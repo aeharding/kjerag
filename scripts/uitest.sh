@@ -632,6 +632,72 @@ exits_clean() {
 	fi
 }
 
+# ------------------------------- the checks, with a calibration to remember
+#
+# The seam correction is a per-camera setting now, not a per-file fit (issue
+# #48), and the whole point of that is that it is in the picture before the
+# first frame rather than two seconds into it. That is a claim about the app's
+# own path, so it is checked through the app: open the file once with an empty
+# config and read the camera out of the report line, write a calibration for
+# that camera into the session's own state directory, open it again, and
+# require the app to say it drew with it and never to say it was fitting.
+#
+# It is also the control for the failure it clears: with the first session's
+# empty config, the app says it is fitting off the file, which is the line the
+# second session must not print.
+
+stored_calibration() {
+	local check="a stored calibration is in the first frame"
+	printf '\n-- calibration checks (%s)\n' "$media"
+
+	# The session's directories persist between runs, so the calibration a
+	# previous run stored is still there and would make this session take the
+	# path it is here to rule out.
+	local state=$session/state/cosmic/app.kyerag.Kyerag/v1
+	rm -f "$state/seam_calibration"
+
+	boot fallback "$media"
+	if ! await '^seam:' "$READY"; then
+		fail "$check" "no seam line in $READY s" "log: $log"
+		teardown
+		return
+	fi
+	local camera
+	camera=$(sed -n 's/^lens:.*camera \([0-9a-f]*\).*/\1/p' "$log" | head -1)
+	if ! grep -q 'no calibration stored for this camera' "$log"; then
+		fail "$check" "the empty config did not fall back to fitting" "log: $log"
+		teardown
+		return
+	fi
+	quit >/dev/null 2>&1 || teardown
+	if [ -z "$camera" ]; then
+		fail "$check" "no camera key in the lens line" "log: $log"
+		return
+	fi
+
+	# The owner's own answer, which is what 6.8 fitted on his static capture.
+	# Any five numbers would do here: what is under test is that they reach
+	# the first frame, not what they are.
+	mkdir -p "$state"
+	printf '{"%s":(roll_deg:0.789,yaw_deg:-2.450,pitch_deg:-0.668,cx_px:-2.55,cy_px:-13.84)}\n' \
+		"$camera" >"$state/seam_calibration"
+
+	boot calibrated "$media"
+	if ! await "this camera's calibration" "$READY"; then
+		fail "$check" "the stored calibration was not read" \
+			"$(grep '^seam:' "$log" || echo 'no seam line')" "log: $log"
+		teardown
+		return
+	fi
+	if grep -q 'no calibration stored for this camera' "$log"; then
+		fail "$check" "it fitted off the file anyway" "log: $log"
+		teardown
+		return
+	fi
+	pass "$check (camera $camera)"
+	exits_clean
+}
+
 # ------------------------------------------ the checks, with nothing open
 
 welcome() {
@@ -696,6 +762,7 @@ dud() {
 
 if [ -n "$media" ]; then
 	with_media
+	stored_calibration
 else
 	welcome
 fi
