@@ -25,13 +25,20 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
   -> two single-plane wgpu textures per frame:
        R8Unorm  from layer 0 (luma,   DRM_FORMAT_R8)
        Rg8Unorm from layer 1 (chroma, DRM_FORMAT_GR88 - note GR, not RG)
-  -> queue-family EXTERNAL acquire (no-op on RADV)
   -> single fragment pass: sample both lenses, Mei inverse-project,
      blend, YUV->RGB, to swapchain at display resolution
 ```
 
-Fallback if the import fights back: `vaDeriveImage` mapping (measured
-0.53 ms/frame at 4K; use `hwmap=mode=read+direct`, never `hwdownload`).
+No queue-family EXTERNAL acquire step is needed with wgpu 30:
+`create_texture_from_hal` offers no hook for it, `TextureUses::
+UNINITIALIZED` works, and the spike's output is byte-identical to the
+copy path's.
+
+There is no viable fallback. The copy path measured 45.3 ms/frame of
+delivery (18.4 fps) in the M0 spike: it cannot sustain realtime for even
+one lens. Zero-copy import is a requirement, not an optimization. (An
+earlier research note put `vaDeriveImage` at 0.53 ms/frame; that was the
+map call alone, with nothing reading the pixels through it.)
 
 ## Trap list (each verified in the 2026-07 study)
 
@@ -51,7 +58,10 @@ Fallback if the import fights back: `vaDeriveImage` mapping (measured
 - Do NOT use ffmpeg's `hwcontext_vulkan` (AVVkFrame) route: handing an
   imported frame to a second Vulkan consumer produced
   `VK_ERROR_DEVICE_LOST` on the target box, twice. DRM_PRIME only.
-- The synchronous map stalls the GPU: keep 2-3 frames in flight.
+- `av_hwframe_map` with `MAP_READ` calls `vaSyncSurface` first (ffmpeg
+  6.1 `hwcontext_vaapi.c:1337`): the map waits for the decode to finish.
+  The spike's 7.64 ms "deliver" is mostly this wait with one frame in
+  flight; keep 2-3 frames in flight to hide it.
 - Reference import code: `ez-ffmpeg` 0.17 `wgpu_filter/hw_interop.rs`,
   `iroh-live` `rusty-codecs/src/render/dmabuf_import.rs`, `bevy-dmabuf`.
 - GStreamer was evaluated and rejected: no wgpu or dmabuf-to-Vulkan sink.
