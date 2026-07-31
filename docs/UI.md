@@ -488,6 +488,11 @@ hand group holds the actions that are about the view rather than the
 transport (subtitles, speed, fullscreen, volume: `src/main.rs:2013-2051`).
 A frame capture is exactly that kind of action.
 
+- **Format:** a JPEG at quality 93 with full size chroma, because a still is
+  a file to share and 12 MB is not (issue #15): 0.7 to 1.8 MB a still against
+  5.3 to 13.3 MB as a lossless PNG, 52 to 54 dB PSNR over five real captures,
+  and it opens on a stock desktop with nothing installed. The clipboard stays
+  PNG.
 - **Button:** `camera-photo-symbolic` in the control row, immediately left
   of fullscreen.
 - **Menu:** `File > Save frame`, showing the `s` accelerator. No ellipsis,

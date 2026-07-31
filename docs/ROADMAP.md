@@ -31,7 +31,7 @@ stillness while playing and never while paused. The scrubber scrubs (issue
 #5): dragging it seeks to keyframes, 21 ms each wherever in the 37.9 GB file
 they land, and letting go seeks to the exact frame. **The view can be
 photographed** (issue #15): `s`, the camera button and `File > Save frame`
-write a 3840 px wide PNG of the reframed view, at the window's aspect and
+write a 3840 px wide JPEG of the reframed view, at the window's aspect and
 not its size, into the desktop's screenshots folder; `Ctrl+C` puts the same
 picture on the clipboard as `image/png`. The capture is the window's own
 pipeline and bind group drawn a second time into a texture of the surface's
@@ -346,6 +346,22 @@ into the same recording that land at the 99th or above: the fades hold.
   row).
 
 ## Decisions log
+
+- 2026-07-31 **A saved still is a JPEG; the clipboard is still a PNG**
+  (issue #15). Twelve encodings of five real 3840x2160 captures, plus
+  libwebp and libjxl for reference, scored against those same pixels with
+  ffmpeg's `psnr` and `ssim` filters. Nothing lossless got near the size a
+  file that gets shared wants: PNG's own levels bottom out at 3.2 to 8.7 MB
+  and take 3 to 7 s to do it, oxipng reaches 2.9 to 7.6 MB in 5 to 7 s, and
+  lossless WebP, the best of them per second, 3.0 to 7.9 MB. Of the lossy
+  ones only JPEG has a maintained pure Rust encoder: lossy WebP and JPEG XL
+  are C libraries, and the one pure Rust JXL encoder does lossless only.
+  Skipping them costs nothing measurable. At quality 93 with no chroma
+  subsampling a still is 0.7 to 1.8 MB, a seventh of the PNG or less, and
+  scores higher on SSIM than libwebp at quality 95 and libjxl at distance 1
+  on all five captures, at 1.3 to 2.5 times their file size. The encode is
+  65 to 74 ms against the PNG's 33 to 45 ms, on the worker thread that has
+  already waited for the GPU and reads back 33 MB before it starts.
 
 - 2026-07-31 **Which frames may take the screen and which seek is still owed
   one are two questions** (issue #55). `Player::pump` answered both with one
