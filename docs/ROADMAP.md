@@ -121,10 +121,35 @@ view moved under 0.05 degrees across five minutes of wandering heading)
 but the owner, on that exact build, still saw the view jump back seconds
 into playback: whatever the app path does to the pin, the unit test did
 not exercise it. Owner's rule applied: no code on main that is not doing
-its job. The dip instrument and the measured attribution went with it and
-live on the investigation branch; the owner's own observation since (dips
-pinned at view yaw 0/180, stable at 90/270, fixed to the view) challenges
-the apparent-gravity attribution and is being re-examined - see #44, #45.
+its job.
+
+**The dip was a bad start, and the seed is fixed** (issue #45,
+docs/research/insv-format.md 8.7). `Filter::solve` seeded the estimate from
+the first tenth of a second of accelerometer whatever it read; on the April
+capture that tenth of a second weighs 1.281 g, which the running filter
+refuses outright, so the horizon started **48.9 degrees** off level and
+walked back over a minute and a half. The seed now searches forward for the
+first window the filter believes completely and carries it back to the start
+of the track with the gyroscope. Measured through the projection pass with
+`kyerag-spike --bin dip`: at 6 seconds 48.9 degrees becomes **1.9** on the
+April capture and 14.7 becomes 8.1 on the June one, at 30 seconds 29.2
+becomes 3.9 and 6.0 becomes 2.5, and at 300 seconds both files read what
+they read before to three decimal places, which is the control. What is
+left is the accelerometer's own disagreement with gravity inside the seed
+window, 2.8 degrees on one capture and 9.8 on the other, and that is the
+residual issue #57 is about.
+
+**The instrument that missed it is repaired.** `dip` gated out any line more
+than 20 degrees off level, so it never measured a defect that is 40 to 50,
+and the 1.9 to 8.5 degree apparent-gravity attribution PR #51 reported was
+that selection. Its injection control passed because 1 to 3 degrees was
+injected where the baseline was already small: **a control has to span the
+regime being measured**. The gate is off by default, every view it drops is
+counted and printed, and the acceptance run injects 45 degrees and reads
+back 45.101 - where the gate that shipped drops 48 of 60 views and reports
+no fit at all. The apparent-gravity size and the GPS prescription (#57) are
+withdrawn in place in 8.7 with pointers to the new numbers; #57 stays on
+hold until the residual is re-measured.
 
 **High-quality sampling at high zoom is half shipped and half measured out**
 (issue #11), which is the last M2 item and the fourth time this project has
@@ -169,7 +194,10 @@ measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
 as before, and the sound goes with it, because a preempted read stops
 without reading another packet and the seek behind it flushes the ring.
 
-M2 is done, except that #44 and #45 reopened against it.
+M2 is done, except that #44 and #45 reopened against it. #45 is fixed above
+and waiting on the owner's retest; #44's symptom shared the same cause, and
+the owner can no longer reproduce it away from the start of a file, so it
+closes on his word rather than on this work's.
 
 **M3 has started, and the player has sound** (issue #13). The file's AAC track
 is decoded off the same demuxer as the two lens streams, resampled by
@@ -237,6 +265,30 @@ into the same recording that land at the 99th or above: the fades hold.
   row).
 
 ## Decisions log
+
+- 2026-07-31 **The orientation filter starts only from a reading it would
+  believe completely** (issue #45). The rule that covers every other sample
+  covers the first one: the seed searches forward for the first
+  `accel_seconds` of accelerometer inside the whole of `trust_g`, and the
+  gyroscope carries it back to the start of the track. Three alternatives
+  were on the table and each was decided by a number rather than by taste.
+  A **burn-in pass** would use every trusted sample of the opening instead
+  of one window's worth, but it converges at `tilt_seconds` from wherever it
+  started, so it needs a second time constant of its own; the forward search
+  is one extra walk over at most 20 seconds of samples and no new constant.
+  Accepting a **partly** trusted window, which is what the issue asked for,
+  leaves the April capture 13.8 degrees off level at 6 seconds against 1.9
+  for a fully trusted one, because the window it settles for is taken during
+  the launch. And the search **stops at 20 seconds**, the default
+  `tilt_seconds`, because past that the filter's own correction is worth
+  more than a distant reading and the gyroscope has more of its own drift to
+  carry back.
+
+  A file that never reads gravity - a motor running from the first frame -
+  gets the window closest to 1 g inside that search, which is a documented
+  fallback rather than a panic or a silent identity, and which by
+  construction is never a worse reading than the opening window the old code
+  took unconditionally.
 
 - 2026-07-31 **The sound goes out through cpal, and follows the picture's
   clock** (issue #13). cosmic-player was read first, as the doctrine asks, and
