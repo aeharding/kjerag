@@ -109,7 +109,12 @@ fn main() -> Fallible<()> {
     let variants = options.variants(&calibration);
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
+    // An instrument has no stored calibration to read: the app keeps that in
+    // its own config, and this is not the app. So the seam is fitted off this
+    // file, which is what every instrument did before the calibration moved
+    // to the camera (issue #48).
     let mut scene = Scene::still(&options.input, options.at())?;
+    scene.fit_seam();
     scene.set_horizon(Horizon::Locked);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);

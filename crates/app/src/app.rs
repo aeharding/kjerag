@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Horizon, Nudge, Request, Scene, Stats};
+use kyerag_render::{Accuracy, Horizon, Nudge, Request, Scene, SeamFit, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -160,6 +160,13 @@ pub enum Message {
     /// A toast's close button, or its own five seconds running out: both
     /// arrive here (cosmic-files `src/app.rs:3008-3010`).
     CloseToast(u64),
+    /// `View > Calibrate seam from this video`: measure this camera's seam off
+    /// the open file and keep the answer (issue #48).
+    CalibrateSeam,
+    /// It came back, a second or two later, off a worker thread. The camera
+    /// travels with it, because the answer is stored under the camera and the
+    /// pilot may have opened something else while it ran.
+    Calibrated(u64, Result<SeamFit, String>),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -462,6 +469,11 @@ impl cosmic::Application for App {
             }
             Message::Captured(to, still) => return self.captured(to, still),
             Message::CloseToast(id) => self.toasts.close(id),
+            Message::CalibrateSeam => {
+                self.show_controls(now);
+                return self.calibrate();
+            }
+            Message::Calibrated(camera, fit) => return self.calibrated(camera, fit),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -559,6 +571,7 @@ impl cosmic::Application for App {
             &self.stored.state,
             &self.key_binds,
             self.open.is_some(),
+            self.has_seam(),
             self.stored.config.horizon_lock,
         )]
     }
@@ -680,6 +693,7 @@ impl App {
         match Scene::open(path) {
             Ok(scene) => {
                 self.failed = false;
+                self.hold_seam(&scene);
                 self.open = Some(Open {
                     path: path.to_path_buf(),
                     duration: scene.duration(),
@@ -712,6 +726,21 @@ impl App {
             });
     }
 
+    /// Hand this camera's seam calibration to the scene, before its first
+    /// frame is drawn (issue #48).
+    ///
+    /// A camera this box has never been asked to calibrate falls back to a fit
+    /// off this file's own frames, which is the weaker answer for the reason
+    /// 6.8 measures: a flight's own seam carries that flight's parallax, and a
+    /// fit taken through it absorbs some. That is the whole of the difference
+    /// between the two paths here.
+    fn hold_seam(&self, scene: &Scene) {
+        match scene.camera_key().and_then(|c| self.stored.state.seam(c)) {
+            Some(fit) => scene.use_seam(fit),
+            None => scene.fit_seam(),
+        }
+    }
+
     /// Hand the volume and the mute to the scene, which is where the sound is
     /// (issue #13). A file with no sound takes them and does nothing.
     fn hold_sound(&self) {
@@ -720,6 +749,13 @@ impl App {
         };
         open.scene.set_volume(self.stored.config.volume as f32);
         open.scene.set_muted(self.stored.config.muted);
+    }
+
+    /// Whether there is a seam to calibrate: `false` for no file and for a
+    /// capture that carries one lens stream (issue #79's camera, a file at a
+    /// time).
+    fn has_seam(&self) -> bool {
+        self.open.as_ref().is_some_and(|open| open.scene.has_seam())
     }
 
     /// Whether there is anything to mute: `false` for no file, for a file
@@ -838,6 +874,55 @@ impl App {
                 self.toast(strings::capture_failed(to, &e))
             }
         }
+    }
+
+    /// Measures this camera's seam off the open file and keeps the answer
+    /// (issue #48).
+    ///
+    /// The run reads real frames from three places in the file, so it is a
+    /// second or two and it happens on a worker thread; the window keeps
+    /// playing while it does. A still capture from a camera standing still is
+    /// what this wants pointed at it, and what the app says so is
+    /// docs/UI.md's line in the menu plus the report line a file with no
+    /// calibration prints.
+    fn calibrate(&self) -> Task<Message> {
+        let Some(open) = &self.open else {
+            return Task::none();
+        };
+        let (Some(camera), Some(job)) = (open.scene.camera_key(), open.scene.seam_job()) else {
+            return Task::none();
+        };
+        let path = open.path.clone();
+        cosmic::task::future(async move {
+            let fit = tokio::task::spawn_blocking(move || job.run(&path))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            Message::Calibrated(camera, fit)
+        })
+        .map(cosmic::Action::App)
+    }
+
+    /// Says what the calibration came to, keeps it, and puts it into the
+    /// picture that is already on screen if that picture came off the same
+    /// camera.
+    fn calibrated(&mut self, camera: u64, fit: Result<SeamFit, String>) -> Task<Message> {
+        let fit = match fit {
+            Ok(fit) => fit,
+            Err(e) => {
+                eprintln!("kyerag: the seam was not calibrated: {e}");
+                return self.toast(strings::calibration_failed(&e));
+            }
+        };
+        self.stored.state.calibrate(camera, fit);
+        self.stored.write_state();
+        if let Some(open) = &self.open {
+            // Not only the file it was measured on: any file from that camera
+            // that happens to be open is drawn with it from here.
+            if open.scene.camera_key() == Some(camera) {
+                open.scene.use_seam(fit);
+            }
+        }
+        self.toast(strings::SEAM_CALIBRATED.to_owned())
     }
 
     /// One toast, and the task that takes it away again five seconds later.

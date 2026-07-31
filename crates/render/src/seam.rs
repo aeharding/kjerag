@@ -10,13 +10,30 @@
 //! lens 1's block of the calibration takes it out. Method, controls and every
 //! number: docs/research/insv-format.md 6.8.
 //!
-//! **The correction is fitted per file rather than written down**, and the
-//! two reasons are 6.8's own open questions. The tilt's *magnitude* is steady
-//! but the yaw/pitch split it decomposes into is under-determined by any one
-//! capture, because a capture only has content at the azimuths it has content
-//! at; and one correction serving every file from one camera is consistent
-//! with two captures minutes apart and is not proved by them. A fit at open
-//! needs neither settled.
+//! **The correction belongs to the camera, not to the file** (6.8). One
+//! five-knob answer fitted on a capture from a camera that was **not moving**
+//! goes into five flights spanning three and a half months, and re-read on
+//! the pixels with it applied it takes their seams from 0.74 to 0.96 degrees
+//! along and 1.69 to 2.18 across down to 0.12 to 0.36 and 0.57 to 0.84.
+//!
+//! A fit off a flight scores better on that flight's own readings, and it is
+//! still not a calibration, because it does not agree with itself. Fitted
+//! file by file the same glued pair of lenses asks for yaws from -1.69 to
+//! -2.58 degrees and principal points from -1.3 to -9.5 px: the yaw alone
+//! spans 0.9 degrees, which at the seam is 15 px of a 1920-wide 90-degree
+//! view. What moves between the files is the scene. Each capture's own
+//! readings put the still one's content at 580 m and the flights' at 2.6 to
+//! 4.2 m, and a fit taken through a seam that close absorbs the parallax into
+//! its answer and then applies it to the whole sphere.
+//!
+//! So the fit runs once, against a capture the pilot points it at, and the
+//! answer is stored under [`CalibrationSet::camera_key`], which is the model
+//! and the factory calibration and is not the serial. Nothing is decoded at
+//! open and nothing lands later: five stored numbers are in the first frame.
+//!
+//! A file whose camera has no stored calibration is still corrected, from its
+//! own frames, best effort ([`Scene::fit_seam`](crate::Scene::fit_seam)).
+//! That is the weaker path and it says so in the line it prints.
 //!
 //! The fit is phase 1's own measurement, in the shipped map's units. Both
 //! lenses are sampled on the **same angular grid** around directions on the
@@ -31,7 +48,7 @@
 //! [`Lens`], and the pass runs on the patched calibration exactly as it ran on
 //! the factory one.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -42,29 +59,39 @@ use super::projection::{Held, Reframe};
 use super::sampling::Sampling;
 use super::{Camera, Size};
 
-/// The knobs the shipped fit turns: a relative rotation, three numbers.
+/// The knobs the shipped fit turns: a relative rotation, and the principal
+/// point that reaches the one term a rotation cannot.
 ///
-/// 6.8 fitted five, adding the principal point, and measured across seven of
-/// the owner's files the two agree exactly where it matters and part company
-/// where it is dangerous:
+/// A rotation alone leaves about 0.4 degrees of **along-seam one cycle**,
+/// which is a principal-point signature and nothing else: a lens tilt reaches
+/// the across-seam column at 1.0000 degrees per degree and the along-seam one
+/// at 0.0000, while a principal-point shift reaches both. Fitting the pair
+/// takes the along-seam residual on the owner's static capture from 0.384
+/// degrees to 0.022 and on his five flights from 0.35-0.49 to 0.11-0.42,
+/// while the across-seam column does not move at all (6.8).
 ///
-/// - **across the seam**, which is the axis the doubled trunk is on, the two
-///   fits land within 0.006 degrees of each other on six of the seven, and
-///   0.017 on the seventh, taking 1.4 to 2.3 degrees down to 0.1 to 0.7;
-/// - **along the seam** the five-knob fit is better, 0.03 to 0.42 against
-///   0.35 to 0.71, because the principal point is the only thing that reaches
-///   the one-cycle term on that axis;
-/// - on the file with the fewest azimuths, a camera on a deck where the near
-///   field fills the seam, the five-knob fit asks for a **55 px** principal
-///   point shift and a yaw of the opposite sign to every other file's. That
-///   is seven patches being overfitted, not a calibration, and it would be
-///   applied to the whole sphere.
+/// The reason three shipped first was that the pair runs away on a file whose
+/// seam has little far-field content: five knobs on the owner's seven
+/// near-field deck patches ask for a -55 px principal point and a yaw of the
+/// opposite sign to every other capture from that camera. [`RIDGE`] and
+/// [`PATCHES_NEEDED`] are what make five safe, and neither is a guess: both
+/// are measured in 6.8.
+pub const KNOBS: [Knob; 5] = [Knob::Roll, Knob::Yaw, Knob::Pitch, Knob::Cx, Knob::Cy];
+
+/// How hard the principal point is held towards zero, in degrees of penalty
+/// per pixel of shift.
 ///
-/// So the rotation ships and the along-seam one-cycle term stays, at about
-/// 0.4 degrees. It is the axis parallax cannot reach and the eye reads as a
-/// slip along the seam rather than a doubled edge; the shipped PR's table has
-/// every file.
-pub const KNOBS: [Knob; 3] = [Knob::Roll, Knob::Yaw, Knob::Pitch];
+/// The data's own weight on the principal point is its leverage squared times
+/// the patch count, which at 0.032 degrees per pixel over fifty patches is
+/// 0.05: a ridge above about 0.2 has already won and one below about 0.02
+/// does nothing. Scanned over 0.05, 0.10 and 0.20 on the owner's captures
+/// (6.8). At 0.05 the thin deck capture's runaway is pulled from -55 px to
+/// -21 while the static capture's own answer moves 1.6 px, from -4.19 to
+/// -2.55, and its along-seam residual improves from 0.030 to 0.022. It is a
+/// prior, not a limit: a capture with content round the whole circle
+/// overrules it, and it is not the guard either. [`PATCHES_NEEDED`] is what
+/// refuses the deck capture outright.
+pub const RIDGE: f64 = 0.05;
 
 /// The widest correction that is a calibration rather than a fit running
 /// away, in degrees of relative rotation.
@@ -76,17 +103,16 @@ pub const KNOBS: [Knob; 3] = [Knob::Roll, Knob::Yaw, Knob::Pitch];
 /// keeps the calibration the camera wrote.
 const RUNAWAY_DEG: f64 = 10.0;
 
-/// How many azimuths have to correlate before a fit is believed.
+/// How many azimuths have to correlate before a fit is believed: twice the
+/// knob count.
 ///
-/// Twice the knob count, which is low, and what lets it be low is the other
-/// half of [`KNOBS`]: three angles fitted on few patches come out **short**
-/// rather than wrong. On the thinnest file measured, seven azimuths of
-/// near-field deck, the fit is a 1.45 degree turn where the six other files
-/// put this camera's error near 2.5, and the turn left over after applying
-/// it is 2.1 degrees rather than the 2.5 it started with. The five-knob fit
-/// on those same seven patches asks for a 55 px principal point and the
-/// opposite yaw, which is not short, it is wrong.
-const PATCHES_NEEDED: usize = 6;
+/// The two captures that fall below it are the two that misbehave. The
+/// owner's deck capture correlates 7 azimuths of near-field decking, and the
+/// five knobs on those ask for a -55 px principal point and a yaw of the
+/// opposite sign to every other capture from the same camera; a ONE X2 clip
+/// correlates 3, on which the five are singular outright. Neither is short,
+/// both are wrong, and a count catches them before the numbers do.
+const PATCHES_NEEDED: usize = 2 * KNOBS.len();
 
 // ------------------------------------------------------------ the ring
 
@@ -563,10 +589,9 @@ pub struct Reading {
 
 /// A correction to lens 1's calibration, in the units `offset_v3` writes.
 ///
-/// Five fields because that is the shape 6.8 fitted, and the shipped fit
-/// turns three of them ([`KNOBS`]): the principal point is carried so the
-/// instrument can run the same fitter both ways on the same patches, which is
-/// how the choice between them was made and how it can be re-made.
+/// Five fields, which is what the shipped fit turns ([`KNOBS`]) and what is
+/// stored per camera. The instrument runs the same fitter with fewer, which
+/// is how the choice between them was made and how it can be re-made.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SeamFit {
     pub roll_deg: f64,
@@ -639,6 +664,18 @@ pub struct Fitted {
     pub patches: usize,
 }
 
+impl Fitted {
+    /// What this fit was measured on and what it left, for the report line.
+    /// The seconds are the caller's: nearly all of a fit is decode, and only
+    /// the caller knows when it started reading.
+    pub fn describe(&self, seconds: f64) -> String {
+        format!(
+            "{} patches, {:.3} -> {:.3} along and {:.3} -> {:.3} across the seam, {seconds:.1} s",
+            self.patches, self.before[0], self.after[0], self.before[1], self.after[1],
+        )
+    }
+}
+
 /// How many times the fit is re-linearized about its own answer.
 ///
 /// One round is what 6.8 reports, and one round is 2 percent short at the
@@ -650,7 +687,20 @@ pub struct Fitted {
 /// (`the_fit_converges_on_the_error_it_was_given`).
 const ROUNDS: usize = 3;
 
-/// The correction that would flatten these readings, fitted through the map.
+/// The correction that would flatten these readings, fitted through the map,
+/// with nothing held towards zero.
+///
+/// This is the fitter an instrument reaches for, which is why it takes its
+/// knobs and no ridge: what the shipped fit does to a set of readings is
+/// [`fit_held`] with [`KNOBS`] and [`RIDGE`], and an instrument that wants to
+/// compare that against something else needs the unregularized version to
+/// compare it with.
+pub fn fit(readings: &[Reading], lenses: &[Lens], frame: Size, knobs: &[Knob]) -> Option<Fitted> {
+    fit_held(readings, lenses, frame, knobs, 0.0)
+}
+
+/// The same fit with the principal point held towards zero by `ridge`
+/// degrees of penalty per pixel (see [`RIDGE`]).
 ///
 /// Each knob is turned by its own probe amount and the map is asked what that
 /// does to every patch, which is a column of the design matrix in the units
@@ -658,7 +708,13 @@ const ROUNDS: usize = 3;
 /// carries parallax as well as calibration, and on far-field content that is
 /// a tenth of a degree against the degrees being corrected (6.8), while the
 /// tilt this is chasing reaches across the seam and barely reaches along it.
-pub fn fit(readings: &[Reading], lenses: &[Lens], frame: Size, knobs: &[Knob]) -> Option<Fitted> {
+pub fn fit_held(
+    readings: &[Reading],
+    lenses: &[Lens],
+    frame: Size,
+    knobs: &[Knob],
+    ridge: f64,
+) -> Option<Fitted> {
     let base = mapped(lenses, frame);
     let mut fit = SeamFit::default();
     let mut patches = 0;
@@ -678,7 +734,7 @@ pub fn fit(readings: &[Reading], lenses: &[Lens], frame: Size, knobs: &[Knob]) -
                 })
             })
             .collect();
-        let (step, kept) = round(&left, &so_far, frame, knobs)?;
+        let (step, kept) = round(&left, &so_far, frame, knobs, ridge)?;
         fit = fit.plus(step);
         patches = kept;
     }
@@ -700,6 +756,7 @@ fn round(
     lenses: &[Lens],
     frame: Size,
     knobs: &[Knob],
+    ridge: f64,
 ) -> Option<(SeamFit, usize)> {
     let base = mapped(lenses, frame);
     let probes: Vec<Reframe> = knobs
@@ -727,6 +784,19 @@ fn round(
         rows.push((along, -reading.along));
         rows.push((across, -reading.across));
         kept += 1;
+    }
+    for (index, knob) in knobs.iter().enumerate() {
+        if ridge <= 0.0 || matches!(knob, Knob::Roll | Knob::Yaw | Knob::Pitch) {
+            continue;
+        }
+        // One row per held knob, asking it for zero. In units of the knob's
+        // own probe step, so one ridge number means the same thing to a
+        // principal point in pixels as it would to any other knob, and the
+        // scale is the principal point's own probe, which is what the ridge
+        // was scanned in.
+        let mut basis = vec![0.0; knobs.len()];
+        basis[index] = ridge * Knob::Cx.probe() / knob.probe();
+        rows.push((basis, 0.0));
     }
     Some((SeamFit::of(knobs, &least_squares(&rows)?.params), kept))
 }
@@ -908,226 +978,182 @@ pub fn measure(path: &Path, lenses: &[Lens], frame: Size, plan: &Plan) -> Fallib
         .collect())
 }
 
-/// This file's own correction, measured off its own frames.
+/// One capture's correction, measured off its own frames, or why there is
+/// none in words a pilot can read.
 ///
-/// `None` is every reason a file has no fit, and they are all ordinary: a
-/// legacy camera that writes one lens per file, a capture with no far-field
-/// content at the seam to correlate, a fit that came out too big to be a
-/// calibration. Each of them leaves the factory calibration in place, which is
-/// what the player did before this existed.
-pub fn fit_file(path: &Path, lenses: &[Lens], frame: Size, plan: &Plan) -> Option<Fitted> {
-    let readings = match measure(path, lenses, frame, plan) {
-        Ok(readings) => readings,
-        Err(e) => {
-            eprintln!("kyerag: the seam could not be read: {e}");
-            return None;
-        }
-    };
+/// Every refusal is ordinary: a legacy camera that writes one lens per file, a
+/// capture with no far-field content at the seam to correlate, a fit that came
+/// out too big to be a calibration. Each of them leaves the factory
+/// calibration in place, which is what the player did before this existed.
+pub fn fit_capture(
+    path: &Path,
+    lenses: &[Lens],
+    frame: Size,
+    plan: &Plan,
+) -> Result<Fitted, String> {
+    let readings = measure(path, lenses, frame, plan).map_err(|e| e.to_string())?;
     if readings.len() < PATCHES_NEEDED {
-        println!(
-            "seam:   {} of {} azimuths correlated, too few to fit; keeping the factory \
-             calibration",
+        return Err(format!(
+            "only {} of {} azimuths on the seam had content both lenses could be matched on, \
+             which is too few to fit",
             readings.len(),
             plan.probe.patches,
-        );
-        return None;
+        ));
     }
-    let fitted = fit(&readings, lenses, frame, &KNOBS)?;
+    let fitted = fit_held(&readings, lenses, frame, &KNOBS, RIDGE)
+        .ok_or("the seam readings do not pin a correction")?;
     if fitted.fit.turn_deg() > RUNAWAY_DEG {
-        println!(
-            "seam:   the fit came to {:.1} deg of rotation, which is a fit running away rather \
-             than a calibration; keeping the factory calibration",
+        return Err(format!(
+            "the fit came to {:.1} deg of rotation, which is a fit running away rather than a \
+             calibration",
             fitted.fit.turn_deg(),
-        );
-        return None;
+        ));
     }
     // A correction is only a correction if it flattens what it was fitted to.
     if fitted.after[0] > fitted.before[0] || fitted.after[1] > fitted.before[1] {
-        println!("seam:   the fit does not flatten the seam; keeping the factory calibration");
-        return None;
+        return Err("the fit does not flatten the seam".to_owned());
     }
-    Some(fitted)
+    Ok(fitted)
 }
 
-// ------------------------------------------------------------ the cache
-
-/// Where a fitted correction is remembered, keyed by
-/// [`CalibrationSet::fingerprint`](kyerag_meta::CalibrationSet::fingerprint).
-///
-/// A cache directory rather than cosmic-config, which is cosmic-files'
-/// practice for exactly this shape of thing: what the pilot chose and what the
-/// app noticed go in `cosmic_config::Config` and `Config::new_state`
-/// (`cosmic-files/src/config.rs`), while a **derived, regenerable, per-file**
-/// answer goes under `dirs::cache_dir()` with a hashed name
-/// (`cosmic-files/src/thumbnail_cacher.rs`, which is the freedesktop
-/// thumbnail spec: `~/.cache/thumbnails/<md5 of the uri>.png`). Deleting this
-/// directory costs one refit and nothing else, which is the test of whether a
-/// thing is a cache.
-///
-/// A file whose fit failed is remembered too, as `none`. cosmic-files does the
-/// same with its `fail/` marker directory, and for the same reason: a capture
-/// with no far-field content at the seam would otherwise pay the whole fit
-/// again on every open.
-fn cache_file(key: u64) -> Option<PathBuf> {
-    Some(
-        dirs::cache_dir()?
-            .join("kyerag")
-            .join("seam")
-            .join(format!("{key:016x}")),
-    )
-}
-
-/// What this box already knows about this capture: `None` if it has never
-/// fitted it, `Some(None)` if it fitted it and there was nothing to find.
-fn cached(key: u64) -> Option<Option<SeamFit>> {
-    read_entry(&std::fs::read_to_string(cache_file(key)?).ok()?)
-}
-
-/// One cache entry: a version, then either three angles or `none`.
-///
-/// An entry a later version wrote, or a truncated one, reads as no entry at
-/// all and the file is fitted again.
-fn read_entry(text: &str) -> Option<Option<SeamFit>> {
-    let mut words = text.split_whitespace();
-    if words.next()? != "1" {
-        return None;
-    }
-    match words.next()? {
-        "none" => Some(None),
-        roll => {
-            let number = |word: Option<&str>| word?.parse::<f64>().ok();
-            Some(Some(SeamFit {
-                roll_deg: number(Some(roll))?,
-                yaw_deg: number(words.next())?,
-                pitch_deg: number(words.next())?,
-                cx_px: number(words.next())?,
-                cy_px: number(words.next())?,
-            }))
+/// The same fit, for a caller with a terminal rather than a toast: the reason
+/// goes to stdout beside the rest of the app's report.
+pub fn fit_file(path: &Path, lenses: &[Lens], frame: Size, plan: &Plan) -> Option<Fitted> {
+    match fit_capture(path, lenses, frame, plan) {
+        Ok(fitted) => Some(fitted),
+        Err(why) => {
+            println!("seam:   {why}; keeping the factory calibration");
+            None
         }
-    }
-}
-
-fn remember(key: u64, fit: Option<SeamFit>) {
-    let Some(path) = cache_file(key) else {
-        return;
-    };
-    let line = entry(fit);
-    let wrote = path
-        .parent()
-        .map(std::fs::create_dir_all)
-        .transpose()
-        .and_then(|_| std::fs::write(&path, line));
-    if let Err(e) = wrote {
-        eprintln!("kyerag: the seam fit will not be remembered: {e}");
-    }
-}
-
-fn entry(fit: Option<SeamFit>) -> String {
-    match fit {
-        Some(fit) => format!(
-            "1 {:.4} {:.4} {:.4} {:.3} {:.3}\n",
-            fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
-        ),
-        None => "1 none\n".to_owned(),
     }
 }
 
 // ------------------------------------------------------------ at open
 
-/// The lenses the pass runs on once this file's own seam fit lands.
+/// The lenses the pass runs on once a seam correction is in hand.
 ///
 /// Empty until then, which is the factory calibration and is what the picture
-/// was before this existed. A cached file fills it here, before the first
-/// frame is drawn; a file being fitted for the first time fills it from the
-/// fit's own thread, and the picture corrects itself mid-playback.
+/// was before this existed. This camera's stored calibration fills it at open,
+/// before the first frame is drawn and with nothing to decode; the fallback
+/// fills it from the fit's own thread, and the picture corrects itself
+/// mid-playback.
 pub type Corrected = Arc<OnceLock<Arc<[Lens]>>>;
 
-/// Fit this file's seam, off the decode path.
+/// Draw with this camera's stored calibration, from the first frame.
 ///
-/// The fit reads its own frames through its own decoder, so nothing here
-/// waits on the player and the player waits on nothing here. A file this box
-/// has fitted before is corrected from the cache, on this thread, before the
-/// first frame is drawn; a file it has not plays its first seconds on the
-/// factory calibration and corrects itself when the fit lands. What that
-/// costs is in the line it prints and in the PR for issue #48.
-pub fn correct(path: &Path, lenses: &Arc<[Lens]>, frame: Size, key: u64) -> Corrected {
-    let landed = Arc::new(OnceLock::new());
-    if remembered(lenses, key, &landed) {
-        return landed;
+/// Nothing is decoded and no thread is started: the correction is five numbers
+/// the pilot's config already holds, and applying them is arithmetic on the
+/// calibration the trailer parsed.
+pub fn known(into: &Corrected, lenses: &Arc<[Lens]>, fit: SeamFit) {
+    if lenses.len() < 2 {
+        return;
     }
-    let (path, lenses, into) = (path.to_path_buf(), lenses.clone(), landed.clone());
+    announce("this camera's calibration", &fit);
+    let _ = into.set(fit.applied(lenses).into());
+}
+
+/// Fit this file's seam from its own frames, off the decode path.
+///
+/// The fallback, for a camera this box has no calibration for. The fit reads
+/// its own frames through its own decoder, so nothing here waits on the player
+/// and the player waits on nothing here; the file plays its first seconds on
+/// the factory calibration and corrects itself when the fit lands, a second or
+/// two in. What it is worth against a proper calibration, and what it costs,
+/// are both in 6.8.
+pub fn correct(into: &Corrected, path: &Path, lenses: &Arc<[Lens]>, frame: Size) {
+    if lenses.len() < 2 {
+        return;
+    }
+    best_effort_notice();
+    let (path, lenses, into) = (path.to_path_buf(), lenses.clone(), into.clone());
     let spawned = std::thread::Builder::new()
         .name("seam fit".to_owned())
-        .spawn(move || fit_into(&path, &lenses, frame, key, &into));
+        .spawn(move || fit_into(&path, &lenses, frame, &into));
     if let Err(e) = spawned {
         eprintln!("kyerag: the seam fit did not start: {e}");
     }
-    landed
 }
 
-/// The same fit, on this thread.
+/// The same fallback, on this thread.
 ///
 /// What a **still** takes (issue #15, and every headless instrument): a
 /// picture written to a file has no moment later to correct itself in.
-pub fn correct_now(path: &Path, lenses: &Arc<[Lens]>, frame: Size, key: u64) -> Corrected {
-    let landed = Arc::new(OnceLock::new());
-    if !remembered(lenses, key, &landed) {
-        fit_into(path, lenses, frame, key, &landed);
-    }
-    landed
-}
-
-/// Whether this file needs no fitting: it has no seam, or this box has fitted
-/// it before.
-fn remembered(lenses: &Arc<[Lens]>, key: u64, landed: &Corrected) -> bool {
+pub fn correct_now(into: &Corrected, path: &Path, lenses: &Arc<[Lens]>, frame: Size) {
     if lenses.len() < 2 {
-        return true;
+        return;
     }
-    match cached(key) {
-        Some(Some(fit)) => {
-            announce("remembered", &fit);
-            let _ = landed.set(fit.applied(lenses).into());
-            true
-        }
-        Some(None) => {
-            println!("seam:   fitted before and there was nothing to find");
-            true
-        }
-        None => false,
-    }
+    best_effort_notice();
+    fit_into(path, lenses, frame, into);
 }
 
-fn fit_into(path: &Path, lenses: &Arc<[Lens]>, frame: Size, key: u64, into: &Corrected) {
+fn best_effort_notice() {
+    println!(
+        "seam:   no calibration stored for this camera, so it is fitted from this file, best \
+         effort. View > Calibrate seam from this video, on a capture from a camera standing \
+         still, is the one that transfers."
+    );
+}
+
+fn fit_into(path: &Path, lenses: &Arc<[Lens]>, frame: Size, into: &Corrected) {
     let started = Instant::now();
-    let fitted = fit_file(path, lenses, frame, &Plan::default());
-    remember(key, fitted.as_ref().map(|fitted| fitted.fit));
-    let Some(fitted) = fitted else {
+    let Some(fitted) = fit_file(path, lenses, frame, &Plan::default()) else {
         return;
     };
     announce(
-        &format!(
-            "{} patches, {:.3} -> {:.3} along and {:.3} -> {:.3} across the seam, {:.1} s",
-            fitted.patches,
-            fitted.before[0],
-            fitted.after[0],
-            fitted.before[1],
-            fitted.after[1],
-            started.elapsed().as_secs_f64(),
-        ),
+        &fitted.describe(started.elapsed().as_secs_f64()),
         &fitted.fit,
     );
     let _ = into.set(fitted.fit.applied(lenses).into());
 }
 
 fn announce(how: &str, fit: &SeamFit) {
-    let point = match (fit.cx_px, fit.cy_px) {
-        (0.0, 0.0) => String::new(),
-        (cx, cy) => format!(", cx {cx:+.2}, cy {cy:+.2} px"),
-    };
     println!(
-        "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg{point} ({how})",
-        fit.roll_deg, fit.yaw_deg, fit.pitch_deg,
+        "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, cy {:+.2} px ({how})",
+        fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
     );
+}
+
+// ------------------------------------------------------------ calibrating
+
+/// One calibration run, taken off the open file so it can be handed to a
+/// worker thread.
+///
+/// It carries the calibration and the frame size rather than the whole scene
+/// because that is all a fit reads, and because the shell must not stop for
+/// one: a fit is a second or two of decode, and a window that stops for two
+/// seconds is a window that has stopped.
+pub struct Job {
+    lenses: Arc<[Lens]>,
+    frame: Size,
+}
+
+impl Job {
+    /// `None` for a file with no seam, which is the one thing that cannot be
+    /// calibrated from.
+    pub fn new(lenses: &Arc<[Lens]>, frame: Size) -> Option<Self> {
+        (lenses.len() >= 2).then(|| Self {
+            lenses: lenses.clone(),
+            frame,
+        })
+    }
+
+    /// Fit this capture's seam, blocking for as long as it takes to read it.
+    ///
+    /// The whole answer, and what it left, go to the terminal; what comes back
+    /// is the five numbers to store and, on a refusal, the reason in words a
+    /// toast can carry.
+    pub fn run(&self, path: &Path) -> Result<SeamFit, String> {
+        let started = Instant::now();
+        let fitted = fit_capture(path, &self.lenses, self.frame, &Plan::default())?;
+        announce(
+            &format!(
+                "calibrated from this video, {}",
+                fitted.describe(started.elapsed().as_secs_f64())
+            ),
+            &fitted.fit,
+        );
+        Ok(fitted.fit)
+    }
 }
 
 // ------------------------------------------------------------ arithmetic
@@ -1211,7 +1237,7 @@ mod tests {
                     })
                 })
                 .collect();
-            fit = fit.plus(round(&readings, &so_far, FRAME, &KNOBS).unwrap().0);
+            fit = fit.plus(round(&readings, &so_far, FRAME, &KNOBS, 0.0).unwrap().0);
             left.push(norm([
                 fit.roll_deg - error.roll_deg,
                 fit.yaw_deg - error.yaw_deg,
@@ -1233,13 +1259,15 @@ mod tests {
     #[test]
     fn an_injected_calibration_error_is_read_back_as_itself() {
         let lenses = fixture_lenses();
-        // The size and shape 6.8 reports on the owner's camera: a couple of
-        // degrees of tilt with a fraction of a degree of roll under it.
+        // The size and shape 6.8 fits on the owner's camera: a couple of
+        // degrees of tilt, a fraction of a degree of roll under it, and a
+        // principal point ten pixels or so off centre.
         let error = SeamFit {
             roll_deg: 0.801,
             yaw_deg: -2.293,
             pitch_deg: -0.817,
-            ..SeamFit::default()
+            cx_px: -4.18,
+            cy_px: -13.91,
         };
         let readings = readings_for(error, &lenses, 72);
         let fitted = fit(&readings, &lenses, FRAME, &KNOBS).unwrap();
@@ -1247,9 +1275,11 @@ mod tests {
             (fitted.fit.roll_deg, error.roll_deg),
             (fitted.fit.yaw_deg, error.yaw_deg),
             (fitted.fit.pitch_deg, error.pitch_deg),
+            (fitted.fit.cx_px, error.cx_px),
+            (fitted.fit.cy_px, error.cy_px),
         ] {
             assert!(
-                (fitted / truth - 1.0).abs() < 0.002,
+                (fitted / truth - 1.0).abs() < 0.02,
                 "read back {fitted:.4} of an injected {truth:.4}"
             );
         }
@@ -1258,6 +1288,72 @@ mod tests {
             "across the seam: {:.3} before, {:.3} after",
             fitted.before[1],
             fitted.after[1],
+        );
+    }
+
+    /// What the fifth and fourth knobs are for: a principal-point error is
+    /// **one cycle round the seam along it**, which is the term a rotation
+    /// cannot reach at all (6.8). Fitted with three knobs it survives; fitted
+    /// with five it does not.
+    #[test]
+    fn a_principal_point_error_needs_the_principal_point_to_come_out() {
+        let lenses = fixture_lenses();
+        let error = SeamFit {
+            cx_px: -5.09,
+            cy_px: -11.15,
+            ..SeamFit::default()
+        };
+        let readings = readings_for(error, &lenses, 72);
+        let rotation = fit(
+            &readings,
+            &lenses,
+            FRAME,
+            &[Knob::Roll, Knob::Yaw, Knob::Pitch],
+        )
+        .unwrap();
+        let five = fit(&readings, &lenses, FRAME, &KNOBS).unwrap();
+        assert!(
+            five.after[0] < 0.1 * rotation.after[0],
+            "along the seam: {:.4} deg left by a rotation, {:.4} by five knobs",
+            rotation.after[0],
+            five.after[0],
+        );
+    }
+
+    /// The ridge is a prior on the principal point and nothing else: it pulls
+    /// a shift the readings barely support towards zero, and leaves the
+    /// angles where they were.
+    #[test]
+    fn the_ridge_holds_the_principal_point_and_not_the_angles() {
+        let lenses = fixture_lenses();
+        let error = SeamFit {
+            roll_deg: 0.801,
+            yaw_deg: -2.293,
+            pitch_deg: -0.817,
+            cx_px: -4.18,
+            cy_px: -13.91,
+        };
+        // Six azimuths of one small arc, which is what a capture whose seam
+        // has content in one place gives the fit.
+        let readings: Vec<Reading> = readings_for(error, &lenses, 72)
+            .into_iter()
+            .take(6)
+            .collect();
+        let free = fit(&readings, &lenses, FRAME, &KNOBS).unwrap();
+        let held = fit_held(&readings, &lenses, FRAME, &KNOBS, RIDGE).unwrap();
+        assert!(
+            held.fit.cx_px.hypot(held.fit.cy_px) < free.fit.cx_px.hypot(free.fit.cy_px),
+            "the ridge did not hold the point: {:.2}, {:.2} free against {:.2}, {:.2} held",
+            free.fit.cx_px,
+            free.fit.cy_px,
+            held.fit.cx_px,
+            held.fit.cy_px,
+        );
+        assert!(
+            (held.fit.turn_deg() - free.fit.turn_deg()).abs() < 0.5,
+            "the ridge moved the rotation: {:.3} deg free against {:.3} held",
+            free.fit.turn_deg(),
+            held.fit.turn_deg(),
         );
     }
 
@@ -1290,9 +1386,9 @@ mod tests {
         assert!((fitted.fit.yaw_deg / 0.5 - 1.0).abs() < 0.02);
     }
 
-    /// A file whose content is at one azimuth cannot separate the three
-    /// knobs, and the guard for that is a count rather than a hope: a fit
-    /// with fewer patches than knobs does not exist at all.
+    /// A file whose content is at one azimuth cannot separate the knobs, and
+    /// the guard for that is a count rather than a hope: a fit with fewer
+    /// patches than knobs does not exist at all.
     #[test]
     fn too_few_patches_is_no_fit() {
         let lenses = fixture_lenses();
@@ -1317,34 +1413,37 @@ mod tests {
         assert_eq!(corrected[0].pose.roll_deg, lenses[0].pose.roll_deg);
     }
 
+    /// A stored calibration is in the picture before the first frame is: no
+    /// decode, no thread, nothing to land later. That is the whole reason the
+    /// correction moved off the file and onto the camera, and it is what the
+    /// step two seconds into a first play used to be.
     #[test]
-    fn a_remembered_fit_reads_back_as_what_was_written() {
+    fn a_stored_calibration_needs_no_file_and_no_wait() {
+        let lenses: Arc<[Lens]> = fixture_lenses().into();
         let fit = SeamFit {
-            roll_deg: 0.8012,
-            yaw_deg: -2.2934,
-            pitch_deg: -0.8171,
-            cx_px: -4.59,
-            cy_px: -14.73,
+            roll_deg: 0.810,
+            yaw_deg: -2.352,
+            pitch_deg: -0.678,
+            cx_px: -4.18,
+            cy_px: -13.91,
         };
-        assert_eq!(read_entry(&entry(Some(fit))), Some(Some(fit)));
-        assert_eq!(read_entry(&entry(None)), Some(None));
+        let landed = Corrected::default();
+        known(&landed, &lenses, fit);
+        let corrected = landed.get().expect("the calibration is not in the picture");
+        assert_eq!(corrected[1].pose.yaw_deg, lenses[1].pose.yaw_deg - 2.352);
+        assert_eq!(corrected[1].intrinsics.cy, lenses[1].intrinsics.cy - 13.91);
+        assert_eq!(corrected[0].pose.yaw_deg, lenses[0].pose.yaw_deg);
     }
 
-    /// An entry this build cannot read is no entry, so the file is fitted
-    /// again rather than drawn with a number of unknown shape.
-    #[test]
-    fn an_entry_from_another_version_is_not_read() {
-        assert_eq!(read_entry("2 0.8 -2.3 -0.8 0.0 0.0"), None);
-        assert_eq!(read_entry("1 0.8 -2.3"), None);
-        assert_eq!(read_entry(""), None);
-    }
-
-    /// Nothing is spawned and nothing is written for a file that cannot have
+    /// Nothing is spawned and nothing is applied for a file that cannot have
     /// a seam, which is what makes the legacy one-lens cameras cost nothing.
     #[test]
     fn a_one_lens_file_starts_no_fit() {
         let lenses: Arc<[Lens]> = fixture_lenses()[..1].into();
-        let landed = correct(Path::new("/nonexistent.insv"), &lenses, FRAME, 0);
+        let landed = Corrected::default();
+        correct(&landed, Path::new("/nonexistent.insv"), &lenses, FRAME);
+        known(&landed, &lenses, SeamFit::default());
         assert!(landed.get().is_none());
+        assert!(Job::new(&lenses, FRAME).is_none());
     }
 }

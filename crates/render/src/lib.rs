@@ -10,9 +10,9 @@ mod projection;
 /// [`Reframe`]'s own mirror of the map.
 pub mod sampling;
 mod scene;
-/// The per-file seam calibration fit (issue #48). Public for
-/// `kyerag-spike --bin seam`, which is the same core with the attribution and
-/// the controls printed round it.
+/// The per-camera seam calibration, and the fit behind it (issue #48).
+/// Public for `kyerag-spike --bin seam`, which is the same core with the
+/// attribution and the controls printed round it.
 pub mod seam;
 mod widget;
 

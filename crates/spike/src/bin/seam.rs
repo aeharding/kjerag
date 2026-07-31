@@ -893,7 +893,7 @@ fn fit(options: &Options) -> Fallible<()> {
         );
         let readings: Vec<Reading> = readings;
         let solved = std::time::Instant::now();
-        let fitted = seam::fit(&readings, &lenses, frame, &seam::KNOBS);
+        let fitted = seam::fit_held(&readings, &lenses, frame, &seam::KNOBS, seam::RIDGE);
         println!(
             "the fit itself took {:.3} s, so the whole of it is {:.2} s",
             solved.elapsed().as_secs_f64(),
@@ -919,16 +919,17 @@ fn fit(options: &Options) -> Fallible<()> {
     Ok(())
 }
 
-/// The shipped fitter's own answer on these patches, three knobs against
-/// five: the decision 6.8 left open, taken per file and through the code that
-/// ships rather than beside it.
+/// The shipped fitter's own answer on these patches, a rotation against the
+/// shipped five knobs: the decision 6.8 took, re-taken here through the code
+/// that ships rather than beside it.
 ///
-/// Both rows are the same iterated fit on the same readings, so the only
-/// difference between them is the two columns. `along` and `across` are the
-/// root mean square of the patch readings before the correction and after it,
-/// predicted through the map; the honest after is a second decode with the
-/// correction in place, which is what `fit=1` draws and what a residual run of
-/// this instrument re-measures.
+/// Every row is the same iterated fit on the same readings, so the only
+/// difference between them is which knobs turn and whether the principal
+/// point is held ([`seam::RIDGE`]). `along` and `across` are the root mean
+/// square of the patch readings before the correction and after it, predicted
+/// through the map; the honest after is a second decode with the correction in
+/// place, which is what `fit=1` draws and what a residual run of this
+/// instrument re-measures.
 fn knob_counts(kept: &[&Patch], lenses: &[Lens], frame: Size) {
     let readings: Vec<Reading> = kept
         .iter()
@@ -938,14 +939,18 @@ fn knob_counts(kept: &[&Patch], lenses: &[Lens], frame: Size) {
             across: patch.mean_across(),
         })
         .collect();
-    println!("\nthe shipped fit on these patches, and the five-knob fit beside it:");
+    println!("\nthe shipped fit on these patches, and a rotation beside it:");
     println!(
         "{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>16} {:>16}",
         "knobs", "roll", "yaw", "pitch", "cx", "cy", "along", "across"
     );
-    let five = [Knob::Roll, Knob::Yaw, Knob::Pitch, Knob::Cx, Knob::Cy];
-    for (name, knobs) in [("rotation", &seam::KNOBS[..]), ("five", &five[..])] {
-        let Some(fitted) = seam::fit(&readings, lenses, frame, knobs) else {
+    let rotation = [Knob::Roll, Knob::Yaw, Knob::Pitch];
+    for (name, knobs, ridge) in [
+        ("rotation", &rotation[..], 0.0),
+        ("five", &seam::KNOBS[..], 0.0),
+        ("shipped", &seam::KNOBS[..], seam::RIDGE),
+    ] {
+        let Some(fitted) = seam::fit_held(&readings, lenses, frame, knobs, ridge) else {
             println!("{name:<10} singular on these patches");
             continue;
         };
@@ -1105,8 +1110,10 @@ impl Options {
     }
 
     /// The correction to draw with: whatever `fix=` says, and with `fit=1`
-    /// **the shipped per-file fit**, run here exactly as the app runs it at
-    /// open. What the eye is checking is then what the player draws.
+    /// **the fit off this file's own frames**, run here exactly as the app
+    /// runs it for a camera it has no stored calibration for. What the eye is
+    /// checking is then what the player draws on that path; `fix=` is how a
+    /// stored calibration is checked, because the store belongs to the app.
     fn corrected(&self, path: &Path, lenses: &[Lens], frame: Size) -> Vec<Lens> {
         let lenses = fixed(lenses, &self.fix);
         if !self.fit {
@@ -1118,11 +1125,14 @@ impl Options {
             return lenses;
         };
         println!(
-            "fit:    roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg over {} patches in {:.1} s\n\
+            "fit:    roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, cy {:+.2} px \
+             over {} patches in {:.1} s\n\
              fit:    along {:.3} -> {:.3}, across {:.3} -> {:.3} deg (predicted)",
             fitted.fit.roll_deg,
             fitted.fit.yaw_deg,
             fitted.fit.pitch_deg,
+            fitted.fit.cx_px,
+            fitted.fit.cy_px,
             fitted.patches,
             started.elapsed().as_secs_f64(),
             fitted.before[0],

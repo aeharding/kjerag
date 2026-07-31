@@ -33,6 +33,7 @@ pub fn menu_bar<'a>(
     state: &ConfigState,
     key_binds: &HashMap<KeyBind, Action>,
     has_file: bool,
+    has_seam: bool,
     horizon_locked: bool,
 ) -> Element<'a, Message> {
     responsive_menu_bar()
@@ -87,6 +88,14 @@ pub fn menu_bar<'a>(
                             horizon_locked,
                             Action::LockHorizon,
                         ),
+                        // Beside the horizon lock rather than in `File`,
+                        // because both items are about how the picture is
+                        // put together rather than about the file it comes
+                        // out of (issue #48). Disabled for a capture with no
+                        // seam in it, which is a one-stream file: the same
+                        // rule the other items follow, on the capability the
+                        // action needs rather than on there being a file.
+                        enabled(has_seam, strings::CALIBRATE_SEAM, Action::CalibrateSeam),
                         Item::Divider,
                         Item::Button(strings::FULLSCREEN.to_owned(), None, Action::Fullscreen),
                         Item::Divider,

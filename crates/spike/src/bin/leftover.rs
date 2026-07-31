@@ -314,7 +314,8 @@ struct Recipe {
 }
 
 /// How many times a fit is re-linearized, which is what the shipped one does
-/// ([`seam::fit`]) and what any candidate has to do to be compared with it.
+/// ([`seam::fit_held`]) and what any candidate has to do to be compared with
+/// it.
 const ROUNDS: usize = 3;
 
 /// One candidate's answer on one file's readings.
@@ -579,7 +580,7 @@ fn per_azimuth(capture: &Capture, density: f64) {
         name: "shipped".to_owned(),
         knobs: seam::KNOBS.to_vec(),
         preset: None,
-        ridge: 0.0,
+        ridge: seam::RIDGE,
         reject: 0.0,
     };
     let Some(fit) = fitted(&readings, &capture.lenses, capture.frame, &shipped) else {
@@ -724,7 +725,7 @@ fn structure(readings: &[Reading], capture: &Capture, density: f64) {
         name: "shipped".to_owned(),
         knobs: seam::KNOBS.to_vec(),
         preset: None,
-        ridge: 0.0,
+        ridge: seam::RIDGE,
         reject: 0.0,
     };
     let Some(fit) = fitted(readings, &capture.lenses, capture.frame, &shipped) else {
@@ -855,8 +856,8 @@ fn pooled(captures: &[Capture], density: f64) {
 /// parallax lives on, which is the shape of this whole problem, so the rows
 /// below attack the scene rather than the axis.
 fn recipes(options: &Options) -> Vec<Recipe> {
-    let rotation = seam::KNOBS.to_vec();
-    let five = vec![Knob::Roll, Knob::Yaw, Knob::Pitch, Knob::Cx, Knob::Cy];
+    let rotation = vec![Knob::Roll, Knob::Yaw, Knob::Pitch];
+    let five = seam::KNOBS.to_vec();
     let mut all = vec![
         Recipe {
             name: "none (factory)".to_owned(),
@@ -866,11 +867,18 @@ fn recipes(options: &Options) -> Vec<Recipe> {
             ridge: 0.0,
         },
         Recipe {
-            name: "shipped: rotation".to_owned(),
+            name: "rotation".to_owned(),
             knobs: rotation.clone(),
             preset: None,
             reject: 0.0,
             ridge: 0.0,
+        },
+        Recipe {
+            name: format!("shipped: five, ridge {:.2}", seam::RIDGE),
+            knobs: five.clone(),
+            preset: None,
+            reject: 0.0,
+            ridge: seam::RIDGE,
         },
         Recipe {
             name: "rotation, reject 2.0".to_owned(),

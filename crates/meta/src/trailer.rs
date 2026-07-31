@@ -200,10 +200,6 @@ impl CalibrationSet {
 #[derive(Debug)]
 pub(crate) struct Trailer {
     pub metadata: ExtraMetadata,
-    /// [`CalibrationSet::fingerprint`], hashed off the bytes the metadata
-    /// record was decoded from rather than off the decoded fields, so it
-    /// covers the fields Kyerag does not declare as well.
-    pub fingerprint: u64,
     /// Record 3, the IMU. Empty where the file has no such record.
     pub gyro: Vec<u8>,
     /// Records 4 and 12 as they came, one per lens and never merged.
@@ -227,9 +223,7 @@ fn read_trailer<S: Read + Seek>(source: &mut S) -> Result<Trailer, Error> {
     let records = locate(source, file_len, file_len - trailer_len)?;
 
     let metadata = find(&records, METADATA_RECORD, PROTOBUF).ok_or(Error::NoMetadata)?;
-    let metadata = read(source, metadata)?;
-    let fingerprint = fingerprint(&metadata);
-    let metadata = ExtraMetadata::decode(&*metadata)?;
+    let metadata = ExtraMetadata::decode(&*read(source, metadata)?)?;
 
     let mut exposure = [const { Vec::new() }; EXPOSURE_RECORDS.len()];
     for (track, id) in exposure.iter_mut().zip(EXPOSURE_RECORDS) {
@@ -243,28 +237,9 @@ fn read_trailer<S: Read + Seek>(source: &mut S) -> Result<Trailer, Error> {
     };
     Ok(Trailer {
         metadata,
-        fingerprint,
         gyro,
         exposure,
     })
-}
-
-/// FNV-1a over the metadata record, which is what names one capture
-/// ([`CalibrationSet::fingerprint`]).
-///
-/// A hash rather than a cryptographic digest because nothing here defends
-/// against a chosen collision: it is a cache key, and the worst a collision
-/// could do is hand one capture another's seam fit. Written out rather than
-/// taken from `std::hash`, whose `DefaultHasher` is explicitly allowed to
-/// change what it answers between releases -- this number is written to disk
-/// and read back by a later build.
-fn fingerprint(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }
 
 /// Every record the trailer carries, as `(id, format, size)`, for the
