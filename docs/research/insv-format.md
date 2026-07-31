@@ -1607,6 +1607,20 @@ as a range.) The second static capture cannot be scored this way at all: the
 view its projection fit lands on has flatter surroundings than band, and their
 own share comes out above 1, which is the metric saying so.
 
+**A file that gets no fit keeps the narrow band, and that is a choice with a
+picture behind it.** The guards refuse a fit where the seam has too little to
+correlate: on a ONE X2 clip (issue #79's camera, now paired at open) only 2 of
+72 azimuths correlate, the rotation those two ask for is 16 degrees, and both
+the azimuth count and the runaway bound catch it independently. The file then
+plays on the factory calibration with a 2 degree crossover, which is what this
+section warned against: at 2 to 3 degrees of disparity the shear is over 1 and
+the crossover folds rather than blends. Rendered both ways at a view where a
+ridge crosses the seam, the fold is the better picture: the 12 degree band
+smears the hillside texture across a third of the frame, and the 2 degree band
+leaves the picture sharp with a local step in it. The width is one constant if
+that judgement is ever reversed, and the X2's own overlap is 11 degrees, so
+there is no hole either way.
+
 **The narrower band did not turn the exposure difference into a line**, which
 is the thing a 2 degree crossover could have cost that 6.3 leaves open.
 Measured on flat sky over the seam, where a step would show if it showed

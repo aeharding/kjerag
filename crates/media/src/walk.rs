@@ -162,13 +162,20 @@ impl Walk {
         self.lanes.len()
     }
 
-    /// How long the file runs, from the container's own duration.
+    /// How long the capture runs, from the containers' own duration. The
+    /// shorter of the two for a capture written one lens per file: past that
+    /// there are no pairs left to walk.
     pub fn duration(&self) -> Duration {
-        let seconds = self.input.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
-        Duration::from_secs_f64(seconds.max(0.0))
+        let ticks = self
+            .inputs
+            .iter()
+            .map(|input| input.duration())
+            .min()
+            .unwrap_or(0);
+        Duration::from_secs_f64((ticks as f64 / f64::from(ff::ffi::AV_TIME_BASE)).max(0.0))
     }
 
-    /// Carry the walk to another instant of the same file, so a caller that
+    /// Carry the walk to another instant of the same capture, so a caller that
     /// wants frames from several places pays the container open once.
     ///
     /// Every decoder is flushed and every queue emptied: a decoder handed
@@ -177,7 +184,9 @@ impl Walk {
     /// from there.
     pub fn jump(&mut self, to: f64) -> Fallible<()> {
         let target = (to * 1e6) as i64;
-        self.input.seek(target, ..target)?;
+        for input in &mut self.inputs {
+            input.seek(target, ..target)?;
+        }
         for decoder in &mut self.decoders {
             decoder.flush();
         }
@@ -185,7 +194,7 @@ impl Walk {
             queue.clear();
         }
         self.from_pts = self.start + self.ticks(to);
-        self.drained = false;
+        self.drained = vec![false; self.inputs.len()];
         Ok(())
     }
 
