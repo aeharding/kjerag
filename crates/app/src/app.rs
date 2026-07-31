@@ -147,8 +147,13 @@ pub enum Message {
     /// Take a still of the view as it stands: `s`, `Ctrl+C`, the camera
     /// button, or either File menu item (issue #15).
     Capture(Destination),
-    /// One came back, some milliseconds later, off the render thread.
-    Captured(Result<Done, String>),
+    /// One came back, some milliseconds later, off the render thread. It
+    /// carries what was asked for as well as what happened, because a failure
+    /// has to say which of the two it was.
+    Captured(Destination, Result<Done, String>),
+    /// A toast's close button, or its own duration running out: both arrive
+    /// here (cosmic-files `src/app.rs:3008-3010`).
+    CloseToast(widget::ToastId),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -188,6 +193,10 @@ pub struct App {
     context_page: ContextPage,
     /// The theme names the settings dropdown shows, in its own order.
     themes: Vec<String>,
+    /// What a capture says when it lands. libcosmic keeps five at most and
+    /// drops the oldest past that, which is the stock behavior cosmic-files
+    /// takes too (`src/widget/toaster/mod.rs:162-181`).
+    toasts: widget::toaster::Toasts<Message>,
     controls: Controls,
     /// Set while the scrubber is being dragged, to whether the file was
     /// playing when the drag started. cosmic-player pauses for the drag and
@@ -267,6 +276,7 @@ impl cosmic::Application for App {
                 strings::THEME_DARK.to_owned(),
                 strings::THEME_LIGHT.to_owned(),
             ],
+            toasts: widget::toaster::Toasts::new(Message::CloseToast),
             controls: Controls {
                 shown: true,
                 since: Instant::now(),
@@ -409,7 +419,8 @@ impl cosmic::Application for App {
                 self.show_controls(now);
                 return self.capture(to);
             }
-            Message::Captured(still) => return report_still(still),
+            Message::Captured(to, still) => return self.captured(to, still),
+            Message::CloseToast(id) => self.toasts.remove(id),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -530,10 +541,26 @@ impl cosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let content = match &self.open {
+        let shown = match &self.open {
             Some(open) => self.playing(open),
             None => self.welcome(),
         };
+        // The toaster goes *beside* the picture, over an empty element, which
+        // is what cosmic-files does and says why: "added on top of an empty
+        // element to ensure that it does not override context menus"
+        // (`src/app.rs:6518-6519`). A `Toaster` with a toast up returns its
+        // own overlay instead of its content's (libcosmic
+        // `src/widget/toaster/widget.rs:137-162`), and our control row *is* an
+        // overlay, the popover's. Wrapping the picture in the toaster would
+        // take the transport away for the five seconds a toast is up.
+        //
+        // Where the toast itself lands is not ours to choose: the toaster
+        // overlay centers it on the window, 15 px above the bottom edge
+        // (`toaster/widget.rs:199-215`), whatever it is mounted over.
+        let content = widget::column::with_children(vec![
+            shown,
+            widget::toaster(&self.toasts, widget::space::horizontal()),
+        ]);
         // cosmic-player implements no drag and drop, so this follows
         // cosmic-files (`src/app.rs:6491-6496`). The destination is the whole
         // window rather than only the video: a file dropped on "No video
@@ -737,11 +764,48 @@ impl App {
                 let _ = finished.send(done);
             }),
         });
-        Task::perform(waiting, |done| {
-            action::app(Message::Captured(done.unwrap_or_else(|_| {
-                Err("the capture was replaced before a redraw took it".to_owned())
-            })))
+        Task::perform(waiting, move |done| {
+            action::app(Message::Captured(
+                to,
+                done.unwrap_or_else(|_| {
+                    Err("the capture was replaced before a redraw took it".to_owned())
+                }),
+            ))
         })
+    }
+
+    /// Says where the still went, and puts it on the clipboard when that is
+    /// what was asked for.
+    ///
+    /// The terminal line stays: it is what the headless harness reads, and it
+    /// carries the whole path, which the toast deliberately does not.
+    fn captured(&mut self, to: Destination, still: Result<Done, String>) -> Task<Message> {
+        match still {
+            Ok(Done::Saved(path)) => {
+                println!("shot:   {}", path.display());
+                self.toast(strings::frame_saved(&path))
+            }
+            Ok(Done::Copied(png)) => {
+                println!("shot:   copied");
+                Task::batch([
+                    self.toast(strings::FRAME_COPIED.to_owned()),
+                    clipboard::write_data(png),
+                ])
+            }
+            Err(e) => {
+                eprintln!("kyerag: no still: {e}");
+                self.toast(strings::capture_failed(to, &e))
+            }
+        }
+    }
+
+    /// One toast, stock duration, exactly as cosmic-files pushes its own
+    /// (`src/app.rs:1354-1358`): 5 s, no action button, and the task handed
+    /// back is what takes the toast away again.
+    fn toast(&mut self, message: String) -> Task<Message> {
+        self.toasts
+            .push(widget::toaster::Toast::new(message))
+            .map(cosmic::Action::App)
     }
 
     fn report(&mut self, now: Instant) {
@@ -896,30 +960,6 @@ impl App {
                 .into(),
         ])
         .into()
-    }
-}
-
-/// Says where the still went, and puts it on the clipboard when that is what
-/// was asked for.
-///
-/// A line on the terminal is all the feedback there is today. docs/UI.md asks
-/// for a toast here and leaves its wording, and whether it carries an action,
-/// as an open question for the owner (its "Open questions", 2): not this
-/// PR's to settle.
-fn report_still(still: Result<Done, String>) -> Task<Message> {
-    match still {
-        Ok(Done::Saved(path)) => {
-            println!("shot:   {}", path.display());
-            Task::none()
-        }
-        Ok(Done::Copied(png)) => {
-            println!("shot:   copied");
-            clipboard::write_data(png)
-        }
-        Err(e) => {
-            eprintln!("kyerag: no still: {e}");
-            Task::none()
-        }
     }
 }
 

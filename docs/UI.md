@@ -495,10 +495,81 @@ A frame capture is exactly that kind of action.
   which is what issue #15 asks for.
 - **Clipboard:** `File > Copy frame`, on `Ctrl+C` (cosmic-files
   `src/key_bind.rs:73`). Issue #15's paste-friendly copy.
-- **Feedback:** a toast saying where the file went. libcosmic has
-  `widget::toaster`, cosmic-files uses toasts for exactly this kind of "it
-  happened, here is the undo" report. **Open question:** toast copy and
-  whether it carries an action ("Show in Files").
+- **Feedback:** a toast. Decided below.
+
+### The capture toast
+
+Shipped, and the open question is closed. cosmic-files is the only
+first-party app with toasts at all: nothing in cosmic-player or cosmic-edit
+mentions `toaster`. So its use of them is the whole precedent, and this
+copies it rather than reasoning from the widget.
+
+**The widget and the placement.** `widget::toaster(&self.toasts,
+widget::space::horizontal())`, pushed as the last child of a column whose
+other child is the picture. That is cosmic-files' own mounting, comment and
+all: "The toaster is added on top of an empty element to ensure that it does
+not override context menus" (`src/app.rs:6518-6519`, and again for its
+desktop window at `6565-6567`). The reason bites harder here than there. A
+`Toaster` with a toast up returns its own overlay *instead of* its content's
+(libcosmic `src/widget/toaster/widget.rs:137-162`, whose author left a
+`//TODO` beside it), and Kyerag's control row is an overlay: the popover's.
+Wrapping the picture in the toaster would take the transport away for the
+five seconds a toast is up.
+
+**Where the toast lands is not ours to choose**, and it is worth saying so
+plainly because it is the one place this feature touches the control
+overlay. The toaster overlay centres the stack on the window and puts it 15
+px above the bottom edge (`toaster/widget.rs:199-215`), whatever it is
+mounted over; there is no anchor, no offset and no position argument. So a
+toast sits across the middle of the control row while that row is up.
+Measured on a 1280x720 headless session: it covers the middle of the
+scrubber and leaves the jump buttons, play/pause, both clocks, and the
+camera, fullscreen and volume buttons clear. That is accepted rather than
+worked around, on three grounds: it is exactly what a first-party app does;
+the control row is transient anyway (2 s of pointer stillness takes it away
+while playing, and the toast then sits over the picture); and the only ways
+to move it are a fork of the widget or a hand-rolled toast, which is the
+custom chrome the doctrine exists to prevent.
+
+**The copy**, in the app's own vocabulary. The menu says `Save frame` and
+`Copy frame`, so the toast says frame:
+
+| event                | toast                                       |
+| -------------------- | ------------------------------------------- |
+| `Save frame` worked  | `Frame saved to "Screenshots"`              |
+| `Copy frame` worked  | `Frame copied to the clipboard`             |
+| `Save frame` failed  | `Frame not saved: {reason}`                 |
+| `Copy frame` failed  | `Frame not copied: {reason}`                |
+
+The destination is the folder's own name in quotes and never a path, which
+is how cosmic-files names one in its toasts: `copied = Copied {$items} items
+from "{$from}" to "{$to}"` (`i18n/en/cosmic_files.ftl:231-234`) built from
+`file_name(to)`, the last component only (`src/operation/mod.rs:563-568`,
+`309-312`). The name follows whatever the capture resolved to, so a session
+with `XDG_SCREENSHOTS_DIR` set elsewhere says that folder's name instead
+(the headless harness reads `Frame saved to "shots"`). The whole path still
+goes to the terminal, where it does not have to be read at a glance.
+
+**Duration and stacking are stock.** `Toast::new(...)` with nothing else set
+is `Duration::Short`, which is 5 s (`toaster/mod.rs:70-88`, `122-127`), and
+cosmic-files sets no duration on any of its toasts either
+(`src/app.rs:1344-1358`). Toasts stack rather than replace: libcosmic keeps
+five and drops the oldest past that (`toaster/mod.rs:162-181`), so five
+quick captures leave five lines stacked upward from the bottom of the
+window, over the picture rather than over the control row. Left as it is,
+because it is the stock behavior and every one of those lines is true.
+
+**No action button, for now.** The toaster takes one
+(`Toast::action`, `toaster/mod.rs:132-144`), and cosmic-files uses it in
+exactly one place: `Undo` on the toast for a delete
+(`src/app.rs:1344-1352`). That is the shape of it there, a way back from
+something destructive. Nothing in cosmic-files, cosmic-player or cosmic-edit
+opens a location from a toast; cosmic-files' own "Open item location" is a
+context menu item (`i18n/en/cosmic_files.ftl:91`, `src/menu.rs:244`,
+`379`). So a "Show in Files" button has no first-party precedent to copy and
+does not ship. If the owner wants it later, the portal call is
+`org.freedesktop.FileManager1.ShowItems` and the toast already carries the
+path it would need.
 
 **Export (issue #12, M3)** goes in the `File` menu only, as
 `Export clip...` with the ellipsis, since it opens a dialog and then runs
@@ -680,7 +751,9 @@ part of issue #16:
    control row. The mute key was answered on 2026-07-31, and `m` is bound.
    What is left of it is smaller: should the speaker button take a wheel of
    its own? Above, under "Conflict 2".
-2. Screenshot feedback: toast wording, and whether it offers an action.
+2. Answered: the capture toasts shipped, with the wording and the reasoning
+   under "The capture toast" above. They carry no action button, because no
+   first-party app opens a location from a toast.
 3. Whether the frame-capture button belongs in the control row at all, or
    whether the menu item plus `s` is enough. No precedent either way.
 4. `Ctrl+0` as "default view" resets yaw, pitch and field of view together.

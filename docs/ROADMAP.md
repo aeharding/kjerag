@@ -37,7 +37,11 @@ picture on the clipboard as `image/png`. The capture is the window's own
 pipeline and bind group drawn a second time into a texture of the surface's
 format, so the numbers in the file are the numbers on the screen, and
 everything after the submit runs on a worker thread: 13 captures over 20 s
-of playback, zero dropped and zero starved in every report.
+of playback, zero dropped and zero starved in every report. **A capture says
+so**, in a toast built the way cosmic-files builds its own: `Frame saved to
+"Screenshots"`, `Frame copied to the clipboard`, or the reason it did not
+happen (docs/UI.md, "The capture toast"). 11 captures over 30 s of playback
+with the toasts in: zero dropped and zero starved in all six reports.
 
 **M1 is done.** The seam blend (issue #7) is the first M2 quality item and
 it has landed: where the two lenses overlap the pass mixes them by
@@ -298,9 +302,9 @@ into the same recording that land at the 99th or above: the fades hold.
   Full 360-degree look-around lands here too (issue #27): both lenses
   sampled, and the seam they left is blended by #7 in M2. The app shell
   around all of it is issue #16, seeking is issue #5, and screenshots are
-  issue #15. What is left of the MVP's UI is the two Settings rows for the
-  capture folder and resolution, and the toast that says where a still
-  went; both wait on docs/UI.md's open question about the wording.
+  issue #15, whose toast has since landed in cosmic-files' idiom
+  (docs/UI.md, "The capture toast"). What is left of the MVP's UI is the two
+  Settings rows for the capture folder and resolution.
 - **M2 Quality** — seam blend (issue #7, done: weight field in, exposure
   correction measured and rejected), gyro horizon lock (issue #8, done:
   complementary filter, `View > Lock horizon`, and a harness that measures
@@ -324,6 +328,24 @@ into the same recording that land at the 99th or above: the fades hold.
   row).
 
 ## Decisions log
+
+- 2026-07-31 **A capture reports itself in a stock toast, mounted beside the
+  picture and not around it** (issue #15, docs/UI.md's open question 2).
+  cosmic-files is the only first-party app that uses `widget::toaster` at
+  all, so its three lines are the whole precedent and all three are copied:
+  the toaster goes over an empty element (`src/app.rs:6518-6519`), the
+  duration is the stock 5 s, and no toast carries an action unless it is
+  undoing something destructive (`Undo` on a delete, `src/app.rs:1344-1352`).
+  Mounting it over an empty element is not decoration here: a `Toaster` with
+  a toast up returns its own overlay instead of its content's (libcosmic
+  `src/widget/toaster/widget.rs:137-162`), and the control row is the
+  popover's overlay, so wrapping the picture would take the transport away
+  for five seconds. **No "Show in Files" button**, because no first-party app
+  opens a location from a toast; cosmic-files' own "Open item location" is a
+  context menu item. The toast's position is the widget's, centred 15 px
+  above the bottom edge, which puts it across the middle of the control row
+  while that row is up; accepted rather than forked, and measured: the
+  buttons and both clocks stay clear.
 
 - 2026-07-31 **The orientation filter starts only from a reading it would
   believe completely** (issue #45). The rule that covers every other sample
