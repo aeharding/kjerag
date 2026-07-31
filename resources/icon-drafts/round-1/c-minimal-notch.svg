@@ -1,0 +1,19 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="c-sky" x1="128" y1="8" x2="128" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F0663E"/>
+      <stop offset="1" stop-color="#FFC94F"/>
+    </linearGradient>
+    <linearGradient id="c-boulder" x1="102" y1="110" x2="158" y2="180" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#DACBB9"/>
+      <stop offset="1" stop-color="#96806A"/>
+    </linearGradient>
+    <clipPath id="c-disc"><circle cx="128" cy="128" r="120"/></clipPath>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#c-sky)"/>
+  <g clip-path="url(#c-disc)">
+    <circle cx="128" cy="142" r="42" fill="url(#c-boulder)"/>
+    <path d="M-20 268L-20 100L84 100L128 178L174 116L276 116L276 268Z" fill="#453A33"/>
+    <path d="M-20 100L84 100L128 178L174 116L276 116L276 127L179 127L128 196L89 111L-20 111Z" fill="#6E5C4E"/>
+  </g>
+</svg>

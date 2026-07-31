@@ -383,6 +383,17 @@ view at a fixed 164 degrees per window width, which is the rate the pinned
 drag itself is going at in the last view before the handover, so the two meet
 at the threshold with nothing to feel. Under 110 nothing changed at all.
 
+**And the zoom key no longer lets go of the drag** (issue #83, pre-existing
+and surfaced by the three above). `Ctrl+=` and `Ctrl+-` took a held drag's
+hold again at the middle of the frame while the hand was somewhere else, so
+the next move of the pointer hauled the picture over to whatever the middle
+had been pointing at: 33 degrees of yaw for a cursor that did not move, in
+the widget-level check that reproduced it. A held drag already knows where
+the cursor is, because that is what the wide regime measures its travel from,
+and the key zooms there now, which is what the wheel has always done. With
+nothing held it still zooms about the middle, which is where a keyboard with
+no hand on the picture is pointing.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
@@ -461,6 +472,20 @@ live, no keyframe UI ever.
   24.04 has no ffmpeg 7 and will not get one, so ffmpeg comes from a PPA
   (AGENTS.md, and the same one in CI) or, without sudo, from
   `scripts/ffmpeg7-local.sh`.
+
+- 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
+  recorded in docs/icon.md). A round teal world with a green coast and a warm
+  rim, and a small figure entering it from the upper left, drawn by
+  `scripts/icon-diver.py` from a joint skeleton rather than traced. The
+  figure's size and how far its feet clear the rim are set together, because
+  the rim crossing is what decides both: round 7 grew it 18 percent inward,
+  holding the feet at the same 27.1 units past the rim.
+  `resources/icons/hicolor/` is the theme tree: a scalable SVG, PNGs from 256
+  down to 16, and a drawing of its own for 32, 24 and 16, because both COSMIC
+  and the Pop theme redraw those sizes instead of exporting. The files are
+  named for the application ID `dev.harding.Kjerag`, the one issue #66
+  settled and issue #75 will put in the code; until that rename lands the
+  binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
 
 - 2026-07-31 Seam bar raised (owner): "I want the best seam support out
   there." The prod gate is not good-enough but best-shipping, Insta360's
