@@ -40,6 +40,12 @@ cargo test
 ## Hard rules
 
 - Branch + PR for all work after the bootstrap commits. Never force-push.
+- ALL work stays inside the owner's repositories. Never open, file, or
+  comment on issues or pull requests of any outside project, ever. This
+  includes "goodwill" bug reports and backport offers to dependencies.
+  Forking a dependency into the owner's account for our own use is fine;
+  interacting with the upstream project is not. Third-party findings are
+  documented in our own docs and issues only.
 - Subagents may write and commit directly on working branches (explicitly
   authorized by the owner, 2026-07-30); main changes only land via PR.
 - Work queue is GitHub issues. Claim an issue by commenting; close via PR.
