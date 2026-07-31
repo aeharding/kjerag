@@ -719,7 +719,7 @@ impl App {
     ///
     /// Nothing here touches the picture. The render pass takes the request on
     /// its next redraw, a worker thread reads the pixels back and either
-    /// writes the PNG or encodes it for the clipboard, and this task is woken
+    /// writes a JPEG or encodes a PNG for the paste, and this task is woken
     /// when that is done. The clipboard is the one step that has to come back
     /// to the shell, because on Wayland it is the window that offers the data.
     fn capture(&self, to: Destination) -> Task<Message> {

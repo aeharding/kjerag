@@ -470,14 +470,16 @@ is_room() {
 }
 
 # `s` writes a still into the session's screenshots folder, which is inside
-# scratch/ and not the developer's own.
+# scratch/ and not the developer's own. The name it looks for is the one the
+# app writes: a JPEG since issue #15, and ffmpeg reads what it finds, so a
+# file that is not the format its name claims fails the decode below.
 saves_a_still() {
 	local still shrunk=$session/still.ppm
 	local try=0
 	while [ "$try" -lt "$PRESSES" ]; do
 		key -k s
 		alive || lost "s saves a still"
-		still=$(find "$session/shots" -name '*.png' | head -1)
+		still=$(find "$session/shots" -name '*.jpg' | head -1)
 		[ -n "$still" ] && break
 		try=$((try + 1))
 	done
@@ -489,7 +491,7 @@ saves_a_still() {
 	if nonblack "$shrunk"; then
 		pass "s saves a still"
 	else
-		fail "s saves a still" "the PNG is black: $still"
+		fail "s saves a still" "the still is black: $still"
 	fi
 }
 
