@@ -115,6 +115,37 @@ this camera's is 29 frames. Expected saving: **0.14 W**, for a state machine
 and a packet ring through the frame path. `kyerag-spike --bin gating` is the
 measurement and it stays runnable.
 
+**Two defects the owner found flying the lock** are fixed and measured
+(issues #44 and #45), and they answer to different halves of it.
+
+The **view no longer drifts back after a drag** (#44). The camera's yaw was
+read inside the stabilized frame, and that frame's own heading is the body's
+heading low passed with #8's 3 s constant, so the number a drag set survived
+but the frame it was measured in did not: within seconds of any change of the
+camera's heading the view was carried along with it. The two requirements
+compete for one constant, because a view that holds its world direction
+indefinitely cannot also swing round with a deliberate 360, so the follow is
+now **drag relative**: the camera's heading drives the view until a drag
+moves it, the drag pins the follow where it found it, and `View > Reset view`
+hands it back. Five minutes of a wandering body heading through the real
+filter now moves the view by less than 0.05 degrees, against the 25 degrees
+of the body's own turn that used to carry it.
+
+The **once-per-revolution horizon dip** (#45) is measured and **not fixed**,
+and that is the finding. `kyerag-spike --bin dip` sweeps a locked view round
+the circle, reads the horizon in every render, and reports the defect twice
+over: as the tilt of the estimated vertical, which one render answers, and as
+the sinusoid a pilot sees, fitted over the whole pan. It reads an injected
+1 degree tilt back as 0.97. Over 12 stretches of two captures the tilt is
+**1.9 to 8.5 degrees, mean 3.7**, and none of the three suspects is it: the
+unsettled angle order is worth 0.13 degrees, both wrong mountings find no
+horizon at all, and `gyro_calib` as a bias makes it worse in all four
+readings. It is the complementary filter's own residual against an
+accelerometer that in flight is not gravity, the shipped constants are the
+best of 16 settings tried across four axes, and the real fix is to subtract
+the aircraft's own acceleration using the GPS track the file carries and this
+project does not yet read. docs/research/insv-format.md 8.7 has all of it.
+
 Next in M2: high-quality zoom sampling (issue #11).
 
 **M3 has started, and the player has sound** (issue #13). The file's AAC track

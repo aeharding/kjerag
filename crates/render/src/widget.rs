@@ -12,7 +12,7 @@ use std::time::Instant;
 use cosmic::iced::widget::shader::{self, Action};
 use cosmic::iced::{Event, Point, Rectangle, mouse, window};
 
-use super::{Next, Scene, ScenePipeline, ScenePrimitive, Viewpoint};
+use super::{Next, Nudge, Scene, ScenePipeline, ScenePrimitive, Viewpoint};
 
 /// Wheels report scroll in lines and touchpads report it in pixels, and iced
 /// passes both through as they came. A feel constant, not a measurement.
@@ -30,12 +30,17 @@ impl<Message> shader::Program<Message> for Scene {
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
         match event {
-            Event::Mouse(event) => mouse_update(viewpoint, event, bounds, cursor),
+            Event::Mouse(event) => mouse_update(self, viewpoint, event, bounds, cursor),
             Event::Window(window::Event::RedrawRequested(now)) => {
                 // The `View` menu's zoom items have no cursor and no event of
                 // their own, so the shell leaves them on the scene and this is
                 // where they reach the camera iced owns.
                 if let Some(nudge) = self.take_nudge() {
+                    // Putting the view back where it opened hands it back to
+                    // the camera's heading as well (issue #44).
+                    if nudge == Nudge::Reset {
+                        self.follow_view();
+                    }
                     viewpoint.nudge(nudge, aspect(bounds));
                 }
                 tick(self, *now)
@@ -117,6 +122,7 @@ impl shader::Pipeline for ScenePipeline {
 /// The pan is a grab: it starts on a press over the widget, it lasts exactly
 /// as long as the button is held, and every way it can end ends it.
 fn mouse_update<Message>(
+    scene: &Scene,
     viewpoint: &mut Viewpoint,
     event: &mouse::Event,
     bounds: Rectangle,
@@ -140,9 +146,18 @@ fn mouse_update<Message>(
         // the drag that decides whether this moves anything, not the cursor.
         // The `uv` of a cursor outside the widget is outside 0 to 1, which is
         // a direction outside the view, which is exactly what the drag means.
-        mouse::Event::CursorMoved { position } => viewpoint
-            .drag_to(uv(*position, bounds), aspect(bounds))
-            .then(Action::request_redraw),
+        mouse::Event::CursorMoved { position } => {
+            let moved = viewpoint.drag_to(uv(*position, bounds), aspect(bounds));
+            // A drag that moves the view is the pilot saying where to look,
+            // and from here the heading follow may not take it back
+            // (issue #44). It is the move and not the press that says so: the
+            // two presses of a double click, which is the shell's fullscreen
+            // gesture, drag nothing anywhere.
+            if moved {
+                scene.pin_view();
+            }
+            moved.then(Action::request_redraw)
+        }
         // The release ends the grab wherever it lands, including off the
         // widget. `CursorLeft` is the case where it cannot land here at all:
         // the pointer left the window still held, so the release will be some
