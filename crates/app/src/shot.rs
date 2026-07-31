@@ -96,13 +96,14 @@ pub fn finish(shot: &Shot, video: &Path, to: Destination) -> Fallible<Done> {
 /// How hard a saved still is compressed (issue #15).
 ///
 /// Measured on this box over five real 3840x2160 captures (sky and wing,
-/// the lens seam, dense ground detail, a low sun, a wide view): 0.7 to
-/// 1.8 MB a still, against 5.3 to 13.3 MB as a lossless PNG, at 52.0 to
-/// 53.8 dB PSNR and 0.995 to 0.998 SSIM against those same pixels
-/// (ffmpeg's `psnr` and `ssim` filters, both inputs at yuv444p). Every
-/// lossless candidate measured, PNG's own levels and lossless WebP
-/// included, stayed above 2.8 MB.
-const QUALITY: u8 = 93;
+/// the lens seam, dense ground detail, a low sun, a wide view): 0.57 to
+/// 1.54 MB a still at this setting, against 5.3 to 13.3 MB as a lossless
+/// PNG, at 51.3 to 53.6 dB PSNR and 0.9946 to 0.9975 SSIM against those
+/// same pixels (ffmpeg's `psnr` and `ssim` filters, both inputs at
+/// yuv444p). Every lossless candidate measured, PNG's own levels and
+/// lossless WebP included, stayed above 2.8 MB. Was 93; the owner judged
+/// the files still a bit big at that setting (2026-07-31).
+const QUALITY: u8 = 90;
 
 /// Full size chroma planes. 4:2:0 is 15% smaller and costs 1.5 dB of
 /// chroma on the same captures, and chroma is where the wing's lines
