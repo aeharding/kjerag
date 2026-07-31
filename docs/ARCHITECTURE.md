@@ -264,30 +264,41 @@ A file with **one** lens stream takes no crossover at all: it has no seam to
 hand over at, and its picture runs to the edge of its own coverage, 7 degrees
 past where a seam would have been.
 
-### The seam is fitted per file, at open (issue #48)
+### The seam is calibrated per camera (issue #48)
 
 The camera's own calibration is out by degrees at the seam on the owner's
 unit: 2.4 across it, which is 43 px of the delivered frame and reads as a
-doubled tree trunk. It is a relative lens tilt, and `kyerag_render::seam`
-measures and corrects it **per file**, because the tilt's magnitude is steady
-across nine months of files and its axis is not.
+doubled tree trunk. It is a relative lens tilt with a principal-point error
+under it, and `kyerag_render::seam` measures and corrects it **per camera**,
+because that is what it is: fitted file by file the same pair of lenses asks
+for five answers 15 view pixels apart, while one answer fitted on a capture
+from a camera standing still reads the same along-seam number on three and a
+half months of the owner's flights as their own fits do
+(docs/research/insv-format.md 6.8).
 
 The fit is the phase-1 instrument's own measurement, in the shipped map's
 units: both lenses sampled on the same angular grid at 72 azimuths on the seam
 circle over frames spread through the file, each calibration field turned by a
 probe amount to build the design matrix, three Gauss-Newton rounds because one
-is 2 percent short at this size. Three knobs, a relative rotation; the
-principal point is measurable but runs away on files whose seam has little
-far-field content, and it buys nothing on the axis the doubling is on.
+is 2 percent short at this size. Five knobs, a relative rotation and a
+principal point, with the point held towards zero by a ridge and a fit refused
+below twice the knob count in azimuths: those two are what keep a capture with
+little far-field content from asking for 54 px of principal point.
 
-It runs on its own thread at open and lands **1.4 to 2.1 s** in, all of it
-decode, so the file plays immediately and the picture corrects itself a moment
-later. The answer is cached under a hash of the file's own metadata record, in
-`dirs::cache_dir()` as cosmic-files caches thumbnails, so every later open of
-the same file is corrected before the first frame. A file the fit cannot read
--- a legacy one-stream capture, a seam with nothing far-field on it, a fit that
-comes out too big to be a calibration -- keeps the factory calibration and says
-nothing to the pilot.
+**Nothing is fitted at open.** The answer is five numbers under a serial-free
+camera key (`CalibrationSet::camera_key`) in cosmic-config state, so a file
+opens corrected before its first frame with nothing to decode. `View >
+Calibrate seam from this video` is what puts one there, on the file the pilot
+has open, off the main thread, about two seconds.
+
+A camera with no stored calibration falls back to fitting off the file being
+played, on its own thread, landing a second or two in and saying so in the
+report line. That is weaker for a measured reason and not just in principle:
+a flight's across-seam column carries that flight's parallax, and a fit
+through it absorbs some into a number that is then applied to the whole
+sphere. A file the fit cannot read -- a legacy one-stream capture, a seam with
+nothing far-field on it, an answer too big to be a calibration -- keeps the
+factory calibration.
 
 Nothing is shown from neither lens: the two 97.4-degree caps overlap by
 about 14 degrees, which is checked over the whole sphere by `cargo test`
@@ -569,14 +580,17 @@ on the X4 Air).
   composition is settled (above); the order is not, and no known camera can
   distinguish it, because every one of them records sub-degree yaw and
   pitch (docs/research/insv-format.md 4.8).
-- What is left of the seam. Settled and shipped for the axis that mattered:
-  the 2.4 degrees **across** the seam was calibration, it is fitted per file
-  at open (above), and what is left is 0.1 to 0.7 degrees of parallax and
-  scene. What stays open is the **along-seam one-cycle** term, about 0.4
-  degrees, which is a principal-point signature: the five-knob fit removes it
-  and cannot be trusted on files whose seam has little far-field content, so
-  the shipped fit turns three knobs and leaves it.
-  docs/research/insv-format.md 6.8 has the per-file numbers.
+- What is left of the seam. Settled and shipped for the geometry: the 2.4
+  degrees **across** the seam and the along-seam one cycle under it were both
+  calibration, and both come out of a five-knob fit stored per camera
+  (above). On the far-field control the whole thing is down to 0.02 along and
+  0.11 across, which is under two view pixels. What is left on **flights** is
+  0.15 to 0.22 along and 0.49 to 0.92 across, and the second of those two
+  numbers is parallax rather than calibration: it is the axis a baseline can
+  reach, it moves with what the camera was looking at, and no correction
+  applied to the whole sphere can take it out. That is the next thing on this
+  seam and it wants depth, not knobs.
+  docs/research/insv-format.md 6.8 has the numbers and the transfer table.
 - **Exposure across the seam is still not corrected** (6.3), and with the
   crossover now 2 degrees wide instead of 10 there is less band to hide a
   brightness step in. Measured on the flattest, brightest content in this

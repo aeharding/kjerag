@@ -319,28 +319,32 @@ Nothing in the shader changed: phase 1 is measurement, and the fitted
 parameters are for the owner to validate before phase 2 applies any of them.
 Method and every number: docs/research/insv-format.md 6.8.
 
-**Phase 2 applies it, per file, and then narrows the band** (issue #48, the
-owner's "2 deg looks good"). The correction is **not** the five numbers phase
-1 fitted: the app runs phase 1's own fitter at open, on 72 azimuths over
-frames spread through the file, because measured across seven files spanning
-nine months the roll is a constant (+0.58 to +0.84 degrees, a per-unit factory
-error) and the tilt's **axis** is not, while its magnitude stays near 2.5.
-Three knobs ship rather than five: across the seam, the axis the doubling is
-on, the two fits agree within 0.006 degrees on six of the seven files, and on
-the seventh -- a camera on a deck, where the near field fills the seam and
-only 7 azimuths correlate -- the five-knob fit asks for a 55 px principal point
-and a yaw of the opposite sign to every other file's. What the rotation leaves
-is about 0.4 degrees of along-seam one-cycle residual, which is stated rather
-than hidden.
+**Phase 2 applies it, per camera, and then narrows the band** (issue #48, the
+owner's "2 deg looks good"). The correction is five knobs, a relative rotation
+and a principal point, **fitted once against a capture from a camera standing
+still and stored under that camera** rather than fitted per file. Which of
+those two is right was measured rather than argued, and not on the number a
+per-file fit minimizes for itself. **The per-file fits disagree with each
+other**: fitted file by file, the same glued pair of lenses asks for yaws from
+-1.69 to -2.58 degrees and principal points 13 px apart, which is 15 px of
+picture at the seam between two answers for one camera that did not change
+between April and July. **The static capture's answer, applied unchanged to
+all five flights, reads the same along-seam number their own fits do** (0.15
+to 0.22 degrees, within 0.002 of the per-file answer on three of five) and
+well inside the 0.31 to 0.40 the per-file rotation left. That axis is the one
+parallax cannot reach, so it is calibration and nothing else. On the
+far-field control the per-camera answer leaves **0.022 degrees along and 0.106
+across**, which is 1.8 view pixels, against 6.7 for the per-file rotation.
 
-The fit costs **1.4 to 2.1 s** and nearly all of it is decode. It runs on its
-own thread, so playback starts immediately and the picture corrects itself
-about two seconds in: 20 s of playback with the fit running is **0 dropped and
-0 starved**, with one redraw 25 ms late against a 33.4 ms frame. The answer is
-cached under a hash of the file's own metadata record, so every later open of
-that file is corrected before the first frame, and a file with no fit -- a
-legacy one-stream capture, a seam with no far-field content -- silently keeps
-the factory calibration.
+That deletes three things this milestone used to carry: the two second wait
+before a first play was corrected, the cache under the file's own hash, and
+the thin-file failure mode where a capture with seven usable azimuths got a
+fit of its own. `View > Calibrate seam from this video` is the one action, on
+a worker thread, about two seconds, with a toast when it lands; a camera with
+nothing stored still gets a best-effort fit off the file being played, which
+is the old path demoted to a fallback and labelled as one in the report line.
+The store is cosmic-config **state**, keyed by a serial-free camera key: the
+model, the delivered frame size and the factory calibration string, hashed.
 
 **Then the crossover, 2 degrees instead of the 14-degree overlap.** On flight
 footage the doubled band goes from 10.60 degrees to 1.50 and its sharpness
@@ -424,8 +428,10 @@ into the same recording that land at the 99th or above: the fades hold.
   **M2 is complete**: issue #48 reopened the seam, and both halves of it have
   now shipped. The two lenses were misaligned by up to 2.7 degrees across the
   seam; phase 1 measured that and attributed it to a relative lens tilt, and
-  phase 2 fits the correction per file at open and hands the picture over in a
-  2 degree crossover instead of the whole 14 degree overlap. Issue #79 opened
+  phase 2 calibrates it per camera off a capture the pilot points at and hands
+  the picture over in a 2 degree crossover instead of the whole 14 degree
+  overlap. What is left at the seam on flight footage is parallax, which is
+  depth rather than geometry and is the next thing to look at. Issue #79 opened
   a second camera: the ONE X2 writes one lens per file, and the player now
   pairs the two at open and holds an X2's horizon with that camera's own IMU
   convention.

@@ -588,6 +588,12 @@ the bottom placement this PR replaced, that check fails.
 | `Copy frame` worked  | `Frame copied to the clipboard`             |
 | `Save frame` failed  | `Frame not saved: {reason}`                 |
 | `Copy frame` failed  | `Frame not copied: {reason}`                |
+| `Calibrate seam` worked | `Seam calibrated for this camera`        |
+| `Calibrate seam` failed | `Seam not calibrated: {reason}`          |
+
+The calibration toast says **camera** rather than video, because that is the
+whole difference between the action and what the app does on its own: the
+answer is kept, and every later video off the same camera opens with it.
 
 The destination is the folder's own name in quotes and never a path, which
 is how cosmic-files names one in its toasts: `copied = Copied {$items} items
@@ -649,14 +655,37 @@ File                      Playback                 View
   Open recent >             Back 10 seconds          Default view
   Close video               Forward 10 seconds       Zoom out
   ---                       ---                      ---
-  Save frame                Previous frame           Fullscreen
-  Copy frame                Next frame               ---
-  ---                                                Settings...
-  Quit                                               About Kyerag...
+  Save frame                Previous frame           [x] Lock horizon
+  Copy frame                Next frame               Calibrate seam from this video
+  ---                                                ---
+  Quit                                               Fullscreen
+                                                     ---
+                                                     Settings...
+                                                     About Kyerag...
 ```
 
 - Ellipsis on items that open a dialog, none on items that act
   (cosmic-player `Open media...` vs `Close file`, `src/menu.rs:119-121`).
+- `Lock horizon` is a checkbox rather than a pair of items, because it is a
+  state (issue #8); cosmic-files spells `Show hidden files` the same way.
+- `Calibrate seam from this video` measures what this camera's two lenses
+  disagree by and keeps the answer for every later video off that camera
+  (issue #48). It sits beside the horizon lock because both are about how
+  the picture is put together rather than about the file it came out of, it
+  is disabled for a capture with no seam in it, and it says what it did in
+  a toast: the run takes a second or two on a worker thread and the window
+  keeps playing while it does. Nothing on screen says it is running, which is
+  the same call the capture toast makes: an action that is over in two seconds
+  and has a result line does not want a progress bar in a window whose job is
+  to keep drawing.
+
+  **A capture from a camera standing still is what it wants pointed at it**,
+  and the reason is measured rather than a preference
+  (docs/research/insv-format.md 6.8): a fit taken through a flight's seam
+  absorbs that flight's own parallax into the answer, and a still capture of
+  far content has none to absorb. The app says so where it matters rather
+  than in a dialog nobody reads: a camera with no calibration prints the
+  advice in its report line as it falls back to fitting off the open file.
 - `Settings...` then a divider then `About <app>...` at the end of `View`
   is the shared convention: cosmic-files `src/menu.rs:762-764`, cosmic-edit
   `src/menu.rs:346-350`.
@@ -707,7 +736,15 @@ first-party app uses:
 
 - `Config` (`CONFIG_VERSION: u64 = 1`): things the pilot chose.
   `app_theme`, `screenshot_dir`, `screenshot_scale`.
-- `ConfigState`: things the app remembers. `recent_files`.
+- `ConfigState`: things the app remembers. `recent_files`, and
+  `seam_calibration`, one entry per camera under a serial-free fingerprint
+  of that camera's own factory calibration (issue #48).
+
+`seam_calibration` is state and not config for the same reason
+`recent_files` is: it is something the app measured rather than something
+the pilot expressed, it has no row on the Settings page, and resetting the
+settings must not throw it away. It is not a cache either. Deleting it does
+not cost a recompute, it costs the pilot the capture he pointed the app at.
 
 Both derive `CosmicConfigEntry` and both get a `cosmic_config` subscription
 so an external change applies live (cosmic-player `src/config.rs`,

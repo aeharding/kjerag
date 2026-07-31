@@ -1499,82 +1499,167 @@ hard visible tear.
   per clip and the string is a starting point. The measurement does not
   distinguish those, and the fix is the same either way.
 - **The split of the tilt between yaw and pitch.** Its magnitude, 2.44
-  degrees, is steady; the axis is not. Fitting the two captures pooled puts
-  the same magnitude at a different azimuth, because the azimuths each capture
-  has content at are different and neither covers the circle. A capture with
-  content all the way round would settle it, and a per-file fit at load would
-  not need it settled. **Phase 2 fits per file, so this stays open and stops
-  mattering** (below).
-- **Whether one correction serves every file from one camera.** The two
-  captures here are minutes apart. Both were fitted with the calibration
-  string byte-identical, and the correction transfers to flight footage from
-  five weeks earlier, which is consistent with a per-unit constant and does
-  not prove one. **Seven files now say what it is worth**: the roll is the
-  same number every time and the tilt's axis is not (below).
+  degrees, is steady; the axis is not, when each file is fitted on its own.
+  **Phase 2 answers this rather than working around it** (below): the axis a
+  file's own fit lands on moves because each file's across-seam column carries
+  that file's parallax, and one answer fitted where there is none transfers to
+  all of them.
+- **Whether one correction serves every file from one camera.** Open in phase
+  1, **settled in phase 2 and shipped**: one five-knob answer fitted on a
+  static capture reads the same along-seam number on the flights as their own
+  fits do, while the per-file fits disagree with each other by 15 view px
+  (below).
 
-#### Phase 2: the same fit, per file, at open
+#### Phase 2: one fit per camera, from a capture the pilot points at
 
-**Confidence: HIGH.** Measured 2026-07-31 on eight of the owner's files
-spanning nine months, through the shipped code (`kyerag_render::seam`, which
-is this section's own fitter moved out of the instrument so there is one of
-it). The app reads its seam at 72 azimuths on 2 frames at each of 3 places
-spread through the file, fits the three angles through the map, and applies
-the answer to lens 1.
+**Confidence: HIGH.** Measured 2026-07-31 on seven of the owner's X4 Air
+captures spanning three and a half months plus a ONE X2 clip, through the
+shipped code (`kyerag_render::seam`, which is this section's own fitter moved
+out of the instrument so there is one of it). Instrument for the tables below:
+`kyerag-spike --bin leftover`, which scores any candidate correction against
+the frames the app itself reads.
 
-| file | azimuths | roll | yaw | pitch | along | across | read + fit |
+**The correction belongs to the camera.** The five knobs are fitted once, on a
+capture from a camera that is not moving, and stored under a serial-free
+camera key. On the owner's static capture, 13 azimuths, principal point held
+by a ridge of 0.05:
+
+| knobs | roll | yaw | pitch | cx | cy | along | across |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| still, 12:07 | 13 | +0.702 | -2.605 | +0.176 | 0.805 -> 0.384 | 2.282 -> 0.110 | 2.07 s |
-| still, 12:12 | 7 | +0.741 | -1.047 | +1.005 | 1.027 -> 0.710 | 1.381 -> 0.510 | 2.00 s |
-| flight, 04-10 | 27 | +0.577 | -2.263 | -0.453 | 0.743 -> 0.487 | 1.689 -> 0.677 | 1.40 s |
-| flight, 05-01 | 35 | +0.801 | -2.358 | -0.353 | 0.886 -> 0.412 | 2.004 -> 0.442 | 1.70 s |
-| flight, 06-23 | 42 | +0.752 | -2.428 | -0.866 | 0.823 -> 0.390 | 2.065 -> 0.592 | 1.60 s |
-| flight, 07-14 | 31 | +0.839 | -2.545 | -0.627 | 0.888 -> 0.349 | 2.178 -> 0.603 | 1.41 s |
-| flight, 07-25 | 18 | +0.799 | -2.988 | -0.459 | 0.867 -> 0.394 | 1.944 -> 0.379 | 1.54 s |
-| 2025-10-18 | one lens stream per file: no seam, no fit |
+| rotation | +0.702 | -2.605 | +0.176 | | | 0.805 -> 0.384 | 2.282 -> **0.110** |
+| five, free | +0.810 | -2.352 | -0.678 | -4.18 | -13.91 | 0.805 -> 0.030 | 2.282 -> 0.103 |
+| **five, ridge 0.05** | **+0.789** | **-2.450** | **-0.668** | **-2.55** | **-13.84** | 0.805 -> **0.022** | 2.282 -> **0.106** |
 
-Read that table twice. **The roll is a constant**: +0.58 to +0.84 degrees over
-nine months and two scenes, which is what a per-unit factory error looks like.
-**The tilt's axis is not**: the yaw runs -1.0 to -3.0 and the pitch +1.0 to
--0.9, while the magnitude stays near 2.5 on every file with more than a
-handful of azimuths. That is this section's own open question answered as far
-as it can be answered from seams, and it is the reason the fit is per file
-rather than a constant in the source.
+**That answer, applied unchanged to every other file**, against what each file
+asks for on its own. `own` is that file's own five-knob ridged fit, which is
+what the fallback path computes; `rotation` is what PR #87 shipped:
 
-**Three knobs ship, not five.** The same readings fitted both ways:
+| file | azimuths | transfer along | own along | rotation along | transfer across | rotation across |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| static, 07-31 12:07 | 13 | **0.022** | 0.022 | 0.384 | **0.106** | 0.109 |
+| flight, 04-10 | 23 | 0.673 | 0.594 | 0.650 | 0.919 | 0.737 |
+| flight, 05-01 | 25 | **0.213** | 0.211 | 0.362 | 0.745 | 0.616 |
+| flight, 05-26 | 40 | **0.154** | 0.137 | 0.308 | 0.485 | 0.426 |
+| flight, 07-14 | 29 | **0.176** | 0.174 | 0.360 | 0.757 | 0.614 |
+| flight, 07-25 | 16 | **0.220** | 0.087 | 0.395 | 0.525 | 0.338 |
+| static, 07-31 12:12 | 5 | 0.483 | 0.305 | 0.548 | 1.270 | 0.581 |
+| ONE X2, 2025-10-18 | 2 | one lens stream per file: no seam, no fit |
 
-| file | five-knob cx, cy | along, five | across, five | against rotation |
-| --- | ---: | ---: | ---: | --- |
-| still, 12:07 | -4.2, -13.9 | 0.030 | 0.104 | across within 0.006 |
-| still, 12:12 | **-55.1**, -31.2 | 0.194 | 0.493 | yaw comes back **+2.28** |
-| flight, 04-10 | -9.6, -5.4 | 0.416 | 0.681 | across within 0.004 |
-| flight, 05-01 | -2.4, -15.1 | 0.093 | 0.440 | across within 0.002 |
-| flight, 06-23 | -6.7, -10.7 | 0.232 | 0.592 | across within 0.001 |
-| flight, 07-14 | -6.1, -8.9 | 0.168 | 0.606 | across within 0.003 |
-| flight, 07-25 | -8.9, -18.8 | 0.106 | 0.383 | across within 0.004 |
+Four things are in that table, and the first of them is what the rest have to
+be read against.
 
-Across the seam, which is the axis the doubled trunk is on, the two fits are
-the same answer. Along it the five-knob fit is better, because the principal
-point is the only thing that reaches the one-cycle term there. And on the file
-with the fewest azimuths -- a camera on a deck, where the near field fills the
-seam -- it asks for a **55 px** principal point and a yaw of the opposite sign
-to every other file's, which is seven patches being overfitted and would be
-applied to the whole sphere. The rotation under-corrects on that file instead
-(1.45 degrees of tilt where the camera's is about 2.5), which is the failure
-worth having. What ships therefore leaves about 0.4 degrees of along-seam
-one-cycle residual, and that is a stated trade rather than a miss.
+**A file's own fit cannot be judged by the residual it leaves on that file**,
+because that residual is the quantity it minimized. The `own` column is a
+floor, not a score. So the case below rests on the two columns that are not
+in-sample: what the per-file fits say about each other, and what any of them
+does on a capture with no scene in it.
 
-**Applied and re-measured**, which is the only test of a fitted parameter: on
-the 12:07 capture the patches read +0.32 to +0.39 along and -0.10 to +0.28
-across, from -1.24 to -0.30 and -2.56 to +2.64.
+**The per-file fits do not agree with each other**, and every one of them is a
+fit of the same glued pair of lenses. Across the five flights the same body's
+own five-knob answer runs roll +0.58 to +0.90, yaw **-1.69 to -2.58**, pitch
+-0.80 to -1.63, cx -1.3 to -9.5 px and cy **-5.4 to -18.6 px**. The yaw alone
+spans 0.89 degrees, which at the seam is 15 px of a 1920-wide 90-degree view,
+and cy spans 13 px of the delivered frame. A camera's extrinsics did not move
+15 px between April and July. What moved is what the camera was pointed at.
 
-**What it costs.** The whole fit is **1.4 to 2.1 s**, and essentially all of it
-is decode: the least squares itself is under a millisecond, three rounds
-included. It runs on its own thread off the decode path, so the file plays
-immediately and corrects itself when the fit lands; measured on 20 s of
-playback at 2560x1440 with the fit running, **0 dropped and 0 starved**, one
-redraw 24.6 to 27.5 ms late against a 33.4 ms frame (0.6 to 1.2 ms without).
-The answer is then cached under a hash of the file's own metadata record, so
-every later open of that file is corrected **before the first frame**.
+**Along the seam, one camera's answer lands where each flight's own fit
+lands**, and well inside the per-file rotation PR #87 shipped: 0.15 to 0.22
+degrees against that rotation's 0.31 to 0.40, and within 0.002 degrees of the
+`own` column on three flights of five. That column is the one parallax cannot
+reach at all (4.9), so it is calibration and nothing else, and a correction
+fitted on a capture months away from a flight reading the same number there as
+a fit taken on the flight itself is what a per-unit constant looks like. Two
+flights do not match: 07-25, whose own fit reaches 0.087, and 04-10, where the
+transfer reads 0.673 against that file's own 0.594 and the rotation's 0.650.
+04-10 is the outlier in every direction: its scene is 2.6 m away, and 1
+azimuth of 23 correlates at all three places in the file.
+
+**Across the seam the transfer reads higher on flights**, 0.49 to 0.92 against
+0.34 to 0.74, and that is the same finding from the other side. The across
+column carries parallax as well as calibration; a per-file fit pulls its tilt
+until the mean of that column is flat, which on a flight means it has absorbed
+that flight's own near-field disparity into a number applied to the whole
+sphere. The measurement that separates them is the static capture, where the
+content is 580 m away and there is no parallax to absorb: the transfer leaves
+**0.022 along and 0.106 across**, which at this view's 16.8 px per degree is
+**1.8 px typical and 4.6 px worst**, against 6.7 and 9.1 for the rotation fit
+PR #87 shipped. Far content is where a per-camera answer is exactly right and
+a per-file one is not.
+
+**Applied and re-read on the pixels**, which is the only test of a fitted
+parameter and is the one thing above that is not a prediction through the map:
+the calibration put into lens 1, the file decoded again, and the seam
+correlated again (`--bin seam mode=fit fix=...`, whose `before` column is the
+re-read). The correction turns lens 1, so the seam circle moves with it and
+the patch set is not the same one: 27 azimuths correlate on 04-10 before and
+18 after, 31 and 16 on 07-14. What the two columns compare is the seam this
+file has, twice.
+
+| file | factory along | factory across | calibrated along | calibrated across |
+| --- | ---: | ---: | ---: | ---: |
+| static, 07-31 12:07 | 0.805 | 2.282 | **0.019** | **0.147** |
+| flight, 04-10 | 0.743 | 1.689 | 0.139 | 0.609 |
+| flight, 05-01 | 0.964 | 2.149 | 0.355 | 0.569 |
+| flight, 05-26 | 0.888 | 1.851 | 0.190 | 0.599 |
+| flight, 07-14 | 0.888 | 2.178 | 0.259 | 0.835 |
+| flight, 07-25 | 0.867 | 1.944 | 0.121 | 0.572 |
+| static, 07-31 12:12 (deck, refused a fit) | 1.027 | 1.381 | 1.051 | 1.273 |
+
+The deck capture is the row that does not move, and it is the row that should
+not: its seam looks down at decking 5 to 30 cm away, where a 33.4 mm baseline
+puts 6 to 38 degrees of disparity, so what those seven patches read is
+parallax and no rotation of a lens can take it out. Every other row is the
+whole correction landing.
+
+**The thin captures are refused, not fitted.** Counted by the shipped fitter
+itself (`--bin seam mode=fit`, the app's own reading plan), the 12:12 deck
+capture correlates **7** of 72 azimuths and the X2 clip **3**, both under
+`PATCHES_NEEDED`, which is twice the knob count. Left to run, the deck
+capture's free five-knob fit asks for a **-55 px** principal point and a yaw
+of **+2.28**, the opposite sign to every other capture from that camera; the
+ridge pulls the point to -21 px and the yaw is still wrong. The X2's five
+knobs are singular on three patches outright. That is what the count is for,
+and it is why the ridge is a prior rather than the whole guard.
+
+**What names a camera** is `CalibrationSet::camera_key`: the model name, the
+delivered frame size and every number of the factory `offset_v3` string,
+FNV-1a hashed. Measured over the owner's captures, it is
+`d8a393389b7b8639` for all seven X4 Air files from April to July and
+`5381a2bf9e3d39bd` for the ONE X2. It is not the serial and it is not derived
+from one; the serial and the GPS track live in the same metadata record and
+neither is in the hash. The delivered frame size is in it on purpose: the
+principal-point half of a correction is in delivered-frame pixels, so a
+capture mode that delivers a different frame is a different key rather than a
+correction scaled wrong.
+
+**What it costs.** Nothing at open: the correction is five numbers in the
+pilot's config, applied to the calibration the trailer already parsed, before
+the first frame is drawn. The fit itself, when the pilot asks for one, is
+**1.4 to 2.1 s** and essentially all of it is decode; the least squares is
+under a millisecond, three Gauss-Newton rounds included. It runs on a worker
+thread, so the window keeps playing while it reads.
+
+**The landing step is gone**, and here is the number for it. The 12:07 static
+capture rendered through the app's own path at 0.2 s and at 2.8 s, at a view
+across the seam, 1920 px wide:
+
+| pair | PSNR |
+| --- | ---: |
+| factory at 0.2 s against factory at 2.8 s (the scene alone) | 26.74 dB |
+| **calibrated at 0.2 s against calibrated at 2.8 s (this branch)** | **26.61 dB** |
+| factory at 0.2 s against calibrated at 2.8 s (what PR #87 played) | 16.92 dB |
+
+The old first play crossed those two rows: the first seconds were the factory
+calibration and everything after the fit landed was not, and the picture moved
+by the whole correction while the pilot watched. This branch has no such pair,
+because there is nothing to land later; what is left between two frames of the
+same capture 2.6 s apart is what moved in front of the camera.
+
+**A camera with no stored calibration still gets one**, fitted off the file
+being played, off the decode path, landing a second or two in. That is the old
+per-file path demoted to a fallback, and the table above is what it is worth:
+better than the factory calibration by a long way, better than the rotation on
+the along-seam axis, and carrying whatever parallax that file's seam had.
 
 #### Phase 2: what the 2 degree crossover did to the picture
 
