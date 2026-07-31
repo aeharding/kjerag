@@ -3282,7 +3282,7 @@ checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
 [[package]]
 name = "naga"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -5721,7 +5721,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "wgpu"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
@@ -5750,7 +5750,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -5781,7 +5781,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-apple"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "wgpu-hal",
 ]
@@ -5789,7 +5789,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-emscripten"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "wgpu-hal",
 ]
@@ -5797,7 +5797,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-windows-linux-android"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "wgpu-hal",
 ]
@@ -5805,7 +5805,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "android_system_properties",
  "arrayvec",
@@ -5852,7 +5852,7 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "28.0.1"
-source = "git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport#fb66f36c5cf1135c11523767652ea7a809b3e598"
+source = "git+https://github.com/aeharding/wgpu?rev=fb66f36c5cf1135c11523767652ea7a809b3e598#fb66f36c5cf1135c11523767652ea7a809b3e598"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",

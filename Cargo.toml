@@ -73,7 +73,7 @@ features = ["wgpu"]
 # VK_EXT_external_memory_dma_buf but never VK_EXT_image_drm_format_modifier,
 # and iced_wgpu builds its device from a fixed DeviceDescriptor with no hook,
 # so the device the shader widget renders on cannot import a tiled dmabuf.
-# This branch is the extension-enable hunk of gfx-rs/wgpu#9366 (shipped in
+# This commit is the extension-enable hunk of gfx-rs/wgpu#9366 (shipped in
 # wgpu 30) applied verbatim to the v28.0.1 tag, and nothing else. Delete this
 # entry and the fork the day libcosmic reaches wgpu 30.
 #
@@ -85,5 +85,13 @@ features = ["wgpu"]
 #
 # Cargo reads a patch section only from the workspace root, so no member
 # manifest may carry one.
+#
+# Pinned by `rev`, not by `branch` (issue #68). Either way Cargo.lock records
+# the one commit, and so does every offline build recipe derived from it:
+# `cargo vendor` and flatpak/cargo-sources.json both fetch it by hash. A
+# branch name is the part that can move: force-push the fork and every
+# recorded build breaks at fetch time, a published Flatpak's rebuild
+# included. The rev below is the tip of `v28-drm-modifier-backport`, which
+# stays on the fork as the readable name for it.
 [patch.crates-io]
-wgpu = { git = "https://github.com/aeharding/wgpu", branch = "v28-drm-modifier-backport" }
+wgpu = { git = "https://github.com/aeharding/wgpu", rev = "fb66f36c5cf1135c11523767652ea7a809b3e598" }
