@@ -27,15 +27,21 @@ wgpu = "28.0"
 # ash major must be the one wgpu-hal 28 links.
 ash = "0.38"
 libc = "0.2"
+# Hands a URL to the desktop, for the About page's links. cosmic-edit and
+# cosmic-files both open theirs with this crate.
+open = "5"
 png = "0.17"
 pollster = "0.4"
 # Decodes the .insv trailer's metadata record. Only the eleven fields
 # kyerag-meta declares are read; protobuf skips the rest.
 prost = "0.14"
-# Reads the checked-in calibration fixture, which telemetry-parser wrote
-# as JSON. Tests only: nothing in the shipped binary parses JSON.
+# Derives the app's two cosmic-config entries, and reads the checked-in
+# calibration fixture that telemetry-parser wrote as JSON.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# The portal file chooser answers in URLs, and a drop's `text/uri-list` is
+# URLs too. Everything past the edge of the shell is a `PathBuf` (docs/UI.md).
+url = "2"
 
 [workspace.dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic"

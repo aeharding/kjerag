@@ -34,6 +34,14 @@ const PITCH_LIMIT: f32 = 89.0 * PI / 180.0;
 /// covers the same fraction of the range wherever it is used.
 const ZOOM_PER_STEP: f32 = 0.12;
 
+/// Scroll steps one press of the zoom key is worth. A wheel notch is a small
+/// adjustment under a cursor that is already pointing at something; a key
+/// press has no cursor and wants to cross the range in a handful of presses.
+const STEPS_PER_KEY: f32 = 3.0;
+
+/// The middle of the output, which is where a keyboard is pointing.
+const MIDDLE: [f32; 2] = [0.5, 0.5];
+
 /// How much bearing a grabbed direction has to have before a drag turns the
 /// view by it. The world vertical is the one direction with no bearing at
 /// all, and a millionth of a radian either side of it is thousands of times
@@ -157,6 +165,24 @@ fn nearest_tilt(sine: f32, held: f32) -> f32 {
     }
 }
 
+/// A view change with no cursor behind it: the `View` menu and its keys.
+///
+/// The mouse reaches the camera through the widget, which is where iced keeps
+/// it. A menu item has no cursor to anchor a zoom on and no widget to send an
+/// event to, so the shell leaves one of these on the [`Scene`] instead and the
+/// next redraw applies it.
+///
+/// [`Scene`]: super::Scene
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Nudge {
+    ZoomIn,
+    ZoomOut,
+    /// Yaw, pitch and field of view together, in one action: `Ctrl+0` in
+    /// cosmic-files and cosmic-edit resets only zoom, because zoom is all
+    /// those apps have (docs/UI.md open question 4).
+    Reset,
+}
+
 /// The shader widget's state: a [`Camera`], and the world direction a held
 /// drag has hold of.
 #[derive(Clone, Copy, Debug, Default)]
@@ -214,6 +240,22 @@ impl Viewpoint {
             *anchor = self.camera.look(uv, aspect);
         }
     }
+
+    /// Apply a [`Nudge`], which zooms about the middle of the view because
+    /// that is where a keyboard is pointing.
+    pub fn nudge(&mut self, nudge: Nudge, aspect: f32) {
+        match nudge {
+            Nudge::ZoomIn => self.zoom(STEPS_PER_KEY, MIDDLE, aspect),
+            Nudge::ZoomOut => self.zoom(-STEPS_PER_KEY, MIDDLE, aspect),
+            // The drag keeps its hold: the direction it grabbed is not where
+            // the reset leaves the view, and re-anchoring here would haul the
+            // picture straight back on the next move.
+            Nudge::Reset => {
+                self.camera = Camera::default();
+                self.anchor = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -221,8 +263,6 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     use super::*;
-
-    const MIDDLE: [f32; 2] = [0.5, 0.5];
 
     /// A drag is exact when the direction it grabbed comes back within a
     /// pixel of the cursor, so the tolerance is what a pixel of a 1000 px
@@ -517,6 +557,29 @@ mod tests {
             );
             assert!(camera.pitch.abs() <= PITCH_LIMIT, "{:?}", degrees(camera));
         }
+    }
+
+    /// The `View` menu's three items: two that change the field of view and
+    /// one that puts the whole camera back where it opened.
+    #[test]
+    fn a_nudge_zooms_about_the_middle_and_resets_everything() {
+        let mut viewpoint = Viewpoint::default();
+        viewpoint.nudge(Nudge::ZoomIn, 1.6);
+        assert!(viewpoint.camera().fov < Camera::default().fov);
+
+        viewpoint.nudge(Nudge::ZoomOut, 1.6);
+        assert!((viewpoint.camera().fov - Camera::default().fov).abs() < 1e-4);
+
+        viewpoint.grab([0.2, 0.8], 1.6);
+        viewpoint.drag_to([0.7, 0.3], 1.6);
+        viewpoint.nudge(Nudge::ZoomIn, 1.6);
+        assert_ne!(viewpoint.camera(), Camera::default());
+
+        viewpoint.nudge(Nudge::Reset, 1.6);
+        assert_eq!(viewpoint.camera(), Camera::default());
+        // A drag still held has let go of a direction that is no longer under
+        // the cursor, so the next move must not haul the view back to it.
+        assert!(!viewpoint.is_dragging());
     }
 
     /// A scroll in the middle of a drag re-reads what the cursor is over, so
