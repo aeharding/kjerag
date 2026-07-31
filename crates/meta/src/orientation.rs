@@ -86,6 +86,14 @@ pub struct Filter {
     /// This is the one number that is a judgement about flying rather than
     /// about sensors. A deliberate turn has to read as a turn, and the swing
     /// of a camera under a wing has to not.
+    ///
+    /// What it follows is the whole stabilized frame, and the view's own yaw
+    /// is read in that frame, so this constant does not only decide how much
+    /// of a turn reaches the picture: it decides that the body's heading owns
+    /// the view. That is issue #44, and the answer is not here. A view a drag
+    /// has taken hold of pins the follow where it found it
+    /// ([`OrientationTrack::follow`]), so the two requirements stop competing
+    /// for one number.
     pub yaw_seconds: f64,
     /// How far from 1 g the accelerometer may read and still be believed
     /// completely, and how far before it is not believed at all. Between them
@@ -116,6 +124,15 @@ pub struct OrientationSample {
     /// Takes a direction in the camera body's frame to the stabilized world
     /// frame.
     pub world_from_body: Quat,
+    /// How far round the world vertical the heading follow has carried that
+    /// stabilized frame by this instant, in radians.
+    ///
+    /// Kept rather than discarded because the frame it turns is the one the
+    /// **view's** own yaw is read in, so a view that is to stay where a drag
+    /// left it has to take this back off (issue #44). It accumulates rather
+    /// than wrapping, so a file with three turns in it reads three turns and
+    /// interpolating across the back of the compass is a small step.
+    pub heading_held: f64,
 }
 
 /// The camera body's orientation over the whole file, at the IMU's own rate.
@@ -157,21 +174,60 @@ impl OrientationTrack {
     /// [`Self::turn`] is what rolling-shutter correction reads (issue #9),
     /// and it is this call at the two ends of one frame's readout.
     pub fn at(&self, offset_us: i64) -> Quat {
+        let Some((from, to, t)) = self.between(offset_us) else {
+            return Quat::IDENTITY;
+        };
+        let (previous, next) = (
+            self.samples[from].world_from_body,
+            self.samples[to].world_from_body,
+        );
+        // An instant on or outside a sample is that sample rather than a mix
+        // of it with itself: an nlerp renormalizes, and the ends of a track
+        // are read for equality.
+        match from == to {
+            true => previous,
+            false => previous.nlerp(next, t),
+        }
+    }
+
+    /// How far round the world vertical the heading follow has carried the
+    /// stabilized frame at `offset_us` ([`OrientationSample::heading_held`]).
+    ///
+    /// The view's own yaw turns about that same vertical and is read in that
+    /// same frame, so this is exactly what a view that has to stay put in the
+    /// world takes back off (issue #44). Zero for a file with no IMU record,
+    /// which leaves such a file's view where it always was.
+    pub fn follow(&self, offset_us: i64) -> f64 {
+        let Some((from, to, t)) = self.between(offset_us) else {
+            return 0.0;
+        };
+        let (previous, next) = (
+            self.samples[from].heading_held,
+            self.samples[to].heading_held,
+        );
+        previous + (next - previous) * t
+    }
+
+    /// The samples `offset_us` falls between and how far between them it is,
+    /// clamped to one sample twice over at both ends of the track. `None`
+    /// where there are no samples at all.
+    fn between(&self, offset_us: i64) -> Option<(usize, usize, f64)> {
         let after = self
             .samples
             .partition_point(|sample| sample.offset_us < offset_us);
         let Some(next) = self.samples.get(after) else {
-            return self.samples.last().map_or(Quat::IDENTITY, at_sample);
+            let last = self.samples.len().checked_sub(1)?;
+            return Some((last, last, 0.0));
         };
-        let Some(previous) = after.checked_sub(1).and_then(|at| self.samples.get(at)) else {
-            return at_sample(next);
+        let Some(previous) = after.checked_sub(1) else {
+            return Some((after, after, 0.0));
         };
-        let span = (next.offset_us - previous.offset_us) as f64;
+        let span = (next.offset_us - self.samples[previous].offset_us) as f64;
         let t = match span > 0.0 {
-            true => (offset_us - previous.offset_us) as f64 / span,
+            true => (offset_us - self.samples[previous].offset_us) as f64 / span,
             false => 0.0,
         };
-        at_sample(previous).nlerp(at_sample(next), t)
+        Some((previous, after, t))
     }
 
     /// How the body turned between two instants, as a rotation vector in the
@@ -195,10 +251,6 @@ impl OrientationTrack {
             .times(self.at(from_us))
             .rotation_vector()
     }
-}
-
-fn at_sample(sample: &OrientationSample) -> Quat {
-    sample.world_from_body
 }
 
 /// The rotation that takes an IMU reading into the camera body's frame.
@@ -311,6 +363,7 @@ impl Filter {
                 out.push(OrientationSample {
                     offset_us: sample.offset_us,
                     world_from_body: Quat::about_down(-heading_held).times(world_from_body),
+                    heading_held,
                 });
             }
         }
@@ -652,6 +705,42 @@ mod tests {
             "{}",
             swept(f64::INFINITY)
         );
+    }
+
+    /// What a held view takes back off (issue #44): the heading the follow
+    /// has caught up with, which is the body's own heading low passed and
+    /// **not** the body's own heading.
+    ///
+    /// A first-order lag on a ramp settles one time constant behind it, so a
+    /// steady 20 deg/s and a 3 second constant put the follow 60 degrees back.
+    /// That gap is the part of the turn that has reached the picture.
+    #[test]
+    fn the_follow_is_the_heading_the_filter_has_caught_up_with() {
+        let turning = track(30.0, |_| ([0.0, 20.0, 0.0], [0.0, -1.0, 0.0]));
+        let solved = Filter::default().solve(&turning, Mat3::IDENTITY);
+
+        let at = |seconds: f64| solved.follow((seconds * 1e6) as i64).to_degrees();
+        assert!((at(30.0) - (600.0 - 60.0)).abs() < 5.0, "{}", at(30.0));
+        // It accumulates rather than wrapping, or a body that turns twice
+        // would read as one that turned back.
+        assert!(at(30.0) > 360.0, "{}", at(30.0));
+        assert!(at(10.0) < at(20.0) && at(20.0) < at(30.0));
+        // And it is read between the stored samples, like the orientation it
+        // belongs to: a fifth of the way in is a fifth of the way along.
+        let step = STORE_US as f64 * 1e-6;
+        let between = solved.follow((STORE_US as f64 * 1.2) as i64).to_degrees();
+        assert!(
+            (between - (at(step) + 0.2 * (at(2.0 * step) - at(step)))).abs() < 1e-9,
+            "{between}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_imu_follows_nothing() {
+        let solved = Filter::default().solve(&GyroTrack::default(), Mat3::IDENTITY);
+
+        assert_eq!(solved.follow(0), 0.0);
+        assert_eq!(solved.follow(8_000_000), 0.0);
     }
 
     /// The interpolation rolling shutter will call: between two samples, and

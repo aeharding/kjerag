@@ -120,6 +120,9 @@ pub struct Scene {
     /// A sensor readout the harness has forced in place of the file's own,
     /// including a zero one, which is the correction switched off.
     readout: Cell<Option<Readout>>,
+    /// The heading the filter's yaw follow had reached when a drag took hold
+    /// of the view, and `None` while the follow still has it (issue #44).
+    pinned: Cell<Option<f64>>,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -130,6 +133,7 @@ struct Holding {
     clock: FrameClock,
     forced: Option<Quat>,
     readout: Option<Readout>,
+    pinned: Option<f64>,
 }
 
 /// A file on screen: its calibration, and where its frames come from.
@@ -225,6 +229,7 @@ impl Scene {
             clock: Cell::new(FrameClock::default()),
             forced: Cell::new(None),
             readout: Cell::new(None),
+            pinned: Cell::new(None),
         }
     }
 
@@ -445,6 +450,38 @@ impl Scene {
         self.horizon.get()
     }
 
+    /// Hold the view where it is now, against the world, so that the filter's
+    /// heading follow cannot carry it any further (issue #44). What a drag
+    /// that moves the camera calls.
+    ///
+    /// The first drag takes hold and every later one inherits it: pinning
+    /// again part way through a file would jump the picture by however far
+    /// the follow had travelled since, and the view is already the pilot's by
+    /// then anyway. [`Self::follow_view`] is the way back.
+    pub fn pin_view(&self) {
+        if self.pinned.get().is_some() {
+            return;
+        }
+        // Nothing to pin to before the first frame arrives, and then the next
+        // move of the same drag pins instead.
+        self.pinned.set(
+            self.show
+                .as_ref()
+                .and_then(|show| show.follow(self.clock.get())),
+        );
+    }
+
+    /// Hand the view back to the camera's heading, which `View > Reset view`
+    /// does along with putting the view straight.
+    pub fn follow_view(&self) {
+        self.pinned.set(None);
+    }
+
+    /// Whether a drag has taken the view off the heading follow (issue #44).
+    pub fn is_view_pinned(&self) -> bool {
+        self.pinned.get().is_some()
+    }
+
     /// Whether this file carries the IMU record horizon lock needs. A file
     /// without one plays with the toggle on and the picture unheld.
     pub fn has_orientation(&self) -> bool {
@@ -525,6 +562,7 @@ impl Scene {
             clock: self.clock.get(),
             forced: self.forced.get(),
             readout: self.readout.get(),
+            pinned: self.pinned.get(),
         };
         ScenePrimitive {
             elapsed: self.started.elapsed().as_secs_f32(),
@@ -553,22 +591,36 @@ impl Show {
         let frames = self.playing.borrow().frames.clone()?;
         let at = self.held.instant(&frames, held.clock);
         let world_from_body = held.forced.unwrap_or_else(|| self.held.orientation.at(at));
+        // Not under the horizon toggle: the readout is the camera's own
+        // motion during the frame, and a view that rides the body has the
+        // same skew in it as one that does not.
+        let rolling = self
+            .held
+            .rolling(at, held.readout.unwrap_or(self.held.readout));
         Some(View {
-            held: Held {
-                body_from_world: match held.horizon {
-                    Horizon::Locked => world_from_body.conjugate(),
-                    Horizon::Free => Quat::IDENTITY,
-                },
-                // Not under the horizon toggle: the readout is the camera's
-                // own motion during the frame, and a view that rides the body
-                // has the same skew in it as one that does not.
-                rolling: self
-                    .held
-                    .rolling(at, held.readout.unwrap_or(self.held.readout)),
+            held: match held.horizon {
+                Horizon::Locked => Held::locked(
+                    world_from_body,
+                    self.held.orientation.follow(at),
+                    held.pinned,
+                    rolling,
+                ),
+                Horizon::Free => Held::free(rolling),
             },
             lenses: self.lenses.clone(),
             frames,
         })
+    }
+
+    /// How far the heading follow has carried the stabilized frame at the
+    /// frame on screen, which is what a drag pins the view at (issue #44).
+    fn follow(&self, clock: FrameClock) -> Option<f64> {
+        let frames = self.playing.borrow().frames.clone()?;
+        Some(
+            self.held
+                .orientation
+                .follow(self.held.instant(&frames, clock)),
+        )
     }
 }
 
