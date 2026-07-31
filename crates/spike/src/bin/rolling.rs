@@ -43,7 +43,7 @@ use kyerag_media::{Fallible, HwDevice, SwFrame, open_decoder};
 use kyerag_meta::{
     CalibrationSet, Filter, OrientationTrack, Quat, Readout, Size as MetaSize, Sweep,
 };
-use kyerag_render::{Camera, Held, Reframe, Rolling, Size};
+use kyerag_render::{Camera, Held, Reframe, Rolling, Sampling, Size};
 
 /// A unit vector, as the projection's own mirror normalizes one.
 fn normalize(v: [f32; 3]) -> [f32; 3] {
@@ -289,6 +289,7 @@ fn between_with(
             held(when),
             1.0,
             false,
+            Sampling::default(),
         )
     });
 
@@ -622,6 +623,7 @@ fn mapped(calibration: &CalibrationSet, frame: Size, rolling: Option<Rolling>) -
         },
         1.0,
         false,
+        Sampling::default(),
     )
 }
 

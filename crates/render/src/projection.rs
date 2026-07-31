@@ -32,6 +32,7 @@
 
 use kyerag_meta::{Intrinsics, Lens, Pose, Quat};
 
+use super::sampling::Sampling;
 use super::{Camera, Size};
 
 /// How many times the landing row is solved for before it is believed
@@ -120,7 +121,12 @@ pub struct Reframe {
     /// components are zero for a file with no IMU record, and then the pass
     /// is what it was before issue #9, down to the instruction count.
     row_axis: [f32; 2],
-    _pad: [f32; 2],
+    /// How far the magnification upgrade may engage on each plane (issue
+    /// #11), luma first: 1 where it may, 0 for bilinear whatever the
+    /// magnification. Two numbers rather than one because NV12's two planes
+    /// are two grids and reach 1:1 an octave of zoom apart. [`Sampling`] is
+    /// the names they come in.
+    sharpen: [f32; 2],
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -309,6 +315,7 @@ impl Reframe {
         held: Held,
         aspect: f32,
         linearize: bool,
+        sampling: Sampling,
     ) -> Self {
         Self {
             lenses: std::array::from_fn(|index| match lenses.get(index) {
@@ -326,7 +333,7 @@ impl Reframe {
             row_axis: held
                 .rolling
                 .map_or([0.0; 2], |rolling| rolling.axis.map(|c| c as f32)),
-            _pad: [0.0; 2],
+            sharpen: sampling.limits(),
         }
     }
 
@@ -344,7 +351,9 @@ impl Reframe {
             linearize: f32::from(u8::from(linearize)),
             elapsed,
             row_axis: [0.0; 2],
-            _pad: [0.0; 2],
+            // Every ray misses every lens, so no plane is ever sampled and
+            // the gradient reaches the target either way.
+            sharpen: Sampling::default().limits(),
         }
     }
 
@@ -402,6 +411,42 @@ impl Reframe {
             }
         }
         Blend { landings, weights }
+    }
+
+    /// How many delivered-frame texels one output pixel covers where it
+    /// lands in this lens's picture: the local Jacobian of the whole backward
+    /// map, which is what says whether the view is magnifying the source
+    /// (issue #11).
+    ///
+    /// Under 1 an output pixel sits inside one texel and the picture is being
+    /// magnified, which is what [`super::sampling`] upgrades for; over 1 it
+    /// spans several and bilinear is the right answer. Taken as the longer of
+    /// the two screen axes' steps, so a landing that is magnified one way and
+    /// minified the other counts as not magnified: the upgrade is for
+    /// pictures that have run out of texels, and the axis that has not is the
+    /// one that would show the resampling.
+    ///
+    /// It is a **local** number and has to be. The fisheye's own density
+    /// varies across its picture (1106 texels per radian down the X4 Air's
+    /// axis, 948 radially at the rim), the rectilinear output's varies across
+    /// the view, and the lens's landing is what carries both. `output` is the
+    /// target's size in pixels; the value scales with it, which is why a
+    /// screenshot magnifies less than the window it was taken from.
+    ///
+    /// WGSL twin: `texel_ratio`, which reads the same two steps off the
+    /// hardware's own quad derivatives. That is the same finite difference,
+    /// and it needs no output size at all: whatever target the pass draws
+    /// into, a quad of it steps the share of the picture it steps.
+    pub fn texels_per_pixel(&self, lens: usize, uv: [f32; 2], output: Size) -> f32 {
+        let landing = |uv: [f32; 2]| self.project(lens, self.view_ray(uv)).pixel;
+        let here = landing(uv);
+        let step = |to: [f32; 2]| {
+            let moved = landing(to);
+            (moved[0] - here[0]).hypot(moved[1] - here[1])
+        };
+        let across = step([uv[0] + 1.0 / output.width as f32, uv[1]]);
+        let down = step([uv[0], uv[1] + 1.0 / output.height as f32]);
+        across.max(down)
     }
 
     /// Whether **any** ray of the whole output can be in this lens's picture,
@@ -1043,6 +1088,10 @@ struct Reframe {
   // components where there is no readout to correct.
   row_axis_x: f32,
   row_axis_y: f32,
+  // How far the magnification upgrade may engage on each plane. Rust twin:
+  // `Reframe::sharpen`.
+  sharpen_luma: f32,
+  sharpen_chroma: f32,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -1206,6 +1255,30 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
 fn frame_uv(pixel: vec2<f32>) -> vec2<f32> {
   return (pixel + vec2<f32>(0.5)) / vec2<f32>(reframe.frame_width, reframe.frame_height);
 }
+
+// How many delivered-frame texels one output pixel covers where it landed.
+// Rust twin: `Reframe::texels_per_pixel`.
+//
+// The finite difference is the hardware's own, one quad at a time, which is
+// why the entry point calls this and `blend` does not: a derivative needs
+// uniform control flow and `blend` is nothing but branches. Reading the step
+// off the quad rather than off a resolution in the uniform block is also
+// what makes a still right without being told (issue #15): the capture draws
+// this same pipeline into a target of its own size, and a quad of that
+// target steps a smaller share of the picture all by itself.
+//
+// The longer of the two steps, so a landing stretched one way and squeezed
+// the other counts as not magnified. That is the safe direction twice over.
+// It leaves the axis that still has texels to spend sampling the way it
+// always did, and where a quad straddles the edge of a lens's coverage one
+// of its lanes has no landing at all and the step reads as most of the
+// picture: a huge ratio, which disengages. That lane is within an output
+// pixel of the edge of that lens's own picture, where its coverage depth and
+// with it its weight have gone to zero and the other lens is carrying the
+// ray.
+fn texel_ratio(pixel: vec2<f32>) -> f32 {
+  return max(length(dpdx(pixel)), length(dpdy(pixel)));
+}
 "#;
 
 #[cfg(test)]
@@ -1214,6 +1287,8 @@ mod tests {
     use kyerag_meta::{
         Distortion, Filter, GyroSample, GyroTrack, Mat3 as ImuMounting, OrientationTrack, Sweep,
     };
+
+    use crate::sampling;
 
     const FRAME: Size = Size {
         width: 3840,
@@ -1283,7 +1358,15 @@ mod tests {
     /// The same fixture with the camera body somewhere other than level,
     /// which is what horizon lock has to take back out.
     fn held(camera: Camera, held: Held) -> Reframe {
-        Reframe::new(&fixture_lenses(), FRAME, camera, held, 1.0, false)
+        Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            camera,
+            held,
+            1.0,
+            false,
+            Sampling::default(),
+        )
     }
 
     /// The camera as it was before issue #27: one stream, one lens, one
@@ -1297,6 +1380,7 @@ mod tests {
             Held::default(),
             1.0,
             false,
+            Sampling::default(),
         )
     }
 
@@ -1724,6 +1808,7 @@ mod tests {
             Held::default(),
             aspect,
             false,
+            Sampling::default(),
         );
 
         for down in 0..=64 {
@@ -1770,6 +1855,7 @@ mod tests {
                         Held::default(),
                         16.0 / 9.0,
                         false,
+                        Sampling::default(),
                     );
                     for lens in 0..MAX_LENSES {
                         if reframe.reaches(lens, 0.0) {
@@ -1810,6 +1896,7 @@ mod tests {
                     Held::default(),
                     16.0 / 9.0,
                     false,
+                    Sampling::default(),
                 )
             };
             for lens in 0..MAX_LENSES {
@@ -1846,6 +1933,149 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A 2560x1440 window, which is where the player's own numbers are
+    /// measured and what a texel-to-pixel ratio is a ratio against.
+    const WINDOW: Size = Size {
+        width: 2560,
+        height: 1440,
+    };
+
+    fn windowed(fov_deg: f32) -> Reframe {
+        Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            Camera {
+                fov: fov_deg.to_radians(),
+                ..Camera::default()
+            },
+            Held::default(),
+            WINDOW.width as f32 / WINDOW.height as f32,
+            false,
+            Sampling::default(),
+        )
+    }
+
+    /// What the ratio has to be down the view axis, from two closed forms
+    /// that owe the Jacobian nothing.
+    ///
+    /// Near its own axis the Mei model's focal length is `fx / (1 + xi)`
+    /// texels per radian, because `sin(theta) / (cos(theta) + xi)` is
+    /// `theta / (1 + xi)` there and the radial polynomial is 1. A
+    /// rectilinear output's is `width / (2 tan(fov / 2))` pixels per radian,
+    /// for the same reason in the other direction. The ratio of the two is
+    /// the magnification, and it is 1105.7 over 1280 at the app's default
+    /// field of view: the player is already magnifying this camera by 16%
+    /// before anyone touches the wheel.
+    fn paraxial_ratio(fov_deg: f32) -> f32 {
+        let lens = fixture_lenses()[0].intrinsics;
+        let source = (lens.fx / (1.0 + lens.xi)) as f32;
+        let output = WINDOW.width as f32 / (2.0 * (fov_deg.to_radians() * 0.5).tan());
+        source / output
+    }
+
+    /// The Jacobian the shader samples by, against arithmetic that shares no
+    /// line with it. Down the view axis, where both closed forms hold, over
+    /// the whole zoom range.
+    ///
+    /// A percent of tolerance covers the lens's own 0.125 degree mounting
+    /// tilt and the finite difference being taken over a real output pixel
+    /// rather than in the limit.
+    #[test]
+    fn the_texel_ratio_is_the_focal_length_the_model_has_on_its_axis() {
+        for fov in [20.0f32, 45.0, 90.0, 110.0] {
+            let ratio = windowed(fov).texels_per_pixel(0, [0.5, 0.5], WINDOW);
+            let paraxial = paraxial_ratio(fov);
+            assert!(
+                (ratio / paraxial - 1.0).abs() < 0.01,
+                "fov {fov}: the map magnifies by {ratio} against {paraxial} paraxial",
+            );
+        }
+    }
+
+    /// What the whole issue rests on: zoomed in, an output pixel is inside
+    /// one source texel, and zoomed out it is not. Down the front lens's
+    /// axis at a 2560 px window, 20 degrees of field of view is six and a
+    /// half output pixels to the texel, the app's own default of 90 is one
+    /// and a sixth, and only past 98 does an output pixel hold a whole texel
+    /// again.
+    #[test]
+    fn a_narrow_view_magnifies_the_source_and_a_wide_one_does_not() {
+        let middle = |fov| windowed(fov).texels_per_pixel(0, [0.5, 0.5], WINDOW);
+
+        near(middle(20.0), 0.152, 0.002);
+        near(middle(90.0), 0.864, 0.002);
+        assert!(middle(110.0) > 1.0, "{} at fov 110", middle(110.0));
+        // And it is monotone in the zoom, which is what makes one threshold
+        // an answer at all.
+        let mut held = 0.0;
+        for fov in [20.0f32, 25.0, 35.0, 60.0, 90.0, 100.0, 110.0] {
+            let ratio = middle(fov);
+            assert!(
+                ratio > held,
+                "fov {fov} magnifies less than the view before"
+            );
+            held = ratio;
+        }
+    }
+
+    /// And it is **local**, which is why the shader asks per fragment rather
+    /// than per redraw. Two things vary and they do not cancel: the fisheye's
+    /// own angular density, and the rectilinear output's, which rises towards
+    /// a corner as the cosine squared of the angle off the view axis.
+    ///
+    /// At the widest view the player offers, the middle of the picture is
+    /// past 1:1 (1.234) and the corners of the same picture are two thirds
+    /// of the way inside it (0.743), which is 1.66 times. A single ratio for
+    /// the view would have to be wrong at one end or the other.
+    #[test]
+    fn the_texel_ratio_is_not_uniform_across_the_frame() {
+        let wide = windowed(110.0);
+        let middle = wide.texels_per_pixel(0, [0.5, 0.5], WINDOW);
+        let corner = wide.texels_per_pixel(0, [0.98, 0.98], WINDOW);
+
+        assert!(
+            middle > 1.0,
+            "the middle of a 110 degree view does not magnify"
+        );
+        assert!(corner < 0.8, "the corner does: {corner}");
+        assert!(
+            middle / corner > 1.5,
+            "{middle} in the middle against {corner} in the corner",
+        );
+
+        // It is not flat at the narrow end either, where the output's own
+        // fall-off is small and the lens's density does the varying.
+        let narrow = windowed(20.0);
+        let spread = narrow.texels_per_pixel(0, [0.5, 0.5], WINDOW)
+            / narrow.texels_per_pixel(0, [0.98, 0.98], WINDOW);
+        assert!(
+            (1.01..1.03).contains(&spread),
+            "{spread} across a 20 degree view"
+        );
+    }
+
+    /// The NV12 wrinkle where it actually lands: at the app's default view,
+    /// on this camera, at this window, the chroma plane is magnified and the
+    /// luma plane is not. The two planes need two thresholds because they
+    /// really do answer differently over the range the player is used in.
+    #[test]
+    fn the_chroma_plane_is_magnified_where_the_luma_plane_is_not() {
+        let engaged = |fov, plane: f32| {
+            let ratio = windowed(fov).texels_per_pixel(0, [0.5, 0.5], WINDOW);
+            sampling::sharpen(sampling::plane_ratio(ratio, plane, FRAME.width as f32), 1.0)
+        };
+        let luma = FRAME.width as f32;
+        let chroma = luma * 0.5;
+
+        for fov in [100.0f32, 110.0] {
+            assert_eq!(engaged(fov, luma), 0.0, "luma at fov {fov}");
+            assert!(engaged(fov, chroma) > 0.0, "chroma at fov {fov}");
+        }
+        // And zoomed in, both.
+        assert_eq!(engaged(20.0, luma), 1.0);
+        assert_eq!(engaged(20.0, chroma), 1.0);
     }
 
     /// Four views that between them point the cap in every direction it can

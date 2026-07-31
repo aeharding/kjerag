@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 
 use kyerag_media::{Fallible, Reader};
 use kyerag_render::{
-    Camera, Extent, Next, Readout, Request, Scene, ScenePipeline, Shot, Size, Sweep, dmabuf,
+    Camera, Extent, Next, Readout, Request, Sampling, Scene, ScenePipeline, Shot, Size, Sweep,
+    dmabuf,
 };
 
 /// Not sRGB, so the pass writes the video's own numbers: the same choice the
@@ -54,10 +55,7 @@ const SHOT_WIDTH: u32 = 3840;
 
 fn main() -> Fallible<()> {
     let args: Vec<String> = std::env::args().collect();
-    let input = PathBuf::from(
-        args.get(1)
-            .ok_or("usage: playback <file.insv> [seconds] [hz] [shots] [yaw] [readout] [fov]")?,
-    );
+    let input = PathBuf::from(args.get(1).ok_or(USAGE)?);
     let seconds: u64 = parse(&args, 2, 60)?;
     let hz: u32 = parse(&args, 3, 60)?;
     let shots: u32 = parse(&args, 4, 0)?;
@@ -74,6 +72,11 @@ fn main() -> Fallible<()> {
     // screen at once, which is where the cost of sampling two of them is
     // largest (issue #10).
     let fov: f32 = parse(&args, 7, Camera::default().fov.to_degrees())?;
+    // Issue #11's cost: `bilinear` is the pass as it sampled before it,
+    // which is what the ms/redraw of the upgrade is measured against, and
+    // `luma` is the half of the upgrade the delivered frame's own grid asks
+    // for.
+    let sample: String = parse(&args, 8, "sharp".to_owned())?;
 
     for lookahead in [0, 2, 4] {
         println!("{}", drain(&input, lookahead)?);
@@ -91,8 +94,16 @@ fn main() -> Fallible<()> {
         shots,
         camera,
         &readout,
+        match sample.as_str() {
+            "bilinear" => Sampling::Bilinear,
+            "luma" => Sampling::Luma,
+            _ => Sampling::Sharp,
+        },
     )
 }
+
+const USAGE: &str = "usage: playback <file.insv> [seconds] [hz] [shots] [yaw] [readout] [fov] \
+     [bilinear|luma|sharp]";
 
 fn parse<T: std::str::FromStr>(args: &[String], i: usize, fallback: T) -> Fallible<T>
 where
@@ -149,6 +160,7 @@ fn play(
     shots: u32,
     camera: Camera,
     readout: &str,
+    sampling: Sampling,
 ) -> Fallible<()> {
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
@@ -166,6 +178,8 @@ fn play(
         scene.set_readout(Some(Readout { sweep, ..file }));
     }
     println!("shutter: readout {readout}");
+    scene.set_sampling(sampling);
+    println!("sample: {sampling:?}");
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let refresh = Duration::from_secs_f64(1.0 / f64::from(hz));
     println!(

@@ -266,6 +266,53 @@ definitions have drifted apart.
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
 
+## Sampling a magnified picture (issue #11)
+
+Zoomed in far enough, an output pixel sits inside one source texel and the
+hardware's bilinear tent is what the eye sees rather than the picture. Where
+that is true the pass reads a **Catmull-Rom kernel** instead, engaged
+smoothly as magnification passes 1:1 and exactly off at or below it
+(`crates/render/src/sampling.rs`). Sixteen texels, taken as **nine bilinear
+fetches**: each axis's middle pair of weights is positive, so it is one fetch
+placed between its two texels; the outer two are negative, which is where the
+resolving comes from, and a sampler cannot weigh a fetch by less than
+nothing. Measured against the same kernel as sixteen `textureLoad`s on the
+highest-contrast view in this footage, the nine agree to 0.14 codes RMS and
+one code at worst, which is the sampler's own filter-weight precision.
+
+**How magnified is decided per fragment, off the map's Jacobian**, because
+nothing about it is uniform. The fisheye's angular density varies across its
+own picture (1106 texels per radian down the X4 Air's axis, 948 radially at
+the rim) and a rectilinear output's rises towards its corners, so at the
+widest view the player offers a 2560 px window is past 1:1 in the middle
+(1.23 texels to the pixel) and two thirds inside it at the corners (0.74).
+The shader reads it as `max(length(dpdx(landing)), length(dpdy(landing)))`,
+the hardware's own quad derivative of the landing the model just computed,
+which is the Jacobian by finite difference with the distortion, the mounting
+and the readout already in it. It is taken in the entry point rather than in
+`blend`, because a derivative needs uniform control flow and the blend is
+branches; `Reframe::texels_per_pixel` is the Rust mirror, checked in
+`cargo test` against the paraxial focal length `fx / (1 + xi)` over the whole
+zoom range.
+
+Reading the step off the quad rather than off a resolution in the uniform
+block is also what makes a **still** right without being told: the capture
+draws this same pipeline into a target of its own size (issue #15), and a
+quad of that target steps a smaller share of the picture by itself. A 3840 px
+still off a 2560 px window is byte for byte a 3840 px render of the same
+view, which `kyerag-spike --bin zoom` checks rather than assumes.
+
+**The chroma plane is not upgraded**, and that is the measurement rather than
+an omission. NV12's two planes are two grids: chroma is half the size, so one
+output pixel covers half as many of its texels and it reaches 1:1 an octave
+of zoom before luma does. On this camera at a 2560 px window that means
+chroma is magnified at **every** field of view the player offers, so
+upgrading it is not a cost paid at high zoom but a cost paid always, and it
+is the larger half of the bill. What it buys on 8-bit 4:2:0 chroma that HEVC
+has already smoothed is 0.41 codes on 40% of pixels and no measurable change
+in detail at all. `Sampling::Sharp` keeps it renderable, one line from
+shipping, for the footage that would change the answer.
+
 ## Rolling shutter (issue #9): fused, measured, and switched off
 
 A frame does not leave the sensor at an instant. `rolling_shutter_time` is
