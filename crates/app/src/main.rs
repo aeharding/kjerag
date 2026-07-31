@@ -2,7 +2,7 @@
 //!
 //! ```sh
 //! cargo run --release                 # animated shader pass, no decode
-//! cargo run --release -- <file.insv>  # frame 0 of stream 0, imported zero-copy
+//! cargo run --release -- <file.insv>  # play it: drag to look, space to pause
 //! ```
 
 mod app;

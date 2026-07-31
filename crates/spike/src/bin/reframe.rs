@@ -8,10 +8,14 @@
 //! ```sh
 //! cargo run --release -p kyerag-spike --bin reframe -- <file.insv>
 //! cargo run --release -p kyerag-spike --bin reframe -- <file.insv> yaw=40 pitch=-15 fov=60
+//! cargo run --release -p kyerag-spike --bin reframe -- <file.insv> frame=1500
 //! ```
 //!
 //! Arguments after the path are `key=value`: `yaw`, `pitch` and `fov` in
-//! degrees, `size` as the output edge in pixels, `out` as the file name.
+//! degrees, `size` as the output edge in pixels, `out` as the file name,
+//! and `frame` or `time` (seconds) to pick which frame is rendered. The
+//! frame is no longer always frame 0 (issue #4's first comment): a seek and
+//! a decode-forward walk get to any of them.
 //!
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
 //! are personal video and this repo is public.
@@ -19,10 +23,11 @@
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+
+use std::time::Duration;
 
 use kyerag_media::Fallible;
-use kyerag_render::{Camera, Extent, Frame, Scene, ScenePipeline, Size, dmabuf};
+use kyerag_render::{Camera, Cue, Extent, Scene, ScenePipeline, Size, dmabuf};
 
 /// Not sRGB, so the shader writes the video's own gamma-encoded numbers
 /// straight out and a PNG viewer shows what the window shows.
@@ -37,6 +42,7 @@ const DEFAULT_EDGE: u32 = 1024;
 struct Options {
     input: PathBuf,
     camera: Camera,
+    at: Cue,
     edge: u32,
     out: PathBuf,
 }
@@ -56,7 +62,7 @@ fn main() -> Fallible<()> {
     let (device, queue) = dmabuf::open_device(&adapter)?;
     println!("gpu:    {}", adapter.get_info().name);
 
-    let scene = Scene::new(Some(Arc::new(Frame::pending(options.input.clone()))));
+    let scene = Scene::still(&options.input, options.at)?;
     let primitive = scene.primitive(options.camera);
     let mut pipeline = ScenePipeline::new(&device, FORMAT);
     pipeline.prepare(&primitive, &device, &queue, 1.0);
@@ -79,6 +85,7 @@ impl Options {
     fn parse(mut args: impl Iterator<Item = String>) -> Fallible<Self> {
         let input = PathBuf::from(args.next().ok_or(USAGE)?);
         let mut camera = Camera::default();
+        let mut at = Cue::Index(0);
         let mut edge = DEFAULT_EDGE;
         let mut out = None;
 
@@ -88,6 +95,8 @@ impl Options {
                 "yaw" => camera.yaw = value.parse::<f32>()?.to_radians(),
                 "pitch" => camera.pitch = value.parse::<f32>()?.to_radians(),
                 "fov" => camera.fov = value.parse::<f32>()?.to_radians(),
+                "frame" => at = Cue::Index(value.parse()?),
+                "time" => at = Cue::Time(Duration::from_secs_f64(value.parse()?)),
                 "size" => edge = value.parse()?,
                 "out" => out = Some(value.to_owned()),
                 _ => return Err(format!("unknown argument {key}. {USAGE}").into()),
@@ -96,23 +105,28 @@ impl Options {
 
         let name = out.unwrap_or_else(|| {
             format!(
-                "reframe-yaw{:.0}-pitch{:.0}-fov{:.0}.png",
+                "reframe-yaw{:.0}-pitch{:.0}-fov{:.0}-{}.png",
                 camera.yaw.to_degrees(),
                 camera.pitch.to_degrees(),
                 camera.fov.to_degrees(),
+                match at {
+                    Cue::Index(index) => format!("frame{index}"),
+                    Cue::Time(time) => format!("t{:.3}", time.as_secs_f64()),
+                },
             )
         });
         Ok(Self {
             input,
             camera,
+            at,
             edge,
             out: PathBuf::from("scratch").join(name),
         })
     }
 }
 
-const USAGE: &str =
-    "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] [size=px] [out=name.png]";
+const USAGE: &str = "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] \
+     [frame=n | time=seconds] [size=px] [out=name.png]";
 
 /// An offscreen colour target and the buffer its pixels are read back into.
 struct Target {

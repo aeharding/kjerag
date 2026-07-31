@@ -8,9 +8,9 @@
 //! [`Scene`], and iced keeps the [`Viewpoint`] in its widget tree.
 
 use cosmic::iced::widget::shader::{self, Action};
-use cosmic::iced::{Event, Rectangle, mouse};
+use cosmic::iced::{Event, Rectangle, mouse, window};
 
-use super::{Scene, ScenePipeline, ScenePrimitive, Viewpoint};
+use super::{Next, Scene, ScenePipeline, ScenePrimitive, Viewpoint};
 
 /// Wheels report scroll in lines and touchpads report it in pixels, and iced
 /// passes both through as they came. A feel constant, not a measurement.
@@ -28,7 +28,7 @@ impl<Message> shader::Program<Message> for Scene {
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
         let Event::Mouse(event) = event else {
-            return None;
+            return tick(self, event);
         };
         match event {
             mouse::Event::ButtonPressed(mouse::Button::Left) => {
@@ -106,6 +106,23 @@ impl shader::Primitive for ScenePrimitive {
 impl shader::Pipeline for ScenePipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         ScenePipeline::new(device, format)
+    }
+}
+
+/// The presentation clock ticks on the window's own redraw event, inside the
+/// pass that then draws the result: the scene takes the frame that is due and
+/// says when the next one is, and the returned [`Action`] is what makes iced
+/// sleep until exactly that instant. Waking per frame rather than per refresh
+/// is what keeps 29.97 fps content off a 60 Hz grid; `kyerag::app` documents
+/// the pacing, and the measurement that rejected the alternative.
+fn tick<Message>(scene: &Scene, event: &Event) -> Option<Action<Message>> {
+    let Event::Window(window::Event::RedrawRequested(now)) = event else {
+        return None;
+    };
+    match scene.pump(*now) {
+        Next::At(due) => Some(Action::request_redraw_at(due)),
+        Next::Refresh => Some(Action::request_redraw()),
+        Next::Never => None,
     }
 }
 

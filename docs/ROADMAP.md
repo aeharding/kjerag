@@ -4,7 +4,7 @@ Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
 **Status 2026-07-31:** feasibility study complete (docs/research/), repo
-bootstrapped, M0 done, and the first reframed frame is on screen.
+bootstrapped, M0 done, and the picture moves.
 `cargo run --release -p kyerag-spike -- <file.insv>` decodes one 3840x3840
 lens on VA-API, imports the dmabuf planes into wgpu with no copy, and
 renders to PNG at 103 fps (3.4x realtime). `cargo run --release --
@@ -25,7 +25,8 @@ drag to look around and scroll to zoom (issue #3). Next: the playback core
   widget, and the wgpu-28 port of the import.
 - **M1 Reframing player** — dual decode, calibrated Mei reprojection,
   drag to reframe, scroll to zoom, play/pause/seek, screenshots. The MVP.
-  Reprojection and the mouse are done (issue #3, one lens, one frame).
+  Reprojection and the mouse are done (issue #3), and so is playback:
+  dual-stream decode, the presentation clock and play/pause (issue #4).
 - **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
   lock (+ Studio-diff test harness), rolling-shutter correction,
   hemisphere-aware decode gating, high-quality zoom sampling.
@@ -132,6 +133,37 @@ drag to look around and scroll to zoom (issue #3). Next: the playback core
   shell has no opinion about it, and no message round trip happens per
   mouse move.
 
+- 2026-07-31 Frames are delivered in pairs, not one stream at a time
+  (issue #4). `Frames` carries every video stream at one PTS, so the two
+  lenses cannot drift apart: there is no code path that delivers lens 0
+  without lens 1. Both are imported into wgpu; the shader samples one until
+  issue #27 lands.
+- 2026-07-31 Playback is paced by due time, not by counting refreshes. Each
+  frame's due time comes off a monotonic clock anchored to the first frame
+  presented, and the shell sleeps until it (`RedrawRequest::At`). The
+  shell-side alternative, a `window::frames()` subscription pumping the
+  clock on each redraw message, was built first and measured: 33-46
+  redraws/s on a 60 Hz display and 1-18 dropped frames per 5 s, because the
+  event has to leave iced and come back. The clock is pumped inside the
+  redraw pass instead, in `kyerag_render`'s shader widget, which costs a
+  `RefCell` in `Scene` and buys 30.0 redraws/s with nothing dropped.
+- 2026-07-31 The engine holds container PTS as the frame clock for now. The
+  trailer's `pts_type = 2` (`VideoPtsEexposureFile`) suggests the per-frame
+  exposure records are the camera's authoritative clock; #4 is pacing, not
+  gyro alignment, and #8's Studio-diff harness is what can tell. Only
+  `Frames::timestamp` changes if it turns out otherwise.
+- 2026-07-31 `Reader::lookahead` is 2 (issue #4). Mapping the oldest queued
+  surface rather than the newest hides the `vaSyncSurface` inside
+  `av_hwframe_map`: 2.19x realtime at depth 0, 2.46x at depth 2, 2.47x at
+  depth 4, so depth 2 takes the whole win. docs/ARCHITECTURE.md's "2-3
+  frames in flight" now has a number behind it.
+- 2026-07-31 `media::first_frame` is gone. Everything reads through
+  `Reader`, which takes a `Cue` (frame index or timestamp), seeks to the
+  keyframe at or before it and walks forward without mapping what it
+  passes: 0.22 s cold to any frame in a 3 GB file, position-independent.
+  This is the entry point #5's seek and #8's harness build on, and the
+  `reframe` instrument now takes `frame=` and `time=`.
+
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 
 Per frame, 300 frames, one lens, one frame in flight (`crates/spike/`):
@@ -146,6 +178,29 @@ Per frame, 300 frames, one lens, one frame in flight (`crates/spike/`):
 dominated by the `vaSyncSurface` inside it, so it is really decode wait: a
 player that keeps 2-3 frames in flight gets that time back. The copy path
 does not reach realtime for even one of the two lenses.
+
+Playback, both lenses, 60 s of a 3840x3840 29.97 fps file, rendering
+2560x1440 (`cargo run --release -p kyerag-spike --bin playback`):
+
+| lookahead | decode        |
+| --------- | ------------- |
+| 0         | 2.19x realtime |
+| 2         | 2.46x realtime |
+| 4         | 2.47x realtime |
+
+| what                        | measured |
+| --------------------------- | -------- |
+| presented                   | 29.94 fps |
+| redraws                     | 30.0 /s   |
+| dropped                     | 0         |
+| starved                     | 0         |
+| worst late                  | 6.6 ms    |
+| reprojection pass           | 1.31 ms/redraw |
+| CPU (decode + import + pass) | 9.1% of one core |
+
+The windowed app over the same 60 s: zero dropped and zero starved in
+every 5 s report, 30.0-30.2 redraws/s, 13.4% of one core and 295 MiB RSS
+for the whole libcosmic process.
 
 ## Ideas parked (complexity needs an observed failure first)
 
