@@ -13,6 +13,18 @@ Performance is a feature; the target is full use of modern hardware
 - docs/research/ — the 2026-07-30 feasibility study (format, pipeline,
   landscape). Quote it to settle disputes; it contains measured numbers.
 
+## Building
+
+`ffmpeg-sys-next` binds the system ffmpeg headers through bindgen, so a
+bare box cannot build this. On Pop!_OS / Ubuntu 24.04 (ffmpeg 6.1, which
+is the version Cargo.toml pins to):
+
+```sh
+sudo apt install libavcodec-dev libavdevice-dev libavfilter-dev \
+  libavformat-dev libavutil-dev libpostproc-dev libswresample-dev \
+  libswscale-dev libclang-dev
+```
+
 ## Gates (run before pushing)
 
 ```sh

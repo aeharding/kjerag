@@ -38,8 +38,13 @@ Fallback if the import fights back: `vaDeriveImage` mapping (measured
 - Use descriptor `pitch[]`/`offset[]` verbatim. Chroma pitch is
   `align(width, 512)`: at 3840-wide that is 4096 != 3840, and computed
   strides shear chroma on real footage while passing on 1920/2560 tests.
+  The M0 spike saw exactly this on X4 Air footage, plus the other half of
+  the trap: luma pitch is 3840, NOT padded. Padding is per-plane, so no
+  single computed rule is right for both. (Chroma offset 14745600,
+  modifier `0x200000010401b04`.)
 - radeonsi exports ONE fd; later planes reference object 0. `dup()` per
-  plane use; caller closes every fd.
+  plane use; caller closes every fd. Spike saw `nb_objects` 1 with both
+  layers on `object_index` 0.
 - Pre-flight the format modifier via
   `vkGetPhysicalDeviceImageFormatProperties2` before image creation;
   an unsupported modifier is UB, not a clean error.
