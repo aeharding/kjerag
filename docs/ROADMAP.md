@@ -276,7 +276,9 @@ into the same recording that land at the 99th or above: the fades hold.
   So 33 of the 39 ms between the reader and the player were the stale
   refill, and what is left is the thread handover plus one packet read of
   interrupt latency. The exact seek a release asks for came down with it,
-  276 ms to 237 ms against a 230 ms reader.
+  276 ms to 237 ms against a 230 ms reader. Both arms were measured before
+  the sound landed (issue #13) and confirmed against it afterwards, three
+  runs each: 59.2 ms to 26.5, and 276 to 236.
 
   **The read a seek itself asked for is never interrupted**, and that is
   load-bearing rather than an omission. A drag asks for positions faster than
