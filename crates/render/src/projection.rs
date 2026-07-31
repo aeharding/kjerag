@@ -2238,6 +2238,18 @@ mod tests {
         world[0].atan2(world[2]).to_degrees()
     }
 
+    /// An unpinned lock is the composition as issue #8 shipped it, down to
+    /// the bits: the view on the follow may not pay for the view off it.
+    #[test]
+    fn a_view_still_on_the_follow_composes_exactly_as_it_did() {
+        let world_from_body = Quat::from_rotation_vector([0.15, -0.4, 0.7]);
+
+        for follow in [0.0, -2.5, 11.0] {
+            let held = Held::locked(world_from_body, follow, None, None);
+            assert_eq!(held.body_from_world, world_from_body.conjugate());
+        }
+    }
+
     /// Issue #44, and the behaviour the owner asked for in one line: pan
     /// somewhere, stop, and nothing moves thereafter.
     ///

@@ -99,6 +99,18 @@ pub struct Filter {
     /// completely, and how far before it is not believed at all. Between them
     /// the correction fades linearly.
     pub trust_g: (f64, f64),
+    /// How long the same disagreement takes to be read as a **bias in the
+    /// gyroscope** rather than as a tilt to be turned out, and subtracted
+    /// from its rate.
+    ///
+    /// Infinity is no bias estimate at all, which is the filter as issue #8
+    /// shipped it, and it is why `tilt_seconds` cannot simply be made long:
+    /// the tilt correction is the only thing cancelling bias, so a long
+    /// constant that rejects turns well settles far off. Estimating the bias
+    /// separately is what would let the two stop competing. Measured against
+    /// the once-per-revolution dip in issue #45, and the measurement is the
+    /// reason it is still infinity: docs/research/insv-format.md 8.7.
+    pub bias_seconds: f64,
 }
 
 impl Default for Filter {
@@ -111,6 +123,7 @@ impl Default for Filter {
             tilt_seconds: 20.0,
             yaw_seconds: 3.0,
             trust_g: (0.05, 0.20),
+            bias_seconds: f64::INFINITY,
         }
     }
 }
@@ -324,6 +337,10 @@ impl Filter {
         let mut world_from_body = level(samples, body_from_imu);
         let mut gravity = world_from_body.conjugate().rotate(UP_IN_WORLD);
         let mut heading_held = 0.0;
+        // What the gyroscope is believed to be reading that it should not, in
+        // radians a second in the body's own frame. Zero throughout unless
+        // `bias_seconds` is finite.
+        let mut bias = [0.0; 3];
         let mut previous = first.offset_us;
         let mut out = Vec::with_capacity(samples.len() / 4);
 
@@ -333,9 +350,9 @@ impl Filter {
 
             let rate = body_from_imu.mul_vec(sample.rate_dps);
             world_from_body = world_from_body
-                .times(Quat::from_rotation_vector(
-                    rate.map(|axis| axis.to_radians() * dt),
-                ))
+                .times(Quat::from_rotation_vector(std::array::from_fn(|axis| {
+                    (rate[axis].to_radians() - bias[axis]) * dt
+                })))
                 .normalized();
 
             let accel = body_from_imu.mul_vec(sample.accel_g);
@@ -347,7 +364,15 @@ impl Filter {
             gravity = std::array::from_fn(|axis| {
                 gravity[axis] + (accel[axis] - gravity[axis]) * smoothing
             });
-            world_from_body = self.levelled(world_from_body, gravity, dt);
+            // One disagreement, read twice: as a tilt to turn out now, and as
+            // a bias to stop reading in the first place.
+            let error = self.disagreement(world_from_body, gravity);
+            world_from_body = levelled(world_from_body, error, (dt / self.tilt_seconds).min(1.0));
+            let pull = dt / (self.tilt_seconds * self.bias_seconds);
+            if pull > 0.0 {
+                let in_body = world_from_body.conjugate().rotate(error);
+                bias = std::array::from_fn(|axis| bias[axis] - in_body[axis] * pull);
+            }
 
             // The heading the view is allowed to keep is the part of it the
             // low pass has not caught up with yet, so the filtered heading is
@@ -370,25 +395,22 @@ impl Filter {
         OrientationTrack { samples: out }
     }
 
-    /// One step of the accelerometer half: turn the estimate towards the
-    /// reading, by as much of the disagreement as the time constant and the
-    /// trust in this reading allow.
-    fn levelled(&self, world_from_body: Quat, accel_g: [f64; 3], dt: f64) -> Quat {
+    /// The disagreement between where the reading says up is and where the
+    /// estimate says up is, as a rotation vector in the world frame, scaled by
+    /// how much of this reading to believe. Zero where it is not believed at
+    /// all, and zero for a reading with no length.
+    ///
+    /// Its cross product with the world vertical has no vertical component of
+    /// its own, so what comes back can only ever correct tilt: heading is not
+    /// observable from gravity and nothing here touches it.
+    fn disagreement(&self, world_from_body: Quat, accel_g: [f64; 3]) -> [f64; 3] {
         let magnitude = norm(accel_g);
-        let gain = self.trust(magnitude) * (dt / self.tilt_seconds).min(1.0);
-        if gain <= 0.0 {
-            return world_from_body;
+        let trust = self.trust(magnitude);
+        if trust <= 0.0 || magnitude <= 0.0 {
+            return [0.0; 3];
         }
-        // The disagreement between where the reading says up is and where the
-        // estimate says up is, as a rotation vector. Its cross product with
-        // the world vertical has no vertical component of its own, so this can
-        // only ever correct tilt: heading is not observable from gravity and
-        // is not touched here.
         let up = world_from_body.rotate(accel_g.map(|axis| axis / magnitude));
-        let error = cross(up, UP_IN_WORLD);
-        Quat::from_rotation_vector(error.map(|axis| axis * gain))
-            .times(world_from_body)
-            .normalized()
+        cross(up, UP_IN_WORLD).map(|axis| axis * trust)
     }
 
     /// How much of a reading to believe, from how far its magnitude is from
@@ -403,6 +425,17 @@ impl Filter {
             false => ((none - off) / (none - full)).clamp(0.0, 1.0),
         }
     }
+}
+
+/// One step of the accelerometer half: turn the estimate towards the reading
+/// by this much of the disagreement it already has with it.
+fn levelled(world_from_body: Quat, error: [f64; 3], gain: f64) -> Quat {
+    if gain <= 0.0 || norm(error) <= 0.0 {
+        return world_from_body;
+    }
+    Quat::from_rotation_vector(error.map(|axis| axis * gain))
+        .times(world_from_body)
+        .normalized()
 }
 
 /// The orientation to start from: whichever tilt puts the first tenth of a
@@ -547,6 +580,34 @@ mod tests {
             "{} degrees held, against {settled} predicted",
             last(&held)
         );
+    }
+
+    /// And the bias can be estimated rather than merely bounded, which is
+    /// what `bias_seconds` is: the same disagreement read as a rate to stop
+    /// believing rather than as a tilt to turn out. What the estimate settles
+    /// at stops being `tilt_seconds * bias` and becomes nothing.
+    ///
+    /// **Off by default, and this test is what would let it be switched on
+    /// rather than a reason to.** On real footage it is worth 0.3 degrees
+    /// plus or minus 0.5 of the once-per-revolution dip over 12 stretches,
+    /// which is not a result (docs/research/insv-format.md 8.7). What is a
+    /// result is the last assertion: switched off it costs nothing at all.
+    #[test]
+    fn a_bias_estimate_takes_the_settled_tilt_out_altogether() {
+        let biased = || track(600.0, |_| ([0.05, 0.0, 0.0], [0.0, -1.0, 0.0]));
+        let last =
+            |solved: &OrientationTrack| tilt_deg(solved.samples().last().unwrap().world_from_body);
+
+        let bounded = Filter::default().solve(&biased(), Mat3::IDENTITY);
+        let estimated = Filter {
+            bias_seconds: 60.0,
+            ..Filter::default()
+        }
+        .solve(&biased(), Mat3::IDENTITY);
+
+        assert!((last(&bounded) - 1.0).abs() < 0.1, "{}", last(&bounded));
+        assert!(last(&estimated) < 0.05, "{} degrees left", last(&estimated));
+        assert_eq!(Filter::default().bias_seconds, f64::INFINITY);
     }
 
     /// And it settles rather than oscillating: an estimate started a long way
