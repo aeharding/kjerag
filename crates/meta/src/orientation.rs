@@ -86,31 +86,11 @@ pub struct Filter {
     /// This is the one number that is a judgement about flying rather than
     /// about sensors. A deliberate turn has to read as a turn, and the swing
     /// of a camera under a wing has to not.
-    ///
-    /// What it follows is the whole stabilized frame, and the view's own yaw
-    /// is read in that frame, so this constant does not only decide how much
-    /// of a turn reaches the picture: it decides that the body's heading owns
-    /// the view. That is issue #44, and the answer is not here. A view a drag
-    /// has taken hold of pins the follow where it found it
-    /// ([`OrientationTrack::follow`]), so the two requirements stop competing
-    /// for one number.
     pub yaw_seconds: f64,
     /// How far from 1 g the accelerometer may read and still be believed
     /// completely, and how far before it is not believed at all. Between them
     /// the correction fades linearly.
     pub trust_g: (f64, f64),
-    /// How long the same disagreement takes to be read as a **bias in the
-    /// gyroscope** rather than as a tilt to be turned out, and subtracted
-    /// from its rate.
-    ///
-    /// Infinity is no bias estimate at all, which is the filter as issue #8
-    /// shipped it, and it is why `tilt_seconds` cannot simply be made long:
-    /// the tilt correction is the only thing cancelling bias, so a long
-    /// constant that rejects turns well settles far off. Estimating the bias
-    /// separately is what would let the two stop competing. Measured against
-    /// the once-per-revolution dip in issue #45, and the measurement is the
-    /// reason it is still infinity: docs/research/insv-format.md 8.7.
-    pub bias_seconds: f64,
 }
 
 impl Default for Filter {
@@ -123,7 +103,6 @@ impl Default for Filter {
             tilt_seconds: 20.0,
             yaw_seconds: 3.0,
             trust_g: (0.05, 0.20),
-            bias_seconds: f64::INFINITY,
         }
     }
 }
@@ -137,15 +116,6 @@ pub struct OrientationSample {
     /// Takes a direction in the camera body's frame to the stabilized world
     /// frame.
     pub world_from_body: Quat,
-    /// How far round the world vertical the heading follow has carried that
-    /// stabilized frame by this instant, in radians.
-    ///
-    /// Kept rather than discarded because the frame it turns is the one the
-    /// **view's** own yaw is read in, so a view that is to stay where a drag
-    /// left it has to take this back off (issue #44). It accumulates rather
-    /// than wrapping, so a file with three turns in it reads three turns and
-    /// interpolating across the back of the compass is a small step.
-    pub heading_held: f64,
 }
 
 /// The camera body's orientation over the whole file, at the IMU's own rate.
@@ -187,60 +157,21 @@ impl OrientationTrack {
     /// [`Self::turn`] is what rolling-shutter correction reads (issue #9),
     /// and it is this call at the two ends of one frame's readout.
     pub fn at(&self, offset_us: i64) -> Quat {
-        let Some((from, to, t)) = self.between(offset_us) else {
-            return Quat::IDENTITY;
-        };
-        let (previous, next) = (
-            self.samples[from].world_from_body,
-            self.samples[to].world_from_body,
-        );
-        // An instant on or outside a sample is that sample rather than a mix
-        // of it with itself: an nlerp renormalizes, and the ends of a track
-        // are read for equality.
-        match from == to {
-            true => previous,
-            false => previous.nlerp(next, t),
-        }
-    }
-
-    /// How far round the world vertical the heading follow has carried the
-    /// stabilized frame at `offset_us` ([`OrientationSample::heading_held`]).
-    ///
-    /// The view's own yaw turns about that same vertical and is read in that
-    /// same frame, so this is exactly what a view that has to stay put in the
-    /// world takes back off (issue #44). Zero for a file with no IMU record,
-    /// which leaves such a file's view where it always was.
-    pub fn follow(&self, offset_us: i64) -> f64 {
-        let Some((from, to, t)) = self.between(offset_us) else {
-            return 0.0;
-        };
-        let (previous, next) = (
-            self.samples[from].heading_held,
-            self.samples[to].heading_held,
-        );
-        previous + (next - previous) * t
-    }
-
-    /// The samples `offset_us` falls between and how far between them it is,
-    /// clamped to one sample twice over at both ends of the track. `None`
-    /// where there are no samples at all.
-    fn between(&self, offset_us: i64) -> Option<(usize, usize, f64)> {
         let after = self
             .samples
             .partition_point(|sample| sample.offset_us < offset_us);
         let Some(next) = self.samples.get(after) else {
-            let last = self.samples.len().checked_sub(1)?;
-            return Some((last, last, 0.0));
+            return self.samples.last().map_or(Quat::IDENTITY, at_sample);
         };
-        let Some(previous) = after.checked_sub(1) else {
-            return Some((after, after, 0.0));
+        let Some(previous) = after.checked_sub(1).and_then(|at| self.samples.get(at)) else {
+            return at_sample(next);
         };
-        let span = (next.offset_us - self.samples[previous].offset_us) as f64;
+        let span = (next.offset_us - previous.offset_us) as f64;
         let t = match span > 0.0 {
-            true => (offset_us - self.samples[previous].offset_us) as f64 / span,
+            true => (offset_us - previous.offset_us) as f64 / span,
             false => 0.0,
         };
-        Some((previous, after, t))
+        at_sample(previous).nlerp(at_sample(next), t)
     }
 
     /// How the body turned between two instants, as a rotation vector in the
@@ -264,6 +195,10 @@ impl OrientationTrack {
             .times(self.at(from_us))
             .rotation_vector()
     }
+}
+
+fn at_sample(sample: &OrientationSample) -> Quat {
+    sample.world_from_body
 }
 
 /// The rotation that takes an IMU reading into the camera body's frame.
@@ -337,10 +272,6 @@ impl Filter {
         let mut world_from_body = level(samples, body_from_imu);
         let mut gravity = world_from_body.conjugate().rotate(UP_IN_WORLD);
         let mut heading_held = 0.0;
-        // What the gyroscope is believed to be reading that it should not, in
-        // radians a second in the body's own frame. Zero throughout unless
-        // `bias_seconds` is finite.
-        let mut bias = [0.0; 3];
         let mut previous = first.offset_us;
         let mut out = Vec::with_capacity(samples.len() / 4);
 
@@ -350,9 +281,9 @@ impl Filter {
 
             let rate = body_from_imu.mul_vec(sample.rate_dps);
             world_from_body = world_from_body
-                .times(Quat::from_rotation_vector(std::array::from_fn(|axis| {
-                    (rate[axis].to_radians() - bias[axis]) * dt
-                })))
+                .times(Quat::from_rotation_vector(
+                    rate.map(|axis| axis.to_radians() * dt),
+                ))
                 .normalized();
 
             let accel = body_from_imu.mul_vec(sample.accel_g);
@@ -364,15 +295,7 @@ impl Filter {
             gravity = std::array::from_fn(|axis| {
                 gravity[axis] + (accel[axis] - gravity[axis]) * smoothing
             });
-            // One disagreement, read twice: as a tilt to turn out now, and as
-            // a bias to stop reading in the first place.
-            let error = self.disagreement(world_from_body, gravity);
-            world_from_body = levelled(world_from_body, error, (dt / self.tilt_seconds).min(1.0));
-            let pull = dt / (self.tilt_seconds * self.bias_seconds);
-            if pull > 0.0 {
-                let in_body = world_from_body.conjugate().rotate(error);
-                bias = std::array::from_fn(|axis| bias[axis] - in_body[axis] * pull);
-            }
+            world_from_body = self.levelled(world_from_body, gravity, dt);
 
             // The heading the view is allowed to keep is the part of it the
             // low pass has not caught up with yet, so the filtered heading is
@@ -388,29 +311,31 @@ impl Filter {
                 out.push(OrientationSample {
                     offset_us: sample.offset_us,
                     world_from_body: Quat::about_down(-heading_held).times(world_from_body),
-                    heading_held,
                 });
             }
         }
         OrientationTrack { samples: out }
     }
 
-    /// The disagreement between where the reading says up is and where the
-    /// estimate says up is, as a rotation vector in the world frame, scaled by
-    /// how much of this reading to believe. Zero where it is not believed at
-    /// all, and zero for a reading with no length.
-    ///
-    /// Its cross product with the world vertical has no vertical component of
-    /// its own, so what comes back can only ever correct tilt: heading is not
-    /// observable from gravity and nothing here touches it.
-    fn disagreement(&self, world_from_body: Quat, accel_g: [f64; 3]) -> [f64; 3] {
+    /// One step of the accelerometer half: turn the estimate towards the
+    /// reading, by as much of the disagreement as the time constant and the
+    /// trust in this reading allow.
+    fn levelled(&self, world_from_body: Quat, accel_g: [f64; 3], dt: f64) -> Quat {
         let magnitude = norm(accel_g);
-        let trust = self.trust(magnitude);
-        if trust <= 0.0 || magnitude <= 0.0 {
-            return [0.0; 3];
+        let gain = self.trust(magnitude) * (dt / self.tilt_seconds).min(1.0);
+        if gain <= 0.0 {
+            return world_from_body;
         }
+        // The disagreement between where the reading says up is and where the
+        // estimate says up is, as a rotation vector. Its cross product with
+        // the world vertical has no vertical component of its own, so this can
+        // only ever correct tilt: heading is not observable from gravity and
+        // is not touched here.
         let up = world_from_body.rotate(accel_g.map(|axis| axis / magnitude));
-        cross(up, UP_IN_WORLD).map(|axis| axis * trust)
+        let error = cross(up, UP_IN_WORLD);
+        Quat::from_rotation_vector(error.map(|axis| axis * gain))
+            .times(world_from_body)
+            .normalized()
     }
 
     /// How much of a reading to believe, from how far its magnitude is from
@@ -425,17 +350,6 @@ impl Filter {
             false => ((none - off) / (none - full)).clamp(0.0, 1.0),
         }
     }
-}
-
-/// One step of the accelerometer half: turn the estimate towards the reading
-/// by this much of the disagreement it already has with it.
-fn levelled(world_from_body: Quat, error: [f64; 3], gain: f64) -> Quat {
-    if gain <= 0.0 || norm(error) <= 0.0 {
-        return world_from_body;
-    }
-    Quat::from_rotation_vector(error.map(|axis| axis * gain))
-        .times(world_from_body)
-        .normalized()
 }
 
 /// The orientation to start from: whichever tilt puts the first tenth of a
@@ -580,34 +494,6 @@ mod tests {
             "{} degrees held, against {settled} predicted",
             last(&held)
         );
-    }
-
-    /// And the bias can be estimated rather than merely bounded, which is
-    /// what `bias_seconds` is: the same disagreement read as a rate to stop
-    /// believing rather than as a tilt to turn out. What the estimate settles
-    /// at stops being `tilt_seconds * bias` and becomes nothing.
-    ///
-    /// **Off by default, and this test is what would let it be switched on
-    /// rather than a reason to.** On real footage it is worth 0.3 degrees
-    /// plus or minus 0.5 of the once-per-revolution dip over 12 stretches,
-    /// which is not a result (docs/research/insv-format.md 8.7). What is a
-    /// result is the last assertion: switched off it costs nothing at all.
-    #[test]
-    fn a_bias_estimate_takes_the_settled_tilt_out_altogether() {
-        let biased = || track(600.0, |_| ([0.05, 0.0, 0.0], [0.0, -1.0, 0.0]));
-        let last =
-            |solved: &OrientationTrack| tilt_deg(solved.samples().last().unwrap().world_from_body);
-
-        let bounded = Filter::default().solve(&biased(), Mat3::IDENTITY);
-        let estimated = Filter {
-            bias_seconds: 60.0,
-            ..Filter::default()
-        }
-        .solve(&biased(), Mat3::IDENTITY);
-
-        assert!((last(&bounded) - 1.0).abs() < 0.1, "{}", last(&bounded));
-        assert!(last(&estimated) < 0.05, "{} degrees left", last(&estimated));
-        assert_eq!(Filter::default().bias_seconds, f64::INFINITY);
     }
 
     /// And it settles rather than oscillating: an estimate started a long way
@@ -766,42 +652,6 @@ mod tests {
             "{}",
             swept(f64::INFINITY)
         );
-    }
-
-    /// What a held view takes back off (issue #44): the heading the follow
-    /// has caught up with, which is the body's own heading low passed and
-    /// **not** the body's own heading.
-    ///
-    /// A first-order lag on a ramp settles one time constant behind it, so a
-    /// steady 20 deg/s and a 3 second constant put the follow 60 degrees back.
-    /// That gap is the part of the turn that has reached the picture.
-    #[test]
-    fn the_follow_is_the_heading_the_filter_has_caught_up_with() {
-        let turning = track(30.0, |_| ([0.0, 20.0, 0.0], [0.0, -1.0, 0.0]));
-        let solved = Filter::default().solve(&turning, Mat3::IDENTITY);
-
-        let at = |seconds: f64| solved.follow((seconds * 1e6) as i64).to_degrees();
-        assert!((at(30.0) - (600.0 - 60.0)).abs() < 5.0, "{}", at(30.0));
-        // It accumulates rather than wrapping, or a body that turns twice
-        // would read as one that turned back.
-        assert!(at(30.0) > 360.0, "{}", at(30.0));
-        assert!(at(10.0) < at(20.0) && at(20.0) < at(30.0));
-        // And it is read between the stored samples, like the orientation it
-        // belongs to: a fifth of the way in is a fifth of the way along.
-        let step = STORE_US as f64 * 1e-6;
-        let between = solved.follow((STORE_US as f64 * 1.2) as i64).to_degrees();
-        assert!(
-            (between - (at(step) + 0.2 * (at(2.0 * step) - at(step)))).abs() < 1e-9,
-            "{between}"
-        );
-    }
-
-    #[test]
-    fn a_file_with_no_imu_follows_nothing() {
-        let solved = Filter::default().solve(&GyroTrack::default(), Mat3::IDENTITY);
-
-        assert_eq!(solved.follow(0), 0.0);
-        assert_eq!(solved.follow(8_000_000), 0.0);
     }
 
     /// The interpolation rolling shutter will call: between two samples, and

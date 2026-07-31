@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ff;
 use kyerag_media::{DrmFrame, Fallible, HwDevice, Reader, open_decoder};
 use kyerag_meta::{CalibrationSet, Filter, Lens, Quat};
-use kyerag_render::{Camera, Held, MAX_LENSES, Reframe, Size};
+use kyerag_render::{Camera, Held, MAX_LENSES, Reframe, Sampling, Size};
 
 /// The window the app's own numbers are taken at.
 const ASPECT: f32 = 2560.0 / 1440.0;
@@ -106,7 +106,15 @@ fn main() -> Fallible<()> {
 }
 
 fn build(lenses: &[Lens], frame: Size, camera: Camera) -> Reframe {
-    Reframe::new(lenses, frame, camera, Held::default(), ASPECT, false)
+    Reframe::new(
+        lenses,
+        frame,
+        camera,
+        Held::default(),
+        ASPECT,
+        false,
+        Sampling::default(),
+    )
 }
 
 fn held(lenses: &[Lens], frame: Size, camera: Camera, body: Quat) -> Reframe {
@@ -114,7 +122,15 @@ fn held(lenses: &[Lens], frame: Size, camera: Camera, body: Quat) -> Reframe {
         body_from_world: body.conjugate(),
         ..Held::default()
     };
-    Reframe::new(lenses, frame, camera, held, ASPECT, false)
+    Reframe::new(
+        lenses,
+        frame,
+        camera,
+        held,
+        ASPECT,
+        false,
+        Sampling::default(),
+    )
 }
 
 /// Which lens, if any, this view gates off. `None` when both are needed.

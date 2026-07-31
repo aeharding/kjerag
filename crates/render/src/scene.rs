@@ -36,6 +36,7 @@ use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack,
 
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
+use super::sampling::{self, Sampling};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -120,9 +121,9 @@ pub struct Scene {
     /// A sensor readout the harness has forced in place of the file's own,
     /// including a zero one, which is the correction switched off.
     readout: Cell<Option<Readout>>,
-    /// The heading the filter's yaw follow had reached when a drag took hold
-    /// of the view, and `None` while the follow still has it (issue #44).
-    pinned: Cell<Option<f64>>,
+    /// How the pass samples where the view magnifies the source (issue #11).
+    /// The instruments move it; the shell leaves it alone.
+    sampling: Cell<Sampling>,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -133,7 +134,6 @@ struct Holding {
     clock: FrameClock,
     forced: Option<Quat>,
     readout: Option<Readout>,
-    pinned: Option<f64>,
 }
 
 /// A file on screen: its calibration, and where its frames come from.
@@ -229,7 +229,7 @@ impl Scene {
             clock: Cell::new(FrameClock::default()),
             forced: Cell::new(None),
             readout: Cell::new(None),
-            pinned: Cell::new(None),
+            sampling: Cell::new(Sampling::default()),
         }
     }
 
@@ -468,33 +468,6 @@ impl Scene {
         self.horizon.get()
     }
 
-    /// Hold the view where it is now, against the world, so that the filter's
-    /// heading follow cannot carry it any further (issue #44). What a drag
-    /// that moves the camera calls.
-    ///
-    /// The first drag takes hold and every later one inherits it: pinning
-    /// again part way through a file would jump the picture by however far
-    /// the follow had travelled since, and the view is already the pilot's by
-    /// then anyway. [`Self::follow_view`] is the way back.
-    pub fn pin_view(&self) {
-        if self.pinned.get().is_some() {
-            return;
-        }
-        // Nothing to pin to before the first frame arrives, and then the next
-        // move of the same drag pins instead.
-        self.pinned.set(
-            self.show
-                .as_ref()
-                .and_then(|show| show.follow(self.clock.get())),
-        );
-    }
-
-    /// Hand the view back to the camera's heading, which `View > Reset view`
-    /// does along with putting the view straight.
-    pub fn follow_view(&self) {
-        self.pinned.set(None);
-    }
-
     /// Whether this file carries the IMU record horizon lock needs. A file
     /// without one plays with the toggle on and the picture unheld.
     pub fn has_orientation(&self) -> bool {
@@ -540,6 +513,15 @@ impl Scene {
         self.show.as_ref().map(|show| show.held.readout)
     }
 
+    /// Sample the magnified picture this way rather than the way the player
+    /// ships (issue #11). The same hook as [`Self::hold_at`], and the same
+    /// reason: what a quality change is worth is the difference between two
+    /// pictures, and the losing one has to come out of the same pass.
+    /// Nothing in the shell calls this.
+    pub fn set_sampling(&self, sampling: Sampling) {
+        self.sampling.set(sampling);
+    }
+
     pub fn stats(&self) -> Option<Stats> {
         self.player(Player::stats)
     }
@@ -575,12 +557,12 @@ impl Scene {
             clock: self.clock.get(),
             forced: self.forced.get(),
             readout: self.readout.get(),
-            pinned: self.pinned.get(),
         };
         ScenePrimitive {
             elapsed: self.started.elapsed().as_secs_f32(),
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
+            sampling: self.sampling.get(),
             shutter: self.shutter.clone(),
         }
     }
@@ -604,36 +586,22 @@ impl Show {
         let frames = self.playing.borrow().frames.clone()?;
         let at = self.held.instant(&frames, held.clock);
         let world_from_body = held.forced.unwrap_or_else(|| self.held.orientation.at(at));
-        // Not under the horizon toggle: the readout is the camera's own
-        // motion during the frame, and a view that rides the body has the
-        // same skew in it as one that does not.
-        let rolling = self
-            .held
-            .rolling(at, held.readout.unwrap_or(self.held.readout));
         Some(View {
-            held: match held.horizon {
-                Horizon::Locked => Held::locked(
-                    world_from_body,
-                    self.held.orientation.follow(at),
-                    held.pinned,
-                    rolling,
-                ),
-                Horizon::Free => Held::free(rolling),
+            held: Held {
+                body_from_world: match held.horizon {
+                    Horizon::Locked => world_from_body.conjugate(),
+                    Horizon::Free => Quat::IDENTITY,
+                },
+                // Not under the horizon toggle: the readout is the camera's
+                // own motion during the frame, and a view that rides the body
+                // has the same skew in it as one that does not.
+                rolling: self
+                    .held
+                    .rolling(at, held.readout.unwrap_or(self.held.readout)),
             },
             lenses: self.lenses.clone(),
             frames,
         })
-    }
-
-    /// How far the heading follow has carried the stabilized frame at the
-    /// frame on screen, which is what a drag pins the view at (issue #44).
-    fn follow(&self, clock: FrameClock) -> Option<f64> {
-        let frames = self.playing.borrow().frames.clone()?;
-        Some(
-            self.held
-                .orientation
-                .follow(self.held.instant(&frames, clock)),
-        )
     }
 }
 
@@ -704,6 +672,9 @@ pub struct ScenePrimitive {
     elapsed: f32,
     camera: Camera,
     view: Option<View>,
+    /// How the pass samples a magnified picture, which is a property of the
+    /// redraw rather than of the frame in it.
+    sampling: Sampling,
     /// A handle on the [`Scene`]'s shutter, not a copy of it: the request
     /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
     /// first, and one that never does is still armed for the next.
@@ -758,7 +729,9 @@ impl ScenePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
-            source: wgpu::ShaderSource::Wgsl(format!("{}\n{SHADER}", projection::wgsl()).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}\n{SHADER}", projection::wgsl(), sampling::wgsl()).into(),
+            ),
         });
         let layout = bind_group_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -851,6 +824,7 @@ impl ScenePipeline {
                 view.held,
                 aspect,
                 self.linearize(),
+                primitive.sampling,
             ),
             _ => Reframe::gradient(primitive.elapsed, aspect, self.linearize()),
         };
@@ -1154,20 +1128,25 @@ fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
 // overlap this is the single fetch the hard pick took before issue #7, and
 // the second fetch is what the blend band costs.
 //
+// `ratio` is each lens's magnification at its own landing, in delivered-frame
+// texels per output pixel (issue #11). It arrives as an argument because the
+// derivatives it comes from have to be read where the control flow is
+// uniform, which is the entry point and not here.
+//
 // WGSL has no texture array to index here, so the lenses are named rather
 // than looped. The explicit mip level is what makes that legal: a
 // `textureSample` computes its own level from derivatives and needs uniform
 // control flow to do it, and every one of these textures has a single level
 // anyway.
-fn picture(mix: Blend) -> vec3<f32> {
+fn picture(mix: Blend, ratio: vec2<f32>) -> vec3<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
   if mix.weights[0] > 0.0 {
-    rgb += mix.weights[0] * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel));
+    rgb += mix.weights[0] * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += mix.weights[1] * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel));
+    rgb += mix.weights[1] * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
     total += mix.weights[1];
   }
   return select(OUTSIDE_GRAY, rgb, total > 0.0);
@@ -1175,9 +1154,14 @@ fn picture(mix: Blend) -> vec3<f32> {
 
 // BT.709 full range: ffprobe reports bt709 and the camera writes yuvj420p.
 // DRM_FORMAT_GR88 is little endian G:R, so .r is Cb and .g is Cr.
-fn nv12(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
-  let y = textureSampleLevel(luma, samp, uv, 0.0).r;
-  let c = textureSampleLevel(chroma, samp, uv, 0.0).rg - vec2<f32>(0.5, 0.5);
+//
+// The two planes are handed the same magnification and reach their own
+// conclusions from it, because they are not the same size: `plane` scales the
+// ratio by the grid it is sampling (`sampling::plane_ratio`), so the chroma
+// plane upgrades an octave of zoom before the luma plane does.
+fn nv12(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f32) -> vec3<f32> {
+  let y = plane(luma, samp, uv, ratio, reframe.sharpen_luma).r;
+  let c = plane(chroma, samp, uv, ratio, reframe.sharpen_chroma).rg - vec2<f32>(0.5, 0.5);
   return vec3<f32>(
     y + 1.5748 * c.g,
     y - 0.1873 * c.r - 0.4681 * c.g,
@@ -1193,7 +1177,16 @@ fn linearize(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  let lens = picture(blend(view_ray(in.uv)));
+  let mix = blend(view_ray(in.uv));
+  // Here rather than inside the blend: a derivative has to be taken where
+  // every lane of the quad is running, and the blend is all branches. What
+  // the neighbouring lanes landed on is exactly what this asks about, so the
+  // landings are read after the blend has answered for all of them.
+  let ratio = vec2<f32>(
+    texel_ratio(mix.landings[0].pixel),
+    texel_ratio(mix.landings[1].pixel),
+  );
+  let lens = picture(mix, ratio);
   let rgb = select(gradient(in.uv, reframe.elapsed), lens, reframe.has_frame > 0.5);
   return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), 1.0);
 }

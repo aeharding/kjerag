@@ -5,6 +5,10 @@ mod camera;
 mod capture;
 pub mod dmabuf;
 mod projection;
+/// How a magnified picture is sampled, and where the upgrade engages
+/// (issue #11). Public for the instrument that measures it, like
+/// [`Reframe`]'s own mirror of the map.
+pub mod sampling;
 mod scene;
 mod widget;
 
@@ -13,6 +17,7 @@ pub use capture::{Request, Shot, Then};
 pub use kyerag_media::{Accuracy, Cue, Fallible, Size, Stats};
 pub use kyerag_meta::{Quat, Readout, Sweep};
 pub use projection::{Blend, Held, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe, Rolling};
+pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on

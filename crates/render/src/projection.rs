@@ -32,6 +32,7 @@
 
 use kyerag_meta::{Intrinsics, Lens, Pose, Quat};
 
+use super::sampling::Sampling;
 use super::{Camera, Size};
 
 /// How many times the landing row is solved for before it is believed
@@ -120,7 +121,12 @@ pub struct Reframe {
     /// components are zero for a file with no IMU record, and then the pass
     /// is what it was before issue #9, down to the instruction count.
     row_axis: [f32; 2],
-    _pad: [f32; 2],
+    /// How far the magnification upgrade may engage on each plane (issue
+    /// #11), luma first: 1 where it may, 0 for bilinear whatever the
+    /// magnification. Two numbers rather than one because NV12's two planes
+    /// are two grids and reach 1:1 an octave of zoom apart. [`Sampling`] is
+    /// the names they come in.
+    sharpen: [f32; 2],
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -245,45 +251,6 @@ pub struct Held {
     pub rolling: Option<Rolling>,
 }
 
-impl Held {
-    /// The lock, composed: where the body was, how far the filter's heading
-    /// follow has carried the stabilized frame by now, and the heading a drag
-    /// has pinned the view at.
-    ///
-    /// **Both halves of issue #44 are this one line.** The camera's yaw is
-    /// read in the stabilized frame, and that frame's own heading is the
-    /// follow, so a view left alone rides the follow: the body's heading owns
-    /// the view and a drag only ever offsets it. Pinning the follow at the
-    /// heading it had when the drag took hold takes it back out, and then the
-    /// view is in a frame nothing moves, which is what holding a view means.
-    ///
-    /// `pinned` of `None` is the follow reaching the view, which is what the
-    /// player does until a drag takes hold and what it does again after
-    /// `View > Reset view`.
-    pub fn locked(
-        world_from_body: Quat,
-        follow: f64,
-        pinned: Option<f64>,
-        rolling: Option<Rolling>,
-    ) -> Self {
-        Self {
-            body_from_world: world_from_body
-                .conjugate()
-                .times(Quat::about_down(pinned.unwrap_or(follow) - follow)),
-            rolling,
-        }
-    }
-
-    /// The view riding the body, which is the pass as it was before issue #8.
-    /// The readout is not under that switch (see [`Self::rolling`]).
-    pub fn free(rolling: Option<Rolling>) -> Self {
-        Self {
-            body_from_world: Quat::IDENTITY,
-            rolling,
-        }
-    }
-}
-
 /// One frame's rolling shutter: the turn the camera body makes between the
 /// first row of the readout and the last, and which way across the delivered
 /// picture those rows run.
@@ -309,6 +276,7 @@ impl Reframe {
         held: Held,
         aspect: f32,
         linearize: bool,
+        sampling: Sampling,
     ) -> Self {
         Self {
             lenses: std::array::from_fn(|index| match lenses.get(index) {
@@ -326,7 +294,7 @@ impl Reframe {
             row_axis: held
                 .rolling
                 .map_or([0.0; 2], |rolling| rolling.axis.map(|c| c as f32)),
-            _pad: [0.0; 2],
+            sharpen: sampling.limits(),
         }
     }
 
@@ -344,7 +312,9 @@ impl Reframe {
             linearize: f32::from(u8::from(linearize)),
             elapsed,
             row_axis: [0.0; 2],
-            _pad: [0.0; 2],
+            // Every ray misses every lens, so no plane is ever sampled and
+            // the gradient reaches the target either way.
+            sharpen: Sampling::default().limits(),
         }
     }
 
@@ -402,6 +372,42 @@ impl Reframe {
             }
         }
         Blend { landings, weights }
+    }
+
+    /// How many delivered-frame texels one output pixel covers where it
+    /// lands in this lens's picture: the local Jacobian of the whole backward
+    /// map, which is what says whether the view is magnifying the source
+    /// (issue #11).
+    ///
+    /// Under 1 an output pixel sits inside one texel and the picture is being
+    /// magnified, which is what [`super::sampling`] upgrades for; over 1 it
+    /// spans several and bilinear is the right answer. Taken as the longer of
+    /// the two screen axes' steps, so a landing that is magnified one way and
+    /// minified the other counts as not magnified: the upgrade is for
+    /// pictures that have run out of texels, and the axis that has not is the
+    /// one that would show the resampling.
+    ///
+    /// It is a **local** number and has to be. The fisheye's own density
+    /// varies across its picture (1106 texels per radian down the X4 Air's
+    /// axis, 948 radially at the rim), the rectilinear output's varies across
+    /// the view, and the lens's landing is what carries both. `output` is the
+    /// target's size in pixels; the value scales with it, which is why a
+    /// screenshot magnifies less than the window it was taken from.
+    ///
+    /// WGSL twin: `texel_ratio`, which reads the same two steps off the
+    /// hardware's own quad derivatives. That is the same finite difference,
+    /// and it needs no output size at all: whatever target the pass draws
+    /// into, a quad of it steps the share of the picture it steps.
+    pub fn texels_per_pixel(&self, lens: usize, uv: [f32; 2], output: Size) -> f32 {
+        let landing = |uv: [f32; 2]| self.project(lens, self.view_ray(uv)).pixel;
+        let here = landing(uv);
+        let step = |to: [f32; 2]| {
+            let moved = landing(to);
+            (moved[0] - here[0]).hypot(moved[1] - here[1])
+        };
+        let across = step([uv[0] + 1.0 / output.width as f32, uv[1]]);
+        let down = step([uv[0], uv[1] + 1.0 / output.height as f32]);
+        across.max(down)
     }
 
     /// Whether **any** ray of the whole output can be in this lens's picture,
@@ -1043,6 +1049,10 @@ struct Reframe {
   // components where there is no readout to correct.
   row_axis_x: f32,
   row_axis_y: f32,
+  // How far the magnification upgrade may engage on each plane. Rust twin:
+  // `Reframe::sharpen`.
+  sharpen_luma: f32,
+  sharpen_chroma: f32,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -1206,14 +1216,38 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
 fn frame_uv(pixel: vec2<f32>) -> vec2<f32> {
   return (pixel + vec2<f32>(0.5)) / vec2<f32>(reframe.frame_width, reframe.frame_height);
 }
+
+// How many delivered-frame texels one output pixel covers where it landed.
+// Rust twin: `Reframe::texels_per_pixel`.
+//
+// The finite difference is the hardware's own, one quad at a time, which is
+// why the entry point calls this and `blend` does not: a derivative needs
+// uniform control flow and `blend` is nothing but branches. Reading the step
+// off the quad rather than off a resolution in the uniform block is also
+// what makes a still right without being told (issue #15): the capture draws
+// this same pipeline into a target of its own size, and a quad of that
+// target steps a smaller share of the picture all by itself.
+//
+// The longer of the two steps, so a landing stretched one way and squeezed
+// the other counts as not magnified. That is the safe direction twice over.
+// It leaves the axis that still has texels to spend sampling the way it
+// always did, and where a quad straddles the edge of a lens's coverage one
+// of its lanes has no landing at all and the step reads as most of the
+// picture: a huge ratio, which disengages. That lane is within an output
+// pixel of the edge of that lens's own picture, where its coverage depth and
+// with it its weight have gone to zero and the other lens is carrying the
+// ray.
+fn texel_ratio(pixel: vec2<f32>) -> f32 {
+  return max(length(dpdx(pixel)), length(dpdy(pixel)));
+}
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kyerag_meta::{
-        Distortion, Filter, GyroSample, GyroTrack, Mat3 as ImuMounting, OrientationTrack, Sweep,
-    };
+    use kyerag_meta::{Distortion, Sweep};
+
+    use crate::sampling;
 
     const FRAME: Size = Size {
         width: 3840,
@@ -1283,7 +1317,15 @@ mod tests {
     /// The same fixture with the camera body somewhere other than level,
     /// which is what horizon lock has to take back out.
     fn held(camera: Camera, held: Held) -> Reframe {
-        Reframe::new(&fixture_lenses(), FRAME, camera, held, 1.0, false)
+        Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            camera,
+            held,
+            1.0,
+            false,
+            Sampling::default(),
+        )
     }
 
     /// The camera as it was before issue #27: one stream, one lens, one
@@ -1297,13 +1339,8 @@ mod tests {
             Held::default(),
             1.0,
             false,
+            Sampling::default(),
         )
-    }
-
-    /// An angle difference wrapped into (-180, 180], so that a heading
-    /// crossing the back of the compass is a small change and not a turn.
-    fn wrapped(degrees: f64) -> f64 {
-        (degrees + 180.0).rem_euclid(360.0) - 180.0
     }
 
     #[track_caller]
@@ -1724,6 +1761,7 @@ mod tests {
             Held::default(),
             aspect,
             false,
+            Sampling::default(),
         );
 
         for down in 0..=64 {
@@ -1770,6 +1808,7 @@ mod tests {
                         Held::default(),
                         16.0 / 9.0,
                         false,
+                        Sampling::default(),
                     );
                     for lens in 0..MAX_LENSES {
                         if reframe.reaches(lens, 0.0) {
@@ -1810,6 +1849,7 @@ mod tests {
                     Held::default(),
                     16.0 / 9.0,
                     false,
+                    Sampling::default(),
                 )
             };
             for lens in 0..MAX_LENSES {
@@ -1846,6 +1886,149 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A 2560x1440 window, which is where the player's own numbers are
+    /// measured and what a texel-to-pixel ratio is a ratio against.
+    const WINDOW: Size = Size {
+        width: 2560,
+        height: 1440,
+    };
+
+    fn windowed(fov_deg: f32) -> Reframe {
+        Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            Camera {
+                fov: fov_deg.to_radians(),
+                ..Camera::default()
+            },
+            Held::default(),
+            WINDOW.width as f32 / WINDOW.height as f32,
+            false,
+            Sampling::default(),
+        )
+    }
+
+    /// What the ratio has to be down the view axis, from two closed forms
+    /// that owe the Jacobian nothing.
+    ///
+    /// Near its own axis the Mei model's focal length is `fx / (1 + xi)`
+    /// texels per radian, because `sin(theta) / (cos(theta) + xi)` is
+    /// `theta / (1 + xi)` there and the radial polynomial is 1. A
+    /// rectilinear output's is `width / (2 tan(fov / 2))` pixels per radian,
+    /// for the same reason in the other direction. The ratio of the two is
+    /// the magnification, and it is 1105.7 over 1280 at the app's default
+    /// field of view: the player is already magnifying this camera by 16%
+    /// before anyone touches the wheel.
+    fn paraxial_ratio(fov_deg: f32) -> f32 {
+        let lens = fixture_lenses()[0].intrinsics;
+        let source = (lens.fx / (1.0 + lens.xi)) as f32;
+        let output = WINDOW.width as f32 / (2.0 * (fov_deg.to_radians() * 0.5).tan());
+        source / output
+    }
+
+    /// The Jacobian the shader samples by, against arithmetic that shares no
+    /// line with it. Down the view axis, where both closed forms hold, over
+    /// the whole zoom range.
+    ///
+    /// A percent of tolerance covers the lens's own 0.125 degree mounting
+    /// tilt and the finite difference being taken over a real output pixel
+    /// rather than in the limit.
+    #[test]
+    fn the_texel_ratio_is_the_focal_length_the_model_has_on_its_axis() {
+        for fov in [20.0f32, 45.0, 90.0, 110.0] {
+            let ratio = windowed(fov).texels_per_pixel(0, [0.5, 0.5], WINDOW);
+            let paraxial = paraxial_ratio(fov);
+            assert!(
+                (ratio / paraxial - 1.0).abs() < 0.01,
+                "fov {fov}: the map magnifies by {ratio} against {paraxial} paraxial",
+            );
+        }
+    }
+
+    /// What the whole issue rests on: zoomed in, an output pixel is inside
+    /// one source texel, and zoomed out it is not. Down the front lens's
+    /// axis at a 2560 px window, 20 degrees of field of view is six and a
+    /// half output pixels to the texel, the app's own default of 90 is one
+    /// and a sixth, and only past 98 does an output pixel hold a whole texel
+    /// again.
+    #[test]
+    fn a_narrow_view_magnifies_the_source_and_a_wide_one_does_not() {
+        let middle = |fov| windowed(fov).texels_per_pixel(0, [0.5, 0.5], WINDOW);
+
+        near(middle(20.0), 0.152, 0.002);
+        near(middle(90.0), 0.864, 0.002);
+        assert!(middle(110.0) > 1.0, "{} at fov 110", middle(110.0));
+        // And it is monotone in the zoom, which is what makes one threshold
+        // an answer at all.
+        let mut held = 0.0;
+        for fov in [20.0f32, 25.0, 35.0, 60.0, 90.0, 100.0, 110.0] {
+            let ratio = middle(fov);
+            assert!(
+                ratio > held,
+                "fov {fov} magnifies less than the view before"
+            );
+            held = ratio;
+        }
+    }
+
+    /// And it is **local**, which is why the shader asks per fragment rather
+    /// than per redraw. Two things vary and they do not cancel: the fisheye's
+    /// own angular density, and the rectilinear output's, which rises towards
+    /// a corner as the cosine squared of the angle off the view axis.
+    ///
+    /// At the widest view the player offers, the middle of the picture is
+    /// past 1:1 (1.234) and the corners of the same picture are two thirds
+    /// of the way inside it (0.743), which is 1.66 times. A single ratio for
+    /// the view would have to be wrong at one end or the other.
+    #[test]
+    fn the_texel_ratio_is_not_uniform_across_the_frame() {
+        let wide = windowed(110.0);
+        let middle = wide.texels_per_pixel(0, [0.5, 0.5], WINDOW);
+        let corner = wide.texels_per_pixel(0, [0.98, 0.98], WINDOW);
+
+        assert!(
+            middle > 1.0,
+            "the middle of a 110 degree view does not magnify"
+        );
+        assert!(corner < 0.8, "the corner does: {corner}");
+        assert!(
+            middle / corner > 1.5,
+            "{middle} in the middle against {corner} in the corner",
+        );
+
+        // It is not flat at the narrow end either, where the output's own
+        // fall-off is small and the lens's density does the varying.
+        let narrow = windowed(20.0);
+        let spread = narrow.texels_per_pixel(0, [0.5, 0.5], WINDOW)
+            / narrow.texels_per_pixel(0, [0.98, 0.98], WINDOW);
+        assert!(
+            (1.01..1.03).contains(&spread),
+            "{spread} across a 20 degree view"
+        );
+    }
+
+    /// The NV12 wrinkle where it actually lands: at the app's default view,
+    /// on this camera, at this window, the chroma plane is magnified and the
+    /// luma plane is not. The two planes need two thresholds because they
+    /// really do answer differently over the range the player is used in.
+    #[test]
+    fn the_chroma_plane_is_magnified_where_the_luma_plane_is_not() {
+        let engaged = |fov, plane: f32| {
+            let ratio = windowed(fov).texels_per_pixel(0, [0.5, 0.5], WINDOW);
+            sampling::sharpen(sampling::plane_ratio(ratio, plane, FRAME.width as f32), 1.0)
+        };
+        let luma = FRAME.width as f32;
+        let chroma = luma * 0.5;
+
+        for fov in [100.0f32, 110.0] {
+            assert_eq!(engaged(fov, luma), 0.0, "luma at fov {fov}");
+            assert!(engaged(fov, chroma) > 0.0, "chroma at fov {fov}");
+        }
+        // And zoomed in, both.
+        assert_eq!(engaged(20.0, luma), 1.0);
+        assert_eq!(engaged(20.0, chroma), 1.0);
     }
 
     /// Four views that between them point the cap in every direction it can
@@ -2182,158 +2365,6 @@ mod tests {
         assert_eq!(moved.0, anchor.0);
         near(moved.1.pixel[0], anchor.1.pixel[0], 1.0);
         near(moved.1.pixel[1], anchor.1.pixel[1], 1.0);
-    }
-
-    /// A level camera whose heading wanders for five minutes: a swing either
-    /// side of straight ahead, and a slow turn under it that never comes back.
-    ///
-    /// Returned with the body's **true** orientation as a function of the same
-    /// clock, which is what makes the test below a test: the composition is
-    /// undone by the thing that made it rather than by a second copy of
-    /// itself.
-    fn wandering() -> (OrientationTrack, impl Fn(i64) -> Quat) {
-        const HZ: i64 = 200;
-        const SECONDS: f64 = 300.0;
-        // 40 degrees either side at a 20 second period, which is faster than
-        // the 3 second follow can hold and slower than it ignores, over a
-        // steady 0.1 deg/s that adds half a turn across the run.
-        let heading = |t: f64| {
-            40f64.to_radians() * (t * std::f64::consts::TAU / 20.0).sin() + 0.1f64.to_radians() * t
-        };
-        let rate = |t: f64| {
-            40f64.to_radians()
-                * (std::f64::consts::TAU / 20.0)
-                * (t * std::f64::consts::TAU / 20.0).cos()
-                + 0.1f64.to_radians()
-        };
-        let samples = (0..(SECONDS * HZ as f64) as i64)
-            .map(|index| {
-                // The rate at the middle of the step this sample covers, not
-                // at its end: the solver integrates rectangles, and reading
-                // the rate at the end of each one leaves a quadrature error
-                // that grows to a sixteenth of a degree here. That is an
-                // error in this synthetic body, not in the thing under test,
-                // and the midpoint rule is what takes it out.
-                let t = (index as f64 - 0.5) / HZ as f64;
-                GyroSample {
-                    offset_us: index * 1_000_000 / HZ,
-                    // Level, so the body's own vertical is the world's and a
-                    // heading rate is a rate about it.
-                    rate_dps: [0.0, rate(t).to_degrees(), 0.0],
-                    accel_g: [0.0, -1.0, 0.0],
-                }
-            })
-            .collect();
-        (
-            Filter::default().solve(&GyroTrack::from_samples(samples), ImuMounting::IDENTITY),
-            move |at: i64| Quat::about_down(heading(at as f64 * 1e-6)),
-        )
-    }
-
-    /// Where in the **world** the middle of the output is looking, which is
-    /// the only frame in which "the view did not move" means anything.
-    fn looking(camera: Camera, held: Held, body: Quat) -> f64 {
-        let ray = world_ray(camera, [0.0, 0.0, 1.0]).map(f64::from);
-        let world = body.rotate(held.body_from_world.rotate(ray));
-        world[0].atan2(world[2]).to_degrees()
-    }
-
-    /// An unpinned lock is the composition as issue #8 shipped it, down to
-    /// the bits: the view on the follow may not pay for the view off it.
-    #[test]
-    fn a_view_still_on_the_follow_composes_exactly_as_it_did() {
-        let world_from_body = Quat::from_rotation_vector([0.15, -0.4, 0.7]);
-
-        for follow in [0.0, -2.5, 11.0] {
-            let held = Held::locked(world_from_body, follow, None, None);
-            assert_eq!(held.body_from_world, world_from_body.conjugate());
-        }
-    }
-
-    /// Issue #44, and the behaviour the owner asked for in one line: pan
-    /// somewhere, stop, and nothing moves thereafter.
-    ///
-    /// Five minutes of a wandering heading through the real filter, with the
-    /// camera left where a drag put it. What the middle of the output looks
-    /// at, **in the world**, may not move at all.
-    #[test]
-    fn a_pinned_view_holds_its_world_direction_while_the_body_wanders() {
-        let (track, body) = wandering();
-        let camera = Camera {
-            yaw: 0.6,
-            pitch: -0.2,
-            ..Camera::default()
-        };
-        let pinned = Some(track.follow(0));
-
-        let at = |seconds: i64| {
-            let us = seconds * 1_000_000;
-            looking(
-                camera,
-                Held::locked(track.at(us), track.follow(us), pinned, None),
-                body(us),
-            )
-        };
-
-        let start = at(0);
-        for seconds in (0..=290).step_by(10) {
-            let moved = wrapped(at(seconds) - start);
-            assert!(
-                moved.abs() < 0.05,
-                "the view moved {moved} degrees by {seconds} s"
-            );
-        }
-    }
-
-    /// And the same run with the view still on the follow, which is what the
-    /// player does before a drag takes hold and what issue #44 was: the view
-    /// is dragged along by the body's heading, all the way to the half turn
-    /// the body ends up having made.
-    ///
-    /// Without this the test above proves only that some arithmetic is
-    /// constant, not that it was ever in danger.
-    #[test]
-    fn a_view_left_on_the_follow_is_carried_by_the_bodys_heading() {
-        let (track, body) = wandering();
-        let camera = Camera {
-            yaw: 0.6,
-            ..Camera::default()
-        };
-
-        let at = |seconds: i64| {
-            let us = seconds * 1_000_000;
-            looking(
-                camera,
-                Held::locked(track.at(us), track.follow(us), None, None),
-                body(us),
-            )
-        };
-
-        let start = at(0);
-        let swung = (0..=290)
-            .step_by(10)
-            .map(|seconds| wrapped(at(seconds) - start).abs())
-            .fold(0.0f64, f64::max);
-        assert!(
-            swung > 30.0,
-            "the follow only moved the view {swung} degrees"
-        );
-
-        // And it does not come back. Twelve instants five seconds apart is
-        // three whole periods of the swing with no phase counted twice, so
-        // what is left in the mean is the slow turn alone, less the three
-        // seconds the follow lags a ramp: 0.1 deg/s at a mean of 257.5 s,
-        // less 0.3.
-        let window: Vec<i64> = (230..290).step_by(5).collect();
-        let carried: f64 = window
-            .iter()
-            .map(|seconds| wrapped(at(*seconds) - start))
-            .sum::<f64>()
-            / window.len() as f64;
-        assert!(
-            (carried - 25.45).abs() < 0.5,
-            "{carried} degrees against the 25.45 the body turned under it"
-        );
     }
 
     /// One frame's readout with the body turning `turn` radians about the
