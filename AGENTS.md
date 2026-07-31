@@ -37,6 +37,10 @@ cargo test
   proxies are generated, never assumed.
 - Simplest design first: smallest truthful version, owner-readable.
   Complexity only from observed failures.
+- Pushing back is welcome (owner's standing request): if the existing
+  structure makes your task awkward, or a refactor would make the code
+  easier to work with, say so in your PR or report instead of contorting
+  around it. Proposals with reasons get taken seriously; the plan pivots.
 - UI copy: plain words, no em dashes.
 
 ## Test media
