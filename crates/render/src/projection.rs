@@ -365,6 +365,55 @@ impl Reframe {
         Blend { landings, weights }
     }
 
+    /// Whether **any** ray of the whole output can be in this lens's picture,
+    /// with `margin` radians of slack on top.
+    ///
+    /// [`Self::within`] asked per pixel; this asks it once for the view, which
+    /// is what a decision about the decoder rather than about a fragment
+    /// would need. The output sits inside a cone about the view axis whose
+    /// half angle is [`Self::cone`], so the ray of it nearest this lens's axis
+    /// is that much nearer than the view axis is, and the whole test is one
+    /// cosine against one dot product of the mounting.
+    ///
+    /// Conservative in the same direction as `within` and for the same
+    /// reason: the cone contains the output rather than being it, so a corner
+    /// that would only have grazed the lens still counts as reaching it.
+    ///
+    /// **Nothing in the player calls this.** The decoder is not gated on it:
+    /// issue #10's other half was built as far as this test, measured, and
+    /// cut, because on real footage with the horizon locked the answer holds
+    /// for 9% of the time at the default field of view and letting go of it
+    /// costs 195 to 340 ms of stale far hemisphere. `kyerag-spike --bin
+    /// gating` is that measurement and this is what it reads; the numbers and
+    /// the reasoning are in docs/ROADMAP.md.
+    pub fn reaches(&self, lens: usize, margin: f32) -> bool {
+        let block = &self.lenses[lens];
+        // A slot with no picture in it. No cone reaches a cap that no ray is
+        // inside.
+        if block.axis_min > 1.0 {
+            return false;
+        }
+        let cap = block.axis_min.acos() + self.cone() + margin;
+        cap >= std::f32::consts::PI || block.view_to_lens[2][2] > cap.cos()
+    }
+
+    /// The half angle of the cone that holds the whole output, in radians:
+    /// the corner ray, which is the furthest from the view axis a rectangle
+    /// reaches.
+    pub fn cone(&self) -> f32 {
+        (1.0 / norm3(self.view_ray([0.0, 0.0]))).acos()
+    }
+
+    /// How far off its own axis this lens can still see, in radians, cap
+    /// margin included. `None` for a slot with no picture in it.
+    ///
+    /// For the instruments: `kyerag-spike --bin gating` reports it, and it is
+    /// [`LensBlock::axis_min`] read back as an angle.
+    pub fn coverage(&self, lens: usize) -> Option<f32> {
+        let axis_min = self.lenses[lens].axis_min;
+        (axis_min <= 1.0).then(|| axis_min.acos())
+    }
+
     /// Whether this lens can have any of this ray, decided before the model
     /// runs (issue #10).
     ///
@@ -1642,6 +1691,96 @@ mod tests {
                     !reframe.within(1, ray),
                     "the back lens is projected at {uv:?}"
                 );
+            }
+        }
+    }
+
+    /// What ties the view-level question to the pixel-level one, and the
+    /// property a decode gate would have rested on: where
+    /// [`Reframe::reaches`] says no, no ray of the output reaches that lens
+    /// either.
+    ///
+    /// The two are asked at different scales and answered by different
+    /// arithmetic, one about a cone and one about a ray, so they can disagree
+    /// in only one safe direction. This is that direction, checked at the
+    /// corners and edges as well as the middle, because the corner is the
+    /// part of a rectangle furthest from the view axis and the reason
+    /// [`Reframe::cone`] is measured off it.
+    #[test]
+    fn no_ray_of_a_gated_view_reaches_the_lens() {
+        for fov in [20.0f32, 45.0, 90.0, 110.0] {
+            for yaw in (0..360).step_by(9) {
+                for pitch in [-80.0f32, -35.0, 0.0, 35.0, 80.0] {
+                    let camera = Camera {
+                        yaw: (yaw as f32).to_radians(),
+                        pitch: pitch.to_radians(),
+                        fov: fov.to_radians(),
+                    };
+                    let reframe = Reframe::new(
+                        &fixture_lenses(),
+                        FRAME,
+                        camera,
+                        Held::default(),
+                        16.0 / 9.0,
+                        false,
+                    );
+                    for lens in 0..MAX_LENSES {
+                        if reframe.reaches(lens, 0.0) {
+                            continue;
+                        }
+                        for down in 0..=16 {
+                            for across in 0..=16 {
+                                let uv = [across as f32 / 16.0, down as f32 / 16.0];
+                                assert!(
+                                    !reframe.within(lens, reframe.view_ray(uv)),
+                                    "lens {lens} is out of reach at fov {fov}, yaw {yaw}, pitch \
+                                     {pitch}, but {uv:?} is inside its cap",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// And it only ever loosens: a wider view or more margin reaches at least
+    /// as far. A gate built on a test that tightened as the view opened would
+    /// engage while the corners were still looking at the far lens.
+    #[test]
+    fn opening_the_view_or_the_margin_only_ever_reaches_further() {
+        for yaw in (0..360).step_by(15) {
+            let camera = |fov: f32| Camera {
+                yaw: (yaw as f32).to_radians(),
+                pitch: 0.2,
+                fov: fov.to_radians(),
+            };
+            let build = |fov| {
+                Reframe::new(
+                    &fixture_lenses(),
+                    FRAME,
+                    camera(fov),
+                    Held::default(),
+                    16.0 / 9.0,
+                    false,
+                )
+            };
+            for lens in 0..MAX_LENSES {
+                for pair in [(20.0f32, 45.0f32), (45.0, 90.0), (90.0, 110.0)] {
+                    assert!(
+                        build(pair.1).reaches(lens, 0.0) || !build(pair.0).reaches(lens, 0.0),
+                        "lens {lens} at yaw {yaw} reaches at fov {} and not at {}",
+                        pair.0,
+                        pair.1,
+                    );
+                }
+                let wide = build(90.0);
+                for margin in [0.1f32, 0.4, 1.0] {
+                    assert!(
+                        wide.reaches(lens, margin) || !wide.reaches(lens, 0.0),
+                        "lens {lens} at yaw {yaw} reaches at no margin and not at {margin}",
+                    );
+                }
             }
         }
     }

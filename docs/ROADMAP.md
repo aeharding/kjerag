@@ -91,8 +91,31 @@ up to 1.9 degrees of misalignment into the seam that #7 just blended.
 turned hard by hand in front of close, still content would settle it
 (docs/research/insv-format.md 6.7).
 
-Next in M2: hemisphere-aware decode gating (issue #10) and high-quality zoom
-sampling (issue #11).
+**Hemisphere-aware decode gating is half done and half cut** (issue #10),
+which is the fourth M2 item and the third time this project has built
+something and then measured it out. The half that shipped is in the shader:
+each lens's picture is one cap around its own axis, that cap comes out of the
+calibration by solving the model's own coverage boundary, and a ray further
+off the axis than the cap weighs exactly nothing, so the pass does not run
+the Mei map for it. One dot product per lens decides. 1.74 to 1.54 ms per
+redraw at a view inside one hemisphere, 1.81 to 1.66 across the seam, and
+eight rendered views are byte for byte what they were.
+
+The half that was cut is the decoder, and the reason is arithmetic. Gating
+the invisible stream is worth 2.84 points of one core and 1.53 W of SoC power
+against a 6.10 W idle, which is the halving the issue predicted. But the gate
+can only be on while **no** ray of the view can reach the far lens, and at the
+app's default 90-degree field of view that is 16.5% of the sphere; on real
+flying footage with the horizon locked, which is the default, a parked view
+is not a parked geometry, and the measured duty cycle is 21.6 to 24.3% with
+no hysteresis at all and 8.9 to 9.4% with the 15 degrees of margin a release
+would need. Releasing a cold gate costs 195 to 340 ms, six to eleven frames
+of stale far hemisphere, because HEVC has no way into the middle of a GOP and
+this camera's is 29 frames. Expected saving: **0.14 W**, for a state machine
+and a packet ring through the frame path. `kyerag-spike --bin gating` is the
+measurement and it stays runnable.
+
+Next in M2: high-quality zoom sampling (issue #11).
 
 ## Milestones
 
@@ -117,11 +140,75 @@ sampling (issue #11).
   overnight), rolling-shutter correction (issue #9, done: fused into the one
   backward map, and switched off because the readout direction is not in the
   file and could not be measured out of flying footage), hemisphere-aware
-  decode gating, high-quality zoom sampling.
+  gating (issue #10, done: the pass skips the lens a ray cannot reach, and
+  the decode gate under the same test is measured and cut), high-quality zoom
+  sampling.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback.
 
 ## Decisions log
+
+- 2026-07-31 The pass **skips the lens a ray cannot reach** (issue #10). Each
+  lens's picture is one cap around its own axis; the cap is solved out of the
+  calibration by finding where the model's own landing leaves the image
+  circle, rather than written down as an angle that would be right for one
+  camera. A ray further off the axis than that weighs exactly zero, so one
+  dot product per lens replaces a Mei evaluation on the majority of the
+  sphere that only one lens can see. The test is one-sided on purpose: false
+  means the weight is exactly zero, true means it might not be, so a lens
+  kept and weighed zero is multiplied by nothing and only a lens wrongly
+  dropped would be a hole. The margin on the cap is half a degree, which is
+  thirty times the worst error eight azimuths make on this fixture and costs
+  0.4% of the sphere in projections that weigh nothing.
+
+- 2026-07-31 The **decoder is not gated** on it (issue #10), and the
+  arithmetic is the reason. What gating the invisible stream is worth,
+  measured at playback pace on this box, two runs each, against a 6.10 W idle:
+
+  | lanes                     | CPU, one core | SoC power |
+  | ------------------------- | ------------: | --------: |
+  | both decoded, both mapped |         7.06% |    9.38 W |
+  | both decoded, one mapped  |         6.88% |    9.36 W |
+  | one decoded, one mapped   |         4.22% |    7.85 W |
+
+  So the full gate does halve decode power, as the issue predicted: 1.53 W of
+  the 3.28 W decoding adds over idle. The cheap version that never goes cold,
+  decoding both and mapping one, is worth 0.02 W and is inside the noise.
+
+  What it is worth **on average** is the problem. A gate can only be on while
+  no ray of the view reaches the far lens, which at the default 90 degrees of
+  field of view is 16.5% of the sphere and 11.0% of yaw/pitch space; at 45
+  degrees it is 45.6% and at 110 it is 8.4%. And with the horizon locked,
+  which is the default and which the footage demands, a parked view is not a
+  parked geometry: the body swings and turns under it. Measured over 40
+  parked views and 60 s of two X4 Air captures, at 90 degrees, the gate would
+  be on 21.6 to 24.3% of the time with no hysteresis and 8.9 to 9.4% with 15
+  degrees of margin, releasing one to three times a minute with nobody
+  touching the mouse. With the lock off it holds forever, but only 5 to 17.5%
+  of parked views qualify. Expected saving at the default: **0.14 W of about
+  10 W**, and 0.26 points of one core.
+
+  Against that, releasing a cold gate is not free and cannot be made free.
+  HEVC has no way into the middle of a GOP and this camera writes 29-frame
+  ones, so the far lens has to be walked from a keyframe: measured at 195 to
+  340 ms, six to eleven frames of stale far hemisphere, and it does not
+  depend on how long the gate was on because the hold is bounded by the GOP.
+  Three warm strategies were tried. Keeping the packets since the last
+  keyframe and replaying them is the best of them and is what those numbers
+  are. Decoding the keyframes as they pass shortens the replay by one frame
+  of 29 and adds a decode a second. Re-seeking on release is slower (230 ms
+  median and 447 worst, issue #5's table) and moves the demuxer the live lane
+  is reading from, so it hitches the hemisphere that never stopped. No margin
+  closes the gap either: the body alone reaches 551 deg/s on this footage,
+  where 15 degrees of margin is 27 ms, and a drag solves for the direction
+  under the cursor and so has no rate bound at all.
+
+  A gate that is on a tenth of the time, saves a seventh of a watt, and can
+  show a stale far hemisphere for a third of a second is not a trade this
+  player makes. `kyerag-spike --bin gating` is the whole measurement and
+  `Reframe::reaches` is the test it would have used, both kept so the loser
+  stays measurable. What would change the answer is a shorter GOP or a
+  format with cheaper random access, and the instrument would say so.
 
 - 2026-07-31 Rolling-shutter correction ships **switched off** (issue #9).
   The readout direction is not in the trailer, and on 30 minutes of flying
@@ -527,6 +614,40 @@ same binary renders two of three test views byte for byte against the pass
 before the change, and the third differs in one channel of one pixel of a
 million by one code, which is the compiler's scheduling of a refactored
 function and not the map.
+
+Hemisphere gating (issue #10), `cargo run --release -p kyerag-spike --bin
+gating`. How much of the sphere a view could gate a lens off for at all, with
+the body held still, and what the view axis has to be within for it:
+
+| fov | cone half-angle | view axis within | of the sphere | of yaw/pitch |
+| --: | --------------: | ---------------: | ------------: | -----------: |
+|  20 |          11.4 deg |         70.7 deg |         67.5% |        54.1% |
+|  45 |          25.4 deg |         56.7 deg |         45.6% |        33.6% |
+|  90 |          48.9 deg |         33.2 deg |         16.5% |        11.0% |
+| 110 |          58.6 deg |         23.5 deg |          8.4% |         5.5% |
+
+And what a **locked horizon** does to that, which is the finding: over 40
+parked views and 60 s of each of two X4 Air captures, with nobody touching
+the mouse, the body's own swing takes the gate off and puts it back.
+
+| fov | margin | gated       | releases/min | median run  |
+| --: | -----: | ----------: | -----------: | ----------: |
+|  45 |  0 deg | 48.4, 49.9% |     2.6, 4.5 | 0.60, 1.43 s |
+|  45 | 15 deg | 32.8, 31.1% |     1.5, 2.4 | 1.77, 2.30 s |
+|  90 |  0 deg | 24.3, 21.6% |     0.9, 2.6 | 1.90, 2.10 s |
+|  90 | 15 deg |   9.4, 8.9% |     1.4, 2.0 | 0.57, 1.17 s |
+|  90 | 30 deg |   0.9, 0.3% |     0.9, 0.3 | 0.47, 0.40 s |
+| 110 | 15 deg |   3.2, 2.5% |     0.5, 1.0 | 0.70, 0.90 s |
+
+Releasing a gate, packets held since the last keyframe and replayed, nothing
+mapped on the way:
+
+| gated for | held packets | catch-up      | frames stale |
+| --------: | -----------: | ------------: | -----------: |
+|     0.5 s |           13 | 195 to 204 ms |       6 to 7 |
+|     2.0 s |           28 | 237 to 335 ms |      8 to 11 |
+|    10.0 s |           28 | 280 to 339 ms |      9 to 11 |
+|    30.0 s |           28 | 293 to 340 ms |      9 to 11 |
 
 Screenshots (issue #15), 3840 px wide at the window's aspect. In the
 windowed app, 20 s of playback with a still saved every 2 s and copied
