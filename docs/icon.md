@@ -269,50 +269,65 @@ of the figure and receded exactly where the eye needs to land.
 
 ## Round 5: converging on H2, diver inside the world
 
-The owner picked H2 and asked for the diver on the left and further
-through the rim, then refined it: the figure should be **mostly inside the
-world with only a subtle jut breaking the outline**, not mostly outside.
-So the rim now crosses the figure near the feet rather than the chest, and
-the freeform-outline principle survives as that one small break.
+The owner picked H2 and asked for the diver on the left and further through
+the rim, then refined twice: the figure should be **mostly inside the world
+with only a subtle jut breaking the outline**, and the diver's head must
+land on **open water, not the green landmass**. So the rim crosses the
+figure near the legs rather than the chest, and the freeform-outline
+principle survives as that one break.
 
 These are spacing variants of a single composition, not new ideas. All
-three share a world at r=86 and a figure at 0.55; only the entry depth and
-angle change.
+three share a world (r=84 at 134,162), a figure scale of 0.55 and an entry
+angle of -62; only how far the legs clear the rim changes.
 
-| #  | file                 | jut past the rim | the idea |
-| -- | -------------------- | ---------------- | -------- |
-| K1 | `k1-foot-jut.svg`    | 6 units (3.2 px at 128) | Feet only. The subtlest reading of the note, nearly a closed circle. |
-| K2 | `k2-ankle-jut.svg`   | 15 units (7.6 px at 128) | Ankles out. The middle reading, and the clearest jut that still looks incidental. |
-| K3 | `k3-calf-jut.svg`    | 28 units (14.2 px at 128) | Lower legs out on a shallower line, so the break reads from further away. |
+| #  | file                | jut past the rim | the idea |
+| -- | ------------------- | ---------------- | -------- |
+| K1 | `k1-shin-out.svg`   | 22 units (10.9 px at 128) | Shins clear the rim. The tightest of the three. |
+| K2 | `k2-calf-out.svg`   | 28 units (14.2 px at 128) | Calves out - the depth the owner pointed at. |
+| K3 | `k3-knee-out.svg`   | 35 units (17.5 px at 128) | Out to the knee, the most pronounced break. |
 
 `scripts/icon-diver.py` places these by naming the landmark the rim should
-cross - `entry(..., ANKLE + 8)` is literally ankle-deep - so the depths
-above are declared rather than dialled in by eye.
+cross - `entry(..., KNEE - 8)` is literally calf-deep - so the depths above
+are declared rather than dialled in by eye.
 
-### The contrast this raised, and the fix
+### Getting water under the head
 
-With the figure now mostly on the world rather than on transparent sky, the
-warm gradient stopped working: the light end sat on the head, and the head
-lands on the pale green crest, where it faded out. Three tones were
-rendered against the real world colours at 128 and 64 before choosing:
-light head (the round-4 gradient), reversed, and a deeper head against a
-mid tail. The last is what ships here, `#EE9048` trailing to `#B8371A` at
-the head.
+Worth recording, because the obvious mechanism does not work: **moving the
+world down, or driving the diver deeper, cannot put water under the head.**
+`entry()` places the figure relative to the world, so the whole
+composition travels together and the head/land relationship is invariant;
+diving deeper pushes the head further *into* the land. Measured, the land
+crest straddled the world's centre (-26 to +2 units) and every head landed
+within 11 units of that centre.
+
+What works is lowering the landmass inside the disc. The land now sits **28
+world units lower** (a per-round `land_shift`), which clears the crest under
+the head by about 15 units even on the variant whose head reaches deepest.
+The world also moved down 10 units and lost 2 of radius, which is the
+framing the owner asked for but is not what fixed the overlap.
+
+### Contrast, checked twice against two different backdrops
+
+Round 4 put the figure against transparent sky and the light end of its
+gradient on the head. Round 5 moved it onto the world, where the head first
+landed on the pale green crest and faded out; four tones were rendered at
+128 and 64 before picking a deep head against a mid tail, `#EE9048` to
+`#B8371A`. When the land dropped and the head moved onto blue, that ramp
+was re-checked against the water rather than assumed - it holds, because
+the head sits on the lighter teal side of the ocean gradient and a deep
+warm on light teal is the strongest pairing of the four tested. No change
+was needed, and no stroke or keyline was added; the language has none.
 
 **Round 4's note that the head must be the light end was right for its
-context and wrong for this one.** Against transparent sky the light end
-advanced; against the world's pale land it disappears. The rule is that
-the head takes whichever end contrasts with what sits behind it, and what
-sits behind it changed when the figure moved inside the disc. No stroke or
-keyline was added - the language has none, and the tone swap was enough.
+context and wrong for this one.** The head takes whichever end contrasts
+with what is behind it, and that changed twice. The gradient is therefore a
+per-round setting in the generator, and round 4's files are untouched.
 
 ### What 32 px ships, revisited
 
-Same size-specific `*-32.svg` as round 4, but the concession is larger
-now: the jut is 0.8 to 3.5 px at 32, so at that size the silhouette is
-effectively a plain circle and the freeform outline is gone. The mark
-inside still reads. If the broken outline matters at 32 px, K3 is the only
-one with enough jut to survive it.
+Same size-specific `*-32.svg` as round 4. The jut is 5.5 to 8.7 px at 128
+but only 2.7 to 4.4 px at 32, so the broken outline is faint but no longer
+absent the way it was at the earlier, shallower depths.
 
 ## Regenerating the contact sheet
 

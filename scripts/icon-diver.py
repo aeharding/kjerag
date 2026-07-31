@@ -88,24 +88,32 @@ ROUND4 = [
 # world, with only a jut past the rim. The rim crosses the figure near the
 # feet, so the depths below sit just either side of the ankle. Same world
 # every time; only the entry changes.
-_W = (134, 152, 86)
+# World nudged down; the spread is re-centred on the deeper jut the owner
+# liked, so only how far the legs clear the rim varies. One angle for all
+# three keeps the pick apples to apples.
+_W = (134, 162, 84)
 _S = 0.55
+_A = -62
 ROUND5 = [
-    ("k1-foot-jut", *_W[2:], _W[0], _W[1],
-     entry(*_W, -50, _S, ANKLE - 8), entry(*_W, -50, 1.0, -30)),
-    ("k2-ankle-jut", *_W[2:], _W[0], _W[1],
-     entry(*_W, -50, _S, ANKLE + 8), entry(*_W, -50, 1.0, -30)),
-    ("k3-calf-jut", *_W[2:], _W[0], _W[1],
-     entry(*_W, -62, _S, KNEE - 8), entry(*_W, -62, 1.0, -26)),
+    ("k1-shin-out", *_W[2:], _W[0], _W[1],
+     entry(*_W, _A, _S, ANKLE + 20), entry(*_W, _A, 1.0, -22)),
+    ("k2-calf-out", *_W[2:], _W[0], _W[1],
+     entry(*_W, _A, _S, KNEE - 8), entry(*_W, _A, 1.0, -22)),
+    ("k3-knee-out", *_W[2:], _W[0], _W[1],
+     entry(*_W, _A, _S, KNEE + 4), entry(*_W, _A, 1.0, -22)),
 ]
 
 # The figure's gradient is per round, because which end of it must be dark
 # depends on what sits behind the head. In round 4 the head is against
 # transparent sky and the light end advances; in round 5 it is against the
 # world's pale land and the light end vanishes. Same figure, opposite ramp.
+# Land shift is in land-local units, positive = down. Round 5 drops the
+# landmass so open water sits under the diver's head; moving the world or
+# the diver cannot do it, because entry() places the figure relative to the
+# world and the head/land relationship travels with them.
 ROUNDS = {
-    "round-4": (ROUND4, ("#D9481F", "#F5A056")),
-    "round-5": (ROUND5, ("#EE9048", "#B8371A")),
+    "round-4": (ROUND4, ("#D9481F", "#F5A056"), 0),
+    "round-5": (ROUND5, ("#EE9048", "#B8371A"), 14),
 }
 
 
@@ -163,7 +171,7 @@ def mark():
                            ["head", "chest"], joints))
 
 
-def draft(key, radius, cx, cy, transform, body, y0, y1, stops):
+def draft(key, radius, cx, cy, transform, body, y0, y1, stops, land_shift=0):
     inner = radius - 3
     return f'''<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
@@ -180,7 +188,7 @@ def draft(key, radius, cx, cy, transform, body, y0, y1, stops):
   <circle cx="{cx}" cy="{cy}" r="{radius}" fill="#FFE0B0"/>
   <circle cx="{cx + 2}" cy="{cy + 2}" r="{inner}" fill="url(#{key}-ocean)"/>
   <g clip-path="url(#{key}-globe)">
-    <g transform="translate({cx + 2} {cy + 2}) scale({inner / 41:.4f}) translate(-130 -146)">
+    <g transform="translate({cx + 2} {cy + 2}) scale({inner / 41:.4f}) translate(-130 {-146 + land_shift})">
 {LAND}
     </g>
   </g>
@@ -193,15 +201,15 @@ def draft(key, radius, cx, cy, transform, body, y0, y1, stops):
 
 def main():
     body, small = figure(), mark()
-    for round_name, (candidates, stops) in ROUNDS.items():
+    for round_name, (candidates, stops, land_shift) in ROUNDS.items():
         out = os.path.join(DRAFTS, round_name)
         os.makedirs(out, exist_ok=True)
         for name, radius, cx, cy, transform, transform32 in candidates:
             key = name.split("-")[0]
             with open(os.path.join(out, f"{name}.svg"), "w") as fh:
-                fh.write(draft(key, radius, cx, cy, transform, body, -104, 98, stops))
+                fh.write(draft(key, radius, cx, cy, transform, body, -104, 98, stops, land_shift))
             with open(os.path.join(out, f"{name}-32.svg"), "w") as fh:
-                fh.write(draft(key, radius, cx, cy, transform32, small, -38, 36, stops))
+                fh.write(draft(key, radius, cx, cy, transform32, small, -38, 36, stops, land_shift))
             print(f"{round_name}/{name}")
 
 
