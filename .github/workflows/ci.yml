@@ -11,13 +11,16 @@ jobs:
       - uses: actions/checkout@v4
       # ffmpeg-sys-next binds the system headers, and bindgen needs libclang
       # to read them. Ubuntu 24.04 ships ffmpeg 6.1, which is what the pin in
-      # Cargo.toml expects.
+      # Cargo.toml expects. The second line is libcosmic's: drm-sys and
+      # wayland-sys pkg-config for libdrm and wayland-client, and the
+      # xkbcommon crate links libxkbcommon.
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
             libavutil-dev libpostproc-dev libswresample-dev libswscale-dev \
-            libclang-dev
+            libclang-dev \
+            libdrm-dev libwayland-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

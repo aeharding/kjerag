@@ -7,17 +7,20 @@ GitHub issues; this doc is the map, issues are the tasks.
 bootstrapped, M0 frame path proven end to end on real footage.
 `cargo run --release --bin spike -- <file.insv>` decodes one 3840x3840 lens
 on VA-API, imports the dmabuf planes into wgpu with no copy, and renders to
-PNG at 103 fps (3.4x realtime). M1 has started: `src/meta/` reads the
-trailer's calibration (issue #2). Next: libcosmic bring-up (issue #1),
-dual decode, and the Mei reprojection (issue #3), which consumes the
-`CalibrationSet` as it stands.
+PNG at 103 fps (3.4x realtime). The shell is up: a libcosmic window whose
+body is an `iced::widget::shader`, with the import ported to wgpu 28 by
+hand (`src/render/dmabuf.rs`, 130 lines inside `unsafe`). One thing stops
+a frame reaching the widget on stock dependencies: see the wgpu-28
+extension entry in the decisions log. M1 has started: `src/meta/` reads
+the trailer's calibration (issue #2). Next: dual decode and the Mei
+reprojection (issue #3), which consumes the `CalibrationSet` as it stands.
 
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
   zero-copy, render headless to PNG with timings. Done (`src/bin/spike.rs`,
-  issue #6). The shell question (libcosmic/wgpu28 vs winit/wgpu30) is now a
-  decision rather than an unknown: see the decisions log.
+  issue #6). Shell bring-up followed in issue #1: libcosmic window, shader
+  widget, and the wgpu-28 port of the import.
 - **M1 Reframing player** — dual decode, calibrated Mei reprojection,
   drag to reframe, scroll to zoom, play/pause/seek, screenshots. The MVP.
 - **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
@@ -63,6 +66,19 @@ dual decode, and the Mei reprojection (issue #3), which consumes the
   bypassing that crate's lens profile (wrong on the Air) and would have
   had to bypass its merged exposure records (M2), so what remained was
   the record walk. `prost` decodes the eleven fields we read.
+- 2026-07-30 libcosmic still pins wgpu 28 (checked, not assumed:
+  `pop-os/libcosmic@dc1cf9f` vendors `pop-os/iced@7346cff`, whose
+  workspace `Cargo.toml` says `wgpu = "28.0"`; the lockfile resolves
+  wgpu 28.0.0 / wgpu-hal 28.0.1). The hand-rolled import stands.
+- 2026-07-30 The whole crate is on wgpu 28, spike included. Two wgpu
+  majors in one graph would mean two sets of incompatible types for the
+  same textures, and the spike's job is to measure the code the app runs.
+- OPEN, needs Alex: nothing exposes `VK_EXT_image_drm_format_modifier` on
+  the device `iced_wgpu` creates, so the shader widget cannot import a
+  frame on stock dependencies. A four-line backport of wgpu 30's behaviour
+  into wgpu-hal 28, carried as a `[patch.crates-io]` fork, was measured
+  end to end and makes it work. The alternative is a second wgpu device
+  and an external-memory handoff. Issue #1 has the numbers.
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 

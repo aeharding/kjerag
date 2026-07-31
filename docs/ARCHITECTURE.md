@@ -3,7 +3,9 @@
 ## Layers
 
 ```
-app      shell + input (drag = yaw/pitch, scroll = FOV zoom, timeline)
+app      libcosmic shell + input (drag = yaw/pitch, scroll = FOV zoom,
+         timeline). The view is an `iced::widget::shader` whose primitive
+         draws into iced's own render pass.
 render   wgpu: dmabuf import, one WGSL pass (NV12 -> RGB + Mei reprojection
          + seam blend), offscreen render for screenshots
 media    ffmpeg demux, dual VA-API HEVC decoders, frame clock, keyframe
@@ -12,9 +14,9 @@ meta     .insv trailer, read directly: per-lens Mei calibration, gyro
          track, per-frame exposure. No UI or ffmpeg dependencies.
 ```
 
-`media` and `meta` know nothing about the shell. The shell decision
-(libcosmic vs winit + wgpu 30) is open until milestone M0 resolves it with
-data; everything below the shell must not care.
+`media` and `meta` know nothing about the shell. The shell is libcosmic,
+which pins wgpu 28, so `render` is written against 28 and owns the one
+module that wgpu 30 would delete (`render/dmabuf.rs`).
 
 ## The frame path (zero-copy)
 
@@ -29,10 +31,13 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
      blend, YUV->RGB, to swapchain at display resolution
 ```
 
-No queue-family EXTERNAL acquire step is needed with wgpu 30:
+No queue-family EXTERNAL acquire step is needed, on either wgpu version:
 `create_texture_from_hal` offers no hook for it, `TextureUses::
 UNINITIALIZED` works, and the spike's output is byte-identical to the
-copy path's.
+copy path's. wgpu 28's `create_texture_from_hal` has no `initial_state`
+argument at all (that is wgpu#9496, new in 30), so the layout-discard
+hazard is unavoidable there; it stays benign for the same two RADV
+reasons, and the byte-identical PNGs are the check.
 
 There is no viable fallback. The copy path measured 45.3 ms/frame of
 delivery (18.4 fps) in the M0 spike: it cannot sustain realtime for even
@@ -68,6 +73,22 @@ map call alone, with nothing reading the pixels through it.)
 - System ffmpeg is 6.1 (Pop!_OS): pin the ffmpeg-next major that matches,
   or vendor a newer ffmpeg; do not assume the 8.x APIs from the research
   notes are present.
+- wgpu-hal 28 enables `VK_KHR_external_memory_fd` and
+  `VK_EXT_external_memory_dma_buf` whenever the adapter has them, but never
+  `VK_EXT_image_drm_format_modifier`, and `iced_wgpu` builds its device from
+  a fixed `DeviceDescriptor` with no hook. A device kyerag opens itself
+  (wgpu-hal `open_with_callback` + `dmabuf::force_extensions`) can import;
+  the device iced hands the shader widget cannot. `enabled_device_extensions()`
+  is the check, and `dmabuf::import` refuses rather than proceeding: creating
+  an image with a disabled extension's structures is UB, not an error.
+- `iced_renderer` silently drops shader primitives when the tiny-skia
+  fallback is chosen (`fallback.rs`: a `log::warn!` and nothing drawn), so
+  a blank widget can mean "wrong renderer", not "wrong shader". libcosmic's
+  `wgpu` feature is not on by default.
+- iced's surface is sRGB when it gamma-corrects, while the spike's offscreen
+  target is `Rgba8Unorm`. The same WGSL writes different numbers to the two:
+  gamma-encoded video has to be linearised before an sRGB target re-encodes
+  it. `TextureFormat::is_srgb()` decides at runtime.
 
 ## Projection
 
@@ -97,8 +118,13 @@ a crash: build the diff-vs-Studio-export harness before trusting any of it.
 
 ## Open questions
 
-- Shell: libcosmic pins wgpu 28 (hand-rolled ash import, ~120 unsafe
-  lines) vs winit + wgpu 30 (`texture_from_dmabuf_fd` exists). M0 decides.
+- How kyerag gets `VK_EXT_image_drm_format_modifier` onto the device
+  `iced_wgpu` creates. Nothing in libcosmic, iced or wgpu 28 exposes a hook;
+  a four-line backport of the wgpu 30 behaviour into wgpu-hal 28, carried as
+  a `[patch.crates-io]` fork, is measured to work and is the proposal. The
+  alternative is a second device plus an external-memory handoff, which is
+  larger and needs a CPU stall per frame (wgpu-hal 28 does not enable
+  `VK_KHR_external_semaphore_fd` either).
 - Vignetting coefficients are not in the metadata; the seam band may show
   rolloff. Needs flat-field calibration if it bites.
 - Slot 8 is `roll`, not `half_fov` (a ONE X2 puts -179.717 in it, and a
