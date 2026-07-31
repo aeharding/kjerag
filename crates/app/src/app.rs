@@ -48,7 +48,7 @@ use cosmic::iced::keyboard::key::{Key, Physical};
 use cosmic::iced::keyboard::{Event as KeyEvent, Modifiers};
 use cosmic::iced::mouse::Event as MouseEvent;
 use cosmic::iced::runtime::clipboard;
-use cosmic::iced::widget::shader;
+use cosmic::iced::widget::{Stack, shader};
 use cosmic::iced::window::{self, Mode};
 use cosmic::iced::{Alignment, Length, Limits, Subscription, time};
 use cosmic::widget::about::About;
@@ -89,6 +89,12 @@ const CONTROLS_POLL: Duration = Duration::from_millis(250);
 /// How often the playback report is printed while playing. It is the only
 /// way to see dropped frames without a profiler.
 const REPORT_EVERY: Duration = Duration::from_secs(5);
+
+/// How long a toast stays up, and how many are kept: libcosmic's own numbers
+/// (`src/widget/toaster/mod.rs:79-85`, `162-181`), which cosmic-files takes
+/// unchanged.
+const TOAST_FOR: Duration = Duration::from_secs(5);
+const TOASTS: usize = 5;
 
 /// Width of the volume popup (cosmic-player `src/main.rs:1924`).
 const VOLUME_POPUP: f32 = 240.0;
@@ -147,8 +153,13 @@ pub enum Message {
     /// Take a still of the view as it stands: `s`, `Ctrl+C`, the camera
     /// button, or either File menu item (issue #15).
     Capture(Destination),
-    /// One came back, some milliseconds later, off the render thread.
-    Captured(Result<Done, String>),
+    /// One came back, some milliseconds later, off the render thread. It
+    /// carries what was asked for as well as what happened, because a failure
+    /// has to say which of the two it was.
+    Captured(Destination, Result<Done, String>),
+    /// A toast's close button, or its own five seconds running out: both
+    /// arrive here (cosmic-files `src/app.rs:3008-3010`).
+    CloseToast(u64),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -188,6 +199,8 @@ pub struct App {
     context_page: ContextPage,
     /// The theme names the settings dropdown shows, in its own order.
     themes: Vec<String>,
+    /// What a capture says when it lands.
+    toasts: Toasts,
     controls: Controls,
     /// Set while the scrubber is being dragged, to whether the file was
     /// playing when the drag started. cosmic-player pauses for the drag and
@@ -212,6 +225,43 @@ struct Open {
     /// instant to ask with, so this is refreshed by whichever message caused
     /// the rebuild.
     position: Duration,
+}
+
+/// The lines a capture leaves on screen, newest last.
+///
+/// libcosmic's `toaster::Toasts` is the model and the numbers are its own
+/// ([`TOASTS`], [`TOAST_FOR`]). It is not that type because that type is only
+/// readable by the widget that draws it, and that widget nails its stack to
+/// the bottom of the window, which is where the control row lives
+/// (docs/UI.md, "The capture toast").
+#[derive(Default)]
+struct Toasts {
+    lines: Vec<Toast>,
+    /// Never reused, so the line a dismissal names is the line it was pushed
+    /// with: the five second task of a line already dropped for being the
+    /// sixth closes nothing.
+    next: u64,
+}
+
+struct Toast {
+    id: u64,
+    message: String,
+}
+
+impl Toasts {
+    fn push(&mut self, message: String) -> u64 {
+        let id = self.next;
+        self.lines.push(Toast { id, message });
+        self.next += 1;
+        if self.lines.len() > TOASTS {
+            self.lines.remove(0);
+        }
+        id
+    }
+
+    fn close(&mut self, id: u64) {
+        self.lines.retain(|toast| toast.id != id);
+    }
 }
 
 /// The overlay's visibility, and when the pointer last asked for it.
@@ -267,6 +317,7 @@ impl cosmic::Application for App {
                 strings::THEME_DARK.to_owned(),
                 strings::THEME_LIGHT.to_owned(),
             ],
+            toasts: Toasts::default(),
             controls: Controls {
                 shown: true,
                 since: Instant::now(),
@@ -409,7 +460,8 @@ impl cosmic::Application for App {
                 self.show_controls(now);
                 return self.capture(to);
             }
-            Message::Captured(still) => return report_still(still),
+            Message::Captured(to, still) => return self.captured(to, still),
+            Message::CloseToast(id) => self.toasts.close(id),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -530,10 +582,26 @@ impl cosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let content = match &self.open {
+        let shown = match &self.open {
             Some(open) => self.playing(open),
             None => self.welcome(),
         };
+        // A layer over the picture rather than a row beside it, so the toast
+        // hangs under the header and the picture keeps the whole window.
+        // `Stack` only takes the cursor away from the layer beneath where the
+        // layer above reports an interaction for it
+        // (`iced/widget/src/stack.rs`, `update`), so the drag that looks
+        // around still starts anywhere except on a toast's close button, and
+        // `overlay::from_children` keeps the control row's overlay working
+        // under it.
+        //
+        // The layer is mounted whether or not there is a toast in it, so the
+        // shape of the tree around the picture never changes. Building the
+        // stack only when a toast arrives was measured under the harness and
+        // is not a free rearrangement: the toast reached the screen on the
+        // first capture after it landed with a fixed tree, and on the sixth,
+        // two seconds later, with a tree that grew a layer.
+        let content = Stack::with_children(vec![shown, self.toast_stack()]);
         // cosmic-player implements no drag and drop, so this follows
         // cosmic-files (`src/app.rs:6491-6496`). The destination is the whole
         // window rather than only the video: a file dropped on "No video
@@ -737,11 +805,74 @@ impl App {
                 let _ = finished.send(done);
             }),
         });
-        Task::perform(waiting, |done| {
-            action::app(Message::Captured(done.unwrap_or_else(|_| {
-                Err("the capture was replaced before a redraw took it".to_owned())
-            })))
+        Task::perform(waiting, move |done| {
+            action::app(Message::Captured(
+                to,
+                done.unwrap_or_else(|_| {
+                    Err("the capture was replaced before a redraw took it".to_owned())
+                }),
+            ))
         })
+    }
+
+    /// Says where the still went, and puts it on the clipboard when that is
+    /// what was asked for.
+    ///
+    /// The terminal line stays: it is what the headless harness reads, and it
+    /// carries the whole path, which the toast deliberately does not.
+    fn captured(&mut self, to: Destination, still: Result<Done, String>) -> Task<Message> {
+        match still {
+            Ok(Done::Saved(path)) => {
+                println!("shot:   {}", path.display());
+                self.toast(strings::frame_saved(&path))
+            }
+            Ok(Done::Copied(png)) => {
+                println!("shot:   copied");
+                Task::batch([
+                    self.toast(strings::FRAME_COPIED.to_owned()),
+                    clipboard::write_data(png),
+                ])
+            }
+            Err(e) => {
+                eprintln!("kyerag: no still: {e}");
+                self.toast(strings::capture_failed(to, &e))
+            }
+        }
+    }
+
+    /// One toast, and the task that takes it away again five seconds later.
+    /// That is libcosmic's own dismissal, moved out of `Toasts::push` with
+    /// nothing else changed: a sleep on the async runtime rather than a timer
+    /// the shell has to keep, so a toast that is up costs no redraws
+    /// (`src/widget/toaster/mod.rs:183-196`).
+    fn toast(&mut self, message: String) -> Task<Message> {
+        let id = self.toasts.push(message);
+        cosmic::task::future(async move {
+            tokio::time::sleep(TOAST_FOR).await;
+            Message::CloseToast(id)
+        })
+        .map(cosmic::Action::App)
+    }
+
+    /// The toasts, under the header and centered, newest first: cosmic-files'
+    /// stack order (libcosmic `src/widget/toaster/mod.rs:56-63`, which reads
+    /// its queue back to front) against the top edge instead of the bottom
+    /// one.
+    fn toast_stack(&self) -> Element<'_, Message> {
+        let spacing = theme::active().cosmic().spacing;
+        let lines = self.toasts.lines.iter().rev().fold(
+            widget::column::with_capacity(self.toasts.lines.len()).spacing(spacing.space_xxxs),
+            |column, toast| column.push(toast_line(toast, spacing)),
+        );
+        widget::column::with_children(vec![lines.into(), widget::space::vertical().into()])
+            .align_x(Alignment::Center)
+            // Clear of the menu bar rather than tucked under it: the header
+            // is the one part of the window a pointer goes to while a capture
+            // is landing.
+            .padding([spacing.space_m, spacing.space_none])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn report(&mut self, now: Instant) {
@@ -899,28 +1030,29 @@ impl App {
     }
 }
 
-/// Says where the still went, and puts it on the clipboard when that is what
-/// was asked for.
-///
-/// A line on the terminal is all the feedback there is today. docs/UI.md asks
-/// for a toast here and leaves its wording, and whether it carries an action,
-/// as an open question for the owner (its "Open questions", 2): not this
-/// PR's to settle.
-fn report_still(still: Result<Done, String>) -> Task<Message> {
-    match still {
-        Ok(Done::Saved(path)) => {
-            println!("shot:   {}", path.display());
-            Task::none()
-        }
-        Ok(Done::Copied(png)) => {
-            println!("shot:   copied");
-            clipboard::write_data(png)
-        }
-        Err(e) => {
-            eprintln!("kyerag: no still: {e}");
-            Task::none()
-        }
-    }
+/// One toast, built out of the same pieces libcosmic's own toaster builds one
+/// out of (`src/widget/toaster/mod.rs:33-54`): the line, a close button, and
+/// a tooltip-class container around both, with its paddings and spacings.
+/// libcosmic's version has a second, optional action button in there; ours
+/// never carries an action (docs/UI.md), so it is one button.
+fn toast_line(toast: &Toast, spacing: cosmic_theme::Spacing) -> Element<'_, Message> {
+    let inside = widget::row::with_capacity(2)
+        .align_y(Alignment::Center)
+        .spacing(spacing.space_s)
+        .push(widget::text(&toast.message))
+        .push(
+            widget::button::icon(icon::from_name("window-close-symbolic"))
+                .on_press(Message::CloseToast(toast.id)),
+        );
+    widget::container(inside)
+        .padding([
+            spacing.space_xxs,
+            spacing.space_s,
+            spacing.space_xxs,
+            spacing.space_m,
+        ])
+        .class(theme::Container::Tooltip)
+        .into()
 }
 
 /// One row of the overlay: cosmic-player's padding and background
@@ -1085,4 +1217,59 @@ fn about() -> About {
             (strings::REPOSITORY, strings::REPOSITORY_URL),
             (strings::SUPPORT, strings::SUPPORT_URL),
         ])
+}
+
+/// The toast queue is ours now rather than libcosmic's, so its three rules
+/// are tested here rather than taken on trust.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(toasts: &Toasts) -> Vec<&str> {
+        toasts
+            .lines
+            .iter()
+            .map(|toast| toast.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn five_are_kept_and_the_oldest_goes_first() {
+        let mut toasts = Toasts::default();
+        for i in 0..7 {
+            toasts.push(i.to_string());
+        }
+        assert_eq!(lines(&toasts), ["2", "3", "4", "5", "6"]);
+    }
+
+    /// Ids are never reused, so the close button on a line that is still up
+    /// cannot take away a later one that landed in its place.
+    #[test]
+    fn closing_one_leaves_the_rest() {
+        let mut toasts = Toasts::default();
+        let first = toasts.push("first".to_owned());
+        toasts.push("second".to_owned());
+        toasts.close(first);
+        assert_eq!(lines(&toasts), ["second"]);
+        toasts.close(first);
+        assert_eq!(lines(&toasts), ["second"]);
+    }
+
+    /// A line dropped for being the sixth still has five seconds of its own
+    /// left to run, and what it names by then may be a line the pilot has
+    /// only just been shown.
+    #[test]
+    fn a_dropped_line_dismisses_nothing_later() {
+        let mut toasts = Toasts::default();
+        let mut dropped = 0;
+        for i in 0..6 {
+            let id = toasts.push(i.to_string());
+            if i == 0 {
+                dropped = id;
+            }
+        }
+        assert_eq!(lines(&toasts), ["1", "2", "3", "4", "5"]);
+        toasts.close(dropped);
+        assert_eq!(lines(&toasts), ["1", "2", "3", "4", "5"]);
+    }
 }

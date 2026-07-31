@@ -232,6 +232,40 @@ nonblack() {
 	[ $((nonzero * 100 / total)) -ge "$NONBLACK_PERCENT" ]
 }
 
+# The two bands of the window that transient chrome must never be drawn over,
+# because both hold things that get pressed: the header bar with the menus at
+# the top, and the control row with the scrubber at the bottom.
+#
+# Measured under cage at 1280x720: the header bar is the top 48 rows and the
+# control row the bottom 48. The bands are those plus clearance, so a message
+# that merely creeps up against the scrubber fails this as well.
+HEADER_BAND=64
+CONTROL_BAND=96
+
+# band <file> <top|bottom> <rows>: those rows of the capture, as raw bytes.
+# grim writes a P6 header of three lines and then the pixels, three bytes to
+# a pixel, so a band is a slice at a computed offset.
+band() {
+	local file=$1 edge=$2 rows=$3 magic width height depth header start
+	{
+		read -r magic
+		read -r width height
+		read -r depth
+	} <"$file"
+	header=$((${#magic} + ${#width} + ${#height} + ${#depth} + 4))
+	case $edge in
+	top) start=$header ;;
+	*) start=$((header + (height - rows) * width * 3)) ;;
+	esac
+	tail -c "+$((start + 1))" "$file" | head -c $((rows * width * 3))
+}
+
+# band_changed <before> <after> <top|bottom> <rows>: something was drawn into
+# that band between the two captures.
+band_changed() {
+	! cmp -s <(band "$1" "$3" "$4") <(band "$2" "$3" "$4")
+}
+
 # said <pattern>: the app printed it. Its own instruments say things no
 # capture can.
 said() {
@@ -356,6 +390,15 @@ with_media() {
 			"$session/paused-a.ppm" "$session/paused-b.ppm"
 	fi
 
+	# Before saves_a_still, because it wants a window with no toast on it and
+	# nothing has pressed `s` yet. A paused window keeps its control row for
+	# good, which is what lets the two captures differ by the toast alone.
+	if [ "$paused" = no ]; then
+		skip "a toast is drawn clear of the controls (nothing paused)"
+	else
+		toast_clears_the_controls
+	fi
+
 	zooms_out_to_the_ball
 	saves_a_still
 	flips_the_horizon
@@ -398,6 +441,54 @@ more_report_lines() {
 		waited=$((waited + 1))
 	done
 	return 1
+}
+
+# A message that says a capture landed must not be drawn over anything the
+# pilot presses. The window is paused, so its picture and its control row are
+# the same bytes in both captures and everything that differs between them is
+# the toast: the header band and the control band have to come through
+# untouched, and something has to have changed somewhere, or the check has
+# proved nothing.
+#
+# PR #74 is why this exists. The stock toaster's overlay is nailed 15 px above
+# the bottom of the window whatever it is mounted over (libcosmic
+# `src/widget/toaster/widget.rs:199-215`), which put every capture message
+# straight across the scrubber, and nothing mechanical noticed.
+toast_clears_the_controls() {
+	local check="a toast is drawn clear of the controls"
+	local before=$session/toast-before.ppm after=$session/toast-up.ppm
+	local shots try=0
+
+	grab toast-before >/dev/null
+	shots=$(grep -c '^shot:' "$log")
+	while [ "$try" -lt "$PRESSES" ]; do
+		key -k s
+		alive || lost "$check"
+		[ "$(grep -c '^shot:' "$log")" -gt "$shots" ] && break
+		try=$((try + 1))
+	done
+	if [ "$(grep -c '^shot:' "$log")" -le "$shots" ]; then
+		fail "$check" "no capture landed after $PRESSES presses of s" "log: $log"
+		return
+	fi
+	grab toast-up >/dev/null
+
+	if cmp -s "$before" "$after"; then
+		fail "$check" "the two captures are identical" \
+			"nothing was on screen to check, so this proves nothing" \
+			"$before" "$after"
+		return
+	fi
+
+	local over=
+	band_changed "$before" "$after" top "$HEADER_BAND" && over="the header bar"
+	band_changed "$before" "$after" bottom "$CONTROL_BAND" &&
+		over="${over:+$over and }the control row"
+	if [ -z "$over" ]; then
+		pass "$check"
+	else
+		fail "$check" "the toast is drawn over $over" "$before" "$after"
+	fi
 }
 
 # Ctrl+- keeps zooming out past the flat range now, until the whole sphere

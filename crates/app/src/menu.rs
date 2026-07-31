@@ -52,17 +52,10 @@ pub fn menu_bar<'a>(
                         Item::Folder(strings::OPEN_RECENT.to_owned(), recent(state)),
                         enabled(has_file, strings::CLOSE_VIDEO, Action::FileClose),
                         Item::Divider,
-                        // Issue #15 gives these two something to do.
-                        Item::ButtonDisabled(
-                            strings::SAVE_FRAME.to_owned(),
-                            None,
-                            Action::SaveFrame,
-                        ),
-                        Item::ButtonDisabled(
-                            strings::COPY_FRAME.to_owned(),
-                            None,
-                            Action::CopyFrame,
-                        ),
+                        // Issue #15 gave these two something to do, and there
+                        // is nothing to take a still of without a file.
+                        enabled(has_file, strings::SAVE_FRAME, Action::SaveFrame),
+                        enabled(has_file, strings::COPY_FRAME, Action::CopyFrame),
                         Item::Divider,
                         Item::Button(strings::QUIT.to_owned(), None, Action::Quit),
                     ],

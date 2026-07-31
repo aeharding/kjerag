@@ -2887,6 +2887,7 @@ dependencies = [
  "open",
  "png 0.17.16",
  "serde",
+ "tokio",
  "url",
 ]
 
@@ -2896,6 +2897,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "ffmpeg-next",
+ "kyerag-meta",
 ]
 
 [[package]]
