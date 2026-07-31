@@ -391,6 +391,18 @@ into the same recording that land at the 99th or above: the fades hold.
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
   row).
 
+## Scope doctrine (owner, 2026-07-31)
+
+Kjerag is a VIEWER: view, reframe, screenshot, and at most a simple clip
+export (mark in and out, export the current view or a lossless cut). It
+must be an awesome viewer before any of that export work starts, so
+quality owns the roadmap until the owner says the bar is met. Keyframed
+reframing and timeline editing are OUT OF SCOPE, not deferred: that is an
+editor, a different product (Kdenlive's bigsh0t filters already cover
+keyframed 360 export on Linux). The one editor-adjacent idea parked with
+no commitment: export that follows the view the pilot actually flies
+live, no keyframe UI ever.
+
 ## Decisions log
 
 - 2026-07-31 **A saved still is a JPEG; the clipboard is still a PNG**
