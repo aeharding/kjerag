@@ -474,14 +474,14 @@ mod tests {
         let mut metadata = fixture::metadata();
         metadata.camera_type = "Insta360 ONE X2".into();
         std::fs::write(
-            dir.join("VID_20251018_184419_00_001.insv"),
+            dir.join("VID_20000101_100000_00_001.insv"),
             Capture::of(&metadata).insv(),
         )
         .unwrap();
         // The second file really is a plain mp4 as far as the trailer reader
         // is concerned: no records, no footer, no magic.
         std::fs::write(
-            dir.join("VID_20251018_184419_10_001.insv"),
+            dir.join("VID_20000101_100000_10_001.insv"),
             b"not really an mp4 either",
         )
         .unwrap();
@@ -494,8 +494,8 @@ mod tests {
     #[test]
     fn the_second_file_of_a_pair_reads_the_first_file_s_trailer() {
         let dir = per_lens_capture("second");
-        let lens0 = dir.join("VID_20251018_184419_00_001.insv");
-        let lens1 = dir.join("VID_20251018_184419_10_001.insv");
+        let lens0 = dir.join("VID_20000101_100000_00_001.insv");
+        let lens1 = dir.join("VID_20000101_100000_10_001.insv");
 
         // What the file itself says, which is nothing.
         assert!(
@@ -522,14 +522,14 @@ mod tests {
     #[test]
     fn a_file_with_a_trailer_never_reads_its_sibling_s() {
         let dir = per_lens_capture("first");
-        let lens0 = dir.join("VID_20251018_184419_00_001.insv");
+        let lens0 = dir.join("VID_20000101_100000_00_001.insv");
 
         // Put a decoy in the sibling's place. If `from_capture` reached for
         // it, the camera model below would be the decoy's.
         let mut decoy = fixture::metadata();
         decoy.camera_type = "decoy".into();
         std::fs::write(
-            dir.join("VID_20251018_184419_10_001.insv"),
+            dir.join("VID_20000101_100000_10_001.insv"),
             Capture::of(&decoy).insv(),
         )
         .unwrap();
@@ -547,8 +547,8 @@ mod tests {
     #[test]
     fn a_pair_with_no_sibling_on_disk_fails_the_way_it_did() {
         let dir = per_lens_capture("alone");
-        let lens1 = dir.join("VID_20251018_184419_10_001.insv");
-        std::fs::remove_file(dir.join("VID_20251018_184419_00_001.insv")).unwrap();
+        let lens1 = dir.join("VID_20000101_100000_10_001.insv");
+        std::fs::remove_file(dir.join("VID_20000101_100000_00_001.insv")).unwrap();
 
         assert!(matches!(
             CalibrationSet::from_capture(&lens1),

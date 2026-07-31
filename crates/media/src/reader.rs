@@ -848,7 +848,7 @@ mod tests {
 
     /// One lens of a ONE X2 pair, as the container describes it: 2880 square,
     /// 30000/1001, time base 1/30000. The real numbers off
-    /// `VID_20251018_184419_00_001.insv`.
+    /// `VID_20000101_100000_00_001.insv`.
     fn x2_lens(frames: u64) -> Shape {
         Shape {
             lenses: 1,
@@ -965,7 +965,7 @@ mod tests {
     /// files, and the pair invariant holds across the two containers.
     ///
     /// Ignored because it needs a per-lens pair on disk. Run it with
-    /// `KYERAG_TEST_INSV=~/Videos/Insta/VID_20251018_191318_00_002.insv \
+    /// `KYERAG_TEST_INSV=~/Videos/Insta/VID_20000101_110000_00_002.insv \
     ///  cargo test -p kyerag-media -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs a per-lens .insv pair, named by KYERAG_TEST_INSV"]

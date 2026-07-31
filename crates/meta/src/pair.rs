@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 const MARKERS: [&str; 2] = ["00", "10"];
 
 /// Where the marker sits in an underscore-separated name: second from last,
-/// i.e. the field before the clip number. `VID_20251018_184419_00_001.insv`
+/// i.e. the field before the clip number. `VID_20000101_100000_00_001.insv`
 /// is `VID`, the date, the time, the **marker**, and the clip.
 const MARKER_FROM_END: usize = 2;
 
@@ -90,12 +90,12 @@ mod tests {
     #[test]
     fn the_marker_swaps_and_the_rest_of_the_name_does_not() {
         assert_eq!(
-            sibling_name("VID_20251018_184419_00_001.insv").as_deref(),
-            Some("VID_20251018_184419_10_001.insv")
+            sibling_name("VID_20000101_100000_00_001.insv").as_deref(),
+            Some("VID_20000101_100000_10_001.insv")
         );
         assert_eq!(
-            sibling_name("VID_20251018_184419_10_001.insv").as_deref(),
-            Some("VID_20251018_184419_00_001.insv")
+            sibling_name("VID_20000101_100000_10_001.insv").as_deref(),
+            Some("VID_20000101_100000_00_001.insv")
         );
     }
 
@@ -105,16 +105,16 @@ mod tests {
     fn a_different_clip_or_time_is_a_different_capture() {
         let pairs = [
             (
-                "VID_20251018_184419_00_001.insv",
-                "VID_20251018_184419_10_001.insv",
+                "VID_20000101_100000_00_001.insv",
+                "VID_20000101_100000_10_001.insv",
             ),
             (
-                "VID_20251018_191318_00_002.insv",
-                "VID_20251018_191318_10_002.insv",
+                "VID_20000101_110000_00_002.insv",
+                "VID_20000101_110000_10_002.insv",
             ),
             (
-                "VID_20251018_193615_00_003.insv",
-                "VID_20251018_193615_10_003.insv",
+                "VID_20000101_120000_00_003.insv",
+                "VID_20000101_120000_10_003.insv",
             ),
         ];
         for (lens0, lens1) in pairs {
@@ -125,7 +125,7 @@ mod tests {
         // And no name maps onto another capture's file.
         assert_ne!(
             sibling_name(pairs[0].0).as_deref(),
-            Some("VID_20251018_191318_10_002.insv")
+            Some("VID_20000101_110000_10_002.insv")
         );
     }
 
@@ -135,9 +135,9 @@ mod tests {
     /// pixels at the right size.
     #[test]
     fn the_lrv_proxy_is_not_a_sibling() {
-        assert_eq!(sibling_name("LRV_20251018_184419_11_001.insv"), None);
+        assert_eq!(sibling_name("LRV_20000101_184419_11_001.insv"), None);
         assert_eq!(
-            lens_index(Path::new("LRV_20251018_184419_11_001.insv")),
+            lens_index(Path::new("LRV_20000101_184419_11_001.insv")),
             None
         );
     }
