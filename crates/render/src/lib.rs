@@ -8,9 +8,9 @@ mod projection;
 mod scene;
 mod widget;
 
-pub use camera::{Camera, Viewpoint};
+pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Shutter, Then};
-pub use kyerag_media::{Cue, Fallible, Size, Stats};
+pub use kyerag_media::{Accuracy, Cue, Fallible, Size, Stats};
 pub use projection::{Landing, MAX_LENSES, OUTSIDE_GRAY, Pick, Reframe};
 pub use scene::{Next, Scene, ScenePipeline, ScenePrimitive};
 

@@ -5,7 +5,13 @@ edition.workspace = true
 
 [dependencies]
 kyerag-render = { workspace = true }
-libcosmic = { workspace = true }
+# `xdg-portal` is the portal file chooser and `about` is the About page.
+# Neither is in libcosmic's default set, and features are additive with the
+# workspace entry's `wgpu` (docs/UI.md).
+libcosmic = { workspace = true, features = ["about", "xdg-portal"] }
+open = { workspace = true }
+serde = { workspace = true }
+url = { workspace = true }
 # Screenshots (issue #15): where a still goes, and what it is encoded as.
 dirs = { workspace = true }
 png = { workspace = true }

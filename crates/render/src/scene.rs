@@ -22,19 +22,19 @@
 //! draw, or the picture is always one refresh behind the clock. The cell is
 //! touched from the UI thread only; the decode thread never sees it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kyerag_media::{Cue, Frames, Player, Reader, Stats};
+use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
 use kyerag_meta::{CalibrationSet, Lens};
 
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, MAX_LENSES, Reframe};
-use super::{Camera, Extent, Fallible, Planes, Size, dmabuf};
+use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
 const SAMPLER_BINDING: u32 = 1 + 2 * MAX_LENSES as u32;
@@ -70,6 +70,14 @@ pub struct Scene {
     started: Instant,
     /// Where a capture waits for the redraw that takes it (issue #15).
     shutter: Shutter,
+    /// Set while the shell has hidden the controls, which is when the pointer
+    /// goes with them: `mouse_interaction` answers `Hidden` instead of `Grab`
+    /// (docs/UI.md, "The cursor"). One bit of shell state, and the only one
+    /// this crate carries.
+    cursor_hidden: bool,
+    /// A [`Nudge`] the `View` menu left for the widget, which is where iced
+    /// keeps the camera. Read once, by the next redraw.
+    nudge: Cell<Option<Nudge>>,
 }
 
 /// A file on screen: its calibration, and where its frames come from.
@@ -101,6 +109,8 @@ impl Scene {
             show: None,
             started: Instant::now(),
             shutter: Shutter::default(),
+            cursor_hidden: false,
+            nudge: Cell::new(None),
         }
     }
 
@@ -123,8 +133,8 @@ impl Scene {
             player.timing().frames,
             player.timing().duration().as_secs_f64(),
         );
-        // M1 has no transport controls yet (issue #16), so opening a file
-        // means playing it. Space pauses.
+        // Opening a file plays it, which is what every player does. Space
+        // and the control row's button pause it (issue #16).
         player.play();
         Ok(Self {
             show: Some(Show::new(lenses, None, Source::Live(Box::new(player)))),
@@ -183,6 +193,11 @@ impl Scene {
             return Next::Never;
         }
         match (player.is_playing(), player.next_due()) {
+            // A seek is outstanding: the picture is about to change even
+            // though no clock is running towards it, so keep asking until it
+            // does. This is what makes a scrub visible while paused, and
+            // dragging the scrubber pauses.
+            (false, _) if player.is_seeking() => Next::Refresh,
             (false, _) => Next::Never,
             (true, Some(due)) => Next::At(due),
             // Playing, but the clock has nothing to measure from yet: the
@@ -197,6 +212,39 @@ impl Scene {
         }
     }
 
+    pub fn play(&mut self) {
+        if let Some(player) = self.player_mut() {
+            player.play();
+        }
+    }
+
+    pub fn pause(&mut self, now: Instant) {
+        if let Some(player) = self.player_mut() {
+            player.pause(now);
+        }
+    }
+
+    /// Move the picture, to a keyframe while a drag is still going and to the
+    /// frame itself when it ends (issue #5).
+    pub fn seek(&mut self, to: Duration, accuracy: Accuracy) {
+        if let Some(player) = self.player_mut() {
+            player.seek(Cue::Time(to), accuracy);
+        }
+    }
+
+    /// One frame forward or back.
+    pub fn step(&mut self, now: Instant, frames: i64) {
+        if let Some(player) = self.player_mut() {
+            player.step(now, frames);
+        }
+    }
+
+    /// A seek has been asked for and has not landed. The shell keeps the
+    /// picture redrawing while this is true.
+    pub fn is_seeking(&self) -> bool {
+        self.player(Player::is_seeking).unwrap_or(false)
+    }
+
     pub fn is_playing(&self) -> bool {
         self.player(Player::is_playing).unwrap_or(false)
     }
@@ -204,6 +252,31 @@ impl Scene {
     pub fn position(&self, now: Instant) -> Duration {
         self.player(|player| player.position(now))
             .unwrap_or_default()
+    }
+
+    /// How long the file runs, from the container: the frame count and the
+    /// rational frame rate, divided.
+    pub fn duration(&self) -> Duration {
+        self.player(|player| player.timing().duration())
+            .unwrap_or_default()
+    }
+
+    /// Hide the pointer along with the controls, or bring both back.
+    pub fn hide_cursor(&mut self, hidden: bool) {
+        self.cursor_hidden = hidden;
+    }
+
+    pub fn is_cursor_hidden(&self) -> bool {
+        self.cursor_hidden
+    }
+
+    /// Leave a view change for the widget to apply on its next redraw.
+    pub fn nudge(&self, nudge: Nudge) {
+        self.nudge.set(Some(nudge));
+    }
+
+    pub(crate) fn take_nudge(&self) -> Option<Nudge> {
+        self.nudge.take()
     }
 
     pub fn stats(&self) -> Option<Stats> {

@@ -31,7 +31,15 @@ impl<Message> shader::Program<Message> for Scene {
     ) -> Option<Action<Message>> {
         match event {
             Event::Mouse(event) => mouse_update(viewpoint, event, bounds, cursor),
-            Event::Window(window::Event::RedrawRequested(now)) => tick(self, *now),
+            Event::Window(window::Event::RedrawRequested(now)) => {
+                // The `View` menu's zoom items have no cursor and no event of
+                // their own, so the shell leaves them on the scene and this is
+                // where they reach the camera iced owns.
+                if let Some(nudge) = self.take_nudge() {
+                    viewpoint.nudge(nudge, aspect(bounds));
+                }
+                tick(self, *now)
+            }
             // Alt-tabbing away mid-drag takes the release with it, and a grab
             // nothing can end is a camera glued to the cursor.
             Event::Window(window::Event::Unfocused) => {
@@ -51,16 +59,25 @@ impl<Message> shader::Program<Message> for Scene {
         self.primitive(viewpoint.camera())
     }
 
+    /// `Hidden` is how a pointer disappears in iced: the winit conversion maps
+    /// it to no cursor icon and the window then calls
+    /// `set_cursor_visible(false)`. It answers only over the video, so the
+    /// pointer comes back the moment it is over the controls.
     fn mouse_interaction(
         &self,
         viewpoint: &Viewpoint,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        match (viewpoint.is_dragging(), cursor.is_over(bounds)) {
-            (true, _) => mouse::Interaction::Grabbing,
-            (false, true) => mouse::Interaction::Grab,
-            (false, false) => mouse::Interaction::default(),
+        match (
+            viewpoint.is_dragging(),
+            self.is_cursor_hidden(),
+            cursor.is_over(bounds),
+        ) {
+            (true, _, _) => mouse::Interaction::Grabbing,
+            (false, true, true) => mouse::Interaction::Hidden,
+            (false, false, true) => mouse::Interaction::Grab,
+            (false, _, false) => mouse::Interaction::default(),
         }
     }
 }
@@ -106,10 +123,17 @@ fn mouse_update<Message>(
     cursor: mouse::Cursor,
 ) -> Option<Action<Message>> {
     match event {
+        // The press is not captured. The shell wraps this widget in a
+        // `mouse_area` whose double press toggles fullscreen, and iced's
+        // `mouse_area` gives up on any event a child captured
+        // (`iced/widget/src/mouse_area.rs`, `update`), so capturing here would
+        // take double click to fullscreen away. Nothing else in the window
+        // wants a press over the video: the two extra grabs a double click
+        // starts move nothing, because neither is dragged anywhere.
         mouse::Event::ButtonPressed(mouse::Button::Left) => {
             let at = cursor.position_over(bounds)?;
             viewpoint.grab(uv(at, bounds), aspect(bounds));
-            Some(Action::request_redraw().and_capture())
+            Some(Action::request_redraw())
         }
         // Deliberately not gated on the cursor being over the widget: a pan
         // that stopped at the window edge, mid-drag, would feel broken. It is
@@ -181,7 +205,7 @@ fn aspect(bounds: Rectangle) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Camera;
+    use crate::{Camera, Nudge};
 
     const BOUNDS: Rectangle = Rectangle {
         x: 0.0,
@@ -342,6 +366,42 @@ mod tests {
 
         widget.release(1400.0, 100.0);
         assert_eq!(widget.interaction(), mouse::Interaction::default());
+    }
+
+    /// Hiding the controls hides the pointer with them, over the video only:
+    /// a pointer that vanished over the header bar could not aim at anything.
+    #[test]
+    fn hidden_controls_hide_the_cursor() {
+        let mut widget = Widget::new();
+        widget.scene.hide_cursor(true);
+
+        widget.cursor_at(100.0, 100.0);
+        assert_eq!(widget.interaction(), mouse::Interaction::Hidden);
+
+        widget.cursor_at(1400.0, 100.0);
+        assert_eq!(widget.interaction(), mouse::Interaction::default());
+
+        widget.scene.hide_cursor(false);
+        widget.cursor_at(100.0, 100.0);
+        assert_eq!(widget.interaction(), mouse::Interaction::Grab);
+    }
+
+    /// The `View` menu has no cursor and no event, so its zoom reaches the
+    /// camera through the scene, once, on the next redraw.
+    #[test]
+    fn a_nudge_reaches_the_camera_on_the_next_redraw() {
+        let redraw = || Event::Window(window::Event::RedrawRequested(Instant::now()));
+        let mut widget = Widget::new();
+
+        widget.scene.nudge(Nudge::ZoomIn);
+        assert_eq!(widget.camera(), Camera::default());
+
+        widget.send(redraw());
+        let zoomed = widget.camera();
+        assert!(zoomed.fov < Camera::default().fov);
+
+        widget.send(redraw());
+        assert_eq!(widget.camera(), zoomed);
     }
 
     /// The zoom is the widget's only other input, and it is not a grab: it

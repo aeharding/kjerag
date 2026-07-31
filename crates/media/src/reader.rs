@@ -27,6 +27,32 @@ pub enum Cue {
     Time(Duration),
 }
 
+impl Cue {
+    pub fn index(self, timing: Timing) -> u64 {
+        match self {
+            Self::Index(index) => index,
+            Self::Time(time) => timing.index_at(time),
+        }
+    }
+
+    pub fn time(self, timing: Timing) -> Duration {
+        timing.time_of(self.index(timing))
+    }
+}
+
+/// How exact a seek has to be, which is the whole difference between a scrub
+/// and a landing (issue #5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Accuracy {
+    /// The keyframe at or before the cue: one decode per lens, wherever in
+    /// the file it is, and a picture within a second of what was asked for.
+    /// What a slider being dragged asks for.
+    Keyframe,
+    /// The frame itself: that keyframe, and then every frame between it and
+    /// the cue, decoded and dropped without being mapped.
+    Exact,
+}
+
 /// The container's own timing, kept as the rational it is written as: the
 /// rate is 30000/1001, and 29.97 is a display convenience. Rounding it to
 /// 30 drifts a frame every 33 seconds, which is exactly the judder this
@@ -122,6 +148,11 @@ pub struct Reader {
     start: i64,
     lookahead: usize,
     skip_before: u64,
+    /// Set from a seek until the frame it landed on has been handed over.
+    /// The lookahead is a pipeline: it costs the frames in it before the
+    /// first picture comes out, which is 24 ms of a 46 ms scrub on this
+    /// camera. A seek gives that up once and fills the pipeline behind it.
+    landing: bool,
     drained: bool,
     /// Held so the device outlives the decoders that reference it.
     _hw: HwDevice,
@@ -199,6 +230,7 @@ impl Reader {
             },
             lookahead: 0,
             skip_before: 0,
+            landing: false,
             drained: false,
             _hw: hw,
         })
@@ -259,17 +291,23 @@ impl Reader {
     /// keyframe at or before it, then decode forward. Frames on the way are
     /// dropped without being mapped, so the walk costs decode and no waiting.
     pub fn frame(&mut self, at: Cue) -> Fallible<Frames> {
-        let index = self.index_of(at);
-        self.seek(at)?;
+        self.seek(at, Accuracy::Exact)?;
         self.next_frames()?
-            .ok_or_else(|| format!("file ended before frame {index}").into())
+            .ok_or_else(|| format!("file ended before frame {}", at.index(self.timing)).into())
     }
 
-    /// Positions the reader so that the next [`Reader::next`] returns the
-    /// frame `at` names. #5 builds the keyframe index and the scrub UX on
-    /// this; the walk here is the plain one.
-    pub fn seek(&mut self, at: Cue) -> Fallible<()> {
-        let index = self.index_of(at);
+    /// Positions the reader so that the next [`Reader::next_frames`] returns
+    /// the frame `at` names, or the keyframe at or before it.
+    ///
+    /// There is no keyframe index to build here, which is what issue #5
+    /// expected: libavformat parses the whole of `stss`/`stco` out of `moov`
+    /// when the file is opened, so the index already exists in memory and
+    /// `av_seek_frame` is a lookup in it. That is why the cost of a seek does
+    /// not depend on where in a 36 GB file it lands. Building a second copy
+    /// of that table would buy nothing;
+    /// `cargo run --release -p kyerag-spike --bin seek` is the measurement.
+    pub fn seek(&mut self, at: Cue, accuracy: Accuracy) -> Fallible<()> {
+        let index = at.index(self.timing);
         // Stream index -1 means the timestamp is in AV_TIME_BASE units,
         // which is microseconds, and `..ts` asks for the keyframe at or
         // before it. GOP is 1.001 s on this camera, so the walk that
@@ -280,16 +318,14 @@ impl Reader {
             lane.decoder.flush();
             lane.queue.clear();
         }
-        self.skip_before = index;
+        self.skip_before = match accuracy {
+            Accuracy::Exact => index,
+            // Nothing to walk to: the picture is whatever the seek landed on.
+            Accuracy::Keyframe => 0,
+        };
+        self.landing = true;
         self.drained = false;
         Ok(())
-    }
-
-    fn index_of(&self, at: Cue) -> u64 {
-        match at {
-            Cue::Index(index) => index,
-            Cue::Time(time) => self.timing.index_at(time),
-        }
     }
 
     /// Reads one packet and decodes whatever it completes.
@@ -326,6 +362,7 @@ impl Reader {
             let timestamp = self.media_time(pts);
             let index = self.timing.index_at(timestamp);
             if index >= self.skip_before {
+                self.landing = false;
                 let mut lenses = Vec::with_capacity(self.lanes.len());
                 for lane in &mut self.lanes {
                     let frame = lane.queue.pop_front().ok_or("lane emptied under us")?;
@@ -350,8 +387,13 @@ impl Reader {
     /// deep enough yet.
     fn ready(&self) -> Fallible<Option<i64>> {
         // At the end of the file there is nothing left to hide the map
-        // behind, so the last frames are mapped as they come.
-        let depth = if self.drained { 1 } else { self.lookahead + 1 };
+        // behind, and right after a seek there is nobody to hide it from:
+        // both hand frames over as they come.
+        let depth = if self.drained || self.landing {
+            1
+        } else {
+            self.lookahead + 1
+        };
         if self.lanes.iter().any(|lane| lane.queue.len() < depth) {
             return Ok(None);
         }
@@ -456,5 +498,65 @@ mod tests {
     #[test]
     fn a_stream_with_no_rate_is_an_error() {
         assert!(Timing::new(ff::Rational::new(0, 0), 0).is_err());
+    }
+
+    /// The first `.insv` under `~/Videos`, or whatever `KYERAG_TEST_INSV`
+    /// points at.
+    fn test_capture() -> Option<std::path::PathBuf> {
+        if let Ok(path) = std::env::var("KYERAG_TEST_INSV") {
+            return Some(path.into());
+        }
+        let videos = std::path::PathBuf::from(std::env::var("HOME").ok()?).join("Videos");
+        let mut captures: Vec<_> = std::fs::read_dir(videos)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("insv"))
+            })
+            .collect();
+        captures.sort();
+        captures.into_iter().next()
+    }
+
+    /// The two claims issue #5 rests on, which no arithmetic can check: an
+    /// exact seek lands on the frame it was asked for, and a keyframe seek
+    /// lands at or before it and never past it. A picture from past the cue
+    /// would make a scrub run ahead of the pilot's hand.
+    ///
+    /// Ignored because the footage is 36 GB and lives on one box. Run it with
+    /// `cargo test -p kyerag-media -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs real footage at ~/Videos/*.insv"]
+    fn a_real_file_lands_where_it_is_told() {
+        let Some(path) = test_capture() else {
+            eprintln!("no .insv found, skipping");
+            return;
+        };
+        let mut reader = Reader::open(&path).unwrap().lookahead(2);
+        let timing = reader.timing();
+
+        for place in [0.01, 0.5, 0.97, 0.33] {
+            let at = timing.duration().mul_f64(place);
+            let wanted = timing.index_at(at);
+
+            reader.seek(Cue::Time(at), Accuracy::Exact).unwrap();
+            let exact = reader.next_frames().unwrap().unwrap();
+            assert_eq!(exact.index, wanted, "exact seek to {at:?}");
+
+            reader.seek(Cue::Time(at), Accuracy::Keyframe).unwrap();
+            let key = reader.next_frames().unwrap().unwrap();
+            assert!(
+                key.index <= wanted && wanted - key.index < 60,
+                "keyframe seek to {at:?} landed on {} for {wanted}",
+                key.index
+            );
+
+            // And reading on from a landing carries on in order, which is
+            // what playing after a scrub depends on.
+            let next = reader.next_frames().unwrap().unwrap();
+            assert_eq!(next.index, key.index + 1);
+        }
     }
 }

@@ -22,9 +22,16 @@ timestamp. Measured over 60 s of real footage: 29.94 fps presented, zero
 dropped, zero starved. **The sphere is closed** (issue #27): the shader
 projects every ray into both lenses and samples the one whose optical axis
 it is nearer, so turning around shows the back hemisphere, upright and
-unmirrored, with a hard seam and an exposure step where the two meet. Next:
-the seam blend and exposure match (issue #7), which is what makes that seam
-disappear, and seek (issue #5) on the same pull API.
+unmirrored, with a hard seam and an exposure step where the two meet. The
+window is a COSMIC app around it (issue #16, built to docs/UI.md): the menu
+bar in the header, a welcome view, the portal file chooser, drag and drop,
+recent files, the whole key map, fullscreen, Settings and About drawers, and
+a control overlay that takes itself and the pointer away after 2 s of
+stillness while playing and never while paused. The scrubber scrubs (issue
+#5): dragging it seeks to keyframes, 21 ms each wherever in the 37.9 GB file
+they land, and letting go seeks to the exact frame. Next: the seam blend and
+exposure match (issue #7), which is what makes that seam disappear, and
+screenshots (issue #15), which is the last of the MVP.
 
 ## Milestones
 
@@ -37,7 +44,9 @@ disappear, and seek (issue #5) on the same pull API.
   Reprojection and the mouse are done (issue #3), and so is playback:
   dual-stream decode, the presentation clock and play/pause (issue #4).
   Full 360-degree look-around lands here too (issue #27): both lenses
-  sampled, hard seam, which #7 blends in M2.
+  sampled, hard seam, which #7 blends in M2. The app shell around all of
+  it is issue #16, and seeking is issue #5. Screenshots (#15) are what
+  is left.
 - **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
   lock (+ Studio-diff test harness), rolling-shutter correction,
   hemisphere-aware decode gating, high-quality zoom sampling.
@@ -213,6 +222,33 @@ disappear, and seek (issue #5) on the same pull API.
   `av_hwframe_map`: 2.19x realtime at depth 0, 2.46x at depth 2, 2.47x at
   depth 4, so depth 2 takes the whole win. docs/ARCHITECTURE.md's "2-3
   frames in flight" now has a number behind it.
+- 2026-07-31 The shell is built to docs/UI.md, which reads the first-party
+  COSMIC apps and cites one for every call (issue #16). Three things in it
+  are ours rather than theirs, each for a reason recorded there: scrubbing
+  seeks keyframes until release (#5), the video does not toggle playback on
+  click because the press is the look-around grab, and there is no nav bar.
+  Two more the implementation added: the auto-hide timeout is checked by a
+  250 ms timer that runs only while playing, because this player sends no
+  per-frame message to hang it on (that is the whole point of the pacing
+  design), and the `text/uri-list` drop is handled while the portal's
+  file-transfer mime is not, because that one is a D-Bus round trip rather
+  than a payload and nothing here is sandboxed.
+- 2026-07-31 There is no hand-built keyframe index, which is what issue #5
+  expected. libavformat parses the whole of `stss`/`stco` out of `moov` when
+  the file is opened, so the index is already in memory and `av_seek_frame`
+  is a lookup in it: measured at 0.1 ms for the seek call itself, and 70.6 ms
+  to open the 37.9 GB file. A second copy of that table would buy nothing.
+  `cargo run --release -p kyerag-spike --bin seek` is the instrument.
+- 2026-07-31 A drag on the scrubber seeks to keyframes and the release seeks
+  exactly (issue #5, docs/UI.md's one deliberate deviation from
+  cosmic-player). Measured on the 37.9 GB file: 21 ms to a keyframe against
+  230 ms median and 450 ms worst to an exact frame, which is what an accurate
+  seek per slider tick would cost. A keyframe lands 455 ms early on average,
+  which is half a GOP.
+- 2026-07-31 A seek hands its first frame over with no lookahead
+  (`Reader::landing`). The lookahead is a pipeline and its depth is paid
+  before the first picture comes out of it: 46 ms per scrub against 21 ms.
+  Playback refills it behind the landing frame.
 - 2026-07-31 `media::first_frame` is gone. Everything reads through
   `Reader`, which takes a `Cue` (frame index or timestamp), seeks to the
   keyframe at or before it and walks forward without mapping what it
@@ -267,6 +303,26 @@ own hemisphere is the obvious saving and is not taken, because 1.6 ms of a
 The windowed app over the same 60 s: zero dropped and zero starved in
 every 5 s report, 30.0-30.2 redraws/s, 13.4% of one core and 295 MiB RSS
 for the whole libcosmic process.
+
+Seeking, 12 places from 1% to 97% of the 37.9 GB file, warm
+(`cargo run --release -p kyerag-spike --bin seek`):
+
+| what                          | median   | worst    |
+| ----------------------------- | -------: | -------: |
+| open the file (moov, once)    | 70.6 ms  |          |
+| `av_seek_frame` alone         | 0.1 ms   |          |
+| keyframe seek, reader         | 21 ms    | 49 ms    |
+| exact seek, reader            | 230 ms   | 447 ms   |
+| keyframe seek, through Player | 59 ms    | 61 ms    |
+| exact seek, through Player    | 276 ms   | 458 ms   |
+
+The worst case is not the far end of the file: it is whichever seek runs
+first after the decoders warm up, and 97% costs the same as 1%. The gap
+between the reader and the player is the decode thread finishing the
+lookahead it started behind the previous landing before it reads the next
+command; running the same test with `Reader::lookahead` at 0 takes the
+player's keyframe scrub from 59 ms to 35 ms, which is where that number
+comes from.
 
 ## Ideas parked (complexity needs an observed failure first)
 
