@@ -1,0 +1,27 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="a-sky" x1="128" y1="8" x2="128" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5B4BA6"/>
+      <stop offset="0.5" stop-color="#E8613C"/>
+      <stop offset="1" stop-color="#FFC24D"/>
+    </linearGradient>
+    <linearGradient id="a-plateau" x1="20" y1="126" x2="120" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A89283"/>
+      <stop offset="1" stop-color="#584A42"/>
+    </linearGradient>
+    <linearGradient id="a-terrace" x1="180" y1="198" x2="200" y2="268" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6B5A50"/>
+      <stop offset="1" stop-color="#3E342E"/>
+    </linearGradient>
+    <clipPath id="a-disc"><circle cx="128" cy="128" r="120"/></clipPath>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#a-sky)"/>
+  <g clip-path="url(#a-disc)">
+    <circle cx="58" cy="62" r="16" fill="#FFF0BC"/>
+    <path d="M136 268L136 198C176 198 220 208 276 228L276 268Z" fill="url(#a-terrace)"/>
+    <path d="M136 198C176 198 220 208 276 228L276 239C220 219 176 209 136 209Z" fill="#8A7466"/>
+    <path d="M-20 268L-20 176C0 150 34 130 76 125C100 122 124 123 136 124L136 268Z" fill="url(#a-plateau)"/>
+    <path d="M-20 176C0 150 34 130 76 125C100 122 124 123 136 124L136 136C124 135 101 134 78 137C38 142 6 161 -20 186Z" fill="#CDB49B"/>
+    <path d="M118 123.1C125 123.2 131 123.6 136 124L136 268L118 268Z" fill="#2B2320" fill-opacity="0.42"/>
+  </g>
+</svg>
