@@ -105,8 +105,13 @@ impl Scene {
         let mut player = Player::open(path)?;
         let lens = calibrated(path, player.size())?;
         println!(
-            "media:  {} lens streams, {}x{}, {:.3} fps, {} frames, {:.1} s",
-            player.lenses(),
+            "media:  {}, {}x{}, {:.3} fps, {} frames, {:.1} s",
+            // The older cameras write one lens per file, so this is 1 as
+            // often as it is 2.
+            match player.lenses() {
+                1 => "1 lens stream".to_owned(),
+                n => format!("{n} lens streams"),
+            },
             player.size().width,
             player.size().height,
             player.timing().fps(),
