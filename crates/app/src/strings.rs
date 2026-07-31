@@ -13,6 +13,8 @@
 
 use std::path::Path;
 
+use crate::shot::Destination;
+
 pub const APP_NAME: &str = "Kyerag";
 pub const COMMENTS: &str = "360 video player for the COSMIC desktop";
 pub const LICENSE: &str = "AGPL-3.0-only";
@@ -65,6 +67,10 @@ pub const FULLSCREEN: &str = "Fullscreen";
 pub const SETTINGS: &str = "Settings...";
 pub const SETTINGS_TITLE: &str = "Settings";
 
+/// What a capture says when it lands (issue #15). The noun is the menu's
+/// own: the pilot pressed `Copy frame`, so the toast says frame.
+pub const FRAME_COPIED: &str = "Frame copied to the clipboard";
+
 /// The Settings page.
 pub const APPEARANCE: &str = "Appearance";
 pub const THEME: &str = "Theme";
@@ -85,6 +91,32 @@ pub fn window_title(open: Option<&Path>) -> String {
     match open.and_then(Path::file_name) {
         Some(name) => format!("{} - {APP_NAME}", name.display()),
         None => APP_NAME.to_owned(),
+    }
+}
+
+/// Where a still went, named the way cosmic-files names a destination in its
+/// own toasts: the folder's own name in quotes, and no path around it
+/// (`i18n/en/cosmic_files.ftl:231-234` `copied = ... to "{$to}"`, built from
+/// `file_name(to)` in `src/operation/mod.rs:563-568` and `309-312`). The
+/// whole path is on the terminal, where it does not have to be read at a
+/// glance.
+///
+/// The folder is whatever the capture resolved to, which is usually
+/// `Screenshots` but is `XDG_SCREENSHOTS_DIR`'s last part when that is set.
+pub fn frame_saved(path: &Path) -> String {
+    match path.parent().and_then(Path::file_name) {
+        Some(folder) => format!("Frame saved to \"{}\"", folder.display()),
+        None => "Frame saved".to_owned(),
+    }
+}
+
+/// A capture that did not happen, with the reason it did not. Which half
+/// failed matters to the pilot: nothing was written, or nothing can be
+/// pasted.
+pub fn capture_failed(to: Destination, reason: &str) -> String {
+    match to {
+        Destination::Save => format!("Frame not saved: {reason}"),
+        Destination::Copy => format!("Frame not copied: {reason}"),
     }
 }
 
@@ -170,11 +202,51 @@ mod tests {
             THEME_SYSTEM,
             THEME_DARK,
             THEME_LIGHT,
+            FRAME_COPIED,
         ];
         for line in copy {
             assert!(!line.contains('\u{2014}'), "em dash in {line:?}");
         }
         assert!(!about_item().contains('\u{2014}'));
+        assert!(!frame_saved(Path::new("/tmp/Screenshots/a.png")).contains('\u{2014}'));
+        assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
+    }
+
+    /// The toast answers one question, which is where to look for the still.
+    /// The folder is named and the path is not: the pilot reads this over the
+    /// video, in the two seconds before the control row hides.
+    #[test]
+    fn the_saved_toast_names_the_folder_and_no_path() {
+        let toast = frame_saved(Path::new(
+            "/home/pilot/Pictures/Screenshots/f_00-00-01.000.png",
+        ));
+        assert_eq!(toast, "Frame saved to \"Screenshots\"");
+        assert!(!toast.contains('/'));
+    }
+
+    /// `XDG_SCREENSHOTS_DIR` can point anywhere, and the toast has to say
+    /// where the still actually went rather than where it usually goes.
+    #[test]
+    fn the_saved_toast_follows_the_folder_that_was_used() {
+        assert_eq!(
+            frame_saved(Path::new("/mnt/flights/stills/f_00-00-01.000.png")),
+            "Frame saved to \"stills\""
+        );
+        assert_eq!(frame_saved(Path::new("f.png")), "Frame saved");
+    }
+
+    /// A failure says which half failed: nothing was written, or nothing can
+    /// be pasted.
+    #[test]
+    fn a_failed_capture_says_which_one_it_was() {
+        assert_eq!(
+            capture_failed(Destination::Save, "Permission denied (os error 13)"),
+            "Frame not saved: Permission denied (os error 13)"
+        );
+        assert_eq!(
+            capture_failed(Destination::Copy, "out of memory"),
+            "Frame not copied: out of memory"
+        );
     }
 
     #[test]
