@@ -619,15 +619,27 @@ construction. 36 patches round the circle of one in-flight X4 Air frame,
   parallax at 3.8 degrees. That part is explained.
 
 What this says is that **an in-flight frame cannot answer the question**.
-Two effects that are not calibration are in every patch. Parallax is one.
-The other is rolling shutter (6.5, issue #9, uncorrected today): 15.883 ms
-of readout displaces content by the camera's own angular rate times that
-time, the two lenses' rows run in nearly opposite directions in the world
-because their rolls are near +90 degrees in opposed frames, so it does not
-cancel between them, and near the seam the picture is only about 15 px per
-degree, which turns a small displacement into a large angle. Pinning the
-calibration residual wants a capture from a camera that is not moving, or
-issue #9 landed first, and probably both.
+Two effects that are not calibration were named as candidates: near-field
+parallax, and rolling shutter.
+
+**Rolling shutter is now measured out (issue #9, 6.7).** The reasoning was
+that 15.883 ms of readout displaces content by the camera's own angular rate
+times that time, that the two lenses' rows run in nearly opposite world
+directions because their rolls are near +90 degrees in opposed frames, so
+that it would not cancel between them, and that near the seam 15 px per
+degree turns a small displacement into a large angle. Every step of that is
+sound except the one that matters: measured on 214 paired patches of 30
+frames rolling up to 123 deg/s, the along-seam residual carries **0.014** of
+the displacement that model predicts, on an instrument that reads an applied
+displacement of the same size and shape back at **0.985 with r = 0.996**.
+Whatever the two sensors do, they do not do it in opposite world directions,
+and none of the -0.36 to -1.20 degrees measured here is theirs.
+
+So the along-seam residual is unchanged and still unattributed, with one
+candidate fewer: parallax cannot reach that axis by construction, rolling
+shutter is measured out of it, and what is left is calibration. Pinning it
+still wants a capture from a camera that is not moving, and 6.7 asks for the
+same capture for its own reasons.
 
 None of it blocked the blend, which needed the band and not the boundary:
 a weight field over a 14-degree overlap does not need a sub-pixel-perfect
@@ -845,6 +857,10 @@ correctable from the gyro. On a vibrating airframe it dominates.
 
 Correct it in the same backward mapping as everything else; see 8.
 
+**That was the expectation. 6.7 is what measuring it found**, and the
+displacement this section predicts is not in the delivered pictures at the
+magnitude it predicts.
+
 ### 6.6 Optical flow does not help
 
 Insta360's `INSOpticalFlowType` is `{DynamicStitch, Disflow, AiFlow}`;
@@ -891,6 +907,198 @@ on the X4 Air fixture, and 179 columns of a 1024-px 90-degree view
 centred on the seam. Outside it exactly one lens claims anything, its
 weight is exactly 1, and the pass costs the one texture fetch it did
 before the blend existed.
+
+### 6.7 The readout direction, and why the correction ships switched off (issue #9)
+
+**Confidence: HIGH for the measurements, and the answer they give is a
+negative.** The correction is built the way 6.5 asks for and fused into the
+one backward map (`crates/render/src/projection.rs`); which way the sensor
+reads is not in the file, and neither of the two instruments that can see a
+readout displacement finds the one this camera would have to have. So
+`kyerag_meta::Sweep::Unknown` is what the calibration answers, the correction
+is a no-op, and everything below is what it would take to change that.
+
+#### What the correction is
+
+For each output ray, after the lens is picked and the landing row computed,
+the orientation the ray is carried through is the one at **that row's**
+readout instant rather than the frame's. The row decides the instant and the
+instant moves the row, so the landing is solved for rather than computed:
+`Reframe::solve`, from the frame's own instant, `READOUT_STEPS` rounds of it.
+No extra pass, no intermediate target and no second sample of the picture,
+which is the insv-stitch principle this player is built on (9, ARCHITECTURE).
+
+Two things the pass needs, and both are measured rather than assumed.
+
+- **A straight turn across the readout.** One rotation vector per frame,
+  `OrientationTrack::turn` over the readout window centred on the frame's
+  instant, scaled by a row's share of it. Against the track's own orientation
+  looked up at each row separately, over 20000 instants of two 30-minute
+  captures: **0.068 and 0.019 degrees at the median**, 0.27 and 0.09 at the
+  99th, 0.64 and 0.34 at the worst. What is left over is the airframe's own
+  vibration inside one readout, which the stored track (200 Hz) does not
+  resolve anyway; a per-row lookup would not recover it either.
+- **The turn is the camera's own.** The stabilized track's turn against the
+  raw gyroscope over the same window: **0.058 and 0.018 degrees at the
+  median**. Read the other way round it is 0.64 and 0.47 at the median and 15.7
+  at the worst, an order of magnitude apart, which is the control that pins
+  the sign of the rotation the correction applies.
+
+Rounds to convergence, in pixels of the delivered frame, at each capture's
+hardest instant, against a solve run eight rounds:
+
+| rounds | capture A, 551 deg/s | capture B, 270 deg/s |
+| ---: | ---: | ---: |
+| 0 (uncorrected) | 111.8 px | 35.3 px |
+| **1** | **4.49 px** | **0.76 px** |
+| 2 | 0.24 px | 0.02 px |
+| 3 | 0.01 px | 0.00 px |
+
+One round is what ships. Two would cost a second pass through the model per
+lens per pixel for a quarter of a pixel at the worst instant of half an hour,
+and the median rate on this footage is 20 deg/s, where one round leaves
+0.006 px.
+
+#### Instrument 1: the seam, where a readout cannot cancel
+
+The reasoning 4.9 left the question on: the two lenses are mounted a half turn
+apart, so if both sensors sweep the same way across their own delivered
+pictures, they sweep in **opposite world directions**, and a readout
+displacement does not cancel between them at the seam. It doubles there, and
+the picture near the seam is 15 px per degree.
+
+Method, and it is 4.9's own instrument with the readout added: both lenses
+sampled on the **same angular grid** around 36 directions on the seam circle,
+6 degrees across, correlated over +/-3 degrees in 0.12 degree steps, on the
+delivered frames rather than on rendered views. 30 consecutive frames of
+capture A from 1151.0 s, rolling 4 to 123 deg/s. A patch counts only where
+**every** candidate correlated above 0.7, so all five are scored on one set of
+patches: 214 readings. Each patch's own mean over the run is taken off before
+anything is compared, because a patch's calibration residual is the same in
+every frame and a readout displacement is not.
+
+| candidate | along-seam spread, within patch |
+| --- | ---: |
+| **uncorrected** | **0.100 deg** |
+| corrected, sweeping right | 0.314 |
+| corrected, sweeping left | 0.312 |
+| corrected, sweeping down | 0.097 |
+| corrected, sweeping up | 0.104 |
+
+And the same readings regressed against what a readout across the delivered
+frame predicts for them, patch by patch:
+
+| | slope | r | predicted spread |
+| --- | ---: | ---: | ---: |
+| the pictures as they come | **-0.014** | -0.04 | 0.686 deg |
+| **control: with the correction applied** | **-0.985** | **-0.996** | 0.686 deg |
+
+**The control is the point.** Applying a readout correction displaces the two
+lenses' pictures by exactly what that readout predicts, and the instrument
+reads that displacement back at 0.985 of its size with a correlation of 0.996.
+So it can see a 0.7 degree displacement of that shape on these pixels, and
+what the pictures themselves carry is 0.014 of it.
+
+**Two sensors sweeping in opposite world directions is therefore ruled out**,
+and with it the model 6.5 and 4.9 both assume. Applying it anyway would put up
+to 1.9 degrees of misalignment into the seam at 120 deg/s, which is about 28
+px of double image in a band that issue #7 just finished blending.
+
+What the seam cannot say is anything about the other two possibilities, and
+this is the instrument's own blind spot rather than a result: two sensors that
+sweep the **same** world direction (mirrored in their own delivered frames,
+which is what two identical modules mounted the same way round in one body
+would do), and a readout running **down** the delivered frame rather than
+across it. Both predict a seam disagreement of 0.002 to 0.003 degrees, which
+is nothing to measure.
+
+#### Instrument 2: inside one lens, where a horizon has to stay straight
+
+A great circle projects to a straight line in a rectilinear view, so a bend in
+a rendered horizon is the picture's and not the world's, and a readout draws
+one: the displacement grows along the picture and a displacement that grows
+along a line curves it. `kyerag-spike --bin horizon readout=...` renders runs
+of frames through the app's own pass under each candidate and measures the
+horizon's own fit residual with the same `skyline` issue #8 used
+(`Skyline::spread`).
+
+What an uncorrected readout of the trailer's length would leave, computed
+through the shipped map, in a 960x540 view at 100 degrees:
+
+| roll rate | worst displacement | **bend** |
+| ---: | ---: | ---: |
+| 50 deg/s | 2.7 px | 0.8 px |
+| 100 | 5.4 | 1.7 |
+| 200 | 10.9 | 3.3 |
+| 400 | 21.7 | 6.6 |
+
+Measured, as the change in that residual against the correction switched off,
+on the frames every candidate found a horizon in, plus or minus the standard
+error of the paired difference:
+
+| stretch | frames | roll | right | left | down | up |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A 1415 s | 22 | 26-97 | **-0.22 +-0.10** | **+0.35 +-0.08** | -0.10 +-0.06 | +0.14 +-0.08 |
+| A 252 s | 12 | 60-129 | +0.15 +-0.09 | -0.17 +-0.22 | +0.10 +-0.09 | -0.04 +-0.07 |
+| B 1053 s | 23 | 35-81 | -0.16 +-0.28 | +0.13 +-0.26 | -0.37 +-0.22 | -0.24 +-0.24 |
+| B 1036 s | 13 | 40-81 | -0.14 +-0.31 | **+1.28 +-0.20** | +0.14 +-0.18 | +0.08 +-0.06 |
+| B 1046 s | 40 | 33-106 | +0.01 +-0.17 | -0.18 +-0.22 | +0.10 +-0.10 | +0.16 +-0.16 |
+
+Negative is straighter. Three of the five say what a sweep to the right would
+say, and say it with the signature the physics predicts: the correction
+improves the residual and its reverse costs about twice as much as the
+correction gained. Two of the five say the opposite. The bend a readout would
+draw at these rates is 0.8 to 2.1 px against a horizon whose own residual is 3
+to 7 px, so the instrument is at the edge of resolving it, and **this is not a
+verdict**. It is why the answer is `Unknown` rather than "right".
+
+#### Instrument 3: one lens against itself, a few frames apart
+
+The strongest design available on this footage, and still not enough. The same
+lens at two instants is turning at two different rates, so far-off content
+that has not moved in the world is displaced differently in each, and the
+difference is what a readout predicts and nothing else does. Patches are
+correlated between frames four apart through the stabilized map, and the fit
+is eight unknowns least squares: three for the rotation the horizon lock
+leaves between the frames, three for the camera's own translation, whose flow
+field over far content is a dipole and looks enough like a readout's to be
+worth taking out, and **two for how far the readout sweeps across the frame
+and down it**, fitted together because separately each reads the other's
+displacement as its own.
+
+The control works: correcting for a readout takes the fitted across-frame
+sweep down by 0.79 to 0.84 where 1.0 is exact, and leaves the down-frame term
+alone. The measurement does not repeat.
+
+| stretch | across x | down y | residual |
+| --- | ---: | ---: | ---: |
+| A 1414.5 s, 20 pairs | +0.72 +-0.32 | +1.16 +-0.37 | 0.44 deg |
+| A 1150.5 s, 24 pairs | +0.39 +-0.20 | -0.47 +-0.21 | 0.57 deg |
+
+The predictor between frames four apart is worth 0.05 to 0.11 degrees against
+a residual of half a degree of parallax, lock error and content change, so the
+error bars are the whole story: two stretches disagree about the sign of one
+axis and about a factor of two on the other.
+
+#### What would settle it, and it is a minute of footage
+
+Every instrument above is starved of the same thing: a **large** turn with
+**still, close, sharp** content and **no translation**. In flight the camera
+is always moving over ground that is far away, the rate is 20 deg/s at the
+median, and the readout displacement is small where the parallax and the
+stabilization residual are not.
+
+A hand-held twist in a room does all of it at once. Ten seconds of an X4 Air
+turned as fast as a wrist will turn it, in front of a bookshelf or a brick
+wall, standing still, is a capture where the predicted displacement is degrees
+rather than tenths, translation is nothing, and content is sharp enough to
+correlate anywhere in the frame. Instrument 3 reads the answer straight off
+it, with instrument 1 as the check on the between-lens half. That is the
+retest this section is waiting on.
+
+Until then: the machinery is in the map, the instruments are in
+`kyerag-spike --bin rolling` and `--bin horizon`, and `readout_sweep` in
+`kyerag_meta` is the one line that changes.
 
 ## 7. What was ruled out
 

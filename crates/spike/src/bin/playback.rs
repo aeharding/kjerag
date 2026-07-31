@@ -30,7 +30,9 @@ use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use kyerag_media::{Fallible, Reader};
-use kyerag_render::{Camera, Extent, Next, Request, Scene, ScenePipeline, Shot, Size, dmabuf};
+use kyerag_render::{
+    Camera, Extent, Next, Readout, Request, Scene, ScenePipeline, Shot, Size, Sweep, dmabuf,
+};
 
 /// Not sRGB, so the pass writes the video's own numbers: the same choice the
 /// `reframe` instrument makes.
@@ -54,7 +56,7 @@ fn main() -> Fallible<()> {
     let args: Vec<String> = std::env::args().collect();
     let input = PathBuf::from(
         args.get(1)
-            .ok_or("usage: playback <file.insv> [seconds] [hz] [shots] [yaw]")?,
+            .ok_or("usage: playback <file.insv> [seconds] [hz] [shots] [yaw] [readout]")?,
     );
     let seconds: u64 = parse(&args, 2, 60)?;
     let hz: u32 = parse(&args, 3, 60)?;
@@ -63,6 +65,11 @@ fn main() -> Fallible<()> {
     // lens axis holds one lens, and only a view across the seam proves a
     // still carries both.
     let yaw: f32 = parse(&args, 5, 0.0)?;
+    // Issue #9's cost: the file's own readout is what the app uses, and a
+    // named sweep forces the correction on over a file whose direction has
+    // not been measured, which is what the cost of switching it on is
+    // measured through.
+    let readout: String = parse(&args, 6, "file".to_owned())?;
 
     for lookahead in [0, 2, 4] {
         println!("{}", drain(&input, lookahead)?);
@@ -72,7 +79,14 @@ fn main() -> Fallible<()> {
         yaw: yaw.to_radians(),
         ..Camera::default()
     };
-    play(&input, Duration::from_secs(seconds), hz, shots, camera)
+    play(
+        &input,
+        Duration::from_secs(seconds),
+        hz,
+        shots,
+        camera,
+        &readout,
+    )
 }
 
 fn parse<T: std::str::FromStr>(args: &[String], i: usize, fallback: T) -> Fallible<T>
@@ -123,12 +137,30 @@ fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
 /// (`iced`'s `RedrawRequest::At`, from `kyerag_render`'s widget), so this
 /// does too. `hz` is the display's refresh rate, and caps how often a redraw
 /// can happen when the scene asks for one as soon as possible.
-fn play(input: &Path, run: Duration, hz: u32, shots: u32, camera: Camera) -> Fallible<()> {
+fn play(
+    input: &Path,
+    run: Duration,
+    hz: u32,
+    shots: u32,
+    camera: Camera,
+    readout: &str,
+) -> Fallible<()> {
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
     println!("device: {}", dmabuf::device_report(&gpu.device));
 
     let mut scene = Scene::open(input)?;
+    let sweep = match readout {
+        "right" => Some(Sweep::Right),
+        "left" => Some(Sweep::Left),
+        "down" => Some(Sweep::Down),
+        "up" => Some(Sweep::Up),
+        _ => None,
+    };
+    if let (Some(sweep), Some(file)) = (sweep, scene.readout()) {
+        scene.set_readout(Some(Readout { sweep, ..file }));
+    }
+    println!("shutter: readout {readout}");
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let refresh = Duration::from_secs_f64(1.0 / f64::from(hz));
     println!(

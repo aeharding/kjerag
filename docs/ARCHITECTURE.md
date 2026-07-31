@@ -255,6 +255,42 @@ definitions have drifted apart.
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
 
+## Rolling shutter (issue #9): fused, measured, and switched off
+
+A frame does not leave the sensor at an instant. `rolling_shutter_time` is
+15.883 ms on the X4 Air, so the row a ray lands on was read up to 8 ms from
+the frame's nominal time, and the orientation that ray should be carried
+through is the one at **that row's** instant. That is circular, because the
+row decides the instant and the instant moves the row, so the landing is
+solved for rather than computed: `Reframe::solve`, from the frame's own
+instant outwards. **One round**, which at the hardest instant of a 30-minute
+capture (551 deg/s) leaves 4.5 px of a 112 px correction and at the median
+rate leaves a hundredth of a pixel; a second round would cost another pass
+through the model per lens per pixel for a quarter of a pixel.
+
+It is one rotation per frame and a multiplication per pixel, not a lookup per
+row: `OrientationTrack::turn` over the readout window is a rotation vector,
+and a row's share of the readout scales it. Measured against the track's own
+orientation looked up per row, that straight line is 0.019 to 0.068 degrees
+out at the median and 0.64 at the worst of two captures, and what is left is
+vibration inside one readout that a 200 Hz track does not resolve either.
+
+The correction is **not under the horizon toggle**: it is the camera's own
+motion during the frame, not the display's, so a view that rides the body has
+the same skew in it as one that does not. With no IMU record it disables
+itself and the pass is what it was before, down to the bits.
+
+**And it is off**, because which way the sensor reads is not in the file and
+could not be measured. The two instruments that can see a readout displacement
+both come back null at the magnitude this camera would have to have, one of
+them with a control that reads an applied displacement of that size back at
+0.985 (r = 0.996). Shipping the direction that the geometry implied would have
+put up to 1.9 degrees of misalignment into the seam at 120 deg/s, where the
+pictures measurably have none. `kyerag_meta::Sweep::Unknown` is that answer,
+`readout_sweep` is the one line that changes when a capture settles it, and
+docs/research/insv-format.md 6.7 has both instruments, the numbers, and the
+ten seconds of footage that would decide it.
+
 ## Horizon lock (issue #8)
 
 The trailer's IMU record is read at open, integrated once, and the result is
@@ -291,11 +327,11 @@ negative control: the string telemetry-parser falls through to for this
 camera reads 54 to 65 degrees of standard deviation against 0.04 to 0.68 for
 the right one.
 
-The orientation track is also **issue #9's input**: it is kept at 200 a
-second rather than one per frame, and `OrientationTrack::at` interpolates, so
-per-row rolling-shutter correction is that call per row with
-`rolling_shutter_ms * (row / rows - 0.5)` added to the frame's instant.
-Nothing else has to change for it.
+The orientation track is also **issue #9's input**, and it needed one method
+rather than one call per row: `OrientationTrack::turn` reads the two ends of a
+frame's readout window and answers the rotation between them as a vector, so a
+row's share of the readout is a multiplication in the shader instead of a
+lookup. The section above is what came of it.
 
 ## Clock domains (the correctness minefield)
 
@@ -327,14 +363,19 @@ on the X4 Air).
   distinguish it, because every one of them records sub-degree yaw and
   pitch (docs/research/insv-format.md 4.8).
 - What is left of the seam once the composition is right. Still open after
-  issue #7, and now with a reason it stayed open: re-measured on delivered
-  frames rather than rendered views, the along-seam residual is
-  consistently negative on every patch that correlates, -0.4 to -1.2
-  degrees, and the across-seam figure is dominated by two things that are
-  not calibration. Near-field parallax is one and is expected. The other is
-  **rolling shutter** (issue #9, uncorrected): the two lenses' rows run in
-  nearly opposite world directions, so the readout displacement does not
-  cancel between them, and the picture near the seam is only 15 px per
-  degree. An in-flight frame cannot separate the three. This wants a
-  capture from a camera that is not moving, or #9 landed first.
-  docs/research/insv-format.md 4.9 has the numbers.
+  issue #7: re-measured on delivered frames rather than rendered views, the
+  along-seam residual is consistently negative on every patch that
+  correlates, -0.4 to -1.2 degrees. Issue #9 has now removed one of the two
+  candidates for it: **rolling shutter is measured out**, at 0.014 of the
+  displacement the opposed-rows model predicts, on an instrument that reads
+  an applied displacement of that size back at 0.985. Near-field parallax
+  cannot reach the along-seam axis by construction. What is left is
+  calibration, and pinning it wants a capture from a camera that is not
+  moving. docs/research/insv-format.md 4.9 and 6.7 have the numbers.
+- **Which way the sensor reads** (issue #9). Not in the file, and not
+  settled by 30 minutes of flying: the displacement it would leave is
+  smaller than the parallax, the stabilization residual and the horizon's
+  own raggedness on this footage, and the two candidate readings the seam
+  cannot separate predict 0.003 degrees there. Ten seconds of a camera
+  turned hard by hand in front of close, still content settles it;
+  docs/research/insv-format.md 6.7 says exactly how.

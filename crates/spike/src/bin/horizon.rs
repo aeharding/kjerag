@@ -36,7 +36,8 @@ use std::path::{Path, PathBuf};
 
 use kyerag_media::Fallible;
 use kyerag_meta::{
-    CalibrationSet, ExposureTrack, Filter, OrientationTrack, Quat, axis_map, body_from_imu,
+    CalibrationSet, ExposureTrack, Filter, OrientationTrack, Quat, Readout, Sweep, axis_map,
+    body_from_imu,
 };
 use kyerag_render::{Camera, Cue, FrameClock, Horizon, Scene, ScenePipeline, Size};
 use kyerag_spike::{Gpu, Offscreen, Skyline, skyline};
@@ -68,11 +69,25 @@ fn main() -> Fallible<()> {
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);
     let aspect = options.size.width as f32 / options.size.height as f32;
     let mut runs: Vec<Vec<Option<Skyline>>> = vec![Vec::new(); variants.len()];
+    // How hard the camera was rolling when each frame was read, which is what
+    // a rolling-shutter candidate has to be scored against: a frame that did
+    // not move cannot tell one readout from another (issue #9).
+    let mut rolls: Vec<f64> = Vec::new();
+    let readout = calibration.readout();
+    let span = (readout.seconds * 1e6) as i64;
+    let track = calibration.orientation(Filter::default());
 
     for step in 0..options.count {
         let Some((index, _)) = scene.frame() else {
             break;
         };
+        let at = calibration.exposure[0].frame_time_us(index).unwrap_or(0);
+        rolls.push(
+            track.turn(at - span / 2, at + span / 2)[2]
+                .abs()
+                .to_degrees()
+                / readout.seconds,
+        );
         for (variant, run) in variants.iter().zip(&mut runs) {
             variant.apply(&scene, index, &calibration.exposure[0]);
             let primitive = scene.primitive(variant.aim.unwrap_or(options.camera));
@@ -101,12 +116,99 @@ fn main() -> Fallible<()> {
         options.from,
     );
     println!(
-        "{:<22} {:>7} {:>9} {:>9} {:>9} {:>9}",
-        "variant", "frames", "mean deg", "sd deg", "p-p deg", "worst/f"
+        "{:<22} {:>7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+        "variant", "frames", "mean deg", "sd deg", "p-p deg", "worst/f", "bend px", "with roll"
     );
     for (variant, run) in variants.iter().zip(&runs) {
-        println!("{}", Report::of(&variant.name, run));
+        println!("{}", Report::of(&variant.name, run, &rolls));
     }
+    // And the paired comparison, which is what tells two candidates apart:
+    // the same frames, the same content, so the horizon's own raggedness
+    // divides out and what is left is what the variant did to it.
+    //
+    // Only the variants that found a horizon at all take part: a variant that
+    // found none is a result of its own (the axis-convention controls are
+    // exactly that) and would otherwise empty the shared set.
+    let found = |variant: usize| runs[variant].iter().flatten().count();
+    let best = (0..runs.len()).map(found).max().unwrap_or(0);
+    let counted: Vec<usize> = (0..runs.len())
+        .filter(|variant| found(*variant) * 2 >= best.max(6))
+        .collect();
+    let shared: Vec<usize> = (0..runs.first().map_or(0, Vec::len))
+        .filter(|frame| rolls[*frame] >= options.roll)
+        .filter(|frame| {
+            counted
+                .iter()
+                .all(|variant| runs[*variant][*frame].is_some())
+        })
+        .collect();
+    if shared.len() >= 3 {
+        println!(
+            "\non the {} frames every variant found a horizon in, roll {:.0} to {:.0} deg/s:",
+            shared.len(),
+            shared.iter().map(|f| rolls[*f]).fold(f64::MAX, f64::min),
+            shared.iter().map(|f| rolls[*f]).fold(f64::MIN, f64::max),
+        );
+        println!(
+            "{:<22} {:>9} {:>11} {:>9} {:>9}",
+            "variant", "bend px", "against off", "sd deg", "worst bend"
+        );
+        // Against the correction switched off, frame by frame: the same
+        // content under two maps, so the horizon's own raggedness subtracts
+        // out and what is left is what the candidate did. The number after
+        // the plus or minus is the standard error of that difference.
+        let bend_of = |variant: usize, frame: usize| runs[variant][frame].map(|line| line.spread);
+        let reference = variants
+            .iter()
+            .position(|variant| variant.name == "readout-off");
+        for (at, (variant, run)) in counted.iter().map(|at| (*at, (&variants[*at], &runs[*at]))) {
+            let bends: Vec<f64> = shared
+                .iter()
+                .filter_map(|f| Some(run[*f]?.spread))
+                .collect();
+            let angles: Vec<f64> = shared
+                .iter()
+                .filter_map(|f| Some(run[*f]?.degrees))
+                .collect();
+            let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len().max(1) as f64;
+            let held = mean(&angles);
+            let against = reference.map(|off| {
+                let moved: Vec<f64> = shared
+                    .iter()
+                    .filter_map(|frame| Some(bend_of(at, *frame)? - bend_of(off, *frame)?))
+                    .collect();
+                let mean_moved = mean(&moved);
+                let error = (mean(
+                    &moved
+                        .iter()
+                        .map(|one| (one - mean_moved).powi(2))
+                        .collect::<Vec<_>>(),
+                ) / moved.len().max(1) as f64)
+                    .sqrt();
+                format!("{mean_moved:+.2}+-{error:.2}")
+            });
+            println!(
+                "{:<22} {:>9.2} {:>11} {:>9.2} {:>9.2}",
+                variant.name,
+                mean(&bends),
+                against.unwrap_or_default(),
+                (mean(
+                    &angles
+                        .iter()
+                        .map(|angle| (angle - held).powi(2))
+                        .collect::<Vec<_>>()
+                ))
+                .sqrt(),
+                bends.iter().fold(0.0f64, |a, b| a.max(*b)),
+            );
+        }
+    }
+    println!(
+        "\nbend is how far the horizon's own points sit from the straight line fitted through \n\
+         them, root mean square pixels: a great circle projects to a straight line, so what \n\
+         bends it is the picture. with roll is that bend's correlation with the roll rate of \n\
+         the frame it was measured on, which is the shape a rolling shutter leaves (issue #9)."
+    );
     Ok(())
 }
 
@@ -114,6 +216,9 @@ fn main() -> Fallible<()> {
 /// frames.
 struct Variant {
     name: String,
+    /// How the sensor is to be read, or `None` for the way the file describes
+    /// it. A [`Readout`] with a zero span is the correction switched off.
+    readout: Option<Readout>,
     /// `None` is horizon lock switched off, which is the picture as it was
     /// before issue #8.
     track: Option<OrientationTrack>,
@@ -132,6 +237,7 @@ struct Variant {
 
 impl Variant {
     fn apply(&self, scene: &Scene, frame: u64, exposure: &ExposureTrack) {
+        scene.set_readout(self.readout);
         let Some(track) = &self.track else {
             scene.set_horizon(Horizon::Free);
             scene.hold_at(None);
@@ -162,11 +268,22 @@ struct Report {
     sd: f64,
     swing: f64,
     step: f64,
+    /// The mean of the horizon's own fit residual, in pixels.
+    bend: f64,
+    /// How that residual moves with the roll rate of the frame it came off,
+    /// as a correlation coefficient. A readout the camera does not have
+    /// leaves a bend that grows with the roll; the right one does not.
+    with_roll: f64,
 }
 
 impl Report {
-    fn of(name: &str, run: &[Option<Skyline>]) -> Self {
+    fn of(name: &str, run: &[Option<Skyline>], rolls: &[f64]) -> Self {
         let angles: Vec<f64> = run.iter().flatten().map(|found| found.degrees).collect();
+        let bends: Vec<(f64, f64)> = run
+            .iter()
+            .zip(rolls)
+            .filter_map(|(found, roll)| Some(((*found)?.spread, *roll)))
+            .collect();
         let count = angles.len().max(1) as f64;
         let mean = angles.iter().sum::<f64>() / count;
         let sd = (angles.iter().map(|a| (a - mean).powi(2)).sum::<f64>() / count).sqrt();
@@ -185,7 +302,30 @@ impl Report {
             swing: angles.iter().fold(f64::MIN, |a, b| a.max(*b))
                 - angles.iter().fold(f64::MAX, |a, b| a.min(*b)),
             step,
+            bend: bends.iter().map(|(bend, _)| bend).sum::<f64>() / bends.len().max(1) as f64,
+            with_roll: correlation(&bends),
         }
+    }
+}
+
+/// How two columns move together, as a correlation coefficient.
+fn correlation(pairs: &[(f64, f64)]) -> f64 {
+    let count = pairs.len() as f64;
+    if count < 3.0 {
+        return 0.0;
+    }
+    let mean_a = pairs.iter().map(|(a, _)| a).sum::<f64>() / count;
+    let mean_b = pairs.iter().map(|(_, b)| b).sum::<f64>() / count;
+    let (mut covariance, mut var_a, mut var_b) = (0.0, 0.0, 0.0);
+    for (a, b) in pairs {
+        let (a, b) = (a - mean_a, b - mean_b);
+        covariance += a * b;
+        var_a += a * a;
+        var_b += b * b;
+    }
+    match var_a > 0.0 && var_b > 0.0 {
+        true => covariance / (var_a * var_b).sqrt(),
+        false => 0.0,
     }
 }
 
@@ -200,8 +340,16 @@ impl std::fmt::Display for Report {
         }
         write!(
             f,
-            "{:<22} {:>3}/{:<3} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
-            self.name, self.measured, self.total, self.mean, self.sd, self.swing, self.step
+            "{:<22} {:>3}/{:<3} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
+            self.name,
+            self.measured,
+            self.total,
+            self.mean,
+            self.sd,
+            self.swing,
+            self.step,
+            self.bend,
+            self.with_roll,
         )
     }
 }
@@ -219,6 +367,13 @@ struct Options {
     yaws: Vec<f64>,
     /// Extra axis conventions to compare against the file's own.
     axes: Vec<String>,
+    /// Rolling-shutter candidates to compare against the file's own
+    /// (issue #9): `off`, or the direction the sensor is read to sweep.
+    readouts: Vec<String>,
+    /// The roll rate a frame has to have before it joins the paired
+    /// comparison, in deg/s. A frame that did not move cannot tell one
+    /// readout from another.
+    roll: f64,
     sweep: bool,
 }
 
@@ -276,18 +431,21 @@ impl Options {
                 name: "locked".to_owned(),
                 track: Some(solve(shipped)),
                 clock: FrameClock::Exposure,
+                readout: None,
                 aim: None,
             },
             Variant {
                 name: "free".to_owned(),
                 track: None,
                 clock: FrameClock::Exposure,
+                readout: None,
                 aim: Some(self.pointed_at_the_horizon(calibration, &solve(shipped))),
             },
             Variant {
                 name: "container-clock".to_owned(),
                 track: Some(solve(shipped)),
                 clock: FrameClock::Container,
+                readout: None,
                 aim: None,
             },
         ];
@@ -305,6 +463,38 @@ impl Options {
                     body_from_imu(axes, &calibration.lenses[0].pose),
                 )),
                 clock: FrameClock::Exposure,
+                readout: None,
+                aim: None,
+            });
+        }
+        // The rolling-shutter candidates (issue #9), on the same frames as
+        // everything else: the file's own readout is what "locked" already
+        // carries, so these are the other three directions and the correction
+        // switched off. A candidate the camera does not have leaves a bend in
+        // the horizon that grows with the roll rate.
+        for name in &self.readouts {
+            let sweep = match name.as_str() {
+                "off" => None,
+                "right" => Some(Sweep::Right),
+                "left" => Some(Sweep::Left),
+                "down" => Some(Sweep::Down),
+                "up" => Some(Sweep::Up),
+                _ => continue,
+            };
+            variants.push(Variant {
+                name: format!("readout-{name}"),
+                track: Some(solve(shipped)),
+                clock: FrameClock::Exposure,
+                readout: Some(match sweep {
+                    Some(sweep) => Readout {
+                        sweep,
+                        ..calibration.readout()
+                    },
+                    None => Readout {
+                        seconds: 0.0,
+                        ..calibration.readout()
+                    },
+                }),
                 aim: None,
             });
         }
@@ -316,6 +506,7 @@ impl Options {
                     ..shipped
                 })),
                 clock: FrameClock::Exposure,
+                readout: None,
                 aim: None,
             });
         }
@@ -327,6 +518,7 @@ impl Options {
                     ..shipped
                 })),
                 clock: FrameClock::Exposure,
+                readout: None,
                 aim: None,
             });
         }
@@ -373,6 +565,8 @@ impl Options {
             tilts: Vec::new(),
             yaws: Vec::new(),
             axes: Vec::new(),
+            readouts: Vec::new(),
+            roll: 0.0,
             sweep: false,
         };
         for arg in args {
@@ -390,6 +584,8 @@ impl Options {
                 "tilt" => options.tilts.push(value.parse()?),
                 "yaw_seconds" => options.yaws.push(value.parse()?),
                 "axes" => options.axes.push(value.to_owned()),
+                "readout" => options.readouts.push(value.to_owned()),
+                "roll" => options.roll = value.parse()?,
                 "sweep" => options.sweep = value.parse::<u32>()? != 0,
                 _ => return Err(format!("unknown argument {key}. {USAGE}").into()),
             }
@@ -400,7 +596,7 @@ impl Options {
 
 const USAGE: &str = "usage: horizon <file.insv> [from=seconds] [count=frames] [yaw=deg] \
      [pitch=deg] [fov=deg] [width=px] [height=px] [png=every] [find=n] [tilt=s] \
-     [yaw_seconds=s] [axes=yzX] [sweep=1]";
+     [yaw_seconds=s] [axes=yzX] [readout=off|right|left|down|up] [roll=deg/s] [sweep=1]";
 
 /// The stretches of the file where the camera rolls hardest, which are the
 /// ones worth pointing this at: a horizon that stays level through a stretch

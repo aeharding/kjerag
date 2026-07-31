@@ -16,6 +16,15 @@
 //! weight per lens, one outside the overlap and a smooth crossover inside it
 //! (issue #7). A ray is dropped only where **no** lens has it.
 //!
+//! The map also carries **when** each ray was seen (issue #9). A frame comes
+//! off the sensor a row at a time over 15.9 ms, so the orientation a ray is
+//! carried through belongs to the row it lands on rather than to the frame,
+//! and [`Reframe::solve`] is that: reframing, stabilization and the readout
+//! in one backward mapping per output pixel, with nothing resampled and no
+//! pass added. It is switched off on every camera today, because which way
+//! the sensor reads is not in the file and could not be measured out of
+//! flying footage (`kyerag_meta::Sweep`).
+//!
 //! Written from the model description in `docs/research/insv-format.md` 5.1
 //! (Mei and Rives 2007, as OpenCV's `cv::omnidir` states it). Nothing here
 //! is transcribed from Gyroflow's `insta360.wgsl`, so this file is plain
@@ -24,6 +33,26 @@
 use kyerag_meta::{Intrinsics, Lens, Pose, Quat};
 
 use super::{Camera, Size};
+
+/// How many times the landing row is solved for before it is believed
+/// (issue #9).
+///
+/// The row a ray lands on decides which instant its orientation is read at,
+/// and that orientation decides the row: the map is its own input. So it is
+/// solved for, from the frame's own instant outwards, and the question is how
+/// many rounds it takes. Each round multiplies what is left over by the share
+/// of the readout the round before moved the landing across, which is a couple
+/// of percent at 500 deg/s and a tenth of that in ordinary flight.
+///
+/// **One round, measured** (`kyerag-spike --bin rolling model=1`): against a
+/// solve run until it stops moving, at the hardest instant of a 30-minute
+/// capture, 551 deg/s, one round leaves **4.5 px** of a 112 px correction and
+/// two leave 0.24 px. The median rate on that footage is 20 deg/s, where the
+/// correction is 4 px and one round leaves a hundredth of one. The second
+/// round is another pass through the model per lens per pixel and costs about
+/// as much again as the first, for a quarter of a pixel at an instant that
+/// happens once in half an hour.
+const READOUT_STEPS: usize = 1;
 
 /// How many lenses one pass can sample.
 ///
@@ -61,6 +90,12 @@ pub struct Reframe {
     has_frame: f32,
     linearize: f32,
     elapsed: f32,
+    /// Which way across the delivered frame the sensor's rows advance
+    /// (`kyerag_meta::Sweep`), and whether the correction runs at all: both
+    /// components are zero for a file with no IMU record, and then the pass
+    /// is what it was before issue #9, down to the instruction count.
+    row_axis: [f32; 2],
+    _pad: [f32; 2],
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -82,9 +117,17 @@ struct LensBlock {
     p1: f32,
     p2: f32,
     image_radius: f32,
+    /// The turn the body makes across one whole readout, in **this lens's**
+    /// frame: a rotation vector, so a row's share of it is a multiplication
+    /// (issue #9). Zero where there is no IMU record to read it from.
+    ///
+    /// Per lens rather than per camera because the two lenses are mounted a
+    /// half turn apart, which is exactly why a readout displacement does not
+    /// cancel between them at the seam.
+    turn: [f32; 3],
     /// A uniform array's element stride rounds up to the element's 16-byte
     /// alignment. WGSL does that itself; `repr(C)` does not.
-    _pad: f32,
+    _pad: [f32; 2],
 }
 
 /// Where a view ray lands in one lens's image, in delivered-frame pixels.
@@ -136,17 +179,30 @@ pub const OUTSIDE_GRAY: f32 = 0.10;
 /// integrated: it takes a direction in the stabilized world frame to the
 /// body's own. Identity is horizon lock switched off, and then the view is in
 /// body coordinates exactly as it was before issue #8.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Held {
     pub body_from_world: Quat,
+    /// How the body moved **during** the frame, which is a different question
+    /// from where it was (issue #9) and is answered whether or not the
+    /// horizon is locked: the readout is the camera's own motion and not the
+    /// display's. `None` is a file with no IMU record, and then the pass is
+    /// what it was before issue #9.
+    pub rolling: Option<Rolling>,
 }
 
-impl Default for Held {
-    fn default() -> Self {
-        Self {
-            body_from_world: Quat::IDENTITY,
-        }
-    }
+/// One frame's rolling shutter: the turn the camera body makes between the
+/// first row of the readout and the last, and which way across the delivered
+/// picture those rows run.
+///
+/// The turn is a rotation vector in the **body's own frame**
+/// (`OrientationTrack::turn` over the readout window, centred on the frame's
+/// instant), so a row's share of the readout scales it, and the ends of the
+/// window are where it is exact.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rolling {
+    pub turn: [f64; 3],
+    /// A unit direction in delivered-frame pixels, from `kyerag_meta::Sweep`.
+    pub axis: [f64; 2],
 }
 
 impl Reframe {
@@ -173,6 +229,10 @@ impl Reframe {
             has_frame: 1.0,
             linearize: f32::from(u8::from(linearize)),
             elapsed: 0.0,
+            row_axis: held
+                .rolling
+                .map_or([0.0; 2], |rolling| rolling.axis.map(|c| c as f32)),
+            _pad: [0.0; 2],
         }
     }
 
@@ -189,6 +249,8 @@ impl Reframe {
             has_frame: 0.0,
             linearize: f32::from(u8::from(linearize)),
             elapsed,
+            row_axis: [0.0; 2],
+            _pad: [0.0; 2],
         }
     }
 
@@ -245,11 +307,69 @@ impl Reframe {
     /// The forward map: a view ray, through one lens's extrinsics and the
     /// Mei/UCM model, to a pixel of that lens's delivered frame.
     ///
+    /// **Where the rolling shutter is taken out (issue #9).** The lens saw
+    /// this ray when it read the row the ray lands on, not when the frame
+    /// nominally began, so the orientation the ray is carried through has to
+    /// be the one at that row's own instant. That is circular: the row picks
+    /// the instant and the instant moves the row. It is solved by iteration
+    /// from the frame's instant, [`READOUT_STEPS`] rounds of it, and each
+    /// round is one more turn of the ray and one more pass through the model
+    /// rather than a second sample of the picture. Nothing is resampled and
+    /// no pass is added: this is the same backward map, with the camera's
+    /// motion during the readout inside it.
+    ///
     /// WGSL twin: `project`. The shader adds one line the mirror does not,
     /// turning the pixel into a texture coordinate (`frame_uv`).
     pub fn project(&self, lens: usize, view_ray: [f32; 3]) -> Landing {
+        self.solve(lens, view_ray, READOUT_STEPS)
+    }
+
+    /// The same map with the row solved for a chosen number of rounds, which
+    /// is how [`READOUT_STEPS`] came to be the number it is rather than a
+    /// guess: zero rounds is the map as it was before issue #9, and a solve
+    /// run until it stops moving is what every other count is measured
+    /// against (`kyerag-spike --bin rolling model=1`).
+    ///
+    /// The shader always runs [`READOUT_STEPS`] of them.
+    pub fn solve(&self, lens: usize, view_ray: [f32; 3], rounds: usize) -> Landing {
+        let block = &self.lenses[lens];
+        let aimed = block.lens_ray(view_ray);
+        let mut landing = self.mei(lens, normalize(aimed));
+        if self.is_rolling() {
+            for _ in 0..rounds {
+                let share = self.readout_share(landing.pixel);
+                let turned = turned(aimed, block.turn.map(|axis| axis * share));
+                landing = self.mei(lens, normalize(turned));
+            }
+        }
+        landing
+    }
+
+    /// Whether the readout correction runs at all. Off for a file with no IMU
+    /// record, and then [`Self::project`] is what it was before issue #9.
+    ///
+    /// WGSL twin: the `reframe.row_axis` test in `project`.
+    fn is_rolling(&self) -> bool {
+        self.row_axis != [0.0; 2]
+    }
+
+    /// Where in the readout the row a landing sits on is exposed: -1/2 at the
+    /// first row of the sensor, +1/2 at the last, and clamped, because a ray
+    /// that missed this lens still has to answer.
+    ///
+    /// WGSL twin: `readout_share`.
+    pub fn readout_share(&self, pixel: [f32; 2]) -> f32 {
+        let across = pixel[0] / self.frame_width - 0.5;
+        let down = pixel[1] / self.frame_height - 0.5;
+        (across * self.row_axis[0] + down * self.row_axis[1]).clamp(-0.5, 0.5)
+    }
+
+    /// The Mei/UCM model itself: a unit ray in one lens's own frame, to a
+    /// pixel of that lens's delivered frame.
+    ///
+    /// WGSL twin: `mei`.
+    fn mei(&self, lens: usize, p: [f32; 3]) -> Landing {
         let lens = &self.lenses[lens];
-        let p = normalize(lens.lens_ray(view_ray));
 
         // The mirror parameter is why a ray past 90 degrees off axis still
         // has a finite projection: it only needs `z + xi > 0`. On this
@@ -335,6 +455,44 @@ fn share(claim: f32, total: f32) -> f32 {
     }
 }
 
+/// A ray turned by a rotation vector: its direction is the axis and its
+/// length is the angle, which is Rodrigues' formula (issue #9).
+///
+/// Written out rather than first-ordered as `v + turn x v`, which is two
+/// instructions and looks tempting for an angle this small. It is not small
+/// enough: the worst rate in 30 minutes of this footage is 523 deg/s, which
+/// is 4 degrees over half a readout, and the term the first order drops is
+/// then 0.14 degrees, or three pixels of a 2560-wide view. A trig pair per
+/// lens per pixel is what the exact form costs and it is cheaper than being
+/// wrong by more than the thing being corrected is worth near the seam.
+///
+/// WGSL twin: `turned`.
+fn turned(v: [f32; 3], turn: [f32; 3]) -> [f32; 3] {
+    let angle = (turn[0] * turn[0] + turn[1] * turn[1] + turn[2] * turn[2]).sqrt();
+    // A still camera, and every file with no IMU record: the axis is not
+    // defined and there is nothing to turn by anyway.
+    if angle < 1e-9 {
+        return v;
+    }
+    let axis = turn.map(|component| component / angle);
+    let (sin, cos) = angle.sin_cos();
+    let across = cross(axis, v);
+    let along = dot(axis, v);
+    std::array::from_fn(|i| v[i] * cos + across[i] * sin + axis[i] * along * (1.0 - cos))
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|axis| a[axis] * b[axis]).sum()
+}
+
 /// How much this lens is preferred for a ray `theta` off its axis, from
 /// `cos(theta)`: `cos^2(theta / 2)`, i.e. 1 straight down the axis, 1/2 on
 /// the seam great circle, 0 straight out the back.
@@ -371,7 +529,8 @@ impl LensBlock {
         p1: 0.0,
         p2: 0.0,
         image_radius: 0.0,
-        _pad: 0.0,
+        turn: [0.0; 3],
+        _pad: [0.0; 2],
     };
 
     fn new(lens: &Lens, index: usize, frame: Size, camera: Camera, held: Held) -> Self {
@@ -390,7 +549,15 @@ impl LensBlock {
             p1: distortion.p1 as f32,
             p2: distortion.p2 as f32,
             image_radius: image_radius(&lens.intrinsics, frame) as f32,
-            _pad: 0.0,
+            // The body's turn across the readout, carried into this lens's
+            // own frame, which is where the ray it corrects is expressed.
+            // Conjugating the rotation by the mounting is what rotating its
+            // axis by the mounting does, and it is why the two lenses'
+            // corrections run opposite ways in the world.
+            turn: held.rolling.map_or([0.0; 3], |rolling| {
+                lens_from_body(&lens.pose, index).mul_vec(rolling.turn.map(|axis| axis as f32))
+            }),
+            _pad: [0.0; 2],
         }
     }
 
@@ -583,7 +750,8 @@ pub(crate) fn wgsl() -> String {
     // `{:?}` rather than `{}`: Rust's Display drops the decimal point on a
     // whole number, and `vec3<f32>(1)` is a type error in WGSL.
     format!(
-        "const OUTSIDE_GRAY = vec3<f32>({OUTSIDE_GRAY:?});\nconst MAX_LENSES = {MAX_LENSES}u;\n{WGSL}"
+        "const OUTSIDE_GRAY = vec3<f32>({OUTSIDE_GRAY:?});\nconst MAX_LENSES = {MAX_LENSES}u;\n\
+         const READOUT_STEPS = {READOUT_STEPS}u;\n{WGSL}"
     )
 }
 
@@ -601,6 +769,11 @@ struct LensBlock {
   p1: f32,
   p2: f32,
   image_radius: f32,
+  // The body's turn across one readout, in this lens's frame. Rust twin:
+  // `LensBlock::turn`.
+  turn_x: f32,
+  turn_y: f32,
+  turn_z: f32,
 };
 
 struct Reframe {
@@ -613,6 +786,10 @@ struct Reframe {
   has_frame: f32,
   linearize: f32,
   elapsed: f32,
+  // Which way across the delivered frame the sensor reads, and zero on both
+  // components where there is no readout to correct.
+  row_axis_x: f32,
+  row_axis_y: f32,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -681,10 +858,47 @@ fn longitude(axis: f32) -> f32 {
   return 0.5 * (1.0 + axis);
 }
 
-// Mei/UCM forward map. Rust twin: `Reframe::project`.
+// The forward map, with the readout taken out of it. Rust twin:
+// `Reframe::project`.
+//
+// The row a ray lands on decides the instant its orientation is read at, and
+// that instant moves the row, so the landing is solved for rather than
+// computed: `READOUT_STEPS` rounds from the frame's own instant. The loop
+// runs a fixed number of times and the whole of it is behind one uniform
+// test, so a file with no IMU record costs what it cost before issue #9.
 fn project(index: u32, ray: vec3<f32>) -> Landing {
   let lens = reframe.lenses[index];
-  let p = normalize(lens.view_to_lens * ray);
+  let aimed = lens.view_to_lens * ray;
+  var landing = mei(lens, normalize(aimed));
+  if reframe.row_axis_x != 0.0 || reframe.row_axis_y != 0.0 {
+    let turn = vec3<f32>(lens.turn_x, lens.turn_y, lens.turn_z);
+    for (var step = 0u; step < READOUT_STEPS; step += 1u) {
+      landing = mei(lens, normalize(turned(aimed, turn * readout_share(landing.pixel))));
+    }
+  }
+  return landing;
+}
+
+// Where in the readout a landing's row is exposed, -1/2 to +1/2. Rust twin:
+// `Reframe::readout_share`.
+fn readout_share(pixel: vec2<f32>) -> f32 {
+  let across = pixel / vec2<f32>(reframe.frame_width, reframe.frame_height) - vec2<f32>(0.5);
+  return clamp(dot(across, vec2<f32>(reframe.row_axis_x, reframe.row_axis_y)), -0.5, 0.5);
+}
+
+// A ray turned by a rotation vector, exactly (Rodrigues). Rust twin: `turned`.
+fn turned(v: vec3<f32>, turn: vec3<f32>) -> vec3<f32> {
+  let angle = length(turn);
+  if angle < 1e-9 {
+    return v;
+  }
+  let axis = turn / angle;
+  return v * cos(angle) + cross(axis, v) * sin(angle)
+    + axis * dot(axis, v) * (1.0 - cos(angle));
+}
+
+// The Mei/UCM model. Rust twin: `Reframe::mei`.
+fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
   let denom = p.z + lens.xi;
   let n = p.xy / denom;
 
@@ -719,7 +933,7 @@ fn frame_uv(pixel: vec2<f32>) -> vec2<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kyerag_meta::Distortion;
+    use kyerag_meta::{Distortion, Sweep};
 
     const FRAME: Size = Size {
         width: 3840,
@@ -1275,6 +1489,7 @@ mod tests {
                 camera,
                 Held {
                     body_from_world: world_from_body.conjugate(),
+                    ..Held::default()
                 },
             );
             let moved = shown(&rolled, rolled.view_ray(OFF_AXIS)).expect("rolled onto nothing");
@@ -1346,6 +1561,7 @@ mod tests {
         // A body that is neither level nor pointing where the view is.
         let hold = Held {
             body_from_world: Quat::from_rotation_vector([0.15, -0.4, 0.7]).conjugate(),
+            ..Held::default()
         };
 
         let before = held(camera, hold);
@@ -1363,13 +1579,170 @@ mod tests {
         near(moved.1.pixel[1], anchor.1.pixel[1], 1.0);
     }
 
+    /// One frame's readout with the body turning `turn` radians about the
+    /// body's own axes across the whole of it, and the sensor read the way
+    /// the X4 Air reads it.
+    fn rolling(turn: [f64; 3]) -> Held {
+        Held {
+            rolling: Some(Rolling {
+                turn,
+                axis: Sweep::Right.axis(),
+            }),
+            ..Held::default()
+        }
+    }
+
+    /// 90 deg/s, a brisk but ordinary roll, across the X4 Air's 15.883 ms
+    /// readout: 1.43 degrees from the first row of the sensor to the last.
+    const READOUT_TURN: f64 = 90.0 * 0.015_883 * std::f64::consts::PI / 180.0;
+
+    /// The whole of issue #9 as one analytic prediction: a camera rolling
+    /// about a lens's own axis smears that lens's picture round the axis, by
+    /// the angle it turned through between the middle row of the sensor and
+    /// the row a pixel sits on, and the correction takes exactly that out.
+    ///
+    /// Tangentially, because a roll about the optical axis is a rotation of
+    /// the image about the principal point: the radius is untouched and the
+    /// displacement is the radius times the angle. The prediction is the
+    /// still landing turned about that point, compared in pixels, because
+    /// pixels are what a smear is measured in.
+    #[test]
+    fn a_constant_roll_is_taken_out_by_the_row_the_ray_lands_on() {
+        let camera = Camera::default();
+        let still = fixture(camera);
+        let turning = held(camera, rolling([0.0, 0.0, READOUT_TURN]));
+        let mut worst = 0.0f32;
+
+        for phi in (0..360).step_by(30) {
+            let ray = direction(60.0, phi as f32);
+            let (before, after) = (still.project(0, ray), turning.project(0, ray));
+            // The row this ray really came off, which is the fixed point the
+            // map solved for rather than the row the frame's instant implies.
+            let share = f64::from(turning.readout_share(after.pixel));
+            let expected = turned_about(&still, 0, before.pixel, READOUT_TURN * share);
+
+            near(after.pixel[0], expected[0], 0.5);
+            near(after.pixel[1], expected[1], 0.5);
+            // And it is not a no-op: this much roll moves a sample by more
+            // than the 12 to 18 px the format study predicts for handheld
+            // motion, at the rows furthest from the middle of the readout.
+            worst = worst.max(norm([
+                after.pixel[0] - before.pixel[0],
+                after.pixel[1] - before.pixel[1],
+            ]));
+        }
+        assert!(worst > 8.0, "the whole roll moved a sample {worst} px");
+    }
+
+    /// The map is its own input, so what it answers has to satisfy itself:
+    /// the row the solve landed on is the row whose instant the solve used.
+    /// This is the residual [`READOUT_STEPS`] is chosen against, and it is
+    /// checked at rates past anything this footage flies.
+    #[test]
+    fn the_solved_landing_is_the_landing_its_own_row_implies() {
+        let camera = Camera::default();
+
+        for rate in [90.0f64, 250.0, 523.0] {
+            let turn = (rate * 0.015_883).to_radians();
+            let reframe = held(camera, rolling([0.0, turn * 0.3, turn]));
+            for phi in (0..360).step_by(45) {
+                let ray = direction(60.0, phi as f32);
+                let solved = reframe.project(0, ray);
+                // One more round of the same solve, which is what a converged
+                // answer does not move under.
+                let block = &reframe.lenses[0];
+                let share = reframe.readout_share(solved.pixel);
+                let again = reframe.mei(
+                    0,
+                    normalize(turned(
+                        block.lens_ray(ray),
+                        block.turn.map(|axis| axis * share),
+                    )),
+                );
+                let apart = norm([
+                    again.pixel[0] - solved.pixel[0],
+                    again.pixel[1] - solved.pixel[1],
+                ]);
+                assert!(apart < 2.5, "{rate} deg/s at {phi} moved {apart} px again");
+            }
+        }
+    }
+
+    /// The row-time mapping, per lens, where the answer is known: the sensor
+    /// reads across the delivered frame, so a ray landing left of centre came
+    /// off early and one landing right of it came off late.
+    ///
+    /// **And the two lenses read the same world direction at opposite ends of
+    /// their own readouts**, because lens 1 is mounted a half turn round. That
+    /// is why a readout displacement does not cancel at the seam but doubles
+    /// there, which is issue #7's open question and 4.9's reason for it.
+    #[test]
+    fn the_two_lenses_read_a_seam_direction_at_opposite_ends_of_the_readout() {
+        let reframe = held(Camera::default(), rolling([0.0; 3]));
+        let share = |lens: usize, ray| reframe.readout_share(reframe.project(lens, ray).pixel);
+
+        // Straight out the right of the body, which is on the seam circle and
+        // in both pictures.
+        near(share(0, [1.0, 0.0, 0.0]), 0.47, 0.03);
+        near(share(1, [1.0, 0.0, 0.0]), -0.47, 0.03);
+
+        for phi in (0..360).step_by(15) {
+            let ray = direction(90.0, phi as f32);
+            let (front, back) = (share(0, ray), share(1, ray));
+            assert!(
+                front * back <= 0.0,
+                "the seam at {phi} degrees is read at {front} of lens 0's readout and {back} of \
+                 lens 1's, which is the same end"
+            );
+        }
+    }
+
+    /// A file with no IMU record has nothing to correct with, and then the
+    /// pass is what it was before issue #9: not nearly the same landing, the
+    /// same landing.
+    #[test]
+    fn without_a_gyro_track_the_map_is_what_it_was() {
+        let camera = Camera {
+            yaw: 0.7,
+            pitch: -0.4,
+            ..Camera::default()
+        };
+        let reframe = held(camera, Held::default());
+
+        assert!(!reframe.is_rolling());
+        for lens in 0..MAX_LENSES {
+            for phi in (0..360).step_by(45) {
+                let ray = direction(70.0, phi as f32);
+                assert_eq!(
+                    reframe.project(lens, ray),
+                    reframe.mei(lens, normalize(reframe.lenses[lens].lens_ray(ray))),
+                );
+            }
+        }
+    }
+
+    /// A landing turned about its own lens's principal point, which is what a
+    /// roll about that lens's axis does to the picture.
+    fn turned_about(reframe: &Reframe, lens: usize, pixel: [f32; 2], angle: f64) -> [f32; 2] {
+        let block = &reframe.lenses[lens];
+        let (x, y) = (
+            f64::from(pixel[0] - block.cx),
+            f64::from(pixel[1] - block.cy),
+        );
+        let (sin, cos) = angle.sin_cos();
+        [
+            (x * cos - y * sin) as f32 + block.cx,
+            (x * sin + y * cos) as f32 + block.cy,
+        ]
+    }
+
     /// The size the WGSL struct rounds up to, which is what the bind group
     /// declares as `min_binding_size`: pipeline creation is where a
     /// disagreement between the two definitions surfaces.
     #[test]
     fn the_uniform_block_is_the_size_wgsl_lays_it_out() {
-        assert_eq!(std::mem::size_of::<LensBlock>(), 96);
-        assert_eq!(std::mem::size_of::<Reframe>(), 224);
+        assert_eq!(std::mem::size_of::<LensBlock>(), 112);
+        assert_eq!(std::mem::size_of::<Reframe>(), 272);
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {
