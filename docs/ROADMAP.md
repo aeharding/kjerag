@@ -372,6 +372,15 @@ into the same recording that land at the 99th or above: the fades hold.
 
 ## Decisions log
 
+- 2026-07-31 **The UI harness builds the binary it drives, every run**
+  (`scripts/uitest.sh`). It used to build only when `target/release/kyerag`
+  was missing, so a binary left over from before a `git revert` is what it
+  drove: the ball check failed twice on a tree whose source passes it four
+  runs out of four, and the capture it filed was the reverted design rather
+  than the restored one. A harness that reports on code it did not run is
+  worse than no harness, and cargo costs nothing when the binary is already
+  fresh. `KYERAG_BIN` stays the way to point it at a binary on purpose,
+  which is how the stale one was identified.
 - 2026-07-31 **The zoom out to the ball is one projection family, not a second
   projection** (issue #47). Perspective and tiny planet are two ends of
   `r = tan(shrink * theta) / shrink`: `shrink` 1 is rectilinear exactly,

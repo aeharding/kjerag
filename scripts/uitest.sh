@@ -96,8 +96,20 @@ for tool in cage wtype grim ffmpeg; do
 	command -v "$tool" >/dev/null || die "$tool is not installed (AGENTS.md, UI verification)"
 done
 
-bin=${KYERAG_BIN:-$root/target/release/kyerag}
-if [ ! -x "$bin" ]; then
+# The build is part of the run, not a fallback for a missing binary. Cargo
+# is a no-op on a fresh one, and the version that only built when the file
+# was absent drove whatever happened to be there instead: on 2026-07-31 a
+# binary built before a `git revert` failed the ball check for an hour while
+# the source it was meant to be checking passed on every run.
+#
+# KYERAG_BIN is the way to point the harness at a binary on purpose, which is
+# how that was measured, so it is taken as given and never rebuilt.
+if [ -n "${KYERAG_BIN:-}" ]; then
+	bin=$KYERAG_BIN
+	[ -x "$bin" ] || die "no binary at $bin (KYERAG_BIN)"
+	printf 'binary %s (KYERAG_BIN: not rebuilt)\n' "$bin"
+else
+	bin=$root/target/release/kyerag
 	printf 'building %s\n' "$bin"
 	(cd "$root" && cargo build --release) || die "the app did not build"
 	[ -x "$bin" ] || die "no binary at $bin"
@@ -397,7 +409,11 @@ more_report_lines() {
 # Presses one at a time and looks after each, because the zoom is a clamp
 # rather than a state: pressing past the end is free, and a dropped key
 # costs a press rather than the check.
-BALL_PRESSES=12
+# Measured on this harness's 1280x672 widget: the room reaches the patch on
+# the fifth press (90, 129, 185, 265, 380, 544 degrees, and the patch is off
+# the ball past about 403). wtype drops about one key in twenty, so the rest
+# is headroom, and the loop breaks on success so headroom costs nothing.
+BALL_PRESSES=20
 ROOM_SPREAD=4
 ROOM_DARK=60
 
