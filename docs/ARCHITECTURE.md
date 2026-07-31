@@ -8,8 +8,8 @@ render   wgpu: dmabuf import, one WGSL pass (NV12 -> RGB + Mei reprojection
          + seam blend), offscreen render for screenshots
 media    ffmpeg demux, dual VA-API HEVC decoders, frame clock, keyframe
          index, seek. No UI dependencies.
-meta     .insv trailer via telemetry-parser: per-lens Mei calibration,
-         gyro track, per-frame exposure. No UI dependencies.
+meta     .insv trailer, read directly: per-lens Mei calibration, gyro
+         track, per-frame exposure. No UI or ffmpeg dependencies.
 ```
 
 `media` and `meta` know nothing about the shell. The shell decision
@@ -79,6 +79,11 @@ AGPL-compatible) is the reference implementation. Static calibrated warp
 with a smooth blend; no optical flow (measured to not help). A reframed
 view centered near a lens axis contains no seam at all.
 
+`src/meta/` turns that string into a `CalibrationSet` whose pixel numbers
+are already in delivered-frame coordinates (3840x3840 per lens), not the
+15360x7680 side-by-side calibration canvas the file writes them on. The
+shader consumes them as they come; nothing downstream rescales.
+
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
 
@@ -96,5 +101,7 @@ a crash: build the diff-vs-Studio-export harness before trusting any of it.
   lines) vs winit + wgpu 30 (`texture_from_dmabuf_fd` exists). M0 decides.
 - Vignetting coefficients are not in the metadata; the seam band may show
   rolloff. Needs flat-field calibration if it bites.
-- The `roll ~= 90` field reading (vs `half_fov`) is unverified against a
-  rendered frame; verify during the first shader bring-up.
+- Slot 8 is `roll`, not `half_fov` (a ONE X2 puts -179.717 in it, and a
+  half-FOV cannot be negative). How to compose `yaw`/`pitch`/`roll` into
+  a rotation, signs included, is still unverified against a rendered
+  frame; settle it during the first shader bring-up.

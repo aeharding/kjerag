@@ -21,8 +21,9 @@ This matters for section 5: the projection math does not have to be
 re-derived from the Mei paper, though the paper and OpenCV's `omnidir`
 remain the better-documented description of the same model.
 
-`telemetry-parser`, which Kyerag uses to read the trailer, is MIT OR
-Apache-2.0 and imposes nothing.
+`telemetry-parser` is MIT OR Apache-2.0 and imposes nothing. Kyerag reads
+the trailer itself (see 4.6 for why) but transcribes that project's
+protobuf field tags, which is exactly what the licence permits.
 
 ## Confidence key
 
@@ -260,6 +261,18 @@ Independent corroboration on a non-Air X4 (firmware v1.4.8), from
 `version_word = 197632`. The grammar holds across both; the numbers do
 not, so **never hardcode a calibration, always read it from the file**.
 
+A second corroboration, this one first-hand: Kyerag read an
+`Insta360 ONE X2` capture (firmware `v1.0.62_build2`) on 2026-07-30. Same
+40-token shape, `lens_count = 2`, `xi = 1.72859`, `tz = -0.021103`
+(21.1 mm, a smaller body), `lensType 41`, canvas 6080 x 3040 against a
+2880 x 2880 delivered frame, `rolling_shutter_time` 23.52 ms, and
+`is_raw_gyro = false` so the older 56-byte gyro encoding. Lens 0's
+translation is exactly zero there too, which is the strongest single
+check that the field order is being read correctly. Note that the canvas
+slot (3040) is **wider than the delivered frame** (2880) on this camera,
+where on the X4 Air it is narrower: nothing may assume the ratio's
+direction.
+
 ### 4.3 What the numbers mean
 
 **`calib_w`/`calib_h` describe the side-by-side PAIR canvas, not one
@@ -298,8 +311,9 @@ tolerances and the extrinsics are **residuals against a nominal opposed
 arrangement**. Applying them as absolute poses points both lenses the
 same way. This is the easiest way to get lens 1 catastrophically wrong.
 
-**`roll ~ 90` is a deliberate 90-degree sensor rotation** plus tolerance
-(MED, see the caveat in 4.7).
+**`roll` is a deliberate sensor rotation** plus tolerance: about 90
+degrees on both X4 variants, about 180 and 0 on a ONE X2 (HIGH, 4.7). It
+is not a constant to assume.
 
 **The `version_word` encodes the offset version** (MED, two data points
 across two cameras): `132096 = (2 << 16) | 0x400` on `offset_v2`, and
@@ -339,11 +353,11 @@ Kyerag should read `offset_v3`, not `original_offset_v3`: if they ever
 differ, the adjusted one describes the glass that was actually in front
 of the sensor.
 
-### 4.6 Two telemetry-parser bugs that bite the X4 Air specifically
+### 4.6 Three telemetry-parser bugs that bite the X4 Air specifically
 
-**Confidence: HIGH.** Both derived by reading
+**Confidence: HIGH.** The first two derived by reading
 `telemetry-parser/src/insta360/mod.rs` against the fixture's
-`camera_type` of `Insta360 X4 Air`.
+`camera_type` of `Insta360 X4 Air`; the third measured on real footage.
 
 1. **Wrong IMU orientation.** The orientation table matches
    `Some("Insta360 X4")` and `Some("Insta360 X5")` exactly. `"Insta360
@@ -356,20 +370,44 @@ of the sensor.
    `c_ratio.x` becomes `3840 / 15360 = 0.25` and `cx` lands at 959.5
    instead of 1918.9.
 
+3. **The published crate aborts on this footage.** Version 0.2.6, the
+   newest on crates.io, serializes `ExtraMetadata`'s enum fields with
+   `unsafe { std::mem::transmute }` of the raw `i32`. The X4 Air capture
+   carries a 15 in a field whose enum stops below it, and the process
+   dies with `trying to construct an enum from an invalid value 0xf`
+   (measured 2026-07-30 against `~/Videos/VID_*.insv`). Upstream master
+   replaced the transmute with a `try_into` that falls back to the raw
+   integer, which is why the checked-in fixture shows `audio_mode` as the
+   number 9 rather than a name.
+
 Kyerag reads `offset_v3` directly rather than consuming the synthesized
-Gyroflow lens profile, so neither bug is on the critical path. The
-orientation string is worth handling ourselves regardless. Both are worth
-upstreaming.
+Gyroflow lens profile, so the first two bugs are not on its path either.
+Bug 3 is the one that decided the design: master is unpublished and pulls
+two further git forks, so Kyerag walks the trailer itself
+(`src/meta/trailer.rs`, section 2 above) and decodes record 1 with
+`prost`. All three are worth upstreaming.
 
 A third trap, not a bug because Gyroflow never hits it: the synthesized
 profile is **lens 0 only**, and `cx * c_ratio` does not subtract the
 half-canvas offset. Feed lens 1's `cx` through it and you get 5775
 instead of 1935.
 
-### 4.7 Open question on slot 8
+### 4.7 Slot 8 is roll, not half_fov (settled 2026-07-30)
 
-An independent X5 reverse-engineer labels slot 8 `half_fov` rather than
-`roll`. Both readings fit a value near 90.
+**Settled by a second camera.** The `Insta360 ONE X2` capture in 4.2 puts
+**-179.717** in slot 8 for lens 0 and 0.963 for lens 1, in a block whose
+other fields all read correctly (lens 0's translation is exactly zero,
+the canvas agrees between blocks). A half-FOV cannot be negative, so slot
+8 is `roll`. It also shows the value is not "about 90" in general: this
+camera's lenses are rolled about 180 degrees apart where the X4 Air's are
+90.534 and 89.076.
+
+What remains open is only the **sign and order convention** the shader
+must apply, which still wants a rendered frame.
+
+The original reasoning, kept because it is the argument for the X4 Air
+specifically: an independent X5 reverse-engineer labels slot 8 `half_fov`
+rather than `roll`, and both readings fit a value near 90.
 
 The evidence favours `roll`: a half-FOV of 90.53 degrees means a
 181-degree lens, which contradicts the ~200 to 204 degree FOV that
@@ -379,9 +417,7 @@ tolerance rather than an optical spec. `yaw` and `pitch` being sub-degree
 in the same block supports "these are tolerances, and 90 is a deliberate
 sensor rotation".
 
-Gyroflow uses it as roll. Kyerag assumes roll. **Verify against a
-rendered frame during first shader bring-up** (also tracked in
-ARCHITECTURE.md's open questions).
+Gyroflow uses it as roll, and so does Kyerag.
 
 ## 5. The projection model
 
@@ -756,8 +792,9 @@ word "insta360". Kyerag is filling real empty space.
 
 Ordered by how much they would cost us.
 
-1. **Slot 8: `roll` or `half_fov`.** Section 4.7. Verify at first shader
-   bring-up.
+1. **The sign and order convention for `yaw`/`pitch`/`roll`.** Slot 8 is
+   settled as roll (4.7); how to compose the three into a rotation is
+   not. Verify at first shader bring-up.
 2. **Vignetting coefficients are not in the metadata.** May show as
    rolloff in the blend band. Would need flat-field calibration.
 3. **`pts_type = VideoPtsEexposureFile` semantics.** If frame PTS really
@@ -769,8 +806,8 @@ Ordered by how much they would cost us.
 5. **`offset` vs `original_offset`.** Identical on our bare-camera
    fixture, so the hypothesis is untested. Would matter to anyone using
    lens guards or a dive case.
-6. **`lensType`.** 131 on the X4 Air, 71 on the non-Air X4, 113 in an X5
-   sidecar. No decoder table exists anywhere.
+6. **`lensType`.** 131 on the X4 Air, 71 on the non-Air X4, 41 on a ONE
+   X2, 113 in an X5 sidecar. No decoder table exists anywhere.
 7. **The 32-byte `padding` at the head of the footer.** Named
    `unknownBuf` by insvtools, copied through verbatim by everything.
 8. **An extended calibration sidecar.** On the X5, the SD card also
