@@ -88,7 +88,10 @@ looks at `default-members`, which is the app crate alone.
   2026-07-31): use libcosmic's stock widgets and the patterns of
   cosmic-files / cosmic-player / cosmic-edit (header bar, standard
   controls, system theming) rather than custom chrome. When in doubt, do
-  what a System76 first-party app would do.
+  what a System76 first-party app would do. Spending real time reading
+  the cosmic-player / cosmic-files / cosmic-edit sources and the COSMIC
+  HIG before building UI is encouraged (owner: "don't be afraid" of that
+  time); getting the idiom right beats shipping fast.
 
 ## Test media
 
