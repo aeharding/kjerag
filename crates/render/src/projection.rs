@@ -997,11 +997,12 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 ///
 /// The angles arrive as their cosines and stay there. Near the seam
 /// `cos(theta) = -sin(theta - 90 deg)`, so the difference of the two cosines
-/// **is** the difference of the two angles in radians, to a part in a million
-/// over the degree either side of the seam that the crossover lives in
-/// (`the_crossover_is_the_width_it_says_it_is`). Past that the clamp has
-/// closed and how it got there does not matter. No trig, and one fewer
-/// multiply than the `cos^2(theta / 2)` preference it replaces.
+/// **is** the difference of the two angles in radians, and what the third
+/// term of the sine costs at the edge of a 2 degree band is 0.00005 degrees
+/// of band width (`the_crossover_is_the_width_it_says_it_is` measures the
+/// band itself at 2.00). Past the band the clamp has closed and how it got
+/// there does not matter. No trig anywhere, and one multiply fewer than the
+/// `cos^2(theta / 2)` preference this replaces.
 ///
 /// WGSL twin: `crossover`.
 fn crossover(apart: f32, reach: f32) -> f32 {

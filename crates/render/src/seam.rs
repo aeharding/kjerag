@@ -78,14 +78,14 @@ const RUNAWAY_DEG: f64 = 10.0;
 
 /// How many azimuths have to correlate before a fit is believed.
 ///
-/// Twice the knob count. What is behind the number is the other half of
-/// [`KNOBS`]: three angles fitted on few patches come out **short** rather
-/// than wrong, which is measured rather than assumed -- on the thinnest file
-/// here, seven azimuths of near-field deck, the fitted rotation is 1.45
-/// degrees where the camera's own error is about 2.5, and applying it leaves
-/// less of the error than it started with at every azimuth. A five-parameter
-/// fit on the same seven patches does not have that property, which is why
-/// this bound can be low and why the knob list is what it is.
+/// Twice the knob count, which is low, and what lets it be low is the other
+/// half of [`KNOBS`]: three angles fitted on few patches come out **short**
+/// rather than wrong. On the thinnest file measured, seven azimuths of
+/// near-field deck, the fit is a 1.45 degree turn where the six other files
+/// put this camera's error near 2.5, and the turn left over after applying
+/// it is 2.1 degrees rather than the 2.5 it started with. The five-knob fit
+/// on those same seven patches asks for a 55 px principal point and the
+/// opposite yaw, which is not short, it is wrong.
 const PATCHES_NEEDED: usize = 6;
 
 // ------------------------------------------------------------ the ring
