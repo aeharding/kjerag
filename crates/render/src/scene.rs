@@ -29,7 +29,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kyerag_media::{Cue, Frames, Player, Reader, Stats};
+use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
 use kyerag_meta::{CalibrationSet, Lens};
 
 use super::projection::{self, MAX_LENSES, Reframe};
@@ -189,6 +189,11 @@ impl Scene {
             return Next::Never;
         }
         match (player.is_playing(), player.next_due()) {
+            // A seek is outstanding: the picture is about to change even
+            // though no clock is running towards it, so keep asking until it
+            // does. This is what makes a scrub visible while paused, and
+            // dragging the scrubber pauses.
+            (false, _) if player.is_seeking() => Next::Refresh,
             (false, _) => Next::Never,
             (true, Some(due)) => Next::At(due),
             // Playing, but the clock has nothing to measure from yet: the
@@ -201,6 +206,39 @@ impl Scene {
         if let Some(player) = self.player_mut() {
             player.toggle(now);
         }
+    }
+
+    pub fn play(&mut self) {
+        if let Some(player) = self.player_mut() {
+            player.play();
+        }
+    }
+
+    pub fn pause(&mut self, now: Instant) {
+        if let Some(player) = self.player_mut() {
+            player.pause(now);
+        }
+    }
+
+    /// Move the picture, to a keyframe while a drag is still going and to the
+    /// frame itself when it ends (issue #5).
+    pub fn seek(&mut self, to: Duration, accuracy: Accuracy) {
+        if let Some(player) = self.player_mut() {
+            player.seek(Cue::Time(to), accuracy);
+        }
+    }
+
+    /// One frame forward or back.
+    pub fn step(&mut self, now: Instant, frames: i64) {
+        if let Some(player) = self.player_mut() {
+            player.step(now, frames);
+        }
+    }
+
+    /// A seek has been asked for and has not landed. The shell keeps the
+    /// picture redrawing while this is true.
+    pub fn is_seeking(&self) -> bool {
+        self.player(Player::is_seeking).unwrap_or(false)
     }
 
     pub fn is_playing(&self) -> bool {

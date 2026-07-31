@@ -53,13 +53,13 @@ use cosmic::widget::about::About;
 use cosmic::widget::dnd_destination::dnd_destination_for_data;
 use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
-use cosmic::widget::{self, icon};
+use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Nudge, Scene, Stats};
+use kyerag_render::{Accuracy, Nudge, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
-use crate::key_bind::{Action, key_binds};
+use crate::key_bind::{Action, JUMP, key_binds};
 use crate::{menu, strings};
 
 /// Icons for the two jump buttons, which are not in the icon theme.
@@ -124,11 +124,19 @@ pub enum Message {
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
-    /// An action whose capability has not landed yet: the four seek and
-    /// frame-step items (issue #5) and the two frame ones (issue #15). They
-    /// are in the key map and in the menu so that the menu is complete and
-    /// draws their accelerators; this is what they do until then.
+    /// An action whose capability has not landed yet: the two frame ones
+    /// (issue #15). They are in the key map and in the menu so that the menu
+    /// is complete and draws their accelerators; this is what they do until
+    /// then.
     NotYet,
+    /// The scrubber was dragged to this position, in seconds.
+    Seek(f64),
+    /// The scrubber was let go.
+    SeekRelease,
+    /// Seconds to jump, forward or back.
+    SeekRelative(f64),
+    /// Frames to step, forward or back.
+    StepFrame(i64),
     /// Pointer input: the controls, the header bar and the cursor come back.
     ShowControls,
     /// A menu popup, which libcosmic runs as its own surface.
@@ -161,6 +169,11 @@ pub struct App {
     /// The theme names the settings dropdown shows, in its own order.
     themes: Vec<String>,
     controls: Controls,
+    /// Set while the scrubber is being dragged, to whether the file was
+    /// playing when the drag started. cosmic-player pauses for the drag and
+    /// restores the previous state on release (`src/main.rs:1325-1357`), and
+    /// so do we.
+    dragging: Option<bool>,
     fullscreen: bool,
     reported: Instant,
     /// The counters as of the last report, so each line covers its own five
@@ -231,6 +244,7 @@ impl cosmic::Application for App {
                 shown: true,
                 since: Instant::now(),
             },
+            dragging: None,
             fullscreen: false,
             reported: Instant::now(),
             counted: Stats::default(),
@@ -319,8 +333,49 @@ impl cosmic::Application for App {
                 // stay up long enough to see what it did.
                 self.show_controls(now);
             }
-            // Issues #5 and #15 are what make these do something.
+            // Issue #15 is what makes these do something.
             Message::NotYet => {}
+            Message::Seek(seconds) => {
+                let position = Duration::from_secs_f64(seconds.max(0.0));
+                let Some(open) = &mut self.open else {
+                    return Task::none();
+                };
+                if self.dragging.is_none() {
+                    self.dragging = Some(open.scene.is_playing());
+                    open.scene.pause(now);
+                }
+                // Where the drag is, not where the picture landed: a
+                // keyframe seek comes down up to a second early, and the
+                // label has to say what the pilot is pointing at.
+                open.position = position;
+                open.scene.seek(position, Accuracy::Keyframe);
+            }
+            Message::SeekRelease => {
+                let was_playing = self.dragging.take().unwrap_or(false);
+                if let Some(open) = &mut self.open {
+                    open.scene.seek(open.position, Accuracy::Exact);
+                    if was_playing {
+                        open.scene.play();
+                    }
+                }
+                self.show_controls(now);
+            }
+            Message::SeekRelative(seconds) => {
+                if let Some(open) = &mut self.open {
+                    // From the clock rather than from the label: with the
+                    // controls hidden nothing has refreshed the label since
+                    // they went.
+                    let to = shift(open.scene.position(now), seconds).min(open.duration);
+                    open.scene.seek(to, Accuracy::Exact);
+                }
+                self.show_controls(now);
+            }
+            Message::StepFrame(frames) => {
+                if let Some(open) = &mut self.open {
+                    open.scene.step(now, frames);
+                }
+                self.show_controls(now);
+            }
             Message::Quit => std::process::exit(0),
             Message::Report => self.report(now),
             Message::ShowControls => self.show_controls(now),
@@ -538,6 +593,12 @@ impl App {
     }
 
     fn read_clock(&mut self, now: Instant) {
+        // A drag owns the position while it lasts. The clock is showing the
+        // keyframe the scrub landed on, which is behind the drag by up to a
+        // GOP, and the label must follow the pilot's hand.
+        if self.dragging.is_some() {
+            return;
+        }
         if let Some(open) = &mut self.open {
             open.position = open.scene.position(now).min(open.duration);
         }
@@ -615,15 +676,15 @@ impl App {
         let mut buttons = widget::row::with_capacity(8)
             .align_y(Alignment::Center)
             .spacing(spacing.space_xxs)
-            // Seeking is issue #5: no `on_press` renders a button disabled,
-            // which is how the row can exist before the capability does.
-            .push(widget::button::icon(
-                icon::from_svg_bytes(JUMP_BACKWARD_ICON).symbolic(true),
-            ))
+            .push(
+                widget::button::icon(icon::from_svg_bytes(JUMP_BACKWARD_ICON).symbolic(true))
+                    .on_press(Message::SeekRelative(-JUMP)),
+            )
             .push(play_pause(open))
-            .push(widget::button::icon(
-                icon::from_svg_bytes(JUMP_FORWARD_ICON).symbolic(true),
-            ));
+            .push(
+                widget::button::icon(icon::from_svg_bytes(JUMP_FORWARD_ICON).symbolic(true))
+                    .on_press(Message::SeekRelative(JUMP)),
+            );
 
         if condensed {
             buttons = buttons.push(widget::space::horizontal());
@@ -719,27 +780,37 @@ fn play_pause(open: &Open) -> Element<'static, Message> {
 /// what is left rather than the total: for a 30-minute file that reads
 /// `00:12:34` and `00:17:26`.
 ///
-/// docs/UI.md's scrubber is a `Slider`, and this one is not yet: it shows the
-/// position and takes no input, because a slider that moves and seeks nothing
-/// is a broken control rather than an unfinished one. Issue #5 is where the
-/// drag becomes a seek to the nearest keyframe and the release an accurate
-/// one, and where this becomes the slider.
+/// Dragging it seeks to keyframes and letting go seeks to the frame, which
+/// is docs/UI.md's one deliberate deviation from cosmic-player: an accurate
+/// seek per slider tick, on a dual 3840x3840 HEVC file, is a decode of every
+/// frame since the last keyframe, twice, per pixel of drag.
 fn scrubber(open: &Open) -> [Element<'static, Message>; 3] {
-    let through = match open.duration.is_zero() {
-        true => 0.0,
-        false => (open.position.as_secs_f64() / open.duration.as_secs_f64()) as f32,
-    };
+    let seconds = |time: Duration| time.as_secs_f64();
     [
         widget::text(strings::clock(open.position))
             .font(font::mono())
             .into(),
-        widget::determinate_linear(through)
-            .width(Length::Fill)
-            .into(),
-        widget::text(strings::clock(open.duration - open.position))
+        Slider::new(
+            0.0..=seconds(open.duration),
+            seconds(open.position),
+            Message::Seek,
+        )
+        .step(0.1)
+        .on_release(Message::SeekRelease)
+        .into(),
+        widget::text(strings::clock(open.duration.saturating_sub(open.position)))
             .font(font::mono())
             .into(),
     ]
+}
+
+/// A position `seconds` away, which is a signed jump on an unsigned clock.
+fn shift(from: Duration, seconds: f64) -> Duration {
+    let by = Duration::from_secs_f64(seconds.abs());
+    match seconds < 0.0 {
+        true => from.saturating_sub(by),
+        false => from.saturating_add(by),
+    }
 }
 
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
