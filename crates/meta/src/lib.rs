@@ -1,9 +1,8 @@
 //! Everything Kyerag reads out of an `.insv` file that is not pixels.
 //!
-//! Today that is the lens calibration; the gyro track and the per-frame
-//! exposure records land here too (issues #8 and #12). No UI and no
-//! ffmpeg: this layer needs a file handle and the last few kilobytes of
-//! the file.
+//! Today that is the lens calibration and the two lenses' shutter tracks;
+//! the gyro track lands here too (issue #8). No UI and no ffmpeg: this
+//! layer needs a file handle and the last few megabytes of the file.
 //!
 //! ```no_run
 //! let calibration = kyerag_meta::CalibrationSet::from_insv("VID.insv")?;
@@ -15,11 +14,13 @@
 //! `docs/research/insv-format.md`.
 
 mod calibration;
+mod exposure;
 mod trailer;
 
 pub use calibration::{
     CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Pose, Size,
 };
+pub use exposure::{ExposureSample, ExposureTrack};
 
 /// Everything that can go wrong between an `.insv` path and a
 /// [`CalibrationSet`].

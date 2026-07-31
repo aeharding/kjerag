@@ -56,16 +56,17 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
   -> two single-plane wgpu textures per frame:
        R8Unorm  from layer 0 (luma,   DRM_FORMAT_R8)
        Rg8Unorm from layer 1 (chroma, DRM_FORMAT_GR88 - note GR, not RG)
-  -> single fragment pass: Mei-project the ray into BOTH lenses, take the
-     one whose optical axis it is nearer, sample that one's planes,
-     YUV->RGB, to swapchain at display resolution
+  -> single fragment pass: Mei-project the ray into BOTH lenses, weigh the
+     two, sample each lens that carries any of the pixel, YUV->RGB, to
+     swapchain at display resolution
 ```
 
 The shader consumes both lenses (issue #27), so a view anywhere on the
-sphere has a picture in it. One lens is *sampled* per output pixel, not
-two: the choice is a branch and the seam it leaves is hard. Issue #7 is
-what turns that branch into a weight, and nothing else has to move for it,
-because both lenses are bound and both landings are already computed.
+sphere has a picture in it, and it mixes them where they overlap (issue
+#7). Outside the overlap, which is everything but a 14-degree band around
+the seam, one lens weighs exactly 1 and the other exactly 0 and only the
+first is fetched: a pixel away from the seam costs what it cost before the
+blend, down to the bits it writes.
 
 No queue-family EXTERNAL acquire step is needed, on either wgpu version:
 `create_texture_from_hal` offers no hook for it, `TextureUses::
@@ -207,11 +208,37 @@ two lenses have to agree across the seam to settle.
 docs/research/insv-format.md 4.8 and 4.9 have the frames, the method and
 the tables.
 
-A ray is shown from the lens whose optical axis it is nearer, and from the
-other one where the nearer lens has run out of coverage. Nothing is shown
-from neither: the two 97.5-degree caps overlap by about 15 degrees, which
-is checked over the whole sphere by `cargo test` and over a 40-view sweep
-of real footage by counting the pixels the shader painted grey.
+Every ray is weighed against both lenses (issue #7), and the weights sum
+to 1 wherever anything has it. Each lens's claim is its **longitude
+preference** times its **coverage depth**:
+`cos^2(theta / 2) * (image_radius - landing_radius)`, zero where the ray
+is not in that lens's picture at all. The first factor puts the crossover
+on the seam great circle, where both lenses are at exactly 1/2, rather
+than wherever the two image circles happen to end. The second is a
+distance transform from the lens's own validity boundary, so a lens fades
+out as it runs out of picture and the rim of the image circle, which is
+where vignetting lands and where the distortion polynomial is least
+trustworthy, is down-weighted for nothing. Neither carries a feather
+width: the band that gets blended is the overlap itself, 83.4 to 97.4
+degrees off the front axis on the X4 Air, and the shape of the crossover
+comes out of the calibration rather than a constant.
+
+Nothing is shown from neither lens: the two 97.4-degree caps overlap by
+about 14 degrees, which is checked over the whole sphere by `cargo test`
+and over a 40-view sweep of real footage by counting the pixels the shader
+painted grey. Where one lens carries the ray alone its weight is written
+rather than divided out, because a GPU `x / x` is a reciprocal multiply
+and lands an ulp short: on RADV that ulp reached the picture as one code
+on 6 pixels of a million, which is enough to stop a one-stream file from
+rendering the bytes it used to.
+
+Exposure is **not** corrected. The trailer carries both lenses'
+per-frame shutter (records 4 and 12, parsed by `kyerag-meta` and kept
+apart), but the two lenses trade shutter against sensor gain to reach the
+same picture brightness, so that ratio is not a brightness ratio: applying
+the symmetric split it implies makes the step across the seam four to
+twenty times worse. Measured on two 30-minute captures;
+docs/research/insv-format.md 6.3 has the method and the table.
 
 The forward map exists twice, in `crates/render/src/projection.rs`: once in
 WGSL for the GPU and once in Rust so `cargo test` can check known angles
@@ -224,22 +251,39 @@ backward mapping per output pixel. No intermediate equirect, ever.
 
 ## Clock domains (the correctness minefield)
 
-Video PTS, `first_frame_timestamp` (us), gyro timestamps (us; divide by
-1000 twice when `is_raw_gyro`), `gyro_timestamp` offset when
-`is_has_gyro_timestamp`, per-lens exposure timestamps, and rolling-shutter
-row time (15.9 ms on the X4 Air). Failure mode is a swimming horizon, not
-a crash: build the diff-vs-Studio-export harness before trusting any of it.
+Video PTS, `first_frame_timestamp`, gyro timestamps, `gyro_timestamp`
+offset when `is_has_gyro_timestamp`, per-lens exposure timestamps, and
+rolling-shutter row time (15.9 ms on the X4 Air). Failure mode is a
+swimming horizon, not a crash: build the diff-vs-Studio-export harness
+before trusting any of it.
+
+One of those is now nailed down. **The trailer's tick is not always a
+microsecond**: `is_raw_gyro` selects it, and `first_frame_timestamp` is in
+whichever tick the file uses. The X4 Air sets the flag and writes
+microseconds; the ONE X2 does not and writes milliseconds, including in
+`first_frame_timestamp`. That is the "divide by 1000 twice" of the format
+study read as what it is, and it is measured against both cameras'
+exposure tracks in `kyerag_meta::ExposureTrack`. The gyro track will want
+the same `Clock`.
 
 ## Open questions
 
 - Vignetting coefficients are not in the metadata; the seam band may show
-  rolloff. Needs flat-field calibration if it bites.
+  rolloff. The weight field down-weights the rim it lands on, which may be
+  enough; flat-field calibration if it is not.
 - The **order** of `yaw`, `pitch` and `roll` within the lens pose. Their
   composition is settled (above); the order is not, and no known camera can
   distinguish it, because every one of them records sub-degree yaw and
   pitch (docs/research/insv-format.md 4.8).
-- What is left of the seam once the composition is right: 0.4 degrees along
-  the seam circle, and an across-seam disagreement that the measurement in
-  4.9 could not pin down. Neither is a convention left to choose; the
-  candidates are the reduced calibration model at the extreme edge, the
-  focal scale, and the angle order above. Issue #7's, with the blend.
+- What is left of the seam once the composition is right. Still open after
+  issue #7, and now with a reason it stayed open: re-measured on delivered
+  frames rather than rendered views, the along-seam residual is
+  consistently negative on every patch that correlates, -0.4 to -1.2
+  degrees, and the across-seam figure is dominated by two things that are
+  not calibration. Near-field parallax is one and is expected. The other is
+  **rolling shutter** (issue #9, uncorrected): the two lenses' rows run in
+  nearly opposite world directions, so the readout displacement does not
+  cancel between them, and the picture near the seam is only 15 px per
+  degree. An in-flight frame cannot separate the three. This wants a
+  capture from a camera that is not moving, or #9 landed first.
+  docs/research/insv-format.md 4.9 has the numbers.

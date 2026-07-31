@@ -1,5 +1,5 @@
-//! Reading the `.insv` trailer: find the metadata record, decode it,
-//! and touch nothing else.
+//! Reading the `.insv` trailer: find the records Kyerag wants, and touch
+//! nothing else.
 //!
 //! Format, from docs/research/insv-format.md section 2, where three
 //! independent implementations are recorded as agreeing byte for byte.
@@ -10,8 +10,19 @@
 //! `payload[size] | format u8 | id u8 | size u32`, so the 6-byte header
 //! trails its own payload and a reader walks headers from the end.
 //!
-//! Kyerag walks to record 1 and stops, so it never reads the GPS track
-//! (record 7) or the thumbnails at all.
+//! **The chain is not walkable on every camera.** On the X4 Air it runs
+//! out after three records: the trailer leaves slack between records (163
+//! to 250 KB on the captures measured), so walking back off the third one
+//! lands in the gap and reads a length out of nothing. Record 0 is an
+//! index of the whole trailer and sits last in the file, so the walk
+//! always reaches it before it can break, and everything past the third
+//! record is found through it. The ONE X2 writes no index and packs its
+//! records tight, where the walk alone gets all of them. Measured
+//! 2026-07-31 on five captures from the two cameras.
+//!
+//! Three records are read: 1, the metadata protobuf that carries the
+//! calibration, and 4 and 12, the two lenses' shutter tracks. The gyro
+//! (record 3, 35 MB) and the thumbnails are seeked over, never read.
 //!
 //! The `ExtraMetadata` field tags are transcribed from telemetry-parser's
 //! `src/insta360/extra_info.rs` (MIT OR Apache-2.0). Only the eleven
@@ -29,7 +40,20 @@ const MAGIC: &[u8] = b"8db42d694ccc418790edff439fe026bf";
 const FOOTER_LEN: i64 = 32 + 4 + 4 + 32;
 /// `format u8 | id u8 | size u32`, trailing its own payload.
 const RECORD_HEADER_LEN: i64 = 1 + 1 + 4;
+/// The index of the whole trailer: `id u8 | format u8 | size u32 |
+/// offset u32` per entry, the offset counted from the start of the
+/// trailer. Empty slots are written with a zero size.
+const INDEX_RECORD: u8 = 0;
+const INDEX_ENTRY_LEN: usize = 1 + 1 + 4 + 4;
 const METADATA_RECORD: u8 = 1;
+/// Lens 0's shutter track and lens 1's, in lens order.
+///
+/// They are two records and they stay two here. telemetry-parser reads
+/// both into one `GroupId::Exposure`, where the second silently replaces
+/// the first, which is why nothing downstream of it can tell the two
+/// lenses apart (docs/research/insv-format.md 6.3).
+const EXPOSURE_RECORDS: [u8; 2] = [4, 12];
+const BINARY: u8 = 0;
 const PROTOBUF: u8 = 1;
 
 /// The trailer fields Kyerag reads, named as the file names them.
@@ -124,56 +148,143 @@ fn offset_v3_from_fixture<'de, D: serde::Deserializer<'de>>(
 }
 
 impl CalibrationSet {
-    /// Read the calibration out of an `.insv` file.
+    /// Read the calibration and the shutter tracks out of an `.insv` file.
     ///
     /// Only the trailer at the end of the file is read, so a 37 GB
     /// capture costs the same as a small one.
     pub fn from_insv(path: impl AsRef<Path>) -> Result<Self, Error> {
         let mut file = std::fs::File::open(path)?;
-        let record = metadata_record(&mut file)?;
-        Self::from_metadata(&ExtraMetadata::decode(&*record)?)
+        Self::from_trailer(&read_trailer(&mut file)?)
     }
 }
 
-/// Walk the record chain backwards and return the payload of the
-/// metadata record.
-fn metadata_record<S: Read + Seek>(source: &mut S) -> Result<Vec<u8>, Error> {
+/// The payloads Kyerag reads out of one trailer.
+#[derive(Debug)]
+pub(crate) struct Trailer {
+    pub metadata: ExtraMetadata,
+    /// Records 4 and 12 as they came, one per lens and never merged.
+    /// Empty where the file has no such record, which is every camera
+    /// that writes one lens per file.
+    pub exposure: [Vec<u8>; EXPOSURE_RECORDS.len()],
+}
+
+/// Where one record sits in the file.
+#[derive(Clone, Copy)]
+struct Located {
+    id: u8,
+    format: u8,
+    at: i64,
+    size: i64,
+}
+
+fn read_trailer<S: Read + Seek>(source: &mut S) -> Result<Trailer, Error> {
     let file_len = source.seek(SeekFrom::End(0))? as i64;
+    let trailer_len = trailer_len(source, file_len)?;
+    let records = locate(source, file_len, file_len - trailer_len)?;
+
+    let metadata = find(&records, METADATA_RECORD, PROTOBUF).ok_or(Error::NoMetadata)?;
+    let metadata = ExtraMetadata::decode(&*read(source, metadata)?)?;
+
+    let mut exposure = [const { Vec::new() }; EXPOSURE_RECORDS.len()];
+    for (track, id) in exposure.iter_mut().zip(EXPOSURE_RECORDS) {
+        if let Some(record) = find(&records, id, BINARY) {
+            *track = read(source, record)?;
+        }
+    }
+    Ok(Trailer { metadata, exposure })
+}
+
+/// How many bytes back from EOF the trailer starts, read from the footer.
+fn trailer_len<S: Read + Seek>(source: &mut S, file_len: i64) -> Result<i64, Error> {
     if file_len < FOOTER_LEN {
         return Err(Error::NoTrailer);
     }
-
     let mut footer = [0u8; FOOTER_LEN as usize];
     source.seek(SeekFrom::End(-FOOTER_LEN))?;
     source.read_exact(&mut footer)?;
     if &footer[FOOTER_LEN as usize - MAGIC.len()..] != MAGIC {
         return Err(Error::NoTrailer);
     }
-    let trailer_len = u32::from_le_bytes([footer[32], footer[33], footer[34], footer[35]]) as i64;
-    if trailer_len > file_len {
-        return Err(Error::NoTrailer);
+    let len = u32::from_le_bytes([footer[32], footer[33], footer[34], footer[35]]) as i64;
+    match len > file_len {
+        true => Err(Error::NoTrailer),
+        false => Ok(len),
     }
+}
 
+/// Every record the trailer offers, index first and then whatever the
+/// backwards walk reached. The two agree wherever both have a record; see
+/// the module docs for why only one of them ever has all of them.
+fn locate<S: Read + Seek>(
+    source: &mut S,
+    file_len: i64,
+    trailer_start: i64,
+) -> Result<Vec<Located>, Error> {
+    let walked = walk(file_len, trailer_start, source)?;
+    let indexed = match find(&walked, INDEX_RECORD, BINARY) {
+        Some(record) => index(&read(source, record)?, file_len, trailer_start),
+        None => Vec::new(),
+    };
+    Ok([indexed, walked].concat())
+}
+
+/// The record chain, from the footer back to wherever it stops making
+/// sense.
+fn walk<S: Read + Seek>(
+    file_len: i64,
+    trailer_start: i64,
+    source: &mut S,
+) -> Result<Vec<Located>, Error> {
+    let mut found = Vec::new();
     // Distance back from EOF to the record header being read.
     let mut back = FOOTER_LEN + RECORD_HEADER_LEN;
-    while back < trailer_len {
+    while file_len - back > trailer_start {
         source.seek(SeekFrom::End(-back))?;
         let mut header = [0u8; RECORD_HEADER_LEN as usize];
         source.read_exact(&mut header)?;
-        let (format, id) = (header[0], header[1]);
         let size = u32::from_le_bytes([header[2], header[3], header[4], header[5]]) as i64;
-        if back + size > trailer_len {
+        let at = file_len - back - size;
+        if at < trailer_start {
             break;
         }
-        if id == METADATA_RECORD && format == PROTOBUF {
-            let mut payload = vec![0u8; size as usize];
-            source.seek(SeekFrom::End(-back - size))?;
-            source.read_exact(&mut payload)?;
-            return Ok(payload);
-        }
+        found.push(Located {
+            id: header[1],
+            format: header[0],
+            at,
+            size,
+        });
         back += size + RECORD_HEADER_LEN;
     }
-    Err(Error::NoMetadata)
+    Ok(found)
+}
+
+/// Record 0's payload, as records.
+fn index(payload: &[u8], file_len: i64, trailer_start: i64) -> Vec<Located> {
+    payload
+        .chunks_exact(INDEX_ENTRY_LEN)
+        .map(|entry| Located {
+            id: entry[0],
+            format: entry[1],
+            at: trailer_start + u32::from_le_bytes([entry[6], entry[7], entry[8], entry[9]]) as i64,
+            size: u32::from_le_bytes([entry[2], entry[3], entry[4], entry[5]]) as i64,
+        })
+        .filter(|record| record.at + record.size <= file_len)
+        .collect()
+}
+
+/// The first record of this id and format that has anything in it.
+fn find(records: &[Located], id: u8, format: u8) -> Option<Located> {
+    records
+        .iter()
+        .copied()
+        .find(|record| (record.id, record.format) == (id, format) && record.size > 0)
+}
+
+fn read<S: Read + Seek>(source: &mut S, record: Located) -> Result<Vec<u8>, Error> {
+    let mut payload = vec![0u8; record.size as usize];
+    source.seek(SeekFrom::Start(record.at as u64))?;
+    source.read_exact(&mut payload)?;
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -181,39 +292,98 @@ mod tests {
     use super::*;
     use crate::fixture;
     use std::io::Cursor;
+    use std::time::Duration;
 
-    /// A minimal `.insv`: some payload bytes standing in for the mp4,
-    /// then a decoy record, then the metadata record, then the footer.
-    fn synthetic_insv(metadata: &ExtraMetadata) -> Vec<u8> {
-        fn record(format: u8, id: u8, payload: &[u8]) -> Vec<u8> {
-            let mut out = payload.to_vec();
-            out.extend([format, id]);
-            out.extend((payload.len() as u32).to_le_bytes());
-            out
+    /// A minimal `.insv`: bytes standing in for the mp4, then a trailer of
+    /// records, then the footer.
+    #[derive(Default)]
+    struct Capture {
+        /// `(id, format, payload)` in file order.
+        records: Vec<(u8, u8, Vec<u8>)>,
+        /// Dead bytes written before each record. The X4 Air leaves 163
+        /// to 250 KB of it and the ONE X2 leaves none, and it is the
+        /// whole difference between a chain a reader can walk and one
+        /// that stops making sense after the records nearest the footer.
+        slack: usize,
+        /// Whether to write record 0, the index of everything else.
+        indexed: bool,
+    }
+
+    impl Capture {
+        /// What every camera writes: a gyro track that must be stepped
+        /// over rather than read, and the metadata record.
+        fn of(metadata: &ExtraMetadata) -> Self {
+            Self {
+                records: vec![
+                    (3, BINARY, vec![0xAB; 64]),
+                    (METADATA_RECORD, PROTOBUF, metadata.encode_to_vec()),
+                ],
+                ..Self::default()
+            }
         }
 
-        let mut trailer = record(0, 3, &[0xAB; 64]); // gyro, walked over
-        trailer.extend(record(PROTOBUF, METADATA_RECORD, &metadata.encode_to_vec()));
+        fn with(mut self, id: u8, payload: Vec<u8>) -> Self {
+            self.records.push((id, BINARY, payload));
+            self
+        }
 
-        let mut footer = vec![0u8; 32];
-        let extra_size = trailer.len() as u32 + FOOTER_LEN as u32;
-        footer.extend(extra_size.to_le_bytes());
-        footer.extend(3u32.to_le_bytes()); // version
-        footer.extend(MAGIC);
+        fn insv(&self) -> Vec<u8> {
+            let mut trailer = Vec::new();
+            let mut entries = Vec::new();
+            for (id, format, payload) in &self.records {
+                trailer.extend(std::iter::repeat_n(0xEE, self.slack));
+                entries.push((*id, *format, payload.len() as u32, trailer.len() as u32));
+                trailer.extend(header(*id, *format, payload));
+            }
+            if self.indexed {
+                let index: Vec<u8> = entries
+                    .iter()
+                    .flat_map(|(id, format, size, at)| {
+                        [&[*id, *format][..], &size.to_le_bytes(), &at.to_le_bytes()].concat()
+                    })
+                    .collect();
+                trailer.extend(header(INDEX_RECORD, BINARY, &index));
+            }
 
-        let mut file = b"not really an mp4".to_vec();
-        file.extend(trailer);
-        file.extend(footer);
-        file
+            let mut file = b"not really an mp4".to_vec();
+            file.extend(&trailer);
+            file.extend(vec![0u8; 32]);
+            file.extend((trailer.len() as u32 + FOOTER_LEN as u32).to_le_bytes());
+            file.extend(3u32.to_le_bytes()); // version
+            file.extend(MAGIC);
+            file
+        }
+    }
+
+    /// `payload | format | id | size`, the way the trailer stores one.
+    fn header(id: u8, format: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = payload.to_vec();
+        out.extend([format, id]);
+        out.extend((payload.len() as u32).to_le_bytes());
+        out
+    }
+
+    /// An exposure record: `{u64 timestamp, f64 shutter}` per sample, at
+    /// the X4 Air's microsecond timebase and frame interval.
+    fn shutters(shutters: &[f64]) -> Vec<u8> {
+        shutters
+            .iter()
+            .enumerate()
+            .flat_map(|(index, shutter)| {
+                let timestamp = 3_812_440u64 + 33_366 * index as u64;
+                [timestamp.to_le_bytes(), shutter.to_le_bytes()].concat()
+            })
+            .collect()
+    }
+
+    fn trailer_of(file: Vec<u8>) -> Result<Trailer, Error> {
+        read_trailer(&mut Cursor::new(file))
     }
 
     #[test]
     fn the_walk_skips_other_records_and_finds_the_metadata() {
         let expected = fixture::metadata();
-        let file = synthetic_insv(&expected);
-
-        let record = metadata_record(&mut Cursor::new(file)).unwrap();
-        let decoded = ExtraMetadata::decode(&*record).unwrap();
+        let decoded = trailer_of(Capture::of(&expected).insv()).unwrap().metadata;
 
         assert_eq!(decoded, expected);
         assert_eq!(decoded.camera_type, "Insta360 X4 Air");
@@ -222,11 +392,11 @@ mod tests {
 
     #[test]
     fn a_file_without_the_magic_is_not_a_trailer() {
-        let mut file = synthetic_insv(&fixture::metadata());
+        let mut file = Capture::of(&fixture::metadata()).insv();
         let last = file.len() - 1;
         file[last] = b'0';
 
-        let error = metadata_record(&mut Cursor::new(file)).unwrap_err();
+        let error = trailer_of(file).unwrap_err();
         assert!(matches!(error, Error::NoTrailer), "{error:?}");
     }
 
@@ -234,12 +404,12 @@ mod tests {
     fn a_trailer_without_a_metadata_record_says_so() {
         let mut metadata = fixture::metadata();
         metadata.camera_type = "decoy".into();
-        let mut file = synthetic_insv(&metadata);
+        let mut file = Capture::of(&metadata).insv();
         // Demote the metadata record to an unknown id.
         let id = file.len() - FOOTER_LEN as usize - 5;
         file[id] = 99;
 
-        let error = metadata_record(&mut Cursor::new(file)).unwrap_err();
+        let error = trailer_of(file).unwrap_err();
         assert!(matches!(error, Error::NoMetadata), "{error:?}");
     }
 
@@ -247,14 +417,85 @@ mod tests {
     /// protobuf -> trailer -> walk -> decode -> calibration.
     #[test]
     fn a_synthetic_capture_yields_the_fixture_calibration() {
-        let file = synthetic_insv(&fixture::metadata());
-        let record = metadata_record(&mut Cursor::new(file)).unwrap();
-        let calibration =
-            CalibrationSet::from_metadata(&ExtraMetadata::decode(&*record).unwrap()).unwrap();
+        let trailer = trailer_of(Capture::of(&fixture::metadata()).insv()).unwrap();
+        let calibration = CalibrationSet::from_trailer(&trailer).unwrap();
 
         assert_eq!(calibration.camera_model, "Insta360 X4 Air");
         assert_eq!(calibration.lenses.len(), 2);
         assert!((calibration.lenses[1].intrinsics.cx - 1935.35).abs() < 0.01);
+    }
+
+    /// Records 4 and 12 are two lenses and stay two. Reading them into one
+    /// key, as telemetry-parser does, leaves lens 0's shutters replaced by
+    /// lens 1's and no way to tell that has happened: here that would show
+    /// as both tracks reading 3 ms.
+    #[test]
+    fn the_two_lenses_shutter_tracks_do_not_overwrite_each_other() {
+        let file = Capture::of(&fixture::metadata())
+            .with(EXPOSURE_RECORDS[0], shutters(&[0.001, 0.002]))
+            .with(EXPOSURE_RECORDS[1], shutters(&[0.003, 0.004]))
+            .insv();
+
+        let calibration = CalibrationSet::from_trailer(&trailer_of(file).unwrap()).unwrap();
+        let shutter = |lens: usize| {
+            calibration.exposure[lens]
+                .samples()
+                .iter()
+                .map(|sample| sample.shutter_s)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(shutter(0), [0.001, 0.002]);
+        assert_eq!(shutter(1), [0.003, 0.004]);
+    }
+
+    /// A camera that writes one lens per file writes record 4 and no
+    /// record 12, and that is a file that opens rather than an error.
+    #[test]
+    fn a_file_with_one_lenss_track_leaves_the_other_empty() {
+        let file = Capture::of(&fixture::metadata())
+            .with(EXPOSURE_RECORDS[0], shutters(&[0.0065]))
+            .insv();
+
+        let calibration = CalibrationSet::from_trailer(&trailer_of(file).unwrap()).unwrap();
+
+        assert_eq!(calibration.exposure[0].samples().len(), 1);
+        assert!(calibration.exposure[1].is_empty());
+    }
+
+    /// The X4 Air's trailer, in miniature: slack between the records, so
+    /// the backwards walk steps off the record nearest the footer into
+    /// dead bytes and stops. Everything is still found, through the index.
+    /// Without the index this same file yields nothing but the record the
+    /// walk started on.
+    #[test]
+    fn a_chain_that_stops_short_is_read_through_the_index() {
+        let spaced = Capture {
+            slack: 64,
+            indexed: true,
+            ..Capture::of(&fixture::metadata())
+        }
+        .with(EXPOSURE_RECORDS[0], shutters(&[0.001]))
+        .with(EXPOSURE_RECORDS[1], shutters(&[0.003]));
+
+        let calibration =
+            CalibrationSet::from_trailer(&trailer_of(spaced.insv()).unwrap()).unwrap();
+        assert_eq!(calibration.camera_model, "Insta360 X4 Air");
+        assert_eq!(
+            calibration.exposure[0].shutter_at(Duration::ZERO),
+            Some(0.001)
+        );
+        assert_eq!(
+            calibration.exposure[1].shutter_at(Duration::ZERO),
+            Some(0.003)
+        );
+
+        let unindexed = Capture {
+            indexed: false,
+            ..spaced
+        };
+        let error = trailer_of(unindexed.insv()).unwrap_err();
+        assert!(matches!(error, Error::NoMetadata), "{error:?}");
     }
 
     /// The first `.insv` under `~/Videos`, or whatever
@@ -315,5 +556,40 @@ mod tests {
         assert_eq!(calibration.lenses[0].pose.translation_m, [0.0, 0.0, 0.0]);
         let baseline = calibration.lenses[1].pose.translation_m[2].abs();
         assert!((0.02..0.05).contains(&baseline), "baseline {baseline} m");
+
+        // Lens 0's shutter track is the one every camera writes. Its
+        // samples run one per frame, which is what says the timebase was
+        // read right: at the wrong one they land 1000x apart.
+        let track = &calibration.exposure[0];
+        assert!(!track.is_empty(), "no exposure record for lens 0");
+        let step = track.samples()[1].offset_us - track.samples()[0].offset_us;
+        assert!((20_000..60_000).contains(&step), "samples {step} us apart");
+
+        // And where the file has both, they are two tracks and not one:
+        // the shutters differ, which is the whole reason record 12 must
+        // not be read over record 4.
+        if calibration.exposure[1].is_empty() {
+            return;
+        }
+        let ratios: Vec<f64> = (0..60)
+            .filter_map(|second| {
+                let at = std::time::Duration::from_secs(second * 30);
+                Some(
+                    calibration.exposure[0].shutter_at(at)?
+                        / calibration.exposure[1].shutter_at(at)?,
+                )
+            })
+            .collect();
+        let worst = ratios
+            .iter()
+            .fold(1.0f64, |held, ratio| held.max(ratio.max(1.0 / ratio)));
+        println!(
+            "shutter ratio over the file: worst {worst:.3} across {} places",
+            ratios.len()
+        );
+        assert!(
+            worst > 1.05,
+            "the two lenses' shutters never differ, which is not a track per lens"
+        );
     }
 }
