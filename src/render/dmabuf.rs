@@ -49,39 +49,36 @@ pub fn force_extensions(args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_
     }
 }
 
-/// Which of [`REQUIRED`] this device is missing. Creating an image with a
-/// disabled extension's structures is undefined behavior rather than an
-/// error, so every import route checks this first.
-pub fn missing_extensions(device: &wgpu::Device) -> Fallible<Vec<&'static CStr>> {
+/// The first of [`REQUIRED`] this device does not have, if any. Creating an
+/// image with a disabled extension's structures is undefined behavior rather
+/// than an error, so this guards every import. It should never fire: the
+/// `[patch.crates-io]` entry in Cargo.toml exists to keep it quiet.
+pub fn missing_extension(device: &wgpu::Device) -> Fallible<Option<&'static CStr>> {
     let hal = unsafe { device.as_hal::<Vulkan>() }.ok_or("not a Vulkan device")?;
     let enabled = hal.enabled_device_extensions();
-    Ok(REQUIRED
-        .into_iter()
-        .filter(|name| !enabled.contains(name))
-        .collect())
+    Ok(REQUIRED.into_iter().find(|name| !enabled.contains(name)))
 }
 
 /// One line naming what this device can and cannot do, for the bring-up
 /// report. Cheap enough to print on every start.
 pub fn device_report(device: &wgpu::Device) -> String {
-    match missing_extensions(device) {
+    match missing_extension(device) {
         Err(e) => format!("dmabuf import: unavailable ({e})"),
-        Ok(missing) if missing.is_empty() => "dmabuf import: all extensions enabled".to_owned(),
-        Ok(missing) => {
-            let names: Vec<&str> = missing.iter().filter_map(|n| n.to_str().ok()).collect();
-            format!("dmabuf import: NOT enabled, missing {}", names.join(", "))
-        }
+        Ok(None) => "dmabuf import: all extensions enabled".to_owned(),
+        Ok(Some(name)) => format!(
+            "dmabuf import: NOT enabled, missing {}",
+            name.to_string_lossy()
+        ),
     }
 }
 
 /// Import one DRM_PRIME descriptor as two sampled textures.
 pub fn import(device: &wgpu::Device, desc: &AVDRMFrameDescriptor, luma: Size) -> Fallible<Planes> {
-    let missing = missing_extensions(device)?;
-    if !missing.is_empty() {
+    if let Some(name) = missing_extension(device)? {
         return Err(format!(
-            "device is missing {missing:?}; importing anyway is undefined behavior. \
-             Create the device through wgpu-hal's open_with_callback and \
-             dmabuf::force_extensions."
+            "device is missing {}; importing anyway is undefined behavior. The \
+             [patch.crates-io] wgpu entry in Cargo.toml is what enables it.",
+            name.to_string_lossy()
         )
         .into());
     }
