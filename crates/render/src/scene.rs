@@ -38,7 +38,7 @@ use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Corrected, SeamFit};
-use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
+use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
 const SAMPLER_BINDING: u32 = 1 + 2 * MAX_LENSES as u32;
@@ -108,8 +108,26 @@ pub struct Scene {
     /// (docs/UI.md, "The cursor"). One bit of shell state, and the only one
     /// this crate carries.
     cursor_hidden: bool,
-    /// A [`Nudge`] the `View` menu left for the widget, which is where iced
-    /// keeps the camera. Read once, by the next redraw.
+    /// Where the view points, and any drag that has hold of it.
+    ///
+    /// Here rather than in the shader widget's own `State`, which is where
+    /// iced would keep it and where issue #77 found it. Widget state lives in
+    /// the widget tree, and the tree is rebuilt from the shell's `view`
+    /// whenever the window changes shape. The header bar coming and going is
+    /// one of those changes -- libcosmic pushes it into the same column as
+    /// the content (`src/app/mod.rs:775`), so hiding it moves the content up
+    /// a place -- and it goes on entering fullscreen, on leaving it, and two
+    /// seconds after the pointer stops while a file plays. Measured
+    /// 2026-07-31 through the headless harness: with the bar pinned up every
+    /// one of those transitions held the view, and with it free each one put
+    /// the camera back to [`Camera::default`].
+    ///
+    /// The [`Scene`] is the shell's own, and the shell's own state outlives
+    /// its view. A [`Cell`] for the same reason the clock is one:
+    /// `shader::Program` hands out `&self` and nothing else.
+    viewpoint: Cell<Viewpoint>,
+    /// A [`Nudge`] the `View` menu left for the widget. Read once, by the
+    /// next redraw, which is where the output's shape is known.
     nudge: Cell<Option<Nudge>>,
     /// `View > Lock horizon`. Read on every redraw rather than taken, because
     /// it is a state and not an event.
@@ -242,6 +260,7 @@ impl Scene {
             started: Instant::now(),
             shutter: Shutter::default(),
             cursor_hidden: false,
+            viewpoint: Cell::new(Viewpoint::default()),
             nudge: Cell::new(None),
             horizon: Cell::new(Horizon::default()),
             clock: Cell::new(FrameClock::default()),
@@ -525,6 +544,21 @@ impl Scene {
 
     pub fn is_cursor_hidden(&self) -> bool {
         self.cursor_hidden
+    }
+
+    /// Where the view points, and whether a drag has hold of it.
+    pub fn viewpoint(&self) -> Viewpoint {
+        self.viewpoint.get()
+    }
+
+    /// Move the view, and hand back whatever the move answered. The widget's
+    /// mouse handling is the only caller: everything else asks through a
+    /// [`Nudge`].
+    pub(crate) fn steer<T>(&self, steer: impl FnOnce(&mut Viewpoint) -> T) -> T {
+        let mut viewpoint = self.viewpoint.get();
+        let answer = steer(&mut viewpoint);
+        self.viewpoint.set(viewpoint);
+        answer
     }
 
     /// Leave a view change for the widget to apply on its next redraw.
