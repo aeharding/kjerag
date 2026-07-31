@@ -116,9 +116,13 @@ error` (measured), so a GPU-less runner would be checking nothing.
   fix, and confirm through the coordinator that the reproduction matches
   what the owner saw (a rendered artifact or precise steps he can
   compare). A fix merges only with a regression test exercising the path
-  the owner actually used. Born of PR #51's same-day revert: a
-  filter-level unit test validated the agent's model of the bug, not the
-  bug, and the "fixed" defect survived on the owner's build.
+  the owner actually used, AND only after the owner has tested the fix
+  himself - the branch build is what he tests; main gets it after his
+  confirmation, never before. No exception for good-looking numbers.
+  Born of PR #51's same-day revert (a filter-level unit test validated
+  the agent's model of the bug, not the bug) and re-learned on PR #59
+  (merged on its measurements before the owner's retest, against his
+  explicit instruction).
 - UI copy: plain words, no em dashes.
 - UI design defers to COSMIC system apps best practice (owner doctrine,
   2026-07-31): use libcosmic's stock widgets and the patterns of
