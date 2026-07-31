@@ -56,7 +56,7 @@ fn main() -> Fallible<()> {
     let args: Vec<String> = std::env::args().collect();
     let input = PathBuf::from(
         args.get(1)
-            .ok_or("usage: playback <file.insv> [seconds] [hz] [shots] [yaw] [readout]")?,
+            .ok_or("usage: playback <file.insv> [seconds] [hz] [shots] [yaw] [readout] [fov]")?,
     );
     let seconds: u64 = parse(&args, 2, 60)?;
     let hz: u32 = parse(&args, 3, 60)?;
@@ -70,6 +70,10 @@ fn main() -> Fallible<()> {
     // not been measured, which is what the cost of switching it on is
     // measured through.
     let readout: String = parse(&args, 6, "file".to_owned())?;
+    // Degrees. A wide view is the one that puts a large area of both lenses on
+    // screen at once, which is where the cost of sampling two of them is
+    // largest (issue #10).
+    let fov: f32 = parse(&args, 7, Camera::default().fov.to_degrees())?;
 
     for lookahead in [0, 2, 4] {
         println!("{}", drain(&input, lookahead)?);
@@ -77,6 +81,7 @@ fn main() -> Fallible<()> {
     println!();
     let camera = Camera {
         yaw: yaw.to_radians(),
+        fov: fov.to_radians(),
         ..Camera::default()
     };
     play(
@@ -164,11 +169,13 @@ fn play(
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let refresh = Duration::from_secs_f64(1.0 / f64::from(hz));
     println!(
-        "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{} at yaw {:.0}",
+        "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{} at yaw {:.0}, \
+         fov {:.0}",
         run.as_secs(),
         OUTPUT.width,
         OUTPUT.height,
         camera.yaw.to_degrees(),
+        camera.fov.to_degrees(),
     );
 
     let start = Instant::now();

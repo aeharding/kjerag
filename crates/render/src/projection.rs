@@ -54,6 +54,31 @@ use super::{Camera, Size};
 /// happens once in half an hour.
 const READOUT_STEPS: usize = 1;
 
+/// How far past a lens's own coverage the pre-test that skips it still lets
+/// the model run, in degrees ([`LensBlock::axis_min`]).
+///
+/// It covers three things, none of them a feather width. The cap is solved
+/// for at [`CAP_AZIMUTHS`] azimuths and the boundary's widest direction can
+/// fall between two of them; the shader reads the ray's axis as a row of the
+/// mounting against the unnormalized ray while the model reads it off the
+/// normalized one; and the bisection stops a billionth of a cosine short.
+/// Measured on the X4 Air fixture, the first of those is 0.016 degrees on
+/// lens 0 and 0.007 on lens 1 and the other two are far below it
+/// (`the_cap_is_tight_against_the_support`), so half a degree is thirty times
+/// the worst of them. What it costs is 0.4% of the sphere in projections that
+/// turn out to weigh nothing.
+const CAP_MARGIN_DEG: f32 = 0.5;
+
+/// Azimuths the coverage cap is solved at.
+///
+/// The boundary is not a circle: `fx` and `fy` differ and the tangential
+/// terms are not radially symmetric at all, and on the X4 Air fixture it runs
+/// 0.47 degrees of spread on lens 0 and 0.66 on lens 1. Eight samples land
+/// within 0.02 degrees of its widest point anyway, which
+/// `the_cap_is_tight_against_the_support` measures rather than assumes, and
+/// [`CAP_MARGIN_DEG`] is what covers the rest.
+const CAP_AZIMUTHS: usize = 8;
+
 /// How many lenses one pass can sample.
 ///
 /// Every camera in the format study is a back-to-back pair, and the two
@@ -117,6 +142,19 @@ struct LensBlock {
     p1: f32,
     p2: f32,
     image_radius: f32,
+    /// The cosine of the widest angle off this lens's axis that can still be
+    /// in its picture, widened by [`CAP_MARGIN_DEG`] and by whatever the
+    /// readout turns the ray through (issue #10).
+    ///
+    /// A ray further off the axis than this weighs exactly nothing, so the
+    /// pass does not run the model for it: one dot product decides, and the
+    /// majority of the sphere that only one lens can see costs one projection
+    /// instead of two. It comes out of the calibration by solving the model's
+    /// own coverage boundary ([`coverage_floor`]), not out of a chosen angle:
+    /// the band it bounds is the overlap the weights already blend across.
+    ///
+    /// 2 for a slot with no picture in it, which no ray can reach.
+    axis_min: f32,
     /// The turn the body makes across one whole readout, in **this lens's**
     /// frame: a rotation vector, so a row's share of it is a multiplication
     /// (issue #9). Zero where there is no IMU record to read it from.
@@ -127,7 +165,7 @@ struct LensBlock {
     turn: [f32; 3],
     /// A uniform array's element stride rounds up to the element's 16-byte
     /// alignment. WGSL does that itself; `repr(C)` does not.
-    _pad: [f32; 2],
+    _pad: [f32; 1],
 }
 
 /// Where a view ray lands in one lens's image, in delivered-frame pixels.
@@ -149,10 +187,27 @@ pub struct Landing {
     pub depth: f32,
 }
 
+impl Landing {
+    /// A lens the pre-test skipped, which is a lens the model was never run
+    /// for (issue #10). Nothing reads it: it is paired with a weight of zero.
+    ///
+    /// WGSL twin: the zero-initialized `var landing: Landing` in `blend`.
+    pub const MISSED: Self = Self {
+        pixel: [0.0; 2],
+        inside: false,
+        axis: 0.0,
+        depth: 0.0,
+    };
+}
+
 /// How much of the picture at one output pixel comes from each lens, and
 /// where in each lens's frame it comes from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Blend {
+    /// Meaningful only where the matching weight is above zero. A lens a ray
+    /// cannot reach is [`Landing::MISSED`] rather than a projection of it,
+    /// because the whole point of issue #10's pre-test is that the model does
+    /// not run there.
     pub landings: [Landing; MAX_LENSES],
     /// One per lens, summing to 1 wherever any lens has the ray and all zero
     /// where none does.
@@ -279,22 +334,28 @@ impl Reframe {
     /// is exactly 1 (see [`share`]), so the pass takes the one sample the
     /// hard pick took before issue #7 and multiplies it by an exact one.
     ///
-    /// Every lens is projected, including a slot the file has no stream for,
-    /// so that the shader's loop runs a constant number of times. A loop
-    /// bounded by `lens_count` cannot be unrolled, and one that is not
-    /// unrolled indexes its arrays dynamically, which puts them in scratch
-    /// memory: measured on RADV 2026-07-31, that alone is 1.82 ms per redraw
-    /// against 1.68 at 2560x1440, more than the second texture fetch the
-    /// blend actually needs costs.
+    /// The loop still runs [`MAX_LENSES`] times whatever the file holds, and
+    /// the array writes in it are still unconditional, because a loop the
+    /// shader compiler cannot unroll indexes its arrays dynamically and they
+    /// go to scratch memory: measured on RADV 2026-07-31, that alone is 1.82
+    /// ms per redraw against 1.68 at 2560x1440, more than the second texture
+    /// fetch the blend actually needs costs. What is conditional is the
+    /// **model**: [`Self::within`] is one dot product and it decides whether
+    /// the projection runs at all (issue #10).
     ///
     /// WGSL twin: `blend`.
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
-        let landings = std::array::from_fn(|lens| self.project(lens, view_ray));
-        let mut weights: [f32; MAX_LENSES] =
-            std::array::from_fn(|lens| match lens < self.lens_count as usize {
-                true => claim(landings[lens]),
-                false => 0.0,
-            });
+        let mut landings = [Landing::MISSED; MAX_LENSES];
+        let mut weights = [0.0; MAX_LENSES];
+        for lens in 0..MAX_LENSES {
+            if !self.within(lens, view_ray) {
+                continue;
+            }
+            landings[lens] = self.project(lens, view_ray);
+            if lens < self.lens_count as usize {
+                weights[lens] = claim(landings[lens]);
+            }
+        }
         let total: f32 = weights.iter().sum();
         if total > 0.0 {
             for weight in &mut weights {
@@ -302,6 +363,27 @@ impl Reframe {
             }
         }
         Blend { landings, weights }
+    }
+
+    /// Whether this lens can have any of this ray, decided before the model
+    /// runs (issue #10).
+    ///
+    /// A lens's picture is one cap around its own axis, and
+    /// [`LensBlock::axis_min`] is how wide that cap is. The mounting is a
+    /// rotation, so the cosine the model would end up reading is one row of
+    /// it against the ray over the ray's own length, which is a dot product
+    /// and a compare against a division, a square root and a Mei evaluation.
+    /// It is a **conservative** test and not the weight field's own support:
+    /// false means the weight is exactly zero, true means it might not be.
+    /// That asymmetry is what keeps the picture the picture. A lens kept and
+    /// weighed zero is written and multiplied by nothing, which is what it
+    /// was before; a lens wrongly dropped would be a hole.
+    ///
+    /// WGSL twin: `within`.
+    pub fn within(&self, lens: usize, view_ray: [f32; 3]) -> bool {
+        let block = &self.lenses[lens];
+        let axis: f32 = (0..3).map(|c| block.view_to_lens[c][2] * view_ray[c]).sum();
+        axis >= block.axis_min * norm3(view_ray)
     }
 
     /// The forward map: a view ray, through one lens's extrinsics and the
@@ -364,49 +446,112 @@ impl Reframe {
         (across * self.row_axis[0] + down * self.row_axis[1]).clamp(-0.5, 0.5)
     }
 
-    /// The Mei/UCM model itself: a unit ray in one lens's own frame, to a
-    /// pixel of that lens's delivered frame.
+    /// The Mei/UCM model itself, for one of this block's lenses.
     ///
     /// WGSL twin: `mei`.
     fn mei(&self, lens: usize, p: [f32; 3]) -> Landing {
-        let lens = &self.lenses[lens];
+        mei(&self.lenses[lens], p)
+    }
+}
 
-        // The mirror parameter is why a ray past 90 degrees off axis still
-        // has a finite projection: it only needs `z + xi > 0`. On this
-        // camera family xi is above 1, so the guard never fires; it is here
-        // for a model where xi is smaller than 1.
-        let denom = p[2] + lens.xi;
-        let x = p[0] / denom;
-        let y = p[1] / denom;
+/// The Mei/UCM model itself: a unit ray in one lens's own frame, to a pixel
+/// of that lens's delivered frame.
+///
+/// Free of [`Reframe`] because [`coverage_floor`] runs it against a block
+/// that is still being built, before there is a `Reframe` to index.
+///
+/// WGSL twin: `mei`.
+fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
+    // The mirror parameter is why a ray past 90 degrees off axis still
+    // has a finite projection: it only needs `z + xi > 0`. On this
+    // camera family xi is above 1, so the guard never fires; it is here
+    // for a model where xi is smaller than 1.
+    let denom = p[2] + lens.xi;
+    let x = p[0] / denom;
+    let y = p[1] / denom;
 
-        let r2 = x * x + y * y;
-        let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
-        let xd = x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x);
-        let yd = y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y);
+    let r2 = x * x + y * y;
+    let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
+    let xd = x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x);
+    let yd = y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y);
 
-        let offset = [lens.fx * xd, lens.fy * yd];
-        // How far round the map can be believed, which is not as far as it
-        // answers. The distance from the principal point grows with the angle
-        // off the axis only up to `cos(theta) = -1/xi`; past that turning
-        // point it comes back down, re-enters the image circle, and a ray
-        // from behind the lens lands a second time on a pixel that belongs
-        // to a ray in front of it. That second landing is issue #30's ghost,
-        // a raw circular fisheye hanging behind the reframed view, and the
-        // radius test cannot see it because the fold puts it well inside the
-        // circle. Every lens needs it: with two of them the fold is a ghost
-        // of the other hemisphere, printed over a picture that is otherwise
-        // correct. Vacuous where xi is below 1: there is no turning point
-        // there, the radius runs away to infinity instead, and `denom` is the
-        // limit that binds.
-        let injective = p[2] * lens.xi > -1.0;
-        let depth = lens.image_radius - norm(offset);
-        Landing {
-            pixel: [offset[0] + lens.cx, offset[1] + lens.cy],
-            inside: denom > 0.0 && injective && depth > 0.0,
-            axis: p[2],
-            depth,
+    let offset = [lens.fx * xd, lens.fy * yd];
+    // How far round the map can be believed, which is not as far as it
+    // answers. The distance from the principal point grows with the angle
+    // off the axis only up to `cos(theta) = -1/xi`; past that turning
+    // point it comes back down, re-enters the image circle, and a ray
+    // from behind the lens lands a second time on a pixel that belongs
+    // to a ray in front of it. That second landing is issue #30's ghost,
+    // a raw circular fisheye hanging behind the reframed view, and the
+    // radius test cannot see it because the fold puts it well inside the
+    // circle. Every lens needs it: with two of them the fold is a ghost
+    // of the other hemisphere, printed over a picture that is otherwise
+    // correct. Vacuous where xi is below 1: there is no turning point
+    // there, the radius runs away to infinity instead, and `denom` is the
+    // limit that binds.
+    let injective = p[2] * lens.xi > -1.0;
+    let depth = lens.image_radius - norm(offset);
+    Landing {
+        pixel: [offset[0] + lens.cx, offset[1] + lens.cy],
+        inside: denom > 0.0 && injective && depth > 0.0,
+        axis: p[2],
+        depth,
+    }
+}
+
+/// The cosine of the widest angle off a lens's axis that can still be in its
+/// picture, widened so that no ray the model would have kept falls outside
+/// it. What [`LensBlock::axis_min`] holds, and issue #10's whole shader half.
+///
+/// It is **solved rather than stated**: the boundary is wherever the model's
+/// own landing leaves the image circle, which the calibration decides through
+/// the mirror parameter, the focal lengths and three radial coefficients. A
+/// number written here instead would be right for one camera.
+///
+/// The solve is a bisection, and what makes that legal is that a lens's
+/// picture is one cap: swept from its axis outwards, `inside` goes off once
+/// and stays off, which is issue #30's guard and
+/// `each_lens_picture_stops_once`.
+///
+/// It runs per redraw rather than once per file, because what it widens by is
+/// per frame, and it is cheap enough that keeping it beside the block it
+/// describes beats caching it: a whole [`Reframe::new`], both lenses solved,
+/// measured at 4.7 us against the 0.20 ms it takes off the pass.
+///
+/// `widen` is the readout's share, in radians: with issue #9's correction on,
+/// the model is handed a ray turned by up to half of `turn`, so the cap has
+/// to cover where that ray can land as well as where this one does.
+fn coverage_floor(block: &LensBlock, widen: f32) -> f32 {
+    // A slot with no picture in it, which is every lens past the file's own
+    // count: no ray is ever in it and none is worth projecting.
+    if !inside_anywhere(block, 1.0) {
+        return 2.0;
+    }
+    let (mut outside, mut inside) = (-1.0f32, 1.0f32);
+    for _ in 0..CAP_BISECTIONS {
+        let middle = 0.5 * (outside + inside);
+        match inside_anywhere(block, middle) {
+            true => inside = middle,
+            false => outside = middle,
         }
     }
+    let cap = outside.clamp(-1.0, 1.0).acos() + widen + CAP_MARGIN_DEG.to_radians();
+    cap.min(std::f32::consts::PI).cos()
+}
+
+/// Halvings of the coverage bisection. Thirty leaves a billionth of a cosine,
+/// which is a thousand times finer than the float the shader compares in.
+const CAP_BISECTIONS: usize = 30;
+
+/// Whether any direction this far off the lens's axis is in its picture. The
+/// boundary is not a circle, so this is the round of it that
+/// [`CAP_AZIMUTHS`] can see.
+fn inside_anywhere(block: &LensBlock, axis: f32) -> bool {
+    let rim = (1.0 - axis * axis).max(0.0).sqrt();
+    (0..CAP_AZIMUTHS).any(|step| {
+        let (sin, cos) = (step as f32 * std::f32::consts::TAU / CAP_AZIMUTHS as f32).sin_cos();
+        mei(block, [rim * cos, rim * sin, axis]).inside
+    })
 }
 
 /// One lens's unnormalized claim on a ray, which [`Reframe::blend`] weighs
@@ -511,7 +656,9 @@ impl LensBlock {
     /// A lens with no picture in it: `xi` of 1 keeps the denominator
     /// positive and a zero image radius puts every ray outside. What an
     /// unfilled slot holds, so that a stray index costs a grey pixel rather
-    /// than a garbage sample.
+    /// than a garbage sample, and since issue #10 not even that: an
+    /// [`Self::axis_min`] of 2 is a cap no ray can be inside, so the pass
+    /// skips the slot instead of projecting into it.
     const EMPTY: Self = Self {
         view_to_lens: [
             [1.0, 0.0, 0.0, 0.0],
@@ -529,14 +676,15 @@ impl LensBlock {
         p1: 0.0,
         p2: 0.0,
         image_radius: 0.0,
+        axis_min: 2.0,
         turn: [0.0; 3],
-        _pad: [0.0; 2],
+        _pad: [0.0; 1],
     };
 
     fn new(lens: &Lens, index: usize, frame: Size, camera: Camera, held: Held) -> Self {
         let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
         let distortion = lens.distortion;
-        Self {
+        let mut block = Self {
             view_to_lens: view_to_lens(&lens.pose, index, camera, held).columns(),
             xi: xi as f32,
             fx: fx as f32,
@@ -557,8 +705,16 @@ impl LensBlock {
             turn: held.rolling.map_or([0.0; 3], |rolling| {
                 lens_from_body(&lens.pose, index).mul_vec(rolling.turn.map(|axis| axis as f32))
             }),
-            _pad: [0.0; 2],
-        }
+            // Solved for below: the cap is a property of the model this block
+            // has just been filled with, and the readout it widens by is the
+            // `turn` above.
+            axis_min: 2.0,
+            _pad: [0.0; 1],
+        };
+        // Half of it, because `readout_share` runs -1/2 to +1/2 and the model
+        // is handed the ray turned by that share of the whole readout.
+        block.axis_min = coverage_floor(&block, 0.5 * norm3(block.turn));
+        block
     }
 
     fn lens_ray(&self, ray: [f32; 3]) -> [f32; 3] {
@@ -686,9 +842,15 @@ fn norm(v: [f32; 2]) -> f32 {
     v[0].hypot(v[1])
 }
 
+/// WGSL twin: `length` on a `vec3<f32>`, which is what `within` divides the
+/// ray's axis by. Written the same way round as [`normalize`] rather than as
+/// a `hypot` chain, so the two answer the same number.
+fn norm3(v: [f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
 pub(crate) fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    v.map(|component| component / length)
+    v.map(|component| component / norm3(v))
 }
 
 /// A 3x3 rotation, row major: `m[row][column]`, and `v_out = M * v_in`.
@@ -769,6 +931,9 @@ struct LensBlock {
   p1: f32,
   p2: f32,
   image_radius: f32,
+  // The cosine of the widest angle off this lens's axis that can still be in
+  // its picture. Rust twin: `LensBlock::axis_min`.
+  axis_min: f32,
   // The body's turn across one readout, in this lens's frame. Rust twin:
   // `LensBlock::turn`.
   turn_x: f32,
@@ -818,22 +983,48 @@ fn view_ray(uv: vec2<f32>) -> vec3<f32> {
 // zeroes the claim of a slot that has no stream rather than shortening the
 // loop. A loop this compiler cannot unroll indexes `out` dynamically, which
 // puts it in scratch memory and costs more than the blend does; the numbers
-// are on the Rust twin.
+// are on the Rust twin. The array writes stay unconditional for the same
+// reason; what `within` skips is the model, not the bookkeeping.
 fn blend(ray: vec3<f32>) -> Blend {
   var out: Blend;
   var total = 0.0;
-  for (var lens = 0u; lens < MAX_LENSES; lens += 1u) {
-    let landing = project(lens, ray);
-    out.landings[lens] = landing;
-    out.weights[lens] = select(0.0, claim(landing), f32(lens) < reframe.lens_count);
-    total += out.weights[lens];
+  let reach = length(ray);
+  for (var index = 0u; index < MAX_LENSES; index += 1u) {
+    let lens = reframe.lenses[index];
+    // Zero, which is `Landing::MISSED`: a lens the ray cannot reach is never
+    // projected and its landing is never read.
+    var landing: Landing;
+    var claimed = 0.0;
+    if within(lens, ray, reach) {
+      landing = project(lens, ray);
+      claimed = select(0.0, claim(landing), f32(index) < reframe.lens_count);
+    }
+    out.landings[index] = landing;
+    out.weights[index] = claimed;
+    total += claimed;
   }
   if total > 0.0 {
-    for (var lens = 0u; lens < MAX_LENSES; lens += 1u) {
-      out.weights[lens] = share(out.weights[lens], total);
+    for (var index = 0u; index < MAX_LENSES; index += 1u) {
+      out.weights[index] = share(out.weights[index], total);
     }
   }
   return out;
+}
+
+// Whether this lens can have any of this ray, before the model runs. Rust
+// twin: `Reframe::within`.
+//
+// The mounting is a rotation, so the cosine `mei` would read off the
+// normalized ray is one row of it against the ray over the ray's own length.
+// Multiplying the cap by the length rather than dividing keeps it to a dot
+// product and a compare. `reach` is the same for every lens.
+fn within(lens: LensBlock, ray: vec3<f32>, reach: f32) -> bool {
+  let axis = dot(vec3<f32>(
+    lens.view_to_lens[0].z,
+    lens.view_to_lens[1].z,
+    lens.view_to_lens[2].z,
+  ), ray);
+  return axis >= lens.axis_min * reach;
 }
 
 // One claim's share of all of them, the lone claimant's written rather than
@@ -866,8 +1057,7 @@ fn longitude(axis: f32) -> f32 {
 // computed: `READOUT_STEPS` rounds from the frame's own instant. The loop
 // runs a fixed number of times and the whole of it is behind one uniform
 // test, so a file with no IMU record costs what it cost before issue #9.
-fn project(index: u32, ray: vec3<f32>) -> Landing {
-  let lens = reframe.lenses[index];
+fn project(lens: LensBlock, ray: vec3<f32>) -> Landing {
   let aimed = lens.view_to_lens * ray;
   var landing = mei(lens, normalize(aimed));
   if reframe.row_axis_x != 0.0 || reframe.row_axis_y != 0.0 {
@@ -1300,6 +1490,235 @@ mod tests {
 
         near(*mixed.first().expect("nothing is mixed at all"), 83.2, 0.2);
         near(*mixed.last().expect("nothing is mixed at all"), 97.4, 0.2);
+    }
+
+    /// Issue #10's pre-test, and the only property it has to have: what it
+    /// drops, the weight field was going to weigh at zero anyway.
+    ///
+    /// Checked over the whole sphere at four cameras, because `within` reads
+    /// the ray in **view** space and the model reads it in the lens's, so a
+    /// composition that agreed only at yaw zero would pass a body-frame sweep
+    /// and put a hole in the picture the moment the view turned. The
+    /// consequence is stated as the weights rather than as `inside`: a weight
+    /// is what the shader multiplies a sample by.
+    #[test]
+    fn the_cap_never_drops_a_ray_a_lens_has() {
+        for camera in cameras() {
+            let reframe = fixture(camera);
+            for theta in 0..=720 {
+                for phi in 0..72 {
+                    let ray = direction(theta as f32 * 0.25, phi as f32 * 5.0);
+                    let weights = reframe.blend(ray).weights;
+                    for (lens, weight) in weights.iter().enumerate() {
+                        assert!(
+                            reframe.within(lens, ray) || *weight == 0.0,
+                            "lens {lens} is skipped at {} degrees off the front axis but weighs \
+                             {weight}",
+                            theta as f32 * 0.25,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// And the pass writes the same picture with it as without: the weights
+    /// are the same **bits**, not nearly the same numbers, because the ulp
+    /// guard in [`share`] exists for exactly this reason and a picture that
+    /// moved by one code would undo it.
+    ///
+    /// The reference is the loop as it was before issue #10: every lens
+    /// projected, whatever the cap says.
+    #[test]
+    fn skipping_a_lens_writes_the_weights_it_wrote_before() {
+        for camera in cameras() {
+            let reframe = fixture(camera);
+            for theta in 0..=720 {
+                for phi in 0..72 {
+                    let ray = direction(theta as f32 * 0.25, phi as f32 * 5.0);
+                    assert_eq!(
+                        reframe.blend(ray).weights,
+                        weighed_without_the_cap(&reframe, ray),
+                        "{} degrees off the front axis at phi {}",
+                        theta as f32 * 0.25,
+                        phi * 5,
+                    );
+                }
+            }
+        }
+    }
+
+    /// A ray past the readout as well: with issue #9's correction forced on
+    /// at a rate past anything this footage flies, the model is handed a ray
+    /// turned by up to half a readout, and the cap has to cover where **that**
+    /// ray lands rather than where this one does.
+    #[test]
+    fn the_cap_covers_the_ray_the_readout_turns_it_into() {
+        for rate in [90.0f64, 250.0, 523.0] {
+            let turn = (rate * 0.015_883).to_radians();
+            let reframe = held(Camera::default(), rolling([turn * 0.3, turn, turn * 0.6]));
+            for theta in 0..=720 {
+                for phi in 0..36 {
+                    let ray = direction(theta as f32 * 0.25, phi as f32 * 10.0);
+                    assert_eq!(
+                        reframe.blend(ray).weights,
+                        weighed_without_the_cap(&reframe, ray),
+                        "{rate} deg/s at {} degrees off the front axis",
+                        theta as f32 * 0.25,
+                    );
+                }
+            }
+        }
+    }
+
+    /// How much the cap costs, which is the other half of choosing it: rays
+    /// it keeps that turn out to weigh nothing.
+    ///
+    /// The two numbers this prints are what [`CAP_MARGIN_DEG`] and
+    /// [`CAP_AZIMUTHS`] are set from. The support's own boundary is not a
+    /// circle, and the spread between the widest and narrowest azimuth is the
+    /// error eight samples can make; the gap is that spread plus the margin,
+    /// and it is what the pass pays for.
+    #[test]
+    fn the_cap_is_tight_against_the_support() {
+        let reframe = fixture(Camera::default());
+
+        for lens in 0..MAX_LENSES {
+            let edges: Vec<f32> = (0..360)
+                .map(|phi| support_edge(&reframe, lens, phi as f32))
+                .collect();
+            let widest = edges.iter().copied().fold(f32::MIN, f32::max);
+            let narrowest = edges.iter().copied().fold(f32::MAX, f32::min);
+            let cap = reframe.lenses[lens].axis_min.acos().to_degrees();
+            // What eight azimuths missed: the cap without its margin against
+            // the widest azimuth of three hundred and sixty.
+            let missed = widest - (cap - CAP_MARGIN_DEG);
+            println!(
+                "lens {lens}: support {narrowest:.3} to {widest:.3} degrees ({:.3} of spread), \
+                 cap {cap:.3}, {:.3} past the widest, eight azimuths missed {missed:.3}",
+                widest - narrowest,
+                cap - widest,
+            );
+
+            assert!(cap > widest, "the cap {cap} is inside the support {widest}");
+            // The margin has to cover what the sampling missed, and be worth
+            // no more than that: everything between the two is projections
+            // that weigh nothing.
+            assert!(missed < 0.1, "eight azimuths missed {missed} degrees");
+            assert!(
+                cap - widest < CAP_MARGIN_DEG,
+                "the cap is {} degrees past the support",
+                cap - widest,
+            );
+        }
+    }
+
+    /// What the whole thing is for: looking down one lens's axis, no pixel of
+    /// the output runs the other lens's model at all.
+    ///
+    /// 90 degrees of field of view at 16:9, which is the app's default, and
+    /// the corners are the part of it nearest the other hemisphere.
+    #[test]
+    fn a_view_down_one_axis_projects_one_lens() {
+        let aspect = 16.0 / 9.0;
+        let reframe = Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            Camera::default(),
+            Held::default(),
+            aspect,
+            false,
+        );
+
+        for down in 0..=64 {
+            for across in 0..=64 {
+                let uv = [across as f32 / 64.0, down as f32 / 64.0];
+                let ray = reframe.view_ray(uv);
+                assert!(
+                    reframe.within(0, ray),
+                    "the front lens is skipped at {uv:?}"
+                );
+                assert!(
+                    !reframe.within(1, ray),
+                    "the back lens is projected at {uv:?}"
+                );
+            }
+        }
+    }
+
+    /// And a file with one stream never projects the slot that has no
+    /// picture in it, wherever it looks. That slot was projected on every
+    /// pixel before issue #10, for a weight of zero.
+    #[test]
+    fn an_empty_slot_is_never_projected() {
+        for camera in cameras() {
+            let reframe = one_lens(camera);
+            for theta in (0..=180).step_by(3) {
+                for phi in (0..360).step_by(15) {
+                    let ray = direction(theta as f32, phi as f32);
+                    assert!(!reframe.within(1, ray), "{theta} degrees, phi {phi}");
+                }
+            }
+        }
+    }
+
+    /// Four views that between them point the cap in every direction it can
+    /// be pointed: down a lens axis, along the seam, out the back, and off
+    /// both centre lines.
+    fn cameras() -> [Camera; 4] {
+        [
+            Camera::default(),
+            Camera {
+                yaw: std::f32::consts::FRAC_PI_2,
+                ..Camera::default()
+            },
+            Camera {
+                yaw: std::f32::consts::PI,
+                pitch: 0.3,
+                ..Camera::default()
+            },
+            Camera {
+                yaw: -0.7,
+                pitch: -1.1,
+                fov: 110f32.to_radians(),
+            },
+        ]
+    }
+
+    /// The blend as it was before issue #10: every lens projected, whatever
+    /// the cap says about it.
+    fn weighed_without_the_cap(reframe: &Reframe, ray: [f32; 3]) -> [f32; MAX_LENSES] {
+        let landings: [Landing; MAX_LENSES] =
+            std::array::from_fn(|lens| reframe.project(lens, ray));
+        let mut weights: [f32; MAX_LENSES] =
+            std::array::from_fn(|lens| match lens < reframe.lens_count as usize {
+                true => claim(landings[lens]),
+                false => 0.0,
+            });
+        let total: f32 = weights.iter().sum();
+        if total > 0.0 {
+            for weight in &mut weights {
+                *weight = share(*weight, total);
+            }
+        }
+        weights
+    }
+
+    /// The widest angle off this lens's own axis, at this azimuth of its own
+    /// frame, that the model still has a picture at. A hundredth of a degree
+    /// at a time, which is finer than the spread being measured by a factor
+    /// of five.
+    fn support_edge(reframe: &Reframe, lens: usize, phi: f32) -> f32 {
+        let block = &reframe.lenses[lens];
+        let (sin_phi, cos_phi) = phi.to_radians().sin_cos();
+        (0..18_000)
+            .map(|step| step as f32 * 0.01)
+            .take_while(|theta| {
+                let (sin, cos) = theta.to_radians().sin_cos();
+                mei(block, [sin * cos_phi, sin * sin_phi, cos]).inside
+            })
+            .last()
+            .expect("the lens has no picture at all")
     }
 
     /// Issue #30's guard, per lens: the picture each lens contributes is one

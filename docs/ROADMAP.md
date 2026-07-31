@@ -463,10 +463,25 @@ Sampling both lenses (issue #27) costs the pass about a quarter more, and
 nothing else: measured back to back against the same binary before the
 change, three runs each at 2560x1440, 1.26 to 1.48 ms/redraw with one lens
 against 1.59 to 1.90 with two, still 0 dropped and 0 starved either way.
-Every output pixel runs the Mei map twice, once per lens. Skipping the
-second projection where the first lands well inside its own hemisphere is
-the obvious saving and is not taken, because 1.7 ms of a 33 ms frame is
-not a problem yet (see also issue #10).
+Every output pixel ran the Mei map twice, once per lens; **since issue #10
+it runs it once wherever only one lens can have the ray**, which is most of
+the sphere. Three 30 s runs each side of the change, same binary, 2560x1440:
+
+| pass, ms/redraw       | before | after |
+| --------------------- | -----: | ----: |
+| yaw 0, fov 90         |   1.74 |  1.54 |
+| yaw 90, fov 90 (seam) |   1.81 |  1.66 |
+| yaw 45, fov 110       |   1.80 |  1.64 |
+
+0 dropped and 0 starved in all eighteen runs, 29.92 fps presented and 30.0
+redraws/s throughout, and eight rendered views are byte for byte what they
+were before. The seam view saves nearly as much as the axis view because a
+90-degree window on the seam is mostly not seam: the band is 14 degrees
+wide and everything either side of it drops a projection. The saving is
+smaller than issue #9's numbers suggest a Mei evaluation is worth, and that
+is the correction rather than a disappointment: the 1.11 ms a readout round
+costs is a `turned` (a sine, a cosine and a cross product), a normalize and
+a Mei, and the Mei is the cheap part of it.
 
 Blending them (issue #7) costs about a twentieth more again, and only a
 little of that is the second texture fetch. Three 60 s runs each of the

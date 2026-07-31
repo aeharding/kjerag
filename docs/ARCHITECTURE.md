@@ -56,9 +56,9 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
   -> two single-plane wgpu textures per frame:
        R8Unorm  from layer 0 (luma,   DRM_FORMAT_R8)
        Rg8Unorm from layer 1 (chroma, DRM_FORMAT_GR88 - note GR, not RG)
-  -> single fragment pass: Mei-project the ray into BOTH lenses, weigh the
-     two, sample each lens that carries any of the pixel, YUV->RGB, to
-     swapchain at display resolution
+  -> single fragment pass: Mei-project the ray into each lens that can have
+     it, weigh them, sample each lens that carries any of the pixel,
+     YUV->RGB, to swapchain at display resolution
 ```
 
 The shader consumes both lenses (issue #27), so a view anywhere on the
@@ -67,6 +67,17 @@ sphere has a picture in it, and it mixes them where they overlap (issue
 the seam, one lens weighs exactly 1 and the other exactly 0 and only the
 first is fetched: a pixel away from the seam costs what it cost before the
 blend, down to the bits it writes.
+
+Since issue #10 the second lens is not projected there either. Each lens's
+picture is one cap around its own axis, and how wide that cap is comes out of
+the calibration by solving the model's own coverage boundary
+(`coverage_floor`), so a ray further off the axis than that weighs exactly
+zero and one dot product says so before the model runs. The test is
+deliberately one-sided: a lens kept and weighed zero is written and
+multiplied by nothing, which is what it was before, and only a lens wrongly
+dropped would be a hole. Worth 0.20 ms of a 1.74 ms pass at a view inside one
+hemisphere and 0.15 of 1.81 across the seam, and every picture it writes is
+byte for byte the one the pass wrote before it.
 
 No queue-family EXTERNAL acquire step is needed, on either wgpu version:
 `create_texture_from_hal` offers no hook for it, `TextureUses::
