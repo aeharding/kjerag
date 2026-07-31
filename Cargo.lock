@@ -2887,6 +2887,7 @@ dependencies = [
  "open",
  "png 0.17.16",
  "serde",
+ "tokio",
  "url",
 ]
 

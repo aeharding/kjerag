@@ -18,3 +18,8 @@ url = { workspace = true }
 dirs = { workspace = true }
 jpeg-encoder = { workspace = true }
 png = { workspace = true }
+# The five second sleep a toast is taken away on. libcosmic's own toaster
+# dismisses on exactly this (`src/widget/toaster/mod.rs:183-196`) and its
+# `tokio` feature is in the default set we take, so this is the runtime the
+# app already runs on rather than a second one.
+tokio = { workspace = true }

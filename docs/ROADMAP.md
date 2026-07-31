@@ -37,7 +37,11 @@ picture on the clipboard as `image/png`. The capture is the window's own
 pipeline and bind group drawn a second time into a texture of the surface's
 format, so the numbers in the file are the numbers on the screen, and
 everything after the submit runs on a worker thread: 13 captures over 20 s
-of playback, zero dropped and zero starved in every report.
+of playback, zero dropped and zero starved in every report. **A capture says
+so**, in a toast built the way cosmic-files builds its own: `Frame saved to
+"Screenshots"`, `Frame copied to the clipboard`, or the reason it did not
+happen (docs/UI.md, "The capture toast"). 11 captures over 30 s of playback
+with the toasts in: zero dropped and zero starved in all six reports.
 
 **M1 is done.** The seam blend (issue #7) is the first M2 quality item and
 it has landed: where the two lenses overlap the pass mixes them by
@@ -358,9 +362,9 @@ into the same recording that land at the 99th or above: the fades hold.
   Full 360-degree look-around lands here too (issue #27): both lenses
   sampled, and the seam they left is blended by #7 in M2. The app shell
   around all of it is issue #16, seeking is issue #5, and screenshots are
-  issue #15. What is left of the MVP's UI is the two Settings rows for the
-  capture folder and resolution, and the toast that says where a still
-  went; both wait on docs/UI.md's open question about the wording.
+  issue #15, whose toast has since landed in cosmic-files' idiom
+  (docs/UI.md, "The capture toast"). What is left of the MVP's UI is the two
+  Settings rows for the capture folder and resolution.
 - **M2 Quality** — seam blend (issue #7, done: weight field in, exposure
   correction measured and rejected), gyro horizon lock (issue #8, done:
   complementary filter, `View > Lock horizon`, and a harness that measures
@@ -406,6 +410,35 @@ no commitment: export that follows the view the pilot actually flies
 live, no keyframe UI ever.
 
 ## Decisions log
+
+- 2026-07-31 **A capture reports itself at the top of the window, in a toast
+  drawn out of libcosmic's own pieces** (issue #15, docs/UI.md's open
+  question 2). cosmic-files is the only first-party app that uses toasts at
+  all, so its lines are the whole precedent and the wording, the 5 s, the
+  five-line stack, the tooltip container and its spacings, and the refusal
+  to carry an action unless it undoes something destructive are all its own
+  (`src/app.rs:1344-1358`, `toaster/mod.rs:33-63`, `79-85`, `162-181`). The
+  **placement is the owner's**, and it is a deviation from cosmic-files with
+  a reason: it puts its toasts at the bottom because the bottom of a file
+  manager is empty, and the bottom of this window is the transport. Shipped
+  over the scrubber first, and the owner found it.
+  `widget::toaster` cannot be moved: its overlay is laid out against the
+  bounds iced hands every overlay, which are the window's
+  (`toaster/widget.rs:199-215` against `user_interface.rs:228`), so it sits
+  15 px above the bottom of the window whatever it is mounted over. Mounting
+  it over a band at the top of the window was built and captured, and the
+  toast did not move. So the stack is a `Stack` layer over the picture,
+  which also gets the control row's overlay back
+  (`overlay::from_children` rather than `Toaster`'s replace-the-content's,
+  `toaster/widget.rs:137-162`). Two things that were measured rather than
+  assumed: the layer is mounted even when empty, because a tree that grows a
+  layer cost the toast five redraws before it reached the screen; and the
+  five seconds is a sleep on the async runtime as libcosmic's own is, not a
+  poll, because a 250 ms poll cost 3 to 6 redraws a second and dropped
+  frames in 2 of 18 report windows against 0 of 18 without it.
+  `scripts/uitest.sh` now asserts the placement instead of a reader having to
+  notice it: transient chrome must leave the header band and the control-row
+  band byte for byte identical, which the shipped-first placement fails.
 
 - 2026-07-31 **A capture is not always one file, and the ONE X2's IMU is
   not mounted like an X4's** (issue #79, owner-reported). Three symptoms on
