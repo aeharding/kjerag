@@ -194,6 +194,47 @@ measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
 as before, and the sound goes with it, because a preempted read stops
 without reading another packet and the seek behind it flushes the ring.
 
+**The zoom goes all the way out to the blue ball** (issue #47, owner ask). The
+scroll used to stop at 110 degrees, because that is where a flat window stops
+being one. It now keeps going: past that threshold the output projection bends
+out of perspective through **stereographic**, which is the **tiny planet**
+Insta360 names and the owner calls the blue ball, and on until the whole
+sphere is a ball with room around it. One
+family does the whole range, `r = tan(shrink * theta) / shrink`, with `shrink`
+running 1 to about 0.18, so nothing is switched over and there is nowhere to
+pop. The far end is where the ball fills 0.8 of the window's **shorter** side,
+which is 605 degrees of field of view on a 16:9 window and 406 on a square
+one, and past 360 the frame is simply wider than the sphere: that extra is the
+room the ball sits in, painted the same grey the pass has always painted where
+no lens has the ray. Ctrl+0 comes back in one press.
+
+Measured on real footage at 2560x1440 (`kyerag-spike --bin ball`): one scroll
+from 20 degrees to the ball, a notch at a time, rendered, and the largest
+single step is 64.3 codes at fov 402, with the largest growth of a step over
+the step before it 1.32x at fov 173 - against 1.15x inside the flat range this
+change did not touch, and nothing standing out at the threshold or at
+stereographic. Cost, interleaved across the range and three runs agreeing
+within 0.01 ms a cell, 0.71 ms/redraw at the default view against 0.81 at the
+ball, on a 33 ms frame; the flat range costs what it cost, `--bin zoom` off
+this branch against the same binary built off main, alternated on one box,
+within 0.04 ms a cell in both directions. Playback at the ball, with three
+3840 px captures taken during it: 29.97 fps presented, **0 dropped, 0
+starved**, and a still of the ball is byte for byte the ball. The drag took no new mathematics: it was
+already written against the projection's own rays rather than against a
+tangent, so it inverts whichever map the view is in, and grabbing the ball and
+turning it works because of that rather than despite it.
+
+What is **not** fixed is aliasing. Out wide the map minifies rather than
+magnifies (7.6 delivered texels to the output pixel at the middle of the
+ball), so issue #11's kernel correctly switches off and the pass is plain
+bilinear on a single mip level: against the same view supersampled 4x4 the
+ball is 4.1 codes out over the pixels that have picture and 107 at worst,
+against 1.1 and 11 at the default view. High-contrast edges will shimmer in a
+moving ball. A prefilter is the fix and it is deliberately not built yet: the
+imported dmabuf textures have one level and no room to generate another in
+place, so it means a downsample pass per frame per lens, for a view the player
+is in for a few seconds at a time. Numbers first, then the owner decides.
+
 M2 is done, except that #44 and #45 reopened against it. #45 is fixed above
 and waiting on the owner's retest; #44's symptom shared the same cause, and
 the owner can no longer reproduce it away from the start of a file, so it
@@ -258,7 +299,10 @@ into the same recording that land at the 99th or above: the fades hold.
   thread off the lookahead refill, 59 ms to 26 ms per scrub), high-quality
   zoom sampling (issue #11, done: a Catmull-Rom kernel on the luma plane
   wherever the map's own Jacobian says an output pixel has landed inside a
-  texel, and the chroma half of it measured and cut). **M2 is complete.**
+  texel, and the chroma half of it measured and cut), and the zoom out to the
+  tiny planet and the whole ball (issue #47, done: one projection family
+  from perspective through stereographic to a finite disc, capped where the
+  ball clears the window's shorter side). **M2 is complete.**
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
@@ -266,6 +310,26 @@ into the same recording that land at the 99th or above: the fades hold.
 
 ## Decisions log
 
+- 2026-07-31 **The zoom out to the ball is one projection family, not a second
+  projection** (issue #47). Perspective and tiny planet are two ends of
+  `r = tan(shrink * theta) / shrink`: `shrink` 1 is rectilinear exactly,
+  1/2 is stereographic exactly, and below that the sphere closes into a finite
+  disc. Blending two separately-written maps was the obvious alternative and
+  is worse in the way that matters, because the thing being asked for is that
+  there be no seam in the scroll: a family has no crossover to hide. The
+  schedule is `shrink = 110 degrees / fov`, which holds `shrink * fov / 2`
+  constant past the threshold - the frame keeps the half angle of the widest
+  flat view and the world shrinks into it - and that is not a taste: it is
+  what makes zooming out zoom out at every point of the frame, where a
+  smoothed schedule that overshoots hands back a scroll that reverses in the
+  middle (`the_picture_only_ever_shrinks`).
+- 2026-07-31 **The field of view is allowed past 360 degrees** (issue #47),
+  rather than capping there or switching to a second control. At 360 the
+  frame's edges are half a turn out and the sphere is exactly as wide as the
+  frame; the owner asked for the ball to sit in frame **with room around it**,
+  and room means the frame reaching further than the sphere does. Anything
+  else needs a second zoom parameter with a different meaning at the far end,
+  which is a worse thing to explain and a worse thing to test.
 - 2026-07-31 **The orientation filter starts only from a reading it would
   believe completely** (issue #45). The rule that covers every other sample
   covers the first one: the seed searches forward for the first
