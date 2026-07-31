@@ -8,14 +8,19 @@ bootstrapped, M0 done, and the picture moves.
 `cargo run --release -p kyerag-spike -- <file.insv>` decodes one 3840x3840
 lens on VA-API, imports the dmabuf planes into wgpu with no copy, and
 renders to PNG at 103 fps (3.4x realtime). `cargo run --release --
-<file.insv>` shows that frame in a libcosmic window, imported zero-copy
-onto the device iced created and reprojected inside iced's own render
-pass: the shell, the shader widget and the wgpu-28 import all confirmed on
-screen. M1 is under way: `crates/meta/` reads the trailer's calibration
+<file.insv>` plays the file in a libcosmic window, every frame imported
+zero-copy onto the device iced created and reprojected inside iced's own
+render pass: the shell, the shader widget and the wgpu-28 import all
+confirmed on screen. M1 is under way: `crates/meta/` reads the trailer's calibration
 (issue #2), the source tree is a workspace with one crate per layer
-(issue #19), and one lens is now reprojected through its Mei/UCM model with
-drag to look around and scroll to zoom (issue #3). Next: the playback core
-(issue #4), which is what turns one frame into moving pictures.
+(issue #19), one lens is reprojected through its Mei/UCM model with drag to
+look around and scroll to zoom (issues #3, #26), and the playback core plays
+it (issue #4): one demuxer, both lenses decoded in lockstep and delivered as
+pairs, a presentation clock that paces 29.97 fps content by due time, space
+to pause, and frames pullable by index or timestamp. Measured over 60 s of
+real footage: 29.94 fps presented, zero dropped, zero starved. Next:
+sampling the second lens in the shader (issue #27), which the pairs are
+already waiting for, and seek (issue #5) on the same pull API.
 
 ## Milestones
 
@@ -132,6 +137,23 @@ drag to look around and scroll to zoom (issue #3). Next: the playback core
   (`Viewpoint`), not in the app's model. Panning is a widget concern, the
   shell has no opinion about it, and no message round trip happens per
   mouse move.
+- 2026-07-31 The drag anchors and solves (issue #29). A press stores the
+  world direction under the cursor, and every move solves for the view that
+  puts that direction back under the cursor: height above the horizon fixes
+  the pitch, bearing then fixes the yaw. Stepping yaw and pitch by the
+  cursor's own movement is only grab-the-world near the middle of the view,
+  because near the pole a yaw turns about an axis nearly along the view
+  ray. The horizon stays level, so where an exact answer would need roll
+  the pitch clamps and the drag reads as a wall; and where a view pitched
+  near the vertical sees past the pole, the solve takes the tilt nearest
+  the one it is already at rather than the mirrored view that fits equally
+  well.
+- 2026-07-31 A ray is in the picture only where the Mei map stays one to
+  one, `cos(theta) > -1/xi`, as well as inside the image circle (issue
+  #30). Past that turning point the map folds rays from behind the camera
+  back inside the circle, which showed as a raw circular fisheye hanging
+  behind the reframed view. The bound comes out of the calibration's own
+  xi, so no maximum field of view has to be guessed at.
 
 - 2026-07-31 Frames are delivered in pairs, not one stream at a time
   (issue #4). `Frames` carries every video stream at one PTS, so the two
