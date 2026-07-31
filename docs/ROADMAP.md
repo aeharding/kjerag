@@ -20,9 +20,9 @@ lockstep and delivered as pairs, a presentation clock that paces 29.97 fps
 content by due time, space to pause, and frames pullable by index or
 timestamp. Measured over 60 s of real footage: 29.94 fps presented, zero
 dropped, zero starved. **The sphere is closed** (issue #27): the shader
-projects every ray into both lenses and samples the one whose optical axis
-it is nearer, so turning around shows the back hemisphere, upright and
-unmirrored, with a hard seam and an exposure step where the two meet. The
+projects every ray into both lenses, so turning around shows the back
+hemisphere, upright and unmirrored, and **the seam between them is
+blended** (issue #7), which is the first of M2. The
 window is a COSMIC app around it (issue #16, built to docs/UI.md): the menu
 bar in the header, a welcome view, the portal file chooser, drag and drop,
 recent files, the whole key map, fullscreen, Settings and About drawers, and
@@ -37,9 +37,22 @@ picture on the clipboard as `image/png`. The capture is the window's own
 pipeline and bind group drawn a second time into a texture of the surface's
 format, so the numbers in the file are the numbers on the screen, and
 everything after the submit runs on a worker thread: 13 captures over 20 s
-of playback, zero dropped and zero starved in every report. Next: the seam
-blend and exposure match (issue #7), which is what makes that seam
-disappear, and M1 is done.
+of playback, zero dropped and zero starved in every report.
+
+**M1 is done.** The seam blend (issue #7) is the first M2 quality item and
+it has landed: where the two lenses overlap the pass mixes them by
+longitude preference times coverage depth, with no feather width anywhere
+in it, and the hard line and the tone edge where the hemispheres met are
+gone. Near-field structure crossing the seam, which on this footage is the
+wing and the lines, ghosts softly instead of stepping, which is parallax
+and is the expected trade. Exposure is deliberately **not** corrected, and
+that is the finding rather than an omission: the trailer's two shutter
+records are parsed and kept apart (issue #7's other half, and the camera's
+own frame clock for #8), but measured over two 30-minute captures the
+brightness step at the seam is 0.9 to 3.5 percent while the shutter ratio
+swings 0.54 to 1.81, and applying the symmetric split those records imply
+makes the step four to twenty times worse. Next in M2: gyro horizon lock
+and the Studio-diff harness (issue #8).
 
 ## Milestones
 
@@ -52,14 +65,15 @@ disappear, and M1 is done.
   Reprojection and the mouse are done (issue #3), and so is playback:
   dual-stream decode, the presentation clock and play/pause (issue #4).
   Full 360-degree look-around lands here too (issue #27): both lenses
-  sampled, hard seam, which #7 blends in M2. The app shell around all of
-  it is issue #16, seeking is issue #5, and screenshots are issue #15.
-  What is left of the MVP's UI is the two Settings rows for the capture
-  folder and resolution, and the toast that says where a still went; both
-  wait on docs/UI.md's open question about the wording.
-- **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
-  lock (+ Studio-diff test harness), rolling-shutter correction,
-  hemisphere-aware decode gating, high-quality zoom sampling.
+  sampled, and the seam they left is blended by #7 in M2. The app shell
+  around all of it is issue #16, seeking is issue #5, and screenshots are
+  issue #15. What is left of the MVP's UI is the two Settings rows for the
+  capture folder and resolution, and the toast that says where a still
+  went; both wait on docs/UI.md's open question about the wording.
+- **M2 Quality** — seam blend (issue #7, done: weight field in, exposure
+  correction measured and rejected), gyro horizon lock (+ Studio-diff test
+  harness), rolling-shutter correction, hemisphere-aware decode gating,
+  high-quality zoom sampling.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback.
 
@@ -181,15 +195,50 @@ disappear, and M1 is done.
   xi, so no maximum field of view has to be guessed at. It is per lens: a
   fold in one lens is now a ghost printed over a picture the other lens is
   drawing correctly.
-- 2026-07-31 The pick between lenses is nearest axis, and it is a branch
-  rather than a blend (issue #27). One lens is sampled per output pixel,
-  which halves the texture fetches against sampling both and selecting; the
-  cost is a hard seam and an exposure step, and both are #7's. A lens that
-  has the ray beats one that does not, so the overlap covers a lens running
-  out of coverage before the halfway line, and nothing is left grey: the
-  two 97.5-degree caps overlap by about 15 degrees. The branch samples with
-  an explicit mip level, because a `textureSample` needs uniform control
-  flow to compute one and every imported texture has a single level anyway.
+- 2026-07-31 ~~The pick between lenses is nearest axis, and it is a branch
+  rather than a blend~~ (issue #27, superseded by #7 the same day). One lens
+  was sampled per output pixel, which halved the texture fetches; the cost
+  was a hard seam. Nothing is left grey either way: the two 97.4-degree caps
+  overlap by about 14 degrees. Sampling still uses an explicit mip level,
+  because a `textureSample` needs uniform control flow to compute one and
+  every imported texture has a single level anyway.
+- 2026-07-31 The lenses are mixed by `cos^2(theta/2) * (image_radius -
+  landing_radius)`, normalized (issue #7). Longitude preference times
+  coverage depth, which is the field docs/research/insv-format.md 6.6
+  recommends, and neither factor is a feather width: the band that gets
+  blended is the overlap itself, 83.4 to 97.4 degrees off the front axis,
+  and the rim of the image circle, where vignetting lands and where the
+  distortion polynomial is least trustworthy, is down-weighted for nothing.
+  The longitude factor is what puts the crossover on the seam great circle
+  rather than wherever the two image circles happen to end, which is 8 px
+  apart on the X4 Air.
+- 2026-07-31 Exposure is NOT corrected from the shutter records, and the
+  measurement is the reason (issue #7). The plan was the symmetric split
+  the format study recommended, `front /= sqrt(g)` and `back *= sqrt(g)`
+  for shutter ratio `g`. Measured first, on two 30-minute X4 Air captures
+  by comparing the mean luma of each lens's overlap annulus, which holds
+  the same world directions in both: the real step is 0.9 to 3.5 percent
+  and `g` swings 0.54 to 1.81, uncorrelated, and the split makes the step
+  14 to 20 percent. The two lenses trade shutter against sensor gain to
+  reach the same brightness, so `g` measures how differently the two
+  hemispheres are lit and not how differently they came out; the per-lens
+  gain that would complete the sum is not in the trailer. What is left,
+  three percent laid across a 14-degree band, is under the eye's threshold.
+  A measured luma ratio off the overlap band is the fallback and costs a
+  readback per frame: do not build it before a capture needs it.
+  docs/research/insv-format.md 6.3 has the method and the table.
+- 2026-07-31 The trailer is read through record 0's index, not by walking
+  (issue #7). Walking is not merely slower on the X4 Air: its trailer
+  leaves 163 to 250 KB of slack between records, so the chain stops making
+  sense after the three records nearest the footer and the exposure records
+  are unreachable. The ONE X2 writes no index and packs its records tight,
+  so the walk is still there for it, and where both exist they agree.
+- 2026-07-31 The blend's loop runs MAX_LENSES times whatever the file
+  holds, and the lens count zeroes a slot rather than shortening the loop
+  (issue #7). A loop the shader compiler cannot unroll indexes its local
+  arrays dynamically, which puts them in scratch memory: 1.82 ms per redraw
+  against 1.68 at 2560x1440, which is more than the blend's own second
+  texture fetch costs.
 - 2026-07-31 Lens 1's nominal arrangement is a half turn about the body's
   vertical, multiplied on the right of the block's own angles (issue #27,
   docs/research/insv-format.md 4.9). The file does not contain the flip at
@@ -304,11 +353,31 @@ Sampling both lenses (issue #27) costs the pass about a quarter more, and
 nothing else: measured back to back against the same binary before the
 change, three runs each at 2560x1440, 1.26 to 1.48 ms/redraw with one lens
 against 1.59 to 1.90 with two, still 0 dropped and 0 starved either way.
-Every output pixel now runs the Mei map twice, once per lens, and samples
-once. Sampling both and selecting afterwards would have cost the fetches
-too; skipping the second projection where the first lands well inside its
-own hemisphere is the obvious saving and is not taken, because 1.6 ms of a
-33 ms frame is not a problem yet (see also issue #10).
+Every output pixel runs the Mei map twice, once per lens. Skipping the
+second projection where the first lands well inside its own hemisphere is
+the obvious saving and is not taken, because 1.7 ms of a 33 ms frame is
+not a problem yet (see also issue #10).
+
+Blending them (issue #7) costs about a twentieth more again, and only a
+little of that is the second texture fetch. Three 60 s runs each of the
+same binary either side of the change, 2560x1440, at two views: yaw 0,
+which is down the front lens's axis and holds no seam at all, and yaw 90,
+which puts the seam down the middle of the picture.
+
+| pass, ms/redraw | yaw 0, no seam | yaw 90, seam through the middle |
+| --------------- | -------------: | ------------------------------: |
+| hard pick (#27) | 1.61 to 1.62   | 1.61 to 1.63                    |
+| blend (#7)      | 1.67 to 1.70   | 1.73 to 1.76                    |
+
+0 dropped and 0 starved in all twelve runs, 29.94 fps presented and 30.0
+redraws/s throughout. The seam costs 0.06 ms of that and the rest is
+structure: an earlier shape of the same shader, whose loop was bounded by
+the file's lens count and so could not be unrolled, measured 1.82 ms at
+yaw 0, because a loop that is not unrolled indexes its local arrays
+dynamically and they go to scratch memory. Away from the seam the pass
+takes the one texture fetch it always did, and writes the same bits: a
+one-lens ONE X2 file renders byte for byte what it rendered before the
+blend, at three yaws, and so does the front hemisphere of a two-lens file.
 
 The windowed app over the same 60 s: zero dropped and zero starved in
 every 5 s report, 30.0-30.2 redraws/s, 13.4% of one core and 295 MiB RSS

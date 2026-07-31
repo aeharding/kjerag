@@ -11,9 +11,11 @@
 //! The frames move (issue #4): a [`Player`] decodes both lenses on its own
 //! thread and this file asks it, on every redraw, which pair belongs on
 //! screen; [`ScenePipeline::prepare`] imports that pair and binds it. Both
-//! lenses are now sampled as well as imported, so the picture is the whole
-//! sphere (issue #27). The pass still samples one lens per pixel: the choice
-//! is a branch, not a blend, and the visible seam it leaves is issue #7's.
+//! lenses are sampled as well as imported, so the picture is the whole
+//! sphere (issue #27), and where the two overlap the pass mixes them by the
+//! weight field in [`super::projection`] rather than picking one (issue #7).
+//! Outside the overlap that weight is exactly 1 and the fetch is the single
+//! fetch it always was.
 //!
 //! [`Scene::pump`] takes `&self` and keeps the clock behind a [`RefCell`],
 //! which is not how a player would be written on its own. It is how iced's
@@ -822,21 +824,28 @@ fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
   return vec3<f32>(wave * uv.x, wave * uv.y, wave);
 }
 
-// What the lens that won has at that pixel, or grey where no lens had the
-// ray. Sampling every lens and selecting afterwards would double the texture
-// fetches; the explicit mip level is what makes the branch legal, because a
+// Each lens's picture at that ray, mixed by its weight, or grey where no lens
+// has the ray. A lens weighted zero is not sampled at all, so outside the
+// overlap this is the single fetch the hard pick took before issue #7, and
+// the second fetch is what the blend band costs.
+//
+// WGSL has no texture array to index here, so the lenses are named rather
+// than looped. The explicit mip level is what makes that legal: a
 // `textureSample` computes its own level from derivatives and needs uniform
-// control flow to do it. Every one of these textures has a single level, so
-// the two calls read the same texel.
-fn picture(chosen: Pick) -> vec3<f32> {
-  if !chosen.landing.inside {
-    return OUTSIDE_GRAY;
+// control flow to do it, and every one of these textures has a single level
+// anyway.
+fn picture(mix: Blend) -> vec3<f32> {
+  var rgb = vec3<f32>(0.0);
+  var total = 0.0;
+  if mix.weights[0] > 0.0 {
+    rgb += mix.weights[0] * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel));
+    total += mix.weights[0];
   }
-  let uv = frame_uv(chosen.landing.pixel);
-  if chosen.lens == 1u {
-    return nv12(luma1, chroma1, uv);
+  if mix.weights[1] > 0.0 {
+    rgb += mix.weights[1] * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel));
+    total += mix.weights[1];
   }
-  return nv12(luma0, chroma0, uv);
+  return select(OUTSIDE_GRAY, rgb, total > 0.0);
 }
 
 // BT.709 full range: ffprobe reports bt709 and the camera writes yuvj420p.
@@ -859,7 +868,7 @@ fn linearize(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  let lens = picture(pick(view_ray(in.uv)));
+  let lens = picture(blend(view_ray(in.uv)));
   let rgb = select(gradient(in.uv, reframe.elapsed), lens, reframe.has_frame > 0.5);
   return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), 1.0);
 }

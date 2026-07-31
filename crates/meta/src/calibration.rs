@@ -4,8 +4,9 @@
 //! Grammar, worked example and provenance for every constant here:
 //! `docs/research/insv-format.md` sections 3 and 4.
 
-use super::Error;
-use super::trailer::ExtraMetadata;
+use super::exposure::Clock;
+use super::trailer::{ExtraMetadata, Trailer};
+use super::{Error, ExposureTrack};
 
 /// `offset_v3` is `lens_count`, then this many fields per lens, then a
 /// version word. The field order inside a block is fixed:
@@ -20,8 +21,9 @@ pub struct Size {
     pub height: u32,
 }
 
-/// The camera's geometric self-description, read from the `.insv`
-/// trailer.
+/// What the `.insv` trailer says about the camera and the capture: the
+/// geometry the shader reprojects with, and the clocks and shutters the
+/// rest of it is timed by.
 ///
 /// Every pixel quantity in here is in the coordinate system of the
 /// **delivered per-lens frame** ([`Self::dimension`]; 3840x3840 on the
@@ -47,6 +49,14 @@ pub struct CalibrationSet {
     /// it is not optional.
     pub rolling_shutter_ms: f64,
     pub gyro: GyroConfig,
+    /// One shutter track per lens, in lens order, from trailer records 4
+    /// and 12. Empty for a lens the file carries no record for, which is
+    /// lens 1 on every camera that writes one lens per file.
+    ///
+    /// Read [`ExposureTrack`]'s own note before reaching for these to
+    /// match brightness across the seam: measured on real captures, they
+    /// do not say what they look like they say.
+    pub exposure: [ExposureTrack; 2],
     /// The canvas the file's own numbers were expressed on, kept so the
     /// conversion in [`Intrinsics`] stays auditable. Nothing downstream
     /// needs it.
@@ -144,8 +154,13 @@ pub struct GyroConfig {
     /// sensor axis feeds x, y and z, uppercase meaning negated. See
     /// [`imu_orientation`].
     pub imu_orientation: &'static str,
-    /// `first_frame_timestamp`, the clock origin in microseconds.
-    pub first_frame_timestamp_us: i64,
+    /// `first_frame_timestamp`, the clock origin, in the trailer's own
+    /// ticks and **not** always microseconds: `is_raw_gyro` selects the
+    /// tick, as it does for the exposure records ([`super::ExposureTrack`],
+    /// where the two readings are measured against real captures). The
+    /// X4 Air writes 3812440 here and the ONE X2 writes 4254, for files
+    /// whose first frames are 3.8 s and 4.3 s in.
+    pub first_frame_timestamp: i64,
     /// `gyro_timestamp`, the gyro-to-video offset, applied as
     /// `t -= gyro_timestamp / 1000` at the end of the clock chain in
     /// docs/research/insv-format.md 8.3. `None` when the file says not
@@ -169,8 +184,25 @@ pub enum GyroEncoding {
 }
 
 impl CalibrationSet {
+    /// Interpret the records the trailer handed over.
+    pub(crate) fn from_trailer(trailer: &Trailer) -> Result<Self, Error> {
+        let clock = Clock {
+            ticks_per_second: match trailer.metadata.is_raw_gyro {
+                true => 1_000_000,
+                false => 1_000,
+            },
+            first_frame: trailer.metadata.first_frame_timestamp,
+        };
+        Ok(Self {
+            exposure: std::array::from_fn(|lens| {
+                ExposureTrack::parse(&trailer.exposure[lens], clock)
+            }),
+            ..Self::from_metadata(&trailer.metadata)?
+        })
+    }
+
     /// Interpret the trailer's metadata record.
-    pub(crate) fn from_metadata(metadata: &ExtraMetadata) -> Result<Self, Error> {
+    fn from_metadata(metadata: &ExtraMetadata) -> Result<Self, Error> {
         let dimension = {
             let d = metadata
                 .dimension
@@ -236,6 +268,7 @@ impl CalibrationSet {
             lenses,
             rolling_shutter_ms: metadata.rolling_shutter_time,
             gyro: GyroConfig::from_metadata(metadata),
+            exposure: Default::default(),
             calibration_canvas: canvas,
         })
     }
@@ -261,7 +294,7 @@ impl GyroConfig {
         Self {
             encoding,
             imu_orientation: imu_orientation(&metadata.camera_type),
-            first_frame_timestamp_us: metadata.first_frame_timestamp,
+            first_frame_timestamp: metadata.first_frame_timestamp,
             gyro_timestamp: match metadata.is_has_gyro_timestamp {
                 true => Some(metadata.gyro_timestamp),
                 false => None,
@@ -482,7 +515,7 @@ mod tests {
                 gyro_range_dps: 2000.0
             }
         );
-        assert_eq!(gyro.first_frame_timestamp_us, 3_848_400);
+        assert_eq!(gyro.first_frame_timestamp, 3_848_400);
         assert_eq!(gyro.gyro_timestamp, Some(1.6));
     }
 

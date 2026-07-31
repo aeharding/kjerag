@@ -109,7 +109,23 @@ id u8 | format u8 | size u32 LE | offset u32 LE
 where `offset` is relative to `extra_start`. exiftool unpacks `format`
 and `id` as a single little-endian u16, which is why its documentation
 and warnings say `0x300` and `0x700` where everything else says 3 and 7.
-Same bytes, different reading.
+Same bytes, different reading. Entries with a zero size are empty slots.
+
+**"Instead of walking" is not a preference (measured 2026-07-31, issue
+#7).** On the X4 Air the chain is not walkable at all past the third
+record. Its trailer leaves slack between records, 163 to 250 KB of it on
+the three captures measured, so a reader that steps off the front of a
+record lands in the gap and reads a length out of nothing. The three
+records nearest the footer are packed tight and the walk gets those: 0
+(the index), 1 (the metadata) and 2 (the thumbnail), in that order. The
+gyro, both exposure records and everything else are reachable only
+through the index. Where both have a record they agree byte for byte.
+
+The ONE X2 writes no index record and packs its trailer tight, and there
+the walk alone reaches all of 1, 2, 3, 4, 5, 9 and 10. So a reader needs
+both: walk from the footer, and if a record 0 turns up in the first few
+steps, use it for the rest. The X4 Air also carries ids 11, 22, 27, 28
+and 29, none of which is in any published table.
 
 ### Record type ids
 
@@ -121,12 +137,12 @@ From `telemetry-parser/src/insta360/record.rs`:
 | 1 | **Metadata** | protobuf `ExtraMetadata`, holds the calibration |
 | 2 | Thumbnail | a single H.264 frame |
 | 3 | **Gyro** | IMU samples, two encodings (section 8) |
-| 4 | **Exposure** | `{u64 ts_us, f64 shutter}` per sample, lens 0 |
+| 4 | **Exposure** | `{u64 ts, f64 shutter}` per sample, lens 0 |
 | 5 | ThumbnailExt | a single H.264 frame |
 | 6 | TimelapseTimestamp | `u64` timestamps |
 | 7 | GPS | 53 bytes per fix |
 | 8 | StarNum | unknown, 11 bytes per record |
-| 9 | AAAData | 48 bytes: EV target, exposure time, bit-packed ISO and luma stats |
+| 9 | AAAData | 48 bytes; see below, the published description does not fit the X4 Air |
 | 10 | Anchors | highlight markers |
 | 11 | AAASimulation | unknown |
 | 12 | **ExposureSecondary** | same shape as 4, lens 1 |
@@ -146,7 +162,19 @@ on the Ace Pro.
 it is a pre-integrated orientation track, and horizon lock skips gyro
 integration and drift entirely. Nobody has decoded them. Cheap to check:
 `gyro2bb --dump` prints `Unknown Insta360 record: 18` with a hex dump if
-it is there.
+it is there. Neither is present on any X4 Air or ONE X2 capture here.
+
+**Record 9 is one track, not one per lens (measured 2026-07-31).** On an
+X4 Air capture it is 54024 samples of 48 bytes for 53940 frames, i.e. one
+per frame, and it is written once for the file. Read as twelve `u32` LE
+each sample is `ts_ms, 0, 0, 0, 0x02000000, a, b, 0, 0, 0, 0, 0`, with
+the timestamp in milliseconds whatever the timebase of records 3, 4 and
+12, and `a` near 2040 and `b` near 5950 on the frames sampled. The
+published reading, "EV target, exposure time, bit-packed ISO and luma
+stats", does not fit those bytes. It matters because a per-lens ISO is
+the one number that would complete the exposure calculation in 6.3, and
+this record does not carry one: there is no second AAAData record for the
+second lens.
 
 ## 3. The metadata protobuf
 
@@ -573,9 +601,40 @@ dominates exactly there), the focal scale of 4.3, and the unsettled
 **order** of yaw/pitch/roll from 4.8. Across the seam the measured shift
 varied between patches by more than parallax explains, and the patches
 that disagreed were the low-correlation ones, so no number for it is
-claimed. It is issue #7's, along with the blend that will hide it: a
-weight field over a 15-degree overlap band does not need a
-sub-pixel-perfect boundary, it needs to know where the boundary is.
+claimed.
+
+**Re-measured for issue #7, and still not attributable (2026-07-31).**
+The instrument moved off rendered views onto the delivered frames: both
+lenses sampled on the *same* angular grid around a direction on the seam
+circle, so there is no rotation to undo and the best-correlating shift is
+in degrees of world angle, split into along-seam and across-seam by
+construction. 36 patches round the circle of one in-flight X4 Air frame,
+3.7 degrees across, the 12 busiest by local contrast correlated over
++/-2 degrees in 0.12 degree steps. Of those, five correlate above 0.85.
+
+- **Along the seam**, where parallax cannot reach, every one of the five
+  is negative: -0.36, -0.60, -0.96, -1.20, -1.20 degrees. Consistent in
+  sign with the 0.4 degrees measured off rendered views, and larger.
+- **Across the seam** they run -2.0 to +2.0 with several peaks pinned at
+  the search limit, and the largest sit at the part of the seam circle
+  that looks at the pilot's own body, half a metre away, where 6.1 puts
+  parallax at 3.8 degrees. That part is explained.
+
+What this says is that **an in-flight frame cannot answer the question**.
+Two effects that are not calibration are in every patch. Parallax is one.
+The other is rolling shutter (6.5, issue #9, uncorrected today): 15.883 ms
+of readout displaces content by the camera's own angular rate times that
+time, the two lenses' rows run in nearly opposite directions in the world
+because their rolls are near +90 degrees in opposed frames, so it does not
+cancel between them, and near the seam the picture is only about 15 px per
+degree, which turns a small displacement into a large angle. Pinning the
+calibration residual wants a capture from a camera that is not moving, or
+issue #9 landed first, and probably both.
+
+None of it blocked the blend, which needed the band and not the boundary:
+a weight field over a 14-degree overlap does not need a sub-pixel-perfect
+crossover, it needs to know where the crossover is. Issue #7 shipped
+without an answer here, and the question stays open.
 
 ## 5. The projection model
 
@@ -686,37 +745,95 @@ hemisphere, the second stream contributes nothing and does not need to be
 decoded. That halves the decode budget for the majority of view
 directions. (Tracked as hemisphere-aware decode gating in M2.)
 
-### 6.3 Exposure mismatch is the artifact that will actually bite
+### 6.3 Exposure mismatch: smaller than expected, and NOT what the shutter says
 
-Insta360's own SDK documentation states it plainly: *"since the two
-lenses operate independently, their respective video exposures may not
-align perfectly... noticeable brightness differences can occur."*
+Insta360's own SDK documentation says it plainly: *"since the two lenses
+operate independently, their respective video exposures may not align
+perfectly... noticeable brightness differences can occur."*
 
 **The file carries per-lens, per-frame shutter speed**: record 4 for one
 lens and record 12 for the other, identical shape
-`{u64 ts_us, f64 shutter}`. Nothing in the open-source landscape uses
-this; Kyerag can.
+`{u64 ts, f64 shutter}`, one sample per frame. Nothing in the
+open-source landscape uses this. The timestamps are in the trailer's own
+tick, which `is_raw_gyro` selects: microseconds on the X4 Air, and
+milliseconds on the ONE X2, whose `first_frame_timestamp` is in
+milliseconds with them.
 
 Gotcha: `telemetry-parser` merges records 4 and 12 into the same
 `GroupId::Exposure` key, so record 12 overwrites record 4 in its output.
 Parse them separately.
 
-Correction should be a **symmetric split**, `front *= 1/sqrt(g)` and
-`back *= sqrt(g)` for gain ratio `g`, with a spatially smooth gain field,
-so neither hemisphere gets a visible step.
+The plan that made was a **symmetric split**, `front *= 1/sqrt(g)` and
+`back *= sqrt(g)` for shutter ratio `g`, so neither hemisphere gets a
+visible step. **It is wrong, and it was measured wrong before it shipped
+(2026-07-31, issue #7).**
+
+**Method.** For each sampled instant, decode both lens frames and take
+the mean luma of the overlap annulus of each: `r` from 1680 to 1913 px
+about lens 0's principal point and 1670 to 1905 about lens 1's, which are
+the radii where both lenses have the ray. The two annuli hold the *same*
+set of world directions, permuted in azimuth by the relative roll, so the
+ratio of the means measures brightness and not content, whatever the
+roll; and vignetting is radial and identical in both, so it cancels. Read
+the shutter records at the same instant for `g`.
+
+**Result**, over two 30-minute X4 Air captures, 30 and 15 instants:
+
+| | capture A (2026-06-23) | capture B (2026-05-01) |
+|---|---|---|
+| mean measured brightness step | **3.5 %** | **0.9 %** |
+| worst measured step | 7.3 % | 2.7 % |
+| shutter ratio `g`, range | 0.54 to 1.81 | 0.62 to 0.74 |
+| mean step after the symmetric split | **14.4 %** | **19.8 %** |
+
+The correction is four to twenty times worse than the artifact, and the
+two are uncorrelated: on capture A the instants with `g < 1` and the
+instants with `g > 1` had the same mean measured ratio, 0.969 against
+0.971.
+
+**Why.** The two lenses run independent auto-exposure loops that trade
+shutter against sensor gain to reach the same picture brightness. The
+shutter ratio therefore measures how differently the two hemispheres are
+*lit*, which on a paraglider is sun against ground and is genuinely a
+factor of 1.8, not how differently they came *out*, which is a percent or
+three. Completing the calculation would need the matching per-lens gain,
+and the trailer does not carry one: record 9 is a single track for the
+file (section 2).
+
+**What to do instead.** Nothing analytic. A percent or three of step,
+laid across the 14-degree blend band of 6.6, is a gradient of 0.015
+percent per pixel at a 1920-wide 90-degree view, which is far under the
+roughly 1 percent step at a sharp edge that the eye picks up. Measured on
+a rendered seam view at 1024 px: the sky either side of the seam differs
+by 2.0 percent and no two neighbouring columns differ by more than 1.9
+codes of 255, which is the sensor noise. A measured luma ratio, adapted
+slowly from the overlap band, is the fallback if a capture ever shows a
+step the blend cannot hide, and it costs a GPU readback per frame; do not
+build it before that capture exists.
+
+Records 4 and 12 are still worth parsing, and Kyerag parses them: they
+are the camera's own frame clock if `pts_type = 2` means what it says
+(section 8.3), and they are what this measurement was made against.
 
 ### 6.4 The rest of the artifact budget
 
-Ranked for a player that samples one lens for most of the frame:
+Ranked for a player that samples one lens for most of the frame. The
+first two rows were re-ranked by the 2026-07-31 measurements above, which
+put both of them under the blend rather than over it:
 
-1. **Exposure and white balance step at the seam.** Fixable
-   analytically from metadata, per above.
+1. ~~**Exposure and white balance step at the seam.**~~ 0.9 to 3.5
+   percent, and not fixable analytically after all: the shutter records
+   do not say what they look like they say (6.3).
 2. **Vignetting rolloff.** Lands exactly on the blend band. Coefficients
    are **not** in the metadata; needs flat-field calibration if it bites.
    The best ffmpeg-based workaround in the wild carries the same caveat:
-   *"will not correct for lens vignetting darkened stitch edge."*
+   *"will not correct for lens vignetting darkened stitch edge."* The
+   weight field of 6.6 down-weights the rim it lands on, which is the
+   cheap half of the fix and may be all of it.
 3. **Parallax ghosting.** Only under about 3 m, only in seam-containing
-   views.
+   views. Now the top of this list: on a paramotor the wing and the lines
+   are the near-field structure that crosses the seam, and a blend turns
+   the hard step they used to show into a soft double image.
 4. **Geometric error from a wrong lens model.** About 8 percent MAE.
 5. **Chromatic aberration.** Measured as **zero** on X-series; applying
    CA correction made PSNR worse. Skip it.
@@ -755,6 +872,27 @@ The leverage is entirely in (a) using the file's real calibration and
 distance transform from each lens's validity boundary. That needs no
 hardcoded feather width and automatically down-weights the vignetted
 circle edge.
+
+**As built (issue #7, `crates/render/src/projection.rs`).** For a ray
+`theta` off a lens's axis landing `r` px from that lens's principal
+point, in a lens whose image circle has radius `R`:
+
+```
+claim = cos^2(theta / 2) * (R - r)          zero where the ray is not in the picture
+w     = claim / sum of claims
+```
+
+The first factor is the longitude preference, 1 down the axis and exactly
+1/2 on the seam great circle, which is what puts the crossover on the
+seam rather than wherever the two image circles happen to end (they end
+8 px apart on the X4 Air, so it is not the same place). The second is the
+distance transform, in that lens's own pixels, which the two lenses of a
+back-to-back pair share a scale for. Neither carries a width: the band
+comes out as the overlap itself, 83.4 to 97.4 degrees off the front axis
+on the X4 Air fixture, and 179 columns of a 1024-px 90-degree view
+centred on the seam. Outside it exactly one lens claims anything, its
+weight is exactly 1, and the pass costs the one texture fetch it did
+before the blend existed.
 
 ## 7. What was ruled out
 

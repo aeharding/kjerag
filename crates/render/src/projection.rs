@@ -1,5 +1,5 @@
 //! The Mei/UCM forward map: one output ray to one lens pixel, for each lens
-//! of the camera, and the choice between them.
+//! of the camera, and how much of each is shown.
 //!
 //! It exists twice on purpose. `WGSL` below is the copy the GPU runs, once
 //! per output pixel; [`Reframe::project`] is the same arithmetic in Rust, so
@@ -10,11 +10,11 @@
 //! the bind group declares `min_binding_size` from this type's size, and
 //! pipeline creation rejects a shader whose struct wants more.
 //!
-//! Two lenses cover the sphere and overlap by about 15 degrees around the
+//! Two lenses cover the sphere and overlap by about 14 degrees around the
 //! seam, so most rays near it are in both pictures and the shader has to
-//! choose. [`Reframe::pick`] is that choice: whichever lens has the ray at
-//! all, and the one whose optical axis is nearer it where both do (issue
-//! #27). A ray is dropped only where **no** lens has it.
+//! decide how much of each to show. [`Reframe::blend`] is that decision: a
+//! weight per lens, one outside the overlap and a smooth crossover inside it
+//! (issue #7). A ray is dropped only where **no** lens has it.
 //!
 //! Written from the model description in `docs/research/insv-format.md` 5.1
 //! (Mei and Rives 2007, as OpenCV's `cv::omnidir` states it). Nothing here
@@ -91,22 +91,37 @@ struct LensBlock {
 ///
 /// `inside` false means the ray missed this lens. Missing every lens is what
 /// the shader paints [`OUTSIDE_GRAY`] for; missing one of two is ordinary,
-/// and is most of what [`Reframe::pick`] is deciding.
+/// and is most of what [`Reframe::blend`] is weighing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Landing {
     pub pixel: [f32; 2],
     pub inside: bool,
-    /// The cosine of the angle between the ray and this lens's optical axis,
-    /// which is what "nearest axis" compares. 1 is straight down the axis
-    /// and 0 is the seam great circle.
+    /// The cosine of the angle between the ray and this lens's optical axis.
+    /// 1 is straight down the axis and 0 is the seam great circle.
     pub axis: f32,
+    /// How far the sample sits inside this lens's coverage: the distance in
+    /// delivered-frame pixels from it to the edge of the image circle,
+    /// positive inside and negative out. This is the distance transform from
+    /// the lens's validity boundary that [`claim`] weighs with.
+    pub depth: f32,
 }
 
-/// The lens a ray is shown from, and where in its frame.
+/// How much of the picture at one output pixel comes from each lens, and
+/// where in each lens's frame it comes from.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pick {
-    pub lens: usize,
-    pub landing: Landing,
+pub struct Blend {
+    pub landings: [Landing; MAX_LENSES],
+    /// One per lens, summing to 1 wherever any lens has the ray and all zero
+    /// where none does.
+    pub weights: [f32; MAX_LENSES],
+}
+
+impl Blend {
+    /// Whether any lens has this ray at all. False is what the shader paints
+    /// [`OUTSIDE_GRAY`] for.
+    pub fn is_covered(&self) -> bool {
+        self.weights.iter().any(|weight| *weight > 0.0)
+    }
 }
 
 /// What the shader paints where no lens has a picture. Neutral and dark,
@@ -167,27 +182,37 @@ impl Reframe {
         view_ray(uv, self.tan_half_fov, self.aspect)
     }
 
-    /// Which lens shows this ray, and where in its frame.
+    /// How much of this ray each lens shows, and where in its frame.
     ///
-    /// Nearest axis wins, which puts the seam on the great circle equidistant
-    /// from the two axes and hands each hemisphere the lens that sees it
-    /// squarest. A lens that has the ray beats one that does not, so the
-    /// pick falls back into the overlap where a lens runs out of coverage
-    /// before the halfway line. `landing.inside` false means no lens had it.
+    /// Each lens stakes a [`claim`] on the ray and the claims are normalized
+    /// against each other, so the weights sum to 1 wherever anything has the
+    /// ray. Outside the overlap only one lens claims anything and its weight
+    /// is exactly 1 (see [`share`]), so the pass takes the one sample the
+    /// hard pick took before issue #7 and multiplies it by an exact one.
     ///
-    /// WGSL twin: `pick`.
-    pub fn pick(&self, view_ray: [f32; 3]) -> Pick {
-        let mut best = Pick {
-            lens: 0,
-            landing: self.project(0, view_ray),
-        };
-        for lens in 1..self.lens_count as usize {
-            let landing = self.project(lens, view_ray);
-            if wins(landing, best.landing) {
-                best = Pick { lens, landing };
+    /// Every lens is projected, including a slot the file has no stream for,
+    /// so that the shader's loop runs a constant number of times. A loop
+    /// bounded by `lens_count` cannot be unrolled, and one that is not
+    /// unrolled indexes its arrays dynamically, which puts them in scratch
+    /// memory: measured on RADV 2026-07-31, that alone is 1.82 ms per redraw
+    /// against 1.68 at 2560x1440, more than the second texture fetch the
+    /// blend actually needs costs.
+    ///
+    /// WGSL twin: `blend`.
+    pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
+        let landings = std::array::from_fn(|lens| self.project(lens, view_ray));
+        let mut weights: [f32; MAX_LENSES] =
+            std::array::from_fn(|lens| match lens < self.lens_count as usize {
+                true => claim(landings[lens]),
+                false => 0.0,
+            });
+        let total: f32 = weights.iter().sum();
+        if total > 0.0 {
+            for weight in &mut weights {
+                *weight = share(*weight, total);
             }
         }
-        best
+        Blend { landings, weights }
     }
 
     /// The forward map: a view ray, through one lens's extrinsics and the
@@ -227,23 +252,74 @@ impl Reframe {
         // there, the radius runs away to infinity instead, and `denom` is the
         // limit that binds.
         let injective = p[2] * lens.xi > -1.0;
+        let depth = lens.image_radius - norm(offset);
         Landing {
             pixel: [offset[0] + lens.cx, offset[1] + lens.cy],
-            inside: denom > 0.0 && injective && norm(offset) <= lens.image_radius,
+            inside: denom > 0.0 && injective && depth > 0.0,
             axis: p[2],
+            depth,
         }
     }
 }
 
-/// Whether `candidate` shows the ray better than the lens already held.
+/// One lens's unnormalized claim on a ray, which [`Reframe::blend`] weighs
+/// against the other lens's.
 ///
-/// WGSL twin: `wins`.
-fn wins(candidate: Landing, held: Landing) -> bool {
-    match (candidate.inside, held.inside) {
-        (true, false) => true,
-        (false, true) => false,
-        _ => candidate.axis > held.axis,
+/// Two factors, per docs/research/insv-format.md 6.6, and neither of them is
+/// a feather width to be chosen:
+///
+/// - **longitude preference**, [`longitude`], which is what puts the
+///   crossover on the seam great circle rather than wherever the two
+///   coverages happen to meet;
+/// - **coverage depth**, `landing.depth`, the distance transform from this
+///   lens's own validity boundary. It reaches zero exactly where the picture
+///   stops, so a lens fades out as it runs out of picture, and the rim of
+///   the image circle, which is where vignetting lands and where the
+///   distortion polynomial is least trustworthy (5.3), is down-weighted for
+///   free.
+///
+/// The band the product blends over is therefore the overlap itself: on the
+/// X4 Air fixture it runs 83.4 to 97.4 degrees off the front axis, because
+/// that is where both lenses have any picture at all.
+///
+/// WGSL twin: `claim`.
+fn claim(landing: Landing) -> f32 {
+    match landing.inside {
+        true => longitude(landing.axis) * landing.depth,
+        false => 0.0,
     }
+}
+
+/// One claim's share of all of them. `total` must be positive; the caller
+/// has nothing to normalize otherwise.
+///
+/// The lone claimant's share is written rather than divided out. Measured on
+/// RADV 2026-07-31: a GPU `x / x` is a reciprocal multiply and lands an ulp
+/// under 1.0, and multiplying a sample by that reaches an 8-bit picture as
+/// one code on 6 pixels of a million. Writing it is what lets a one-stream
+/// ONE X2 file render bit for bit what it rendered before the blend existed,
+/// which it does at every yaw tested.
+///
+/// WGSL twin: `share`.
+fn share(claim: f32, total: f32) -> f32 {
+    match claim == total {
+        true => 1.0,
+        false => claim / total,
+    }
+}
+
+/// How much this lens is preferred for a ray `theta` off its axis, from
+/// `cos(theta)`: `cos^2(theta / 2)`, i.e. 1 straight down the axis, 1/2 on
+/// the seam great circle, 0 straight out the back.
+///
+/// It is never zero anywhere in the overlap, so it only tilts the crossover;
+/// the coverage depth is what closes it. Being exactly 1/2 for both lenses
+/// on the seam is the whole job, and it is the reason the crossover does not
+/// drift to wherever the two image circles happen to end.
+///
+/// WGSL twin: `longitude`.
+fn longitude(axis: f32) -> f32 {
+    0.5 * (1.0 + axis)
 }
 
 impl LensBlock {
@@ -401,9 +477,10 @@ fn opposed(index: usize) -> Mat3 {
 /// itself: past the lens's real coverage the radial polynomial keeps
 /// returning finite pixel coordinates, so something has to say where the
 /// picture stops. On the X4 Air fixture this radius is 1913 px, which the
-/// model reaches at about 97.5 degrees off axis, so two lenses overlap by
-/// about 15 degrees around the seam and the seam blend (issue #7) is what
-/// will want that band.
+/// model reaches at about 97.4 degrees off axis, so two lenses overlap by
+/// about 14 degrees around the seam. That circle is the validity boundary
+/// [`claim`] measures its coverage depth from, so it sets the blend band as
+/// well as the picture's edge.
 fn image_radius(intrinsics: &Intrinsics, frame: Size) -> f64 {
     let (width, height) = (f64::from(frame.width), f64::from(frame.height));
     intrinsics
@@ -519,11 +596,12 @@ struct Landing {
   pixel: vec2<f32>,
   inside: bool,
   axis: f32,
+  depth: f32,
 };
 
-struct Pick {
-  lens: u32,
-  landing: Landing,
+struct Blend {
+  landings: array<Landing, MAX_LENSES>,
+  weights: array<f32, MAX_LENSES>,
 };
 
 // x right, y down, z forward, matching the lens frame the model projects in.
@@ -532,25 +610,50 @@ fn view_ray(uv: vec2<f32>) -> vec3<f32> {
   return vec3<f32>(plane.x, plane.y / reframe.aspect, 1.0);
 }
 
-// Nearest axis wins, and a lens that has the ray beats one that does not.
-// Rust twin: `Reframe::pick`.
-fn pick(ray: vec3<f32>) -> Pick {
-  var best = Pick(0u, project(0u, ray));
-  for (var lens = 1u; f32(lens) < reframe.lens_count; lens += 1u) {
+// Every lens's claim on the ray, normalized. Rust twin: `Reframe::blend`.
+//
+// The loop runs MAX_LENSES times whatever the file holds, and the lens count
+// zeroes the claim of a slot that has no stream rather than shortening the
+// loop. A loop this compiler cannot unroll indexes `out` dynamically, which
+// puts it in scratch memory and costs more than the blend does; the numbers
+// are on the Rust twin.
+fn blend(ray: vec3<f32>) -> Blend {
+  var out: Blend;
+  var total = 0.0;
+  for (var lens = 0u; lens < MAX_LENSES; lens += 1u) {
     let landing = project(lens, ray);
-    if wins(landing, best.landing) {
-      best = Pick(lens, landing);
+    out.landings[lens] = landing;
+    out.weights[lens] = select(0.0, claim(landing), f32(lens) < reframe.lens_count);
+    total += out.weights[lens];
+  }
+  if total > 0.0 {
+    for (var lens = 0u; lens < MAX_LENSES; lens += 1u) {
+      out.weights[lens] = share(out.weights[lens], total);
     }
   }
-  return best;
+  return out;
 }
 
-// Rust twin: `wins`.
-fn wins(candidate: Landing, held: Landing) -> bool {
-  if candidate.inside != held.inside {
-    return candidate.inside;
+// One claim's share of all of them, the lone claimant's written rather than
+// divided out. Rust twin: `share`.
+fn share(claim: f32, total: f32) -> f32 {
+  if claim == total {
+    return 1.0;
   }
-  return candidate.axis > held.axis;
+  return claim / total;
+}
+
+// Longitude preference times coverage depth. Rust twin: `claim`.
+fn claim(landing: Landing) -> f32 {
+  if !landing.inside {
+    return 0.0;
+  }
+  return longitude(landing.axis) * landing.depth;
+}
+
+// cos^2(theta / 2), from cos(theta). Rust twin: `longitude`.
+fn longitude(axis: f32) -> f32 {
+  return 0.5 * (1.0 + axis);
 }
 
 // Mei/UCM forward map. Rust twin: `Reframe::project`.
@@ -572,10 +675,12 @@ fn project(index: u32, ray: vec3<f32>) -> Landing {
   // Past `cos(theta) = -1/xi` the map folds and lands rays from behind this
   // lens back inside its image circle. Rust twin: `injective`.
   let injective = p.z * lens.xi > -1.0;
+  let depth = lens.image_radius - length(offset);
   var landing: Landing;
   landing.pixel = offset + vec2<f32>(lens.cx, lens.cy);
-  landing.inside = denom > 0.0 && injective && length(offset) <= lens.image_radius;
+  landing.inside = denom > 0.0 && injective && depth > 0.0;
   landing.axis = p.z;
+  landing.depth = depth;
   return landing;
 }
 
@@ -680,6 +785,16 @@ mod tests {
         [sin_theta * cos_phi, sin_theta * sin_phi, cos_theta]
     }
 
+    /// The lens carrying most of an output pixel, and where it lands, which
+    /// is the question the hard pick answered before issue #7. `None` where
+    /// no lens has the ray, which is what the shader paints grey.
+    fn shown(reframe: &Reframe, ray: [f32; 3]) -> Option<(usize, Landing)> {
+        let blend = reframe.blend(ray);
+        let lens =
+            (0..MAX_LENSES).max_by(|a, b| blend.weights[*a].total_cmp(&blend.weights[*b]))?;
+        blend.is_covered().then(|| (lens, blend.landings[lens]))
+    }
+
     /// The sanity check the model has to pass before any pixel is believed:
     /// the middle of the view looks along the front lens's axis, and the lens
     /// axis is the principal point.
@@ -691,16 +806,16 @@ mod tests {
     #[test]
     fn the_view_axis_lands_on_the_principal_point() {
         let reframe = fixture(Camera::default());
-        let pick = reframe.pick(reframe.view_ray([0.5, 0.5]));
+        let (lens, landing) =
+            shown(&reframe, reframe.view_ray([0.5, 0.5])).expect("no lens has the view axis");
 
-        assert_eq!(pick.lens, 0);
-        assert!(pick.landing.inside);
-        near(pick.landing.pixel[0], 1918.94, 3.0);
-        near(pick.landing.pixel[1], 1927.21, 3.0);
+        assert_eq!(lens, 0);
+        near(landing.pixel[0], 1918.94, 3.0);
+        near(landing.pixel[1], 1927.21, 3.0);
     }
 
     /// And the other half of issue #27: the ray straight out the back is lens
-    /// 1's own axis, so it is lens 1 that is picked and its principal point
+    /// 1's own axis, so it is lens 1 that shows it and its principal point
     /// that it lands on. Without the nominal half turn in `opposed` this ray
     /// projects nowhere near lens 1's centre, and with the wrong half turn it
     /// lands there with the picture upside down.
@@ -710,12 +825,11 @@ mod tests {
     #[test]
     fn the_ray_out_the_back_lands_on_the_second_lens_principal_point() {
         let reframe = fixture(Camera::default());
-        let pick = reframe.pick([0.0, 0.0, -1.0]);
+        let (lens, landing) = shown(&reframe, [0.0, 0.0, -1.0]).expect("no lens has the back axis");
 
-        assert_eq!(pick.lens, 1);
-        assert!(pick.landing.inside);
-        near(pick.landing.pixel[0], 1935.35, 4.0);
-        near(pick.landing.pixel[1], 1935.09, 4.0);
+        assert_eq!(lens, 1);
+        near(landing.pixel[0], 1935.35, 4.0);
+        near(landing.pixel[1], 1935.09, 4.0);
     }
 
     /// The nominal arrangement is a rotation and not a reflection, which is
@@ -728,14 +842,14 @@ mod tests {
         let reframe = fixture(Camera::default());
         // 20 degrees off the back axis, up and to the right in the body
         // frame. y is down, so up is negative.
-        let up = reframe.pick(normalize([0.0, -0.36, -1.0]));
-        let right = reframe.pick(normalize([0.36, 0.0, -1.0]));
+        let up = shown(&reframe, normalize([0.0, -0.36, -1.0])).expect("nothing above the back");
+        let right = shown(&reframe, normalize([0.36, 0.0, -1.0])).expect("nothing right of it");
 
-        assert_eq!((up.lens, right.lens), (1, 1));
-        assert!(up.landing.pixel[1] < 1935.09 - 100.0, "{up:?}");
-        near(up.landing.pixel[0], 1935.35, 40.0);
-        assert!(right.landing.pixel[0] < 1935.35 - 100.0, "{right:?}");
-        near(right.landing.pixel[1], 1935.09, 40.0);
+        assert_eq!((up.0, right.0), (1, 1));
+        assert!(up.1.pixel[1] < 1935.09 - 100.0, "{up:?}");
+        near(up.1.pixel[0], 1935.35, 40.0);
+        assert!(right.1.pixel[0] < 1935.35 - 100.0, "{right:?}");
+        near(right.1.pixel[1], 1935.09, 40.0);
     }
 
     /// A ray 90 degrees off the axis lands inside the image circle, which is
@@ -764,8 +878,9 @@ mod tests {
 
         assert!(!landing.inside);
         near(radius(&reframe, 0, landing), 2038.0, 8.0);
-        // And it is the back lens that shows it.
-        assert_eq!(reframe.pick(direction(120.0, 0.0)).lens, 1);
+        // And it is the back lens that shows it, on its own.
+        let blend = reframe.blend(direction(120.0, 0.0));
+        assert_eq!(blend.weights, [0.0, 1.0]);
     }
 
     /// The whole sphere, on a grid fine enough to walk through the seam: every
@@ -779,9 +894,8 @@ mod tests {
         for theta in 0..=720 {
             for phi in 0..72 {
                 let ray = direction(theta as f32 * 0.25, phi as f32 * 5.0);
-                let pick = reframe.pick(ray);
                 assert!(
-                    pick.landing.inside,
+                    reframe.blend(ray).is_covered(),
                     "no lens has {ray:?}, {} degrees off the front axis",
                     theta as f32 * 0.25
                 );
@@ -790,34 +904,150 @@ mod tests {
     }
 
     /// Round the seam great circle, at the seam and either side of it: both
-    /// lenses have the ray, because the overlap is about 15 degrees wide, and
-    /// the one that wins is the one the ray leans toward.
+    /// lenses have the ray, because the overlap is about 14 degrees wide, and
+    /// the one that leads is the one the ray leans toward.
     #[test]
-    fn the_seam_is_a_choice_between_two_pictures_and_not_a_gap() {
+    fn the_seam_is_a_mix_of_two_pictures_and_not_a_gap() {
         let reframe = fixture(Camera::default());
 
         for phi in 0..360 {
             let phi = phi as f32;
             for offset in [-5.0, -1.0, 0.0, 1.0, 5.0] {
                 let ray = direction(90.0 + offset, phi);
+                let blend = reframe.blend(ray);
                 assert!(
-                    reframe.project(0, ray).inside && reframe.project(1, ray).inside,
+                    blend.weights.iter().all(|weight| *weight > 0.0),
                     "the overlap does not reach {offset} degrees from the seam at {phi}",
                 );
-                // Which side of the seam wins is only settled a lens tilt away
-                // from it: the two axes are 0.2 degrees off exactly opposed,
-                // so on the halfway line itself either lens is a fair answer.
+                // Which side of the seam leads is only settled a lens tilt
+                // away from it: the two axes are 0.2 degrees off exactly
+                // opposed, so on the halfway line itself either lens is a
+                // fair answer.
                 if offset == 0.0 {
                     continue;
                 }
-                let picked = reframe.pick(ray).lens;
+                let leader = usize::from(blend.weights[1] > blend.weights[0]);
                 assert_eq!(
-                    picked,
+                    leader,
                     usize::from(offset > 0.0),
-                    "{offset} degrees past the seam at {phi} picked lens {picked}",
+                    "{offset} degrees past the seam at {phi} leads with lens {leader}",
                 );
             }
         }
+    }
+
+    /// The blend's first invariant, over the whole sphere: an output pixel is
+    /// one pixel's worth of picture. Anything else is a seam that reads as a
+    /// bright or dark line, which is the artifact issue #7 exists to remove.
+    #[test]
+    fn the_weights_are_one_pixels_worth_of_picture_everywhere() {
+        let reframe = fixture(Camera::default());
+
+        for theta in 0..=720 {
+            for phi in 0..72 {
+                let theta = theta as f32 * 0.25;
+                let blend = reframe.blend(direction(theta, phi as f32 * 5.0));
+                let total: f32 = blend.weights.iter().sum();
+                near(total, 1.0, 1e-6);
+                assert!(
+                    blend.weights.iter().all(|weight| *weight >= 0.0),
+                    "{theta} degrees off the front axis weighs {:?}",
+                    blend.weights
+                );
+            }
+        }
+    }
+
+    /// Outside the overlap the second lens contributes nothing, and the first
+    /// one's weight is exactly 1 rather than nearly it. That exactness is
+    /// what makes the picture away from the seam the same bits it was before
+    /// the blend, and it is what lets the shader skip the second fetch.
+    #[test]
+    fn one_lens_carries_everything_outside_the_overlap() {
+        let reframe = fixture(Camera::default());
+
+        for theta in [0.0, 30.0, 60.0, 80.0, 100.0, 130.0, 180.0] {
+            for phi in 0..8 {
+                let blend = reframe.blend(direction(theta, phi as f32 * 45.0));
+                assert_eq!(
+                    blend.weights,
+                    match theta < 90.0 {
+                        true => [1.0, 0.0],
+                        false => [0.0, 1.0],
+                    },
+                    "{theta} degrees off the front axis"
+                );
+            }
+        }
+    }
+
+    /// The crossover sits on the seam great circle, which is what the
+    /// longitude preference buys: without it the two coverage depths cross
+    /// wherever the two image circles happen to end, which is 0.2 degrees off
+    /// on this fixture and camera-dependent in general.
+    ///
+    /// Not exactly half: lens 1's image circle is 8 px smaller than lens 0's,
+    /// so it runs out of coverage marginally sooner and carries marginally
+    /// less of the seam.
+    #[test]
+    fn the_crossover_sits_on_the_seam() {
+        let reframe = fixture(Camera::default());
+
+        for phi in 0..36 {
+            let blend = reframe.blend(direction(90.0, phi as f32 * 10.0));
+            near(blend.weights[0], 0.5, 0.03);
+            near(blend.weights[1], 0.5, 0.03);
+        }
+    }
+
+    /// Continuity, which is the property the eye actually reads: swept
+    /// through the whole band a hundred steps to the degree, no lens's weight
+    /// ever moves more than a hundredth in one step. The hard pick this
+    /// replaces moved 1.0 in one step, at the seam, which is the line issue
+    /// #7 was filed about.
+    ///
+    /// The sweep runs well past both edges of the overlap, so it also covers
+    /// the two places a weight arrives at 0: the band edge is where a blend
+    /// with a feather width of its own would show a crease.
+    #[test]
+    fn no_weight_ever_steps() {
+        let reframe = fixture(Camera::default());
+
+        for phi in [0.0, 90.0, 180.0, 270.0] {
+            let mut held = reframe.blend(direction(70.0, phi)).weights;
+            let mut worst: f32 = 0.0;
+
+            for step in 1..=4000 {
+                let weights = reframe
+                    .blend(direction(70.0 + step as f32 * 0.01, phi))
+                    .weights;
+                for lens in 0..MAX_LENSES {
+                    worst = worst.max((weights[lens] - held[lens]).abs());
+                }
+                held = weights;
+            }
+
+            assert!(worst < 0.01, "a weight jumped by {worst} at phi {phi}");
+        }
+    }
+
+    /// And the band is the overlap itself rather than a width chosen here:
+    /// the weights are mixed exactly where both lenses have a picture, which
+    /// on this fixture is 83.4 to 97.4 degrees off the front axis, and the
+    /// two lenses hand over across the whole of it.
+    #[test]
+    fn the_blend_band_is_the_overlap_itself() {
+        let reframe = fixture(Camera::default());
+        let mixed: Vec<f32> = (0..3000)
+            .map(|step| 70.0 + step as f32 * 0.01)
+            .filter(|theta| {
+                let weights = reframe.blend(direction(*theta, 0.0)).weights;
+                weights.iter().all(|weight| *weight > 0.0)
+            })
+            .collect();
+
+        near(*mixed.first().expect("nothing is mixed at all"), 83.2, 0.2);
+        near(*mixed.last().expect("nothing is mixed at all"), 97.4, 0.2);
     }
 
     /// Issue #30's guard, per lens: the picture each lens contributes is one
@@ -869,18 +1099,18 @@ mod tests {
     fn a_horizontal_drag_carries_the_content_with_the_cursor() {
         let camera = Camera::default();
         let before = fixture(camera);
-        let anchor = before.pick(before.view_ray([0.5, 0.5]));
+        let anchor = shown(&before, before.view_ray([0.5, 0.5])).expect("grabbed nothing");
 
         let mut dragged = camera;
         dragged.aim(camera.look([0.5, 0.5], 1.0), [0.6, 0.5], 1.0);
         assert!(dragged.yaw < 0.0, "dragging right turns the view left");
 
         let after = fixture(dragged);
-        let moved = after.pick(after.view_ray([0.6, 0.5]));
+        let moved = shown(&after, after.view_ray([0.6, 0.5])).expect("dragged onto nothing");
 
-        assert_eq!(moved.lens, anchor.lens);
-        near(moved.landing.pixel[0], anchor.landing.pixel[0], 0.05);
-        near(moved.landing.pixel[1], anchor.landing.pixel[1], 0.05);
+        assert_eq!(moved.0, anchor.0);
+        near(moved.1.pixel[0], anchor.1.pixel[0], 0.05);
+        near(moved.1.pixel[1], anchor.1.pixel[1], 0.05);
     }
 
     /// The same for the vertical axis, which is the one whose sign is easy
@@ -889,18 +1119,18 @@ mod tests {
     fn a_vertical_drag_carries_the_content_with_the_cursor() {
         let camera = Camera::default();
         let before = fixture(camera);
-        let anchor = before.pick(before.view_ray([0.5, 0.5]));
+        let anchor = shown(&before, before.view_ray([0.5, 0.5])).expect("grabbed nothing");
 
         let mut dragged = camera;
         dragged.aim(camera.look([0.5, 0.5], 1.0), [0.5, 0.6], 1.0);
         assert!(dragged.pitch > 0.0, "dragging down looks up");
 
         let after = fixture(dragged);
-        let moved = after.pick(after.view_ray([0.5, 0.6]));
+        let moved = shown(&after, after.view_ray([0.5, 0.6])).expect("dragged onto nothing");
 
-        assert_eq!(moved.lens, anchor.lens);
-        near(moved.landing.pixel[0], anchor.landing.pixel[0], 0.05);
-        near(moved.landing.pixel[1], anchor.landing.pixel[1], 0.05);
+        assert_eq!(moved.0, anchor.0);
+        near(moved.1.pixel[0], anchor.1.pixel[0], 0.05);
+        near(moved.1.pixel[1], anchor.1.pixel[1], 0.05);
     }
 
     /// And the same on the pilot's body, where issue #29 was reported: a view
@@ -919,18 +1149,17 @@ mod tests {
             ..Camera::default()
         };
         let before = fixture(camera);
-        let anchor = before.pick(before.view_ray(from));
-        assert!(anchor.landing.inside, "grabbed a pixel no lens has");
+        let anchor = shown(&before, before.view_ray(from)).expect("grabbed a pixel no lens has");
 
         let mut dragged = camera;
         dragged.aim(camera.look(from, aspect), to, aspect);
 
         let after = fixture(dragged);
-        let moved = after.pick(after.view_ray(to));
+        let moved = shown(&after, after.view_ray(to)).expect("dragged onto nothing");
 
-        assert_eq!(moved.lens, anchor.lens);
-        near(moved.landing.pixel[0], anchor.landing.pixel[0], 1.0);
-        near(moved.landing.pixel[1], anchor.landing.pixel[1], 1.0);
+        assert_eq!(moved.0, anchor.0);
+        near(moved.1.pixel[0], anchor.1.pixel[0], 1.0);
+        near(moved.1.pixel[1], anchor.1.pixel[1], 1.0);
     }
 
     /// The datum, pinned: on a lens rolled a quarter turn, the top of the
@@ -941,28 +1170,27 @@ mod tests {
     #[test]
     fn roll_is_measured_from_the_frames_horizontal_axis() {
         let reframe = fixture(Camera::default());
-        let top = reframe.pick(reframe.view_ray([0.5, 0.1]));
+        let (lens, landing) =
+            shown(&reframe, reframe.view_ray([0.5, 0.1])).expect("nothing at the top of the view");
 
-        assert_eq!(top.lens, 0);
-        assert!(top.landing.inside);
-        assert!(top.landing.pixel[1] < 1927.21 - 100.0, "{top:?}");
-        near(top.landing.pixel[0], 1918.94, 40.0);
+        assert_eq!(lens, 0);
+        assert!(landing.pixel[1] < 1927.21 - 100.0, "{landing:?}");
+        near(landing.pixel[0], 1918.94, 40.0);
     }
 
     /// A file with one stream is the camera it was before: one hemisphere,
     /// and grey behind it. The older cameras write a lens per file, and
-    /// nothing about them changed with issue #27.
+    /// nothing about them changed with issue #27 or #7.
     #[test]
     fn one_stream_still_renders_one_hemisphere() {
         let reframe = one_lens(Camera::default());
 
-        let front = reframe.pick(reframe.view_ray([0.5, 0.5]));
-        assert_eq!(front.lens, 0);
-        assert!(front.landing.inside);
+        let front = reframe.blend(reframe.view_ray([0.5, 0.5]));
+        assert_eq!(front.weights, [1.0, 0.0]);
 
-        let back = reframe.pick([0.0, 0.0, -1.0]);
-        assert_eq!(back.lens, 0);
-        assert!(!back.landing.inside);
+        let back = reframe.blend([0.0, 0.0, -1.0]);
+        assert_eq!(back.weights, [0.0, 0.0]);
+        assert!(!back.is_covered());
     }
 
     /// Issue #30: the ray straight out the back of one lens projects onto its
