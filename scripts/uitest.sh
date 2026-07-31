@@ -507,7 +507,15 @@ toast_clears_the_controls() {
 # the ball past about 403). wtype drops about one key in twenty, so the rest
 # is headroom, and the loop breaks on success so headroom costs nothing.
 BALL_PRESSES=20
-ROOM_SPREAD=4
+# The room is one flat theme colour, so it reads a spread of 0 through the
+# capture and this tolerance is for rounding and nothing else. It was 4,
+# which is wide enough to let dark picture through: on the owner's deck
+# capture the foliage at the ball's rim reads 15 19 15, a spread of exactly
+# 4, so the zoom-out loop stopped one press early on a patch that was
+# picture, and `fullscreen holds the view` then failed on the same patch
+# reading 18 22 17. The footage this was first measured on has sky at that
+# patch (185 224 241), where nothing is near the threshold either way.
+ROOM_SPREAD=1
 ROOM_DARK=60
 
 # reach_the_ball <name>: press ctrl+- until the patch reads the room, and
