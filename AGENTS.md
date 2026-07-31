@@ -24,6 +24,8 @@ cargo test
 ## Hard rules
 
 - Branch + PR for all work after the bootstrap commits. Never force-push.
+- Subagents may write and commit directly on working branches (explicitly
+  authorized by the owner, 2026-07-30); main changes only land via PR.
 - Work queue is GitHub issues. Claim an issue by commenting; close via PR.
 - License is AGPL-3.0. GPL-3.0 code (e.g. Gyroflow's Insta360 WGSL) MAY be
   used with attribution and an SPDX header on the file. Code under
