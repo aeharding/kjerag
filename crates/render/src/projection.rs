@@ -167,9 +167,21 @@ impl Reframe {
         let yd = y * radial + 2.0 * self.p2 * x * y + self.p1 * (r2 + 2.0 * y * y);
 
         let offset = [self.fx * xd, self.fy * yd];
+        // How far round the map can be believed, which is not as far as it
+        // answers. The distance from the principal point grows with the angle
+        // off the axis only up to `cos(theta) = -1/xi`; past that turning
+        // point it comes back down, re-enters the image circle, and a ray
+        // from behind the camera lands a second time on a pixel that belongs
+        // to a ray in front of it. That second landing is issue #30's ghost,
+        // a raw circular fisheye hanging behind the reframed view, and the
+        // radius test cannot see it because the fold puts it well inside the
+        // circle. Vacuous where xi is below 1: there is no turning point
+        // there, the radius runs away to infinity instead, and `denom` is the
+        // limit that binds.
+        let injective = p[2] * self.xi > -1.0;
         Landing {
             pixel: [offset[0] + self.cx, offset[1] + self.cy],
-            inside: denom > 0.0 && norm(offset) <= self.image_radius,
+            inside: denom > 0.0 && injective && norm(offset) <= self.image_radius,
         }
     }
 
@@ -384,9 +396,12 @@ fn project(ray: vec3<f32>) -> Landing {
   let d = n * radial + tangential;
 
   let offset = vec2<f32>(reframe.fx * d.x, reframe.fy * d.y);
+  // Past `cos(theta) = -1/xi` the map folds and lands rays from behind the
+  // camera back inside the image circle. Rust twin: `injective`.
+  let injective = p.z * reframe.xi > -1.0;
   var landing: Landing;
   landing.pixel = offset + vec2<f32>(reframe.cx, reframe.cy);
-  landing.inside = denom > 0.0 && length(offset) <= reframe.image_radius;
+  landing.inside = denom > 0.0 && injective && length(offset) <= reframe.image_radius;
   return landing;
 }
 
@@ -582,6 +597,49 @@ mod tests {
         assert!(top.inside);
         assert!(top.pixel[1] < reframe.cy - 100.0, "{top:?}");
         near(top.pixel[0], reframe.cx, 40.0);
+    }
+
+    /// Issue #30: the ray straight out the back of the camera projects onto
+    /// the principal point itself, which is as far inside the image circle as
+    /// a pixel can get. Nothing but the domain test rejects it.
+    #[test]
+    fn a_ray_from_straight_behind_is_not_in_the_picture() {
+        let reframe = fixture(Camera::default());
+        let landing = reframe.project([0.0, 0.0, -1.0]);
+
+        assert!(!landing.inside);
+        assert!(radius(&reframe, landing) < reframe.image_radius);
+        // The principal point itself, give or take the eighth of a degree the
+        // lens is mounted off the body axis.
+        near(radius(&reframe, landing), 0.0, 10.0);
+    }
+
+    /// And the picture is one cap around the axis, not a cap and a ghost.
+    /// Swept from the axis to straight backward, `inside` goes off once and
+    /// stays off. On the radius test alone it came back on at 131.5 degrees
+    /// and stayed on all the way to 180, which is the fisheye the owner saw
+    /// hanging behind the view.
+    #[test]
+    fn the_picture_stops_once() {
+        let reframe = fixture(Camera::default());
+        let mut edge = None;
+
+        for step in 0..=1800 {
+            let theta = step as f32 * 0.1;
+            let (s, c) = theta.to_radians().sin_cos();
+            match (reframe.project([s, 0.0, c]).inside, edge) {
+                (false, None) => edge = Some(theta),
+                (true, Some(stopped)) => {
+                    panic!("the picture stopped at {stopped} degrees and came back at {theta}")
+                }
+                _ => {}
+            }
+        }
+
+        // Where the model reaches the image circle, which is what decides
+        // how much picture there is: 97.5 degrees, as the note on
+        // `image_radius` says.
+        near(edge.expect("the picture never stopped"), 97.5, 0.2);
     }
 
     /// The size the WGSL struct rounds up to, which is what the bind group
