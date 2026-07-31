@@ -4,7 +4,7 @@
 //! rules themselves are arithmetic, and arithmetic is testable without a
 //! window.
 
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 use super::projection::{fov_ceiling, normalize, view_ray, world_ray};
 
@@ -33,10 +33,6 @@ pub struct Camera {
 /// fitting a round picture in a wide window is not the same as fitting it in
 /// a square one.
 const FOV_MIN: f32 = 20.0 * PI / 180.0;
-
-/// Straight up and straight down are where a yaw/pitch camera loses its
-/// horizon, so the view stops just short of both.
-const PITCH_LIMIT: f32 = 89.0 * PI / 180.0;
 
 /// Field of view per scroll step, as a ratio. Multiplicative, so a notch
 /// covers the same fraction of the range wherever it is used.
@@ -95,10 +91,18 @@ impl Camera {
     /// at all. Height above the horizon fixes the pitch, and bearing then
     /// fixes the yaw.
     ///
+    /// **The pitch runs all the way round** (issue #63). Past a quarter turn
+    /// the view is looking back over the top of itself and the world is
+    /// upside down, which is a place the drag may go and keep going: there is
+    /// no wall at the zenith or the nadir, and no snap. It stays a pitch and
+    /// never becomes a roll, so the horizon stays a level line either way up,
+    /// and the yaw is left alone by a vertical drag rather than swinging half
+    /// a turn at the pole.
+    ///
     /// Exact wherever a level horizon can hold the direction there at all.
-    /// Where it cannot, the pitch clamps: that leaves the direction on the
-    /// cursor's own meridian but short of it, so the drag reads as a wall
-    /// rather than as a slip.
+    /// Where it cannot -- a direction nearer the pole than the cursor's own
+    /// ray reaches without rolling -- the height clamps, which leaves the
+    /// direction on the cursor's own meridian but short of it.
     ///
     /// A cursor in the room around the ball (issue #47) is asking for a
     /// direction to be put where there are no directions, so the view holds
@@ -123,8 +127,8 @@ impl Camera {
         // `across * sin(rise + p)` above the horizon; the direction sits at
         // `-direction.y`, y being down. Asking for more than `across` asks
         // for a direction closer to the pole than this ray reaches without
-        // rolling, and that clamp, with the pitch limit under it, is the
-        // whole of the degeneracy.
+        // rolling, and that clamp is the whole of the degeneracy now that the
+        // pitch has no limit of its own (issue #63).
         let tilt = match across > 0.0 {
             true => nearest_tilt(
                 (-direction[1] / across).clamp(-1.0, 1.0),
@@ -137,10 +141,13 @@ impl Camera {
             // holds is as good as any, and the bearing below still answers.
             false => self.pitch + rise,
         };
-        self.pitch = (tilt - rise).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        // Wrapped rather than clamped: a rotation is the same rotation a turn
+        // later, so this is only about keeping the number readable. Nothing
+        // reads the pitch back except this file.
+        self.pitch = wrap(tilt - rise);
 
         // Bearing fixes the yaw, at the tilt the height asked for rather than
-        // the one the pitch limit allowed: taking it from the clamped pitch
+        // the one the height clamp allowed: taking it from the clamped tilt
         // instead swings the view half a turn the moment a stopped drag
         // carries the cursor over the pole, because the cursor's own bearing
         // reverses there and the direction's does not. Read as one complex
@@ -180,18 +187,30 @@ impl Camera {
 ///
 /// A view pitched close to the vertical sees past the pole, and content past
 /// it solves at a tilt outside the quarter turn `asin` answers in. Both tilts
-/// really do put the direction under the cursor, the far one by pitching the
-/// other way through a view turned around, so this is not a choice about
-/// correctness: it is the choice between following the drag and flipping.
+/// really do put the direction under the cursor, the far one through a view
+/// that has gone over the top and is upside down, so this is not a choice
+/// about correctness: it is the choice between following the drag and
+/// jumping, and the drag is what a hand is holding.
+///
+/// Nearest the short way round, which is what carries a drag over the pole
+/// (issue #63): each of the two tilts is a tilt every turn, and at the
+/// crossing the nearer of them is the one a quarter turn past the vertical,
+/// not the one the previous turn left behind.
 fn nearest_tilt(sine: f32, held: f32) -> f32 {
     let principal = sine.asin();
-    // The two mirrored tilts are `pi - principal` and `-pi - principal`, and
-    // only the one on the held tilt's side of zero can be the nearer.
-    let mirrored = PI.copysign(principal + held) - principal;
-    if (mirrored - held).abs() < (principal - held).abs() {
-        mirrored
-    } else {
-        principal
+    let (near, far) = (wrap(principal - held), wrap(PI - principal - held));
+    match far.abs() < near.abs() {
+        true => held + far,
+        false => held + near,
+    }
+}
+
+/// The same angle, in (-pi, pi].
+fn wrap(angle: f32) -> f32 {
+    let turned = angle.rem_euclid(TAU);
+    match turned > PI {
+        true => turned - TAU,
+        false => turned,
     }
 }
 
@@ -341,6 +360,15 @@ mod tests {
             .map_or(PI, |under| angle_between(under, direction))
     }
 
+    /// A viewpoint parked at one camera with nothing held, which is where a
+    /// test that starts partway round the sphere starts.
+    fn parked(camera: Camera) -> Viewpoint {
+        Viewpoint {
+            camera,
+            ..Viewpoint::default()
+        }
+    }
+
     fn degrees(camera: Camera) -> (f32, f32) {
         (camera.yaw.to_degrees(), camera.pitch.to_degrees())
     }
@@ -363,17 +391,42 @@ mod tests {
         assert!(viewpoint.camera().pitch > 0.0);
     }
 
+    /// Issue #63, in the owner's own words: "I should keep being able to look
+    /// up until I see upside down, and keep going".
+    ///
     /// One drag can only ask for so much, so this is a hundred of them: grab
-    /// the middle, haul it to the bottom, let go, grab the middle again.
+    /// the middle, haul it to the bottom, let go, grab the middle again. The
+    /// view is upside down partway through and back the right way up by the
+    /// end, having gone round; what it never does is stop.
     #[test]
-    fn the_pitch_stops_short_of_straight_up() {
+    fn the_pitch_keeps_going_past_straight_up() {
         let mut viewpoint = Viewpoint::default();
+        let mut climbed = 0.0;
+        let mut inverted = 0;
+
         for _ in 0..100 {
+            let before = viewpoint.camera().pitch;
             viewpoint.grab(MIDDLE, 1.0);
             viewpoint.drag_to([0.5, 1.0], 1.0);
             viewpoint.release();
+            let camera = viewpoint.camera();
+
+            let step = wrap(camera.pitch - before);
+            assert!(step > 0.0, "the drag stopped climbing at {before}");
+            climbed += step;
+            if camera.pitch.abs() > FRAC_PI_2 {
+                inverted += 1;
+            }
+            // A vertical drag is a pitch and nothing else: no yaw anywhere,
+            // least of all at the pole it just went over.
+            assert_eq!(camera.yaw, 0.0, "the view turned at {:?}", degrees(camera));
         }
-        assert_eq!(viewpoint.camera().pitch, PITCH_LIMIT);
+
+        assert!(
+            climbed > TAU,
+            "a hundred drags up climbed {climbed} rad, not a whole turn",
+        );
+        assert!(inverted > 0, "the view was never upside down");
     }
 
     /// A full turn of dragging comes back to where it started rather than
@@ -497,9 +550,12 @@ mod tests {
     /// drop points: wherever a level horizon can hold the grabbed direction
     /// under the cursor, it is under the cursor.
     ///
-    /// Where it cannot, one of the two limits is what says so and the
-    /// direction is asked for no more: either it is nearer the pole than the
-    /// cursor's own ray reaches, or the pitch it wants is past the limit.
+    /// Where it cannot, there is one thing that says so and the direction is
+    /// asked for no more: it is nearer the pole than the cursor's own ray
+    /// reaches without rolling. There used to be a second, the pitch limit,
+    /// and issue #63 took it away, so the pitches here run past the vertical
+    /// and out the other side: the solve has to hold the world under the
+    /// cursor in an upside down view exactly as it does in an upright one.
     #[test]
     fn the_grabbed_direction_stays_under_the_cursor() {
         let places: Vec<[f32; 2]> = [0.02, 0.3, 0.5, 0.72, 0.98]
@@ -508,9 +564,10 @@ mod tests {
             .collect();
         let mut exact = 0;
         let mut clamped = 0;
+        let mut upside_down = 0;
 
         for yaw in [-2.9, -0.4, 0.0, 1.1, 3.0] {
-            for pitch in [-1.55, -1.2, -0.6, 0.0, 0.85, 1.5] {
+            for pitch in [-3.0, -2.2, -1.55, -1.2, -0.6, 0.0, 0.85, 1.5, 2.2, 3.0] {
                 for aspect in [0.6, 1.0, 16.0 / 9.0] {
                     // The whole range and not the old one: the flat views, the
                     // threshold the bend starts at, stereographic, and the ball
@@ -528,12 +585,14 @@ mod tests {
 
                                 let short = reach(direction, to, camera, aspect)
                                     .is_none_or(|spare| spare < 0.0);
-                                let stopped = aimed.pitch.abs() >= PITCH_LIMIT;
-                                if short || stopped {
+                                if short {
                                     clamped += 1;
                                     continue;
                                 }
                                 exact += 1;
+                                if aimed.pitch.abs() > FRAC_PI_2 {
+                                    upside_down += 1;
+                                }
                                 let slip = slip(aimed, direction, to, aspect);
                                 assert!(
                                     slip <= pixel(camera, to, aspect),
@@ -553,7 +612,12 @@ mod tests {
             exact > 10_000,
             "{exact} solvable cases is too few to mean much"
         );
-        assert!(clamped > 0, "the grid never reached the degenerate cases");
+        assert!(clamped > 0, "the grid never reached the degenerate case");
+        assert!(
+            upside_down > 1_000,
+            "{upside_down} solved views were upside down, which is too few to \
+             say the far side of the pole was tested",
+        );
     }
 
     /// How much angle a level horizon has to spare in putting `direction` at
@@ -569,11 +633,12 @@ mod tests {
 
     /// The pilot's body: a view pitched most of the way down sees past the
     /// nadir along the bottom of the output, and content past it solves at a
-    /// pitch `asin` cannot name. Dragging it has to follow the cursor while
-    /// the pitch limit allows, then stop dead, and never flip to the mirrored
-    /// view that fits equally well.
+    /// pitch `asin` cannot name. It used to follow the cursor as far as the
+    /// pitch limit and then stop dead, which was the spec until issue #63;
+    /// now it follows all the way, down through the nadir and up the far
+    /// side, and it is the same one solve doing it.
     #[test]
-    fn content_past_the_nadir_follows_the_cursor_then_stops() {
+    fn content_past_the_nadir_follows_the_cursor_over_the_pole() {
         let aspect = 16.0 / 9.0;
         let start = Camera {
             yaw: 0.0,
@@ -587,7 +652,7 @@ mod tests {
         assert!(direction[2] < 0.0, "grabbed something in front of the view");
 
         let mut camera = start;
-        let mut followed = 0;
+        let mut crossed = false;
         for step in 1..=90 {
             let to = [0.5, 0.95 - 0.01 * step as f32];
             camera.aim(direction, to, aspect);
@@ -597,20 +662,15 @@ mod tests {
                 "the view turned around: {:?}",
                 degrees(camera)
             );
-            assert!(camera.pitch >= -PITCH_LIMIT, "{:?}", degrees(camera));
+            let slip = slip(camera, direction, to, aspect);
             assert!(
-                camera.pitch < -1.0,
-                "the view came back up: {:?}",
-                degrees(camera)
+                slip <= pixel(camera, to, aspect),
+                "the body slipped {slip} rad off the cursor at {:?}",
+                degrees(camera),
             );
-            if slip(camera, direction, to, aspect) <= pixel(camera, to, aspect) {
-                followed += 1;
-            }
+            crossed |= camera.pitch.abs() > FRAC_PI_2;
         }
-        assert!(
-            (10..80).contains(&followed),
-            "{followed} of 90 steps followed the cursor"
-        );
+        assert!(crossed, "the drag never reached the far side of the nadir");
     }
 
     /// The world vertical itself has no bearing to hold, so a drag on it
@@ -633,7 +693,7 @@ mod tests {
                 let mut aimed = camera;
                 aimed.aim(direction, [x as f32 / 10.0, y as f32 / 10.0], 1.0);
                 assert_eq!(aimed.yaw, camera.yaw);
-                assert!(aimed.pitch.abs() <= PITCH_LIMIT);
+                assert!(aimed.pitch.is_finite() && aimed.pitch.abs() <= PI);
             }
         }
     }
@@ -641,7 +701,8 @@ mod tests {
     /// A cursor swept clean across the pole's own place on the output, with
     /// hold of a direction a degree away from it. The turn is fast, because
     /// hauling a point that close to the axis really does swing the world,
-    /// but it stays a turn: level, finite, and inside the pitch limit.
+    /// but it stays a turn: level, finite, and a rotation rather than a
+    /// number running away.
     #[test]
     fn dragging_across_the_pole_stays_level_and_finite() {
         let mut camera = Camera {
@@ -661,8 +722,142 @@ mod tests {
                 "{:?}",
                 degrees(camera)
             );
-            assert!(camera.pitch.abs() <= PITCH_LIMIT, "{:?}", degrees(camera));
+            assert!(
+                camera.pitch.is_finite() && camera.pitch.abs() <= PI,
+                "{:?}",
+                degrees(camera)
+            );
         }
+    }
+
+    /// Issue #63's acceptance, in one drag: grab something near the top of a
+    /// wide view, haul it to the bottom, and the view goes up over the zenith
+    /// and out the other side without the grabbed direction ever leaving the
+    /// cursor.
+    ///
+    /// What "no wall, no snap" means as arithmetic: the grabbed direction
+    /// stays within a pixel of the cursor at every step, the pitch climbs at
+    /// every step, and it climbs past a quarter turn.
+    #[test]
+    fn a_drag_carries_the_view_through_the_zenith() {
+        let aspect = 16.0 / 9.0;
+        let mut camera = Camera {
+            yaw: 0.4,
+            pitch: 70f32.to_radians(),
+            fov: FOV_FLAT,
+        };
+        let grab = [0.5, 0.06];
+        let direction = camera
+            .look(grab, aspect)
+            .expect("a flat view is all sphere");
+
+        let mut climbed = 0.0;
+        for step in 1..=88 {
+            let to = [0.5, grab[1] + 0.01 * step as f32];
+            let before = camera.pitch;
+            camera.aim(direction, to, aspect);
+
+            let slip = slip(camera, direction, to, aspect);
+            assert!(
+                slip <= pixel(camera, to, aspect),
+                "the world came off the cursor by {slip} rad at {:?}",
+                degrees(camera),
+            );
+            let climb = wrap(camera.pitch - before);
+            assert!(climb > 0.0, "the climb stalled at {:?}", degrees(camera));
+            climbed += climb;
+            // A drag straight down the middle turns nothing, at the pole
+            // least of all.
+            assert!(
+                (camera.yaw - 0.4).abs() < 1e-3,
+                "the view swung to {:?}",
+                degrees(camera),
+            );
+        }
+
+        assert!(
+            camera.pitch.abs() > FRAC_PI_2,
+            "one drag ended at {:?}, still the right way up",
+            degrees(camera),
+        );
+        assert!(climbed > 1.0, "the drag only climbed {climbed} rad");
+    }
+
+    /// Upside down is a pitch and not a roll (issue #63): half a turn of
+    /// pitch swaps the sky for the ground and leaves the horizon a level line
+    /// across the output rather than a tilted one.
+    #[test]
+    fn a_view_past_the_pole_is_upside_down_and_level() {
+        let aspect = 16.0 / 9.0;
+        let camera = Camera {
+            yaw: 0.9,
+            pitch: PI,
+            fov: FRAC_PI_2,
+        };
+        let look = |uv| camera.look(uv, aspect).expect("a flat view is all sphere");
+
+        // y is down, so a smaller y is higher: the top of the output is the
+        // ground and the bottom is the sky.
+        assert!(
+            look([0.5, 0.1])[1] > look([0.5, 0.9])[1],
+            "the ends did not swap",
+        );
+
+        // Level: the horizon lands along one row of the output and stays
+        // there, corner to corner, instead of running down the frame.
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let height = look([u, 0.5])[1];
+            assert!(height.abs() < 1e-6, "the horizon sits at {height} at {u}");
+        }
+    }
+
+    /// Round and round: a full turn of vertical dragging comes back to the
+    /// view it started at, having been upside down in the middle of it.
+    #[test]
+    fn a_whole_vertical_turn_comes_back() {
+        let start = Camera {
+            yaw: -1.2,
+            pitch: 0.0,
+            fov: FRAC_PI_2,
+        };
+        let mut viewpoint = parked(start);
+        let mut inverted = 0;
+
+        // Each grab-drag-release pitches up by a fixed slice of the view, so
+        // the loop is however many of those slices make a turn, and the test
+        // is that the arithmetic closes.
+        for _ in 0..1000 {
+            viewpoint.grab(MIDDLE, 1.0);
+            viewpoint.drag_to([0.5, 0.55], 1.0);
+            viewpoint.release();
+            if viewpoint.camera().pitch.abs() > FRAC_PI_2 {
+                inverted += 1;
+            }
+            if inverted > 0 && wrap(viewpoint.camera().pitch - start.pitch).abs() < 1e-2 {
+                assert!(
+                    (viewpoint.camera().yaw - start.yaw).abs() < 1e-3,
+                    "the yaw drifted to {:?}",
+                    degrees(viewpoint.camera()),
+                );
+                return;
+            }
+        }
+        panic!(
+            "a thousand drags up never came back round: {:?}",
+            degrees(viewpoint.camera())
+        );
+    }
+
+    /// Ctrl+0 rights the view from anywhere, upside down included.
+    #[test]
+    fn the_default_view_comes_back_from_upside_down() {
+        let mut viewpoint = parked(Camera {
+            yaw: 2.5,
+            pitch: 2.9,
+            fov: 0.6,
+        });
+        viewpoint.nudge(Nudge::Reset, 1.6);
+        assert_eq!(viewpoint.camera(), Camera::default());
     }
 
     /// The `View` menu's three items: two that change the field of view and
