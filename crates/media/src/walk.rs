@@ -1,10 +1,11 @@
 //! Decoded frames in system memory, one instant of every stream at a time.
 //!
-//! The player's own [`kyerag_media::Reader`] delivers frames into GPU memory,
-//! which is where the app wants them and not where an instrument that samples
-//! the delivered picture at angles does. `rolling` (issue #9) opened this walk
-//! first; `seam` (issue #48) needs the same frames and needs them from an
-//! ordinary `.mp4` as well, so it lives here rather than in either binary.
+//! [`Reader`](super::Reader) delivers frames into GPU memory, which is where
+//! the picture wants them and not where anything that reads the delivered
+//! **pixels** at angles can go. `rolling` (issue #9) opened this walk first;
+//! `seam` (issue #48) measured the seam with it, and since the seam fit now
+//! runs at open in the app as well as in the instruments it lives here rather
+//! than in `kyerag-spike`.
 //!
 //! Nothing here interprets a stream as a lens: a capture's video streams come
 //! out in lens order and the caller decides what they are. Insta360 writes
@@ -22,8 +23,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ffmpeg_next as ff;
-use kyerag_media::{Fallible, HwDevice, SwFrame, open_decoder};
-use kyerag_meta::Size;
+
+use super::{Fallible, HwDevice, Size, SwFrame, open_decoder};
 
 /// Every video stream of one container, in container order.
 fn video_streams(input: &ff::format::context::Input) -> Vec<usize> {
@@ -159,6 +160,39 @@ impl Walk {
     /// caller that needs a seam has to say so itself.
     pub fn streams(&self) -> usize {
         self.lanes.len()
+    }
+
+    /// How long the file runs, from the container's own duration.
+    pub fn duration(&self) -> Duration {
+        let seconds = self.input.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
+        Duration::from_secs_f64(seconds.max(0.0))
+    }
+
+    /// Carry the walk to another instant of the same file, so a caller that
+    /// wants frames from several places pays the container open once.
+    ///
+    /// Every decoder is flushed and every queue emptied: a decoder handed
+    /// packets from a new place without one keeps answering with the frames it
+    /// was mid-way through, which would pair a frame from here with a frame
+    /// from there.
+    pub fn jump(&mut self, to: f64) -> Fallible<()> {
+        let target = (to * 1e6) as i64;
+        self.input.seek(target, ..target)?;
+        for decoder in &mut self.decoders {
+            decoder.flush();
+        }
+        for queue in &mut self.queues {
+            queue.clear();
+        }
+        self.from_pts = self.start + self.ticks(to);
+        self.drained = false;
+        Ok(())
+    }
+
+    /// A time in seconds as this file's own stream ticks.
+    fn ticks(&self, seconds: f64) -> i64 {
+        (seconds * f64::from(self.time_base.denominator()) / f64::from(self.time_base.numerator()))
+            as i64
     }
 
     /// The next instant every stream has a frame for, at or after the one the

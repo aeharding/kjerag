@@ -71,6 +71,18 @@ pub struct CalibrationSet {
     /// conversion in [`Intrinsics`] stays auditable. Nothing downstream
     /// needs it.
     pub calibration_canvas: Size,
+    /// What names this capture: a hash of the trailer's metadata record,
+    /// which carries the calibration string and the capture's own first
+    /// frame timestamp. The seam fit is cached under it (issue #48), so a
+    /// file that is renamed, moved or copied keeps its fit and two
+    /// different captures never share one.
+    ///
+    /// It is a hash and it stays one. The record it is taken over holds the
+    /// camera's serial and the capture's clock; a number that cannot be
+    /// turned back into them is what may be written into a cache file.
+    ///
+    /// 0 for a calibration that did not come from a file.
+    pub fingerprint: u64,
 }
 
 /// One lens: a Mei/UCM camera model plus where the lens sits.
@@ -324,6 +336,7 @@ impl CalibrationSet {
         };
         let set = Self::from_metadata(&trailer.metadata)?;
         Ok(Self {
+            fingerprint: trailer.fingerprint,
             exposure: std::array::from_fn(|lens| {
                 ExposureTrack::parse(&trailer.exposure[lens], clock)
             }),
@@ -433,6 +446,7 @@ impl CalibrationSet {
             exposure: Default::default(),
             imu: GyroTrack::default(),
             calibration_canvas: canvas,
+            fingerprint: 0,
         })
     }
 }

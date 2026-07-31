@@ -10,6 +10,9 @@ kyerag-media = { workspace = true }
 # depends on nothing but prost, which is what its ffmpeg-free CI job checks.
 kyerag-meta = { workspace = true }
 ash = { workspace = true }
+# Where the per-file seam fit is remembered (`src/seam.rs`): the XDG cache
+# directory, which is where cosmic-files puts its thumbnails.
+dirs = { workspace = true }
 libc = { workspace = true }
 wgpu = { workspace = true }
 # Only for `ffi::AVDRMFrameDescriptor`, the descriptor an import reads. No

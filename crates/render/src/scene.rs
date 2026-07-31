@@ -37,6 +37,7 @@ use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack,
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
+use super::seam::{self, Corrected};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -138,8 +139,14 @@ struct Holding {
 
 /// A file on screen: its calibration, and where its frames come from.
 struct Show {
-    /// One per decoded stream, in stream order.
+    /// One per decoded stream, in stream order, as the camera calibrated
+    /// them.
     lenses: Arc<[Lens]>,
+    /// The same lenses with this file's own seam correction in them, once it
+    /// has been fitted (issue #48). Empty until then, and empty for good on a
+    /// file that has no seam to fit or no content to fit it on, which is the
+    /// factory calibration and is what every earlier build drew.
+    corrected: Corrected,
     /// Where the camera body was, over the whole file, and the camera's own
     /// timestamp for each frame. Both come out of the trailer at open
     /// (issue #8); both are empty for a file with no IMU record, and then
@@ -237,7 +244,10 @@ impl Scene {
     /// is parsed; the first frames arrive on the decode thread.
     pub fn open(path: &Path) -> Fallible<Self> {
         let mut player = Player::open(path)?;
-        let (lenses, held) = calibrated(path, player.size(), player.lenses())?;
+        let (lenses, held, fingerprint) = calibrated(path, player.size(), player.lenses())?;
+        // Off the decode path and off this thread: the first frame is not
+        // waiting for a seam fit.
+        let corrected = seam::correct(path, &lenses, player.size(), fingerprint);
         println!(
             "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
@@ -265,6 +275,7 @@ impl Scene {
         Ok(Self {
             show: Some(Show::new(
                 lenses,
+                corrected,
                 held,
                 None,
                 Source::Live(Box::new(player)),
@@ -279,7 +290,10 @@ impl Scene {
     /// the frame it is checking.
     pub fn still(path: &Path, at: Cue) -> Fallible<Self> {
         let mut reader = Reader::open(path)?;
-        let (lenses, held) = calibrated(path, reader.size(), reader.lenses())?;
+        let (lenses, held, fingerprint) = calibrated(path, reader.size(), reader.lenses())?;
+        // On this thread, unlike playback's: one picture is the whole event,
+        // so there is no later for a correction to arrive in.
+        let corrected = seam::correct_now(path, &lenses, reader.size(), fingerprint);
         let frames = reader.frame(at)?;
         println!(
             "frame:  {} at {:.3} s",
@@ -292,6 +306,7 @@ impl Scene {
         Ok(Self {
             show: Some(Show::new(
                 lenses,
+                corrected,
                 held,
                 Some(Arc::new(frames)),
                 Source::Stepped(Box::new(reader)),
@@ -578,15 +593,23 @@ impl Scene {
 impl Show {
     fn new(
         lenses: Arc<[Lens]>,
+        corrected: Corrected,
         held: Arc<Motion>,
         frames: Option<Arc<Frames>>,
         source: Source,
     ) -> Self {
         Self {
             lenses,
+            corrected,
             held,
             playing: RefCell::new(Playing { frames, source }),
         }
+    }
+
+    /// What the pass runs on: this file's own fitted calibration once the fit
+    /// has landed, and the camera's own until then.
+    fn lenses(&self) -> Arc<[Lens]> {
+        self.corrected.get().unwrap_or(&self.lenses).clone()
     }
 
     fn view(&self, held: Holding) -> Option<View> {
@@ -606,7 +629,7 @@ impl Show {
                     .held
                     .rolling(at, held.readout.unwrap_or(self.held.readout)),
             },
-            lenses: self.lenses.clone(),
+            lenses: self.lenses(),
             frames,
         })
     }
@@ -633,7 +656,11 @@ impl Show {
 /// capture is 1.8 million IMU samples and costs about a fifth of a second to
 /// read and integrate, against 70 ms to open the container. Doing it per
 /// frame would be 30 times a second for a track that does not change.
-fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>, Arc<Motion>)> {
+fn calibrated(
+    path: &Path,
+    size: Size,
+    streams: usize,
+) -> Fallible<(Arc<[Lens]>, Arc<Motion>, u64)> {
     let calibration = CalibrationSet::from_capture(path)?;
     // The calibration's pixel numbers are already in delivered-frame
     // coordinates, so they describe this texture only if the stream is the
@@ -677,7 +704,7 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>,
         exposure: calibration.exposure[0].clone(),
         readout: calibration.readout(),
     };
-    Ok((lenses.into(), Arc::new(held)))
+    Ok((lenses.into(), Arc::new(held), calibration.fingerprint))
 }
 
 /// What the shell hands the renderer for one frame.

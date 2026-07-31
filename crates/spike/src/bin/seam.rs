@@ -75,8 +75,12 @@ use std::path::{Path, PathBuf};
 
 use kyerag_media::Fallible;
 use kyerag_meta::{CalibrationSet, Lens, Mat3, Quat, Size as MetaSize};
+use kyerag_render::seam::{
+    self, Found, Knob, Probe, Reading, Refused, Where, least_squares, mapped, moved, read_ring,
+    ring, rms, turned, unit,
+};
 use kyerag_render::{Camera, Held, Landing, Reframe, Sampling, Size};
-use kyerag_spike::{Pair, Plane, Walk};
+use kyerag_spike::{Pair, Walk};
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
@@ -85,6 +89,7 @@ fn main() -> Fallible<()> {
         Mode::Render => render(&options),
         Mode::Blend => blend(&options),
         Mode::Parity => parity(&options),
+        Mode::Fit => fit(&options),
     }
 }
 
@@ -98,6 +103,9 @@ enum Mode {
     Blend,
     /// Our stitch against the camera maker's own, on the same capture.
     Parity,
+    /// What the shipped per-file fit reads on this file, and what it costs:
+    /// the app's own path (issue #48 phase 2), timed and printed.
+    Fit,
 }
 
 /// The inter-lens baseline in millimetres, which is what sets parallax and is
@@ -110,32 +118,6 @@ fn baseline_mm(calibration: &CalibrationSet) -> f64 {
 }
 
 // ------------------------------------------------------------ the ring
-
-/// One direction on the seam great circle, and the two axes of the sphere
-/// there: along the circle towards increasing azimuth, and across it towards
-/// the front lens.
-#[derive(Clone, Copy)]
-struct Where {
-    phi: f64,
-    centre: [f64; 3],
-    along: [f64; 3],
-    across: [f64; 3],
-}
-
-fn ring(patches: usize) -> Vec<Where> {
-    (0..patches)
-        .map(|index| {
-            let phi = index as f64 / patches as f64 * std::f64::consts::TAU;
-            let (sin, cos) = phi.sin_cos();
-            Where {
-                phi,
-                centre: [cos, sin, 0.0],
-                along: [-sin, cos, 0.0],
-                across: [0.0, 0.0, 1.0],
-            }
-        })
-        .collect()
-}
 
 /// Which way is up in the camera body's frame, from the accelerometer.
 ///
@@ -188,398 +170,6 @@ fn axis_of(reframe: &Reframe, lens: usize) -> [f64; 3] {
     best
 }
 
-// ------------------------------------------------------------ the patches
-
-/// One lens's picture of a rectangle of the sphere, sampled on a grid of
-/// **directions** rather than of pixels: `2 * along + 1` by `2 * across + 1`,
-/// `step` radians apart, laid out along then across.
-struct Grid {
-    along: isize,
-    across: isize,
-    luma: Vec<f64>,
-}
-
-impl Grid {
-    fn at(&self, i: isize, j: isize) -> f64 {
-        self.luma[((i + self.along) * (2 * self.across + 1) + (j + self.across)) as usize]
-    }
-
-    /// How much picture there is to correlate, in 8-bit codes. Flat sky
-    /// correlates with anything.
-    fn contrast(&self) -> f64 {
-        let count = self.luma.len() as f64;
-        let mean = self.luma.iter().sum::<f64>() / count;
-        (self.luma.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count).sqrt()
-    }
-
-    /// Zero-mean normalized cross-correlation against `other` shifted by
-    /// `(di, dj)`, over every `stride`-th sample of this grid.
-    fn correlation(&self, other: &Grid, di: isize, dj: isize, stride: isize) -> f64 {
-        let (mut sum_a, mut sum_b, mut count) = (0.0, 0.0, 0.0);
-        let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(self.luma.len());
-        let mut i = -self.along;
-        while i <= self.along {
-            let mut j = -self.across;
-            while j <= self.across {
-                let (a, b) = (self.at(i, j), other.at(i + di, j + dj));
-                sum_a += a;
-                sum_b += b;
-                count += 1.0;
-                pairs.push((a, b));
-                j += stride;
-            }
-            i += stride;
-        }
-        let (mean_a, mean_b) = (sum_a / count, sum_b / count);
-        let (mut covariance, mut var_a, mut var_b) = (0.0, 0.0, 0.0);
-        for (a, b) in pairs {
-            let (a, b) = (a - mean_a, b - mean_b);
-            covariance += a * b;
-            var_a += a * a;
-            var_b += b * b;
-        }
-        match var_a > 0.0 && var_b > 0.0 {
-            true => covariance / (var_a * var_b).sqrt(),
-            false => 0.0,
-        }
-    }
-}
-
-/// One lens's picture of the sphere around `at`. `None` where any corner of
-/// the rectangle is outside this lens's picture: the two lenses have to be
-/// answering about the same directions or the correlation means nothing.
-fn sample(
-    reframe: &Reframe,
-    plane: &Plane,
-    lens: usize,
-    at: &Where,
-    half: (isize, isize),
-    step: f64,
-) -> Option<Grid> {
-    let mut luma = Vec::with_capacity(((2 * half.0 + 1) * (2 * half.1 + 1)) as usize);
-    for i in -half.0..=half.0 {
-        for j in -half.1..=half.1 {
-            let (a, b) = (i as f64 * step, j as f64 * step);
-            let ray = unit(std::array::from_fn(|axis| {
-                at.centre[axis] + at.along[axis] * a + at.across[axis] * b
-            }));
-            let landing = reframe.project(lens, ray.map(|c| c as f32));
-            if !landing.inside {
-                return None;
-            }
-            luma.push(plane.at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1]))?);
-        }
-    }
-    Some(Grid {
-        along: half.0,
-        across: half.1,
-        luma,
-    })
-}
-
-/// The shift, in grid steps, that lines `back`'s picture up with `front`'s,
-/// and how well it correlates there.
-///
-/// Coarse then fine then parabolic. The coarse pass strides both the search
-/// and the samples it scores on, which is what makes an across-seam search
-/// wide enough to hold near-field parallax affordable; the fine pass is every
-/// step within one coarse cell of the winner; and the peak is then
-/// interpolated between whole steps, because a residual of a third of a step
-/// is exactly the size this instrument is trying to resolve.
-fn best_shift(front: &Grid, back: &Grid, search: (isize, isize)) -> Option<(f64, f64, f64)> {
-    let stride = (search.0.max(search.1) / 12).max(1);
-    // How far apart the shifts are tried and how far apart the samples are
-    // scored are two different strides, and tying them together is how a
-    // coarse pass over a wide search ends up correlating sixteen pixels
-    // against sixteen pixels and finding a peak in the noise.
-    let coarse = stride.min(3);
-    let score = |di, dj, stride| front.correlation(back, di, dj, stride);
-    let mut best: Option<(isize, isize, f64)> = None;
-    let mut di = -search.0;
-    while di <= search.0 {
-        let mut dj = -search.1;
-        while dj <= search.1 {
-            let r = score(di, dj, coarse);
-            if best.is_none_or(|(_, _, held)| r > held) {
-                best = Some((di, dj, r));
-            }
-            dj += stride;
-        }
-        di += stride;
-    }
-    let (coarse_i, coarse_j, _) = best?;
-    let mut best: Option<(isize, isize, f64)> = None;
-    for di in (coarse_i - stride).max(-search.0)..=(coarse_i + stride).min(search.0) {
-        for dj in (coarse_j - stride).max(-search.1)..=(coarse_j + stride).min(search.1) {
-            let r = score(di, dj, 1);
-            if best.is_none_or(|(_, _, held)| r > held) {
-                best = Some((di, dj, r));
-            }
-        }
-    }
-    let (i, j, r) = best?;
-    let peak = |minus: f64, here: f64, plus: f64| {
-        let curve = minus - 2.0 * here + plus;
-        match curve < 0.0 {
-            true => (0.5 * (minus - plus) / curve).clamp(-1.0, 1.0),
-            false => 0.0,
-        }
-    };
-    let (mut refined_i, mut refined_j) = (0.0, 0.0);
-    if i.abs() < search.0 {
-        refined_i = peak(score(i - 1, j, 1), r, score(i + 1, j, 1));
-    }
-    if j.abs() < search.1 {
-        refined_j = peak(score(i, j - 1, 1), r, score(i, j + 1, 1));
-    }
-    Some((i as f64 + refined_i, j as f64 + refined_j, r))
-}
-
-/// What one patch's correlation found: where lens 1's picture of the same
-/// directions sits relative to lens 0's, in degrees of world angle.
-#[derive(Clone, Copy)]
-struct Found {
-    along: f64,
-    across: f64,
-    r: f64,
-    contrast: f64,
-}
-
-/// Every patch round the seam of one frame, under one calibration, in patch
-/// order. `None` where a lens has no usable picture of that patch, or where
-/// there is nothing in it to correlate.
-/// Why a patch was not a patch, which on a ring that crosses a deck, a
-/// treeline and a blank sky is most of them and is worth saying out loud.
-#[derive(Default)]
-struct Refused {
-    /// One of the two lenses has no picture of the whole rectangle, which
-    /// past about 6 degrees off the seam is every patch: the overlap band is
-    /// only so wide, so near-field content that parallax has moved further
-    /// than that is not in both pictures at all and no instrument can pair it.
-    outside: usize,
-    flat: usize,
-    unlike: usize,
-    pinned: usize,
-}
-
-fn measure(
-    reframe: &Reframe,
-    pair: &Pair,
-    ring: &[Where],
-    options: &Options,
-    refused: &mut Refused,
-) -> Vec<Option<Found>> {
-    let step = options.step.to_radians();
-    let half = (options.span.to_radians() / 2.0 / step) as isize;
-    let search = (
-        (options.along / options.step) as isize,
-        (options.across / options.step) as isize,
-    );
-    ring.iter()
-        .map(|at| {
-            let Some(front) = sample(reframe, &pair.lenses[0], 0, at, (half, half), step) else {
-                refused.outside += 1;
-                return None;
-            };
-            if front.contrast() < options.contrast {
-                refused.flat += 1;
-                return None;
-            }
-            let Some(back) = sample(
-                reframe,
-                &pair.lenses[1],
-                1,
-                at,
-                (half + search.0, half + search.1),
-                step,
-            ) else {
-                refused.outside += 1;
-                return None;
-            };
-            let (along, across, r) = best_shift(&front, &back, search)?;
-            if r < options.keep {
-                refused.unlike += 1;
-            }
-            // A peak against the edge of the search is not a peak, it is the
-            // search running out. Near-field content at this seam moves
-            // further across than the overlap band is wide, and a reading
-            // pinned at the limit would report the limit.
-            if along.abs() >= search.0 as f64 || across.abs() >= search.1 as f64 {
-                refused.pinned += 1;
-                return None;
-            }
-            Some(Found {
-                along: (along * step).to_degrees(),
-                across: (across * step).to_degrees(),
-                r,
-                contrast: front.contrast(),
-            })
-        })
-        .collect()
-}
-
-// ------------------------------------------------------------ the knobs
-
-/// One field of one lens's calibration, in the units `offset_v3` writes it in.
-///
-/// Everything here is applied to **lens 1**, because the seam sees only the
-/// two lenses' disagreement and cannot say which of them is wrong: a correction
-/// of `+x` on lens 1 and one of `-x` on lens 0 are the same picture at the
-/// seam. Reported that way round, a fitted number is a patch to lens 1's block
-/// of the string the camera wrote.
-#[derive(Clone, Copy, PartialEq)]
-enum Knob {
-    Roll,
-    Yaw,
-    Pitch,
-    Cx,
-    Cy,
-    Fx,
-    Fy,
-    Xi,
-}
-
-impl Knob {
-    const ALL: [Self; 8] = [
-        Self::Roll,
-        Self::Yaw,
-        Self::Pitch,
-        Self::Cx,
-        Self::Cy,
-        Self::Fx,
-        Self::Fy,
-        Self::Xi,
-    ];
-
-    fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|knob| knob.name() == name)
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Roll => "roll",
-            Self::Yaw => "yaw",
-            Self::Pitch => "pitch",
-            Self::Cx => "cx",
-            Self::Cy => "cy",
-            Self::Fx => "fx",
-            Self::Fy => "fy",
-            Self::Xi => "xi",
-        }
-    }
-
-    /// What one unit of this knob is. The two focal lengths are fractional
-    /// because a focal error is a scale and quoting it in pixels hides that
-    /// 1 px of 3666 is 0.016 degrees at the rim.
-    fn unit(self) -> &'static str {
-        match self {
-            Self::Roll | Self::Yaw | Self::Pitch => "deg",
-            Self::Cx | Self::Cy => "px",
-            Self::Fx | Self::Fy => "ratio",
-            Self::Xi => "abs",
-        }
-    }
-
-    /// The step the Jacobian is taken over, in this knob's own units. Large
-    /// enough that the projection's f32 arithmetic is not what is being
-    /// measured, small enough to stay linear at a tenth of a degree.
-    fn probe(self) -> f64 {
-        match self {
-            Self::Roll | Self::Yaw | Self::Pitch => 0.10,
-            Self::Cx | Self::Cy => 4.0,
-            Self::Fx | Self::Fy => 0.001,
-            Self::Xi => 0.005,
-        }
-    }
-
-    fn apply(self, lens: &mut Lens, amount: f64) {
-        match self {
-            Self::Roll => lens.pose.roll_deg += amount,
-            Self::Yaw => lens.pose.yaw_deg += amount,
-            Self::Pitch => lens.pose.pitch_deg += amount,
-            Self::Cx => lens.intrinsics.cx += amount,
-            Self::Cy => lens.intrinsics.cy += amount,
-            Self::Fx => lens.intrinsics.fx *= 1.0 + amount,
-            Self::Fy => lens.intrinsics.fy *= 1.0 + amount,
-            Self::Xi => lens.intrinsics.xi += amount,
-        }
-    }
-}
-
-/// A calibration with one knob turned on lens 1.
-fn turned(lenses: &[Lens], knob: Knob, amount: f64) -> Vec<Lens> {
-    let mut lenses = lenses.to_vec();
-    if let Some(lens) = lenses.get_mut(1) {
-        knob.apply(lens, amount);
-    }
-    lenses
-}
-
-/// The map for one calibration: the camera left alone and the horizon
-/// unlocked, so a view ray is a direction in the camera body's own frame and a
-/// patch of the sphere is addressed by its angles.
-fn mapped(lenses: &[Lens], frame: Size) -> Reframe {
-    Reframe::new(
-        lenses,
-        frame,
-        Camera::default(),
-        Held::default(),
-        1.0,
-        false,
-        Sampling::default(),
-    )
-}
-
-/// How far a change to the calibration moves lens `lens`'s picture of one
-/// direction, in degrees along and across the seam.
-///
-/// This is the model's own prediction of what the correlation will read, and
-/// it is where the fit and the control both come from. If the change moves the
-/// projection of a fixed direction by `dg` pixels, then the content that used
-/// to correlate at shift `s` now correlates at `s - J^-1 dg`, where `J` is the
-/// local Jacobian of the unchanged map from the two sphere axes to pixels.
-/// Everything else in this file is one measurement compared against this.
-fn moved(base: &Reframe, tweaked: &Reframe, lens: usize, at: &Where) -> Option<[f64; 2]> {
-    let here = base.project(lens, at.centre.map(|c| c as f32));
-    let there = tweaked.project(lens, at.centre.map(|c| c as f32));
-    if !here.inside || !there.inside {
-        return None;
-    }
-    // One hundredth of a degree, which is a sixth of a pixel at the rim: far
-    // enough out of the f32 noise, near enough that the map is a plane.
-    let probe = 0.01f64.to_radians();
-    let column = |axis: [f64; 3]| {
-        let step = |sign: f64| {
-            let ray = unit(std::array::from_fn(|c| {
-                at.centre[c] + sign * probe * axis[c]
-            }));
-            base.project(lens, ray.map(|c| c as f32)).pixel
-        };
-        let (plus, minus) = (step(1.0), step(-1.0));
-        [
-            f64::from(plus[0] - minus[0]) / (2.0 * probe),
-            f64::from(plus[1] - minus[1]) / (2.0 * probe),
-        ]
-    };
-    let (a, b) = (column(at.along), column(at.across));
-    let determinant = a[0] * b[1] - a[1] * b[0];
-    if determinant.abs() < 1e-9 {
-        return None;
-    }
-    let d = [
-        f64::from(there.pixel[0] - here.pixel[0]),
-        f64::from(there.pixel[1] - here.pixel[1]),
-    ];
-    // -J^-1 d, in degrees.
-    Some(
-        [
-            -(b[1] * d[0] - b[0] * d[1]) / determinant,
-            -(a[0] * d[1] - a[1] * d[0]) / determinant,
-        ]
-        .map(f64::to_degrees),
-    )
-}
-
 // ------------------------------------------------------------ the run
 
 /// What one patch came to over the run, and what the geometry says about it.
@@ -628,7 +218,7 @@ fn residual(options: &Options) -> Fallible<()> {
         let calibration = CalibrationSet::from_insv(&path)?;
         let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
         let ring = ring(options.patches);
-        let lenses = fixed(&calibration.lenses, &options.fix);
+        let lenses = options.corrected(&path, &calibration.lenses, frame);
         let base = mapped(&lenses, frame);
         // Every candidate is measured on the same frames, and each is compared
         // against the measurement on the patches the two of them share: an
@@ -694,6 +284,7 @@ fn residual(options: &Options) -> Fallible<()> {
     parallax(&pooled, baseline_mm(&calibration) / 1e3);
     signatures(&base, &lenses, frame, &ring, &Knob::ALL);
     correction(&pooled, &base, &lenses, frame, options);
+    knob_counts(&pooled, &lenses, frame);
     if candidates.len() > 1 {
         println!(
             "\nthe controls: a known error injected into lens 1's calibration and read back off \n\
@@ -762,7 +353,8 @@ fn sweep(
     path: &Path,
 ) -> Fallible<Vec<Vec<Patch>>> {
     let up = body_up(calibration).ok_or("this file carries no IMU record, so up is unknown")?;
-    let mut walk = Walk::open(path, options.from, calibration.dimension)?;
+    let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
+    let mut walk = Walk::open(path, options.from, frame)?;
     if walk.streams() < 2 {
         return Err("this file carries one lens stream, so it has no seam".into());
     }
@@ -789,7 +381,9 @@ fn sweep(
         };
         let found: Vec<Vec<Option<Found>>> = candidates
             .iter()
-            .map(|(_, reframe)| measure(reframe, &pair, ring, options, &mut refused))
+            .map(|(_, reframe)| {
+                read_ring(reframe, &pair.lenses, ring, &options.probe(), &mut refused)
+            })
             .collect();
         for (candidate, patches) in found.iter().zip(&mut patches) {
             for (index, found) in candidate.iter().enumerate() {
@@ -1248,88 +842,6 @@ fn correction(kept: &[&Patch], base: &Reframe, lenses: &[Lens], frame: Size, opt
     );
 }
 
-// ------------------------------------------------------------ least squares
-
-struct Fit {
-    params: Vec<f64>,
-    errors: Vec<f64>,
-    residual: f64,
-}
-
-/// Ordinary least squares through the normal equations, with the standard
-/// error of each parameter. Small systems only, which every fit here is.
-fn least_squares(rows: &[(Vec<f64>, f64)]) -> Option<Fit> {
-    let width = rows.first()?.0.len();
-    if rows.len() <= width {
-        return None;
-    }
-    let mut normal = vec![vec![0.0; width]; width];
-    let mut right = vec![0.0; width];
-    for (basis, value) in rows {
-        for i in 0..width {
-            right[i] += basis[i] * value;
-            for j in 0..width {
-                normal[i][j] += basis[i] * basis[j];
-            }
-        }
-    }
-    let inverse = invert(&normal)?;
-    let params: Vec<f64> = (0..width)
-        .map(|i| (0..width).map(|j| inverse[i][j] * right[j]).sum())
-        .collect();
-    let residual = (rows
-        .iter()
-        .map(|(basis, value)| {
-            let modelled: f64 = basis.iter().zip(&params).map(|(b, p)| b * p).sum();
-            (value - modelled).powi(2)
-        })
-        .sum::<f64>()
-        / (rows.len() - width) as f64)
-        .sqrt();
-    Some(Fit {
-        errors: (0..width)
-            .map(|i| residual * inverse[i][i].max(0.0).sqrt())
-            .collect(),
-        params,
-        residual: residual * ((rows.len() - width) as f64 / rows.len() as f64).sqrt(),
-    })
-}
-
-/// Gauss-Jordan with partial pivoting, or `None` where the system is singular.
-fn invert(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
-    let width = matrix.len();
-    let mut work: Vec<Vec<f64>> = (0..width)
-        .map(|i| {
-            let mut row = matrix[i].clone();
-            row.extend((0..width).map(|j| f64::from(u8::from(i == j))));
-            row
-        })
-        .collect();
-    for column in 0..width {
-        let pivot = (column..width)
-            .max_by(|a, b| work[*a][column].abs().total_cmp(&work[*b][column].abs()))?;
-        if work[pivot][column].abs() < 1e-12 {
-            return None;
-        }
-        work.swap(column, pivot);
-        let divisor = work[column][column];
-        for value in &mut work[column] {
-            *value /= divisor;
-        }
-        for row in 0..width {
-            if row == column {
-                continue;
-            }
-            let factor = work[row][column];
-            let pivot = work[column].clone();
-            for (value, above) in work[row].iter_mut().zip(&pivot) {
-                *value -= factor * above;
-            }
-        }
-    }
-    Some(work.into_iter().map(|row| row[width..].to_vec()).collect())
-}
-
 /// Pearson's r between the one basis column and the value, which is the
 /// statistic a control is read by.
 fn correlation(rows: &[(Vec<f64>, f64)]) -> f64 {
@@ -1349,6 +861,107 @@ fn correlation(rows: &[(Vec<f64>, f64)]) -> f64 {
     match var_x > 0.0 && var_y > 0.0 {
         true => covariance / (var_x * var_y).sqrt(),
         false => 0.0,
+    }
+}
+
+/// The shipped fit, on the frames the app itself would read.
+///
+/// Everything the app does at open: the same places in the file, the same
+/// patches, the same iterated fit. What it adds is the clock and the second
+/// knob set, because what the app cannot report is how long it took and what
+/// the fit it did not run would have said.
+fn fit(options: &Options) -> Fallible<()> {
+    for path in options.inputs() {
+        let calibration = CalibrationSet::from_insv(&path)?;
+        let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
+        let lenses = fixed(&calibration.lenses, &options.fix);
+        let plan = seam::Plan {
+            probe: options.probe(),
+            ..seam::Plan::default()
+        };
+        let started = std::time::Instant::now();
+        let readings = seam::measure(&path, &lenses, frame, &plan)?;
+        let read = started.elapsed().as_secs_f64();
+        println!(
+            "\n{}: {} of {} azimuths correlated over {} places x {} frames, read in {:.2} s",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            readings.len(),
+            plan.probe.patches,
+            plan.places,
+            plan.frames,
+            read,
+        );
+        let readings: Vec<Reading> = readings;
+        let solved = std::time::Instant::now();
+        let fitted = seam::fit(&readings, &lenses, frame, &seam::KNOBS);
+        println!(
+            "the fit itself took {:.3} s, so the whole of it is {:.2} s",
+            solved.elapsed().as_secs_f64(),
+            read + solved.elapsed().as_secs_f64(),
+        );
+        if fitted.is_none() {
+            println!("no fit: these patches do not separate the knobs");
+            continue;
+        }
+        let held: Vec<Patch> = readings
+            .iter()
+            .map(|reading| Patch {
+                at: reading.at,
+                along: vec![reading.along],
+                across: vec![reading.across],
+                r: Vec::new(),
+                contrast: 0.0,
+                below: 0.0,
+            })
+            .collect();
+        knob_counts(&held.iter().collect::<Vec<_>>(), &lenses, frame);
+    }
+    Ok(())
+}
+
+/// The shipped fitter's own answer on these patches, three knobs against
+/// five: the decision 6.8 left open, taken per file and through the code that
+/// ships rather than beside it.
+///
+/// Both rows are the same iterated fit on the same readings, so the only
+/// difference between them is the two columns. `along` and `across` are the
+/// root mean square of the patch readings before the correction and after it,
+/// predicted through the map; the honest after is a second decode with the
+/// correction in place, which is what `fit=1` draws and what a residual run of
+/// this instrument re-measures.
+fn knob_counts(kept: &[&Patch], lenses: &[Lens], frame: Size) {
+    let readings: Vec<Reading> = kept
+        .iter()
+        .map(|patch| Reading {
+            at: patch.at,
+            along: patch.mean_along(),
+            across: patch.mean_across(),
+        })
+        .collect();
+    println!("\nthe shipped fit on these patches, and the five-knob fit beside it:");
+    println!(
+        "{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>16} {:>16}",
+        "knobs", "roll", "yaw", "pitch", "cx", "cy", "along", "across"
+    );
+    let five = [Knob::Roll, Knob::Yaw, Knob::Pitch, Knob::Cx, Knob::Cy];
+    for (name, knobs) in [("rotation", &seam::KNOBS[..]), ("five", &five[..])] {
+        let Some(fitted) = seam::fit(&readings, lenses, frame, knobs) else {
+            println!("{name:<10} singular on these patches");
+            continue;
+        };
+        println!(
+            "{name:<10} {:>8.3} {:>8.3} {:>8.3} {:>8.2} {:>8.2} {:>7.3} -> {:>5.3} \
+             {:>7.3} -> {:>5.3}",
+            fitted.fit.roll_deg,
+            fitted.fit.yaw_deg,
+            fitted.fit.pitch_deg,
+            fitted.fit.cx_px,
+            fitted.fit.cy_px,
+            fitted.before[0],
+            fitted.after[0],
+            fitted.before[1],
+            fitted.after[1],
+        );
     }
 }
 
@@ -1385,6 +998,9 @@ struct Options {
     /// which is how a fitted answer is checked: apply it, measure again, and
     /// the residual it was fitted to should be gone.
     fix: Vec<(Knob, f64)>,
+    /// Run the shipped per-file fit and draw with it, which is what the app
+    /// does at open (issue #48 phase 2).
+    fit: bool,
     yaw: f64,
     pitch: f64,
     fov: f64,
@@ -1415,6 +1031,7 @@ impl Options {
             both: false,
             control: false,
             fix: Vec::new(),
+            fit: false,
             yaw: 90.0,
             pitch: 0.0,
             fov: 50.0,
@@ -1431,6 +1048,7 @@ impl Options {
                         "render" => Mode::Render,
                         "blend" => Mode::Blend,
                         "parity" => Mode::Parity,
+                        "fit" => Mode::Fit,
                         _ => return Err(format!("no mode called {value}. {USAGE}").into()),
                     };
                 }
@@ -1448,6 +1066,7 @@ impl Options {
                         .collect::<Result<Vec<f64>, _>>()?;
                 }
                 "fix" => options.fix = turns(value)?,
+                "fit" => options.fit = value.parse::<u32>()? != 0,
                 "from" => options.from = value.parse()?,
                 "count" => options.count = value.parse()?,
                 "patches" => options.patches = value.parse()?,
@@ -1469,6 +1088,49 @@ impl Options {
             }
         }
         Ok(options)
+    }
+
+    /// How the seam is read, which is the shipped fitter's own knobs with
+    /// this run's numbers in them.
+    fn probe(&self) -> Probe {
+        Probe {
+            patches: self.patches,
+            span: self.span,
+            step: self.step,
+            along: self.along,
+            across: self.across,
+            keep: self.keep,
+            contrast: self.contrast,
+        }
+    }
+
+    /// The correction to draw with: whatever `fix=` says, and with `fit=1`
+    /// **the shipped per-file fit**, run here exactly as the app runs it at
+    /// open. What the eye is checking is then what the player draws.
+    fn corrected(&self, path: &Path, lenses: &[Lens], frame: Size) -> Vec<Lens> {
+        let lenses = fixed(lenses, &self.fix);
+        if !self.fit {
+            return lenses;
+        }
+        let started = std::time::Instant::now();
+        let Some(fitted) = seam::fit_file(path, &lenses, frame, &seam::Plan::default()) else {
+            println!("fit:    no fit; the factory calibration stands");
+            return lenses;
+        };
+        println!(
+            "fit:    roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg over {} patches in {:.1} s\n\
+             fit:    along {:.3} -> {:.3}, across {:.3} -> {:.3} deg (predicted)",
+            fitted.fit.roll_deg,
+            fitted.fit.yaw_deg,
+            fitted.fit.pitch_deg,
+            fitted.patches,
+            started.elapsed().as_secs_f64(),
+            fitted.before[0],
+            fitted.after[0],
+            fitted.before[1],
+            fitted.after[1],
+        );
+        fitted.fit.applied(&lenses)
     }
 
     fn camera(&self) -> Camera {
@@ -1543,8 +1205,8 @@ fn turns(value: &str) -> Fallible<Vec<(Knob, f64)>> {
         .collect()
 }
 
-const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend] [also=<other.insv>] \
-     [fix=roll:0.8,yaw:-2] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [bands=14,8,4] [out=x.png] \
+const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend|parity|fit] [also=<other.insv>] \
+     [fix=roll:0.8,yaw:-2] [fit=1] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [bands=14,8,4] [out=x.png] \
      [from=seconds] [count=frames] [patches=n] \
      [span=deg] [step=deg] [along=deg] [across=deg] [keep=r] [contrast=codes] \
      [knobs=roll,cx,cy,...] [control=1]";
@@ -1566,25 +1228,12 @@ fn spread(values: impl Iterator<Item = f64>) -> f64 {
     (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt()
 }
 
-fn rms(values: impl Iterator<Item = f64>) -> f64 {
-    let values: Vec<f64> = values.collect();
-    match values.is_empty() {
-        true => 0.0,
-        false => (values.iter().map(|v| v * v).sum::<f64>() / values.len() as f64).sqrt(),
-    }
-}
-
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|axis| a[axis] * b[axis]).sum()
 }
 
 fn norm(v: [f64; 3]) -> f64 {
     dot(v, v).sqrt()
-}
-
-fn unit(v: [f64; 3]) -> [f64; 3] {
-    let length = norm(v).max(f64::MIN_POSITIVE);
-    v.map(|c| c / length)
 }
 
 // ------------------------------------------------------------ the blend
@@ -1829,7 +1478,8 @@ impl View {
 /// One frame of one file, decoded, plus the map that reads it.
 fn frame_at(options: &Options, path: &Path) -> Fallible<(CalibrationSet, Pair)> {
     let calibration = CalibrationSet::from_insv(path)?;
-    let mut walk = Walk::open(path, options.from, calibration.dimension)?;
+    let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
+    let mut walk = Walk::open(path, options.from, frame)?;
     if walk.streams() < 2 {
         return Err("this file carries one lens stream, so it has no seam".into());
     }
@@ -1853,7 +1503,7 @@ fn viewed(lenses: &[Lens], frame: Size, camera: Camera) -> Reframe {
 fn render(options: &Options) -> Fallible<()> {
     let (calibration, pair) = frame_at(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let lenses = fixed(&calibration.lenses, &options.fix);
+    let lenses = options.corrected(&options.input, &calibration.lenses, frame);
     let reframe = viewed(&lenses, frame, options.camera());
     let view = View::paint(&reframe, &pair, options.weighting(), options.size);
     let out = options.out();
@@ -1883,7 +1533,7 @@ fn render(options: &Options) -> Fallible<()> {
 fn blend(options: &Options) -> Fallible<()> {
     let (calibration, pair) = frame_at(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let lenses = fixed(&calibration.lenses, &options.fix);
+    let lenses = options.corrected(&options.input, &calibration.lenses, frame);
     let reframe = viewed(&lenses, frame, options.camera());
     let ring = ring(options.patches);
 
@@ -1904,7 +1554,7 @@ fn blend(options: &Options) -> Fallible<()> {
         .copied()
         .collect();
     let mut refused = Refused::default();
-    let found = measure(&body, &pair, &seen, options, &mut refused);
+    let found = read_ring(&body, &pair.lenses, &seen, &options.probe(), &mut refused);
     let disparities: Vec<f64> = found
         .iter()
         .flatten()
@@ -2025,7 +1675,7 @@ fn parity(options: &Options) -> Fallible<()> {
         .ok_or("parity wants against=<export.mp4>")?;
     let (calibration, ours) = frame_at(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let lenses = fixed(&calibration.lenses, &options.fix);
+    let lenses = options.corrected(&options.input, &calibration.lenses, frame);
     let export = export_frame(&theirs, options)?;
     println!(
         "theirs: {} at {:.2} s, {}x{}",
@@ -2187,7 +1837,7 @@ impl Export {
 
 fn export_frame(path: &Path, options: &Options) -> Fallible<Export> {
     let probe = ffprobe_size(path)?;
-    let mut walk = Walk::open(path, options.from, probe)?;
+    let mut walk = Walk::open(path, options.from, Size::new(probe.width, probe.height))?;
     let pair = walk
         .next_pair()?
         .ok_or("no frame decoded from the export")?;

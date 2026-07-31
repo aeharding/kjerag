@@ -7,17 +7,16 @@
 //! wants [`skyline`]. [`Picture`] is the third of them: a rendered view and
 //! what separates two of them, which `zoom` and `ball` both ask for.
 //!
-//! [`Walk`] is the other half. The instruments that measure the **delivered**
-//! picture rather than a rendered one want frames in system memory, every
-//! stream at one instant, and `rolling` (issue #9) and `seam` (issue #48) want
-//! the same ones.
+//! The frames themselves come from `kyerag_media::Walk`, re-exported here
+//! because the instruments that read the **delivered** picture rather than a
+//! rendered one all reach for it: it moved into `media` when the seam fit
+//! started running at open in the app as well (issue #48).
 
-mod frames;
 mod offscreen;
 mod picture;
 mod skyline;
 
-pub use frames::{Pair, Plane, Walk};
+pub use kyerag_media::{Pair, Plane, Walk};
 pub use offscreen::{Gpu, Offscreen};
 pub use picture::{Difference, FORMAT, Picture, Render, aspect};
 pub use skyline::{Skyline, skyline};
