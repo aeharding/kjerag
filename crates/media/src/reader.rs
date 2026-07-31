@@ -960,6 +960,53 @@ mod tests {
         captures.into_iter().next()
     }
 
+    /// **Issue #79, on the owner's own path.** A capture written one lens
+    /// per file opens as one source of two lenses, from either of its two
+    /// files, and the pair invariant holds across the two containers.
+    ///
+    /// Ignored because it needs a per-lens pair on disk. Run it with
+    /// `KYERAG_TEST_INSV=~/Videos/Insta/VID_20251018_191318_00_002.insv \
+    ///  cargo test -p kyerag-media -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs a per-lens .insv pair, named by KYERAG_TEST_INSV"]
+    fn a_per_lens_pair_opens_as_one_capture_from_either_file() {
+        let Some(lens0) = test_capture() else {
+            eprintln!("no .insv found, skipping");
+            return;
+        };
+        let Some(lens1) = kyerag_meta::sibling(&lens0) else {
+            eprintln!("{} has no sibling, skipping", lens0.display());
+            return;
+        };
+
+        for path in [&lens0, &lens1] {
+            let mut reader = Reader::open(path).unwrap();
+            assert_eq!(reader.files(), 2, "{}", path.display());
+            assert_eq!(reader.lenses(), 2, "{}", path.display());
+
+            // Every delivery is a complete set, and the indices run in
+            // order: a lens is never handed over without its partner.
+            for expected in 0..90 {
+                let frames = reader.next_frames().unwrap().expect("ended early");
+                assert_eq!(frames.lenses.len(), 2);
+                assert_eq!(frames.index, expected);
+            }
+
+            // And a seek lands both files on the same frame.
+            reader.seek(Cue::Index(1200), Accuracy::Exact).unwrap();
+            let landed = reader.next_frames().unwrap().unwrap();
+            assert_eq!(landed.index, 1200);
+            assert_eq!(landed.lenses.len(), 2);
+        }
+
+        // The capture is the shorter of the two files: lens 0 runs a frame
+        // longer, and a frame with no partner is not a frame of the
+        // capture.
+        let paired = Reader::open(&lens0).unwrap().timing().frames;
+        let alone = Reader::open(&lens1).unwrap().timing().frames;
+        assert_eq!(paired, alone, "both ends of the pair count the same");
+    }
+
     /// The two claims issue #5 rests on, which no arithmetic can check: an
     /// exact seek lands on the frame it was asked for, and a keyframe seek
     /// lands at or before it and never past it. A picture from past the cue
