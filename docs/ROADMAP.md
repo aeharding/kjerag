@@ -134,6 +134,19 @@ cosmic-player's own volume dropdown, with both settings remembered in
 cosmic-config. The wheel stayed on zoom (docs/UI.md, "Conflict 2"). Nothing is
 processed: a paramotor track is mostly wind, and it is played as recorded.
 
+`kyerag-spike --bin sync` is the measurement, and it drives the real player
+with no GPU in it: play, pause, resume, two scrubs and a frame step on a
+printed schedule, with the app's own five-second report. Over a 325 s run of
+real footage, past those, the sound sat **0.0 ms** from the picture in 40 of
+44 windows and never further than **0.8 ms**, with zero underruns and zero
+dropped chunks; the target was 40. The same binary with the drift correction
+switched off and nothing else changed sits at **+28.1 ms** and stays there,
+which is what the correction is for and is the control that says the number
+above means something. Recording the output device's monitor and measuring the
+sample-to-sample step at each join puts every one of the six below the 97th
+percentile of ordinary playback, against 12 of 15 synthetic hard cuts spliced
+into the same recording that land at the 99th or above: the fades hold.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
