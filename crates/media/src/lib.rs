@@ -34,7 +34,7 @@ use ffmpeg_next as ff;
 pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, SwFrame, open_decoder};
 pub use player::{Player, Stats};
-pub use reader::{Accuracy, Cue, Frames, Reader, Timing};
+pub use reader::{Accuracy, Cue, Frames, Read, Reader, Timing};
 
 const NANOS: u64 = 1_000_000_000;
 

@@ -155,6 +155,20 @@ that HEVC has already smoothed, is 0.41 codes on 40% of pixels and **no**
 measurable change in detail at all: 4.606 either way. `Sampling::Sharp` keeps
 it one line from shipping for footage that would change the answer.
 
+**A scrub no longer waits for pictures nobody asked for** (issue #46). The
+decode thread used to look at its command queue only between reads, so a
+drag position arriving while it refilled the lookahead behind the last
+landing waited out three pair decodes first: 33 of the 39 ms between a
+keyframe seek at the reader (21 ms) and the same seek through the player
+(59 ms). It now asks between packet reads and gives the read up, and a scrub
+costs 26 ms: about 38 picture updates a second where there were 17. The read
+a seek itself asked for is never given up, because drag positions arrive
+faster than landings come out of them and a rule that always took the newest
+would show no picture at all. Playback is untouched by construction and by
+measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
+as before, and the sound goes with it, because a preempted read stops
+without reading another packet and the seek behind it flushes the ring.
+
 M2 is done, except that #44 and #45 reopened against it.
 
 **M3 has started, and the player has sound** (issue #13). The file's AAC track
@@ -211,10 +225,12 @@ into the same recording that land at the 99th or above: the fades hold.
   backward map, and switched off because the readout direction is not in the
   file and could not be measured out of flying footage), hemisphere-aware
   gating (issue #10, done: the pass skips the lens a ray cannot reach, and
-  the decode gate under the same test is measured and cut), high-quality zoom
-  sampling (issue #11, done: a Catmull-Rom kernel on the luma plane wherever
-  the map's own Jacobian says an output pixel has landed inside a texel, and
-  the chroma half of it measured and cut). **M2 is complete.**
+  the decode gate under the same test is measured and cut), scrub
+  responsiveness (issue #46, done: a newer drag position takes the decode
+  thread off the lookahead refill, 59 ms to 26 ms per scrub), high-quality
+  zoom sampling (issue #11, done: a Catmull-Rom kernel on the luma plane
+  wherever the map's own Jacobian says an output pixel has landed inside a
+  texel, and the chroma half of it measured and cut). **M2 is complete.**
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
@@ -294,6 +310,80 @@ into the same recording that land at the 99th or above: the fades hold.
   which paramotor flying does not have much of, is what would change the
   answer.
 
+- 2026-07-31 **A scrub takes the decode thread off the lookahead refill**
+  (issue #46). The thread used to look at its command queue only between
+  reads, so a drag position that arrived while it was refilling the pipeline
+  behind the last landing waited for three pair decodes of pictures nobody
+  would ever see. `Reader::read_until` now asks an interrupt between packet
+  reads and gives the read up when a newer command is waiting; nothing is
+  thrown away, because the lanes keep what they decoded and the seek that
+  follows is what clears them. Measured on the 37.9 GB fixture, the same 12
+  places issue #5 used, medians of 10 runs per arm interleaved so that both
+  saw the same box:
+
+  | keyframe scrub             | before  | after   |
+  | -------------------------- | ------: | ------: |
+  | reader alone               | 20.6 ms | 20.6 ms |
+  | through the player         | 59.2 ms | 26.4 ms |
+  | picture updates per second | 16.9    | 37.9    |
+
+  So 33 of the 39 ms between the reader and the player were the stale
+  refill, and what is left is the thread handover plus one packet read of
+  interrupt latency. The exact seek a release asks for came down with it,
+  276 ms to 237 ms against a 230 ms reader. Both arms were measured before
+  the sound landed (issue #13) and confirmed against it afterwards, three
+  runs each: 59.2 ms to 26.5, and 276 to 236.
+
+  **The read a seek itself asked for is never interrupted**, and that is
+  load-bearing rather than an omission. A drag asks for positions faster than
+  pictures come out of them (10 to 12 a second against 20 to 60 asked for, in
+  the table below), so a rule that gave up whatever was newest would give up
+  every landing too and a fast drag would show no picture at all.
+
+  It composes with the sound (issue #13) without a rule of its own. A read
+  that is given up stops before reading another packet, so it feeds the ring
+  nothing more, and the seek it was given up for flushes the ring twice over:
+  `Player::hush` on the shell's thread as the command is sent, and
+  `Reader::seek` on the decode thread when it arrives. Preempting only
+  shortens the gap between those two, which is the window in which the old
+  position could still be decoded into the ring.
+
+- 2026-07-31 **Skipping the map for a frame that will be overtaken is not
+  worth its line** (issue #46, measured and rejected). Under
+  newest-command-wins a refill frame can be decoded, mapped and handed over
+  microseconds before the command that makes it stale, and the map is the
+  expensive half (`av_hwframe_map` waits for the decode: 7.64 ms a frame in
+  the M0 table, twice for a pair). Asking the interrupt before the map
+  rather than after it recovers that. It cannot be worth much, and it is
+  not: the window is one packet read wide, and interleaved runs of the two
+  orderings sit inside each other's spread (26.4 ms against 26.5 for the
+  scrub, 237 against 237 for the release, and the drag rates inside a
+  picture a second of each other). The measurement is `--bin seek`; the
+  ordering that ships is the one with the cheaper claim on it.
+
+- 2026-07-31 **A drag is not a run of jumps, and the instrument now says so**
+  (issue #46). `--bin seek` measured seeks one at a time, waiting for each
+  picture before asking for the next, which is a hand that stops. A drag
+  fires a position per pointer move whether or not the picture has caught
+  up, and `Player::pump` shows a frame only while its own seek is still the
+  newest, so a hand moving faster than a landing takes shows **nothing**.
+  Sweeping the fixture end to end, 2 s per rate, medians of 8 runs:
+
+  | positions/s | 10   | 20   | 30   | 45  | 60  |
+  | ----------- | ---: | ---: | ---: | --: | --: |
+  | before      | 10.0 | 10.2 |  9.0 | 3.8 | 0.0 |
+  | after       | 10.0 | 12.0 | 10.0 | 5.5 | 0.0 |
+
+  The release lands on the exact frame in all 105 of those drags, before and
+  after. The interruptible read helps here too, but the ceiling is not the
+  refill and this change does not move it: at 60 positions/s neither arm
+  puts a single picture on the screen, and that is what a fast drag on the
+  scrubber does today. Whatever costs the difference between a 26 ms scrub
+  and a 100 ms drag cycle has not been found yet, and an all-or-nothing
+  epoch rule is what turns it into a frozen picture rather than a slow one.
+  It is not the page cache: a sweep confined to one warm 36 s window of the
+  file measures the same 10.0, 11.5, 10.5, 5.5 and 0.0 against the full
+  file's 10.0, 12.0, 10.0, 5.5 and 0.0, interleaved on a quiet box.
 - 2026-07-31 The pass **skips the lens a ray cannot reach** (issue #10). Each
   lens's picture is one cap around its own axis; the cap is solved out of the
   calibration by finding where the model's own landing leaves the image
@@ -903,16 +993,28 @@ Seeking, 12 places from 1% to 97% of the 37.9 GB file, warm
 | `av_seek_frame` alone         | 0.1 ms   |          |
 | keyframe seek, reader         | 21 ms    | 49 ms    |
 | exact seek, reader            | 230 ms   | 447 ms   |
-| keyframe seek, through Player | 59 ms    | 61 ms    |
-| exact seek, through Player    | 276 ms   | 458 ms   |
+| keyframe seek, through Player | 26 ms    | 54 ms    |
+| exact seek, through Player    | 237 ms   | 473 ms   |
 
 The worst case is not the far end of the file: it is whichever seek runs
-first after the decoders warm up, and 97% costs the same as 1%. The gap
-between the reader and the player is the decode thread finishing the
-lookahead it started behind the previous landing before it reads the next
-command; running the same test with `Reader::lookahead` at 0 takes the
-player's keyframe scrub from 59 ms to 35 ms, which is where that number
-comes from.
+first after the decoders warm up, and 97% costs the same as 1%. The player
+used to cost 59 ms against the reader's 21, because the decode thread
+finished the lookahead it had started behind the previous landing before it
+read the next command; issue #46 made that read interruptible and the two
+numbers above are what is left.
+
+The same instrument measures a drag, which asks for a position per pointer
+move rather than waiting for each picture, sweeping the file end to end for
+2 s per rate:
+
+| positions/s     | 10   | 20   | 30   | 45  | 60  |
+| --------------- | ---: | ---: | ---: | --: | --: |
+| picture updates | 10.0 | 12.0 | 10.0 | 5.5 | 0.0 |
+
+A picture reaches the screen only while its own seek is still the newest, so
+past about 30 positions a second the landings arrive stale and the picture
+stops moving until the hand does. The release lands on the exact frame every
+time regardless.
 
 ## Ideas parked (complexity needs an observed failure first)
 
