@@ -534,32 +534,24 @@ impl Reframe {
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
-        for (lens, landing) in landings.iter_mut().enumerate() {
-            if self.within(lens, view_ray) {
-                *landing = self.project(lens, view_ray);
+        let reach = norm3(view_ray);
+        // Both axis cosines, once: the crossover below needs them together
+        // and the cap test needs them one at a time, and computing them here
+        // is what keeps this pass costing what it cost before the crossover
+        // existed ([`Self::handover`]).
+        let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
+        let front = self.handover(axis, reach);
+        for lens in 0..MAX_LENSES {
+            if !self.covers(lens, axis[lens], reach) {
+                continue;
             }
-        }
-        // The crossover is the two lenses against each other, so it cannot be
-        // decided inside the loop that projects them. A lens the cap skipped
-        // is at least 7 degrees from the seam and its [`Landing::MISSED`]
-        // axis of 0 leaves the share clamped exactly where its real axis
-        // would have (`skipping_a_lens_writes_the_weights_it_wrote_before`).
-        //
-        // A file with one lens stream has no seam and takes no crossover: its
-        // one picture runs to the edge of its own coverage, which is 7
-        // degrees past where a seam would have been, and a crossover would
-        // paint that band grey (`one_stream_keeps_the_whole_of_its_picture`).
-        let front = match self.lens_count > 1.0 {
-            true => crossover(landings[0].axis, landings[1].axis),
-            false => 1.0,
-        };
-        for (lens, weight) in weights.iter_mut().enumerate() {
+            landings[lens] = self.project(lens, view_ray);
             if lens < self.lens_count as usize {
                 let share = match lens {
                     0 => front,
                     _ => 1.0 - front,
                 };
-                *weight = claim(landings[lens], share);
+                weights[lens] = claim(landings[lens], share);
             }
         }
         let total: f32 = weights.iter().sum();
@@ -569,6 +561,49 @@ impl Reframe {
             }
         }
         Blend { landings, weights }
+    }
+
+    /// The front lens's share of this ray, which is what hands the picture
+    /// from one lens to the other across the seam (issue #48).
+    ///
+    /// Taken from the **mounting** rather than from the two landings, and
+    /// that is the whole reason it is a step of its own rather than two lines
+    /// inside [`Self::blend`]'s loop. A value read back out of the `Blend`
+    /// array after the loop that filled it cannot stay in registers: measured
+    /// on RADV 2026-07-31 at 2560x1440 under live decode, doing it that way
+    /// costs **5.5 ms per redraw against 3.6**, which is the same scratch
+    /// memory trap the loop's own comment describes. `kyerag-spike --bin
+    /// zoom`, which renders the pass with nothing else on the GPU, reads the
+    /// two versions as equal; `--bin playback`, which runs it under live
+    /// decode, is where the difference is.
+    ///
+    /// The cosines are the ray's own, before the readout turns it, where
+    /// [`Landing::axis`] is the turned ray's. That is the better question
+    /// anyway: both lenses read down their own pictures, which is one world
+    /// direction, so the readout moves no content across the seam at all
+    /// (0.000 degrees measured, docs/research/insv-format.md 6.7) and a
+    /// crossover that followed it would swing with the camera for nothing.
+    ///
+    /// 1 for a file with one lens stream: it has no seam and takes no
+    /// crossover, and its picture runs to the edge of its own coverage, 7
+    /// degrees past where a seam would have been
+    /// (`one_stream_keeps_the_whole_of_its_picture`).
+    ///
+    /// WGSL twin: `handover`.
+    fn handover(&self, axis: [f32; MAX_LENSES], reach: f32) -> f32 {
+        match self.lens_count > 1.0 {
+            true => crossover(axis[0] - axis[1], reach),
+            false => 1.0,
+        }
+    }
+
+    /// How far a ray is off one lens's axis, as an unnormalized cosine: one
+    /// row of the mounting against the ray.
+    ///
+    /// WGSL twin: `axis_of`.
+    fn axis_of(&self, lens: usize, view_ray: [f32; 3]) -> f32 {
+        let block = &self.lenses[lens];
+        (0..3).map(|c| block.view_to_lens[c][2] * view_ray[c]).sum()
     }
 
     /// How many delivered-frame texels one output pixel covers where it
@@ -686,9 +721,14 @@ impl Reframe {
     ///
     /// WGSL twin: `within`.
     pub fn within(&self, lens: usize, view_ray: [f32; 3]) -> bool {
-        let block = &self.lenses[lens];
-        let axis: f32 = (0..3).map(|c| block.view_to_lens[c][2] * view_ray[c]).sum();
-        axis >= block.axis_min * norm3(view_ray)
+        self.covers(lens, self.axis_of(lens, view_ray), norm3(view_ray))
+    }
+
+    /// The same test with the ray's own numbers already in hand, which is how
+    /// [`Self::blend`] asks it: a dot product it has computed once for the
+    /// crossover is not computed again here.
+    fn covers(&self, lens: usize, axis: f32, reach: f32) -> bool {
+        axis >= self.lenses[lens].axis_min * reach
     }
 
     /// The forward map: a view ray, through one lens's extrinsics and the
@@ -940,9 +980,13 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|axis| a[axis] * b[axis]).sum()
 }
 
-/// The **front** lens's share of a ray, from the two lenses' own axis
-/// cosines: 1 well inside its own hemisphere, 1/2 on the seam, 0 once the ray
-/// is half a crossover past it (issue #48).
+/// The **front** lens's share of a ray, from how far apart the two lenses'
+/// axis dot products are: 1 well inside its own hemisphere, 1/2 on the seam,
+/// 0 once the ray is half a crossover past it (issue #48).
+///
+/// `apart` is the difference of the two unnormalized dot products and `reach`
+/// is the ray's length, so the division that normalizes them happens once
+/// here rather than twice at the call site.
 ///
 /// How far past the seam a ray looks is half the difference of the two
 /// lenses' angles off their own axes. Written that way rather than as "ninety
@@ -960,8 +1004,8 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// multiply than the `cos^2(theta / 2)` preference it replaces.
 ///
 /// WGSL twin: `crossover`.
-fn crossover(front: f32, back: f32) -> f32 {
-    (0.5 + (front - back) / (2.0 * CROSSOVER_DEG.to_radians())).clamp(0.0, 1.0)
+fn crossover(apart: f32, reach: f32) -> f32 {
+    (0.5 + apart / (2.0 * reach * CROSSOVER_DEG.to_radians())).clamp(0.0, 1.0)
 }
 
 impl LensBlock {
@@ -1334,25 +1378,25 @@ fn blend(ray: vec3<f32>) -> Blend {
   var out: Blend;
   var total = 0.0;
   let reach = length(ray);
+  // Both axis cosines before the loop: the crossover needs them together,
+  // the cap test needs them one at a time, and reading them back out of
+  // `out` after the loop instead costs 5.5 ms a redraw against 3.6. Rust
+  // twin: `Reframe::blend`.
+  let axis0 = axis_of(reframe.lenses[0], ray);
+  let axis1 = axis_of(reframe.lenses[1], ray);
+  let front = handover(axis0, axis1, reach);
   for (var index = 0u; index < MAX_LENSES; index += 1u) {
     let lens = reframe.lenses[index];
     // Zero, which is `Landing::MISSED`: a lens the ray cannot reach is never
     // projected and its landing is never read.
     var landing: Landing;
-    if within(lens, ray, reach) {
+    var claimed = 0.0;
+    if within(lens, select(axis1, axis0, index == 0u), reach) {
       landing = project(lens, ray);
+      let share = select(1.0 - front, front, index == 0u);
+      claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
     }
     out.landings[index] = landing;
-  }
-  // The crossover weighs the two lenses against each other, so it comes after
-  // both landings and before either weight, and a one-stream file takes none
-  // of it. Rust twin: `Reframe::blend`.
-  let front = select(1.0, crossover(out.landings[0].axis, out.landings[1].axis),
-                     reframe.lens_count > 1.0);
-  for (var index = 0u; index < MAX_LENSES; index += 1u) {
-    let share = select(1.0 - front, front, index == 0u);
-    let claimed = select(0.0, claim(out.landings[index], share),
-                         f32(index) < reframe.lens_count);
     out.weights[index] = claimed;
     total += claimed;
   }
@@ -1365,19 +1409,24 @@ fn blend(ray: vec3<f32>) -> Blend {
 }
 
 // Whether this lens can have any of this ray, before the model runs. Rust
-// twin: `Reframe::within`.
+// twin: `Reframe::covers`.
 //
 // The mounting is a rotation, so the cosine `mei` would read off the
 // normalized ray is one row of it against the ray over the ray's own length.
-// Multiplying the cap by the length rather than dividing keeps it to a dot
-// product and a compare. `reach` is the same for every lens.
-fn within(lens: LensBlock, ray: vec3<f32>, reach: f32) -> bool {
-  let axis = dot(vec3<f32>(
+// Multiplying the cap by the length rather than dividing keeps it to a
+// compare. `reach` is the same for every lens.
+fn within(lens: LensBlock, axis: f32, reach: f32) -> bool {
+  return axis >= lens.axis_min * reach;
+}
+
+// How far a ray is off one lens's axis, as an unnormalized cosine: one row of
+// the mounting against the ray. Rust twin: `Reframe::axis_of`.
+fn axis_of(lens: LensBlock, ray: vec3<f32>) -> f32 {
+  return dot(vec3<f32>(
     lens.view_to_lens[0].z,
     lens.view_to_lens[1].z,
     lens.view_to_lens[2].z,
   ), ray);
-  return axis >= lens.axis_min * reach;
 }
 
 // One claim's share of all of them, the lone claimant's written rather than
@@ -1398,9 +1447,19 @@ fn claim(landing: Landing, share: f32) -> f32 {
   return share * landing.depth;
 }
 
-// The front lens's share, from the two axis cosines. Rust twin: `crossover`.
-fn crossover(front: f32, back: f32) -> f32 {
-  return clamp(0.5 + (front - back) / (2.0 * CROSSOVER), 0.0, 1.0);
+// The front lens's share of the ray, and 1 for a one-stream file, which has
+// no seam to hand over at. Rust twin: `Reframe::handover`.
+fn handover(axis0: f32, axis1: f32, reach: f32) -> f32 {
+  if reframe.lens_count <= 1.0 {
+    return 1.0;
+  }
+  return crossover(axis0 - axis1, reach);
+}
+
+// The front lens's share, from how far apart the two dot products are. Rust
+// twin: `crossover`.
+fn crossover(apart: f32, reach: f32) -> f32 {
+  return clamp(0.5 + apart / (2.0 * reach * CROSSOVER), 0.0, 1.0);
 }
 
 // The forward map, with the readout taken out of it. Rust twin:
@@ -2389,7 +2448,10 @@ pub(crate) mod tests {
     fn weighed_without_the_cap(reframe: &Reframe, ray: [f32; 3]) -> [f32; MAX_LENSES] {
         let landings: [Landing; MAX_LENSES] =
             std::array::from_fn(|lens| reframe.project(lens, ray));
-        let front = crossover(landings[0].axis, landings[1].axis);
+        let front = reframe.handover(
+            std::array::from_fn(|lens| reframe.axis_of(lens, ray)),
+            norm3(ray),
+        );
         let mut weights: [f32; MAX_LENSES] =
             std::array::from_fn(|lens| match lens < reframe.lens_count as usize {
                 true => claim(

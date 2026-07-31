@@ -315,6 +315,41 @@ Nothing in the shader changed: phase 1 is measurement, and the fitted
 parameters are for the owner to validate before phase 2 applies any of them.
 Method and every number: docs/research/insv-format.md 6.8.
 
+**Phase 2 applies it, per file, and then narrows the band** (issue #48, the
+owner's "2 deg looks good"). The correction is **not** the five numbers phase
+1 fitted: the app runs phase 1's own fitter at open, on 72 azimuths over
+frames spread through the file, because measured across seven files spanning
+nine months the roll is a constant (+0.58 to +0.84 degrees, a per-unit factory
+error) and the tilt's **axis** is not, while its magnitude stays near 2.5.
+Three knobs ship rather than five: across the seam, the axis the doubling is
+on, the two fits agree within 0.006 degrees on six of the seven files, and on
+the seventh -- a camera on a deck, where the near field fills the seam and
+only 7 azimuths correlate -- the five-knob fit asks for a 55 px principal point
+and a yaw of the opposite sign to every other file's. What the rotation leaves
+is about 0.4 degrees of along-seam one-cycle residual, which is stated rather
+than hidden.
+
+The fit costs **1.4 to 2.1 s** and nearly all of it is decode. It runs on its
+own thread, so playback starts immediately and the picture corrects itself
+about two seconds in: 20 s of playback with the fit running is **0 dropped and
+0 starved**, with one redraw 25 ms late against a 33.4 ms frame. The answer is
+cached under a hash of the file's own metadata record, so every later open of
+that file is corrected before the first frame, and a file with no fit -- a
+legacy one-stream capture, a seam with no far-field content -- silently keeps
+the factory calibration.
+
+**Then the crossover, 2 degrees instead of the 14-degree overlap.** On flight
+footage the doubled band goes from 10.60 degrees to 1.50 and its sharpness
+against the front lens alone from 0.723 to 1.074. Against Insta360's own
+stitch, the benchmark: they keep 0.92 to 0.97 of their own sharpness across
+the seam, we kept **0.579**, the calibration alone took us to 0.689 and the
+band takes us to **0.871** -- four fifths of the gap, closed. The pass costs
+what it cost (3.77 ms per redraw before, 3.59 after, interleaved at
+2560x1440), which took two attempts: reading the two lenses' angles back out
+of the `Blend` array after the loop that fills it costs 5.5 ms against 3.6,
+and only `--bin playback` under live decode can see that -- `--bin zoom` reads
+the two as equal.
+
 **M3 has started, and the player has sound** (issue #13). The file's AAC track
 is decoded off the same demuxer as the two lens streams, resampled by
 `swresample` into the device's own format, and written to a ring that a cpal
@@ -382,12 +417,14 @@ into the same recording that land at the 99th or above: the fades hold.
   ball clears the window's shorter side; the tiny-planet framing sits
   mid-scroll on the way there, and the owner chose to keep the extended
   range after trying a hard stop at the planet).
-  **M2 is complete**, except that issue #48 reopened the seam: the two lenses
-  are misaligned by up to 2.7 degrees across it, phase 1 has measured that,
-  attributed it to a relative lens tilt and fitted the correction, and phase 2
-  will apply it. Issue #79 opened a second camera: the ONE X2 writes one lens
-  per file, and the player now pairs the two at open and holds an X2's horizon
-  with that camera's own IMU convention.
+  **M2 is complete**: issue #48 reopened the seam, and both halves of it have
+  now shipped. The two lenses were misaligned by up to 2.7 degrees across the
+  seam; phase 1 measured that and attributed it to a relative lens tilt, and
+  phase 2 fits the correction per file at open and hands the picture over in a
+  2 degree crossover instead of the whole 14 degree overlap. Issue #79 opened
+  a second camera: the ONE X2 writes one lens per file, and the player now
+  pairs the two at open and holds an X2's horizon with that camera's own IMU
+  convention.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control

@@ -71,11 +71,10 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
 ```
 
 The shader consumes both lenses (issue #27), so a view anywhere on the
-sphere has a picture in it, and it mixes them where they overlap (issue
-#7). Outside the overlap, which is everything but a 14-degree band around
-the seam, one lens weighs exactly 1 and the other exactly 0 and only the
-first is fetched: a pixel away from the seam costs what it cost before the
-blend, down to the bits it writes.
+sphere has a picture in it, and it mixes them across a 2-degree crossover on
+the seam (issues #7 and #48). Outside that crossover one lens weighs exactly
+1 and the other exactly 0 and only the first is fetched: a pixel away from
+the seam costs what it cost before the blend, down to the bits it writes.
 
 Since issue #10 the second lens is not projected there either. Each lens's
 picture is one cap around its own axis, and how wide that cap is comes out of
@@ -243,19 +242,52 @@ docs/research/insv-format.md 4.8 and 4.9 have the frames, the method and
 the tables.
 
 Every ray is weighed against both lenses (issue #7), and the weights sum
-to 1 wherever anything has it. Each lens's claim is its **longitude
-preference** times its **coverage depth**:
-`cos^2(theta / 2) * (image_radius - landing_radius)`, zero where the ray
-is not in that lens's picture at all. The first factor puts the crossover
-on the seam great circle, where both lenses are at exactly 1/2, rather
-than wherever the two image circles happen to end. The second is a
-distance transform from the lens's own validity boundary, so a lens fades
-out as it runs out of picture and the rim of the image circle, which is
-where vignetting lands and where the distortion polynomial is least
-trustworthy, is down-weighted for nothing. Neither carries a feather
-width: the band that gets blended is the overlap itself, 83.4 to 97.4
-degrees off the front axis on the X4 Air, and the shape of the crossover
-comes out of the calibration rather than a constant.
+to 1 wherever anything has it. Each lens's claim is its **share of the
+crossover** times its **coverage depth**, zero where the ray is not in that
+lens's picture at all. The crossover is **2 degrees wide** and centred where
+the two lenses are equally far off their own axes (issue #48), which is the
+seam wherever the calibration puts it; the coverage depth is a distance
+transform from the lens's own validity boundary, so a lens fades out as it
+runs out of picture and the rim of the image circle, where vignetting lands
+and where the distortion polynomial is least trustworthy, is down-weighted for
+nothing.
+
+The width is the one number here a person chose, and it is a trade with
+measurements on both sides (docs/research/insv-format.md 6.8): a wider band
+draws whatever the two lenses disagree about twice, and a narrower one folds
+the picture where they disagree at all. It could only be narrowed after the
+calibration was corrected, and it takes the doubled band on real footage from
+10.6 degrees to 1.5 while the band's own sharpness goes from 0.723 of one
+lens's to 1.074.
+
+A file with **one** lens stream takes no crossover at all: it has no seam to
+hand over at, and its picture runs to the edge of its own coverage, 7 degrees
+past where a seam would have been.
+
+### The seam is fitted per file, at open (issue #48)
+
+The camera's own calibration is out by degrees at the seam on the owner's
+unit: 2.4 across it, which is 43 px of the delivered frame and reads as a
+doubled tree trunk. It is a relative lens tilt, and `kyerag_render::seam`
+measures and corrects it **per file**, because the tilt's magnitude is steady
+across nine months of files and its axis is not.
+
+The fit is the phase-1 instrument's own measurement, in the shipped map's
+units: both lenses sampled on the same angular grid at 72 azimuths on the seam
+circle over frames spread through the file, each calibration field turned by a
+probe amount to build the design matrix, three Gauss-Newton rounds because one
+is 2 percent short at this size. Three knobs, a relative rotation; the
+principal point is measurable but runs away on files whose seam has little
+far-field content, and it buys nothing on the axis the doubling is on.
+
+It runs on its own thread at open and lands **1.4 to 2.1 s** in, all of it
+decode, so the file plays immediately and the picture corrects itself a moment
+later. The answer is cached under a hash of the file's own metadata record, in
+`dirs::cache_dir()` as cosmic-files caches thumbnails, so every later open of
+the same file is corrected before the first frame. A file the fit cannot read
+-- a legacy one-stream capture, a seam with nothing far-field on it, a fit that
+comes out too big to be a calibration -- keeps the factory calibration and says
+nothing to the pilot.
 
 Nothing is shown from neither lens: the two 97.4-degree caps overlap by
 about 14 degrees, which is checked over the whole sphere by `cargo test`
@@ -537,16 +569,19 @@ on the X4 Air).
   composition is settled (above); the order is not, and no known camera can
   distinguish it, because every one of them records sub-degree yaw and
   pitch (docs/research/insv-format.md 4.8).
-- What is left of the seam once the composition is right. Still open after
-  issue #7: re-measured on delivered frames rather than rendered views, the
-  along-seam residual is consistently negative on every patch that
-  correlates, -0.4 to -1.2 degrees. Issue #9 has now removed the other two
-  candidates for it: **rolling shutter is measured out** twice over, at 0.014
-  of the displacement the opposed-rows model predicts, and then at 0.000
-  degrees once the direction turned out to be down the frame, which is the
-  same world direction in both lenses and cancels between them. Near-field
-  parallax cannot reach the along-seam axis by construction. What is left is
-  calibration, and a capture from a camera that is not moving now says so
-  directly: -0.78 degrees along the seam with the camera doing nothing at
-  all, moving 0.018 frame to frame against 0.100 in flight.
-  docs/research/insv-format.md 4.9 and 6.7 have the numbers.
+- What is left of the seam. Settled and shipped for the axis that mattered:
+  the 2.4 degrees **across** the seam was calibration, it is fitted per file
+  at open (above), and what is left is 0.1 to 0.7 degrees of parallax and
+  scene. What stays open is the **along-seam one-cycle** term, about 0.4
+  degrees, which is a principal-point signature: the five-knob fit removes it
+  and cannot be trusted on files whose seam has little far-field content, so
+  the shipped fit turns three knobs and leaves it.
+  docs/research/insv-format.md 6.8 has the per-file numbers.
+- **Exposure across the seam is still not corrected** (6.3), and with the
+  crossover now 2 degrees wide instead of 10 there is less band to hide a
+  brightness step in. Measured on the flattest, brightest content in this
+  footage, it did not become one: the luma profile across the seam is the same
+  ramp either way, 147.8 to 153.8 codes over 70 px before and 147.1 to 154.4
+  after, because what differs between the two lenses there is vignetting
+  inside each lens's own picture rather than a step at the handover. One view;
+  it is still the thing to look at first if a seam shows on flat sky.

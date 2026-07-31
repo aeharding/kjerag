@@ -49,8 +49,8 @@ use super::{Camera, Size};
 /// where it is dangerous:
 ///
 /// - **across the seam**, which is the axis the doubled trunk is on, the two
-///   fits land within 0.006 degrees of each other on every file, taking 1.7
-///   to 2.3 degrees down to 0.1 to 0.7;
+///   fits land within 0.006 degrees of each other on six of the seven, and
+///   0.017 on the seventh, taking 1.4 to 2.3 degrees down to 0.1 to 0.7;
 /// - **along the seam** the five-knob fit is better, 0.03 to 0.42 against
 ///   0.35 to 0.71, because the principal point is the only thing that reaches
 ///   the one-cycle term on that axis;

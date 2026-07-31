@@ -1571,10 +1571,18 @@ fn blend(options: &Options) -> Fallible<()> {
         seen.len(),
         disparities.len(),
     );
-    println!(
-        "seam:   the two lenses disagree by {disparity:.2} deg here on average, {:.2} at worst",
-        disparities.iter().copied().fold(0.0, f64::max),
-    );
+    match disparities.is_empty() {
+        // Which is not a disparity of zero, and the shear column below says
+        // so rather than printing one: a correction that turns lens 1 by a
+        // couple of degrees moves some of these patch rectangles out of one
+        // lens's picture, and a rectangle that is not in both pictures cannot
+        // be correlated at all.
+        true => println!("seam:   no patch in this view correlated, so the disparity is unknown"),
+        false => println!(
+            "seam:   the two lenses disagree by {disparity:.2} deg here on average, {:.2} at worst",
+            disparities.iter().copied().fold(0.0, f64::max),
+        ),
+    }
     println!(
         "single: the front lens alone over the same band carries {reference:.1} of gradient \
          energy over {} pixels, which is what the sharpness column is a share of",
@@ -1596,9 +1604,10 @@ fn blend(options: &Options) -> Fallible<()> {
                 true => view.sharpness(band) / reference,
                 false => 0.0,
             },
-            match doubled > 0.0 {
-                true => format!("{:.2}", disparity / doubled),
-                false => "cut".to_owned(),
+            match (doubled > 0.0, disparities.is_empty()) {
+                (true, false) => format!("{:.2}", disparity / doubled),
+                (true, true) => "-".to_owned(),
+                (false, _) => "cut".to_owned(),
             },
         );
     }

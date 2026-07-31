@@ -1503,12 +1503,132 @@ hard visible tear.
   the same magnitude at a different azimuth, because the azimuths each capture
   has content at are different and neither covers the circle. A capture with
   content all the way round would settle it, and a per-file fit at load would
-  not need it settled.
+  not need it settled. **Phase 2 fits per file, so this stays open and stops
+  mattering** (below).
 - **Whether one correction serves every file from one camera.** The two
   captures here are minutes apart. Both were fitted with the calibration
   string byte-identical, and the correction transfers to flight footage from
   five weeks earlier, which is consistent with a per-unit constant and does
-  not prove one.
+  not prove one. **Seven files now say what it is worth**: the roll is the
+  same number every time and the tilt's axis is not (below).
+
+#### Phase 2: the same fit, per file, at open
+
+**Confidence: HIGH.** Measured 2026-07-31 on eight of the owner's files
+spanning nine months, through the shipped code (`kyerag_render::seam`, which
+is this section's own fitter moved out of the instrument so there is one of
+it). The app reads its seam at 72 azimuths on 2 frames at each of 3 places
+spread through the file, fits the three angles through the map, and applies
+the answer to lens 1.
+
+| file | azimuths | roll | yaw | pitch | along | across | read + fit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| still, 12:07 | 13 | +0.702 | -2.605 | +0.176 | 0.805 -> 0.384 | 2.282 -> 0.110 | 2.07 s |
+| still, 12:12 | 7 | +0.741 | -1.047 | +1.005 | 1.027 -> 0.710 | 1.381 -> 0.510 | 2.00 s |
+| flight, 04-10 | 27 | +0.577 | -2.263 | -0.453 | 0.743 -> 0.487 | 1.689 -> 0.677 | 1.40 s |
+| flight, 05-01 | 35 | +0.801 | -2.358 | -0.353 | 0.886 -> 0.412 | 2.004 -> 0.442 | 1.70 s |
+| flight, 06-23 | 42 | +0.752 | -2.428 | -0.866 | 0.823 -> 0.390 | 2.065 -> 0.592 | 1.60 s |
+| flight, 07-14 | 31 | +0.839 | -2.545 | -0.627 | 0.888 -> 0.349 | 2.178 -> 0.603 | 1.41 s |
+| flight, 07-25 | 18 | +0.799 | -2.988 | -0.459 | 0.867 -> 0.394 | 1.944 -> 0.379 | 1.54 s |
+| 2025-10-18 | one lens stream per file: no seam, no fit |
+
+Read that table twice. **The roll is a constant**: +0.58 to +0.84 degrees over
+nine months and two scenes, which is what a per-unit factory error looks like.
+**The tilt's axis is not**: the yaw runs -1.0 to -3.0 and the pitch +1.0 to
+-0.9, while the magnitude stays near 2.5 on every file with more than a
+handful of azimuths. That is this section's own open question answered as far
+as it can be answered from seams, and it is the reason the fit is per file
+rather than a constant in the source.
+
+**Three knobs ship, not five.** The same readings fitted both ways:
+
+| file | five-knob cx, cy | along, five | across, five | against rotation |
+| --- | ---: | ---: | ---: | --- |
+| still, 12:07 | -4.2, -13.9 | 0.030 | 0.104 | across within 0.006 |
+| still, 12:12 | **-55.1**, -31.2 | 0.194 | 0.493 | yaw comes back **+2.28** |
+| flight, 04-10 | -9.6, -5.4 | 0.416 | 0.681 | across within 0.004 |
+| flight, 05-01 | -2.4, -15.1 | 0.093 | 0.440 | across within 0.002 |
+| flight, 06-23 | -6.7, -10.7 | 0.232 | 0.592 | across within 0.001 |
+| flight, 07-14 | -6.1, -8.9 | 0.168 | 0.606 | across within 0.003 |
+| flight, 07-25 | -8.9, -18.8 | 0.106 | 0.383 | across within 0.004 |
+
+Across the seam, which is the axis the doubled trunk is on, the two fits are
+the same answer. Along it the five-knob fit is better, because the principal
+point is the only thing that reaches the one-cycle term there. And on the file
+with the fewest azimuths -- a camera on a deck, where the near field fills the
+seam -- it asks for a **55 px** principal point and a yaw of the opposite sign
+to every other file's, which is seven patches being overfitted and would be
+applied to the whole sphere. The rotation under-corrects on that file instead
+(1.45 degrees of tilt where the camera's is about 2.5), which is the failure
+worth having. What ships therefore leaves about 0.4 degrees of along-seam
+one-cycle residual, and that is a stated trade rather than a miss.
+
+**Applied and re-measured**, which is the only test of a fitted parameter: on
+the 12:07 capture the patches read +0.32 to +0.39 along and -0.10 to +0.28
+across, from -1.24 to -0.30 and -2.56 to +2.64.
+
+**What it costs.** The whole fit is **1.4 to 2.1 s**, and essentially all of it
+is decode: the least squares itself is under a millisecond, three rounds
+included. It runs on its own thread off the decode path, so the file plays
+immediately and corrects itself when the fit lands; measured on 20 s of
+playback at 2560x1440 with the fit running, **0 dropped and 0 starved**, one
+redraw 24.6 to 27.5 ms late against a 33.4 ms frame (0.6 to 1.2 ms without).
+The answer is then cached under a hash of the file's own metadata record, so
+every later open of that file is corrected **before the first frame**.
+
+#### Phase 2: what the 2 degree crossover did to the picture
+
+The band ships as measured. On the flight frame above, scored the same way as
+the table in "what a narrower blend is worth":
+
+| | doubled band | sharpness |
+| --- | ---: | ---: |
+| shipped weights, before | 10.60 deg | 0.723 |
+| shipped weights, after | **1.50 deg** | **1.074** |
+
+A sharpness of 1.0 is a band no softer than the front lens's own picture over
+the same pixels, so the crossover is now doing what a blend is supposed to do:
+hiding the join without smearing what crosses it.
+
+**Against Insta360's own stitch**, the benchmark this issue is measured
+against, on the 12:07 capture and their export of it:
+
+| picture | band over its own surroundings |
+| --- | ---: |
+| Insta360's export | 0.92 to 0.97 |
+| ours, before | 0.579 |
+| ours, correction only (phase 1) | 0.689 |
+| **ours, correction and 2 degree band** | **0.871** |
+
+Four fifths of the gap to their stitch, closed. (Their own number moves with
+the view the projection fit lands on, 0.965 in the run scored against our
+0.579 and 0.924 in the run scored against our 0.871, which is why it is quoted
+as a range.) The second static capture cannot be scored this way at all: the
+view its projection fit lands on has flatter surroundings than band, and their
+own share comes out above 1, which is the metric saying so.
+
+**The narrower band did not turn the exposure difference into a line**, which
+is the thing a 2 degree crossover could have cost that 6.3 leaves open.
+Measured on flat sky over the seam, where a step would show if it showed
+anywhere in this footage: the luma runs 147.8 to 153.8 codes over 70 px with
+the shipped band before and 147.1 to 154.4 after, the same ramp. What differs
+between the two lenses there is vignetting inside each lens's own picture,
+which the band width cannot spread and the coverage-depth factor already
+down-weights.
+
+**The pass costs what it cost.** Interleaved runs of 20 s of playback at
+2560x1440 under live decode: 3.70, 3.77 and 3.83 ms per redraw before, 3.59,
+3.59 and 3.83 after. The crossover reads the two axis cosines the coverage
+test already needed, so the arithmetic added is a subtract, a divide and a
+clamp per pixel.
+
+That last number took three attempts, and the two that failed are worth
+recording. Reading the two lenses' angles back out of the `Blend` array after
+the loop that fills it -- the obvious way to write this, since the landings are
+right there -- costs **5.5 ms per redraw against 3.6**, because a value read
+back out of an array cannot stay in registers. `kyerag-spike --bin zoom`,
+which renders the same pass with nothing else on the GPU, reads the two
+versions as **equal**; only `--bin playback`, under live decode, shows it.
 
 ## 7. What was ruled out
 
