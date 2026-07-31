@@ -2846,6 +2846,7 @@ version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
  "kyerag-media",
+ "kyerag-meta",
  "kyerag-render",
  "png 0.17.16",
  "pollster",

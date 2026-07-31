@@ -4,7 +4,7 @@ Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
 **Status 2026-07-31:** feasibility study complete (docs/research/), repo
-bootstrapped, M0 done, and the picture moves.
+bootstrapped, M0 done, M1 done, and the horizon holds still.
 `cargo run --release -p kyerag-spike -- <file.insv>` decodes one 3840x3840
 lens on VA-API, imports the dmabuf planes into wgpu with no copy, and
 renders to PNG at 103 fps (3.4x realtime). `cargo run --release --
@@ -51,8 +51,32 @@ records are parsed and kept apart (issue #7's other half, and the camera's
 own frame clock for #8), but measured over two 30-minute captures the
 brightness step at the seam is 0.9 to 3.5 percent while the shutter ratio
 swings 0.54 to 1.81, and applying the symmetric split those records imply
-makes the step four to twenty times worse. Next in M2: gyro horizon lock
-and the Studio-diff harness (issue #8).
+makes the step four to twenty times worse.
+
+**The horizon is locked** (issue #8), which is the second M2 item and the
+one the feasibility study called the riskiest correctness surface. The
+trailer's IMU is parsed and integrated into a `world_from_body` quaternion
+every 5 ms of the file, and the reprojection pass composes its inverse
+between the lens mounting and the camera, so the world stays put while the
+camera swings. Roll and pitch are locked completely; yaw is high passed with
+a 3 s constant, so a swing is cancelled and a deliberate turn still reads as
+a turn. Drag to look around needed no change at all: the anchor it stores is
+in whatever frame the camera rotation lands in, and with the lock on that
+frame is the world. Measured on rendered frames: the horizon moves 0.23
+degrees peak to peak over 120 frames of calm flight and 2.86 through a
+61 deg/s roll, where with the lock off it leaves the picture entirely.
+`View > Lock horizon` and `h` flip it live, and it is on by default.
+
+Two conventions were settled on the way, both against pixels rather than
+against other people's tables. The IMU's axis convention is `xZY` for the
+X-series in Kyerag's own frame, picked out of all 24 rotations by comparing
+the accelerometer's idea of up against the horizon in unlocked frames; it
+wins every stretch of two captures by 15 to 36 degrees over the runner-up.
+And the quarter-turn roll datum from issue #3 belongs to the **delivered
+picture** rather than to the sensor, which the IMU could tell apart because
+it is bolted to the sensor: that closes the last "what 4.8 does not settle".
+Next in M2: rolling-shutter correction (issue #9), whose input is the
+orientation track this landed.
 
 ## Milestones
 
@@ -71,8 +95,10 @@ and the Studio-diff harness (issue #8).
   capture folder and resolution, and the toast that says where a still
   went; both wait on docs/UI.md's open question about the wording.
 - **M2 Quality** — seam blend (issue #7, done: weight field in, exposure
-  correction measured and rejected), gyro horizon lock (+ Studio-diff test
-  harness), rolling-shutter correction, hemisphere-aware decode gating,
+  correction measured and rejected), gyro horizon lock (issue #8, done:
+  complementary filter, `View > Lock horizon`, and a harness that measures
+  the horizon in rendered frames because a Studio export was not available
+  overnight), rolling-shutter correction, hemisphere-aware decode gating,
   high-quality zoom sampling.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback.
@@ -314,6 +340,63 @@ and the Studio-diff harness (issue #8).
   passes: 0.22 s cold to any frame in a 3 GB file, position-independent.
   This is the entry point #5's seek and #8's harness build on, and the
   `reframe` instrument now takes `frame=` and `time=`.
+
+- 2026-07-31 Horizon lock is **on by default** (issue #8). The footage
+  decided it: this camera is clamped rolled about a quarter turn and pitched
+  down, so an unlocked view of a paramotor flight has its horizon running
+  down the picture and swinging out of it, and the reframed view inherits
+  every swing of a camera hanging under a wing. `View > Lock horizon` and
+  `h` flip it live and the choice is remembered. `h` is bare and is ours,
+  like `s`: no COSMIC app locks a horizon, so there is no precedent, and the
+  owner asked to be able to flip it while watching.
+- 2026-07-31 The camera-body orientation is a **complementary filter**, not a
+  Kalman filter (issue #8). Integrate the gyroscope, turn the estimate
+  towards the accelerometer with a 20 s constant, and believe the
+  accelerometer only near 1 g. A Kalman filter estimates the same two states
+  with a covariance nobody can populate from a file that records no noise
+  figures. Every constant is measured on real footage and the reason for each
+  is in docs/research/insv-format.md 8.5; the one that is a judgement rather
+  than a measurement is the 3 s yaw constant, and the numbers either side of
+  it are there too.
+- 2026-07-31 Yaw is **high passed, not locked** (issue #8). A view welded to
+  the heading the file starts on fights every deliberate turn; a view that
+  follows the body exactly inherits every swing. At 3 s the view's worst
+  heading swing inside a second is 29 degrees against 103 unstabilized, and
+  it still follows 946 degrees of real turning a minute against 986.
+- 2026-07-31 The IMU axis convention is **measured, not transcribed** (issue
+  #8). A three-letter convention string is only half of a convention; the
+  other half is the frame it lands in, which is whatever the project it came
+  from composes next, and Kyerag's composition is its own. All 24 rotations
+  were compared against the horizon in unlocked rendered frames; `xZY` wins
+  every stretch of two captures, by 15 to 36 degrees over the runner-up.
+- 2026-07-31 The quarter-turn roll datum belongs to the **delivered picture**,
+  not to the sensor (issue #8, closing the open question in
+  docs/research/insv-format.md 4.8). The IMU is bolted to the sensor and can
+  tell the two readings apart: held level by its accelerometer alone, an X4
+  Air comes out a quarter turn on its side through `Rz(roll - 90)` and level
+  through `Rz(roll)`. `kyerag_meta::Pose` now carries both.
+- 2026-07-31 The **gyro is aligned to the exposure records' clock**, and
+  playback still paces on container PTS (issue #8). `pts_type = 2` means what
+  it says: the camera's own timestamps drift from the container's nominal
+  30000/1001 grid at 6.4 ppm, 11.5 ms by the end of a 30-minute file. What
+  the choice is worth is 0.10 to 0.15 degrees of camera orientation on
+  average and 0.95 to 1.48 at the worst instant; rendered, the two are
+  indistinguishable, so the case for the camera's clock is that bound plus
+  the fact that the gyro timestamps come off the same clock.
+  `FrameClock::Container` is kept so the loser stays measurable.
+- 2026-07-31 The orientation track is stored at **200 a second**, not per
+  frame and not per IMU sample (issue #8). Per sample is 1.8 million
+  quaternions and 72 MB on a 30-minute capture; per frame is too coarse for
+  issue #9, which needs an orientation part way through a frame. 5 ms is
+  three times finer than the 15.9 ms readout it exists to serve.
+- 2026-07-31 Verification is **physics in the footage**, with a Studio export
+  as a later drop-in (issue #8). The owner was asleep and no reference export
+  existed, so the references are that a horizon is level and an accelerometer
+  at rest reads 1 g. `kyerag-spike --bin horizon` measures the horizon's
+  angle in rendered frames; its own tests are its positive control, and a
+  deliberately wrong axis convention is the negative one, reading 54 to 65
+  degrees of standard deviation against 0.04 to 0.68 for the right answer. A
+  Studio export becomes one more row in the same table.
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 

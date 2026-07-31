@@ -42,6 +42,10 @@ pub struct ExposureSample {
 #[derive(Clone, Default, PartialEq)]
 pub struct ExposureTrack {
     samples: Vec<ExposureSample>,
+    /// Which sample is the file's first frame. The camera writes a handful
+    /// before it commits one, 8 of them on the X4 Air captures measured, so
+    /// this is not zero and the count is not the frame count.
+    first_frame: usize,
 }
 
 /// Summarised rather than dumped: a 30-minute capture holds 54017 samples
@@ -93,19 +97,45 @@ impl ExposureTrack {
             .map(|sample| sample.shutter_s)
     }
 
+    /// When the camera itself says frame `index` was exposed, in media time
+    /// from the first frame.
+    ///
+    /// **This is the file's authoritative frame clock, and the container's
+    /// PTS is not** (`pts_type = 2`, `VideoPtsEexposureFile`). The two agree
+    /// at the first frame and drift apart at 6.4 parts per million, which is
+    /// the camera's real sensor clock against the container's nominal
+    /// 30000/1001: measured over a 30-minute X4 Air capture, 11.5 ms by the
+    /// end of it, a third of a frame. Aligning the gyro to this one is what
+    /// keeps a fast roll at the end of a long file from tilting the horizon
+    /// by the rate times that gap. docs/research/insv-format.md 8.6 has the
+    /// table and what it costs to get it wrong.
+    ///
+    /// `None` for a file whose exposure record does not reach that frame,
+    /// where the container's own PTS is the only clock there is.
+    pub fn frame_time_us(&self, index: u64) -> Option<i64> {
+        let at = self.first_frame.checked_add(usize::try_from(index).ok()?)?;
+        Some(self.samples.get(at)?.offset_us)
+    }
+
     /// Read one record's payload. A trailing part-sample is dropped: no
     /// capture has ever had one, and half a timestamp is not a sample.
     pub(crate) fn parse(payload: &[u8], clock: Clock) -> Self {
+        let samples: Vec<ExposureSample> = payload
+            .chunks_exact(SAMPLE_LEN)
+            .map(|sample| ExposureSample {
+                offset_us: clock.offset_us(u64::from_le_bytes(
+                    sample[..8].try_into().expect("eight bytes"),
+                )),
+                shutter_s: f64::from_le_bytes(sample[8..].try_into().expect("eight bytes")),
+            })
+            .collect();
         Self {
-            samples: payload
-                .chunks_exact(SAMPLE_LEN)
-                .map(|sample| ExposureSample {
-                    offset_us: clock.offset_us(u64::from_le_bytes(
-                        sample[..8].try_into().expect("eight bytes"),
-                    )),
-                    shutter_s: f64::from_le_bytes(sample[8..].try_into().expect("eight bytes")),
-                })
-                .collect(),
+            first_frame: samples
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, sample)| sample.offset_us.abs())
+                .map_or(0, |(index, _)| index),
+            samples,
         }
     }
 }
@@ -132,7 +162,7 @@ pub(crate) struct Clock {
 }
 
 impl Clock {
-    fn offset_us(self, timestamp: u64) -> i64 {
+    pub(crate) fn offset_us(self, timestamp: u64) -> i64 {
         let ticks = i64::try_from(timestamp).unwrap_or(i64::MAX) - self.first_frame;
         match self.ticks_per_second {
             0 => 0,
@@ -223,6 +253,38 @@ mod tests {
 
         assert_eq!(track.shutter_at(Duration::ZERO), Some(0.001));
         assert_eq!(track.shutter_at(Duration::from_secs(600)), Some(0.003));
+    }
+
+    /// The frame clock: the track starts before the first frame, so frame 0
+    /// is not sample 0, and reading it as sample 0 puts every frame's gyro
+    /// lookup 267 ms early on this camera.
+    #[test]
+    fn frame_zero_is_the_sample_the_camera_committed_it_on() {
+        // Eight samples of pre-roll, as the X4 Air writes, then the frames.
+        let track = ExposureTrack::parse(&payload(3_545_503, 33_366, &[0.001; 20]), MICROSECONDS);
+
+        assert_eq!(track.frame_time_us(0), Some(-9));
+        assert_eq!(track.frame_time_us(1), Some(33_357));
+        assert_eq!(track.frame_time_us(11), Some(367_017));
+        // Past the end of the record there is no camera timestamp at all.
+        assert_eq!(track.frame_time_us(12), None);
+    }
+
+    /// And the two clocks are compared frame by frame, which is what says
+    /// the camera's is worth having: 30 frames of the container's nominal
+    /// 1001/30000 against 30 of the camera's own slightly different rate.
+    #[test]
+    fn the_camera_clock_and_the_container_grid_drift_apart() {
+        // 33 366.67 us is the container's frame; the camera writes 33 366.
+        let track = ExposureTrack::parse(&payload(3_812_440, 33_366, &[0.001; 1000]), MICROSECONDS);
+        let container = |frame: u64| (frame as f64 * 1_001.0 / 30_000.0 * 1e6) as i64;
+
+        assert_eq!(track.frame_time_us(0), Some(0));
+        let apart = track.frame_time_us(999).unwrap() - container(999);
+        assert!(
+            (-700..-600).contains(&apart),
+            "{apart} us apart at frame 999"
+        );
     }
 
     #[test]

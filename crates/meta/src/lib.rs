@@ -1,26 +1,36 @@
 //! Everything Kyerag reads out of an `.insv` file that is not pixels.
 //!
-//! Today that is the lens calibration and the two lenses' shutter tracks;
-//! the gyro track lands here too (issue #8). No UI and no ffmpeg: this
-//! layer needs a file handle and the last few megabytes of the file.
+//! The lens calibration, the two lenses' shutter tracks, and the IMU: its
+//! samples as the sensor wrote them, and the orientation those samples
+//! integrate to, which is what holds the horizon still (issue #8). No UI and
+//! no ffmpeg: this layer needs a file handle and the last few megabytes of
+//! the file.
 //!
 //! ```no_run
 //! let calibration = kyerag_meta::CalibrationSet::from_insv("VID.insv")?;
+//! let horizon = calibration.orientation(kyerag_meta::Filter::default());
 //! # Ok::<(), kyerag_meta::Error>(())
 //! ```
 //!
-//! The trailer format, the `offset_v3` grammar and the provenance of
-//! every number quoted in these doc comments are in
+//! The trailer format, the `offset_v3` grammar, the clock chain and the
+//! provenance of every number quoted in these doc comments are in
 //! `docs/research/insv-format.md`.
 
 mod calibration;
 mod exposure;
+mod gyro;
+mod orientation;
+mod rotation;
 mod trailer;
 
 pub use calibration::{
     CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Pose, Size,
 };
 pub use exposure::{ExposureSample, ExposureTrack};
+pub use gyro::{GyroSample, GyroTrack};
+pub use orientation::{Filter, OrientationSample, OrientationTrack, axis_map, body_from_imu};
+pub use rotation::{Mat3, Quat};
+pub use trailer::record_index;
 
 /// Everything that can go wrong between an `.insv` path and a
 /// [`CalibrationSet`].

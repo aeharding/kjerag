@@ -5,8 +5,10 @@
 //! `docs/research/insv-format.md` sections 3 and 4.
 
 use super::exposure::Clock;
+use super::orientation::{Filter, OrientationTrack, body_from_imu};
+use super::rotation::Mat3;
 use super::trailer::{ExtraMetadata, Trailer};
-use super::{Error, ExposureTrack};
+use super::{Error, ExposureTrack, GyroTrack};
 
 /// `offset_v3` is `lens_count`, then this many fields per lens, then a
 /// version word. The field order inside a block is fixed:
@@ -57,6 +59,14 @@ pub struct CalibrationSet {
     /// match brightness across the seam: measured on real captures, they
     /// do not say what they look like they say.
     pub exposure: [ExposureTrack; 2],
+    /// The IMU track from trailer record 3, **in the sensor's own axes**.
+    /// Empty for a file that carries no gyro record.
+    ///
+    /// Raw on purpose: turning it into the camera body's frame is a
+    /// choice with evidence behind it, and [`Self::orientation`] is where
+    /// that choice is made and where it can be overridden by a harness
+    /// that wants to watch a wrong one fail.
+    pub imu: GyroTrack,
     /// The canvas the file's own numbers were expressed on, kept so the
     /// conversion in [`Intrinsics`] stays auditable. Nothing downstream
     /// needs it.
@@ -137,13 +147,73 @@ pub struct Pose {
     /// A deliberate sensor rotation plus tolerance, and not a constant:
     /// near 90 on both X4 variants, near 180 and 0 on a ONE X2. That
     /// negative X2 value is what rules out the `half_fov` reading of
-    /// this slot (docs/research/insv-format.md 4.7). How to compose the
-    /// three angles into a rotation is still open.
+    /// this slot (docs/research/insv-format.md 4.7).
     pub roll_deg: f64,
     /// Metres, lens 0 at the origin. Lens 1 is dominated by z, and that
     /// is the inter-lens baseline that sets parallax: -0.033284 m on the
     /// fixture, -0.03132 m on a non-Air X4.
     pub translation_m: [f64; 3],
+}
+
+/// The quarter turn between `offset_v3`'s roll and the delivered frame's
+/// own vertical. Applying roll as the file writes it renders an X4 Air a
+/// quarter turn on its side; subtracting this datum first renders it
+/// upright, and renders a ONE X2 upright as well.
+///
+/// Measured 2026-07-31 by rendering all four candidate rotations of lens 0
+/// against plumb references in real footage from both cameras. The method,
+/// the references and the result table are in
+/// docs/research/insv-format.md 4.8.
+const ROLL_DATUM_DEG: f64 = -90.0;
+
+impl Pose {
+    /// The lens's own mounting: roll about the optical axis, then the
+    /// sub-degree yaw and pitch. `ray_lens = lens_from_body * ray_body`,
+    /// in a right-handed frame whose axes are the delivered frame's own,
+    /// x right, y down, z out along the optical axis.
+    ///
+    /// This is lens 0's whole story. Lens 1 additionally sits in a nominal
+    /// arrangement the file does not record, a half turn about the body's
+    /// vertical, which `kyerag-render` multiplies on the right of this
+    /// (docs/research/insv-format.md 4.9). The **order** of the three
+    /// angles is not settled, and neither camera can settle it: yaw and
+    /// pitch are 0.103 and 0.07 degrees on the X4 Air, so every ordering
+    /// agrees to about 2 px.
+    ///
+    /// It lives here rather than in the shader layer because the same three
+    /// angles describe where the IMU is bolted, one quarter turn away
+    /// ([`Self::sensor_from_body`]).
+    pub fn lens_from_body(&self) -> Mat3 {
+        // The datum is on `roll`, inside the composition, not a quarter turn
+        // bolted onto the outside of it: `Rz(roll - 90) Ry Rx` and
+        // `Rz(roll) Ry Rx Rz(-90)` are two different rotations wherever yaw
+        // and pitch are not zero, and on this fixture the difference moves
+        // the seam crossover by 3 percent of the blend band.
+        Mat3::rot_z((self.roll_deg + ROLL_DATUM_DEG).to_radians())
+            .times(Mat3::rot_y(self.yaw_deg.to_radians()))
+            .times(Mat3::rot_x(self.pitch_deg.to_radians()))
+    }
+
+    /// The same mounting measured against the **sensor** rather than the
+    /// delivered frame: `roll` exactly as `offset_v3` writes it, with no
+    /// quarter-turn datum in it.
+    ///
+    /// **Measured 2026-07-31 (issue #8), and it settles an open question
+    /// from 4.8.** That entry recorded two readings of where the 90 degrees
+    /// comes from, and said nothing downstream could tell them apart: either
+    /// `roll` is measured from the delivered frame's horizontal axis, or the
+    /// camera delivers the sensor image already turned a quarter turn. The
+    /// IMU tells them apart, because it is bolted to the sensor and not to
+    /// the picture. Held level by its accelerometer alone, an X4 Air's
+    /// horizon comes out exactly a quarter turn on its side through
+    /// `lens_from_body` and level through this. So the picture is rotated
+    /// and the sensor is not, and the datum belongs to the delivered frame.
+    /// docs/research/insv-format.md 8.5 has the frames.
+    pub fn sensor_from_body(&self) -> Mat3 {
+        Mat3::rot_z(self.roll_deg.to_radians())
+            .times(Mat3::rot_y(self.yaw_deg.to_radians()))
+            .times(Mat3::rot_x(self.pitch_deg.to_radians()))
+    }
 }
 
 /// What it takes to read the gyro record and place its samples in time.
@@ -193,12 +263,36 @@ impl CalibrationSet {
             },
             first_frame: trailer.metadata.first_frame_timestamp,
         };
+        let set = Self::from_metadata(&trailer.metadata)?;
         Ok(Self {
             exposure: std::array::from_fn(|lens| {
                 ExposureTrack::parse(&trailer.exposure[lens], clock)
             }),
-            ..Self::from_metadata(&trailer.metadata)?
+            imu: GyroTrack::parse(
+                &trailer.gyro,
+                set.gyro.encoding,
+                clock,
+                set.gyro.video_offset_us(),
+            ),
+            ..set
         })
+    }
+
+    /// The rotation that takes an IMU reading into the camera body's frame,
+    /// from this camera's axis convention and lens 0's own mounting.
+    pub fn body_from_imu(&self) -> Mat3 {
+        match self.lenses.first() {
+            Some(lens) => body_from_imu(self.gyro.imu_orientation, &lens.pose),
+            None => Mat3::IDENTITY,
+        }
+    }
+
+    /// Where the camera body was pointing, over the whole file.
+    ///
+    /// Empty for a file with no IMU record, which is what makes horizon
+    /// lock a no-op on such a file rather than an error.
+    pub fn orientation(&self, filter: Filter) -> OrientationTrack {
+        filter.solve(&self.imu, self.body_from_imu())
     }
 
     /// Interpret the trailer's metadata record.
@@ -269,6 +363,7 @@ impl CalibrationSet {
             rolling_shutter_ms: metadata.rolling_shutter_time,
             gyro: GyroConfig::from_metadata(metadata),
             exposure: Default::default(),
+            imu: GyroTrack::default(),
             calibration_canvas: canvas,
         })
     }
@@ -301,23 +396,56 @@ impl GyroConfig {
             },
         }
     }
+
+    /// How far ahead of the video the IMU's own timestamps run, in
+    /// microseconds, which is what comes off every gyro sample's media
+    /// time.
+    ///
+    /// `gyro_timestamp` is **milliseconds** (MED, and the reading is
+    /// arithmetic rather than a source: the field reads 1.6 on the X4 Air,
+    /// which is 1.6 ms of a 33.4 ms frame. The two other readings that fit
+    /// the same number are 1.6 microseconds, which is 20 times finer than
+    /// one IMU sample and could not have been worth a field, and 1.6
+    /// seconds, which is 48 frames and would be visible as a horizon that
+    /// leads the picture). At the roll rates on this footage it is worth
+    /// about a fifth of a degree, so it is small either way and it is
+    /// applied because the file asks for it.
+    fn video_offset_us(&self) -> i64 {
+        (self.gyro_timestamp.unwrap_or(0.0) * 1_000.0) as i64
+    }
 }
 
-/// The IMU axis convention for a camera that has an `offset_v3`
-/// calibration, which is the only kind Kyerag reads. Upstream's table is
-/// two-dimensional (model crossed with whether `offset_v3` is present);
-/// this is that half of it.
+/// Which sensor axis feeds which body axis, as the three-letter convention
+/// [`super::axis_map`] reads, where a lower case letter is negated.
 ///
-/// telemetry-parser matches `Some("Insta360 X4")` exactly, so an
-/// `Insta360 X4 Air` falls through to the default `Xyz` and its horizon
-/// tilts. Matching the family fixes that. The Air is assumed to share
-/// the X4's IMU mounting; unverified, because no horizon has been
-/// rendered yet (issue #8).
+/// **Measured, not transcribed (issue #8).** The string is only half of a
+/// convention; the other half is the frame it lands in. Kyerag takes it
+/// through [`Pose::sensor_from_body`] into the body frame the reprojection
+/// pass uses, which is not the frame any other project's table is written
+/// against, so this table is derived from footage rather than copied and
+/// copying one would have meant nothing.
+///
+/// How: for each of the 24 conventions that are rotations, compare the
+/// accelerometer's idea of up against the horizon in an **unlocked** rendered
+/// frame, which is the true vertical in body coordinates. Over five stretches
+/// of two X4 Air captures, 37 to 50 frames each, `xZY` reads 2.3 to 12.2
+/// degrees off and the runner-up of the 24 reads 15.1 to 36.6. What is left
+/// is the accelerometer's own disagreement with vertical in flight, which is
+/// real acceleration and not a convention. The command is
+/// `cargo run --release -p kyerag-spike --bin horizon -- <file.insv>
+/// from=<seconds> sweep=1`, and docs/research/insv-format.md 8.5 has the
+/// tables.
+///
+/// The default is the same string: the X-series mounting is the only one
+/// measured, and a guess with evidence behind it beats one without. It is
+/// **not** verified for a ONE X2, whose sensor roll is near 180 where an X4's
+/// is near 90 (issue #18's caution). Run the sweep above before believing a
+/// locked horizon on one.
 fn imu_orientation(camera_model: &str) -> &'static str {
     match camera_model {
-        m if m.starts_with("Insta360 X4") => "yzX",
-        m if m.starts_with("Insta360 X5") => "yzX",
-        _ => "Xyz",
+        m if m.starts_with("Insta360 X4") => "xZY",
+        m if m.starts_with("Insta360 X5") => "xZY",
+        _ => "xZY",
     }
 }
 
@@ -519,14 +647,36 @@ mod tests {
         assert_eq!(gyro.gyro_timestamp, Some(1.6));
     }
 
-    /// telemetry-parser matches "Insta360 X4" exactly and drops the Air
-    /// on the default, which tilts the horizon.
+    /// The convention the sweep in `kyerag-spike --bin horizon` settled, and
+    /// the fixture is the camera it was settled on.
     #[test]
-    fn the_x4_air_gets_the_x4_imu_orientation() {
-        assert_eq!(calibration().gyro.imu_orientation, "yzX");
-        assert_eq!(imu_orientation("Insta360 X4"), "yzX");
-        assert_eq!(imu_orientation("Insta360 X5"), "yzX");
-        assert_eq!(imu_orientation("Insta360 ONE X2"), "Xyz");
+    fn the_x4_air_gets_the_measured_imu_orientation() {
+        assert_eq!(calibration().gyro.imu_orientation, "xZY");
+        assert_eq!(imu_orientation("Insta360 X4"), "xZY");
+        assert_eq!(imu_orientation("Insta360 X5"), "xZY");
+    }
+
+    /// The whole chain from the file to the sensor's axes, checked at the
+    /// one instant physics knows the answer for: an accelerometer reading
+    /// 1 g up the camera's own vertical is a camera sitting level, and it
+    /// has to come out as the body frame's up, which is -y.
+    ///
+    /// The X4 Air's sensor is rolled 90.534 degrees, so "up the camera's own
+    /// vertical" is not up the sensor's: it is the sensor axis the
+    /// convention names, and this test is that composition end to end.
+    #[test]
+    fn a_level_camera_reads_gravity_up_the_body_vertical() {
+        let calibration = calibration();
+        let to_body = calibration.body_from_imu();
+        // What the sensor reads with the camera level, from the same two
+        // steps read backwards.
+        let level = to_body.transpose().mul_vec([0.0, -1.0, 0.0]);
+
+        let body = to_body.mul_vec(level);
+        assert!((body[1] + 1.0).abs() < 1e-9, "{body:?}");
+        // And it is a rotation, so the reading keeps its length: an IMU's
+        // three axes are right handed and a reflection is not a mounting.
+        assert!((to_body.determinant() - 1.0).abs() < 1e-9);
     }
 
     #[test]

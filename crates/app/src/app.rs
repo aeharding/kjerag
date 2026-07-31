@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Nudge, Request, Scene, Stats};
+use kyerag_render::{Accuracy, Horizon, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -121,6 +121,9 @@ pub enum Message {
     Fullscreen,
     Key(Modifiers, Physical, Key),
     LaunchUrl(String),
+    /// Hold the picture against the world, or let it ride the camera
+    /// (issue #8).
+    LockHorizon,
     /// A view change from the `View` menu or its keys.
     Look(Nudge),
     PlayPause,
@@ -265,6 +268,9 @@ impl cosmic::Application for App {
         match message {
             Message::Config(config) => {
                 self.stored.config = config;
+                // The setting can change from outside this window, so the
+                // scene is told again rather than only on the toggle.
+                self.hold_horizon();
                 return cosmic::command::set_theme(self.stored.config.app_theme.theme());
             }
             Message::ConfigState(state) => self.stored.state = state,
@@ -322,6 +328,12 @@ impl cosmic::Application for App {
                 if let Err(e) = open::that_detached(&url) {
                     eprintln!("kyerag: {url} not opened: {e}");
                 }
+            }
+            Message::LockHorizon => {
+                self.stored.config.horizon_lock = !self.stored.config.horizon_lock;
+                self.stored.write_config();
+                self.hold_horizon();
+                self.show_controls(now);
             }
             Message::Look(nudge) => {
                 if let Some(open) = &self.open {
@@ -438,6 +450,7 @@ impl cosmic::Application for App {
             &self.stored.state,
             &self.key_binds,
             self.open.is_some(),
+            self.stored.config.horizon_lock,
         )]
     }
 
@@ -550,6 +563,7 @@ impl App {
                 });
                 self.stored.state.remember(path);
                 self.stored.write_state();
+                self.hold_horizon();
             }
             Err(e) => {
                 eprintln!("kyerag: {} not shown: {e}", path.display());
@@ -557,6 +571,19 @@ impl App {
                 self.open = None;
             }
         }
+    }
+
+    /// Hand the horizon setting to the scene, which is where the picture is
+    /// held. A file with no IMU record takes it and does nothing with it.
+    fn hold_horizon(&self) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        open.scene
+            .set_horizon(match self.stored.config.horizon_lock {
+                true => Horizon::Locked,
+                false => Horizon::Free,
+            });
     }
 
     fn retitle(&mut self) -> Task<Message> {

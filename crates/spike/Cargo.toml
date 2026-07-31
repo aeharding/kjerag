@@ -15,6 +15,9 @@ path = "src/main.rs"
 
 [dependencies]
 kyerag-media = { workspace = true }
+# The IMU track and the orientation it integrates to, which `gyro` reports
+# on and `horizon` renders against (issue #8).
+kyerag-meta = { workspace = true }
 kyerag-render = { workspace = true }
 ffmpeg-next = { workspace = true }
 png = { workspace = true }

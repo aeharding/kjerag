@@ -33,6 +33,7 @@ pub fn menu_bar<'a>(
     state: &ConfigState,
     key_binds: &HashMap<KeyBind, Action>,
     has_file: bool,
+    horizon_locked: bool,
 ) -> Element<'a, Message> {
     responsive_menu_bar()
         .item_height(ItemHeight::Dynamic(40))
@@ -83,6 +84,16 @@ pub fn menu_bar<'a>(
                         enabled(has_file, strings::ZOOM_IN, Action::ZoomIn),
                         enabled(has_file, strings::DEFAULT_VIEW, Action::DefaultView),
                         enabled(has_file, strings::ZOOM_OUT, Action::ZoomOut),
+                        Item::Divider,
+                        // A checkbox rather than a pair of items, which is
+                        // what cosmic-files does for every setting that is a
+                        // state (`src/menu.rs`, "Show hidden files").
+                        Item::CheckBox(
+                            strings::LOCK_HORIZON.to_owned(),
+                            None,
+                            horizon_locked,
+                            Action::LockHorizon,
+                        ),
                         Item::Divider,
                         Item::Button(strings::FULLSCREEN.to_owned(), None, Action::Fullscreen),
                         Item::Divider,

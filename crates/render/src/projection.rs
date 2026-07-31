@@ -21,7 +21,7 @@
 //! is transcribed from Gyroflow's `insta360.wgsl`, so this file is plain
 //! AGPL-3.0 with no GPL header.
 
-use kyerag_meta::{Intrinsics, Lens, Pose};
+use kyerag_meta::{Intrinsics, Lens, Pose, Quat};
 
 use super::{Camera, Size};
 
@@ -129,13 +129,40 @@ impl Blend {
 /// it the same way it treats a sampled pixel.
 pub const OUTSIDE_GRAY: f32 = 0.10;
 
+/// Where the camera body was when a frame was taken, and how the view is to
+/// be held against it.
+///
+/// `body_from_world` is the inverse of the orientation `kyerag-meta`
+/// integrated: it takes a direction in the stabilized world frame to the
+/// body's own. Identity is horizon lock switched off, and then the view is in
+/// body coordinates exactly as it was before issue #8.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Held {
+    pub body_from_world: Quat,
+}
+
+impl Default for Held {
+    fn default() -> Self {
+        Self {
+            body_from_world: Quat::IDENTITY,
+        }
+    }
+}
+
 impl Reframe {
     /// The block for one camera pose and the lenses of one file, in file
     /// order. Anything past [`MAX_LENSES`] is dropped.
-    pub fn new(lenses: &[Lens], frame: Size, camera: Camera, aspect: f32, linearize: bool) -> Self {
+    pub fn new(
+        lenses: &[Lens],
+        frame: Size,
+        camera: Camera,
+        held: Held,
+        aspect: f32,
+        linearize: bool,
+    ) -> Self {
         Self {
             lenses: std::array::from_fn(|index| match lenses.get(index) {
-                Some(lens) => LensBlock::new(lens, index, frame, camera),
+                Some(lens) => LensBlock::new(lens, index, frame, camera, held),
                 None => LensBlock::EMPTY,
             }),
             tan_half_fov: (camera.fov * 0.5).tan(),
@@ -347,11 +374,11 @@ impl LensBlock {
         _pad: 0.0,
     };
 
-    fn new(lens: &Lens, index: usize, frame: Size, camera: Camera) -> Self {
+    fn new(lens: &Lens, index: usize, frame: Size, camera: Camera, held: Held) -> Self {
         let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
         let distortion = lens.distortion;
         Self {
-            view_to_lens: view_to_lens(&lens.pose, index, camera).columns(),
+            view_to_lens: view_to_lens(&lens.pose, index, camera, held).columns(),
             xi: xi as f32,
             fx: fx as f32,
             fy: fy as f32,
@@ -399,11 +426,24 @@ pub(crate) fn world_ray(camera: Camera, ray: [f32; 3]) -> [f32; 3] {
 
 /// The rotation that takes a view-space ray to lens `index`'s frame.
 ///
-/// Both halves are right-handed in the frame the projection uses: x right,
-/// y down, z along the axis being pointed. Positive camera yaw turns right,
-/// positive camera pitch looks up.
-fn view_to_lens(pose: &Pose, index: usize, camera: Camera) -> Mat3 {
-    lens_from_body(pose, index).mul(camera_rotation(camera))
+/// Three steps, right to left: where the view is pointing in the world, where
+/// the camera body was when the frame was taken, and where this lens sits on
+/// that body. Every one of them is right-handed in the frame the projection
+/// uses: x right, y down, z along the axis being pointed. Positive camera yaw
+/// turns right, positive camera pitch looks up.
+///
+/// The middle step is horizon lock (issue #8), and it is the whole of it: the
+/// camera's own yaw and pitch are read in the **stabilized world** frame
+/// rather than the body's, so a body that rolls under a level view leaves the
+/// view level. It is also why the drag needed no change at all. `Camera::look`
+/// answers in whatever frame `camera_rotation` lands in, the drag anchors a
+/// direction in that frame and solves for the view that puts it back there,
+/// and with lock on that frame is the world: the anchor stays on the world
+/// and the picture turns under it.
+fn view_to_lens(pose: &Pose, index: usize, camera: Camera, held: Held) -> Mat3 {
+    lens_from_body(pose, index)
+        .mul(Mat3::from(held.body_from_world.matrix().rows()))
+        .mul(camera_rotation(camera))
 }
 
 /// Yaw about the world vertical, then pitch about the view's own horizontal.
@@ -413,31 +453,15 @@ fn camera_rotation(camera: Camera) -> Mat3 {
     Mat3::rot_y(camera.yaw as f64).mul(Mat3::rot_x(camera.pitch as f64))
 }
 
-/// The quarter turn between `offset_v3`'s roll and the delivered frame's own
-/// vertical. Applying roll as the file writes it renders an X4 Air a quarter
-/// turn on its side; subtracting this datum first renders it upright, and
-/// renders a ONE X2 upright as well.
+/// The lens's own mounting, over the nominal arrangement it is mounted in
+/// ([`opposed`]).
 ///
-/// Measured 2026-07-31 by rendering all four candidate rotations of lens 0
-/// against plumb references in real footage from both cameras. The method,
-/// the references and the result table are in docs/research/insv-format.md
-/// 4.8, which is also where the open question this closes was written down.
-const ROLL_DATUM_DEG: f64 = -90.0;
-
-/// The lens's own mounting, as `offset_v3` records it: roll about the optical
-/// axis, then the sub-degree yaw and pitch, applied over the nominal
-/// arrangement the lens is mounted in ([`opposed`]).
-///
-/// The **order** of the three angles is not settled, and neither camera can
-/// settle it: yaw and pitch are 0.103 and 0.07 degrees on the X4 Air, and
-/// near the axis the model's effective focal length is `fx / (1 + xi)` =
-/// 1106 px/rad, so every ordering agrees to about 2 px. A camera with a
-/// large yaw or pitch would tell them apart; none is known to exist.
+/// The three angles and the quarter-turn datum they are measured against live
+/// in `kyerag_meta::Pose::lens_from_body`, because the IMU needs the same
+/// rotation to get out of the front lens's frame and into the body's, and one
+/// settled convention wants one definition.
 fn lens_from_body(pose: &Pose, index: usize) -> Mat3 {
-    Mat3::rot_z((pose.roll_deg + ROLL_DATUM_DEG).to_radians())
-        .mul(Mat3::rot_y(pose.yaw_deg.to_radians()))
-        .mul(Mat3::rot_x(pose.pitch_deg.to_radians()))
-        .mul(opposed(index))
+    Mat3::from(pose.lens_from_body().rows()).mul(opposed(index))
 }
 
 /// The nominal pose lens `index` is mounted in, which its extrinsics are a
@@ -504,6 +528,12 @@ pub(crate) fn normalize(v: [f32; 3]) -> [f32; 3] {
 #[derive(Clone, Copy, Debug)]
 struct Mat3([[f64; 3]; 3]);
 
+impl From<[[f64; 3]; 3]> for Mat3 {
+    fn from(rows: [[f64; 3]; 3]) -> Self {
+        Self(rows)
+    }
+}
+
 impl Mat3 {
     const IDENTITY: Self = Self([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
 
@@ -515,11 +545,6 @@ impl Mat3 {
     fn rot_y(angle: f64) -> Self {
         let (s, c) = angle.sin_cos();
         Self([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
-    }
-
-    fn rot_z(angle: f64) -> Self {
-        let (s, c) = angle.sin_cos();
-        Self([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
     }
 
     fn mul_vec(self, v: [f32; 3]) -> [f32; 3] {
@@ -758,14 +783,27 @@ mod tests {
     }
 
     fn fixture(camera: Camera) -> Reframe {
-        Reframe::new(&fixture_lenses(), FRAME, camera, 1.0, false)
+        held(camera, Held::default())
+    }
+
+    /// The same fixture with the camera body somewhere other than level,
+    /// which is what horizon lock has to take back out.
+    fn held(camera: Camera, held: Held) -> Reframe {
+        Reframe::new(&fixture_lenses(), FRAME, camera, held, 1.0, false)
     }
 
     /// The camera as it was before issue #27: one stream, one lens, one
     /// hemisphere. Legacy files that write a lens per file still render this
     /// way.
     fn one_lens(camera: Camera) -> Reframe {
-        Reframe::new(&fixture_lenses()[..1], FRAME, camera, 1.0, false)
+        Reframe::new(
+            &fixture_lenses()[..1],
+            FRAME,
+            camera,
+            Held::default(),
+            1.0,
+            false,
+        )
     }
 
     #[track_caller]
@@ -1210,6 +1248,119 @@ mod tests {
             // the lens is mounted off the body axis.
             near(radius(&reframe, lens, landing), 0.0, 15.0);
         }
+    }
+
+    /// Horizon lock, in lens pixels: a body rolled a quarter turn shows the
+    /// same world direction at the same place in the output.
+    ///
+    /// This is the whole claim of issue #8 reduced to one number. The camera
+    /// is left alone, the body is turned under it, and the pixel the middle
+    /// of the output reads has to be the pixel a body-frame direction 90
+    /// degrees round predicts, because with the lock on the view is in the
+    /// world frame and the world did not move.
+    #[test]
+    fn a_rolled_body_shows_the_same_world_direction_in_the_same_place() {
+        // Off both centre lines, so a roll about the view axis moves it in
+        // both directions rather than sliding it along one.
+        const OFF_AXIS: [f32; 2] = [0.3, 0.3];
+        let camera = Camera::default();
+        let level = fixture(camera);
+        let anchor = shown(&level, level.view_ray(OFF_AXIS)).expect("grabbed nothing");
+
+        for roll in [10.0f64, -35.0, 90.0, 179.0] {
+            // The body rolled about its own forward axis, which is what a
+            // camera swinging under a wing does.
+            let world_from_body = Quat::from_rotation_vector([0.0, 0.0, roll.to_radians()]);
+            let rolled = held(
+                camera,
+                Held {
+                    body_from_world: world_from_body.conjugate(),
+                },
+            );
+            let moved = shown(&rolled, rolled.view_ray(OFF_AXIS)).expect("rolled onto nothing");
+
+            // The world direction is unchanged, so it lands in whichever lens
+            // pixel that direction has always landed in: the body turned, so
+            // that pixel moved, and this is the check that it moved by
+            // exactly the roll.
+            let turned = world_from_body
+                .conjugate()
+                .rotate(level.view_ray(OFF_AXIS).map(f64::from))
+                .map(|axis| axis as f32);
+            let expected = shown(&level, turned).expect("the turned ray is in no lens");
+            assert_eq!(moved.0, expected.0, "{roll} degrees");
+            near(moved.1.pixel[0], expected.1.pixel[0], 0.05);
+            near(moved.1.pixel[1], expected.1.pixel[1], 0.05);
+            // And it is not a no-op: a rolled body really does read a
+            // different pixel than a level one, by hundreds of pixels here.
+            let apart = norm([
+                moved.1.pixel[0] - anchor.1.pixel[0],
+                moved.1.pixel[1] - anchor.1.pixel[1],
+            ]);
+            assert!(
+                apart > 50.0,
+                "{roll} degrees of roll moved the sample {apart} px"
+            );
+        }
+    }
+
+    /// And with the lock off nothing changed: identity is exactly the
+    /// composition the pass had before issue #8, down to the bits.
+    #[test]
+    fn an_identity_hold_is_the_pass_as_it_was() {
+        let camera = Camera {
+            yaw: 0.7,
+            pitch: -0.4,
+            ..Camera::default()
+        };
+        let plain = fixture(camera);
+        let identity = held(camera, Held::default());
+
+        for lens in 0..MAX_LENSES {
+            assert_eq!(
+                plain.lenses[lens].view_to_lens,
+                identity.lenses[lens].view_to_lens
+            );
+        }
+    }
+
+    /// The drag composes with the lock, which is the other half of issue #8's
+    /// requirement: the grabbed content stays under the cursor while the
+    /// horizon is being held.
+    ///
+    /// It needs no code of its own, and that is the finding. `Camera::look`
+    /// answers in whatever frame `camera_rotation` lands in; the lock moves
+    /// that frame from the body to the world, so the anchor is a world
+    /// direction and the solve puts a world direction back under the cursor.
+    /// The check is in lens pixels, because angles agreeing while pixels do
+    /// not is exactly the bug a frame composition can have.
+    #[test]
+    fn a_drag_still_carries_the_content_while_the_horizon_is_held() {
+        let aspect = 1.0;
+        let (from, to) = ([0.62, 0.6], [0.38, 0.42]);
+        let camera = Camera {
+            yaw: 0.4,
+            pitch: -0.3,
+            ..Camera::default()
+        };
+        // A body that is neither level nor pointing where the view is.
+        let hold = Held {
+            body_from_world: Quat::from_rotation_vector([0.15, -0.4, 0.7]).conjugate(),
+        };
+
+        let before = held(camera, hold);
+        let anchor = shown(&before, before.view_ray(from)).expect("grabbed a pixel no lens has");
+
+        let mut dragged = camera;
+        dragged.aim(camera.look(from, aspect), to, aspect);
+        assert_ne!(dragged, camera, "the drag moved nothing");
+
+        let after = held(dragged, hold);
+        let moved = shown(&after, after.view_ray(to)).expect("dragged onto nothing");
+
+        assert_eq!(moved.0, anchor.0);
+        near(moved.1.pixel[0], anchor.1.pixel[0], 1.0);
+        near(moved.1.pixel[1], anchor.1.pixel[1], 1.0);
     }
 
     /// The size the WGSL struct rounds up to, which is what the bind group

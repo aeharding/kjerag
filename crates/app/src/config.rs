@@ -47,12 +47,25 @@ impl AppTheme {
 #[serde(default)]
 pub struct Config {
     pub app_theme: AppTheme,
+    /// Hold the picture against the world rather than the camera (issue #8).
+    ///
+    /// **On by default**, because of what the footage looks like without it:
+    /// this camera is clamped rolled about a quarter turn and pitched down,
+    /// so an unlocked view of a paramotor flight has its horizon running down
+    /// the picture and swinging, and the reframed view inherits every swing
+    /// of a camera hanging under a wing. Measured over three seconds of calm
+    /// flight, the horizon in a locked view moves 0.24 degrees peak to peak
+    /// against 3.19 unlocked, and in a wingover 2.76 against a horizon that
+    /// leaves the picture entirely. `View > Lock horizon` and `h` flip it
+    /// live for anyone who wants the camera's own view.
+    pub horizon_lock: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             app_theme: AppTheme::System,
+            horizon_lock: true,
         }
     }
 }

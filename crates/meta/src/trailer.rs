@@ -20,9 +20,19 @@
 //! records tight, where the walk alone gets all of them. Measured
 //! 2026-07-31 on five captures from the two cameras.
 //!
-//! Three records are read: 1, the metadata protobuf that carries the
-//! calibration, and 4 and 12, the two lenses' shutter tracks. The gyro
-//! (record 3, 35 MB) and the thumbnails are seeked over, never read.
+//! Four records are read: 1, the metadata protobuf that carries the
+//! calibration, 3, the IMU track, and 4 and 12, the two lenses' shutter
+//! tracks. The thumbnails are seeked over, never read.
+//!
+//! Record 3 is the big one, 35 MB on a 30-minute X4 Air capture, and it is
+//! read whole at open. Reading it lazily would buy back a tenth of a second
+//! of a file open that already costs 70 ms for the mp4 index, and would cost
+//! a second file handle held for the life of the file (issue #8).
+//!
+//! Record 15, `SecGyro`, is **not** read. No published table says what it
+//! holds, and no X4 Air or ONE X2 capture measured here carries one at all;
+//! `kyerag-spike --bin gyro` prints the record ids of a file, which is how
+//! that was checked rather than assumed.
 //!
 //! The `ExtraMetadata` field tags are transcribed from telemetry-parser's
 //! `src/insta360/extra_info.rs` (MIT OR Apache-2.0). Only the eleven
@@ -46,6 +56,8 @@ const RECORD_HEADER_LEN: i64 = 1 + 1 + 4;
 const INDEX_RECORD: u8 = 0;
 const INDEX_ENTRY_LEN: usize = 1 + 1 + 4 + 4;
 const METADATA_RECORD: u8 = 1;
+/// The IMU: accelerometer and gyroscope, two encodings (`super::gyro`).
+const GYRO_RECORD: u8 = 3;
 /// Lens 0's shutter track and lens 1's, in lens order.
 ///
 /// They are two records and they stay two here. telemetry-parser reads
@@ -162,6 +174,8 @@ impl CalibrationSet {
 #[derive(Debug)]
 pub(crate) struct Trailer {
     pub metadata: ExtraMetadata,
+    /// Record 3, the IMU. Empty where the file has no such record.
+    pub gyro: Vec<u8>,
     /// Records 4 and 12 as they came, one per lens and never merged.
     /// Empty where the file has no such record, which is every camera
     /// that writes one lens per file.
@@ -191,7 +205,31 @@ fn read_trailer<S: Read + Seek>(source: &mut S) -> Result<Trailer, Error> {
             *track = read(source, record)?;
         }
     }
-    Ok(Trailer { metadata, exposure })
+    let gyro = match find(&records, GYRO_RECORD, BINARY) {
+        Some(record) => read(source, record)?,
+        None => Vec::new(),
+    };
+    Ok(Trailer {
+        metadata,
+        gyro,
+        exposure,
+    })
+}
+
+/// Every record the trailer carries, as `(id, format, size)`, for the
+/// instruments that ask what is in a file rather than reading one thing out
+/// of it. Nothing in the player calls this.
+pub fn record_index(path: impl AsRef<Path>) -> Result<Vec<(u8, u8, i64)>, Error> {
+    let mut file = std::fs::File::open(path)?;
+    let file_len = file.seek(SeekFrom::End(0))? as i64;
+    let trailer_len = trailer_len(&mut file, file_len)?;
+    let mut found: Vec<(u8, u8, i64)> = locate(&mut file, file_len, file_len - trailer_len)?
+        .iter()
+        .map(|record| (record.id, record.format, record.size))
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    Ok(found)
 }
 
 /// How many bytes back from EOF the trailer starts, read from the footer.
@@ -556,6 +594,46 @@ mod tests {
         assert_eq!(calibration.lenses[0].pose.translation_m, [0.0, 0.0, 0.0]);
         let baseline = calibration.lenses[1].pose.translation_m[2].abs();
         assert!((0.02..0.05).contains(&baseline), "baseline {baseline} m");
+
+        // The IMU, and the one thing about it physics knows the answer
+        // to: an accelerometer measures 1 g and nothing else, on
+        // average, however the camera is pointing. It comes out at 1.00
+        // to 1.02 g on every capture measured, and it is the check that
+        // says the ranges, the bias and the accelerometer-first ordering
+        // were all read right: any one of them wrong and this is 0.5, 2
+        // or a number with no units.
+        let imu = &calibration.imu;
+        assert!(!imu.is_empty(), "no gyro record");
+        assert!(
+            (100.0..2000.0).contains(&imu.rate_hz()),
+            "the IMU runs at {} Hz",
+            imu.rate_hz()
+        );
+        let mean = imu
+            .samples()
+            .iter()
+            .map(|sample| {
+                sample
+                    .accel_g
+                    .iter()
+                    .map(|axis| axis * axis)
+                    .sum::<f64>()
+                    .sqrt()
+            })
+            .sum::<f64>()
+            / imu.samples().len() as f64;
+        println!("accelerometer reads {mean:.4} g on average");
+        assert!((0.9..1.3).contains(&mean), "accelerometer reads {mean} g");
+
+        // And the orientation those samples integrate to is a rotation at
+        // every instant, which is what the shader composes with.
+        let held = calibration.orientation(crate::Filter::default());
+        assert!(!held.is_empty());
+        for sample in held.samples().iter().step_by(1000) {
+            let q = sample.world_from_body;
+            let length = (q.w * q.w + q.v.iter().map(|c| c * c).sum::<f64>()).sqrt();
+            assert!((length - 1.0).abs() < 1e-6, "{q:?} is not a rotation");
+        }
 
         // Lens 0's shutter track is the one every camera writes. Its
         // samples run one per frame, which is what says the timebase was
