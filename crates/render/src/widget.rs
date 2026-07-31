@@ -8,7 +8,7 @@
 //! [`Scene`], and iced keeps the [`Viewpoint`] in its widget tree.
 
 use cosmic::iced::widget::shader::{self, Action};
-use cosmic::iced::{Event, Rectangle, mouse, window};
+use cosmic::iced::{Event, Point, Rectangle, mouse, window};
 
 use super::{Scene, ScenePipeline, ScenePrimitive, Viewpoint};
 
@@ -105,14 +105,16 @@ fn mouse_update<Message>(
     match event {
         mouse::Event::ButtonPressed(mouse::Button::Left) => {
             let at = cursor.position_over(bounds)?;
-            viewpoint.grab(at.x, at.y);
+            viewpoint.grab(uv(at, bounds), aspect(bounds));
             Some(Action::request_redraw().and_capture())
         }
         // Deliberately not gated on the cursor being over the widget: a pan
         // that stopped at the window edge, mid-drag, would feel broken. It is
         // the drag that decides whether this moves anything, not the cursor.
+        // The `uv` of a cursor outside the widget is outside 0 to 1, which is
+        // a direction outside the view, which is exactly what the drag means.
         mouse::Event::CursorMoved { position } => viewpoint
-            .drag_to(position.x, position.y, bounds.width)
+            .drag_to(uv(*position, bounds), aspect(bounds))
             .then(Action::request_redraw),
         // The release ends the grab wherever it lands, including off the
         // widget. `CursorLeft` is the case where it cannot land here at all:
@@ -122,10 +124,11 @@ fn mouse_update<Message>(
             viewpoint.release();
             None
         }
-        mouse::Event::WheelScrolled { delta } => cursor.is_over(bounds).then(|| {
-            viewpoint.zoom(steps(*delta));
-            Action::request_redraw().and_capture()
-        }),
+        mouse::Event::WheelScrolled { delta } => {
+            let at = cursor.position_over(bounds)?;
+            viewpoint.zoom(steps(*delta), uv(at, bounds), aspect(bounds));
+            Some(Action::request_redraw().and_capture())
+        }
         _ => None,
     }
 }
@@ -137,14 +140,29 @@ fn steps(delta: mouse::ScrollDelta) -> f32 {
     }
 }
 
+/// Where a cursor position falls in the widget: 0 to 1 across it, y down,
+/// which is how the projection reads a point of the output.
+fn uv(at: Point, bounds: Rectangle) -> [f32; 2] {
+    [
+        (at.x - bounds.x) / bounds.width.max(1.0),
+        (at.y - bounds.y) / bounds.height.max(1.0),
+    ]
+}
+
+/// Width over height, read the same way [`ScenePipeline::prepare`] reads it,
+/// because the two have to agree on where a pixel is looking.
+///
+/// [`ScenePipeline::prepare`]: super::ScenePipeline::prepare
+fn aspect(bounds: Rectangle) -> f32 {
+    bounds.width / bounds.height.max(1.0)
+}
+
 /// The grab, driven through the event stream iced actually delivers rather
 /// than through [`Viewpoint`]'s methods, because which event calls which
 /// method is half of what issue #26 was about. No window and no GPU: a
 /// [`Scene`] with no file is inert until something asks it for a primitive.
 #[cfg(test)]
 mod tests {
-    use cosmic::iced::Point;
-
     use super::*;
     use crate::Camera;
 
