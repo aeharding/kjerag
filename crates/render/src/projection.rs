@@ -34,7 +34,10 @@
 //! point of the frame becomes the ray this file then projects. A flat window
 //! on the world is what a player wants until the view gets wide, and past
 //! about 110 degrees it stops being one, so the frame bends from there out
-//! until the whole sphere is a ball with room around it (issue #47).
+//! until the earth has curled into a ball inside the picture and the sky is
+//! wrapped round it into every corner (issue #47). **Every point of the frame
+//! looks at the sphere, at every field of view the zoom offers**: there is no
+//! state where the picture is a disc with empty room around it.
 
 use std::f32::consts::PI;
 
@@ -107,14 +110,31 @@ pub const MAX_LENSES: usize = 2;
 /// exactly 1.
 pub(crate) const FOV_FLAT: f32 = 110.0 * PI / 180.0;
 
-/// How much of the frame's shorter side the whole sphere fills at the far end
-/// of the zoom, which is what caps it ([`fov_ceiling`]).
+/// How far off the view axis the frame's own corner is allowed to look, which
+/// is what caps the zoom ([`fov_ceiling`]).
 ///
-/// The ball is round and a window is not, so this is measured against the
-/// shorter side: 0.8 leaves a tenth of it as room on the two near edges and
-/// more on the others. It is a look rather than a measurement, and the one
-/// number in this file the owner is expected to have an opinion about.
-const BALL_FILL: f32 = 0.8;
+/// The corner is the furthest point of the frame, and what stops the zoom is
+/// that the map runs out of picture there before it runs out of angle.
+/// Approaching half a turn the antipode spreads over a whole circle of the
+/// frame -- the plane radius keeps growing while `sin(theta)` closes -- so the
+/// corner is stretched along the way it wraps by `r / sin(theta)` against
+/// `sec^2(shrink * theta)` radially: 2.3x at 150 degrees, 4.8x at 165, 7.4x
+/// here, 19x at 176 and 78x at 179.
+///
+/// **170 is where that stops showing**, measured by eye on real footage at
+/// 2560x1440 rather than argued: sensor grain in a clear sky still reads as
+/// grain at 165 and 170 and is visibly combed into arcs at 173, and by 179 the
+/// outer third of the frame is smear. The framing that comes with it is the
+/// one being asked for: looking down, the horizon circle is 0.75 of the frame
+/// height, so the earth is a ball inside the picture with the sky wrapped
+/// round it into every corner.
+///
+/// It is stated as the corner's own angle rather than as a field of view
+/// because that is what makes the far end look the same in every window: a
+/// square window and an ultrawide one reach it at 294 and 334 degrees of
+/// horizontal field of view, and both have the same 10 degrees of margin off
+/// the antipode.
+pub(crate) const CORNER_MAX: f32 = 170.0 * PI / 180.0;
 
 /// The output projection: how a point of the frame becomes a ray, at one
 /// field of view and one window shape.
@@ -123,10 +143,10 @@ const BALL_FILL: f32 = 0.8;
 /// direction `theta` off the view axis with `r = tan(shrink * theta) /
 /// shrink`. At `shrink` 1 that is `r = tan(theta)`, the flat window every
 /// perspective view is; at 1/2 it is `r = 2 tan(theta / 2)`, which is
-/// stereographic, which is the tiny planet; and below that the whole sphere
-/// closes into a disc of finite radius with nothing outside it. One parameter
-/// walks all three, and every one of them meets the next in value and in
-/// slope, so a scroll through the range has nowhere to pop.
+/// stereographic, which is the tiny planet; and below that the world keeps
+/// shrinking into the same frame. One parameter walks all three, and every
+/// one of them meets the next in value and in slope, so a scroll through the
+/// range has nowhere to pop.
 ///
 /// **The schedule.** `shrink` is `FOV_FLAT / fov`, held at 1 until the view
 /// is wider than that. Past there the product `shrink * fov / 2` is constant,
@@ -134,6 +154,12 @@ const BALL_FILL: f32 = 0.8;
 /// flat view, and widening the field of view shrinks the world into it
 /// instead of stretching it. That is what makes the zoom keep meaning zoom
 /// out through the bend, and `the_picture_only_ever_shrinks` is the check.
+///
+/// **The frame is all picture.** The zoom stops at [`fov_ceiling`], which is
+/// where the corner reaches [`CORNER_MAX`], so no point of any frame the
+/// player can ask for is further out than that: every one of them is a real
+/// direction and the sky fills the corners. The far end of the zoom is the
+/// tiny planet, not a ball with empty room around it.
 ///
 /// The mirror of `struct Screen` in `WGSL`, and part of the uniform block.
 #[repr(C)]
@@ -144,58 +170,55 @@ pub(crate) struct Screen {
     half_extent: f32,
     /// How much of a real angle the flat frame sees. 1 is the plain
     /// perspective view, 1/2 is stereographic, and the far end of the zoom is
-    /// about 0.18.
+    /// about 0.35.
     shrink: f32,
-    /// The plane radius the sphere ends at, which is where `theta` reaches
-    /// half a turn. Past it the frame is looking at nothing at all and the
-    /// pass paints [`OUTSIDE_GRAY`], which is the room the ball sits in.
-    ///
-    /// [`f32::MAX`] wherever the sphere has no edge in the plane: at `shrink`
-    /// of 1/2 and above, `theta` cannot reach half a turn however far out the
-    /// frame goes, and a stereographic or flatter view fills its frame.
-    ball_radius: f32,
     /// Output width over output height. The vertical field of view is
     /// whatever this leaves.
     aspect: f32,
+    /// A uniform block aligns a struct inside it to 16 bytes and rounds its
+    /// size up to the same, which `repr(C)` does not: three floats here and
+    /// four in the shader would be a layout the pipeline rejects.
+    _pad: f32,
 }
 
 impl Screen {
     fn new(camera: Camera, aspect: f32) -> Self {
-        let shrink = (FOV_FLAT / camera.fov).min(1.0);
+        // The ceiling is a property of the **window**, so it is applied here
+        // as well as in `Camera::zoom`: a window narrowed after the scroll
+        // has a corner further out than the one the scroll was clamped
+        // against, and the frame would run off the sphere at the edges of a
+        // view nobody touched.
+        let fov = camera.fov.min(fov_ceiling(aspect));
+        let shrink = (FOV_FLAT / fov).min(1.0);
         Self {
-            half_extent: (shrink * camera.fov * 0.5).tan() / shrink,
+            half_extent: (shrink * fov * 0.5).tan() / shrink,
             shrink,
-            ball_radius: ball_radius(shrink),
             aspect,
+            _pad: 0.0,
         }
     }
 
     /// The ray a point of the output looks along, in view space: x right, y
     /// down, z forward. `uv` runs 0 to 1 across the output, y down.
     ///
-    /// `None` is the room around the ball, where the frame has run off the
-    /// sphere and there is no direction to answer with. Nothing else in this
-    /// crate can return it: a flat frame is all sphere.
+    /// Every point of the frame has one. The far end of the zoom is capped
+    /// where the corner is [`CORNER_MAX`] off the axis, which is short of the
+    /// half turn a direction runs out at.
     ///
-    /// WGSL twin: `view_ray`, whose `w` is this `Option`.
-    fn ray(self, uv: [f32; 2]) -> Option<[f32; 3]> {
+    /// WGSL twin: `view_ray`.
+    fn ray(self, uv: [f32; 2]) -> [f32; 3] {
         let plane = [
             (uv[0] * 2.0 - 1.0) * self.half_extent,
             (uv[1] * 2.0 - 1.0) * self.half_extent / self.aspect,
         ];
         // The flat window, and the whole of it: two multiplies, the ray at z
         // of 1 and unnormalized, exactly the instructions this was before
-        // issue #47. Ahead of the ball test rather than after it because a
-        // flat frame is all sphere -- [`Self::ball_radius`] is [`f32::MAX`]
-        // wherever `shrink` is 1 -- so the length below is work the range the
-        // player already had would be paying for nothing.
+        // issue #47. The length and the trig below are what the bend costs,
+        // and the range the player already had does not pay for them.
         if self.shrink == 1.0 {
-            return Some([plane[0], plane[1], 1.0]);
+            return [plane[0], plane[1], 1.0];
         }
         let radius = norm(plane);
-        if radius > self.ball_radius {
-            return None;
-        }
         let theta = (self.shrink * radius).atan() / self.shrink;
         let (sin, cos) = theta.sin_cos();
         // The middle of the frame, where the azimuth is not defined and the
@@ -204,37 +227,31 @@ impl Screen {
             true => sin / radius,
             false => 0.0,
         };
-        Some([plane[0] * out, plane[1] * out, cos])
-    }
-}
-
-/// The plane radius the sphere's far side lands at, for one [`Screen::shrink`].
-///
-/// `tan(shrink * pi) / shrink`, which is where `theta` reaches half a turn.
-/// At a `shrink` of 1/2 or more that angle is a quarter turn or more into the
-/// tangent's own asymptote: the far side is at infinity, the frame is all
-/// picture, and there is no ball to leave room around.
-fn ball_radius(shrink: f32) -> f32 {
-    match shrink < 0.5 {
-        true => (shrink * PI).tan() / shrink,
-        false => f32::MAX,
+        [plane[0] * out, plane[1] * out, cos]
     }
 }
 
 /// The far end of the zoom: the widest field of view worth offering, which is
-/// the one where the whole ball sits in the frame at [`BALL_FILL`] of its
-/// shorter side.
+/// the one whose corner looks [`CORNER_MAX`] off the view axis.
 ///
-/// It depends on the window shape because the ball does not: a wide window
-/// has to be zoomed out further than a square one before a round picture
-/// clears its top and bottom. The solve is closed: past [`FOV_FLAT`] the ball
-/// is `tan(shrink * pi) / shrink` across a frame `tan(FOV_FLAT / 2) / shrink`
-/// wide, so the `shrink` cancels and what fraction of the frame the ball
-/// fills depends on `shrink` alone.
+/// It depends on the window shape because the corner does: a wide window's
+/// corner is a smaller share of a turn from the middle of its own edge than a
+/// square window's is, so it can be zoomed out further before it reaches the
+/// same angle. The solve is closed, because past [`FOV_FLAT`] the whole
+/// schedule is one division by `shrink`: the corner sits at
+/// `tan(FOV_FLAT / 2) * diagonal / shrink` in the plane and `theta` is
+/// `atan(shrink * r) / shrink`, so the `shrink` inside the `atan` cancels and
+/// the angle out to the corner is [`corner_at_flat`] over `shrink`.
 pub(crate) fn fov_ceiling(aspect: f32) -> f32 {
-    let shorter = aspect.max(1.0);
-    let shrink = (BALL_FILL * (FOV_FLAT * 0.5).tan() / shorter).atan() / PI;
-    FOV_FLAT / shrink
+    FOV_FLAT * CORNER_MAX / corner_at_flat(aspect)
+}
+
+/// How far off the view axis the corner of a window this shape looks in the
+/// widest flat view, in radians. Around 59 degrees on 16:9 and 64 on a square
+/// window.
+fn corner_at_flat(aspect: f32) -> f32 {
+    let diagonal = (1.0 + 1.0 / (aspect * aspect)).sqrt();
+    ((FOV_FLAT * 0.5).tan() * diagonal).atan()
 }
 
 /// The uniform block, mirrored field for field by `struct Reframe` in
@@ -484,10 +501,7 @@ impl Reframe {
 
     /// The ray a point in the output looks along, in view space: x right,
     /// y down, z forward. `uv` runs 0 to 1 across the output, y down.
-    ///
-    /// `None` in the room around the ball (issue #47), which only the widest
-    /// views have any of.
-    pub fn view_ray(&self, uv: [f32; 2]) -> Option<[f32; 3]> {
+    pub fn view_ray(&self, uv: [f32; 2]) -> [f32; 3] {
         self.screen.ray(uv)
     }
 
@@ -555,18 +569,11 @@ impl Reframe {
     /// and it needs no output size at all: whatever target the pass draws
     /// into, a quad of it steps the share of the picture it steps.
     pub fn texels_per_pixel(&self, lens: usize, uv: [f32; 2], output: Size) -> f32 {
-        let landing = |uv: [f32; 2]| Some(self.project(lens, self.view_ray(uv)?).pixel);
-        let Some(here) = landing(uv) else {
-            return f32::INFINITY;
-        };
-        let step = |to: [f32; 2]| match landing(to) {
-            Some(moved) => (moved[0] - here[0]).hypot(moved[1] - here[1]),
-            // A quad that straddles the edge of the ball, where the step
-            // across is the whole picture. The WGSL twin reads exactly that
-            // off its own derivative, because the lane outside has no landing
-            // in it, and a huge ratio is a magnification of none: the upgrade
-            // switches off at the rim rather than guessing.
-            None => f32::INFINITY,
+        let landing = |uv: [f32; 2]| self.project(lens, self.view_ray(uv)).pixel;
+        let here = landing(uv);
+        let step = |to: [f32; 2]| {
+            let moved = landing(to);
+            (moved[0] - here[0]).hypot(moved[1] - here[1])
         };
         let across = step([uv[0] + 1.0 / output.width as f32, uv[1]]);
         let down = step([uv[0], uv[1] + 1.0 / output.height as f32]);
@@ -607,16 +614,12 @@ impl Reframe {
 
     /// The half angle of the cone that holds the whole output, in radians:
     /// the corner ray, which is the furthest from the view axis a rectangle
-    /// reaches.
-    ///
-    /// Half a turn once the corner has run off the sphere, which is a cone
-    /// that holds everything: a view with the ball inside it is looking at
-    /// the whole world at once.
+    /// reaches. [`CORNER_MAX`] at the far end of the zoom, which is a cone
+    /// holding all but a cap around the antipode.
     pub fn cone(&self) -> f32 {
-        match self.view_ray([0.0, 0.0]) {
-            Some(corner) => normalize(corner)[2].clamp(-1.0, 1.0).acos(),
-            None => PI,
-        }
+        normalize(self.view_ray([0.0, 0.0]))[2]
+            .clamp(-1.0, 1.0)
+            .acos()
     }
 
     /// How far off its own axis this lens can still see, in radians, cap
@@ -997,7 +1000,7 @@ impl LensBlock {
 /// a projection, which is the whole of what issue #47 asked of it: the anchor
 /// solve inverts whichever map the view is currently in, because it is handed
 /// the rays that map makes.
-pub(crate) fn view_ray(uv: [f32; 2], camera: Camera, aspect: f32) -> Option<[f32; 3]> {
+pub(crate) fn view_ray(uv: [f32; 2], camera: Camera, aspect: f32) -> [f32; 3] {
     Screen::new(camera, aspect).ray(uv)
 }
 
@@ -1208,8 +1211,10 @@ struct LensBlock {
 struct Screen {
   half_extent: f32,
   shrink: f32,
-  ball_radius: f32,
   aspect: f32,
+  // WGSL rounds a struct in a uniform block up to a 16-byte size. Rust twin:
+  // `Screen::_pad`.
+  pad: f32,
 };
 
 struct Reframe {
@@ -1250,27 +1255,23 @@ struct Blend {
 };
 
 // x right, y down, z forward, matching the lens frame the model projects in.
-// Rust twin: `Screen::ray`, whose `Option` this `w` is: 1 where the frame is
-// looking at the sphere and 0 in the room around the ball, which no lens can
-// have and the pass paints OUTSIDE_GRAY.
-fn view_ray(uv: vec2<f32>) -> vec4<f32> {
+// Every point of the frame has a ray: the zoom stops where the corner is
+// CORNER_MAX off the axis, short of the half turn a direction runs out at.
+// Rust twin: `Screen::ray`.
+fn view_ray(uv: vec2<f32>) -> vec3<f32> {
   let screen = reframe.screen;
   let extent = (uv * 2.0 - vec2<f32>(1.0)) * screen.half_extent;
   let plane = vec2<f32>(extent.x, extent.y / screen.aspect);
   // The flat window, which is every view the player had before issue #47:
   // the same two multiplies it always was, and neither the length below nor
-  // the trig under that. A flat frame is all sphere, so the ball test it
-  // skips could not have fired.
+  // the trig under that.
   if screen.shrink == 1.0 {
-    return vec4<f32>(plane, 1.0, 1.0);
+    return vec3<f32>(plane, 1.0);
   }
   let radius = length(plane);
-  if radius > screen.ball_radius {
-    return vec4<f32>(0.0, 0.0, 1.0, 0.0);
-  }
   let theta = atan(screen.shrink * radius) / screen.shrink;
   let out = select(0.0, sin(theta) / radius, radius > 0.0);
-  return vec4<f32>(plane * out, cos(theta), 1.0);
+  return vec3<f32>(plane * out, cos(theta));
 }
 
 // Every lens's claim on the ray, normalized. Rust twin: `Reframe::blend`.
@@ -1564,7 +1565,7 @@ mod tests {
     /// The ray at a point of the output, which every view in these tests is
     /// flat enough to have one of.
     fn ray(reframe: &Reframe, uv: [f32; 2]) -> [f32; 3] {
-        reframe.view_ray(uv).expect("a flat view is all sphere")
+        reframe.view_ray(uv)
     }
 
     fn shown(reframe: &Reframe, ray: [f32; 3]) -> Option<(usize, Landing)> {
@@ -2346,11 +2347,7 @@ mod tests {
         let anchor = shown(&before, ray(&before, [0.5, 0.5])).expect("grabbed nothing");
 
         let mut dragged = camera;
-        dragged.aim(
-            camera.look([0.5, 0.5], 1.0).expect("grabbed nothing"),
-            [0.6, 0.5],
-            1.0,
-        );
+        dragged.aim(camera.look([0.5, 0.5], 1.0), [0.6, 0.5], 1.0);
         assert!(dragged.yaw < 0.0, "dragging right turns the view left");
 
         let after = fixture(dragged);
@@ -2370,11 +2367,7 @@ mod tests {
         let anchor = shown(&before, ray(&before, [0.5, 0.5])).expect("grabbed nothing");
 
         let mut dragged = camera;
-        dragged.aim(
-            camera.look([0.5, 0.5], 1.0).expect("grabbed nothing"),
-            [0.5, 0.6],
-            1.0,
-        );
+        dragged.aim(camera.look([0.5, 0.5], 1.0), [0.5, 0.6], 1.0);
         assert!(dragged.pitch > 0.0, "dragging down looks up");
 
         let after = fixture(dragged);
@@ -2404,11 +2397,7 @@ mod tests {
         let anchor = shown(&before, ray(&before, from)).expect("grabbed a pixel no lens has");
 
         let mut dragged = camera;
-        dragged.aim(
-            camera.look(from, aspect).expect("grabbed nothing"),
-            to,
-            aspect,
-        );
+        dragged.aim(camera.look(from, aspect), to, aspect);
 
         let after = fixture(dragged);
         let moved = shown(&after, ray(&after, to)).expect("dragged onto nothing");
@@ -2572,11 +2561,7 @@ mod tests {
         let anchor = shown(&before, ray(&before, from)).expect("grabbed a pixel no lens has");
 
         let mut dragged = camera;
-        dragged.aim(
-            camera.look(from, aspect).expect("grabbed nothing"),
-            to,
-            aspect,
-        );
+        dragged.aim(camera.look(from, aspect), to, aspect);
         assert_ne!(dragged, camera, "the drag moved nothing");
 
         let after = held(dragged, hold);
@@ -2766,8 +2751,8 @@ mod tests {
     }
 
     /// How far off the view axis a point of the output looks, in radians.
-    fn off_axis(screen: Screen, uv: [f32; 2]) -> Option<f32> {
-        Some(normalize(screen.ray(uv)?)[2].clamp(-1.0, 1.0).acos())
+    fn off_axis(screen: Screen, uv: [f32; 2]) -> f32 {
+        normalize(screen.ray(uv))[2].clamp(-1.0, 1.0).acos()
     }
 
     /// Under the threshold the map is the flat window it always was, and not
@@ -2779,16 +2764,15 @@ mod tests {
             for aspect in [0.6, 1.0, WIDE] {
                 let screen = screen(fov_deg, aspect);
                 assert_eq!(screen.shrink, 1.0);
-                assert_eq!(screen.ball_radius, f32::MAX);
                 let tan_half_fov = (fov_deg.to_radians() * 0.5).tan();
                 for uv in places() {
                     assert_eq!(
                         screen.ray(uv),
-                        Some([
+                        [
                             (uv[0] * 2.0 - 1.0) * tan_half_fov,
                             (uv[1] * 2.0 - 1.0) * tan_half_fov / aspect,
                             1.0,
-                        ]),
+                        ],
                     );
                 }
             }
@@ -2804,7 +2788,7 @@ mod tests {
         assert_eq!(screen.shrink, 0.5);
 
         for uv in places() {
-            let theta = off_axis(screen, uv).expect("stereographic fills its frame");
+            let theta = off_axis(screen, uv);
             let plane = [
                 (uv[0] * 2.0 - 1.0) * screen.half_extent,
                 (uv[1] * 2.0 - 1.0) * screen.half_extent / screen.aspect,
@@ -2815,8 +2799,7 @@ mod tests {
 
     /// Zooming out only ever zooms out. Every point of the frame looks
     /// further off the axis as the field of view widens, all the way from the
-    /// narrowest view to the ball, and a point that has run off the sphere
-    /// does not come back.
+    /// narrowest view to the tiny planet.
     ///
     /// This is the whole of why the schedule is what it is. The bend and the
     /// widening pull the picture opposite ways -- a wider view spreads the
@@ -2829,24 +2812,17 @@ mod tests {
             let steps = 400;
             for uv in places() {
                 let mut held: Option<f32> = None;
-                let mut gone = false;
                 for step in 0..=steps {
                     let fov =
                         FOV_MIN_DEG * (ceiling / FOV_MIN_DEG).powf(step as f32 / steps as f32);
-                    let screen = screen(fov, aspect);
-                    match off_axis(screen, uv) {
-                        Some(theta) => {
-                            assert!(!gone, "{uv:?} came back onto the sphere at fov {fov:.1}");
-                            if let Some(held) = held {
-                                assert!(
-                                    theta >= held - 1e-5,
-                                    "{uv:?} looked back in from {held} to {theta} at fov {fov:.1}",
-                                );
-                            }
-                            held = Some(theta);
-                        }
-                        None => gone = true,
+                    let theta = off_axis(screen(fov, aspect), uv);
+                    if let Some(held) = held {
+                        assert!(
+                            theta >= held - 1e-5,
+                            "{uv:?} looked back in from {held} to {theta} at fov {fov:.1}",
+                        );
                     }
+                    held = Some(theta);
                 }
             }
         }
@@ -2872,10 +2848,7 @@ mod tests {
             let (before, after) = (screen(from / step, WIDE), screen(from * step, WIDE));
             places()
                 .iter()
-                .filter_map(|&uv| {
-                    let (a, b) = (before.ray(uv)?, after.ray(uv)?);
-                    Some(angle_between(normalize(a), normalize(b)))
-                })
+                .map(|&uv| angle_between(normalize(before.ray(uv)), normalize(after.ray(uv))))
                 .fold(0.0, f32::max)
         };
 
@@ -2907,12 +2880,21 @@ mod tests {
         norm3(crossed).atan2(dot(a, b))
     }
 
-    /// The far end of the zoom, which is the whole point of issue #47: the
-    /// ball sits inside the frame, round, centred, with room around it, and
-    /// the room is the same grey the pass has always painted where no lens
-    /// has the ray.
+    /// The far end of the zoom, which is what issue #47 asks for and what the
+    /// owner's own test of it corrected: **the tiny planet**. The earth curls
+    /// into a ball inside the picture, the sky wraps round it and fills the
+    /// corners, and the frame is video edge to edge at every field of view
+    /// the zoom offers.
+    ///
+    /// Three claims, on every window shape. The corner is [`CORNER_MAX`] off
+    /// the axis, which is the cap and is short of the half turn the map runs
+    /// out at. The horizon circle -- everything level with the camera, which
+    /// is the rim of the planet when the view is looking down -- is inside
+    /// the frame's shorter side, so the ball really is a ball in the picture
+    /// rather than a wide view of the ground. And the corner is further out
+    /// than that rim, which is the sky wrapped round it.
     #[test]
-    fn the_ball_sits_in_the_frame_with_room_around_it() {
+    fn the_far_end_is_the_tiny_planet() {
         for aspect in [0.6, 1.0, WIDE] {
             let screen = Screen::new(
                 Camera {
@@ -2921,10 +2903,14 @@ mod tests {
                 },
                 aspect,
             );
-            // The ball fills `BALL_FILL` of the frame's shorter side, so in
-            // that side's own uv its rim is this far from the middle; the
-            // longer side holds the same radius in fewer of its own units.
-            let rim = 0.5 * BALL_FILL;
+            near(
+                off_axis(screen, [0.0, 0.0]).to_degrees(),
+                CORNER_MAX.to_degrees(),
+                1e-2,
+            );
+
+            // Out from the middle along the frame's shorter side, which is
+            // the direction a round picture runs out of frame first.
             let toward = [(1.0 / aspect).min(1.0), aspect.min(1.0)];
             for axis in 0..2 {
                 let edge = |at: f32| {
@@ -2932,26 +2918,43 @@ mod tests {
                     uv[axis] += at * toward[axis];
                     uv
                 };
+                let rim = off_axis(screen, edge(0.5)).to_degrees();
                 assert!(
-                    screen.ray(edge(rim * 0.98)).is_some(),
-                    "the ball is smaller than {BALL_FILL} of the frame at aspect {aspect}",
-                );
-                assert!(
-                    screen.ray(edge(rim * 1.02)).is_none(),
-                    "the ball is larger than {BALL_FILL} of the frame at aspect {aspect}",
+                    rim > 90.0,
+                    "the horizon is outside the frame at aspect {aspect}: the shorter side \
+                     reaches only {rim} degrees, so the planet has no sky around it",
                 );
             }
-            assert!(screen.ray([0.02, 0.02]).is_none(), "no room in the corner");
         }
     }
 
-    /// A ball view holds the whole sphere at once, which is the first time
-    /// one pass has had to: every pixel of the ball is picture, the seam
-    /// blend still sums to one across it, and the far side of each lens is
-    /// carried by the other one rather than by the fold the model would
-    /// otherwise land there (issue #30's guard, now on the hot path).
+    /// A window that narrows after the scroll has a corner further out than
+    /// the one the scroll was clamped against, so the map itself holds the
+    /// ceiling as well: the frame stays full of video through a resize that
+    /// nobody zoomed for.
     #[test]
-    fn every_pixel_of_the_ball_is_picture() {
+    fn a_window_that_narrows_keeps_the_frame_full() {
+        let widest = Camera {
+            fov: fov_ceiling(21.0 / 9.0),
+            ..Camera::default()
+        };
+        for aspect in [0.5, 0.6, 1.0, WIDE] {
+            let corner = off_axis(Screen::new(widest, aspect), [0.0, 0.0]);
+            near(corner.to_degrees(), CORNER_MAX.to_degrees(), 1e-2);
+        }
+    }
+
+    /// The widest view holds all but a cap of the sphere at once, which is
+    /// the first time one pass has had to: **every pixel of it is picture**,
+    /// the seam blend still sums to one across it, and the far side of each
+    /// lens is carried by the other one rather than by the fold the model
+    /// would otherwise land there (issue #30's guard, now on the hot path).
+    ///
+    /// The no-grey claim is this test: `is_covered` is exactly what the
+    /// shader paints [`OUTSIDE_GRAY`] for, and nothing in the frame answers
+    /// false.
+    #[test]
+    fn every_pixel_of_the_widest_view_is_picture() {
         let camera = Camera {
             fov: fov_ceiling(WIDE),
             ..Camera::default()
@@ -2965,35 +2968,32 @@ mod tests {
             false,
             Sampling::default(),
         );
-        let (mut lit, mut room, mut furthest) = (0, 0, 0.0f32);
+        let (mut lit, mut furthest) = (0, 0.0f32);
 
         for down in 0..=120 {
             for across in 0..=120 {
                 let uv = [across as f32 / 120.0, down as f32 / 120.0];
-                let Some(ray) = reframe.view_ray(uv) else {
-                    room += 1;
-                    continue;
-                };
+                let ray = reframe.view_ray(uv);
                 lit += 1;
                 let blend = reframe.blend(ray);
-                assert!(blend.is_covered(), "no lens has {uv:?} of the ball");
+                assert!(
+                    blend.is_covered(),
+                    "no lens has {uv:?}, which would be grey"
+                );
                 near(blend.weights.iter().sum(), 1.0, 1e-5);
                 for lens in 0..MAX_LENSES {
                     let landing = blend.landings[lens];
                     assert!(
                         blend.weights[lens] == 0.0 || landing.inside,
-                        "the ball is showing a folded landing at {uv:?}",
+                        "the widest view is showing a folded landing at {uv:?}",
                     );
                 }
                 furthest = furthest.max(normalize(ray)[2].clamp(-1.0, 1.0).acos());
             }
         }
 
-        // The ball is round and the frame is not, so a wide window is
-        // mostly room: at 16:9 the ball is an ellipse of 0.225 by 0.4 of the
-        // frame, which is 28% of it.
-        assert!(lit > 3_500 && room > 9_000, "{lit} lit and {room} room");
-        near(furthest.to_degrees(), 180.0, 1.0);
+        assert_eq!(lit, 121 * 121, "the whole frame was not walked");
+        near(furthest.to_degrees(), CORNER_MAX.to_degrees(), 1e-2);
     }
 
     /// The size the WGSL struct rounds up to, which is what the bind group

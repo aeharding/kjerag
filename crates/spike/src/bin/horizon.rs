@@ -771,12 +771,7 @@ fn vertical_in_the_picture(
             // Two points a long way apart on the fitted line span the plane of
             // the horizon, so its normal is the vertical; a third point on the
             // sky side of the line is what says which of the two normals it is.
-            let look = |uv: [f64; 2]| {
-                camera
-                    .look(uv.map(|c| c as f32), aspect)
-                    .expect("the horizon runs are measured in flat views")
-                    .map(f64::from)
-            };
+            let look = |uv: [f64; 2]| camera.look(uv.map(|c| c as f32), aspect).map(f64::from);
             let middle: [f64; 2] =
                 std::array::from_fn(|axis| (line.through[0][axis] + line.through[1][axis]) / 2.0);
             let sky: [f64; 2] = std::array::from_fn(|axis| middle[axis] + line.sky[axis] * 0.2);

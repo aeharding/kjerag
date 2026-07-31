@@ -344,7 +344,7 @@ with_media() {
 			"$session/paused-a.ppm" "$session/paused-b.ppm"
 	fi
 
-	zooms_out_to_the_ball
+	zooms_out_to_the_tiny_planet
 	saves_a_still
 	flips_the_horizon
 	survives_fullscreen
@@ -386,71 +386,116 @@ more_report_lines() {
 	return 1
 }
 
-# Ctrl+- keeps zooming out past the flat range now, until the whole sphere
-# is a ball with room around it (issue #47). The room is the one thing in
-# the window whose colour the app decides rather than the footage:
-# OUTSIDE_GRAY, flat and neutral, where a frame of video at the same place
-# is neither. So the check reads one patch a fourteenth of the way in from
-# the left, level with the middle, which is outside the ball at the far end
-# of the zoom and inside the picture at the default view.
+# Ctrl+- keeps zooming out past the flat range now, and the far end of it is
+# the tiny planet: the earth curled into a ball inside the picture with the
+# sky wrapped round it into every corner (issue #47).
 #
-# Presses one at a time and looks after each, because the zoom is a clamp
-# rather than a state: pressing past the end is free, and a dropped key
-# costs a press rather than the check.
-BALL_PRESSES=12
-ROOM_SPREAD=4
-ROOM_DARK=60
+# What is checked is the invariant the owner's own test of this settled:
+# **the frame is video the whole way out**. There is no zoom level whose
+# picture is a disc with empty room around it, so no pixel of the window is
+# OUTSIDE_GRAY, which is the one colour in it the app decides rather than the
+# footage: flat, neutral, and 25 25 25 through the surface's own sRGB round
+# trip. `room_share` counts how much of a capture is that colour and the
+# check is that none of it is, at the far end of the zoom and at the default
+# view alike. (These two checks read the other way round before the owner
+# tested the first build: they asserted the room was there.)
+#
+# A measurement whose whole job is to read zero has to be shown able to read
+# something first. Run against a render of the far end this change replaced,
+# which was a disc with room around it, `room_share` answers 127.1 of 255,
+# which is the half of that frame that had no picture in it; run against
+# renders of this branch's own far end it answers 0.007 and 0.005, and
+# against a plain tiny planet 0.001. Those are single dark pixels of footage
+# that happen to be neutral, four orders of magnitude under a void.
+#
+# The presses are one at a time, because the zoom is a clamp rather than a
+# state: pressing past the end is free, and a dropped key costs a press
+# rather than the check. That is also how the check knows it is **at** the far
+# end rather than somewhere on the way to it: a few more presses on a paused
+# player leave the window byte for byte identical only if the clamp is what is
+# holding it.
+ZOOM_PRESSES=14
+ZOOM_SPARE=4
+# Out of 255, so this is a four-hundredth of the window. Nothing but a void
+# reaches it.
+ROOM_NONE=1
 
-zooms_out_to_the_ball() {
-	local before after try=0
-	before=$(patch_rgb "$(grab zoom-before)")
-	while [ "$try" -lt "$BALL_PRESSES" ]; do
-		key -M ctrl -k minus -m ctrl
-		alive || lost "ctrl+- zooms out to the ball"
-		after=$(patch_rgb "$(grab zoom-ball)")
-		is_room "$after" && break
-		try=$((try + 1))
-	done
-	if ! is_room "$after"; then
-		fail "ctrl+- zooms out to the ball" \
-			"after $BALL_PRESSES presses the patch reads $after, which is not the room \
-around the ball" "$session/zoom-ball.ppm"
+zooms_out_to_the_tiny_planet() {
+	# A file with one calibrated lens really is half a sphere of nothing at a
+	# wide view, and no projection can fill a frame from a hemisphere.
+	if grep -q '^lens:.*sampling 1 of' "$log"; then
+		skip "ctrl+- zooms out to the tiny planet (one lens: no far hemisphere)"
 		return
 	fi
-	pass "ctrl+- zooms out to the ball (patch $after, was $before)"
+	local before planet grey try=0
+	before=$(grab zoom-before)
+	while [ "$try" -lt "$ZOOM_PRESSES" ]; do
+		key -M ctrl -k minus -m ctrl
+		alive || lost "ctrl+- zooms out to the tiny planet"
+		try=$((try + 1))
+	done
+	planet=$(grab zoom-planet)
+	# The player is paused here, so nothing but a key changes the window:
+	# two captures that are the same bytes are a zoom that never happened,
+	# and a grey check on a view that never widened proves nothing.
+	if cmp -s "$before" "$planet"; then
+		fail "ctrl+- zooms out to the tiny planet" \
+			"$ZOOM_PRESSES presses left the window byte for byte what it was" \
+			"$before" "$planet"
+		return
+	fi
+	try=0
+	while [ "$try" -lt "$ZOOM_SPARE" ]; do
+		key -M ctrl -k minus -m ctrl
+		alive || lost "ctrl+- zooms out to the tiny planet"
+		try=$((try + 1))
+	done
+	if ! cmp -s "$planet" "$(grab zoom-end)"; then
+		fail "ctrl+- zooms out to the tiny planet" \
+			"the picture was still widening after $ZOOM_PRESSES presses, so what the \
+grey is being read off is not the far end" "$session/zoom-planet.ppm" \
+			"$session/zoom-end.ppm"
+		return
+	fi
+	grey=$(room_share "$planet")
+	if is_void "$grey"; then
+		fail "ctrl+- zooms out to the tiny planet" \
+			"$grey of 255 of the window is the flat grey the pass paints where it has \
+no picture, so the frame is not all video" "$session/zoom-planet.ppm"
+		return
+	fi
+	pass "ctrl+- zooms out to the tiny planet (grey $grey of 255)"
 
 	key -M ctrl -k 0 -m ctrl
-	after=$(patch_rgb "$(grab zoom-reset)")
-	if is_room "$after"; then
-		fail "ctrl+0 comes back from the ball" \
-			"the patch still reads $after, which is the room around the ball" \
-			"$session/zoom-reset.ppm"
+	grey=$(room_share "$(grab zoom-reset)")
+	if is_void "$grey"; then
+		fail "ctrl+0 comes back to a full frame" \
+			"$grey of 255 of the window is the flat grey the pass paints where it has \
+no picture" "$session/zoom-reset.ppm"
 	else
-		pass "ctrl+0 comes back from the ball (patch $after)"
+		pass "ctrl+0 comes back to a full frame (grey $grey of 255)"
 	fi
 }
 
-# The mean colour of a small patch of a capture, as three decimal codes.
-# `scale=1:1` is the averaging, and rawvideo is what makes `od` the whole
-# reader.
-patch_rgb() {
-	ffmpeg -y -loglevel error -i "$1" \
-		-vf "crop=iw*0.05:ih*0.05:iw*0.07:ih*0.47,scale=1:1" \
-		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+# How much of a capture is OUTSIDE_GRAY, out of 255. `geq` writes a mask one
+# pixel at a time -- neutral to the code, and 25, which is what the pass
+# writes where it has no picture once the surface's own sRGB round trip has
+# been through it -- and `signalstats` averages the whole plane exactly.
+#
+# Exactly, and that is why it is not the scaler: averaging a mask by scaling
+# it to one pixel reads 3.5% of a picture that has 0.02% in it, and a filter
+# that invents a void is a filter that can hide one.
+room_share() {
+	local mask="255*eq(r(X,Y),g(X,Y))*eq(g(X,Y),b(X,Y))*lte(abs(r(X,Y)-25),1)" said
+	said=$(ffmpeg -y -loglevel info -i "$1" \
+		-vf "format=rgb24,geq=r='$mask':g='$mask':b='$mask',format=gray,\
+signalstats,metadata=print" -f null - 2>&1)
+	printf '%s\n' "$said" >>"$log"
+	printf '%s' "$said" | grep -m1 -o 'YAVG=[0-9.]*' | cut -d= -f2
 }
 
-# Whether a patch is the flat neutral grey the pass paints where the frame
-# has no sphere in it, rather than a piece of picture: dark, and the three
-# channels within a code or two of each other. Measured on this harness, the
-# room reads 25 25 25, which is OUTSIDE_GRAY through the surface's own sRGB
-# round trip, and the same patch of the default view read 185 224 241 on the
-# owner's footage, which is sky.
-is_room() {
-	local rgb=($1) hi lo
-	[ "${#rgb[@]}" = 3 ] || return 1
-	hi=$(printf '%s\n' "${rgb[@]}" | sort -n | tail -1)
-	lo=$(printf '%s\n' "${rgb[@]}" | sort -n | head -1)
-	[ "$hi" -le "$ROOM_DARK" ] && [ $((hi - lo)) -le "$ROOM_SPREAD" ]
+is_void() {
+	awk -v share="$1" -v none="$ROOM_NONE" 'BEGIN { exit !(share + 0 > none) }'
 }
 
 # `s` writes a still into the session's screenshots folder, which is inside

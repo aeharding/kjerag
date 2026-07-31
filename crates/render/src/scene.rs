@@ -1177,14 +1177,7 @@ fn linearize(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  let look = view_ray(in.uv);
-  // Zero, which is every weight zero: the room around the ball at the far end
-  // of the zoom (issue #47) is a fragment no lens has, and `picture` already
-  // paints that. Nothing is sampled for it and no model is run.
-  var mix: Blend;
-  if look.w > 0.0 {
-    mix = blend(look.xyz);
-  }
+  let mix = blend(view_ray(in.uv));
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
   // the neighbouring lanes landed on is exactly what this asks about, so the
