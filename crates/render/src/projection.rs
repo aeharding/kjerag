@@ -141,14 +141,8 @@ impl Reframe {
 
     /// The ray a point in the output looks along, in view space: x right,
     /// y down, z forward. `uv` runs 0 to 1 across the output, y down.
-    ///
-    /// WGSL twin: `view_ray`.
     pub fn view_ray(&self, uv: [f32; 2]) -> [f32; 3] {
-        [
-            (uv[0] * 2.0 - 1.0) * self.tan_half_fov,
-            (uv[1] * 2.0 - 1.0) * self.tan_half_fov / self.aspect,
-            1.0,
-        ]
+        view_ray(uv, self.tan_half_fov, self.aspect)
     }
 
     /// The forward map: a view ray, through the lens's extrinsics and the
@@ -173,9 +167,21 @@ impl Reframe {
         let yd = y * radial + 2.0 * self.p2 * x * y + self.p1 * (r2 + 2.0 * y * y);
 
         let offset = [self.fx * xd, self.fy * yd];
+        // How far round the map can be believed, which is not as far as it
+        // answers. The distance from the principal point grows with the angle
+        // off the axis only up to `cos(theta) = -1/xi`; past that turning
+        // point it comes back down, re-enters the image circle, and a ray
+        // from behind the camera lands a second time on a pixel that belongs
+        // to a ray in front of it. That second landing is issue #30's ghost,
+        // a raw circular fisheye hanging behind the reframed view, and the
+        // radius test cannot see it because the fold puts it well inside the
+        // circle. Vacuous where xi is below 1: there is no turning point
+        // there, the radius runs away to infinity instead, and `denom` is the
+        // limit that binds.
+        let injective = p[2] * self.xi > -1.0;
         Landing {
             pixel: [offset[0] + self.cx, offset[1] + self.cy],
-            inside: denom > 0.0 && norm(offset) <= self.image_radius,
+            inside: denom > 0.0 && injective && norm(offset) <= self.image_radius,
         }
     }
 
@@ -187,13 +193,42 @@ impl Reframe {
     }
 }
 
+/// The ray a point of the output looks along, in view space: x right, y down,
+/// z forward. `uv` runs 0 to 1 across the output, y down, and `aspect` is the
+/// output's width over its height.
+///
+/// WGSL twin: `view_ray`.
+pub(crate) fn view_ray(uv: [f32; 2], tan_half_fov: f32, aspect: f32) -> [f32; 3] {
+    [
+        (uv[0] * 2.0 - 1.0) * tan_half_fov,
+        (uv[1] * 2.0 - 1.0) * tan_half_fov / aspect,
+        1.0,
+    ]
+}
+
+/// Where a view-space ray points in the world: the camera's own rotation,
+/// with none of the lens's mounting.
+///
+/// The drag solve in `super::camera` inverts this, so it reads the
+/// composition from here rather than assuming one.
+pub(crate) fn world_ray(camera: Camera, ray: [f32; 3]) -> [f32; 3] {
+    camera_rotation(camera).mul_vec(ray)
+}
+
 /// The rotation that takes a view-space ray to the lens frame.
 ///
 /// Both halves are right-handed in the frame the projection uses: x right,
 /// y down, z along the axis being pointed. Positive camera yaw turns right,
 /// positive camera pitch looks up.
 fn view_to_lens(pose: &Pose, camera: Camera) -> Mat3 {
-    lens_from_body(pose).mul(Mat3::rot_y(camera.yaw as f64).mul(Mat3::rot_x(camera.pitch as f64)))
+    lens_from_body(pose).mul(camera_rotation(camera))
+}
+
+/// Yaw about the world vertical, then pitch about the view's own horizontal.
+/// Never roll: the horizon stays level, which is the whole reason a drag near
+/// the pole has to give something up (issue #29).
+fn camera_rotation(camera: Camera) -> Mat3 {
+    Mat3::rot_y(camera.yaw as f64).mul(Mat3::rot_x(camera.pitch as f64))
 }
 
 /// The quarter turn between `offset_v3`'s roll and the delivered frame's own
@@ -245,7 +280,7 @@ fn norm(v: [f32; 2]) -> f32 {
     v[0].hypot(v[1])
 }
 
-fn normalize(v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn normalize(v: [f32; 3]) -> [f32; 3] {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     v.map(|component| component / length)
 }
@@ -270,6 +305,11 @@ impl Mat3 {
     fn rot_z(angle: f64) -> Self {
         let (s, c) = angle.sin_cos();
         Self([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    }
+
+    fn mul_vec(self, v: [f32; 3]) -> [f32; 3] {
+        let v = v.map(f64::from);
+        std::array::from_fn(|row| (0..3).map(|k| self.0[row][k] * v[k]).sum::<f64>() as f32)
     }
 
     fn mul(self, rhs: Self) -> Self {
@@ -356,9 +396,12 @@ fn project(ray: vec3<f32>) -> Landing {
   let d = n * radial + tangential;
 
   let offset = vec2<f32>(reframe.fx * d.x, reframe.fy * d.y);
+  // Past `cos(theta) = -1/xi` the map folds and lands rays from behind the
+  // camera back inside the image circle. Rust twin: `injective`.
+  let injective = p.z * reframe.xi > -1.0;
   var landing: Landing;
   landing.pixel = offset + vec2<f32>(reframe.cx, reframe.cy);
-  landing.inside = denom > 0.0 && length(offset) <= reframe.image_radius;
+  landing.inside = denom > 0.0 && injective && length(offset) <= reframe.image_radius;
   return landing;
 }
 
@@ -469,20 +512,25 @@ mod tests {
         near(radius(&reframe, landing), 2038.0, 8.0);
     }
 
-    /// Grab-the-world, end to end: drag 100 px right and the content that
-    /// was in the middle is 100 px right of the middle, reading the same
-    /// lens pixel. Exact, because the pan turns the camera by exactly the
-    /// angle the moved output pixel subtends.
+    /// Grab-the-world, end to end and in lens pixels: whatever the middle of
+    /// the output was showing is a tenth of the way right of the middle after
+    /// a drag that far, reading the same lens pixel it did before.
+    ///
+    /// The camera's own tests measure the solve in angles; this is the one
+    /// that says the angles and the lens agree about which way is which, so
+    /// the drag and the picture cannot drift apart.
     #[test]
     fn a_horizontal_drag_carries_the_content_with_the_cursor() {
-        let width = 1000.0;
-        let mut camera = Camera::default();
+        let camera = Camera::default();
         let before = fixture(camera);
         let anchor = before.project(before.view_ray([0.5, 0.5]));
 
-        camera.pan(100.0, 0.0, width);
-        let after = fixture(camera);
-        let moved = after.project(after.view_ray([0.5 + 100.0 / width, 0.5]));
+        let mut dragged = camera;
+        dragged.aim(camera.look([0.5, 0.5], 1.0), [0.6, 0.5], 1.0);
+        assert!(dragged.yaw < 0.0, "dragging right turns the view left");
+
+        let after = fixture(dragged);
+        let moved = after.project(after.view_ray([0.6, 0.5]));
 
         near(moved.pixel[0], anchor.pixel[0], 0.05);
         near(moved.pixel[1], anchor.pixel[1], 0.05);
@@ -492,19 +540,48 @@ mod tests {
     /// to get backwards: dragging down shows more sky.
     #[test]
     fn a_vertical_drag_carries_the_content_with_the_cursor() {
-        let width = 1000.0;
-        let mut camera = Camera::default();
+        let camera = Camera::default();
         let before = fixture(camera);
         let anchor = before.project(before.view_ray([0.5, 0.5]));
 
-        camera.pan(0.0, 100.0, width);
-        assert!(camera.pitch > 0.0, "dragging down looks up");
+        let mut dragged = camera;
+        dragged.aim(camera.look([0.5, 0.5], 1.0), [0.5, 0.6], 1.0);
+        assert!(dragged.pitch > 0.0, "dragging down looks up");
 
-        let after = fixture(camera);
-        let moved = after.project(after.view_ray([0.5, 0.5 + 100.0 / width]));
+        let after = fixture(dragged);
+        let moved = after.project(after.view_ray([0.5, 0.6]));
 
         near(moved.pixel[0], anchor.pixel[0], 0.05);
         near(moved.pixel[1], anchor.pixel[1], 0.05);
+    }
+
+    /// And the same on the pilot's body, where issue #29 was reported: a view
+    /// pitched most of the way down, a grab well off the middle of the
+    /// output, and the lens pixel under the cursor stays the lens pixel under
+    /// the cursor.
+    #[test]
+    fn a_drag_near_the_nadir_carries_the_content_with_the_cursor() {
+        // `fixture` builds its block at aspect 1, which is what `view_ray`
+        // below reads: the solve has to be told the same thing.
+        let aspect = 1.0;
+        let (from, to) = ([0.62, 0.6], [0.45, 0.45]);
+        let camera = Camera {
+            yaw: 0.4,
+            pitch: -60f32.to_radians(),
+            ..Camera::default()
+        };
+        let before = fixture(camera);
+        let anchor = before.project(before.view_ray(from));
+        assert!(anchor.inside, "grabbed a pixel the lens does not have");
+
+        let mut dragged = camera;
+        dragged.aim(camera.look(from, aspect), to, aspect);
+
+        let after = fixture(dragged);
+        let moved = after.project(after.view_ray(to));
+
+        near(moved.pixel[0], anchor.pixel[0], 1.0);
+        near(moved.pixel[1], anchor.pixel[1], 1.0);
     }
 
     /// The datum, pinned: on a lens rolled a quarter turn, the top of the
@@ -520,6 +597,49 @@ mod tests {
         assert!(top.inside);
         assert!(top.pixel[1] < reframe.cy - 100.0, "{top:?}");
         near(top.pixel[0], reframe.cx, 40.0);
+    }
+
+    /// Issue #30: the ray straight out the back of the camera projects onto
+    /// the principal point itself, which is as far inside the image circle as
+    /// a pixel can get. Nothing but the domain test rejects it.
+    #[test]
+    fn a_ray_from_straight_behind_is_not_in_the_picture() {
+        let reframe = fixture(Camera::default());
+        let landing = reframe.project([0.0, 0.0, -1.0]);
+
+        assert!(!landing.inside);
+        assert!(radius(&reframe, landing) < reframe.image_radius);
+        // The principal point itself, give or take the eighth of a degree the
+        // lens is mounted off the body axis.
+        near(radius(&reframe, landing), 0.0, 10.0);
+    }
+
+    /// And the picture is one cap around the axis, not a cap and a ghost.
+    /// Swept from the axis to straight backward, `inside` goes off once and
+    /// stays off. On the radius test alone it came back on at 131.5 degrees
+    /// and stayed on all the way to 180, which is the fisheye the owner saw
+    /// hanging behind the view.
+    #[test]
+    fn the_picture_stops_once() {
+        let reframe = fixture(Camera::default());
+        let mut edge = None;
+
+        for step in 0..=1800 {
+            let theta = step as f32 * 0.1;
+            let (s, c) = theta.to_radians().sin_cos();
+            match (reframe.project([s, 0.0, c]).inside, edge) {
+                (false, None) => edge = Some(theta),
+                (true, Some(stopped)) => {
+                    panic!("the picture stopped at {stopped} degrees and came back at {theta}")
+                }
+                _ => {}
+            }
+        }
+
+        // Where the model reaches the image circle, which is what decides
+        // how much picture there is: 97.5 degrees, as the note on
+        // `image_radius` says.
+        near(edge.expect("the picture never stopped"), 97.5, 0.2);
     }
 
     /// The size the WGSL struct rounds up to, which is what the bind group

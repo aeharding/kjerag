@@ -131,6 +131,23 @@ drag to look around and scroll to zoom (issue #3). Next: the playback core
   (`Viewpoint`), not in the app's model. Panning is a widget concern, the
   shell has no opinion about it, and no message round trip happens per
   mouse move.
+- 2026-07-31 The drag anchors and solves (issue #29). A press stores the
+  world direction under the cursor, and every move solves for the view that
+  puts that direction back under the cursor: height above the horizon fixes
+  the pitch, bearing then fixes the yaw. Stepping yaw and pitch by the
+  cursor's own movement is only grab-the-world near the middle of the view,
+  because near the pole a yaw turns about an axis nearly along the view
+  ray. The horizon stays level, so where an exact answer would need roll
+  the pitch clamps and the drag reads as a wall; and where a view pitched
+  near the vertical sees past the pole, the solve takes the tilt nearest
+  the one it is already at rather than the mirrored view that fits equally
+  well.
+- 2026-07-31 A ray is in the picture only where the Mei map stays one to
+  one, `cos(theta) > -1/xi`, as well as inside the image circle (issue
+  #30). Past that turning point the map folds rays from behind the camera
+  back inside the circle, which showed as a raw circular fisheye hanging
+  behind the reframed view. The bound comes out of the calibration's own
+  xi, so no maximum field of view has to be guessed at.
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 
