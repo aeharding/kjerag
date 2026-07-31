@@ -181,6 +181,29 @@ mod tests {
         assert_eq!(pressed(Modifiers::CTRL, comma), Some(Action::Settings));
     }
 
+    /// `s` and `Ctrl+C` are the two ways into issue #15 that do not need a
+    /// pointer, so the map has to reach the capture and not something near
+    /// it.
+    #[test]
+    fn the_frame_keys_take_a_still() {
+        assert_eq!(
+            pressed(Modifiers::empty(), Key::Character("s".into())),
+            Some(Action::SaveFrame)
+        );
+        assert_eq!(
+            pressed(Modifiers::CTRL, Key::Character("c".into())),
+            Some(Action::CopyFrame)
+        );
+        assert!(matches!(
+            Action::SaveFrame.message(),
+            Message::Capture(Destination::Save)
+        ));
+        assert!(matches!(
+            Action::CopyFrame.message(),
+            Message::Capture(Destination::Copy)
+        ));
+    }
+
     /// Escape belongs to `on_escape`, so binding it here would fire twice.
     #[test]
     fn escape_is_not_in_the_map() {

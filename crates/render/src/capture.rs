@@ -17,6 +17,11 @@
 //! format changes here is channel order, which [`Order`] puts back the way
 //! PNG wants on the CPU.
 //!
+//! What a still does not hold is the shell: the control overlay and the
+//! header bar are iced widgets composited into the surface after this pass,
+//! and this pass is all a capture runs. A picture of the view, not a
+//! picture of the window.
+//!
 //! Only the submit happens on the render thread. Waiting for the GPU,
 //! mapping, unpadding and whatever the shell then does with the pixels all
 //! run on a worker thread, because a capture that stalled the redraw would
@@ -67,13 +72,13 @@ pub struct Shot {
 ///
 /// [`Scene`]: super::Scene
 #[derive(Clone, Default)]
-pub struct Shutter(Arc<Mutex<Option<Request>>>);
+pub(crate) struct Shutter(Arc<Mutex<Option<Request>>>);
 
 impl Shutter {
     /// Arms a capture for the next redraw. A second one armed before the
     /// first has been taken replaces it: two shutters open on one picture
     /// is one picture.
-    pub fn arm(&self, request: Request) {
+    pub(crate) fn arm(&self, request: Request) {
         if let Ok(mut slot) = self.0.lock() {
             *slot = Some(request);
         }
