@@ -111,6 +111,14 @@ error` (measured), so a GPU-less runner would be checking nothing.
   structure makes your task awkward, or a refactor would make the code
   easier to work with, say so in your PR or report instead of contorting
   around it. Proposals with reasons get taken seriously; the plan pivots.
+- Owner-reported defects (owner directive, 2026-07-31): reproduce the
+  exact reported symptom through the real pipeline BEFORE writing the
+  fix, and confirm through the coordinator that the reproduction matches
+  what the owner saw (a rendered artifact or precise steps he can
+  compare). A fix merges only with a regression test exercising the path
+  the owner actually used. Born of PR #51's same-day revert: a
+  filter-level unit test validated the agent's model of the bug, not the
+  bug, and the "fixed" defect survived on the owner's build.
 - UI copy: plain words, no em dashes.
 - UI design defers to COSMIC system apps best practice (owner doctrine,
   2026-07-31): use libcosmic's stock widgets and the patterns of

@@ -251,45 +251,6 @@ pub struct Held {
     pub rolling: Option<Rolling>,
 }
 
-impl Held {
-    /// The lock, composed: where the body was, how far the filter's heading
-    /// follow has carried the stabilized frame by now, and the heading a drag
-    /// has pinned the view at.
-    ///
-    /// **Both halves of issue #44 are this one line.** The camera's yaw is
-    /// read in the stabilized frame, and that frame's own heading is the
-    /// follow, so a view left alone rides the follow: the body's heading owns
-    /// the view and a drag only ever offsets it. Pinning the follow at the
-    /// heading it had when the drag took hold takes it back out, and then the
-    /// view is in a frame nothing moves, which is what holding a view means.
-    ///
-    /// `pinned` of `None` is the follow reaching the view, which is what the
-    /// player does until a drag takes hold and what it does again after
-    /// `View > Reset view`.
-    pub fn locked(
-        world_from_body: Quat,
-        follow: f64,
-        pinned: Option<f64>,
-        rolling: Option<Rolling>,
-    ) -> Self {
-        Self {
-            body_from_world: world_from_body
-                .conjugate()
-                .times(Quat::about_down(pinned.unwrap_or(follow) - follow)),
-            rolling,
-        }
-    }
-
-    /// The view riding the body, which is the pass as it was before issue #8.
-    /// The readout is not under that switch (see [`Self::rolling`]).
-    pub fn free(rolling: Option<Rolling>) -> Self {
-        Self {
-            body_from_world: Quat::IDENTITY,
-            rolling,
-        }
-    }
-}
-
 /// One frame's rolling shutter: the turn the camera body makes between the
 /// first row of the readout and the last, and which way across the delivered
 /// picture those rows run.
@@ -1284,9 +1245,7 @@ fn texel_ratio(pixel: vec2<f32>) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kyerag_meta::{
-        Distortion, Filter, GyroSample, GyroTrack, Mat3 as ImuMounting, OrientationTrack, Sweep,
-    };
+    use kyerag_meta::{Distortion, Sweep};
 
     use crate::sampling;
 
@@ -1382,12 +1341,6 @@ mod tests {
             false,
             Sampling::default(),
         )
-    }
-
-    /// An angle difference wrapped into (-180, 180], so that a heading
-    /// crossing the back of the compass is a small change and not a turn.
-    fn wrapped(degrees: f64) -> f64 {
-        (degrees + 180.0).rem_euclid(360.0) - 180.0
     }
 
     #[track_caller]
@@ -2412,158 +2365,6 @@ mod tests {
         assert_eq!(moved.0, anchor.0);
         near(moved.1.pixel[0], anchor.1.pixel[0], 1.0);
         near(moved.1.pixel[1], anchor.1.pixel[1], 1.0);
-    }
-
-    /// A level camera whose heading wanders for five minutes: a swing either
-    /// side of straight ahead, and a slow turn under it that never comes back.
-    ///
-    /// Returned with the body's **true** orientation as a function of the same
-    /// clock, which is what makes the test below a test: the composition is
-    /// undone by the thing that made it rather than by a second copy of
-    /// itself.
-    fn wandering() -> (OrientationTrack, impl Fn(i64) -> Quat) {
-        const HZ: i64 = 200;
-        const SECONDS: f64 = 300.0;
-        // 40 degrees either side at a 20 second period, which is faster than
-        // the 3 second follow can hold and slower than it ignores, over a
-        // steady 0.1 deg/s that adds half a turn across the run.
-        let heading = |t: f64| {
-            40f64.to_radians() * (t * std::f64::consts::TAU / 20.0).sin() + 0.1f64.to_radians() * t
-        };
-        let rate = |t: f64| {
-            40f64.to_radians()
-                * (std::f64::consts::TAU / 20.0)
-                * (t * std::f64::consts::TAU / 20.0).cos()
-                + 0.1f64.to_radians()
-        };
-        let samples = (0..(SECONDS * HZ as f64) as i64)
-            .map(|index| {
-                // The rate at the middle of the step this sample covers, not
-                // at its end: the solver integrates rectangles, and reading
-                // the rate at the end of each one leaves a quadrature error
-                // that grows to a sixteenth of a degree here. That is an
-                // error in this synthetic body, not in the thing under test,
-                // and the midpoint rule is what takes it out.
-                let t = (index as f64 - 0.5) / HZ as f64;
-                GyroSample {
-                    offset_us: index * 1_000_000 / HZ,
-                    // Level, so the body's own vertical is the world's and a
-                    // heading rate is a rate about it.
-                    rate_dps: [0.0, rate(t).to_degrees(), 0.0],
-                    accel_g: [0.0, -1.0, 0.0],
-                }
-            })
-            .collect();
-        (
-            Filter::default().solve(&GyroTrack::from_samples(samples), ImuMounting::IDENTITY),
-            move |at: i64| Quat::about_down(heading(at as f64 * 1e-6)),
-        )
-    }
-
-    /// Where in the **world** the middle of the output is looking, which is
-    /// the only frame in which "the view did not move" means anything.
-    fn looking(camera: Camera, held: Held, body: Quat) -> f64 {
-        let ray = world_ray(camera, [0.0, 0.0, 1.0]).map(f64::from);
-        let world = body.rotate(held.body_from_world.rotate(ray));
-        world[0].atan2(world[2]).to_degrees()
-    }
-
-    /// An unpinned lock is the composition as issue #8 shipped it, down to
-    /// the bits: the view on the follow may not pay for the view off it.
-    #[test]
-    fn a_view_still_on_the_follow_composes_exactly_as_it_did() {
-        let world_from_body = Quat::from_rotation_vector([0.15, -0.4, 0.7]);
-
-        for follow in [0.0, -2.5, 11.0] {
-            let held = Held::locked(world_from_body, follow, None, None);
-            assert_eq!(held.body_from_world, world_from_body.conjugate());
-        }
-    }
-
-    /// Issue #44, and the behaviour the owner asked for in one line: pan
-    /// somewhere, stop, and nothing moves thereafter.
-    ///
-    /// Five minutes of a wandering heading through the real filter, with the
-    /// camera left where a drag put it. What the middle of the output looks
-    /// at, **in the world**, may not move at all.
-    #[test]
-    fn a_pinned_view_holds_its_world_direction_while_the_body_wanders() {
-        let (track, body) = wandering();
-        let camera = Camera {
-            yaw: 0.6,
-            pitch: -0.2,
-            ..Camera::default()
-        };
-        let pinned = Some(track.follow(0));
-
-        let at = |seconds: i64| {
-            let us = seconds * 1_000_000;
-            looking(
-                camera,
-                Held::locked(track.at(us), track.follow(us), pinned, None),
-                body(us),
-            )
-        };
-
-        let start = at(0);
-        for seconds in (0..=290).step_by(10) {
-            let moved = wrapped(at(seconds) - start);
-            assert!(
-                moved.abs() < 0.05,
-                "the view moved {moved} degrees by {seconds} s"
-            );
-        }
-    }
-
-    /// And the same run with the view still on the follow, which is what the
-    /// player does before a drag takes hold and what issue #44 was: the view
-    /// is dragged along by the body's heading, all the way to the half turn
-    /// the body ends up having made.
-    ///
-    /// Without this the test above proves only that some arithmetic is
-    /// constant, not that it was ever in danger.
-    #[test]
-    fn a_view_left_on_the_follow_is_carried_by_the_bodys_heading() {
-        let (track, body) = wandering();
-        let camera = Camera {
-            yaw: 0.6,
-            ..Camera::default()
-        };
-
-        let at = |seconds: i64| {
-            let us = seconds * 1_000_000;
-            looking(
-                camera,
-                Held::locked(track.at(us), track.follow(us), None, None),
-                body(us),
-            )
-        };
-
-        let start = at(0);
-        let swung = (0..=290)
-            .step_by(10)
-            .map(|seconds| wrapped(at(seconds) - start).abs())
-            .fold(0.0f64, f64::max);
-        assert!(
-            swung > 30.0,
-            "the follow only moved the view {swung} degrees"
-        );
-
-        // And it does not come back. Twelve instants five seconds apart is
-        // three whole periods of the swing with no phase counted twice, so
-        // what is left in the mean is the slow turn alone, less the three
-        // seconds the follow lags a ramp: 0.1 deg/s at a mean of 257.5 s,
-        // less 0.3.
-        let window: Vec<i64> = (230..290).step_by(5).collect();
-        let carried: f64 = window
-            .iter()
-            .map(|seconds| wrapped(at(*seconds) - start))
-            .sum::<f64>()
-            / window.len() as f64;
-        assert!(
-            (carried - 25.45).abs() < 0.5,
-            "{carried} degrees against the 25.45 the body turned under it"
-        );
     }
 
     /// One frame's readout with the body turning `turn` radians about the
