@@ -109,6 +109,19 @@ impl Timing {
     }
 }
 
+/// What a read stopped on.
+#[derive(Debug)]
+pub enum Read {
+    /// A complete set of lenses.
+    Frames(Frames),
+    /// The end of the file.
+    Ended,
+    /// The interrupt asked for the read to stop. Nothing was thrown away:
+    /// the lanes keep everything they have decoded, so a read that is not
+    /// followed by a seek carries on from where this one stopped.
+    Interrupted,
+}
+
 /// One instant of the recording: every lens at the same PTS, mapped to
 /// DRM_PRIME and ready for `kyerag_render::dmabuf::import`.
 ///
@@ -276,12 +289,36 @@ impl Reader {
 
     /// The next complete set of lenses, or `None` at the end of the file.
     pub fn next_frames(&mut self) -> Fallible<Option<Frames>> {
+        match self.read_until(|| false)? {
+            Read::Frames(frames) => Ok(Some(frames)),
+            // A read that never asks to stop only stops at the end.
+            Read::Ended | Read::Interrupted => Ok(None),
+        }
+    }
+
+    /// The next complete set of lenses, giving up if `interrupted` says the
+    /// work has been overtaken.
+    ///
+    /// This is what lets a scrub abandon the lookahead refill it started
+    /// behind the last landing: three pair decodes, and 38 ms of the 59 ms a
+    /// scrub update used to cost (issue #37's table, issue #46's fix), spent
+    /// on pictures the pilot has already dragged past.
+    ///
+    /// Reading is a run of packet reads and the caller only gets a say
+    /// between them, so a read is given up one packet after the interrupt
+    /// turns true rather than at once. What that grain costs is inside the
+    /// 26 ms a scrub now takes through the [`super::Player`] against this
+    /// reader's own 21.
+    pub fn read_until(&mut self, mut interrupted: impl FnMut() -> bool) -> Fallible<Read> {
         loop {
             if let Some(frames) = self.take()? {
-                return Ok(Some(frames));
+                return Ok(Read::Frames(frames));
             }
             if self.drained {
-                return Ok(None);
+                return Ok(Read::Ended);
+            }
+            if interrupted() {
+                return Ok(Read::Interrupted);
             }
             self.pump()?;
         }
@@ -552,6 +589,14 @@ mod tests {
                 "keyframe seek to {at:?} landed on {} for {wanted}",
                 key.index
             );
+
+            // Giving a read up must cost nothing but the time already spent:
+            // the lanes keep what they decoded, so the frame the abandoned
+            // read was reaching for is the one the next read hands over.
+            assert!(matches!(
+                reader.read_until(|| true).unwrap(),
+                Read::Interrupted
+            ));
 
             // And reading on from a landing carries on in order, which is
             // what playing after a scrub depends on.

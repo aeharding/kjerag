@@ -25,7 +25,7 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Accuracy, Cue, Fallible, Frames, Reader, Size, Timing};
+use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
 
 /// Pairs the decode thread may have ready and waiting.
 const QUEUED: usize = 2;
@@ -315,22 +315,43 @@ impl Player {
     }
 }
 
+/// What [`decode_ahead`] needs of a [`Reader`]. A trait because the loop
+/// below is the whole of newest-command-wins, preemption and epoch tagging,
+/// and testing those against a real reader would need a VA-API device and
+/// 38 GB of footage.
+trait Source {
+    fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()>;
+    fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read>;
+}
+
+impl Source for Reader {
+    fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()> {
+        Reader::seek(self, to, accuracy)
+    }
+
+    fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read> {
+        Reader::read_until(self, interrupted)
+    }
+}
+
 /// Decodes ahead of the picture until the player goes away. The bounded
 /// channel is the throttle: a full one blocks here, so a paused player
 /// stops decoding after `QUEUED` pairs instead of eating the file.
-fn decode_ahead(mut reader: Reader, notes: &SyncSender<Note>, commands: &Receiver<Command>) {
+fn decode_ahead(mut reader: impl Source, notes: &SyncSender<Note>, commands: &Receiver<Command>) {
     let mut epoch = 0;
     let mut ended = false;
+    // Taken off the channel by the interrupt below and not acted on yet.
+    let mut held: Option<Command> = None;
     loop {
+        let mut order = held.take();
         // At the end of the file there is nothing to read and nothing to do
         // but wait for a seek, so the thread blocks rather than spinning.
-        let mut order = match ended {
-            true => match commands.recv() {
-                Ok(order) => Some(order),
+        if order.is_none() && ended {
+            match commands.recv() {
+                Ok(first) => order = Some(first),
                 Err(_) => return,
-            },
-            false => None,
-        };
+            }
+        }
         // Only the newest command is still wanted. A drag asks for a position
         // per pointer move, and serving the ones behind the last would spend
         // a keyframe decode each on pictures nobody waited to see.
@@ -341,20 +362,49 @@ fn decode_ahead(mut reader: Reader, notes: &SyncSender<Note>, commands: &Receive
                 Err(TryRecvError::Disconnected) => return,
             }
         }
-        if let Some(Command::Seek { epoch: to, .. }) = &order {
-            epoch = *to;
-            ended = false;
-        }
-        if let Some(Command::Seek { to, accuracy, .. }) = order
-            && let Err(e) = reader.seek(to, accuracy)
+        // Set while this read is the landing the newest command asked for.
+        let landing = order.is_some();
+        if let Some(Command::Seek {
+            epoch: to,
+            to: cue,
+            accuracy,
+        }) = order
         {
-            let _ = notes.send(Note::Failed(e));
-            return;
+            epoch = to;
+            ended = false;
+            if let Err(e) = reader.seek(cue, accuracy) {
+                let _ = notes.send(Note::Failed(e));
+                return;
+            }
         }
 
-        let note = match reader.next_frames() {
-            Ok(Some(frames)) => Note::Frames(epoch, frames),
-            Ok(None) => {
+        // A newer command takes the thread off the lookahead refill, which is
+        // three pair decodes for a position the pilot may already have
+        // dragged past: 38 ms of the 59 ms a scrub update used to cost.
+        //
+        // A landing is exempt and always finishes. Positions arrive faster
+        // than pictures come out of them (10 to 12 a second against 20 to 60
+        // asked for), so a rule that gave up whatever was newest would give
+        // up every landing, and a fast drag would show nothing at all.
+        let read = reader.read_until(&mut || match landing {
+            true => false,
+            false => match commands.try_recv() {
+                Ok(newer) => {
+                    held = Some(newer);
+                    true
+                }
+                Err(TryRecvError::Empty) => false,
+                // Nobody is waiting for this any more. Stopping here reaches
+                // the drain above, which returns.
+                Err(TryRecvError::Disconnected) => true,
+            },
+        });
+        let note = match read {
+            Ok(Read::Frames(frames)) => Note::Frames(epoch, frames),
+            // Overtaken. The lanes keep what they decoded; the seek that
+            // comes of `held` is what clears it.
+            Ok(Read::Interrupted) => continue,
+            Ok(Read::Ended) => {
                 ended = true;
                 Note::Ended(epoch)
             }
@@ -556,6 +606,8 @@ impl Clock {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::Size;
 
@@ -738,5 +790,227 @@ mod tests {
         assert!(presenter.advance(start, feed(&mut next)).is_none());
         assert_eq!(presenter.stats.presented, 1);
         assert_eq!(presenter.stats.dropped, 0);
+    }
+
+    /// Packet reads in one read of the fake source below. A real read asks
+    /// the interrupt between packets, so preemption can only ever happen at
+    /// that grain and the fake has to have the same grain to be worth
+    /// anything.
+    const PACKETS: usize = 8;
+
+    /// What the fake source below was asked to do, in order. `Gave` is the
+    /// whole point: an abandoned read sends no note, so the trace is the
+    /// only place the work it did not finish shows up.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Did {
+        Seek(u64, Accuracy),
+        Read(u64),
+        Gave(u64),
+    }
+
+    /// A source with no file behind it, so that the decode thread's loop
+    /// (newest command wins, preempt the lookahead, tag by epoch) can be run
+    /// on the test's own thread.
+    ///
+    /// `script` has one entry per read the loop attempts, interrupted ones
+    /// included: the command, if any, that lands in the middle of it. Mid-read is the case that matters, because a
+    /// command arriving between two reads was never in danger of being
+    /// missed. When the script runs out the source lets go of the command
+    /// channel and says the file ended, which is what stops the loop.
+    struct Fake {
+        at: u64,
+        read: usize,
+        script: Vec<Option<Command>>,
+        commands: Option<Sender<Command>>,
+        did: Arc<Mutex<Vec<Did>>>,
+    }
+
+    impl Fake {
+        fn note(&self, did: Did) {
+            self.did.lock().unwrap().push(did);
+        }
+    }
+
+    impl Source for Fake {
+        fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()> {
+            // The fake counts frames, so an index cue is all it can answer.
+            let Cue::Index(index) = to else {
+                return Err("the fake source seeks by index".into());
+            };
+            self.at = index;
+            self.note(Did::Seek(index, accuracy));
+            Ok(())
+        }
+
+        fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read> {
+            let Some(mut arriving) = self.script.get_mut(self.read).map(Option::take) else {
+                self.commands = None;
+                return Ok(Read::Ended);
+            };
+            self.read += 1;
+            for packet in 0..PACKETS {
+                if packet == PACKETS / 2
+                    && let Some(order) = arriving.take()
+                    && let Some(commands) = &self.commands
+                {
+                    commands.send(order).unwrap();
+                }
+                if interrupted() {
+                    self.note(Did::Gave(self.at));
+                    return Ok(Read::Interrupted);
+                }
+            }
+            self.note(Did::Read(self.at));
+            self.at += 1;
+            Ok(Read::Frames(frame(self.at - 1)))
+        }
+    }
+
+    /// Runs the decode thread's loop against [`Fake`] until its script runs
+    /// out, and reports what came back and what the source was asked for.
+    fn decode(first: Vec<Command>, script: Vec<Option<Command>>) -> (Vec<(u64, u64)>, Vec<Did>) {
+        let (commands, orders) = channel();
+        let (sender, notes) = sync_channel(64);
+        let did = Arc::new(Mutex::new(Vec::new()));
+        for order in first {
+            commands.send(order).unwrap();
+        }
+        let source = Fake {
+            at: 0,
+            read: 0,
+            script,
+            commands: Some(commands.clone()),
+            did: did.clone(),
+        };
+        // The source's clone is the only one left, so the loop ends when it
+        // lets go rather than when this function does.
+        drop(commands);
+        decode_ahead(source, &sender, &orders);
+        drop(sender);
+
+        let shown = notes
+            .try_iter()
+            .filter_map(|note| match note {
+                Note::Frames(epoch, frames) => Some((epoch, frames.index)),
+                _ => None,
+            })
+            .collect();
+        let did = did.lock().unwrap().drain(..).collect();
+        (shown, did)
+    }
+
+    fn seek_to(epoch: u64, index: u64, accuracy: Accuracy) -> Command {
+        Command::Seek {
+            epoch,
+            to: Cue::Index(index),
+            accuracy,
+        }
+    }
+
+    /// The refill after a landing is three pair decodes for a position the
+    /// pilot may already have dragged away from (38 ms of the 59 ms a scrub
+    /// update cost, issue #46). A command landing in the middle of it takes
+    /// the thread off it, and the frame it was decoding is never shown.
+    #[test]
+    fn a_command_arriving_mid_refill_preempts_it() {
+        let (shown, did) = decode(
+            vec![seek_to(1, 100, Accuracy::Keyframe)],
+            vec![None, Some(seek_to(2, 500, Accuracy::Keyframe)), None],
+        );
+
+        // Frame 101, the one the refill was reading, never reaches the
+        // player, and the picture that follows carries the newer epoch.
+        assert_eq!(shown, [(1, 100), (2, 500)]);
+        assert_eq!(
+            did,
+            [
+                Did::Seek(100, Accuracy::Keyframe),
+                Did::Read(100),
+                Did::Gave(101),
+                Did::Seek(500, Accuracy::Keyframe),
+                Did::Read(500),
+            ]
+        );
+    }
+
+    /// Playback is the case where nothing is pending, and it must not pay
+    /// for the interrupt path at all: every read runs to a frame, in order,
+    /// under one epoch.
+    #[test]
+    fn nothing_is_preempted_while_the_channel_is_empty() {
+        let (shown, did) = decode(
+            vec![seek_to(1, 100, Accuracy::Keyframe)],
+            vec![None, None, None, None],
+        );
+
+        assert_eq!(shown, [(1, 100), (1, 101), (1, 102), (1, 103)]);
+        assert!(!did.contains(&Did::Gave(101)));
+        assert_eq!(did.iter().filter(|d| matches!(d, Did::Gave(_))).count(), 0);
+    }
+
+    /// Letting go of the scrubber asks for the frame itself, and it has to
+    /// win however many drag positions are still in flight: one exact seek,
+    /// one picture, tagged with the release's own epoch.
+    #[test]
+    fn a_release_overtakes_the_drag_positions_behind_it() {
+        let (shown, did) = decode(
+            vec![
+                seek_to(1, 100, Accuracy::Keyframe),
+                seek_to(2, 200, Accuracy::Keyframe),
+                seek_to(3, 300, Accuracy::Keyframe),
+                seek_to(4, 317, Accuracy::Exact),
+            ],
+            vec![None],
+        );
+
+        assert_eq!(shown, [(4, 317)]);
+        assert_eq!(did, [Did::Seek(317, Accuracy::Exact), Did::Read(317)]);
+    }
+
+    /// The same release, arriving while the thread is refilling behind a
+    /// drag landing. The interruption must not cost it its accuracy or its
+    /// epoch: this is the one path the pilot's finger leaving the scrubber
+    /// goes down.
+    #[test]
+    fn a_release_mid_refill_still_lands_exactly() {
+        let (shown, did) = decode(
+            vec![seek_to(1, 100, Accuracy::Keyframe)],
+            vec![None, Some(seek_to(2, 117, Accuracy::Exact)), None],
+        );
+
+        assert_eq!(shown, [(1, 100), (2, 117)]);
+        assert_eq!(
+            did,
+            [
+                Did::Seek(100, Accuracy::Keyframe),
+                Did::Read(100),
+                Did::Gave(101),
+                Did::Seek(117, Accuracy::Exact),
+                Did::Read(117),
+            ]
+        );
+    }
+
+    /// A landing is what the newest command asked for, so it finishes even
+    /// with a newer one waiting. Interrupting it would mean a drag whose
+    /// positions arrive faster than a keyframe decode takes (16.7 ms against
+    /// 21 ms on this camera) never produces a picture at all.
+    #[test]
+    fn a_landing_finishes_even_with_a_command_waiting() {
+        let (shown, did) = decode(
+            vec![seek_to(1, 100, Accuracy::Keyframe)],
+            vec![Some(seek_to(2, 500, Accuracy::Keyframe)), None],
+        );
+
+        assert_eq!(shown, [(1, 100), (2, 500)]);
+        assert_eq!(
+            did,
+            [
+                Did::Seek(100, Accuracy::Keyframe),
+                Did::Read(100),
+                Did::Seek(500, Accuracy::Keyframe),
+                Did::Read(500),
+            ]
+        );
     }
 }

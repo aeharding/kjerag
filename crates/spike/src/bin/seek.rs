@@ -12,6 +12,11 @@
 //! cargo run --release -p kyerag-spike --bin seek -- <file.insv>
 //! ```
 //!
+//! It measures two shapes of scrub. One seek at a time is what a hand that
+//! stops between positions asks for; a drag fires a position per pointer
+//! move whether or not the picture has caught up, and only the second one
+//! says how often the picture actually changes under a finger.
+//!
 //! Nothing is written to disk: this instrument reports, it does not render
 //! pictures of real footage.
 
@@ -56,12 +61,83 @@ fn main() -> Fallible<()> {
     for accuracy in [Accuracy::Keyframe, Accuracy::Exact] {
         println!("{}", scrub(&input, accuracy)?);
     }
+    println!();
+    // 60 is what iced coalesces pointer moves to, and so the fastest a
+    // scrubber can be asked for a position; the slower rates are a hand that
+    // is not throwing the pointer across the window.
+    for rate in [10, 20, 30, 45, 60] {
+        println!("{}", drag(&input, rate, Duration::from_secs(2))?);
+    }
     Ok(())
 }
 
-/// The whole path a drag takes: the shell asks the [`Player`], the decode
-/// thread seeks, and a redraw finds the picture changed. The reader numbers
-/// above are the decode half of this; the rest is the thread handover.
+/// A drag, which is not the same shape as the jumps above: the shell fires a
+/// position per pointer move whether or not the picture has caught up, so
+/// the commands arrive faster than a landing takes and most are overtaken
+/// before they are read. What the pilot judges is how often the picture
+/// changes, and that depends on how fast the hand is going, so `moves` is
+/// swept rather than picked.
+///
+/// A picture only reaches the screen while its own seek is still the newest
+/// (the epoch discipline in `Player::pump`), so a hand moving faster than a
+/// landing takes shows nothing at all until it slows down.
+///
+/// The release is measured with it, because the whole point of dragging to
+/// keyframes is that letting go still lands on the frame under the finger.
+fn drag(input: &Path, moves: u32, over: Duration) -> Fallible<String> {
+    let mut player = Player::open(input)?;
+    let timing = player.timing();
+    while player.pump(Instant::now())?.is_none() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let period = Duration::from_secs(1) / moves;
+    let start = Instant::now();
+    let mut updates = 0u32;
+    let mut moved = start;
+    let mut at = Duration::ZERO;
+    loop {
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(start);
+        if elapsed >= over {
+            break;
+        }
+        if now >= moved {
+            // One end of the file to the other, so that no two positions
+            // are near each other.
+            at = timing
+                .duration()
+                .mul_f64(0.05 + 0.9 * elapsed.div_duration_f64(over));
+            player.seek(Cue::Time(at), Accuracy::Keyframe);
+            moved += period;
+        }
+        if player.pump(now)?.is_some() {
+            updates += 1;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let released = Instant::now();
+    player.seek(Cue::Time(at), Accuracy::Exact);
+    while player.pump(Instant::now())?.is_none() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let landed = player.index().ok_or("the release produced no picture")?;
+
+    Ok(format!(
+        "drag at {moves:3} positions/s: {:5.1} picture updates/s, release \
+         landed on {landed} wanting {} in {:5.1} ms",
+        f64::from(updates) / over.as_secs_f64(),
+        timing.index_at(at),
+        released.elapsed().as_secs_f64() * 1000.0,
+    ))
+}
+
+/// One seek at a time through the whole path: the shell asks the [`Player`],
+/// the decode thread seeks, and a redraw finds the picture changed. The
+/// reader numbers above are the decode half of this; the rest is the thread
+/// handover. [`drag`] is the same path with the next position asked for
+/// before the last picture arrives, which is what a hand actually does.
 ///
 /// The poll here is 1 ms because the point is the engine's own cost. A window
 /// asks again at its refresh rate, so add up to one refresh (16.7 ms at
