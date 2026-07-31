@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata. A Flatpak with no metainfo installs but shows up in
+  COSMIC Store and GNOME Software as a nameless entry, and Flathub rejects
+  it outright, so it ships with the desktop entry rather than after it.
+
+  Two things here are still owner decisions, both called out in
+  docs/DISTRIBUTION.md: the SPDX licence spelling (only vs or-later) and the
+  screenshots, which Flathub requires and which need a real window with real
+  footage in it.
+-->
+<component type="desktop-application">
+  <id>app.kyerag.Kyerag</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+
+  <name>Kyerag</name>
+  <summary>Play Insta360 360 video</summary>
+
+  <description>
+    <p>
+      Kyerag plays Insta360 .insv files directly: no stitching step, no proxy
+      files, no export round trip. Drag to reframe, scroll to zoom, take
+      screenshots.
+    </p>
+    <p>
+      The dual fisheye footage is decoded on the GPU and reprojected through
+      the calibrated lens model that every .insv carries, so the horizon is
+      where it belongs and the seam between the two lenses is blended.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">app.kyerag.Kyerag.desktop</launchable>
+
+  <provides>
+    <mediatype>video/x-insta360-insv</mediatype>
+  </provides>
+
+  <url type="homepage">https://github.com/aeharding/kyerag</url>
+  <url type="bugtracker">https://github.com/aeharding/kyerag/issues</url>
+  <url type="vcs-browser">https://github.com/aeharding/kyerag</url>
+
+  <developer id="dev.harding">
+    <name>Alex Harding</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Player</category>
+    <category>Video</category>
+  </categories>
+
+  <keywords>
+    <keyword>360</keyword>
+    <keyword>Insta360</keyword>
+    <keyword>fisheye</keyword>
+    <keyword>reframe</keyword>
+  </keywords>
+
+  <!--
+    Flathub will not accept a submission without at least one screenshot.
+    Ours has to be a real window over real footage, which is the owner's to
+    take and to agree to publish.
+  <screenshots>
+    <screenshot type="default">
+      <image>https://…/kyerag-reframe.png</image>
+      <caption>Reframing a shot</caption>
+    </screenshot>
+  </screenshots>
+  -->
+
+  <releases>
+    <release version="0.1.0" type="development" date="2026-07-31">
+      <description>
+        <p>Pre-alpha. Playback, reframing and stills work; nothing is stable.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,90 @@
+# Flatpak manifest. Reasoning, measurements and the open blocker are in
+# docs/DISTRIBUTION.md; this file only says what.
+#
+# Build it (needs `just vendor` first, which is the only step that touches
+# the network):
+#
+#   just vendor
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#       scratch/flatpak-build flatpak/app.kyerag.Kyerag.yml
+#
+# As of 2026-07-31 that fails in `cargo build`, on purpose and for one known
+# reason: the runtime ships ffmpeg 7.1 and the workspace pins ffmpeg-next
+# 6.1. DISTRIBUTION.md section 3.4 has the measurement and the fix.
+app-id: app.kyerag.Kyerag
+runtime: org.freedesktop.Platform
+# 25.08, not 24.08: libcosmic needs rustc 1.93 and the rust-stable extension
+# is 1.89.0 on 24.08, 1.97.1 on 25.08 (measured).
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # ffmpeg-sys-next runs bindgen, which needs libclang. The SDK has none.
+  - org.freedesktop.Sdk.Extension.llvm21
+command: kyerag
+
+finish-args:
+  # A COSMIC app. No X11 socket: the frame path is Wayland dmabuf and has
+  # never been run under Xwayland, so claiming it would be a guess.
+  - --socket=wayland
+  # The GPU, which is both halves of the pipeline: VA-API decode through
+  # /dev/dri/renderD128 and the Vulkan device wgpu imports the dmabuf onto.
+  - --device=dri
+  # cpal links ALSA, and the runtime's /etc/alsa/conf.d/99-pulseaudio-default.conf
+  # makes ALSA's `default` device the pulse plugin, which this socket carries.
+  # Measured playing real footage in the sandbox: 0 underruns.
+  - --socket=pulseaudio
+  # cosmic-config deliberately escapes the sandbox and reads and writes the
+  # HOST's ~/.config/cosmic and ~/.local/state/cosmic, so both have to be
+  # granted by name. Without the second one every run logs "saved state not
+  # saved: Read-only file system" (measured) and nothing is remembered.
+  - --filesystem=xdg-config/cosmic
+  - --filesystem=~/.local/state/cosmic
+  - --talk-name=com.system76.CosmicSettingsDaemon
+  - --talk-name=com.system76.CosmicSettingsDaemon.Config.*
+  # Where a saved still goes (crates/app/src/shot.rs). Without this the PNG
+  # lands inside the sandbox's private home and the pilot never finds it.
+  - --filesystem=xdg-pictures
+  # No other filesystem access on purpose: files arrive through the file
+  # chooser portal, or as a document-portal path that flatpak's
+  # --file-forwarding hands us when a file manager opens one.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm21/lib
+  env:
+    LIBCLANG_PATH: /usr/lib/sdk/llvm21/lib
+    CARGO_HOME: /run/build/kyerag/cargo
+    CARGO_NET_OFFLINE: 'true'
+
+modules:
+  - name: kyerag
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --offline --locked
+      - install -Dm0755 target/release/kyerag /app/bin/kyerag
+      - install -Dm0644 res/app.kyerag.Kyerag.desktop
+        /app/share/applications/app.kyerag.Kyerag.desktop
+      - install -Dm0644 res/app.kyerag.Kyerag.metainfo.xml
+        /app/share/metainfo/app.kyerag.Kyerag.metainfo.xml
+      - install -Dm0644 res/app.kyerag.Kyerag.xml
+        /app/share/mime/packages/app.kyerag.Kyerag.xml
+      # No icon install step: the project has none yet. An app.kyerag.Kyerag
+      # icon under /app/share/icons/hicolor/<size>/apps/ is what the desktop
+      # entry's Icon= key already names.
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .worktrees
+          - scratch
+          - target
+          - vendor
+          - vendor.tar
+      # `just vendor`. Carries .cargo/config.toml and vendor/, which between
+      # them redirect crates.io, the eleven git dependencies and the
+      # [patch.crates-io] wgpu fork at a local directory.
+      - type: archive
+        path: ../vendor.tar
+        strip-components: 0
