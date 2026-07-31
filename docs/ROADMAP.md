@@ -449,6 +449,14 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-07-31 Seam bar raised (owner): "I want the best seam support out
+  there." The prod gate is not good-enough but best-shipping, Insta360's
+  stitcher included. Two tracks: the per-camera geometric foundation
+  (static-capture 5-knob fit, #87 rework) ships first; depth-aware seam
+  alignment (the overlap band is a 33 mm stereo pair, disparity gives
+  metric depth - what dynamic stitching fundamentally is) is #80 phase A,
+  research-first with owner-validated design before implementation.
+
 - 2026-07-31 **The camera is the shell's state, not the widget tree's**
   (issue #77). iced keeps a widget's state in the widget tree and rebuilds
   it whenever the tree changes shape under it, which the header bar coming
