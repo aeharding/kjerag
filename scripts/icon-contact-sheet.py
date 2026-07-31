@@ -6,6 +6,11 @@ legibility is judged honestly), plus the 32 px raster magnified 4x with
 nearest-neighbour so its pixels can be inspected without squinting. Every row
 is repeated on the COSMIC light and dark desktop greys.
 
+A candidate `x.svg` may ship a size-specific `x-32.svg` alongside it, the way
+the Pop theme redraws its own small sizes. When one exists the sheet adds a
+"32 tuned" column and its blowup, so the naive downscale and the redraw sit
+side by side and the 32 px cost is visible rather than asserted.
+
 Backgrounds are cosmic-theme's `gray_1`: #D7D7D7 light, #1B1B1B dark
 (pop-os/libcosmic, cosmic-theme/src/model/{light,dark}.ron).
 
@@ -36,8 +41,9 @@ LABEL_W, PAD, GAP, ROW_GAP, HEADER = 104, 22, 18, 22, 54
 FONT = "Fira Sans"
 
 
-def panel_width():
-    return PAD * 2 + sum(SIZES) + GAP * len(SIZES) + 32 * MAG
+def panel_width(any_tuned):
+    extra = (32 + GAP + 32 * MAG + GAP) if any_tuned else 0
+    return PAD * 2 + sum(SIZES) + GAP * len(SIZES) + 32 * MAG + extra
 
 
 def newest_round():
@@ -57,22 +63,29 @@ def main():
     src = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else newest_round())
     # Absolute: the sheet is written to scratch/, so relative hrefs would
     # resolve against that directory instead of the draft directory.
-    candidates = sorted(glob.glob(os.path.join(src, "*.svg")))
+    candidates = sorted(p for p in glob.glob(os.path.join(src, "*.svg"))
+                        if not p.endswith("-32.svg"))
     if not candidates:
         sys.exit(f"no candidate SVGs in {src}")
     os.makedirs(OUT, exist_ok=True)
     tag = os.path.basename(os.path.normpath(src))
 
-    # True 32 px rasters, for the magnified column.
+    # True 32 px rasters, for the magnified columns.
+    tuned = {}
     for svg in candidates:
         stem = os.path.splitext(os.path.basename(svg))[0]
         subprocess.run(
             ["resvg", "--width", "32", "--height", "32", svg,
-             os.path.join(OUT, f"{stem}-32.png")],
-            check=True,
-        )
+             os.path.join(OUT, f"{stem}-32.png")], check=True)
+        alt = os.path.join(src, f"{stem}-32.svg")
+        if os.path.exists(alt):
+            tuned[stem] = alt
+            subprocess.run(
+                ["resvg", "--width", "32", "--height", "32", alt,
+                 os.path.join(OUT, f"{stem}-tuned32.png")], check=True)
+    any_tuned = bool(tuned)
 
-    pw = panel_width()
+    pw = panel_width(any_tuned)
     row_h = max(SIZES) + ROW_GAP
     width = LABEL_W + len(BACKGROUNDS) * (pw + GAP)
     height = HEADER + len(candidates) * row_h + PAD
@@ -94,8 +107,16 @@ def main():
             svg.append(f'<text x="{cx}" y="{HEADER - 12}" font-family="{FONT}" '
                        f'font-size="13" fill="{fg}" opacity="0.75">{s}</text>')
             cx += s + GAP
+        if any_tuned:
+            svg.append(f'<text x="{cx}" y="{HEADER - 12}" font-family="{FONT}" '
+                       f'font-size="13" fill="{fg}" opacity="0.75">32 art</text>')
+            cx += 32 + GAP
         svg.append(f'<text x="{cx}" y="{HEADER - 12}" font-family="{FONT}" '
-                   f'font-size="13" fill="{fg}" opacity="0.75">32 x{MAG}</text>')
+                   f'font-size="13" fill="{fg}" opacity="0.75">raw x{MAG}</text>')
+        cx += 32 * MAG + GAP
+        if any_tuned:
+            svg.append(f'<text x="{cx}" y="{HEADER - 12}" font-family="{FONT}" '
+                       f'font-size="13" fill="{fg}" opacity="0.75">art x{MAG}</text>')
 
     for row, path in enumerate(candidates):
         stem = os.path.splitext(os.path.basename(path))[0]
@@ -114,10 +135,21 @@ def main():
                 svg.append(f'<image xlink:href="{path}" x="{x}" '
                            f'y="{mid - s / 2}" width="{s}" height="{s}"/>')
                 x += s + GAP
+            if any_tuned:
+                if stem in tuned:
+                    svg.append(f'<image xlink:href="{tuned[stem]}" x="{x}" '
+                               f'y="{mid - 16}" width="32" height="32"/>')
+                x += 32 + GAP
             png = os.path.join(OUT, f"{stem}-32.png")
             svg.append(f'<image xlink:href="{png}" x="{x}" y="{mid - 32 * MAG / 2}" '
                        f'width="{32 * MAG}" height="{32 * MAG}" '
                        'image-rendering="optimizeSpeed"/>')
+            x += 32 * MAG + GAP
+            if any_tuned and stem in tuned:
+                tpng = os.path.join(OUT, f"{stem}-tuned32.png")
+                svg.append(f'<image xlink:href="{tpng}" x="{x}" '
+                           f'y="{mid - 32 * MAG / 2}" width="{32 * MAG}" '
+                           f'height="{32 * MAG}" image-rendering="optimizeSpeed"/>')
 
     svg.append("</svg>")
     sheet = os.path.join(OUT, f"contact-sheet-{tag}.svg")

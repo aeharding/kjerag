@@ -4,8 +4,9 @@ The app has no icon yet. Drafts live in `resources/icon-drafts/round-N/`
 and **none of them ships**: each round is something for the owner to react
 to, and the next one narrows. Round 1 explored six concepts; the owner
 picked F, a small round world wedged in a rock notch, so round 2 varies
-that one. Round 3 explores a separate owner concept - a freefall figure
-diving at the same world - and stands alongside round 2, not after it.
+that one. Round 3 explores a separate owner concept, a freefall figure
+diving at the same world, and stands alongside round 2 rather than after
+it; round 4 is that concept reworked to the owner's notes.
 
 The doctrine it serves is AGENTS.md's: **UI design defers to COSMIC system
 apps best practice**. Same method as docs/UI.md - where a first-party app
@@ -216,9 +217,59 @@ transparent, a dark figure disappears against the COSMIC dark grey and a
 pale one disappears against the light grey; a mid-saturation warm reads on
 both, and is complementary to the world's teal.
 
+## Round 4: a small diver in side profile, world dominant
+
+Round 3's feedback: the diver needs to be smaller, in side profile, and
+look like a person rather than a stick figure. Side profile is also what
+makes a dive read as a dive - round 3 established that a frontal figure
+stops reading as soon as it is rotated.
+
+| #  | file                | the idea | what it sacrifices |
+| -- | ------------------- | -------- | ------------------ |
+| H1 | `h1-exit-line.svg`  | Diver upper-left tracking head-down at the world lower-right: the classic exit line, read along the diagonal. | The head lands against the world's warm rim, the one place the figure has least contrast. |
+| H2 | `h2-piercing.svg`   | Diver arcing over the limb with the head already inside the world's edge - the moment of entry. | Reads as arrival rather than travel; there is no distance left to fall. |
+| H3 | `h3-long-way.svg`   | Small diver high, big world low, a lot of empty sky between: the long way down. | The most empty canvas of the three, and the smallest world of the three. |
+
+### What 32 px ships
+
+**Not a person.** A 200-unit figure at this scale is about 12 px tall at
+32, which cannot hold a head and four limbs. Each candidate therefore
+ships a size-specific `*-32.svg`, the way the Pop theme redraws its own
+small sizes: the same world, with the diver reduced to a head and a
+tapering body - a dart, not an anatomy. The contact sheet shows the naive
+downscale and the redraw side by side (`32` against `32 art`, and both
+blowups) so the cost is visible rather than asserted. **This is the
+accepted design, not a defect**: at 32 px the world carries the icon and
+the mark says only that something is falling into it. Ball-only is the
+fallback if even the mark reads as grit.
+
+### Building the figure
+
+`scripts/icon-diver.py` generates round 4 from a joint skeleton: each bone
+is the tangent trapezoid between two joint circles, plus a circle at each
+joint, unioned into a tapered limb. It exists because three hand-traced
+attempts failed in a row, and because the fix for a bad silhouette is to
+move a joint - a number in the skeleton, against a re-trace by hand.
+
+Two results worth keeping:
+
+- **Chest depth against head depth decides whether it reads as a person.**
+  The canon is roughly 2:1. The first attempts drew them about equal, and
+  every one was a tadpole: a round head on a narrow tapering body, no
+  matter what the limbs did.
+- **Split legs are the strongest human cue at small size.** With the legs
+  together the figure stayed a dart; scissoring them apart is what made it
+  a diving person. Swept-back arms help, but they are the first thing to
+  merge into the torso as the figure shrinks.
+
+The figure's gradient runs deep at the trailing end to light at the head,
+not the other way round. Drawn the other way the head was the darkest part
+of the figure and receded exactly where the eye needs to land.
+
 ## Regenerating the contact sheet
 
 ```sh
+python3 scripts/icon-diver.py                             # round 4 art
 python3 scripts/icon-contact-sheet.py                     # newest round
 python3 scripts/icon-contact-sheet.py resources/icon-drafts/round-1
 ```
