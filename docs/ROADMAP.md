@@ -351,23 +351,34 @@ into the same recording that land at the 99th or above: the fades hold.
 
 ## Decisions log
 
-- 2026-07-31 **A capture reports itself in a stock toast, mounted beside the
-  picture and not around it** (issue #15, docs/UI.md's open question 2).
-  cosmic-files is the only first-party app that uses `widget::toaster` at
-  all, so its three lines are the whole precedent and all three are copied:
-  the toaster goes over an empty element (`src/app.rs:6518-6519`), the
-  duration is the stock 5 s, and no toast carries an action unless it is
-  undoing something destructive (`Undo` on a delete, `src/app.rs:1344-1352`).
-  Mounting it over an empty element is not decoration here: a `Toaster` with
-  a toast up returns its own overlay instead of its content's (libcosmic
-  `src/widget/toaster/widget.rs:137-162`), and the control row is the
-  popover's overlay, so wrapping the picture would take the transport away
-  for five seconds. **No "Show in Files" button**, because no first-party app
-  opens a location from a toast; cosmic-files' own "Open item location" is a
-  context menu item. The toast's position is the widget's, centred 15 px
-  above the bottom edge, which puts it across the middle of the control row
-  while that row is up; accepted rather than forked, and measured: the
-  buttons and both clocks stay clear.
+- 2026-07-31 **A capture reports itself at the top of the window, in a toast
+  drawn out of libcosmic's own pieces** (issue #15, docs/UI.md's open
+  question 2). cosmic-files is the only first-party app that uses toasts at
+  all, so its lines are the whole precedent and the wording, the 5 s, the
+  five-line stack, the tooltip container and its spacings, and the refusal
+  to carry an action unless it undoes something destructive are all its own
+  (`src/app.rs:1344-1358`, `toaster/mod.rs:33-63`, `79-85`, `162-181`). The
+  **placement is the owner's**, and it is a deviation from cosmic-files with
+  a reason: it puts its toasts at the bottom because the bottom of a file
+  manager is empty, and the bottom of this window is the transport. Shipped
+  over the scrubber first, and the owner found it.
+  `widget::toaster` cannot be moved: its overlay is laid out against the
+  bounds iced hands every overlay, which are the window's
+  (`toaster/widget.rs:199-215` against `user_interface.rs:228`), so it sits
+  15 px above the bottom of the window whatever it is mounted over. Mounting
+  it over a band at the top of the window was built and captured, and the
+  toast did not move. So the stack is a `Stack` layer over the picture,
+  which also gets the control row's overlay back
+  (`overlay::from_children` rather than `Toaster`'s replace-the-content's,
+  `toaster/widget.rs:137-162`). Two things that were measured rather than
+  assumed: the layer is mounted even when empty, because a tree that grows a
+  layer cost the toast five redraws before it reached the screen; and the
+  five seconds is a sleep on the async runtime as libcosmic's own is, not a
+  poll, because a 250 ms poll cost 3 to 6 redraws a second and dropped
+  frames in 2 of 18 report windows against 0 of 18 without it.
+  `scripts/uitest.sh` now asserts the placement instead of a reader having to
+  notice it: transient chrome must leave the header band and the control-row
+  band byte for byte identical, which the shipped-first placement fails.
 
 - 2026-07-31 **Which frames may take the screen and which seek is still owed
   one are two questions** (issue #55). `Player::pump` answered both with one

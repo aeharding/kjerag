@@ -504,32 +504,62 @@ first-party app with toasts at all: nothing in cosmic-player or cosmic-edit
 mentions `toaster`. So its use of them is the whole precedent, and this
 copies it rather than reasoning from the widget.
 
-**The widget and the placement.** `widget::toaster(&self.toasts,
-widget::space::horizontal())`, pushed as the last child of a column whose
-other child is the picture. That is cosmic-files' own mounting, comment and
-all: "The toaster is added on top of an empty element to ensure that it does
-not override context menus" (`src/app.rs:6518-6519`, and again for its
-desktop window at `6565-6567`). The reason bites harder here than there. A
-`Toaster` with a toast up returns its own overlay *instead of* its content's
-(libcosmic `src/widget/toaster/widget.rs:137-162`, whose author left a
-`//TODO` beside it), and Kyerag's control row is an overlay: the popover's.
-Wrapping the picture in the toaster would take the transport away for the
-five seconds a toast is up.
+**The placement is a deviation from cosmic-files, and it is the owner's
+call.** cosmic-files puts its toasts at the bottom of the window, and it can:
+the bottom of a file manager is empty space. The bottom of this window is the
+transport. The owner asked for the message at the top after seeing it land
+over the progress bar, and that is what ships: the toast hangs under the
+header bar, centred, one `space_m` below it, and the control row and the
+scrubber are never covered.
 
-**Where the toast lands is not ours to choose**, and it is worth saying so
-plainly because it is the one place this feature touches the control
-overlay. The toaster overlay centres the stack on the window and puts it 15
-px above the bottom edge (`toaster/widget.rs:199-215`), whatever it is
-mounted over; there is no anchor, no offset and no position argument. So a
-toast sits across the middle of the control row while that row is up.
-Measured on a 1280x720 headless session: it covers the middle of the
-scrubber and leaves the jump buttons, play/pause, both clocks, and the
-camera, fullscreen and volume buttons clear. That is accepted rather than
-worked around, on three grounds: it is exactly what a first-party app does;
-the control row is transient anyway (2 s of pointer stillness takes it away
-while playing, and the toast then sits over the picture); and the only ways
-to move it are a fork of the widget or a hand-rolled toast, which is the
-custom chrome the doctrine exists to prevent.
+**Which means the stock toaster widget cannot be used, and this is worth
+recording, because reading it wrong costs a build.** `widget::toaster` does
+not place its stack relative to whatever it is mounted over. Its overlay is
+laid out against the bounds iced hands every overlay, which are the whole
+window's (`ToasterOverlay::layout`, libcosmic
+`src/widget/toaster/widget.rs:199-215`, against `overlay.layout(renderer,
+self.bounds)` in `iced/runtime/src/user_interface.rs:228`), and it puts the
+stack 15 px above the bottom of those bounds with no anchor, offset or
+position argument. Mounting it over a fixed-height band at the top of the
+window was built and captured under the harness: the toast did not move, and
+sat across the scrubber exactly as before.
+
+**So the stack is drawn rather than delegated**, out of the same pieces
+libcosmic's own `toaster()` builds a toast from and with its own spacings:
+`container(row![text, button::icon("window-close-symbolic")])
+.padding([space_xxs, space_s, space_xxs, space_m])
+.class(theme::Container::Tooltip)`, one per line, newest first
+(`src/widget/toaster/mod.rs:33-63`). It is a `Stack` layer over the picture,
+top aligned and centred. Three things fall out of that choice and all three
+are load-bearing:
+
+- **The control row keeps working.** A `Toaster` with a toast up returns its
+  own overlay *instead of* its content's (`toaster/widget.rs:137-162`, whose
+  author left a `//TODO` beside it) and our control row *is* an overlay, the
+  popover's. `Stack` hands back `overlay::from_children` instead, so the row
+  is still there while a toast is up. That was the reason cosmic-files'
+  mount-over-an-empty-element trick was copied in the first place, and it is
+  no longer needed.
+- **The picture still takes a drag.** `Stack::update` only takes the cursor
+  away from the layer beneath where the layer above reports an interaction
+  for that position (`iced/widget/src/stack.rs`), and a container of text
+  reports none, so looking around still starts anywhere except on a toast's
+  own close button.
+- **The layer is mounted whether or not it holds a toast.** Building the
+  stack only when one arrives changes the shape of the tree around the
+  shader widget, and that is not free: measured under the harness, the toast
+  reached the screen on the first capture after it landed with a fixed tree
+  and on the sixth, two seconds later, with a tree that grew a layer.
+
+Measured on a 1280x720 headless session, dark and light: the toast occupies
+rows 72 to 119 of the window, the header bar is rows 0 to 47 and the control
+row is rows 672 to 719. Five stacked toasts reach row 327, still 297 rows
+clear of the control row. `scripts/uitest.sh` asserts it rather than trusting
+it: "a toast is drawn clear of the controls" captures the paused window with
+and without a toast up and requires the top 64 rows and the bottom 96 to be
+byte for byte identical between the two, and requires something to have
+changed somewhere so that the check cannot pass by showing nothing. Against
+the bottom placement this PR replaced, that check fails.
 
 **The copy**, in the app's own vocabulary. The menu says `Save frame` and
 `Copy frame`, so the toast says frame:
@@ -550,17 +580,23 @@ with `XDG_SCREENSHOTS_DIR` set elsewhere says that folder's name instead
 (the headless harness reads `Frame saved to "shots"`). The whole path still
 goes to the terminal, where it does not have to be read at a glance.
 
-**Duration and stacking are stock.** `Toast::new(...)` with nothing else set
-is `Duration::Short`, which is 5 s (`toaster/mod.rs:70-88`, `122-127`), and
-cosmic-files sets no duration on any of its toasts either
-(`src/app.rs:1344-1358`). Toasts stack rather than replace: libcosmic keeps
-five and drops the oldest past that (`toaster/mod.rs:162-181`), so five
-quick captures leave five lines stacked upward from the bottom of the
-window, over the picture rather than over the control row. Left as it is,
-because it is the stock behavior and every one of those lines is true.
+**Duration and stacking are stock**, and they are stock in the strong sense:
+the numbers and the mechanism are both libcosmic's, only the anchor moved.
+Five seconds is `Duration::Short` (`toaster/mod.rs:79-85`), which is what
+cosmic-files leaves every toast on (`src/app.rs:1344-1358`). Five lines are
+kept and the oldest is dropped past that (`toaster/mod.rs:162-181`); toasts
+stack rather than replace. A line is taken away by a five second sleep on the
+async runtime, which is exactly how `Toasts::push` does it
+(`toaster/mod.rs:183-196`), and not by a timer the shell keeps: a poll was
+written first and measured against the stock build, and it cost 3 to 6 extra
+redraws a second and dropped frames in 2 of 18 report windows, against 0 of
+18 with the sleep. Reading the queue back to front puts the newest line
+nearest the anchored edge, which is libcosmic's order (`toaster/mod.rs:56-63`)
+read against the top, so five quick captures stack downward from the header
+and no line already on screen moves when the next one lands.
 
-**No action button, for now.** The toaster takes one
-(`Toast::action`, `toaster/mod.rs:132-144`), and cosmic-files uses it in
+**No action button, for now.** libcosmic's toast carries one if it is asked
+to (`Toast::action`, `toaster/mod.rs:132-144`), and cosmic-files asks in
 exactly one place: `Undo` on the toast for a delete
 (`src/app.rs:1344-1352`). That is the shape of it there, a way back from
 something destructive. Nothing in cosmic-files, cosmic-player or cosmic-edit
@@ -733,6 +769,11 @@ reviewer can find them in one place:
    asked for them to persist, and they go in `Config` beside the theme.
 9. **The volume popup closes with the control row**, rather than holding the
    row open the way cosmic-player's dropdowns do. See "The volume slider".
+10. **The capture toast is at the top of the window**, where cosmic-files
+    puts its own at the bottom, and it is drawn rather than delegated to
+    `widget::toaster`. Owner's call, and the reason is the window: the
+    bottom of a file manager is empty space and the bottom of this one is
+    the transport. See "The capture toast".
 
 Two things cosmic-player does that we should copy later, neither of them
 part of issue #16:
