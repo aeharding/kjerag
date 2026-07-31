@@ -64,8 +64,10 @@ fn main() -> Fallible<()> {
     println!();
     // 60 is what iced coalesces pointer moves to, and so the fastest a
     // scrubber can be asked for a position; the slower rates are a hand that
-    // is not throwing the pointer across the window.
-    for rate in [10, 20, 30, 45, 60] {
+    // is not throwing the pointer across the window. 90 is past what the
+    // shell can deliver and is here as the shape of the curve rather than as
+    // a hand: a rule that starves has already starved by 60.
+    for rate in [10, 15, 20, 30, 45, 60, 90] {
         println!("{}", drag(&input, rate, Duration::from_secs(2))?);
     }
     Ok(())
@@ -78,9 +80,10 @@ fn main() -> Fallible<()> {
 /// changes, and that depends on how fast the hand is going, so `moves` is
 /// swept rather than picked.
 ///
-/// A picture only reaches the screen while its own seek is still the newest
-/// (the epoch discipline in `Player::pump`), so a hand moving faster than a
-/// landing takes shows nothing at all until it slows down.
+/// A picture reaches the screen while its own seek is newer than the position
+/// on screen (the epoch discipline in `Player::pump`), so a hand moving faster
+/// than a landing takes sees the landings it has already dragged past rather
+/// than nothing at all (issue #55). What this measures is how many.
 ///
 /// The release is measured with it, because the whole point of dragging to
 /// keyframes is that letting go still lands on the frame under the finger.
@@ -119,7 +122,12 @@ fn drag(input: &Path, moves: u32, over: Duration) -> Fallible<String> {
 
     let released = Instant::now();
     player.seek(Cue::Time(at), Accuracy::Exact);
-    while player.pump(Instant::now())?.is_none() {
+    // The release has landed when the seek has, not when the next picture
+    // arrives: a drag leaves landings of its own behind it, and they reach
+    // the screen ahead of the frame the pilot let go on. This is the window
+    // the app keeps redrawing in.
+    while player.is_seeking() {
+        player.pump(Instant::now())?;
         std::thread::sleep(Duration::from_millis(1));
     }
     let landed = player.index().ok_or("the release produced no picture")?;
