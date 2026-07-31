@@ -25,6 +25,8 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::audio::{Audio, Beat, Reading};
+use super::sound::Sound;
 use super::{Accuracy, Cue, Fallible, Frames, Reader, Size, Timing};
 
 /// Pairs the decode thread may have ready and waiting.
@@ -57,6 +59,10 @@ pub struct Stats {
     /// Worst delay between a frame's due time and the pump that showed it.
     /// A caller redrawing at vsync cannot beat one refresh here.
     pub worst_late: Duration,
+    /// What the sound did, and `None` for a file with no sound in it. The
+    /// report says nothing about sound rather than reporting a clean zero,
+    /// because a silent file and a working one are not the same news.
+    pub audio: Option<Audio>,
 }
 
 impl Stats {
@@ -70,13 +76,16 @@ impl Stats {
             dropped: self.dropped.saturating_sub(earlier.dropped),
             starved: self.starved.saturating_sub(earlier.starved),
             worst_late: self.worst_late,
+            audio: self
+                .audio
+                .map(|audio| audio.since(earlier.audio.unwrap_or_default())),
         }
     }
 
     /// One line, for a run of `over`.
     pub fn report(&self, over: Duration) -> String {
         let per_second = |count: u64| count as f64 / over.as_secs_f64().max(f64::EPSILON);
-        format!(
+        let line = format!(
             "{:.2} fps presented in {:.1} redraws/s, {} dropped, {} starved, \
              worst {:.1} ms late",
             per_second(self.presented),
@@ -84,7 +93,11 @@ impl Stats {
             self.dropped,
             self.starved,
             self.worst_late.as_secs_f64() * 1000.0,
-        )
+        );
+        match &self.audio {
+            Some(audio) => format!("{line}, {}", audio.report()),
+            None => line,
+        }
     }
 }
 
@@ -115,6 +128,10 @@ pub struct Player {
     notes: Receiver<Note>,
     commands: Sender<Command>,
     presenter: Presenter,
+    /// The open output device, and `None` for a file with no sound or a box
+    /// with no working one. A player that will not show a video because it
+    /// could not open a speaker is worse than one that plays it silently.
+    sound: Option<Sound>,
     timing: Timing,
     size: Size,
     lenses: usize,
@@ -134,8 +151,21 @@ impl Player {
     /// is parsed: the first frame arrives on the thread, so a big file does
     /// not hold the window shut.
     pub fn open(path: &Path) -> Fallible<Self> {
-        let reader = Reader::open(path)?.lookahead(LOOKAHEAD);
+        let mut reader = Reader::open(path)?.lookahead(LOOKAHEAD);
         let (timing, size, lenses) = (reader.timing(), reader.size(), reader.lenses());
+        let beat = Arc::new(Beat::default());
+        let sound = reader
+            .sound_rate()
+            .and_then(|rate| match Sound::open(&beat, rate) {
+                Ok(sound) => Some(sound),
+                Err(e) => {
+                    eprintln!("kyerag: playing silently: {e}");
+                    None
+                }
+            });
+        if let Some(sound) = &sound {
+            reader = reader.listen(sound)?;
+        }
         let (sender, notes) = sync_channel(QUEUED);
         // Unbounded, because a drag asks for a position per pointer move and
         // the player must never block on handing one over. The thread throws
@@ -148,7 +178,8 @@ impl Player {
         Ok(Self {
             notes,
             commands,
-            presenter: Presenter::new(timing.interval()),
+            presenter: Presenter::new(timing.interval(), beat),
+            sound,
             timing,
             size,
             lenses,
@@ -172,7 +203,30 @@ impl Player {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.presenter.clock.playing
+        self.presenter.clock.is_playing()
+    }
+
+    /// Whether this file has a sound track that a device took. `false` is
+    /// either a file with no sound or a box with no working output, and the
+    /// pictures play the same either way.
+    pub fn has_sound(&self) -> bool {
+        self.sound.is_some()
+    }
+
+    /// Loudness, 0 to 1. Applied per sample in the device callback, so it
+    /// takes effect within one buffer and ramps rather than steps.
+    pub fn set_volume(&self, volume: f32) {
+        if let Some(sound) = &self.sound {
+            sound.pipe().set_volume(volume);
+        }
+    }
+
+    /// Silence without stopping. The sound keeps running under a mute, so
+    /// unmuting lands where the picture is rather than where it was.
+    pub fn set_muted(&self, muted: bool) {
+        if let Some(sound) = &self.sound {
+            sound.pipe().set_muted(muted);
+        }
     }
 
     /// True once the file has been read to the end and every frame of it
@@ -199,7 +253,10 @@ impl Player {
     }
 
     pub fn stats(&self) -> Stats {
-        self.presenter.stats
+        Stats {
+            audio: self.sound.as_ref().map(|sound| sound.pipe().health()),
+            ..self.presenter.stats
+        }
     }
 
     /// When the next frame is due, for a caller that would rather sleep than
@@ -234,6 +291,7 @@ impl Player {
         self.epoch += 1;
         self.ended = false;
         self.seeking = true;
+        self.hush();
         self.presenter.reseek(to.time(self.timing));
         let command = Command::Seek {
             epoch: self.epoch,
@@ -265,10 +323,21 @@ impl Player {
         let target = index.saturating_add_signed(frames).min(self.last_index());
         match frames == 1 && target == index + 1 {
             true => {
+                self.hush();
                 self.presenter.reseek(self.timing.time_of(target));
                 self.seeking = true;
             }
             false => self.seek(Cue::Index(target), Accuracy::Exact),
+        }
+    }
+
+    /// Throw away sound decoded before a jump, here on the shell's thread
+    /// rather than waiting for the decode thread to reach the seek: that
+    /// thread can be blocked handing over a frame, and every millisecond it
+    /// waits is a millisecond of the old position still playing.
+    fn hush(&self) {
+        if let Some(sound) = &self.sound {
+            sound.pipe().flush();
         }
     }
 
@@ -380,9 +449,9 @@ struct Presenter {
 }
 
 impl Presenter {
-    fn new(interval: Duration) -> Self {
+    fn new(interval: Duration, beat: Arc<Beat>) -> Self {
         Self {
-            clock: Clock::default(),
+            clock: Clock::new(beat),
             interval,
             current: None,
             peeked: None,
@@ -425,7 +494,7 @@ impl Presenter {
                 self.stats.dropped += 1;
             }
             // Paused, one frame is a picture rather than playback.
-            if !self.clock.playing {
+            if !self.clock.is_playing() {
                 break;
             }
         }
@@ -443,7 +512,7 @@ impl Presenter {
     /// picture yet is the file that was just opened, or one that has just
     /// been seeked: it gets one frame.
     fn is_frozen(&self) -> bool {
-        !self.clock.playing && self.current.is_some()
+        !self.clock.is_playing() && self.current.is_some()
     }
 
     /// Throw away the picture and put the clock where the seek is going. The
@@ -481,7 +550,7 @@ impl Presenter {
     /// Nothing was shown. That is only a fault if a frame was owed: between
     /// two frames the picture is meant to stand still.
     fn note_starvation(&mut self, now: Instant) {
-        if !self.clock.playing || !self.clock.is_anchored() {
+        if !self.clock.is_playing() || !self.clock.is_anchored() {
             return;
         }
         let Some(current) = &self.current else {
@@ -500,57 +569,84 @@ impl Presenter {
 /// position is `position`. Anchoring happens on the frame that starts or
 /// resumes playback, never on every frame: a clock re-anchored per frame
 /// cannot measure its own drift, and drift is the thing worth measuring.
-#[derive(Debug, Default)]
+///
+/// Every move is published to a [`Beat`], because the sound follows this
+/// clock from the audio device's own thread (issue #13). Publishing rather
+/// than sharing keeps the arithmetic here, where the pictures read it.
+#[derive(Debug)]
 struct Clock {
-    playing: bool,
-    position: Duration,
-    origin: Option<Instant>,
+    reading: Reading,
+    beat: Arc<Beat>,
 }
 
 impl Clock {
-    fn position(&self, now: Instant) -> Duration {
-        match self.origin {
-            Some(origin) if self.playing => self.position + now.saturating_duration_since(origin),
-            _ => self.position,
+    fn new(beat: Arc<Beat>) -> Self {
+        Self {
+            reading: Reading::default(),
+            beat,
         }
     }
 
+    fn position(&self, now: Instant) -> Duration {
+        self.reading.position(now)
+    }
+
+    fn is_playing(&self) -> bool {
+        self.reading.playing
+    }
+
     fn is_anchored(&self) -> bool {
-        self.origin.is_some()
+        self.reading.origin.is_some()
     }
 
     /// The instant this clock will read `target`, if it is running towards
     /// it. A due time, in other words, and the reason the caller can sleep
     /// instead of polling.
     fn reaches(&self, target: Duration) -> Option<Instant> {
-        let origin = self.origin?;
-        match self.playing {
-            true => Some(origin + target.saturating_sub(self.position)),
+        let origin = self.reading.origin?;
+        match self.reading.playing {
+            true => Some(origin + target.saturating_sub(self.reading.position)),
             false => None,
         }
     }
 
     fn play(&mut self) {
-        self.playing = true;
-        self.origin = None;
+        self.moved(Reading {
+            playing: true,
+            origin: None,
+            ..self.reading
+        });
     }
 
     fn pause(&mut self, now: Instant) {
-        self.position = self.position(now);
-        self.playing = false;
-        self.origin = None;
+        self.moved(Reading {
+            playing: false,
+            position: self.position(now),
+            origin: None,
+        });
     }
 
     fn anchor(&mut self, now: Instant, at: Duration) {
-        self.position = at;
-        self.origin = Some(now);
+        self.moved(Reading {
+            position: at,
+            origin: Some(now),
+            ..self.reading
+        });
     }
 
     /// Where the clock reads until the frame that was seeked to arrives.
     /// Unanchoring is what makes that frame anchor it, whenever it comes.
     fn seek(&mut self, to: Duration) {
-        self.position = to;
-        self.origin = None;
+        self.moved(Reading {
+            position: to,
+            origin: None,
+            ..self.reading
+        });
+    }
+
+    fn moved(&mut self, reading: Reading) {
+        self.reading = reading;
+        self.beat.publish(reading);
     }
 }
 
@@ -584,7 +680,7 @@ mod tests {
 
     #[test]
     fn a_60_hz_redraw_shows_29_97_content_without_dropping_a_frame() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -607,7 +703,7 @@ mod tests {
 
     #[test]
     fn a_display_slower_than_the_content_drops_rather_than_falls_behind() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -624,7 +720,7 @@ mod tests {
 
     #[test]
     fn a_stalled_decoder_starves_and_never_drops() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         presenter.clock.play();
         let start = Instant::now();
 
@@ -644,7 +740,7 @@ mod tests {
 
     #[test]
     fn pause_freezes_the_position_and_resume_carries_on_from_it() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -670,7 +766,7 @@ mod tests {
 
     #[test]
     fn the_first_frame_shows_however_long_the_decoder_took_to_produce_it() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -691,7 +787,7 @@ mod tests {
     /// that matters most, because dragging the scrubber pauses.
     #[test]
     fn a_seek_while_paused_shows_one_frame_and_then_stands_still() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         let start = Instant::now();
         let mut next = 0;
         presenter.advance(start, feed(&mut next));
@@ -713,7 +809,7 @@ mod tests {
     /// request would make the next frame look late and drop it.
     #[test]
     fn the_clock_takes_the_landing_time_and_not_the_request() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         presenter.clock.play();
         let start = Instant::now();
 
@@ -727,7 +823,7 @@ mod tests {
 
     #[test]
     fn a_paused_player_still_takes_one_frame_so_there_is_a_picture() {
-        let mut presenter = Presenter::new(NTSC);
+        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         let start = Instant::now();
         let mut next = 0;
 

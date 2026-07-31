@@ -117,6 +117,23 @@ measurement and it stays runnable.
 
 Next in M2: high-quality zoom sampling (issue #11).
 
+**M3 has started, and the player has sound** (issue #13). The file's AAC track
+is decoded off the same demuxer as the two lens streams, resampled by
+`swresample` into the device's own format, and written to a ring that a cpal
+output stream drains. **The picture stays the clock.** Every device callback
+asks the presentation clock where the picture will be when the samples it is
+about to write are heard, and moves the sound to meet it: a splice when the
+two are more than 30 ms apart, which only a start, a seek landing or a
+recovered stall ever is, and a resampling ratio of a few parts per million the
+rest of the time, which is what holds two crystals together over a half-hour
+flight. A seek throws the ring away on the shell's thread rather than waiting
+for the decode thread to reach the seek, so no stale sound survives a scrub,
+and every start and stop is a 5 ms ramp rather than a step, so a pause does
+not click. In the control row: a speaker button after fullscreen, opening
+cosmic-player's own volume dropdown, with both settings remembered in
+cosmic-config. The wheel stayed on zoom (docs/UI.md, "Conflict 2"). Nothing is
+processed: a paramotor track is mostly wind, and it is played as recorded.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
@@ -144,9 +161,40 @@ Next in M2: high-quality zoom sampling (issue #11).
   the decode gate under the same test is measured and cut), high-quality zoom
   sampling.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
-  time-range remux), audio playback.
+  time-range remux), audio playback (issue #13, done: AAC off the same
+  demuxer, cpal out, slaved to the video clock, volume and mute in the control
+  row).
 
 ## Decisions log
+
+- 2026-07-31 **The sound goes out through cpal, and follows the picture's
+  clock** (issue #13). cosmic-player was read first, as the doctrine asks, and
+  it has no audio output code to copy: it is `iced_video_player`, which is
+  GStreamer `playbin` with only the *video* sink replaced by an appsink
+  (`src/video.rs:20-26`), so its sound leaves through playbin's default
+  `autoaudiosink` and its volume and mute are playbin properties
+  (`src/main.rs:1225-1235`). No COSMIC first-party binary on this box links an
+  audio library for playback at all: `cosmic-settings-daemon` links
+  libpipewire, and that is routing. GStreamer is already rejected here for the
+  frame path, so the choice was issue #13's own pair, cpal or PipeWire
+  directly, and cpal is the smaller by a wide margin. PipeWire still plays
+  what it writes, through `pipewire-alsa`. The cost is one apt package,
+  `libasound2-dev`, because cpal's Linux target links `alsa` whatever host it
+  ends up using.
+
+  The clock is **not** re-anchored on the sound, and that was not a
+  free choice either: the pictures are paced by due time against a monotonic
+  clock (issue #4), a reframing player must not judder, and a sound card is
+  the one clock in the room that cannot be asked to wait. So the sound follows
+  instead, in two corrections of different kinds. A **splice** when the ring's
+  head is more than 30 ms from where the picture will be: sound whose moment
+  has passed is dropped, sound whose moment has not come waits under silence,
+  and the gain ramps down before the join and up after it. Only a start, a
+  seek landing or a recovered stall is ever that far out. A **resampling
+  ratio** the rest of the time, through `swr_set_compensation`, capped at
+  0.5% and settling near 0.005%: that is the difference between the sound
+  card's crystal and `CLOCK_MONOTONIC`, and without it a ring that is right
+  now is tens of milliseconds out half an hour later.
 
 - 2026-07-31 The pass **skips the lens a ray cannot reach** (issue #10). Each
   lens's picture is one cap around its own axis; the cap is solved out of the

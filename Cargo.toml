@@ -15,6 +15,13 @@ kyerag-media = { path = "crates/media" }
 kyerag-meta = { path = "crates/meta" }
 kyerag-render = { path = "crates/render" }
 
+# The sound out (issue #13). cosmic-player has no audio output code to copy:
+# it is GStreamer playbin with only the video sink replaced, and GStreamer is
+# already rejected here for the frame path. cpal is the smaller of issue #13's
+# two named alternatives, and PipeWire still plays what it writes, through
+# pipewire-alsa. Its Linux target links `alsa` whatever host it ends up using,
+# which is what adds libasound2-dev to the build requirements (AGENTS.md).
+cpal = "0.18"
 # System ffmpeg is 6.1 (Pop!_OS 24.04); the crate major must match the
 # headers it binds, so this pin moves only when the system ffmpeg does.
 # `kyerag-meta` is deliberately not a dependent: the trailer needs a file
