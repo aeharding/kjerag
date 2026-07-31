@@ -115,7 +115,36 @@ this camera's is 29 frames. Expected saving: **0.14 W**, for a state machine
 and a packet ring through the frame path. `kyerag-spike --bin gating` is the
 measurement and it stays runnable.
 
-Next in M2: high-quality zoom sampling (issue #11).
+**High-quality sampling at high zoom is half shipped and half measured out**
+(issue #11), which is the last M2 item and the fourth time this project has
+built something and then cut part of it. What ships is the **luma** plane:
+where an output pixel has landed inside a source texel, the pass reads a
+Catmull-Rom kernel instead of the hardware's bilinear tent, engaged smoothly
+from 1:1 to 2:1 magnification and exactly off at 1:1 and wider. Sixteen
+texels as nine bilinear fetches, which agree with sixteen point fetches to
+0.14 codes RMS. How magnified a fragment is comes off the **map's own
+Jacobian**, the hardware's quad derivative of the landing, so the fisheye's
+uneven angular density and the output's own fall-off towards its corners are
+both in it and neither had to be assumed. On real footage at the window the
+player's numbers are taken at, zoomed to 50 degrees on ground and buildings:
+detail (mean absolute Laplacian) 4.12 codes bilinear against 4.61 sharp,
+**+11.8%**, 1.8 codes mean over 85% of pixels, and side by side at four times
+life size the stone courses of a barn separate instead of smearing, with no
+ringing on the roof line. It is worth **most in the middle of the zoom
+range** and least at the end of it: at 5x, which is 25 degrees, the source has
+nothing left to resolve and the two kernels draw the same ramp (+1.8%).
+
+What is cut is the **chroma** plane. NV12's two planes are two grids, and
+measuring them separately is what found it: chroma is half the size, so it is
+magnified twice as hard and it is under 1:1 at **every** field of view this
+player offers. Upgrading it is therefore not a cost paid at high zoom but a
+cost paid always, and it is the larger half of the bill (0.69 to 0.90 ms
+with luma upgraded, to 1.23 with both). What it buys, on 8-bit 4:2:0 chroma
+that HEVC has already smoothed, is 0.41 codes on 40% of pixels and **no**
+measurable change in detail at all: 4.606 either way. `Sampling::Sharp` keeps
+it one line from shipping for footage that would change the answer.
+
+M2 is done.
 
 **M3 has started, and the player has sound** (issue #13). The file's AAC track
 is decoded off the same demuxer as the two lens streams, resampled by
@@ -172,7 +201,9 @@ into the same recording that land at the 99th or above: the fades hold.
   file and could not be measured out of flying footage), hemisphere-aware
   gating (issue #10, done: the pass skips the lens a ray cannot reach, and
   the decode gate under the same test is measured and cut), high-quality zoom
-  sampling.
+  sampling (issue #11, done: a Catmull-Rom kernel on the luma plane wherever
+  the map's own Jacobian says an output pixel has landed inside a texel, and
+  the chroma half of it measured and cut). **M2 is complete.**
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
@@ -208,6 +239,49 @@ into the same recording that land at the 99th or above: the fades hold.
   0.5% and settling near 0.005%: that is the difference between the sound
   card's crystal and `CLOCK_MONOTONIC`, and without it a ring that is right
   now is tens of milliseconds out half an hour later.
+
+- 2026-07-31 A magnified picture is sampled with a **Catmull-Rom kernel**,
+  engaged on the map's own Jacobian (issue #11). The decision is per fragment
+  and not per redraw because nothing about it is uniform: the fisheye carries
+  1106 texels per radian down its axis and 948 radially at the rim of its
+  picture, and a rectilinear output's density rises towards its corners, so
+  the widest view the player offers is past 1:1 in the middle of a 2560 px
+  window (1.23 texels to the pixel) and two thirds inside it at the corners
+  (0.74). The shader reads that as the hardware's quad derivative of the
+  landing the model just computed, which is the Jacobian by finite difference
+  with the distortion, the mounting and the readout already in it, and needs
+  no output size in the uniform block. Catmull-Rom rather than a B-spline
+  because the kernel must pass **through** the texels it is given; a B-spline
+  is what the usual four-tap trick is written for and it blurs a magnified
+  picture. Sixteen texels as nine bilinear fetches, which measured 0.14 codes
+  RMS and one code at worst against the same kernel as sixteen point fetches,
+  on the highest-contrast view in this footage.
+
+  Engaged **smoothly**, by mixing the kernel's weights from linear towards
+  Catmull-Rom between 1:1 and 2:1, rather than by crossfading two sampled
+  pictures: one kernel instead of two wherever the zoom sits in the band, and
+  exactly the linear weights at the far end, so a view that is not magnifying
+  takes the one fetch it always took and writes the bits it always wrote.
+  Swept 70 steps of zoom across the whole band, the largest single step in
+  which the sharp picture moved further than the bilinear one is 0.4 codes,
+  against the 0.6 codes a kernel switched on rather than mixed would have to
+  put somewhere.
+
+- 2026-07-31 The **chroma plane is not upgraded** (issue #11), and, like the
+  exposure match and the decode gate before it, the measurement is the
+  reason. NV12's two planes are two grids, so they were given two thresholds
+  and asked separately, which is what found the problem with upgrading the
+  smaller one: chroma is half the size, so it is magnified twice as hard as
+  luma and it is under 1:1 at **every** field of view this player offers at a
+  window anyone uses. Its upgrade is therefore not a cost paid at high zoom
+  but a cost paid always, and it is the larger half of the bill. What it buys
+  is nothing anyone can see: 0.41 codes on 40% of pixels, and the detail
+  metric does not move at all (4.606 with it against 4.606 without, on 4.120
+  bilinear). Rendered at four times life size on the most saturated content in
+  half an hour of footage, the two are indistinguishable. `Sampling::Sharp`
+  is one line and stays runnable; footage with hard saturated colour edges,
+  which paramotor flying does not have much of, is what would change the
+  answer.
 
 - 2026-07-31 The pass **skips the lens a ray cannot reach** (issue #10). Each
   lens's picture is one cap around its own axis; the cap is solved out of the
@@ -719,6 +793,95 @@ starved, and `prepare` costs 2.19 ms on the redraw that takes a capture
 against 0.57 ms on one that does not (worst 6.26 ms against 3.29 ms). What
 is left is the readback and the encode, and both belong to a worker
 thread: 45 to 53 ms to encode one 8.5 MB PNG.
+
+High-quality zoom sampling (issue #11), `cargo run --release -p kyerag-spike
+--bin zoom`. How far the view magnifies the source, down the front lens's
+axis at 2560x1440, and how far each plane's kernel engages there:
+
+| fov | centre | corner | luma engaged | chroma engaged |
+| --: | -----: | -----: | -----------: | -------------: |
+|  20 |  0.152 |  0.150 |         1.00 |           1.00 |
+|  60 |  0.499 |  0.435 |         1.00 |           1.00 |
+|  90 |  0.864 |  0.626 |         0.18 |           1.00 |
+| 100 |  1.030 |  0.686 |         0.00 |           1.00 |
+| 110 |  1.234 |  0.743 |         0.00 |           0.86 |
+
+Texels per output pixel: under 1 is magnifying. Two things to read off it.
+The player is **already magnifying this camera at its own default view**, by
+16% in the middle of the picture and 60% at the corners, before anybody
+touches the wheel. And the chroma plane, at half the grid, is under 1:1 at
+every field of view on offer, which is what cut its half of the upgrade.
+
+What the two halves are worth, at 2560x1440 on real footage, as the mean
+absolute Laplacian of the luma ("detail") and as the difference between the
+pictures:
+
+| view                          | bilinear | luma          | both planes   |
+| ----------------------------- | -------: | ------------: | ------------: |
+| ground and buildings, fov 50  |    4.120 | 4.606 (+11.8%) | 4.606 (+11.8%) |
+| wing and lines, fov 50        |    1.126 | 1.214 (+7.8%) | 1.217 (+8.1%) |
+| wing and lines, fov 25        |    0.676 | 0.688 (+1.8%) | 0.694 (+2.6%) |
+
+| view                         | luma moves            | chroma adds          |
+| ---------------------------- | --------------------- | -------------------- |
+| ground and buildings, fov 50 | 1.835 codes over 85.4% | 0.412 over 39.9%    |
+| wing and lines, fov 50       | 0.475 codes over 42.5% | 0.259 over 25.6%    |
+| wing and lines, fov 25       | 0.453 codes over 40.1% | 0.268 over 26.5%    |
+
+The upgrade is worth most in the **middle** of the zoom range and least at
+the end of it, which is the opposite of what the issue expected: at 5x, on a
+white canopy, the source has nothing left to resolve and the two kernels draw
+the same ramp. Textured content at 1.6x is where a bilinear tent is
+measurably the wrong shape.
+
+The pass alone, one process, a still frame, the three settings interleaved
+render by render so a laptop that throttles throttles all of them, least of
+39 renders a cell:
+
+| pass, ms/redraw | bilinear | luma (ships) | both planes |
+| --------------- | -------: | -----------: | ----------: |
+| fov 20          |     0.56 |         0.76 |        1.00 |
+| fov 25          |     0.53 |         0.69 |        0.93 |
+| fov 35          |     0.54 |         0.70 |        0.96 |
+| fov 60          |     0.61 |         0.79 |        1.07 |
+| fov 90          |     0.69 |         0.90 |        1.23 |
+| fov 100         |     0.69 |         0.87 |        1.19 |
+| fov 110         |     0.70 |         0.79 |        1.07 |
+
+And under playback, which is the same pass with a cold texture cache and two
+decoders running beside it (`--bin playback <file> 20 60 0 0 file <fov>
+<setting>`). Every row here presented 29.9 fps with **0 dropped and 0
+starved**; rows the box spoiled are left out, and the box was shared for part
+of this session, which is why the controlled table is the one above.
+
+| pass, ms/redraw | bilinear | luma | both planes |
+| --------------- | -------: | ---: | ----------: |
+| fov 20          |     2.07 | 2.83 |        3.39 |
+| fov 45          |     2.06 | 2.52 |        3.41 |
+| fov 90          |     2.23 | 2.47 |        4.68 |
+| fov 110         |     2.23 | 2.40 |        3.57 |
+
+Three properties, measured rather than argued:
+
+- **It touches only what is magnified.** At fov 110 and 2560x1440, 47.7% of
+  the picture is under 1:1 and 20.1% of it moved; the least magnified pixel
+  that moved sits at 1.0008 texels to the pixel, where 1.0 is the switch-off.
+  Rendered small enough that the whole picture is past 1:1, at 640, 960 and
+  1280 px wide, the shipped setting is byte for byte the picture bilinear
+  drew. Upgrading chroma as well is not byte-identical even at 960 px wide.
+- **It does not pop.** Over 71 one-degree steps of zoom, the shipped setting
+  is 0.179 codes from bilinear at fov 110 and 1.838 at fov 40, and the
+  largest single step in that difference is 0.047 codes, 2.5% of it, where a
+  kernel switched on rather than mixed in would put all 1.838 in one step.
+  Step for step the picture itself moves 1.050x as far sharp as bilinear at
+  the median and 1.063x at the worst, spread along the whole sweep: a sharper
+  picture moving, not a kernel arriving.
+- **A still gets it without being told** (issue #15). A 3840 px capture off a
+  2560 px window magnifies 1.5x harder (0.293 texels to the pixel against
+  0.440) and is byte for byte a 3840 px render of the same view, because the
+  magnification is read off the hardware's quad derivative in whatever target
+  the pass is drawing into rather than out of a resolution in the uniform
+  block.
 
 Seeking, 12 places from 1% to 97% of the 37.9 GB file, warm
 (`cargo run --release -p kyerag-spike --bin seek`):
