@@ -880,11 +880,17 @@ impl App {
     /// (issue #48).
     ///
     /// The run reads real frames from three places in the file, so it is a
-    /// second or two and it happens on a worker thread; the window keeps
-    /// playing while it does. A still capture from a camera standing still is
-    /// what this wants pointed at it, and what the app says so is
-    /// docs/UI.md's line in the menu plus the report line a file with no
-    /// calibration prints.
+    /// second or two and it happens on a thread of its own; the window keeps
+    /// playing while it does. A capture from a camera standing still is what
+    /// this wants pointed at it, and where the app says so is docs/UI.md's
+    /// line in the menu plus the report line a file with no calibration
+    /// prints.
+    ///
+    /// A thread and a channel rather than the async runtime's blocking pool,
+    /// which is what [`Self::capture`] does two functions up and for the same
+    /// reason: the work is a decoder, it belongs on a thread that is allowed
+    /// to sit in `read`, and this way the shell asks the runtime for nothing
+    /// but the wakeup.
     fn calibrate(&self) -> Task<Message> {
         let Some(open) = &self.open else {
             return Task::none();
@@ -893,13 +899,24 @@ impl App {
             return Task::none();
         };
         let path = open.path.clone();
-        cosmic::task::future(async move {
-            let fit = tokio::task::spawn_blocking(move || job.run(&path))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            Message::Calibrated(camera, fit)
+        let (finished, waiting) = oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("seam calibration".to_owned())
+            .spawn(move || {
+                let _ = finished.send(job.run(&path));
+            });
+        if let Err(e) = spawned {
+            return cosmic::task::message(cosmic::Action::App(Message::Calibrated(
+                camera,
+                Err(e.to_string()),
+            )));
+        }
+        Task::perform(waiting, move |done| {
+            action::app(Message::Calibrated(
+                camera,
+                done.unwrap_or_else(|_| Err("the calibration did not finish".to_owned())),
+            ))
         })
-        .map(cosmic::Action::App)
     }
 
     /// Says what the calibration came to, keeps it, and puts it into the
