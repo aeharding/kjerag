@@ -6,7 +6,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use super::projection::{fov_ceiling, normalize, view_ray, world_ray};
+use super::projection::{FOV_FLAT, fov_ceiling, normalize, view_ray, world_ray};
 
 /// Where the view points and how wide it is. Radians throughout.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -165,6 +165,35 @@ impl Camera {
         }
     }
 
+    /// Turn the view by a cursor move, with nothing pinned to the cursor.
+    ///
+    /// The wide half of the zoom drags this way (issue #78). Pinning the
+    /// world to the cursor is what makes the flat range feel like a hand on
+    /// the picture, and it is also what makes the wide end twitchy: a pixel
+    /// out there spans degrees, and near the ball's rim it spans a whole turn
+    /// of azimuth, so an exact solve has no choice but to fling the view
+    /// about. Past the flat range the drag stops asking for exact and asks
+    /// for calm instead: the same travel of the hand turns the world by the
+    /// same angle wherever the zoom is.
+    ///
+    /// Vertically that is all it is, because pitch turns about the view's own
+    /// horizontal axis and a vertical drag is exactly a pitch. Horizontally
+    /// the view has only the world's vertical to turn about, and that axis
+    /// hangs upside down once the pitch is past a quarter turn (issue #63):
+    /// the same turn of the yaw then moves the picture the other way, so the
+    /// drag turns the other way with it and the picture keeps following the
+    /// hand.
+    pub fn turn(&mut self, from: [f32; 2], to: [f32; 2], aspect: f32) {
+        // `aspect` on the vertical only, so that the two axes answer the same
+        // angle per pixel: `uv` is a fraction of the width across and a
+        // fraction of the height down, and a window is wider than it is tall.
+        let sideways = (to[0] - from[0]) * wide_rate();
+        let up = (to[1] - from[1]) * wide_rate() / aspect;
+
+        self.yaw = wrap(self.yaw - sideways * self.pitch.cos().signum());
+        self.pitch = wrap(self.pitch + up);
+    }
+
     /// Zoom by scroll steps, positive being a scroll away from the user.
     ///
     /// One scroll out of the far end is one scroll back in, because the range
@@ -205,6 +234,25 @@ fn nearest_tilt(sine: f32, held: f32) -> f32 {
     }
 }
 
+/// How far the world turns per frame width of cursor travel, once the view is
+/// wider than the flat range (issue #78).
+///
+/// **This is the feel constant, and it is one number.** It is the rate the
+/// glued drag itself turns at, at the middle of the widest flat view, which
+/// is the last view before the handover: 2 tan(55 degrees), or 164 degrees of
+/// world per width of window. So the drag hands over at the pace it was
+/// already going, and then holds that pace all the way out to the ball
+/// instead of running away with the zoom -- the glued rate at the middle of
+/// the ball view is five and a half times this, and that is the twitch the
+/// owner reported.
+///
+/// A first guess, to be tuned by the hand that felt the problem. Turning it
+/// down calms the ball further at the price of a small step at the handover;
+/// nothing else in the file depends on its value.
+fn wide_rate() -> f32 {
+    2.0 * (FOV_FLAT * 0.5).tan()
+}
+
 /// The same angle, in (-pi, pi].
 fn wrap(angle: f32) -> f32 {
     let turned = angle.rem_euclid(TAU);
@@ -232,12 +280,24 @@ pub enum Nudge {
     Reset,
 }
 
-/// The shader widget's state: a [`Camera`], and the world direction a held
-/// drag has hold of.
+/// A drag in progress: what it took hold of, and where the cursor was last
+/// seen.
+///
+/// Both, because the two halves of the zoom drag differently (issue #78). A
+/// flat view is dragged by the direction, which stays under the cursor; a
+/// view wider than that is dragged by the cursor's own travel. The field of
+/// view can change mid-drag, so a drag carries what each needs.
+#[derive(Clone, Copy, Debug)]
+struct Drag {
+    anchor: [f32; 3],
+    at: [f32; 2],
+}
+
+/// Where the view points, and any drag that has hold of it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Viewpoint {
     camera: Camera,
-    anchor: Option<[f32; 3]>,
+    drag: Option<Drag>,
 }
 
 impl Viewpoint {
@@ -246,38 +306,41 @@ impl Viewpoint {
     }
 
     pub fn is_dragging(&self) -> bool {
-        self.anchor.is_some()
+        self.drag.is_some()
     }
 
-    /// Take hold of whatever the cursor is over. A direction, and not a
-    /// cursor position: a position only says how far the last move went, and
-    /// the same move means a different turn depending on where in the view it
-    /// happens.
+    /// Take hold of whatever the cursor is over: the direction, which is what
+    /// a flat view's drag pins to the cursor, and the position, which is what
+    /// a wider one measures its travel from.
     ///
     /// A press on the room around the ball takes hold of nothing, because
     /// there is nothing there to take hold of.
     pub fn grab(&mut self, uv: [f32; 2], aspect: f32) {
-        self.anchor = self.camera.look(uv, aspect);
+        self.drag = self.hold(uv, aspect);
     }
 
     pub fn release(&mut self) {
-        self.anchor = None;
+        self.drag = None;
     }
 
     /// Continue a drag to a new cursor position. `true` when the camera
     /// moved, which is the caller's cue to ask for a redraw.
     ///
     /// A move with no grab held moves nothing and arms nothing: [`grab`] is
-    /// the only thing that sets the anchor, because an anchor armed by a move
-    /// on its way past panned the view with no button down (issue #26).
+    /// the only thing that starts a drag, because a drag armed by a move on
+    /// its way past panned the view with no button down (issue #26).
     ///
     /// [`grab`]: Self::grab
     pub fn drag_to(&mut self, uv: [f32; 2], aspect: f32) -> bool {
-        let Some(anchor) = self.anchor else {
+        let Some(drag) = self.drag else {
             return false;
         };
         let parked = self.camera;
-        self.camera.aim(anchor, uv, aspect);
+        match self.camera.fov > FOV_FLAT {
+            true => self.camera.turn(drag.at, uv, aspect),
+            false => self.camera.aim(drag.anchor, uv, aspect),
+        }
+        self.drag = Some(Drag { at: uv, ..drag });
         self.camera != parked
     }
 
@@ -288,8 +351,8 @@ impl Viewpoint {
     /// for the old one would jump the picture on its next move.
     pub fn zoom(&mut self, steps: f32, uv: [f32; 2], aspect: f32) {
         self.camera.zoom(steps, aspect);
-        if self.anchor.is_some() {
-            self.anchor = self.camera.look(uv, aspect);
+        if self.drag.is_some() {
+            self.drag = self.hold(uv, aspect);
         }
     }
 
@@ -304,9 +367,16 @@ impl Viewpoint {
             // picture straight back on the next move.
             Nudge::Reset => {
                 self.camera = Camera::default();
-                self.anchor = None;
+                self.drag = None;
             }
         }
+    }
+
+    fn hold(&self, uv: [f32; 2], aspect: f32) -> Option<Drag> {
+        Some(Drag {
+            anchor: self.camera.look(uv, aspect)?,
+            at: uv,
+        })
     }
 }
 
@@ -314,7 +384,6 @@ impl Viewpoint {
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use super::super::projection::FOV_FLAT;
     use super::*;
 
     /// A drag is exact when the direction it grabbed comes back within a
@@ -358,6 +427,22 @@ mod tests {
         camera
             .look(uv, aspect)
             .map_or(PI, |under| angle_between(under, direction))
+    }
+
+    /// Which way the picture slid: positive when the direction that was in
+    /// the middle of the frame has ended up right of the middle.
+    fn slid(before: [f32; 3], camera: Camera, aspect: f32) -> f32 {
+        slip(camera, before, [0.45, 0.5], aspect) - slip(camera, before, [0.55, 0.5], aspect)
+    }
+
+    /// Zoomed all the way out, which is as far as the clamp allows.
+    fn at_the_ball(aspect: f32) -> Viewpoint {
+        let mut viewpoint = Viewpoint::default();
+        for _ in 0..40 {
+            viewpoint.zoom(-1.0, MIDDLE, aspect);
+        }
+        assert_eq!(viewpoint.camera().fov, fov_ceiling(aspect));
+        viewpoint
     }
 
     /// A viewpoint parked at one camera with nothing held, which is where a
@@ -883,49 +968,140 @@ mod tests {
         assert!(!viewpoint.is_dragging());
     }
 
-    /// The ball can be grabbed and turned like anything else (issue #47): the
-    /// drag is one solve over the whole range, and the projection it inverts
-    /// is whichever one the view is in.
+    /// The ball can be grabbed and turned like anything else (issue #47), and
+    /// since issue #78 it turns calmly rather than exactly: the picture
+    /// follows the hand, at the rate the flat range handed over at, instead
+    /// of being pinned to the cursor at a zoom where a pixel spans degrees.
     #[test]
-    fn the_ball_turns_under_the_cursor() {
+    fn the_ball_turns_calmly_with_the_drag() {
         let aspect = 16.0 / 9.0;
-        let mut viewpoint = Viewpoint::default();
-        for _ in 0..40 {
-            viewpoint.zoom(-1.0, MIDDLE, aspect);
-        }
-        assert_eq!(viewpoint.camera().fov, fov_ceiling(aspect));
-
-        // Across the middle of the ball, which at this zoom is a couple of
-        // tenths of the frame either side of the centre.
-        let from = [0.46, 0.52];
-        viewpoint.grab(from, aspect);
-        let held = viewpoint
-            .camera()
-            .look(from, aspect)
+        let mut viewpoint = at_the_ball(aspect);
+        let start = viewpoint.camera();
+        let middle = start
+            .look(MIDDLE, aspect)
             .expect("the middle of the ball is picture");
-        for step in 1..=20 {
-            let to = [from[0] + 0.004 * step as f32, from[1] - 0.002 * step as f32];
-            assert!(viewpoint.drag_to(to, aspect), "the ball did not turn");
-            let camera = viewpoint.camera();
-            assert!(camera.yaw.is_finite() && camera.pitch.is_finite());
-            let slip = slip(camera, held, to, aspect);
-            assert!(
-                slip <= pixel(camera, to, aspect),
-                "the ball slipped {slip} rad under the cursor at step {step}",
-            );
+
+        let (from, to) = ([0.46, 0.52], [0.56, 0.52]);
+        viewpoint.grab(from, aspect);
+        assert!(viewpoint.drag_to(to, aspect), "the ball did not turn");
+        let turned = viewpoint.camera();
+        assert!(turned.yaw.is_finite() && turned.pitch.is_finite());
+        assert!(
+            slid(middle, turned, aspect) > 0.0,
+            "the ball did not follow the hand",
+        );
+
+        // Calm, measured against the drag that used to be here: pinning the
+        // grabbed direction to the cursor turns this view several times as
+        // far for the same move of the hand.
+        let mut pinned = start;
+        pinned.aim(
+            start.look(from, aspect).expect("the grab was on the ball"),
+            to,
+            aspect,
+        );
+        let calm = wrap(turned.yaw - start.yaw).abs();
+        let exact = wrap(pinned.yaw - start.yaw).abs();
+        assert!(
+            exact > 3.0 * calm,
+            "the ball turned {calm} rad where the pinned solve turned {exact}, \
+             which is not much calmer",
+        );
+    }
+
+    /// The handover is not a step (issue #78). The widest flat view, which is
+    /// pinned to the cursor, and the first view past it, which is not, turn
+    /// by the same amount for the same move of the hand.
+    #[test]
+    fn the_wide_drag_takes_over_at_the_pace_the_glue_left_off() {
+        let aspect = 16.0 / 9.0;
+        let step = [0.53, 0.47];
+        let turn = |fov| {
+            let mut viewpoint = parked(Camera {
+                fov,
+                ..Camera::default()
+            });
+            viewpoint.grab(MIDDLE, aspect);
+            assert!(viewpoint.drag_to(step, aspect));
+            viewpoint.camera()
+        };
+
+        let glued = turn(FOV_FLAT);
+        let rated = turn(FOV_FLAT * 1.001);
+        let apart = (glued.yaw - rated.yaw)
+            .abs()
+            .max((glued.pitch - rated.pitch).abs());
+        assert!(
+            apart < 0.02 * glued.yaw.abs(),
+            "the drag stepped by {apart} rad at the threshold, from {:?} to {:?}",
+            degrees(glued),
+            degrees(rated),
+        );
+    }
+
+    /// Issue #63 in issue #78's drag: the wide view goes over the pole too,
+    /// and once it is upside down a sideways drag still moves the picture the
+    /// way the hand goes rather than the other way.
+    #[test]
+    fn the_wide_drag_goes_over_the_pole_the_right_way_round() {
+        let aspect = 16.0 / 9.0;
+        let mut viewpoint = at_the_ball(aspect);
+        viewpoint.grab(MIDDLE, aspect);
+
+        // Hauled down the window and let go, over and over, which is how a
+        // hand asks for more than one window's worth of pitch.
+        let mut seen = [false, false];
+        for _ in 0..8 {
+            viewpoint.grab([0.5, 0.2], aspect);
+            for step in 1..=6 {
+                let at = [0.5, 0.2 + 0.1 * step as f32];
+                let before = viewpoint.camera();
+                assert!(viewpoint.drag_to(at, aspect), "the drag stalled");
+                assert!(
+                    wrap(viewpoint.camera().pitch - before.pitch) > 0.0,
+                    "the climb stalled at {:?}",
+                    degrees(viewpoint.camera()),
+                );
+
+                // The first time the view is upright, and the first time it
+                // is upside down: a sideways drag has to move the picture the
+                // way the hand goes, either way up.
+                let inverted = viewpoint.camera().pitch.abs() > FRAC_PI_2;
+                if !seen[usize::from(inverted)] {
+                    seen[usize::from(inverted)] = true;
+                    let middle = viewpoint
+                        .camera()
+                        .look(MIDDLE, aspect)
+                        .expect("the middle of the ball is picture");
+                    let mut sideways = viewpoint;
+                    assert!(sideways.drag_to([at[0] + 0.1, at[1]], aspect));
+                    assert!(
+                        slid(middle, sideways.camera(), aspect) > 0.0,
+                        "the picture went the other way from the hand at {:?}, \
+                         upside down: {inverted}",
+                        degrees(viewpoint.camera()),
+                    );
+                }
+            }
+            viewpoint.release();
         }
+        assert_eq!(seen, [true, true], "the drag never went over the pole");
     }
 
     /// The room around the ball holds nothing, so a press on it takes hold of
-    /// nothing and a drag into it holds the view still rather than hauling it
-    /// somewhere arbitrary.
+    /// nothing.
+    ///
+    /// A drag that starts on the ball and wanders out into the room keeps
+    /// turning the view, which is issue #78's doing: the wide drag reads the
+    /// hand's travel and not what is under the cursor, so there is nothing
+    /// for the room to fail to answer. Before it, the same drag stopped dead
+    /// on the way out and started again on the way back, because the solve
+    /// had nothing to solve for; the room is most of the corners at this
+    /// zoom, and stopping there is what a hand notices.
     #[test]
     fn the_room_around_the_ball_is_not_a_handle() {
         let aspect = 16.0 / 9.0;
-        let mut viewpoint = Viewpoint::default();
-        for _ in 0..40 {
-            viewpoint.zoom(-1.0, MIDDLE, aspect);
-        }
+        let mut viewpoint = at_the_ball(aspect);
         let corner = [0.01, 0.01];
         assert!(
             viewpoint.camera().look(corner, aspect).is_none(),
@@ -936,14 +1112,12 @@ mod tests {
         assert!(!viewpoint.is_dragging());
         assert!(!viewpoint.drag_to([0.5, 0.5], aspect));
 
-        // And a drag that starts on the ball and wanders off it stops rather
-        // than jumping.
         viewpoint.grab([0.5, 0.5], aspect);
         assert!(viewpoint.is_dragging());
         viewpoint.drag_to([0.53, 0.5], aspect);
         let parked = viewpoint.camera();
-        assert!(!viewpoint.drag_to(corner, aspect));
-        assert_eq!(viewpoint.camera(), parked);
+        assert!(viewpoint.drag_to(corner, aspect), "the drag stopped dead");
+        assert_ne!(viewpoint.camera(), parked);
     }
 
     /// Ctrl+0 comes back from the ball in one press, which is the way out of
