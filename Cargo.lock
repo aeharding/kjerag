@@ -2810,6 +2810,7 @@ dependencies = [
  "ash",
  "ffmpeg-next",
  "kyerag-media",
+ "kyerag-meta",
  "libc",
  "libcosmic",
  "wgpu",

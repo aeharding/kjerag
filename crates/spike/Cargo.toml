@@ -5,6 +5,10 @@ name = "kyerag-spike"
 version.workspace = true
 edition.workspace = true
 
+# `cargo run -p kyerag-spike` still means the measuring instrument, as every
+# doc says it does, now that `reframe` is a second binary in this crate.
+default-run = "spike"
+
 [[bin]]
 name = "spike"
 path = "src/main.rs"

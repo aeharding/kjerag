@@ -19,8 +19,13 @@ The repo is a cargo workspace, one crate per layer: `crates/meta`,
 `crates/media`, `crates/render`, `crates/app` (the `kyerag` binary) and
 `crates/spike`. `cargo run` still starts the app, because `default-members`
 is the app; everything else takes `-p`
-(`cargo run --release -p kyerag-spike -- <file.insv>`). The
-`[patch.crates-io]` wgpu entry lives in the root manifest, which is the
+(`cargo run --release -p kyerag-spike -- <file.insv>`). `crates/spike` holds
+a second binary, `reframe`, which runs the app's own projection pass over
+one frame and writes a PNG, so a reframed view can be looked at with no
+compositor:
+`cargo run --release -p kyerag-spike --bin reframe -- <file.insv> yaw=30 fov=60`
+
+The `[patch.crates-io]` wgpu entry lives in the root manifest, which is the
 only place cargo reads one.
 
 `kyerag-meta` depends on no C library and must stay that way:

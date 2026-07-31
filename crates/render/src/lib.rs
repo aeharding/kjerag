@@ -1,11 +1,15 @@
 //! wgpu: frame import and the shader pass. No demuxing and no decoding; it
 //! takes frames from `kyerag-media` and hands the pass to iced (src/widget.rs).
 
+mod camera;
 pub mod dmabuf;
+mod projection;
 mod scene;
 mod widget;
 
+pub use camera::{Camera, Viewpoint};
 pub use kyerag_media::{Fallible, Size};
+pub use projection::{Landing, OUTSIDE_GRAY, Reframe};
 pub use scene::{Frame, Scene, ScenePipeline, ScenePrimitive};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on
