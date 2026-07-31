@@ -1,0 +1,14 @@
+# The trailer layer. No ffmpeg and no wgpu, on purpose: this crate must
+# build and test on a box with no libav headers (issue #19), which is what
+# the `meta` job in .github/workflows/ci.yml proves on every push.
+[package]
+name = "kyerag-meta"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prost = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

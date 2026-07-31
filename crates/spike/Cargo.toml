@@ -1,0 +1,18 @@
+# The M0 measuring instrument, kept out of the app's dependency graph: png
+# and pollster exist for this binary alone.
+[package]
+name = "kyerag-spike"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "spike"
+path = "src/main.rs"
+
+[dependencies]
+kyerag-media = { workspace = true }
+kyerag-render = { workspace = true }
+ffmpeg-next = { workspace = true }
+png = { workspace = true }
+pollster = { workspace = true }
+wgpu = { workspace = true }

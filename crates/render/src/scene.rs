@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{Planes, Size, dmabuf};
-use crate::media::{self, DrmFrame};
+use kyerag_media::{self as media, DrmFrame};
+
+use super::{Extent, Fallible, Planes, Size, dmabuf};
 
 /// A file the shell was asked to show. Decoding waits for the first
 /// [`ScenePipeline::prepare`], because the import needs iced's device and
@@ -193,7 +194,7 @@ impl ScenePipeline {
         }
     }
 
-    fn load(&mut self, frame: &Frame, device: &wgpu::Device) -> crate::Fallible<Source> {
+    fn load(&mut self, frame: &Frame, device: &wgpu::Device) -> Fallible<Source> {
         let (mapped, size) = media::first_frame(&frame.path, 0)?;
         println!("drm:    {}", mapped.describe());
         let planes = dmabuf::import(device, mapped.descriptor(), size)?;

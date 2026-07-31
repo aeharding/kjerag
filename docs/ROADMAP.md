@@ -4,20 +4,21 @@ Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
 **Status 2026-07-31:** feasibility study complete (docs/research/), repo
-bootstrapped, M0 done. `cargo run --release --bin spike -- <file.insv>`
+bootstrapped, M0 done. `cargo run --release -p kyerag-spike -- <file.insv>`
 decodes one 3840x3840 lens on VA-API, imports the dmabuf planes into wgpu
 with no copy, and renders to PNG at 103 fps (3.4x realtime). `cargo run
 --release -- <file.insv>` shows that frame in a libcosmic window, imported
 zero-copy onto the device iced created and sampled inside iced's own render
 pass: the shell, the shader widget and the wgpu-28 import all confirmed on
-screen. M1 has started: `src/meta/` reads the trailer's calibration
-(issue #2). Next: dual decode and the Mei reprojection (issue #3), which
+screen. M1 has started: `crates/meta/` reads the trailer's calibration
+(issue #2), and the source tree is now a workspace with one crate per layer
+(issue #19). Next: dual decode and the Mei reprojection (issue #3), which
 consumes the `CalibrationSet` as it stands.
 
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
-  zero-copy, render headless to PNG with timings. Done (`src/bin/spike.rs`,
+  zero-copy, render headless to PNG with timings. Done (`crates/spike/`,
   issue #6). Shell bring-up followed in issue #1: libcosmic window, shader
   widget, and the wgpu-28 port of the import.
 - **M1 Reframing player** — dual decode, calibrated Mei reprojection,
@@ -56,7 +57,7 @@ consumes the `CalibrationSet` as it stands.
 - 2026-07-30 PR policy (Alex): the coordinator self-merges once CI is
   green and the diff is reviewed. Alex steers via issues, the roadmap,
   and check-ins.
-- 2026-07-30 The trailer is read directly (`src/meta/trailer.rs`, ~45
+- 2026-07-30 The trailer is read directly (`crates/meta/src/trailer.rs`, ~45
   lines) instead of through `telemetry-parser`. The published 0.2.6
   aborts on our X4 Air footage: it serializes the metadata protobuf's
   enum fields with `unsafe { transmute }` of the raw i32, and the file
@@ -81,7 +82,7 @@ consumes the `CalibrationSet` as it stands.
   The alternative was a second wgpu device and an external-memory handoff:
   roughly 200 more unsafe lines and a CPU stall per frame.
   **Deletion condition: the day libcosmic reaches wgpu 30, delete the patch
-  entry, the fork, and `src/render/dmabuf.rs`, and call
+  entry, the fork, and `crates/render/src/dmabuf.rs`, and call
   `vulkan::Device::texture_from_dmabuf_fd` instead.**
 - 2026-07-31 The patch entry names `wgpu`, not `wgpu-hal`. Patching
   wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
@@ -92,10 +93,22 @@ consumes the `CalibrationSet` as it stands.
   `border_padding` on the right and, because `nav_bar.active` defaults to
   true even with no nav model, by nothing on the left. Video wants both
   edges (issue #22).
+- 2026-07-31 One crate per layer, in a workspace (issue #19): `kyerag-meta`,
+  `kyerag-media`, `kyerag-render`, `kyerag` (the app) and `kyerag-spike`.
+  The layer diagram is now a build constraint, and `kyerag-meta` builds and
+  tests with no libav headers anywhere on the box, which a CI job that
+  installs nothing checks on every push. `[patch.crates-io]` moved to the
+  workspace root, the only manifest cargo reads one from.
+- 2026-07-31 `kyerag-render` depends on libcosmic, for one file. The three
+  `iced::widget::shader` impls are a foreign trait on types `render` owns,
+  and coherence forbids writing them in `kyerag`. The alternative, a set of
+  forwarding newtypes in the app crate, is more code for the same wiring;
+  they live in `crates/render/src/widget.rs` and nothing else in the crate
+  mentions iced.
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 
-Per frame, 300 frames, one lens, one frame in flight (`src/bin/spike.rs`):
+Per frame, 300 frames, one lens, one frame in flight (`crates/spike/`):
 
 | path      | demux | decode | deliver | import | render | fps   |
 | --------- | ----: | -----: | ------: | -----: | -----: | ----: |

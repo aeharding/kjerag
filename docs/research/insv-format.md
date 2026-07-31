@@ -384,7 +384,7 @@ Kyerag reads `offset_v3` directly rather than consuming the synthesized
 Gyroflow lens profile, so the first two bugs are not on its path either.
 Bug 3 is the one that decided the design: master is unpublished and pulls
 two further git forks, so Kyerag walks the trailer itself
-(`src/meta/trailer.rs`, section 2 above) and decodes record 1 with
+(`crates/meta/src/trailer.rs`, section 2 above) and decodes record 1 with
 `prost`. All three are worth upstreaming.
 
 A third trap, not a bug because Gyroflow never hits it: the synthesized

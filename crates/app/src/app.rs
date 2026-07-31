@@ -3,7 +3,7 @@
 //! This is the M0 bring-up surface, not the player. It exists to prove two
 //! things under cosmic-comp: that a custom wgpu pass runs inside libcosmic at
 //! all, and that a VA-API frame imported from a dmabuf can be sampled by that
-//! pass on the device iced created (see [`crate::render::dmabuf`]).
+//! pass on the device iced created (see `kyerag_render::dmabuf`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,10 +11,9 @@ use std::time::Duration;
 
 use cosmic::app::{Core, Settings, Task};
 use cosmic::iced::widget::shader;
-use cosmic::iced::{Length, Rectangle, Subscription, mouse};
+use cosmic::iced::{Length, Subscription};
 use cosmic::{Element, executor};
-
-use crate::render::{Frame, Scene, ScenePipeline, ScenePrimitive};
+use kyerag_render::{Frame, Scene};
 
 /// Runs the shell. With no path the widget draws an animated WGSL gradient
 /// and nothing is decoded; with one it shows the first frame of stream 0.
@@ -90,42 +89,5 @@ impl cosmic::Application for App {
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
-    }
-}
-
-impl shader::Program<Message> for Scene {
-    type State = ();
-    type Primitive = ScenePrimitive;
-
-    fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> ScenePrimitive {
-        self.primitive()
-    }
-}
-
-impl shader::Primitive for ScenePrimitive {
-    type Pipeline = ScenePipeline;
-
-    fn prepare(
-        &self,
-        pipeline: &mut ScenePipeline,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _bounds: &Rectangle,
-        _viewport: &shader::Viewport,
-    ) {
-        pipeline.prepare(self, device, queue);
-    }
-
-    /// Drawing into iced's own pass rather than opening a second one: the
-    /// widget's viewport and scissor are already set to the widget bounds.
-    fn draw(&self, pipeline: &ScenePipeline, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        pipeline.draw(pass);
-        true
-    }
-}
-
-impl shader::Pipeline for ScenePipeline {
-    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        ScenePipeline::new(device, format)
     }
 }

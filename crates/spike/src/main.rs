@@ -6,7 +6,7 @@
 //! saving is a measured number rather than a claim.
 //!
 //! ```sh
-//! cargo run --release --bin spike -- <file.insv> [frames] [stream]
+//! cargo run --release -p kyerag-spike -- <file.insv> [frames] [stream]
 //! ```
 //!
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
@@ -18,9 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
-use kyerag::Fallible;
-use kyerag::media::{DrmFrame, HwDevice, SwFrame, open_decoder};
-use kyerag::render::{Planes, Size, dmabuf};
+use kyerag_media::{DrmFrame, Fallible, HwDevice, SwFrame, open_decoder};
+use kyerag_render::{Extent, Planes, Size, dmabuf};
 use wgpu::hal::api::Vulkan;
 
 /// Offscreen render target edge. Small on purpose: the spike measures the

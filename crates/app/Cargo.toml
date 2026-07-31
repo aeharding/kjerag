@@ -1,0 +1,8 @@
+[package]
+name = "kyerag"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kyerag-render = { workspace = true }
+libcosmic = { workspace = true }
