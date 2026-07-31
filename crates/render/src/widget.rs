@@ -435,6 +435,32 @@ mod tests {
         assert_eq!(widget.camera(), zoomed);
     }
 
+    /// Issue #83, through the events iced delivers: a drag is held, the zoom
+    /// key goes in, and the picture stays where the zoom left it until the
+    /// hand asks for something else. The nudge used to re-take the drag's
+    /// hold at the middle of the frame while the cursor was elsewhere, so the
+    /// next move -- this one, which goes nowhere at all -- hauled the picture
+    /// across.
+    #[test]
+    fn a_nudge_mid_drag_keeps_the_grab() {
+        let mut widget = Widget::new();
+        widget.press(200.0, 400.0).move_to(700.0, 150.0);
+
+        widget.scene.nudge(Nudge::ZoomOut);
+        widget.send(Event::Window(
+            window::Event::RedrawRequested(Instant::now()),
+        ));
+        let zoomed = widget.camera();
+        assert!(zoomed.fov > Camera::default().fov, "the key did not zoom");
+
+        widget.move_to(700.0, 150.0);
+        let moved = widget.camera();
+        assert!(
+            (moved.yaw - zoomed.yaw).abs() < 1e-4 && (moved.pitch - zoomed.pitch).abs() < 1e-4,
+            "the cursor stayed put and the view went from {zoomed:?} to {moved:?}",
+        );
+    }
+
     /// The zoom is the widget's only other input, and it is not a grab: it
     /// answers where the pointer is, held or not.
     #[test]
