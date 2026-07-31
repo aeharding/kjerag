@@ -214,10 +214,66 @@ decoder's rate, which is also the answer to #46's open question about a
 100 ms drag cycle. There was no 100 ms cycle. Three landings in four were
 being thrown away.
 
-M2 is done, except that #44 and #45 reopened against it. #45 is fixed above
-and waiting on the owner's retest; #44's symptom shared the same cause, and
-the owner can no longer reproduce it away from the start of a file, so it
-closes on his word rather than on this work's.
+M2 is done. #44 and #45 closed against it (the seed fix, owner-verified),
+and #48 has now reopened the seam.
+
+**The seam is out by degrees, and it is calibration** (issue #48, phase 1,
+measurement only). The owner supplied the one thing every earlier reading of
+this was starved of: a capture from a camera that is **not moving**, and
+Insta360's own export of the same capture as the parity benchmark. On a still
+camera there is no parallax worth the name in the far field, no rolling
+shutter and no motion blur, so what is left at the seam is the calibration.
+`kyerag-spike --bin seam` measures it round the whole seam circle and splits
+it into the axis parallax cannot reach and the axis it owns.
+
+The along-seam residual #7 and #42 left open, -0.36 to -1.20 degrees, is real
+and reads -0.30 to -1.25 here. It is not the problem. **Across** the seam the
+two lenses disagree by **-2.4 to +2.7 degrees**, which is 43 px of the
+delivered frame, and that is what the owner has been looking at: it draws a
+tree trunk twice in a blended view and breaks the horizon in a hard cut, on
+this capture and on his flight footage. Insta360's own export of the same
+frame draws the trunk once.
+
+The structure attributes it. Measured round the circle, a constant and one
+cycle account for everything, leaving 0.012 degrees along and 0.055 across;
+and the shipped map's own knob table says only a relative **lens tilt** can
+put 2.7 degrees of one cycle across the seam while leaving 0.46 along it. The
+fitted correction to lens 1 is a rotation of roll +0.80, yaw -2.29, pitch
+-0.82 degrees plus a 15 px principal-point shift, and applying it takes the
+along-seam residual from 0.766 to 0.077 degrees and the across-seam from 2.333
+to 0.108. Applied and re-measured, every patch reads inside 0.02 degrees along;
+rendered, **a hard cut with no blend at all is continuous** through content
+that was visibly broken before, on both static captures and on flight footage
+from five weeks earlier.
+
+Controls, because #45's lesson is that an instrument which cannot catch the
+failure is not an instrument: injected errors of the size being reported read
+back at 0.99 to 1.06 (roll along, yaw across at r = 1.000, a 20 px principal
+point on both axes); a second capture of a completely different scene, taken
+minutes later with the camera moved, is fixed by the first capture's
+correction; and the deck under the camera fails to pair at all exactly where
+parallax says it must, because 5 to 30 cm of subject distance is 6 to 38
+degrees of disparity in a 14 degree band.
+
+Against the benchmark, each stitch scored on its own picture (gradient energy
+in the seam band over the same statistic either side of it, so tone curves
+divide out): Insta360 keeps **0.83 to 0.88** of its sharpness across the seam,
+we keep **0.573**, and the correction takes us to **0.689**. Their export is a
+square 1440x1440 reframe about 95 degrees across, mildly compressed rather
+than rectilinear, not an equirect crop.
+
+The blend width has a number now instead of a guess. Rendering the same
+seam-crossing frame under crossovers of stated width and scoring each against
+the front lens alone: a **2 degree** band takes 80 percent of what a hard cut
+would give, against a 14 degree band today. But the two halves are not
+independent, and this is the finding that orders the work: shear, the
+disparity divided by the band, is 1.07 at 2 degrees with today's calibration
+and 0.52 with the correction applied. **Narrowing the band before correcting
+the calibration would trade a soft wide ghost for a hard visible tear.**
+
+Nothing in the shader changed: phase 1 is measurement, and the fitted
+parameters are for the owner to validate before phase 2 applies any of them.
+Method and every number: docs/research/insv-format.md 6.8.
 
 **M3 has started, and the player has sound** (issue #13). The file's AAC track
 is decoded off the same demuxer as the two lens streams, resampled by
@@ -280,7 +336,10 @@ into the same recording that land at the 99th or above: the fades hold.
   instead of freezing, 0 to 46 picture updates a second), high-quality
   zoom sampling (issue #11, done: a Catmull-Rom kernel on the luma plane
   wherever the map's own Jacobian says an output pixel has landed inside a
-  texel, and the chroma half of it measured and cut). **M2 is complete.**
+  texel, and the chroma half of it measured and cut). **M2 is complete**,
+  except that issue #48 reopened the seam: the two lenses are misaligned by up
+  to 2.7 degrees across it, phase 1 has measured that, attributed it to a
+  relative lens tilt and fitted the correction, and phase 2 will apply it.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
