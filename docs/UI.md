@@ -345,7 +345,8 @@ video, exactly as in a window.
 ## The keyboard
 
 The map is cosmic-player's, extended with the standard app keys the other
-two first-party apps agree on. Nothing here is invented except `s`.
+two first-party apps agree on. Three bare letters are invented, because no
+COSMIC app does what they do: `s`, `h` and `m`.
 
 | key             | action                    | precedent                                            |
 | --------------- | ------------------------- | ---------------------------------------------------- |
@@ -365,6 +366,9 @@ two first-party apps agree on. Nothing here is invented except `s`.
 | `Ctrl+-`        | zoom out                  | cosmic-edit `:43`, cosmic-files `:53`                |
 | `Ctrl+0`        | default view              | cosmic-edit `:42`, cosmic-files `:52`                |
 | `s`             | save frame                | none; see below                                      |
+| `Ctrl+C`        | copy frame                | cosmic-files `src/key_bind.rs:73`                    |
+| `h`             | lock the horizon          | none; see below                                      |
+| `m`             | mute                      | none; mpv's key, see below                           |
 
 Notes:
 
@@ -384,6 +388,13 @@ Notes:
   app captures its own view. Bare unmodified letters are idiomatic in this
   app class though: cosmic-player binds `f` and `a` with no modifier. The
   owner asked for `s` in issue #16, so `s` it is.
+- **`h` for the horizon lock and `m` for mute** are the same kind of
+  invention. No COSMIC app locks a horizon, and cosmic-player binds no mute
+  key at all, so `m` follows mpv rather than a first-party app. The owner
+  asked for `h` in issue #8 and approved `m` on 2026-07-31. `m` sends the
+  speaker button's own message, so it is remembered the same way the button
+  is, and a file with no sound in it ignores it exactly as the disabled
+  button does.
 - Implement this as libcosmic's `HashMap<KeyBind, Action>` plus a
   `Message::Key(modifiers, physical_key, key)` from a global subscription,
   matched with `KeyBind::matches` (cosmic-player `src/main.rs:1207-1213`,
@@ -459,14 +470,15 @@ also take a wheel**, which is cosmic-player's own `//TODO`
 (`src/main.rs:2032`) and would give volume a wheel without taking one from
 zoom.
 
-**Mute has no key.** cosmic-player binds none: its `key_bind.rs` is `f`,
+**Mute is `m`.** cosmic-player binds no mute key: its `key_bind.rs` is `f`,
 `Alt+Enter`, `Space`, the two arrows, `.`, `,` and `a`, and mute is reachable
 only through the dropdown's button (and through MPRIS, which we do not have
-yet). We follow it. **Open question** for the owner: this app has already
-invented two bare letters where no COSMIC app had a precedent (`s` for save
-frame, `h` for the horizon lock), so `m` would be in keeping with Kyerag's own
-practice even though it is not in cosmic-player's; it is not the implementing
-agent's to add.
+yet). Kyerag binds it anyway, which is mpv's key and is in keeping with the
+two bare letters this app had already invented where no COSMIC app had a
+precedent (`s` for save frame, `h` for the horizon lock). The owner approved
+it on 2026-07-31. The key sends the speaker button's own message, so mute
+persists the same way from either one, and a file with no sound in it takes
+`m` and does nothing, which is the state the button is drawn disabled in.
 
 ## Screenshots, and where export will go
 
@@ -665,9 +677,9 @@ part of issue #16:
 ## Open questions
 
 1. Answered by issue #13: the wheel stayed on zoom and volume went into the
-   control row. What is left of it is smaller: should the speaker button take
-   a wheel of its own, and should `m` be bound to mute? Both above, under
-   "Conflict 2".
+   control row. The mute key was answered on 2026-07-31, and `m` is bound.
+   What is left of it is smaller: should the speaker button take a wheel of
+   its own? Above, under "Conflict 2".
 2. Screenshot feedback: toast wording, and whether it offers an action.
 3. Whether the frame-capture button belongs in the control row at all, or
    whether the menu item plus `s` is enough. No precedent either way.

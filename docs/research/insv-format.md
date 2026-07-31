@@ -521,7 +521,12 @@ real flights and this repo is public: they stay local.
   and pitch (0.103 and 0.07 on the X4 Air), and near the axis the model's
   effective focal length is `fx / (1 + xi)` = 1106 px/rad, so every
   ordering agrees to about 2 px. A camera with a large yaw or pitch would
-  tell them apart; none is known to exist.
+  tell them apart; none is known to exist. **Measured again in 8.7**, this
+  time through the horizon lock, where the ordering reaches the picture a
+  second way because the IMU's own mounting is the same three angles: all
+  six orderings land within **0.13 degrees** of each other on every stretch
+  of two captures. Still arbitrary, and now with a number on how little it
+  matters.
 - ~~**Where the 90 degrees comes from.**~~ Settled in 8.5, by the one thing
   downstream that does care: the IMU is bolted to the sensor rather than to
   the picture, and it wants `Rz(roll)` where the picture wants
@@ -1448,6 +1453,160 @@ come off the same camera clock as the exposure timestamps, so aligning them
 to each other is self-consistent, and it costs nothing.
 `FrameClock::Container` is kept so the losing hypothesis stays measurable.
 
+### 8.7 The once-per-revolution horizon dip (issue #45)
+
+**Confidence: HIGH for the size and for what it is not; MED for the
+remedy, because nothing tried removes it.** Measured 2026-07-31.
+
+With the lock on, panning a full circle dips the horizon once to the left
+and once to the right and leaves it slightly off level at both. That is
+the signature of one thing and one thing only: the estimated vertical is
+tilted a constant amount away from the real one. A tilt of `e` towards
+azimuth `phi` puts the horizon `e sin(yaw - phi)` off level and
+`e cos(yaw - phi)` off centre, so the two ride the pan in quadrature with
+a 360-degree period.
+
+#### The instrument
+
+`crates/spike/src/bin/dip.rs`. It holds one frame, sweeps the camera
+round the circle, finds the horizon in every render with the same
+`skyline` 8.5 used, and reports the defect **twice over**:
+
+- **the tilt vector**: two points on the fitted line are two directions in
+  the frame the camera reads its rays in, which with the lock on is the
+  stabilized world, so the normal of the plane they span is where the
+  picture says up is. The estimate says `[0, -1, 0]`. The angle between
+  them is the whole defect, and it comes out of a **single** render.
+- **the sinusoid**: `offset + amplitude cos(yaw - phase)`, least squares,
+  fitted to the horizon's angle and to its height against yaw. This is the
+  defect as a pilot meets it.
+
+The two are independent measurements of one quantity, so they have to
+agree, and they do: over 12 stretches the fitted amplitude sits within
+0.2 degrees of the tilt vector's length in every one, and the height fit
+within 0.3.
+
+```sh
+cargo run --release -p kyerag-spike --bin dip -- <file.insv> from=300
+cargo run --release -p kyerag-spike --bin dip -- <file.insv> from=300 inject=1
+```
+
+#### What says it can catch a wrong answer
+
+1. **An injected tilt reads back.** `inject=` turns the held orientation
+   by a known angle about a known world axis. Asked for 1, 2 and -1
+   degrees, the tilt vector moves by **0.97, 2.01 and -1.02**, and the
+   axis it moves along is right: an injection 90 degrees round moves it
+   1.05 degrees perpendicular to the first. The sinusoid tracks it to
+   within 0.02 degrees over the same runs.
+2. **The rebasing reproduces the shipped answer.** The candidate
+   orderings are rendered by pre-rotating the held orientation rather than
+   by rebuilding the shader's copy of the mounting, so the ordering the
+   shader already uses has to come back **identical** through that path:
+   2.821 against 2.821 degrees, and the same phase to the degree.
+3. **Two wrong mountings fail loudly.** Dropping the IMU's mounting
+   residual, and applying it unturned instead of inverted, both find **no
+   horizon at all** in any view of any stretch.
+
+#### How big it is
+
+Twelve stretches, six each of two 30-minute X4 Air captures from the same
+camera as 8.5, 24 yaws of 6 frames each, 960x540 at 100 degrees:
+
+| stretch | 120 s | 300 s | 600 s | 900 s | 1200 s | 1500 s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| capture 1 | 3.71 | 1.93 | 5.89 | 1.95 | 3.29 | **8.52** |
+| capture 2 | 4.78 | 3.21 | 2.84 | 2.11 | 3.00 | 2.74 |
+
+Degrees of tilt. **Mean 3.7, median 3.2, worst 8.5.** A wider scan of the
+same two captures and a third found 1.2 to 8.6.
+
+The number that matters most is the **spread within one capture**: 1.9 to
+8.5 degrees on one file, one camera, one calibration, one lens model. No
+constant of the camera can do that. Whatever this is, it changes with the
+flying.
+
+#### The three suspects in issue #45, and what each is worth
+
+| suspect | measured | verdict |
+| --- | --- | --- |
+| the **order** of `offset_v3`'s three angles (4.8's last open question) | all six orderings within **0.13 degrees** of each other, on every stretch | not it, and 30x too small to be it |
+| the **IMU mounting residual**, dropped or applied unturned | no horizon found in any view | not it; these are the negative controls |
+| **`gyro_calib`** as a bias, either triple as the gyro's, both signs | 4.1 to 12.4 degrees against 2.8 to 4.4 shipped: **worse in all four combinations** | not it |
+
+The order row is the useful one for 4.8: measured through the locked
+path, which is a place the ordering could have shown up that 4.8 did not
+have, every ordering still agrees to a tenth of a degree. The choice
+remains arbitrary and remains immaterial.
+
+#### What it actually is
+
+The complementary filter's own residual, against an accelerometer that in
+flight is not measuring gravity. `orientation.rs` says so under "What it
+cannot do" and 8.5 called the 5.88 degree mean on the rolly stretch "the
+coordinated-turn lean an accelerometer cannot see past". This is that,
+measured the way a pilot meets it.
+
+Two directions of evidence bracket it, from 16 filter settings over the
+same 12 stretches:
+
+- **Believing the accelerometer less** makes it worse. Trust windows of
+  (0.02, 0.10), (0.01, 0.05) and (0.005, 0.02) g, which stop trusting a
+  coordinated turn at 11, 8 and 6 degrees of bank instead of 18, read
+  means of 4.2, 6.1 and 10.6 against 3.7 shipped.
+- **Believing it more slowly** makes it worse too. `tilt_seconds` of 60
+  and 200 read 6.8 and 15.7.
+
+Both directions worse is what an optimum looks like, and the shipped
+constants are sitting in it: **of everything tried, nothing beat the
+filter as issue #8 shipped it.** Smoothing the accelerometer over 3
+seconds instead of 1 came closest (mean 3.61 against 3.66) and was worse
+at its worst (11.8 against 8.5), which is not a reason to move a constant.
+
+The binding constraint is named by the second bullet: a long tilt
+constant is what rejects a turn, and the only thing stopping one is that
+the tilt correction is also the only thing cancelling gyroscope bias. At
+200 seconds the estimate reaches 15 to 20 degrees off, which is drift
+arriving, not lean.
+
+So the obvious next lever was tried too: **estimate the bias**, feeding
+the same disagreement into a running estimate of what the gyroscope is
+reading that it should not, so that the tilt constant can go long without
+drifting (`Filter::bias_seconds`; synthetically it takes the settled tilt
+from `tilt_seconds * bias` to nothing). Paired against the shipped filter
+on the same 12 stretches:
+
+| bias, tilt | mean difference | better in |
+| --- | ---: | ---: |
+| 60 s, tilt 20 s | **-0.32 +- 0.47 deg** | 8 of 12 |
+| 200 s, tilt 20 s | **-0.30 +- 0.36 deg** | 7 of 12 |
+| 200 s, tilt 60 s | +1.06 +- 0.92 | 4 of 12 |
+| 200 s, tilt 200 s | +8.19 +- 1.63 | 1 of 12 |
+
+A third of a degree either side of nothing is not a result, and the long
+tilt constants it was supposed to unlock are still worse, so the estimator
+ships **off**. It ships present because it is the one lever the evidence
+points at and rebuilding it to re-measure would cost more than the
+comparison it enables: `dip.rs` runs it from the command line.
+
+#### The residual, honestly
+
+**Kyerag ships the dip.** Amplitude before: mean 3.7 degrees, median 3.2,
+range 1.9 to 8.5 over 12 stretches. Amplitude after: the same numbers,
+because nothing measured here removes it and shipping a constant that
+loses on the measurement to look busy would be worse than saying this.
+
+What would remove it is not a constant. It is either
+
+- **an estimate of the gyroscope's bias**, so that `tilt_seconds` can go
+  long enough to reject a turn without drifting (`Filter::bias_seconds`
+  exists and is infinity; the measurement that would move it is one
+  `dip.rs` run), or
+- **the acceleration the aircraft is actually under**, which the file
+  carries and this project does not read: with GPS velocity differentiated,
+  the specific force minus that is gravity, and the accelerometer stops
+  lying. That is the real fix and it is a separate piece of work.
+
 ## 9. Prior art worth reading
 
 - **`BenjaminHenriksson/insv-stitch`** (MIT, Python, X5) is by far the
@@ -1502,7 +1661,9 @@ Ordered by how much they would cost us.
    Ry(yaw) * Rx(pitch)`, and the quarter-turn datum is the finding (4.8).
    What is left of it is the **order** of the three, which no known camera
    can distinguish because every one of them records sub-degree yaw and
-   pitch. Lens 1's nominal arrangement, which the same entry used to leave
+   pitch: bounded at **0.13 degrees** through the horizon lock in 8.7,
+   which is the second path it could have shown up in and the last one
+   there is. Lens 1's nominal arrangement, which the same entry used to leave
    open, is settled in 4.9: a half turn about the body's vertical,
    multiplied on the right of the block's own angles.
 2. **Vignetting coefficients are not in the metadata.** May show as
@@ -1528,7 +1689,11 @@ Ordered by how much they would cost us.
    writes one.** If it does, it is a strictly better calibration.
 9. **Records 8, 11, 13, 15, 16, 17 payloads.** Nobody has decoded them.
 10. **`gyro_calib`'s six doubles.** Probably 3 gyro plus 3 accel bias
-    (magnitudes are consistent with bias), but unlabelled.
+    (magnitudes are consistent with bias), but unlabelled, and **not a
+    bias the filter is missing**: subtracted from the rates and from the
+    accelerometer, either triple as the gyro's and both signs, all four
+    combinations make the horizon worse rather than better (8.7). Still
+    unlabelled, now with one reading ruled out.
 
 ## 11. Reproducing any of this
 
