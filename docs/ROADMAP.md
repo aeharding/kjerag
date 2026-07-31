@@ -385,13 +385,37 @@ into the same recording that land at the 99th or above: the fades hold.
   **M2 is complete**, except that issue #48 reopened the seam: the two lenses
   are misaligned by up to 2.7 degrees across it, phase 1 has measured that,
   attributed it to a relative lens tilt and fitted the correction, and phase 2
-  will apply it.
+  will apply it. Issue #79 opened a second camera: the ONE X2 writes one lens
+  per file, and the player now pairs the two at open and holds an X2's horizon
+  with that camera's own IMU convention.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
   row).
 
 ## Decisions log
+
+- 2026-07-31 **A capture is not always one file, and the ONE X2's IMU is
+  not mounted like an X4's** (issue #79, owner-reported). Three symptoms on
+  the owner's X2 footage were two defects and one thing that was never
+  broken. Half a sphere was the camera writing one lens per file: the two
+  are paired at open, matched on frame index, and either file of a pair now
+  opens the whole capture. The horizon being "way wrong" was the IMU axis
+  convention, which fell through to the X4's `xZY` and is 121 degrees out on
+  this camera; measured against pixels it is `Zxy`. "Upside down" was the
+  same defect seen through a horizon lock that is on by default, and the
+  delivered-frame datum it appeared to accuse turned out to be right: the
+  unlocked picture is upright on a plumb reference, and the seam's own
+  arithmetic agrees to 0.16 degrees.
+
+  Two method notes worth keeping. The 24-way sweep **cannot** finish this
+  job on a camera whose two best candidates are a half turn apart when the
+  footage has no true horizon in it - a mountain ridge is not level - and
+  what finished it was aiming the view along the accelerometer on a still
+  frame and looking at whether the sky was there. And a wrong picture datum
+  and a wrong axis convention are not separately observable in a locked
+  view, because each cancels the other; only the unlocked picture pins the
+  datum.
 
 - 2026-07-31 **A saved still is a JPEG; the clipboard is still a PNG**
   (issue #15). Twelve encodings of five real 3840x2160 captures, plus

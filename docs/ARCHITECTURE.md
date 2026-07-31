@@ -16,7 +16,9 @@ crates/render   kyerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
                                offscreen render for screenshots
 crates/media    kyerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
-                               frames by index or timestamp. No UI.
+                               frames by index or timestamp. One demuxer per
+                               file of the capture, which is two on the
+                               cameras that write one lens per file. No UI.
 crates/meta     kyerag-meta    .insv trailer, read directly: per-lens Mei
                                calibration, gyro track, per-frame exposure.
                                No UI, no ffmpeg, no wgpu.
@@ -26,10 +28,17 @@ crates/spike    kyerag-spike   the headless instruments, kept out of the
                                a PNG, no compositor needed)
 ```
 
-`app` -> `render` -> `media`, `render` -> `meta` for the calibration the
-shader runs on, and `meta` depends on nothing but `prost`. That last one is
-the point of the split: `cargo test -p kyerag-meta` passes on a box with no
-libav headers, and a CI job that installs nothing proves it on every push.
+`app` -> `render` -> `media` -> `meta`, `render` -> `meta` as well for the
+calibration the shader runs on, and `meta` depends on nothing but `prost`.
+That last one is the point of the split: `cargo test -p kyerag-meta` passes
+on a box with no libav headers, and a CI job that installs nothing proves it
+on every push.
+
+`media -> meta` is one function wide and it is issue #79's: a capture is not
+always one file, and which file holds the other lens is a fact about `.insv`
+naming, which `meta` owns. `media` owns what a container is and does the
+verifying half with it (`Shape::pairs_with`), because the second file of a
+per-lens pair carries no trailer to check against.
 
 `media` and `meta` know nothing about the shell. `render` names libcosmic
 for exactly one file, `crates/render/src/widget.rs`: those three
@@ -95,10 +104,18 @@ map call alone, with nothing reading the pixels through it.)
 
 ## Playback (issue #4)
 
-One demuxer feeds both decoders and hands out `Frames`: every video stream
-at the same PTS, mapped and ready to import. A lens is never delivered
-without its partner, so the two streams cannot drift apart; if a head ever
-lacked a partner the reader drops it rather than pairing two instants.
+One demuxer per file feeds every decoder and hands out `Frames`: every lens
+at the same instant, mapped and ready to import. A lens is never delivered
+without its partner, so the two cannot drift apart; if a head ever lacked a
+partner the reader drops it rather than pairing two instants.
+
+Two demuxers is the ONE X2 case (issue #79), where a capture is two files of
+one lens each. They share a frame grid exactly, so the lanes are matched on
+frame **index** - the one number that means the same thing in two timelines
+with their own `start_time` - and the reader pumps whichever file is behind
+so neither runs away with the memory. The lens 0 file is a frame longer than
+its partner in every pair measured, and that frame is dropped: it has no
+partner, and half a sphere is not a picture.
 
 `Player` runs that reader on its own thread behind a two-deep channel and
 answers one question per redraw: which frame belongs on screen at this
