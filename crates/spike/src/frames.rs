@@ -6,9 +6,16 @@
 //! first; `seam` (issue #48) needs the same frames and needs them from an
 //! ordinary `.mp4` as well, so it lives here rather than in either binary.
 //!
-//! Nothing here interprets a stream as a lens: a file's video streams come out
-//! in file order and the caller decides what they are. Insta360 writes two,
-//! one per lens; a stitched export has one.
+//! Nothing here interprets a stream as a lens: a capture's video streams come
+//! out in lens order and the caller decides what they are. Insta360 writes
+//! two, one per lens; a stitched export has one.
+//!
+//! A capture is not always one file. The ONE X2 writes one lens per file, so
+//! the walk opens the sibling alongside (issue #79, `kyerag_meta::sibling`)
+//! and pairs across the two the same way it pairs across two streams of one:
+//! same instant, or neither. Without it the seam instruments answer "this
+//! file carries one lens stream" on every X2 capture, which is the file's
+//! shape rather than the camera's.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -17,6 +24,15 @@ use std::time::Duration;
 use ffmpeg_next as ff;
 use kyerag_media::{Fallible, HwDevice, SwFrame, open_decoder};
 use kyerag_meta::Size;
+
+/// Every video stream of one container, in container order.
+fn video_streams(input: &ff::format::context::Input) -> Vec<usize> {
+    input
+        .streams()
+        .filter(|s| s.parameters().medium() == ff::media::Type::Video)
+        .map(|s| s.index())
+        .collect()
+}
 
 /// One frame of every stream, at one instant.
 pub struct Pair {
@@ -61,19 +77,22 @@ impl Plane {
     }
 }
 
-/// A walk forward through every video stream of one file from one instant,
+/// A walk forward through every video stream of one capture from one instant,
 /// delivering frames in step.
 pub struct Walk {
-    input: ff::format::context::Input,
+    /// One demuxer per file: two only for a capture written one lens per
+    /// file, and they share a frame grid exactly (docs/research 1).
+    inputs: Vec<ff::format::context::Input>,
     decoders: Vec<ff::decoder::Video>,
-    streams: Vec<usize>,
+    /// `(file, stream)` per lane, in lens order.
+    lanes: Vec<(usize, usize)>,
     queues: Vec<VecDeque<(i64, Plane)>>,
     time_base: ff::Rational,
     start: i64,
     from_pts: i64,
     fps: f64,
     size: Size,
-    drained: bool,
+    drained: Vec<bool>,
     /// Held so the VA-API device outlives the decoders that reference it.
     _hw: HwDevice,
 }
@@ -81,49 +100,65 @@ pub struct Walk {
 impl Walk {
     pub fn open(path: &Path, from: f64, size: Size) -> Fallible<Self> {
         ff::init()?;
-        let mut input = ff::format::input(&path)?;
         let hw = HwDevice::vaapi()?;
-        let streams: Vec<usize> = input
-            .streams()
-            .filter(|s| s.parameters().medium() == ff::media::Type::Video)
-            .map(|s| s.index())
-            .collect();
-        let stream = input
-            .stream(*streams.first().ok_or("this file carries no video stream")?)
-            .ok_or("no video stream")?;
+        let mut inputs = vec![ff::format::input(&path)?];
+        let mut lanes = Vec::new();
+        for stream in video_streams(&inputs[0]) {
+            lanes.push((0, stream));
+        }
+        // One lens in this file: the other one may be in the file beside it.
+        // Lens order is the marker's, not the order they were named in.
+        if lanes.len() == 1
+            && let Some(beside) = kyerag_meta::sibling(path)
+        {
+            let second = ff::format::input(&beside)?;
+            let streams = video_streams(&second);
+            if streams.len() == 1 {
+                inputs.push(second);
+                lanes.push((1, streams[0]));
+                if kyerag_meta::lens_index(path) == Some(1) {
+                    lanes.swap(0, 1);
+                }
+            }
+        }
+
+        let (file, index) = *lanes.first().ok_or("this file carries no video stream")?;
+        let stream = inputs[file].stream(index).ok_or("no video stream")?;
         let time_base = stream.time_base();
         let start = stream.start_time().max(0);
         let rate = stream.avg_frame_rate();
         let fps = f64::from(rate.numerator()) / f64::from(rate.denominator());
-        let decoders = streams
+        let decoders = lanes
             .iter()
-            .map(|index| open_decoder(&input, *index, &hw))
+            .map(|(file, index)| open_decoder(&inputs[*file], *index, &hw))
             .collect::<Fallible<Vec<_>>>()?;
 
         let target = (from * 1e6) as i64;
-        input.seek(target, ..target)?;
+        for input in &mut inputs {
+            input.seek(target, ..target)?;
+        }
         let from_pts = start
             + (from * f64::from(time_base.denominator()) / f64::from(time_base.numerator())) as i64;
         Ok(Self {
-            input,
+            drained: vec![false; inputs.len()],
+            inputs,
             decoders,
-            queues: streams.iter().map(|_| VecDeque::new()).collect(),
-            streams,
+            queues: lanes.iter().map(|_| VecDeque::new()).collect(),
+            lanes,
             time_base,
             start,
             from_pts,
             fps,
             size,
-            drained: false,
             _hw: hw,
         })
     }
 
-    /// How many video streams this file carries. Two is a dual-fisheye
-    /// `.insv`; one is a stitched export, and a caller that needs a seam has
-    /// to say so itself.
+    /// How many lenses this capture carries. Two is a dual-fisheye capture,
+    /// in one file or in two; one is a stitched export or half a pair, and a
+    /// caller that needs a seam has to say so itself.
     pub fn streams(&self) -> usize {
-        self.streams.len()
+        self.lanes.len()
     }
 
     /// The next instant every stream has a frame for, at or after the one the
@@ -164,26 +199,46 @@ impl Walk {
                 }
                 continue;
             }
-            if self.drained {
+            if self.drained.iter().all(|done| *done) {
                 return Ok(None);
             }
             self.pump()?;
         }
     }
 
+    /// Reads one packet from the file with the fewest frames waiting, so a
+    /// pair stays in step instead of one file running away with the memory.
     fn pump(&mut self) -> Fallible<()> {
+        let queued = |file: usize| {
+            self.lanes
+                .iter()
+                .enumerate()
+                .filter(|(_, (owner, _))| *owner == file)
+                .map(|(lane, _)| self.queues[lane].len())
+                .min()
+                .unwrap_or(0)
+        };
+        let file = (0..self.inputs.len())
+            .filter(|file| !self.drained[*file])
+            .min_by_key(|file| queued(*file))
+            .unwrap_or(0);
+
         let mut packet = ff::Packet::empty();
-        match packet.read(&mut self.input) {
+        match packet.read(&mut self.inputs[file]) {
             Ok(()) => {
-                let Some(lane) = self.streams.iter().position(|s| *s == packet.stream()) else {
+                let at = (file, packet.stream());
+                let Some(lane) = self.lanes.iter().position(|owner| *owner == at) else {
                     return Ok(());
                 };
                 self.decoders[lane].send_packet(&packet)?;
                 self.drain(lane)
             }
             Err(ff::Error::Eof) => {
-                self.drained = true;
-                for lane in 0..self.decoders.len() {
+                self.drained[file] = true;
+                let lanes: Vec<usize> = (0..self.lanes.len())
+                    .filter(|lane| self.lanes[*lane].0 == file)
+                    .collect();
+                for lane in lanes {
                     self.decoders[lane].send_eof()?;
                     self.drain(lane)?;
                 }

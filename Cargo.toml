@@ -37,6 +37,11 @@ ash = "0.38"
 # the tree through libcosmic, and the crate the COSMIC screenshot portal
 # itself asks for the folder we write into.
 dirs = "6.0"
+# Encodes a saved still (issue #15). Pure Rust, no C library and no system
+# package; its `simd` feature is what keeps the encode near the PNG it
+# replaces, measured over a real 3840x2160 capture: 105 ms without it, 70 ms
+# with.
+jpeg-encoder = { version = "0.6", features = ["simd"] }
 libc = "0.2"
 # Hands a URL to the desktop, for the About page's links. cosmic-edit and
 # cosmic-files both open theirs with this crate.
@@ -50,6 +55,9 @@ prost = "0.14"
 # calibration fixture that telemetry-parser wrote as JSON.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Only the timer, and only for the toast dismissal: libcosmic's default
+# features already bring tokio in as the app's executor.
+tokio = { version = "1", default-features = false, features = ["time"] }
 # The portal file chooser answers in URLs, and a drop's `text/uri-list` is
 # URLs too. Everything past the edge of the shell is a `PathBuf` (docs/UI.md).
 url = "2"

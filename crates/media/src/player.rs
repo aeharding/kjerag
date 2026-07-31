@@ -135,15 +135,103 @@ pub struct Player {
     timing: Timing,
     size: Size,
     lenses: usize,
+    files: usize,
     failure: Option<Box<dyn std::error::Error + Send + Sync>>,
     ended: bool,
-    /// Bumped by every seek. Frames tagged with an older one were decoded
-    /// before it and are no longer what the pilot asked to see.
-    epoch: u64,
-    /// Set from a seek until the frame it asked for is on screen. The picture
-    /// is about to change even when the clock is not running, which is what
-    /// tells a paused caller to keep redrawing.
-    seeking: bool,
+    /// Which frames may go on screen, and which seek is still owed one.
+    epochs: Epochs,
+}
+
+/// What the picture is waiting for, which is what decides which frames may
+/// take the screen while it waits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Wait {
+    /// Nothing. The clock moves the picture, one frame at its due time.
+    #[default]
+    Nothing,
+    /// A seek's own frame. Only a position newer than the one on screen may
+    /// take it: the pilot has asked to leave the one they are looking at, and
+    /// the reader is still handing over frames of it.
+    Position,
+    /// The next frame of the position on screen. Stepping one frame forward
+    /// asks for exactly that and sends no seek at all, because the reader is
+    /// already sitting on it ([`Player::step`]).
+    Frame,
+}
+
+/// Which frames may go on screen, and which seek is still owed one.
+///
+/// Those are two questions, and a hand faster than a landing is where they
+/// come apart (issue #55). Every seek bumps `asked` and every frame carries
+/// the epoch it was decoded under, so a drag that outruns the decoder has
+/// several seeks in flight and the pictures coming out of them are tagged
+/// with epochs the pilot has already dragged past. Showing only the newest
+/// seek's frames therefore shows nothing at all: at 60 positions a second
+/// not one picture reached the screen for the length of the drag.
+///
+/// Frames arrive in the order they were asked for, so a picture from a seek
+/// the pilot has dragged past is still a picture of somewhere they have been
+/// since the one on screen, and putting it up can only move the picture
+/// forwards.
+///
+/// The wait is the other question and it is answered separately, because it
+/// is what keeps a paused window redrawing: it ends on the newest seek's own
+/// frame rather than on whatever picture went up last. Ending it on an
+/// intermediate picture stops the redraw loop while the release's exact frame
+/// is still being decoded, and leaves the pilot looking at the keyframe their
+/// finger passed over instead of the frame they let go on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Epochs {
+    /// Bumped by every seek.
+    asked: u64,
+    /// What the picture on screen was decoded under.
+    shown: u64,
+    wait: Wait,
+}
+
+impl Epochs {
+    /// A seek, and the epoch the frames it produces will carry.
+    fn ask(&mut self) -> u64 {
+        self.asked += 1;
+        self.wait = Wait::Position;
+        self.asked
+    }
+
+    /// A frame is owed under the epoch already in force.
+    fn owe(&mut self) {
+        self.wait = Wait::Frame;
+    }
+
+    /// Nothing is coming: the decode thread has gone away.
+    fn give_up(&mut self) {
+        self.wait = Wait::Nothing;
+    }
+
+    /// Whether a frame decoded under `tag` may take the screen.
+    fn accepts(&self, tag: u64) -> bool {
+        match self.wait {
+            Wait::Position => tag > self.shown,
+            Wait::Nothing | Wait::Frame => tag >= self.shown,
+        }
+    }
+
+    /// Whether `tag` is the newest seek: the only one whose frame ends the
+    /// wait, and the only one whose end of file is this player's end of file.
+    fn is_newest(&self, tag: u64) -> bool {
+        tag == self.asked
+    }
+
+    /// A frame decoded under `tag` is going on screen.
+    fn showed(&mut self, tag: u64) {
+        self.shown = tag;
+        if self.is_newest(tag) {
+            self.wait = Wait::Nothing;
+        }
+    }
+
+    fn is_seeking(&self) -> bool {
+        self.wait != Wait::Nothing
+    }
 }
 
 impl Player {
@@ -152,7 +240,8 @@ impl Player {
     /// not hold the window shut.
     pub fn open(path: &Path) -> Fallible<Self> {
         let mut reader = Reader::open(path)?.lookahead(LOOKAHEAD);
-        let (timing, size, lenses) = (reader.timing(), reader.size(), reader.lenses());
+        let (timing, size) = (reader.timing(), reader.size());
+        let (lenses, files) = (reader.lenses(), reader.files());
         let beat = Arc::new(Beat::default());
         let sound = reader
             .sound_rate()
@@ -183,10 +272,10 @@ impl Player {
             timing,
             size,
             lenses,
+            files,
             failure: None,
             ended: false,
-            epoch: 0,
-            seeking: false,
+            epochs: Epochs::default(),
         })
     }
 
@@ -200,6 +289,12 @@ impl Player {
 
     pub fn lenses(&self) -> usize {
         self.lenses
+    }
+
+    /// How many files this capture was opened from: 2 for a per-lens pair
+    /// the reader put back together, 1 for everything else.
+    pub fn files(&self) -> usize {
+        self.files
     }
 
     pub fn is_playing(&self) -> bool {
@@ -248,8 +343,12 @@ impl Player {
     /// A seek has been asked for and the frame it asked for is not on screen
     /// yet. A paused caller has to keep redrawing while this is true, because
     /// there is no clock running to tell it the picture will change.
+    ///
+    /// A drag can put pictures on screen while this stays true: they are
+    /// landings of seeks the pilot has already dragged past, and the seek
+    /// under the finger is still owed its own.
     pub fn is_seeking(&self) -> bool {
-        self.seeking
+        self.epochs.is_seeking()
     }
 
     pub fn stats(&self) -> Stats {
@@ -288,18 +387,17 @@ impl Player {
     /// return immediately: the seek happens on the decode thread, and
     /// [`Player::is_seeking`] is true until its first frame arrives.
     pub fn seek(&mut self, to: Cue, accuracy: Accuracy) {
-        self.epoch += 1;
+        let epoch = self.epochs.ask();
         self.ended = false;
-        self.seeking = true;
         self.hush();
         self.presenter.reseek(to.time(self.timing));
         let command = Command::Seek {
-            epoch: self.epoch,
+            epoch,
             to,
             accuracy,
         };
         if self.commands.send(command).is_err() {
-            self.seeking = false;
+            self.epochs.give_up();
             return;
         }
         // Frames decoded before the seek are still in the channel, and the
@@ -325,7 +423,7 @@ impl Player {
             true => {
                 self.hush();
                 self.presenter.reseek(self.timing.time_of(target));
-                self.seeking = true;
+                self.epochs.owe();
             }
             false => self.seek(Cue::Index(target), Accuracy::Exact),
         }
@@ -350,16 +448,21 @@ impl Player {
     /// The frame that belongs on screen at `now`, or `None` when the picture
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
-        let epoch = self.epoch;
         let (notes, failure, ended) = (&self.notes, &mut self.failure, &mut self.ended);
-        let shown = self.presenter.advance(now, || {
+        let epochs = &mut self.epochs;
+        let owed = epochs.is_seeking();
+        let shown = self.presenter.advance(now, owed, || {
             loop {
                 match notes.try_recv() {
-                    Ok(Note::Frames(tag, frames)) if tag == epoch => return Some(frames),
-                    // Decoded before the seek that is now in force.
+                    Ok(Note::Frames(tag, frames)) if epochs.accepts(tag) => {
+                        epochs.showed(tag);
+                        return Some(frames);
+                    }
+                    // Older than the picture on screen: decoded before it, so
+                    // showing it would run the picture backwards.
                     Ok(Note::Frames(..)) => continue,
                     Ok(Note::Ended(tag)) => {
-                        *ended = tag == epoch;
+                        *ended = epochs.is_newest(tag);
                         return None;
                     }
                     Ok(Note::Failed(e)) => {
@@ -374,9 +477,6 @@ impl Player {
                 }
             }
         });
-        if shown.is_some() {
-            self.seeking = false;
-        }
         match self.failure.take() {
             Some(e) => Err(e),
             None => Ok(shown),
@@ -521,18 +621,28 @@ impl Presenter {
         self.clock.reaches(next)
     }
 
+    /// `owed` is a seek waiting for its picture: the first frame this takes
+    /// is that seek's landing, and a landing goes up wherever the clock is
+    /// rather than when the clock reaches it.
     fn advance(
         &mut self,
         now: Instant,
+        mut owed: bool,
         mut next: impl FnMut() -> Option<Frames>,
     ) -> Option<Arc<Frames>> {
         self.stats.redraws += 1;
-        if self.is_frozen() {
+        if self.is_frozen(owed) {
             return None;
         }
         let mut shown = None;
 
         while let Some(frames) = self.peeked.take().or_else(&mut next) {
+            // The landing is the new position, so the clock moves to it. What
+            // follows it in the same pump is ordinary playback and is paced.
+            if owed {
+                owed = false;
+                self.reseek(frames.timestamp);
+            }
             if !self.claim(now, &frames) {
                 self.peeked = Some(frames);
                 break;
@@ -561,8 +671,12 @@ impl Presenter {
     /// Paused with a picture on screen, nothing may change. Paused with no
     /// picture yet is the file that was just opened, or one that has just
     /// been seeked: it gets one frame.
-    fn is_frozen(&self) -> bool {
-        !self.clock.is_playing() && self.current.is_some()
+    ///
+    /// A seek still owed a picture gets one however many pictures have
+    /// already gone up, which is what lets a drag keep moving: it shows a
+    /// landing per redraw, and the release's exact frame is the last of them.
+    fn is_frozen(&self, owed: bool) -> bool {
+        !owed && !self.clock.is_playing() && self.current.is_some()
     }
 
     /// Throw away the picture and put the clock where the seek is going. The
@@ -740,7 +854,7 @@ mod tests {
         let mut shown = Vec::new();
         for tick in 0..600u32 {
             let at = start + HZ_60 * tick;
-            if let Some(frames) = presenter.advance(at, feed(&mut next)) {
+            if let Some(frames) = presenter.advance(at, false, feed(&mut next)) {
                 shown.push(frames.index);
             }
         }
@@ -761,7 +875,7 @@ mod tests {
         let mut next = 0;
 
         for tick in 0..100u32 {
-            presenter.advance(start + NTSC * 3 * tick, feed(&mut next));
+            presenter.advance(start + NTSC * 3 * tick, false, feed(&mut next));
         }
 
         // One frame shown per pump, the other two of each three skipped.
@@ -778,9 +892,9 @@ mod tests {
 
         // One frame decoded, and then the decoder produces nothing.
         let mut first = Some(frame(0));
-        presenter.advance(start, || first.take());
+        presenter.advance(start, false, || first.take());
         for tick in 1..10u32 {
-            presenter.advance(start + HZ_60 * tick, || None);
+            presenter.advance(start + HZ_60 * tick, false, || None);
         }
 
         assert_eq!(presenter.stats.presented, 1);
@@ -798,7 +912,7 @@ mod tests {
         let mut next = 0;
 
         for tick in 0..60u32 {
-            presenter.advance(start + HZ_60 * tick, feed(&mut next));
+            presenter.advance(start + HZ_60 * tick, false, feed(&mut next));
         }
         let paused_at = start + HZ_60 * 60;
         presenter.clock.pause(paused_at);
@@ -807,11 +921,11 @@ mod tests {
         // An hour later the position has not moved and no frame is shown.
         let later = paused_at + Duration::from_secs(3600);
         assert_eq!(presenter.clock.position(later), position);
-        assert!(presenter.advance(later, feed(&mut next)).is_none());
+        assert!(presenter.advance(later, false, feed(&mut next)).is_none());
 
         // Resuming picks up where it stopped rather than jumping an hour.
         presenter.clock.play();
-        presenter.advance(later, feed(&mut next));
+        presenter.advance(later, false, feed(&mut next));
         assert!(presenter.clock.position(later) < position + NTSC * 2);
         assert_eq!(presenter.stats.dropped, 0);
     }
@@ -825,9 +939,9 @@ mod tests {
 
         // Half a second of opening the file and warming the decoder.
         for tick in 0..30u32 {
-            presenter.advance(start + HZ_60 * tick, || None);
+            presenter.advance(start + HZ_60 * tick, false, || None);
         }
-        let shown = presenter.advance(start + Duration::from_millis(500), feed(&mut next));
+        let shown = presenter.advance(start + Duration::from_millis(500), false, feed(&mut next));
 
         assert_eq!(shown.map(|f| f.index), Some(0));
         assert_eq!(presenter.stats.dropped, 0);
@@ -842,18 +956,22 @@ mod tests {
         let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
         let start = Instant::now();
         let mut next = 0;
-        presenter.advance(start, feed(&mut next));
-        assert!(presenter.advance(start, feed(&mut next)).is_none());
+        presenter.advance(start, false, feed(&mut next));
+        assert!(presenter.advance(start, false, feed(&mut next)).is_none());
 
         presenter.reseek(NTSC * 900);
         assert_eq!(presenter.clock.position(start), NTSC * 900);
 
+        // The seek is owed a picture, which is what the player says while one
+        // is outstanding, and nothing is owed once it has landed.
         let mut landed = Some(frame(900));
         assert_eq!(
-            presenter.advance(start, || landed.take()).map(|f| f.index),
+            presenter
+                .advance(start, true, || landed.take())
+                .map(|f| f.index),
             Some(900)
         );
-        assert!(presenter.advance(start, feed(&mut next)).is_none());
+        assert!(presenter.advance(start, false, feed(&mut next)).is_none());
     }
 
     /// A keyframe seek lands at or before what it was asked for, and the
@@ -867,7 +985,7 @@ mod tests {
 
         presenter.reseek(NTSC * 950);
         let mut landed = Some(frame(900));
-        presenter.advance(start, || landed.take());
+        presenter.advance(start, true, || landed.take());
 
         assert_eq!(presenter.clock.position(start), NTSC * 900);
         assert_eq!(presenter.stats.dropped, 0);
@@ -880,10 +998,12 @@ mod tests {
         let mut next = 0;
 
         assert_eq!(
-            presenter.advance(start, feed(&mut next)).map(|f| f.index),
+            presenter
+                .advance(start, false, feed(&mut next))
+                .map(|f| f.index),
             Some(0)
         );
-        assert!(presenter.advance(start, feed(&mut next)).is_none());
+        assert!(presenter.advance(start, false, feed(&mut next)).is_none());
         assert_eq!(presenter.stats.presented, 1);
         assert_eq!(presenter.stats.dropped, 0);
     }
@@ -1108,5 +1228,286 @@ mod tests {
                 Did::Read(500),
             ]
         );
+    }
+
+    /// Which frames may take the screen is a different question with a seek
+    /// outstanding and without one, and the whole of issue #55 is that the
+    /// answer to the first is not "only the newest seek's".
+    #[test]
+    fn what_may_take_the_screen_depends_on_what_the_picture_is_waiting_for() {
+        let mut epochs = Epochs::default();
+        assert!(epochs.accepts(0), "the first frame of a file carries 0");
+
+        for _ in 0..4 {
+            epochs.ask();
+        }
+        epochs.showed(2);
+
+        // Waiting on a seek: a newer position, and nothing else.
+        assert!(
+            epochs.accepts(3),
+            "a position asked for after the one shown"
+        );
+        assert!(!epochs.accepts(2), "more of the position being left");
+        assert!(!epochs.accepts(1), "a position left two seeks ago");
+
+        // Waiting on the frame after the one on screen, which is what
+        // stepping forward asks for and which carries the epoch in force.
+        epochs.owe();
+        assert!(epochs.accepts(2));
+        assert!(!epochs.accepts(1));
+
+        // Playing: every frame carries the epoch on screen.
+        epochs.showed(4);
+        assert!(!epochs.is_seeking());
+        assert!(epochs.accepts(4));
+        assert!(!epochs.accepts(3));
+    }
+
+    /// The lifecycle, which is the half of this the epochs do not answer: a
+    /// drag leaves several seeks in flight, pictures go up from the ones the
+    /// pilot has dragged past, and the wait ends on the newest seek's own
+    /// frame and no other. `seeking` is what keeps a paused window redrawing,
+    /// so a wait that ends early is a picture that never arrives.
+    #[test]
+    fn overlapping_seeks_keep_seeking_until_the_newest_lands() {
+        let mut epochs = Epochs::default();
+        assert!(!epochs.is_seeking(), "an open file is not seeking");
+
+        for epoch in 1..=3 {
+            assert_eq!(epochs.ask(), epoch);
+        }
+        epochs.showed(1);
+        assert!(epochs.is_seeking(), "two seeks are still in flight");
+        epochs.showed(2);
+        assert!(epochs.is_seeking(), "one seek is still in flight");
+        epochs.showed(3);
+        assert!(!epochs.is_seeking());
+
+        // Stepping one frame on sends no seek: the reader is already sitting
+        // on the frame, and the epoch in force is the one it will carry.
+        epochs.owe();
+        assert!(epochs.is_seeking());
+        epochs.showed(3);
+        assert!(!epochs.is_seeking());
+    }
+
+    /// A [`Player`] with no file behind it. The test is the decode thread: it
+    /// sends the notes and reads the commands, so the whole of `pump` runs on
+    /// the test's own thread with no decoder and no footage.
+    struct Bench {
+        player: Player,
+        notes: SyncSender<Note>,
+        commands: Receiver<Command>,
+    }
+
+    impl Bench {
+        fn new() -> Self {
+            let (sender, notes) = sync_channel(64);
+            let (commands, orders) = channel();
+            let timing = Timing::new(crate::ff::Rational::new(30_000, 1001), 100_000).unwrap();
+            Self {
+                player: Player {
+                    notes,
+                    commands,
+                    presenter: Presenter::new(timing.interval(), Arc::new(Beat::default())),
+                    sound: None,
+                    timing,
+                    size: Size::new(3840, 3840),
+                    lenses: 2,
+                    files: 1,
+                    failure: None,
+                    ended: false,
+                    epochs: Epochs::default(),
+                },
+                notes: sender,
+                commands: orders,
+            }
+        }
+
+        /// A pair decoded under `epoch`, as the decode thread would hand it
+        /// over.
+        fn decoded(&self, epoch: u64, index: u64) {
+            self.notes.send(Note::Frames(epoch, frame(index))).unwrap();
+        }
+
+        /// One redraw, and the frame it put on screen.
+        fn redraw(&mut self, now: Instant) -> Option<u64> {
+            self.player.pump(now).unwrap().map(|frames| frames.index)
+        }
+
+        /// What the decode thread was asked for, in order.
+        fn asked(&self) -> Vec<(u64, Accuracy)> {
+            self.commands
+                .try_iter()
+                .map(|Command::Seek { to, accuracy, .. }| (to.index(self.player.timing), accuracy))
+                .collect()
+        }
+    }
+
+    /// The whole of issue #55. Every position is asked for before the last
+    /// one has produced a picture, so each picture that does arrive carries
+    /// an epoch the pilot dragged past two seeks ago. Showing only the newest
+    /// seek's frames shows none of them, and the picture is frozen for the
+    /// length of the drag.
+    #[test]
+    fn a_drag_faster_than_the_decoder_still_moves_the_picture() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+        let mut shown = Vec::new();
+
+        // Five positions, and the decoder two landings behind the hand.
+        for position in 0..5u64 {
+            bench
+                .player
+                .seek(Cue::Index(position * 1000), Accuracy::Keyframe);
+            if let Some(landed) = position.checked_sub(2) {
+                bench.decoded(landed + 1, landed * 1000);
+            }
+            shown.extend(bench.redraw(now));
+        }
+
+        assert_eq!(shown, [0, 1000, 2000]);
+        assert!(
+            bench.player.is_seeking(),
+            "the position under the finger has not landed"
+        );
+    }
+
+    /// Letting go asks for the frame under the handle, and the drag's
+    /// leftovers are still coming out of the decoder behind it. They may have
+    /// the screen while the release is still being decoded, and they may not
+    /// end the wait for it: `is_seeking` false is what stops a paused window
+    /// redrawing, and it would stop it one picture short of the release.
+    #[test]
+    fn the_release_lands_the_exact_frame_behind_the_drag_s_leftovers() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+
+        bench.player.seek(Cue::Index(1000), Accuracy::Keyframe);
+        bench.player.seek(Cue::Index(2000), Accuracy::Keyframe);
+        bench.player.seek(Cue::Index(3000), Accuracy::Exact);
+
+        bench.decoded(2, 2000);
+        assert_eq!(bench.redraw(now), Some(2000), "a keyframe from the drag");
+        assert!(
+            bench.player.is_seeking(),
+            "the release is still being decoded"
+        );
+
+        bench.decoded(3, 3000);
+        assert_eq!(bench.redraw(now), Some(3000));
+        assert!(!bench.player.is_seeking());
+        assert_eq!(bench.player.index(), Some(3000));
+
+        // And it stands still on the frame it landed on.
+        assert_eq!(bench.redraw(now), None);
+        assert_eq!(bench.player.index(), Some(3000));
+        assert_eq!(
+            bench.asked(),
+            [
+                (1000, Accuracy::Keyframe),
+                (2000, Accuracy::Keyframe),
+                (3000, Accuracy::Exact),
+            ]
+        );
+    }
+
+    /// A seek is a request to leave the position on screen, and the read that
+    /// was in flight when it was sent lands after it: the reader hands over
+    /// one more frame of the position being left. That frame is a picture of
+    /// nowhere the pilot asked to be. Measured through the real player, an
+    /// exact seek shows it 79 ms after the request and the frame that was
+    /// asked for 159 ms after that.
+    #[test]
+    fn frames_of_the_position_being_left_do_not_take_the_screen() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+
+        bench.player.seek(Cue::Index(1000), Accuracy::Keyframe);
+        bench.decoded(1, 1000);
+        assert_eq!(bench.redraw(now), Some(1000));
+
+        bench.player.seek(Cue::Index(9000), Accuracy::Exact);
+        bench.decoded(1, 1001);
+        assert_eq!(bench.redraw(now), None, "the position being left");
+        assert!(bench.player.is_seeking());
+
+        bench.decoded(2, 9000);
+        assert_eq!(bench.redraw(now), Some(9000));
+        assert!(!bench.player.is_seeking());
+    }
+
+    /// The floor under all of it: a frame older than the picture on screen
+    /// would run the picture backwards under the finger. One decode thread
+    /// hands frames over in the order they were asked for, so this delivery
+    /// is one it does not make; the floor is what makes "never backwards"
+    /// something `pump` decides rather than something the thread happens to
+    /// do.
+    #[test]
+    fn a_frame_older_than_the_picture_on_screen_is_refused() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+
+        bench.player.seek(Cue::Index(1000), Accuracy::Keyframe);
+        bench.player.seek(Cue::Index(2000), Accuracy::Keyframe);
+        bench.player.seek(Cue::Index(3000), Accuracy::Keyframe);
+
+        bench.decoded(2, 2000);
+        assert_eq!(bench.redraw(now), Some(2000));
+
+        bench.decoded(1, 1000);
+        assert_eq!(bench.redraw(now), None, "older than what is on screen");
+        assert_eq!(bench.player.index(), Some(2000));
+        assert!(bench.player.is_seeking());
+    }
+
+    /// A drag that runs off the end of the file reads one position to the end
+    /// while the hand is already somewhere else. That end belongs to the seek
+    /// that hit it and to no other: taken for the player's own, it stops the
+    /// clock and the redraws with a seek still owed a picture.
+    #[test]
+    fn the_end_of_a_superseded_seek_is_not_the_end_of_the_file() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+
+        bench.player.seek(Cue::Index(99_999), Accuracy::Keyframe);
+        bench.player.seek(Cue::Index(1000), Accuracy::Keyframe);
+
+        bench.notes.send(Note::Ended(1)).unwrap();
+        assert_eq!(bench.redraw(now), None);
+        assert!(
+            !bench.player.is_ended(),
+            "the newest seek is not at the end"
+        );
+
+        bench.decoded(2, 1000);
+        assert_eq!(bench.redraw(now), Some(1000));
+        assert!(!bench.player.is_seeking());
+    }
+
+    /// Playback is the case with nothing outstanding, and the epochs must not
+    /// reach it: frames are paced by their own timestamps, one to a due time,
+    /// however many redraws that takes.
+    #[test]
+    fn a_landing_while_playing_is_followed_by_ordinary_pacing() {
+        let mut bench = Bench::new();
+        let start = Instant::now();
+
+        bench.player.play();
+        bench.player.seek(Cue::Index(900), Accuracy::Exact);
+        for index in 900..904 {
+            bench.decoded(1, index);
+        }
+
+        // The landing goes up on arrival, wherever the clock is.
+        assert_eq!(bench.redraw(start), Some(900));
+        assert!(!bench.player.is_seeking());
+        // The three behind it wait for their own due times.
+        assert_eq!(bench.redraw(start + HZ_60), None);
+        assert_eq!(bench.redraw(start + NTSC), Some(901));
+        assert_eq!(bench.redraw(start + NTSC * 2), Some(902));
+        assert_eq!(bench.player.stats().dropped, 0);
+        assert_eq!(bench.player.stats().starved, 0);
     }
 }

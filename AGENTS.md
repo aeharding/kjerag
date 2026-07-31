@@ -28,6 +28,16 @@ compositor:
 The `[patch.crates-io]` wgpu entry lives in the root manifest, which is the
 only place cargo reads one.
 
+**Two checkouts must not share a `CARGO_TARGET_DIR`.** Pointing a worktree's
+build at the main checkout's `target/` to reuse its dependency cache works
+until the moment something is built from the other tree: the uplifted
+binaries in `target/release/` are one name each, so `target/release/reframe`
+silently became the main checkout's while `target/release/zoom` stayed the
+worktree's, and an instrument then measured the wrong code and rendered the
+wrong picture (issue #47, 2026-07-31). If a comparison against another commit
+is what is wanted, build each side into its own target directory, or check
+the binary carries the change before believing a number it prints.
+
 `kyerag-meta` depends on no C library and must stay that way:
 `cargo test -p kyerag-meta` is expected to pass on a box with no libav
 headers, and CI has a job with nothing installed that proves it.
@@ -93,7 +103,11 @@ error` (measured), so a GPU-less runner would be checking nothing.
   includes "goodwill" bug reports and backport offers to dependencies.
   Forking a dependency into the owner's account for our own use is fine;
   interacting with the upstream project is not. Third-party findings are
-  documented in our own docs and issues only.
+  documented in our own docs and issues only. ONE scoped exception
+  (owner-granted 2026-07-31): Flathub publishing for this app, done
+  together with the owner and with him told before every outward action;
+  everything is prepared and previewed in this repo first. Self-hosted
+  flatpak distribution is declined by the owner; Flathub is the channel.
 - Subagents may write and commit directly on working branches (explicitly
   authorized by the owner, 2026-07-30); main changes only land via PR.
 - Work queue is GitHub issues. Claim an issue by commenting; close via PR.
@@ -123,6 +137,14 @@ error` (measured), so a GPU-less runner would be checking nothing.
   the agent's model of the bug, not the bug) and re-learned on PR #59
   (merged on its measurements before the owner's retest, against his
   explicit instruction).
+- Accepted tradeoffs are owner decisions (owner root-cause, 2026-07-31):
+  when an agent measures a user-visible compromise and decides to accept
+  it (placement, overlap, quality, feel), that acceptance goes in a
+  clearly-labeled "Accepted tradeoffs" list at the TOP of the PR body,
+  and the coordinator relays each item to the owner as an explicit
+  question before the owner is asked to test. Documenting a tradeoff in
+  prose is not surfacing it: the toast-over-scrubber call was measured,
+  disclosed mid-report, relayed by nobody, and found by the owner.
 - UI copy: plain words, no em dashes.
 - UI design defers to COSMIC system apps best practice (owner doctrine,
   2026-07-31): use libcosmic's stock widgets and the patterns of
