@@ -13,14 +13,14 @@ Anatomy follows the 7.5-head canon at 200 units tall. The proportion that
 actually decides whether it reads as a person is chest depth against head
 depth: roughly 2:1. At 1:1 it is a tadpole no matter what the limbs do.
 
-Writes resources/icon-drafts/round-4/. Re-run after editing SKELETON.
+Writes resources/icon-drafts/round-{4,5}/. Re-run after editing SKELETON.
 """
 
 import math
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "resources", "icon-drafts", "round-4")
+DRAFTS = os.path.join(ROOT, "resources", "icon-drafts")
 
 # Joint positions and radii, in a local frame where +y is the dive
 # direction: the head leads at +y, the feet trail at -y.
@@ -58,8 +58,24 @@ LAND = (
     ' 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>'
 )
 
+def entry(cx, cy, radius, angle, scale, depth):
+    """Place the figure so the world's rim crosses it at local y=`depth`.
+
+    The dive runs along local +y, so `depth` names the landmark that sits on
+    the rim: SKELETON["chest"][1] is chest-deep, ["waist"][1] waist-deep.
+    Anything above the head's y leaves the figure clear of the world.
+    """
+    theta = math.radians(angle)
+    dx, dy = -math.sin(theta), math.cos(theta)
+    reach = radius + scale * depth
+    return (f"translate({cx - reach * dx:.1f} {cy - reach * dy:.1f}) "
+            f"rotate({angle}) scale({scale})")
+
+
+ANKLE, KNEE = SKELETON["ankle"][1], SKELETON["knee"][1]
+
 # name, world radius, world centre, figure transform, 32 px mark transform
-CANDIDATES = [
+ROUND4 = [
     ("h1-exit-line", 78, 162, 166,
      "translate(73 72) rotate(-40) scale(0.62)", "translate(90 84) rotate(-40)"),
     ("h2-piercing", 82, 128, 158,
@@ -67,6 +83,30 @@ CANDIDATES = [
     ("h3-long-way", 70, 128, 176,
      "translate(116 53) rotate(-8) scale(0.48)", "translate(120 62) rotate(-8)"),
 ]
+
+# Round 5 converges on H2: diver moved to the left and mostly inside the
+# world, with only a jut past the rim. The rim crosses the figure near the
+# feet, so the depths below sit just either side of the ankle. Same world
+# every time; only the entry changes.
+_W = (134, 152, 86)
+_S = 0.55
+ROUND5 = [
+    ("k1-foot-jut", *_W[2:], _W[0], _W[1],
+     entry(*_W, -50, _S, ANKLE - 8), entry(*_W, -50, 1.0, -30)),
+    ("k2-ankle-jut", *_W[2:], _W[0], _W[1],
+     entry(*_W, -50, _S, ANKLE + 8), entry(*_W, -50, 1.0, -30)),
+    ("k3-calf-jut", *_W[2:], _W[0], _W[1],
+     entry(*_W, -62, _S, KNEE - 8), entry(*_W, -62, 1.0, -26)),
+]
+
+# The figure's gradient is per round, because which end of it must be dark
+# depends on what sits behind the head. In round 4 the head is against
+# transparent sky and the light end advances; in round 5 it is against the
+# world's pale land and the light end vanishes. Same figure, opposite ramp.
+ROUNDS = {
+    "round-4": (ROUND4, ("#D9481F", "#F5A056")),
+    "round-5": (ROUND5, ("#EE9048", "#B8371A")),
+}
 
 
 def bone(a, b):
@@ -123,7 +163,7 @@ def mark():
                            ["head", "chest"], joints))
 
 
-def draft(key, radius, cx, cy, transform, body, y0, y1):
+def draft(key, radius, cx, cy, transform, body, y0, y1, stops):
     inner = radius - 3
     return f'''<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
@@ -132,8 +172,8 @@ def draft(key, radius, cx, cy, transform, body, y0, y1):
       <stop offset="1" stop-color="#1B7B9C"/>
     </linearGradient>
     <linearGradient id="{key}-fig" x1="0" y1="{y0}" x2="30" y2="{y1}" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#D9481F"/>
-      <stop offset="1" stop-color="#F5A056"/>
+      <stop stop-color="{stops[0]}"/>
+      <stop offset="1" stop-color="{stops[1]}"/>
     </linearGradient>
     <clipPath id="{key}-globe"><circle cx="{cx + 2}" cy="{cy + 2}" r="{inner}"/></clipPath>
   </defs>
@@ -152,15 +192,17 @@ def draft(key, radius, cx, cy, transform, body, y0, y1):
 
 
 def main():
-    os.makedirs(OUT, exist_ok=True)
     body, small = figure(), mark()
-    for name, radius, cx, cy, transform, transform32 in CANDIDATES:
-        key = name.split("-")[0]
-        with open(os.path.join(OUT, f"{name}.svg"), "w") as fh:
-            fh.write(draft(key, radius, cx, cy, transform, body, -104, 98))
-        with open(os.path.join(OUT, f"{name}-32.svg"), "w") as fh:
-            fh.write(draft(key, radius, cx, cy, transform32, small, -38, 36))
-        print(name)
+    for round_name, (candidates, stops) in ROUNDS.items():
+        out = os.path.join(DRAFTS, round_name)
+        os.makedirs(out, exist_ok=True)
+        for name, radius, cx, cy, transform, transform32 in candidates:
+            key = name.split("-")[0]
+            with open(os.path.join(out, f"{name}.svg"), "w") as fh:
+                fh.write(draft(key, radius, cx, cy, transform, body, -104, 98, stops))
+            with open(os.path.join(out, f"{name}-32.svg"), "w") as fh:
+                fh.write(draft(key, radius, cx, cy, transform32, small, -38, 36, stops))
+            print(f"{round_name}/{name}")
 
 
 if __name__ == "__main__":

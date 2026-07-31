@@ -6,7 +6,8 @@ to, and the next one narrows. Round 1 explored six concepts; the owner
 picked F, a small round world wedged in a rock notch, so round 2 varies
 that one. Round 3 explores a separate owner concept, a freefall figure
 diving at the same world, and stands alongside round 2 rather than after
-it; round 4 is that concept reworked to the owner's notes.
+it; rounds 4 and 5 are that concept reworked to the owner's notes,
+round 5 converging on a single composition.
 
 The doctrine it serves is AGENTS.md's: **UI design defers to COSMIC system
 apps best practice**. Same method as docs/UI.md - where a first-party app
@@ -265,6 +266,53 @@ Two results worth keeping:
 The figure's gradient runs deep at the trailing end to light at the head,
 not the other way round. Drawn the other way the head was the darkest part
 of the figure and receded exactly where the eye needs to land.
+
+## Round 5: converging on H2, diver inside the world
+
+The owner picked H2 and asked for the diver on the left and further
+through the rim, then refined it: the figure should be **mostly inside the
+world with only a subtle jut breaking the outline**, not mostly outside.
+So the rim now crosses the figure near the feet rather than the chest, and
+the freeform-outline principle survives as that one small break.
+
+These are spacing variants of a single composition, not new ideas. All
+three share a world at r=86 and a figure at 0.55; only the entry depth and
+angle change.
+
+| #  | file                 | jut past the rim | the idea |
+| -- | -------------------- | ---------------- | -------- |
+| K1 | `k1-foot-jut.svg`    | 6 units (3.2 px at 128) | Feet only. The subtlest reading of the note, nearly a closed circle. |
+| K2 | `k2-ankle-jut.svg`   | 15 units (7.6 px at 128) | Ankles out. The middle reading, and the clearest jut that still looks incidental. |
+| K3 | `k3-calf-jut.svg`    | 28 units (14.2 px at 128) | Lower legs out on a shallower line, so the break reads from further away. |
+
+`scripts/icon-diver.py` places these by naming the landmark the rim should
+cross - `entry(..., ANKLE + 8)` is literally ankle-deep - so the depths
+above are declared rather than dialled in by eye.
+
+### The contrast this raised, and the fix
+
+With the figure now mostly on the world rather than on transparent sky, the
+warm gradient stopped working: the light end sat on the head, and the head
+lands on the pale green crest, where it faded out. Three tones were
+rendered against the real world colours at 128 and 64 before choosing:
+light head (the round-4 gradient), reversed, and a deeper head against a
+mid tail. The last is what ships here, `#EE9048` trailing to `#B8371A` at
+the head.
+
+**Round 4's note that the head must be the light end was right for its
+context and wrong for this one.** Against transparent sky the light end
+advanced; against the world's pale land it disappears. The rule is that
+the head takes whichever end contrasts with what sits behind it, and what
+sits behind it changed when the figure moved inside the disc. No stroke or
+keyline was added - the language has none, and the tone swap was enough.
+
+### What 32 px ships, revisited
+
+Same size-specific `*-32.svg` as round 4, but the concession is larger
+now: the jut is 0.8 to 3.5 px at 32, so at that size the silhouette is
+effectively a plain circle and the freeform outline is gone. The mark
+inside still reads. If the broken outline matters at 32 px, K3 is the only
+one with enough jut to survive it.
 
 ## Regenerating the contact sheet
 
