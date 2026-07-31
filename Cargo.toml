@@ -2,6 +2,9 @@
 name = "kyerag"
 version = "0.1.0"
 edition = "2024"
+# `spike` is a measuring instrument, `kyerag` is the app: plain `cargo run`
+# should start the app.
+default-run = "kyerag"
 
 [dependencies]
 # System ffmpeg is 6.1 (Pop!_OS 24.04); the crate major must match the
@@ -26,6 +29,22 @@ rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1"
 # wgpu is not a default feature: the default renderer is tiny-skia, which
 # has no shader widget and no device to import into.
 features = ["wgpu"]
+
+# wgpu-hal 28 enables VK_KHR_external_memory_fd and
+# VK_EXT_external_memory_dma_buf but never VK_EXT_image_drm_format_modifier,
+# and iced_wgpu builds its device from a fixed DeviceDescriptor with no hook,
+# so the device the shader widget renders on cannot import a tiled dmabuf.
+# This branch is the extension-enable hunk of gfx-rs/wgpu#9366 (shipped in
+# wgpu 30) applied verbatim to the v28.0.1 tag, and nothing else. Delete this
+# entry and the fork the day libcosmic reaches wgpu 30.
+#
+# The entry names `wgpu` even though the change is in `wgpu-hal`: patching
+# wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
+# and two wgpu-types in one graph is two incompatible `TextureFormat`s.
+# `wgpu` is the only crate in that workspace anything outside it depends on,
+# so patching it pulls the whole stack from one consistent source.
+[patch.crates-io]
+wgpu = { git = "https://github.com/aeharding/wgpu", branch = "v28-drm-modifier-backport" }
 
 [dev-dependencies]
 # Reads the checked-in calibration fixture, which telemetry-parser wrote

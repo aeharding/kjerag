@@ -55,7 +55,14 @@ impl cosmic::Application for App {
         &mut self.core
     }
 
-    fn init(core: Core, input: Self::Flags) -> (Self, Task<Self::Message>) {
+    fn init(mut core: Core, input: Self::Flags) -> (Self, Task<Self::Message>) {
+        // libcosmic's content container insets the app's view by
+        // `border_padding` on the right and, because `nav_bar.active`
+        // defaults to true even for an app with no nav model, by nothing on
+        // the left (`app/mod.rs`, `main_content_padding`). Measured at scale
+        // 1.25: 1 physical px of window border on the left against 10 on the
+        // right. Video wants both edges, so the container comes off.
+        core.window.content_container = false;
         let frame = input.map(|path| Arc::new(Frame::pending(path)));
         (
             App {

@@ -76,11 +76,18 @@ map call alone, with nothing reading the pixels through it.)
 - wgpu-hal 28 enables `VK_KHR_external_memory_fd` and
   `VK_EXT_external_memory_dma_buf` whenever the adapter has them, but never
   `VK_EXT_image_drm_format_modifier`, and `iced_wgpu` builds its device from
-  a fixed `DeviceDescriptor` with no hook. A device kyerag opens itself
-  (wgpu-hal `open_with_callback` + `dmabuf::force_extensions`) can import;
-  the device iced hands the shader widget cannot. `enabled_device_extensions()`
-  is the check, and `dmabuf::import` refuses rather than proceeding: creating
-  an image with a disabled extension's structures is UB, not an error.
+  a fixed `DeviceDescriptor` with no hook. The `[patch.crates-io]` entry in
+  Cargo.toml is what turns the third one on, for iced's device and ours
+  alike; the spike additionally forces it through wgpu-hal's
+  `open_with_callback` because it builds its own device. `dmabuf::import`
+  still checks `enabled_device_extensions()` and refuses: creating an image
+  with a disabled extension's structures is UB, not an error, so the day
+  someone drops the patch entry the failure must be loud.
+- libcosmic's content container insets the app's view by `border_padding`
+  on the right and, because `nav_bar.active` defaults to true even with no
+  nav model, by nothing on the left (`app/mod.rs`, `main_content_padding`).
+  Measured at scale 1.25: 1 physical px of border left, 10 right. The app
+  sets `core.window.content_container = false` (issue #22).
 - `iced_renderer` silently drops shader primitives when the tiny-skia
   fallback is chosen (`fallback.rs`: a `log::warn!` and nothing drawn), so
   a blank widget can mean "wrong renderer", not "wrong shader". libcosmic's
@@ -118,13 +125,6 @@ a crash: build the diff-vs-Studio-export harness before trusting any of it.
 
 ## Open questions
 
-- How kyerag gets `VK_EXT_image_drm_format_modifier` onto the device
-  `iced_wgpu` creates. Nothing in libcosmic, iced or wgpu 28 exposes a hook;
-  a four-line backport of the wgpu 30 behaviour into wgpu-hal 28, carried as
-  a `[patch.crates-io]` fork, is measured to work and is the proposal. The
-  alternative is a second device plus an external-memory handoff, which is
-  larger and needs a CPU stall per frame (wgpu-hal 28 does not enable
-  `VK_KHR_external_semaphore_fd` either).
 - Vignetting coefficients are not in the metadata; the seam band may show
   rolloff. Needs flat-field calibration if it bites.
 - Slot 8 is `roll`, not `half_fov` (a ONE X2 puts -179.717 in it, and a

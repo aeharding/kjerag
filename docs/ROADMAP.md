@@ -3,17 +3,16 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
-**Status 2026-07-30:** feasibility study complete (docs/research/), repo
-bootstrapped, M0 frame path proven end to end on real footage.
-`cargo run --release --bin spike -- <file.insv>` decodes one 3840x3840 lens
-on VA-API, imports the dmabuf planes into wgpu with no copy, and renders to
-PNG at 103 fps (3.4x realtime). The shell is up: a libcosmic window whose
-body is an `iced::widget::shader`, with the import ported to wgpu 28 by
-hand (`src/render/dmabuf.rs`, 130 lines inside `unsafe`). One thing stops
-a frame reaching the widget on stock dependencies: see the wgpu-28
-extension entry in the decisions log. M1 has started: `src/meta/` reads
-the trailer's calibration (issue #2). Next: dual decode and the Mei
-reprojection (issue #3), which consumes the `CalibrationSet` as it stands.
+**Status 2026-07-31:** feasibility study complete (docs/research/), repo
+bootstrapped, M0 done. `cargo run --release --bin spike -- <file.insv>`
+decodes one 3840x3840 lens on VA-API, imports the dmabuf planes into wgpu
+with no copy, and renders to PNG at 103 fps (3.4x realtime). `cargo run
+--release -- <file.insv>` shows that frame in a libcosmic window, imported
+zero-copy onto the device iced created and sampled inside iced's own render
+pass: the shell, the shader widget and the wgpu-28 import all confirmed on
+screen. M1 has started: `src/meta/` reads the trailer's calibration
+(issue #2). Next: dual decode and the Mei reprojection (issue #3), which
+consumes the `CalibrationSet` as it stands.
 
 ## Milestones
 
@@ -73,12 +72,26 @@ reprojection (issue #3), which consumes the `CalibrationSet` as it stands.
 - 2026-07-30 The whole crate is on wgpu 28, spike included. Two wgpu
   majors in one graph would mean two sets of incompatible types for the
   same textures, and the spike's job is to measure the code the app runs.
-- OPEN, needs Alex: nothing exposes `VK_EXT_image_drm_format_modifier` on
-  the device `iced_wgpu` creates, so the shader widget cannot import a
-  frame on stock dependencies. A four-line backport of wgpu 30's behaviour
-  into wgpu-hal 28, carried as a `[patch.crates-io]` fork, was measured
-  end to end and makes it work. The alternative is a second wgpu device
-  and an external-memory handoff. Issue #1 has the numbers.
+- 2026-07-31 Carry a wgpu fork (Alex). Nothing exposes
+  `VK_EXT_image_drm_format_modifier` on the device `iced_wgpu` creates, so
+  the shader widget could not import a frame on stock dependencies. We
+  carry the extension-enable hunk of gfx-rs/wgpu#9366 (shipped in wgpu 30)
+  applied verbatim to the v28.0.1 tag, on
+  `aeharding/wgpu@v28-drm-modifier-backport`, through `[patch.crates-io]`.
+  The alternative was a second wgpu device and an external-memory handoff:
+  roughly 200 more unsafe lines and a CPU stall per frame.
+  **Deletion condition: the day libcosmic reaches wgpu 30, delete the patch
+  entry, the fork, and `src/render/dmabuf.rs`, and call
+  `vulkan::Device::texture_from_dmabuf_fd` instead.**
+- 2026-07-31 The patch entry names `wgpu`, not `wgpu-hal`. Patching
+  wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
+  and two wgpu-types in one graph is two incompatible `TextureFormat`s.
+  `wgpu` is the only crate in that workspace anything outside it depends on.
+- 2026-07-31 The app turns libcosmic's content container off
+  (`core.window.content_container = false`). It insets the view by
+  `border_padding` on the right and, because `nav_bar.active` defaults to
+  true even with no nav model, by nothing on the left. Video wants both
+  edges (issue #22).
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 
