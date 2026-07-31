@@ -90,6 +90,9 @@ const CONTROLS_POLL: Duration = Duration::from_millis(250);
 /// way to see dropped frames without a profiler.
 const REPORT_EVERY: Duration = Duration::from_secs(5);
 
+/// Width of the volume popup (cosmic-player `src/main.rs:1924`).
+const VOLUME_POPUP: f32 = 240.0;
+
 /// Runs the shell.
 pub fn run(input: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let stored = Stored::load(App::APP_ID);
@@ -109,6 +112,17 @@ pub struct Flags {
 
 #[derive(Clone, Debug)]
 pub enum Message {
+    /// The speaker button in the control row: show the volume slider, or take
+    /// it away (cosmic-player `src/main.rs:1049-1053`, one dropdown of its
+    /// four).
+    AudioDropdown,
+    /// Mute, or unmute (cosmic-player `src/main.rs:1223-1227`).
+    AudioToggle,
+    /// The volume slider was dragged, 0 to 1.
+    AudioVolume(f64),
+    /// It was let go, which is when the setting is written. A cosmic-config
+    /// entry per pointer move would be a file write per pointer move.
+    AudioVolumeRelease,
     Config(Config),
     ConfigState(ConfigState),
     /// A drag and drop landed. `None` is a payload that could not be read.
@@ -204,6 +218,13 @@ struct Open {
 struct Controls {
     shown: bool,
     since: Instant,
+    /// The volume slider, which sits in a popup above the row rather than in
+    /// it (cosmic-player `src/main.rs:1777-1807`). It goes when the row goes,
+    /// which cosmic-player does the other way round: it holds the controls up
+    /// for as long as a dropdown is open (`src/main.rs:1627`). Ours cannot,
+    /// because a drag to look around is pointer input, so the row would never
+    /// time out and the dropdown would never close.
+    volume: bool,
 }
 
 impl cosmic::Application for App {
@@ -249,6 +270,7 @@ impl cosmic::Application for App {
             controls: Controls {
                 shown: true,
                 since: Instant::now(),
+                volume: false,
             },
             dragging: None,
             fullscreen: false,
@@ -266,11 +288,35 @@ impl cosmic::Application for App {
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         let now = Instant::now();
         match message {
+            Message::AudioDropdown => {
+                self.controls.volume = !self.controls.volume;
+                self.show_controls(now);
+            }
+            Message::AudioToggle => {
+                self.stored.config.muted = !self.stored.config.muted;
+                self.stored.write_config();
+                self.hold_sound();
+                self.show_controls(now);
+            }
+            Message::AudioVolume(volume) => {
+                // Moving the slider unmutes, which is what cosmic-player does
+                // (`src/main.rs:1229-1235`): the pilot is asking to hear
+                // something.
+                self.stored.config.volume = volume.clamp(0.0, 1.0);
+                self.stored.config.muted = false;
+                self.hold_sound();
+                self.show_controls(now);
+            }
+            Message::AudioVolumeRelease => {
+                self.stored.write_config();
+                self.show_controls(now);
+            }
             Message::Config(config) => {
                 self.stored.config = config;
-                // The setting can change from outside this window, so the
+                // The settings can change from outside this window, so the
                 // scene is told again rather than only on the toggle.
                 self.hold_horizon();
+                self.hold_sound();
                 return cosmic::command::set_theme(self.stored.config.app_theme.theme());
             }
             Message::ConfigState(state) => self.stored.state = state,
@@ -310,6 +356,10 @@ impl cosmic::Application for App {
                     return Task::none();
                 };
                 self.fullscreen = !self.fullscreen;
+                // The popup is laid out against the window, so it does not
+                // survive the window changing shape under it (cosmic-player
+                // `src/main.rs:1190-1193`).
+                self.controls.volume = false;
                 self.show_controls(now);
                 let mode = match self.fullscreen {
                     true => Mode::Fullscreen,
@@ -564,6 +614,7 @@ impl App {
                 self.stored.state.remember(path);
                 self.stored.write_state();
                 self.hold_horizon();
+                self.hold_sound();
             }
             Err(e) => {
                 eprintln!("kyerag: {} not shown: {e}", path.display());
@@ -586,6 +637,16 @@ impl App {
             });
     }
 
+    /// Hand the volume and the mute to the scene, which is where the sound is
+    /// (issue #13). A file with no sound takes them and does nothing.
+    fn hold_sound(&self) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        open.scene.set_volume(self.stored.config.volume as f32);
+        open.scene.set_muted(self.stored.config.muted);
+    }
+
     fn retitle(&mut self) -> Task<Message> {
         let Some(id) = self.core.main_window_id() else {
             return Task::none();
@@ -600,6 +661,7 @@ impl App {
         self.controls = Controls {
             shown: true,
             since: now,
+            ..self.controls
         };
         self.core.window.show_headerbar = !self.fullscreen;
         self.hide_cursor(false);
@@ -615,6 +677,7 @@ impl App {
             return;
         }
         self.controls.shown = false;
+        self.controls.volume = false;
         self.core.window.show_headerbar = false;
         self.hide_cursor(true);
     }
@@ -768,7 +831,11 @@ impl App {
                 .push(
                     widget::button::icon(icon::from_name("view-fullscreen-symbolic").size(16))
                         .on_press(Message::Fullscreen),
-                ),
+                )
+                // Last, after fullscreen, which is cosmic-player's own order
+                // (`src/main.rs:2013-2051`). A file with no sound draws it
+                // with no `on_press`, which renders it disabled.
+                .push(speaker(open, &self.stored.config, Message::AudioDropdown)),
             spacing,
         )];
         if condensed {
@@ -779,6 +846,11 @@ impl App {
                 times = times.push(element);
             }
             rows.push(bar(times, spacing));
+        }
+        if self.controls.volume {
+            // Above the row, right aligned under the button that opened it
+            // (cosmic-player `src/main.rs:1899-1926`).
+            rows.insert(0, volume_popup(open, &self.stored.config, spacing));
         }
         widget::column::with_children(rows).into()
     }
@@ -850,6 +922,63 @@ fn bar<'a>(
     )
     .on_press(Message::ShowControls)
     .into()
+}
+
+/// The speaker button, which says what the sound is doing and is the way to
+/// the slider. Its four icons and the two thirds they switch at are
+/// cosmic-player's (`src/main.rs:2033-2051`).
+fn speaker(open: &Open, config: &Config, press: Message) -> Element<'static, Message> {
+    let name = match (config.muted, config.volume) {
+        (true, _) => "audio-volume-muted-symbolic",
+        (false, volume) if volume >= 2.0 / 3.0 => "audio-volume-high-symbolic",
+        (false, volume) if volume >= 1.0 / 3.0 => "audio-volume-medium-symbolic",
+        (false, _) => "audio-volume-low-symbolic",
+    };
+    let button = widget::button::icon(icon::from_name(name).size(16));
+    match open.scene.has_sound() {
+        true => button.on_press(press).into(),
+        // No `on_press` is how libcosmic draws a button disabled, which is
+        // what a file with no sound in it should show.
+        false => button.into(),
+    }
+}
+
+/// The volume slider, in a popup above the control row rather than in it
+/// (cosmic-player `src/main.rs:1780-1807`, `1899-1926`).
+///
+/// cosmic-player styles the card with a hand-rolled container closure carrying
+/// a `//TODO: move style to libcosmic` next to it (`src/main.rs:1905-1922`).
+/// libcosmic has since moved it: `theme::Container::Dropdown` is the same
+/// component base, divider border and small radius
+/// (`src/theme/style/iced.rs:608-619`), so the stock one is what this uses.
+fn volume_popup(
+    open: &Open,
+    config: &Config,
+    spacing: cosmic_theme::Spacing,
+) -> Element<'static, Message> {
+    let inside = widget::row::with_capacity(2)
+        .align_y(Alignment::Center)
+        .spacing(spacing.space_xxs)
+        .push(speaker(open, config, Message::AudioToggle))
+        .push(
+            Slider::new(0.0..=1.0, config.volume, Message::AudioVolume)
+                .step(0.01)
+                .on_release(Message::AudioVolumeRelease),
+        );
+    widget::row::with_capacity(2)
+        .push(widget::space::horizontal())
+        .push(
+            widget::mouse_area(
+                widget::container(
+                    widget::container(inside).padding([spacing.space_xxs, spacing.space_m]),
+                )
+                .padding(1)
+                .class(theme::Container::Dropdown)
+                .width(Length::Fixed(VOLUME_POPUP)),
+            )
+            .on_press(Message::ShowControls),
+        )
+        .into()
 }
 
 fn play_pause(open: &Open) -> Element<'static, Message> {

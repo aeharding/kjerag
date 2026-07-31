@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
-use super::{DrmFrame, Fallible, HwDevice, Size, decode};
+use super::sound::Sound;
+use super::track::Track;
+use super::{DrmFrame, Fallible, HwDevice, NANOS, Size, decode, media_time};
 
 /// Which frame a caller wants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,8 +66,6 @@ pub struct Timing {
     /// Frames in one video stream, as the container's index reports it.
     pub frames: u64,
 }
-
-const NANOS: u64 = 1_000_000_000;
 
 impl Timing {
     pub fn new(rate: ff::Rational, frames: u64) -> Fallible<Self> {
@@ -139,6 +139,9 @@ impl std::fmt::Debug for Frames {
 pub struct Reader {
     input: ff::format::context::Input,
     lanes: Vec<Lane>,
+    /// The file's sound, when it has one and a device took it. Fed from this
+    /// same demux loop, because there is only one file handle.
+    track: Option<Track>,
     timing: Timing,
     size: Size,
     /// Stream time base, shared by both video streams (checked at open).
@@ -220,6 +223,7 @@ impl Reader {
         Ok(Self {
             input,
             lanes,
+            track: None,
             timing: Timing::new(rate, frames.max(0) as u64)?,
             size,
             time_base,
@@ -250,6 +254,31 @@ impl Reader {
     pub fn lookahead(mut self, frames: usize) -> Self {
         self.lookahead = frames;
         self
+    }
+
+    /// Decode this file's sound as well, into `sound`'s ring (issue #13).
+    ///
+    /// A file with no audio stream takes this and stays silent, which is what
+    /// the older cameras' per-lens files do. Nothing else about the reader
+    /// changes: the sound comes off the packets this demuxer is already
+    /// reading.
+    pub fn listen(mut self, sound: &Sound) -> Fallible<Self> {
+        self.track = Track::open(&self.input, sound.pipe(), sound.rate(), sound.channels())?;
+        Ok(self)
+    }
+
+    /// The sample rate of the file's audio stream, or `None` for a file with
+    /// no sound in it. Read before a device is opened, so the device can be
+    /// asked for the rate that needs no resampling.
+    pub fn sound_rate(&self) -> Option<u32> {
+        let stream = self
+            .input
+            .streams()
+            .find(|s| s.parameters().medium() == ff::media::Type::Audio)?;
+        // `Parameters` hands out no accessors, and opening a second decoder to
+        // read one integer is worse than reading the integer.
+        let rate = unsafe { (*stream.parameters().as_ptr()).sample_rate };
+        u32::try_from(rate).ok().filter(|rate| *rate > 0)
     }
 
     pub fn timing(&self) -> Timing {
@@ -318,6 +347,12 @@ impl Reader {
             lane.decoder.flush();
             lane.queue.clear();
         }
+        // The sound goes with them. Everything already decoded is from before
+        // the seek, and a scrub that leaves a tail of it playing is the thing
+        // the epoch discipline exists to stop.
+        if let Some(track) = &mut self.track {
+            track.flush();
+        }
         self.skip_before = match accuracy {
             Accuracy::Exact => index,
             // Nothing to walk to: the picture is whatever the seek landed on.
@@ -333,6 +368,9 @@ impl Reader {
         let mut packet = ff::Packet::empty();
         match packet.read(&mut self.input) {
             Ok(()) => {
+                if let Some(track) = self.track.as_mut().filter(|t| t.stream == packet.stream()) {
+                    return track.take(&packet);
+                }
                 let Some(lane) = self.lanes.iter_mut().find(|l| l.stream == packet.stream()) else {
                     return Ok(());
                 };
@@ -344,6 +382,9 @@ impl Reader {
                 for lane in &mut self.lanes {
                     lane.decoder.send_eof()?;
                     lane.drain()?;
+                }
+                if let Some(track) = &mut self.track {
+                    track.end()?;
                 }
                 Ok(())
             }
@@ -432,10 +473,7 @@ impl Reader {
     }
 
     fn media_time(&self, pts: i64) -> Duration {
-        let ticks = pts.saturating_sub(self.start).max(0) as u128;
-        let nanos = ticks * self.time_base.numerator() as u128 * u128::from(NANOS)
-            / self.time_base.denominator() as u128;
-        Duration::from_nanos(nanos as u64)
+        media_time(pts, self.start, self.time_base)
     }
 }
 

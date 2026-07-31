@@ -43,7 +43,9 @@ impl AppTheme {
 }
 
 /// Things the pilot chose. Issue #15 adds the screenshot folder and scale.
-#[derive(Clone, CosmicConfigEntry, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// Not `Eq`: the volume is a fraction, and a fraction has no total equality.
+#[derive(Clone, CosmicConfigEntry, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub app_theme: AppTheme,
@@ -59,6 +61,14 @@ pub struct Config {
     /// leaves the picture entirely. `View > Lock horizon` and `h` flip it
     /// live for anyone who wants the camera's own view.
     pub horizon_lock: bool,
+    /// Loudness, 0 to 1 (issue #13).
+    ///
+    /// cosmic-player keeps neither this nor [`Config::muted`]: its volume is a
+    /// GStreamer playbin property and starts at 1 every run. Remembering them
+    /// is the owner's ask, and it suits this player: a paramotor track is
+    /// half an hour of wind noise, so whoever turns it down means it.
+    pub volume: f64,
+    pub muted: bool,
 }
 
 impl Default for Config {
@@ -66,6 +76,8 @@ impl Default for Config {
         Self {
             app_theme: AppTheme::System,
             horizon_lock: true,
+            volume: 1.0,
+            muted: false,
         }
     }
 }

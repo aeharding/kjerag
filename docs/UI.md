@@ -193,11 +193,10 @@ Copy that exactly. Spacing between controls is `space_xxs`, and the row is
 ### What is in the row
 
 Left to right, following cosmic-player's order and dropping what we do not
-have (no subtitles, no playback speed, no repeat, and no volume until audio
-lands in issue #13):
+have (no subtitles, no playback speed, no repeat):
 
 ```
-[back 10 s] [play/pause] [forward 10 s]   00:12:34  =====O------------  00:17:26   [frame] [fullscreen]
+[back 10 s] [play/pause] [forward 10 s]   00:12:34  =====O---------  00:17:26   [frame] [fullscreen] [volume]
 ```
 
 - Jump buttons: `SeekRelative(-10.0)` and `SeekRelative(10.0)`
@@ -216,9 +215,43 @@ lands in issue #13):
   icons (`cosmic-icons/freedesktop/scalable/devices/`). No precedent; see
   "Screenshots" below.
 - Fullscreen: `view-fullscreen-symbolic` (`src/main.rs:2026-2031`).
+- Volume, **after** fullscreen and not before it, which is cosmic-player's own
+  order (`src/main.rs:2013-2051`). One speaker button, whose four icons say
+  what the sound is doing: `audio-volume-muted-symbolic` when muted, and
+  `-high-`, `-medium-` or `-low-` above two thirds, above one third and below
+  it (`src/main.rs:2033-2051`). Pressing it opens the slider, below.
 
 A button with no `on_press` renders disabled, which is how the row can
-exist before the capability behind a button does.
+exist before the capability behind a button does. The volume button is drawn
+that way for a file with no sound in it and for a box with no working output
+device.
+
+### The volume slider
+
+Not in the row: in a popup **above** it, right aligned under the button that
+opened it, exactly as cosmic-player's audio dropdown
+(`src/main.rs:1777-1807` for the contents and `1899-1926` for the frame). The
+contents are a second copy of the speaker button, which is the mute toggle,
+and `Slider::new(0.0..=1.0, volume, ...)` with `.step(0.01)`. Moving the
+slider unmutes, because the pilot is asking to hear something
+(`src/main.rs:1229-1235`).
+
+One deliberate improvement on the source: cosmic-player styles that popup with
+a hand-rolled container closure carrying a `//TODO: move style to libcosmic`
+beside it (`src/main.rs:1905-1922`). libcosmic has since moved it.
+`theme::Container::Dropdown` is the same component base, divider border and
+small radius (`src/theme/style/iced.rs:608-619`), so the stock one is what we
+use.
+
+**When it closes.** cosmic-player holds its controls up for as long as a
+dropdown is open (`src/main.rs:1627`) and closes the dropdown on a click in
+the video, on fullscreen, and on every transport action
+(`src/main.rs:1192`, `1254`, `1327`, `1349`, `1501`, `1508-1513`). We cannot
+copy the first two of those. Holding the controls up while a dropdown is open
+would hold them up forever, because in this app dragging the picture is
+pointer input; and a click in the video is the look-around grab (conflict 1,
+below), which fires before a `mouse_area` around it could see it. So ours
+closes with the control row, on the same 2 s of stillness, and on fullscreen.
 
 ### Auto-hide
 
@@ -397,19 +430,43 @@ disagree with each other:
   tests for both halves).
 - libcosmic scrollables: a bare wheel scrolls, everywhere else.
 
-Kyerag has no scrollable content in the video area and no volume until
-issue #13, and the wheel is already bound to zoom. Keep it: a bare wheel
-over the video zooms the view. It matches cosmic-files' meaning (the wheel
-resizes what you are looking at) without cosmic-files' modifier, which
-exists there only because a file list also scrolls, and ours does not.
+Kyerag has no scrollable content in the video area, and the wheel is already
+bound to zoom. Keep it: a bare wheel over the video zooms the view. It matches
+cosmic-files' meaning (the wheel resizes what you are looking at) without
+cosmic-files' modifier, which exists there only because a file list also
+scrolls, and ours does not.
 
-When audio lands, the wheel is already taken. Volume then goes where
-cosmic-player's own volume slider is, in the control row
-(`src/main.rs:1780-1807`), not on the wheel. **Open question** for the
-owner: whether that is acceptable, or whether zoom should move to
-`Ctrl+wheel` at that point to free the bare wheel for volume. Deciding it
-now, before anyone has used the player with sound, would be deciding it
-blind.
+Audio has now landed (issue #13) and **the wheel stayed on zoom**. Volume went
+where cosmic-player's own volume slider is, in the control row
+(`src/main.rs:1780-1807`). Three things weighed against copying
+cosmic-player's bare-wheel volume, and the owner's earlier ruling that the
+wheel is zoom stands on all three:
+
+1. The wheel is the *only* way to change the field of view with a pointer. A
+   drag looks around; there is no second gesture free. Volume has a button, a
+   slider and (later) MPRIS and the media keys.
+2. cosmic-player's own wheel handler suppresses itself while the nav bar is
+   open (`src/main.rs:1318`), which is an admission that a bare wheel over
+   content is contested. Its content is a still picture; ours is a view
+   direction.
+3. cosmic-files is the closer precedent for what a wheel means over content
+   that has a size: it resizes (`src/tab.rs:7326-7346`). We do the same thing
+   without its Ctrl, because nothing under our pointer scrolls.
+
+What the wheel does not do is settled, then, and `Ctrl+wheel` stays free.
+Left open for the owner after real use: whether the **speaker button should
+also take a wheel**, which is cosmic-player's own `//TODO`
+(`src/main.rs:2032`) and would give volume a wheel without taking one from
+zoom.
+
+**Mute has no key.** cosmic-player binds none: its `key_bind.rs` is `f`,
+`Alt+Enter`, `Space`, the two arrows, `.`, `,` and `a`, and mute is reachable
+only through the dropdown's button (and through MPRIS, which we do not have
+yet). We follow it. **Open question** for the owner: this app has already
+invented two bare letters where no COSMIC app had a precedent (`s` for save
+frame, `h` for the horizon lock), so `m` would be in keeping with Kyerag's own
+practice even though it is not in cosmic-player's; it is not the implementing
+agent's to add.
 
 ## Screenshots, and where export will go
 
@@ -588,6 +645,11 @@ reviewer can find them in one place:
 6. **`responsive_menu_bar` rather than `MenuBar::new`.** cosmic-player is
    the only one of the three still on the old API.
 7. **No i18n yet.**
+8. **Volume and mute are remembered.** cosmic-player keeps neither: both are
+   GStreamer playbin properties and start at 1 and false every run. The owner
+   asked for them to persist, and they go in `Config` beside the theme.
+9. **The volume popup closes with the control row**, rather than holding the
+   row open the way cosmic-player's dropdowns do. See "The volume slider".
 
 Two things cosmic-player does that we should copy later, neither of them
 part of issue #16:
@@ -602,8 +664,10 @@ part of issue #16:
 
 ## Open questions
 
-1. The wheel, once audio lands: volume in the control row only, or move
-   zoom to `Ctrl+wheel`? Deliberately not decided now.
+1. Answered by issue #13: the wheel stayed on zoom and volume went into the
+   control row. What is left of it is smaller: should the speaker button take
+   a wheel of its own, and should `m` be bound to mute? Both above, under
+   "Conflict 2".
 2. Screenshot feedback: toast wording, and whether it offers an action.
 3. Whether the frame-capture button belongs in the control row at all, or
    whether the menu item plus `s` is enough. No precedent either way.

@@ -417,6 +417,24 @@ impl Scene {
             .unwrap_or_default()
     }
 
+    /// Whether this file has a sound track that a device took (issue #13).
+    /// `false` is a file with no sound in it, or a box with no working output;
+    /// the control row draws its volume button disabled for both.
+    pub fn has_sound(&self) -> bool {
+        self.player(Player::has_sound).unwrap_or(false)
+    }
+
+    /// Loudness, 0 to 1. A file with no sound takes it and does nothing.
+    pub fn set_volume(&self, volume: f32) {
+        self.player(|player| player.set_volume(volume));
+    }
+
+    /// Silence without stopping: the sound keeps running under a mute, so
+    /// unmuting lands where the picture is rather than where it was.
+    pub fn set_muted(&self, muted: bool) {
+        self.player(|player| player.set_muted(muted));
+    }
+
     /// Hide the pointer along with the controls, or bring both back.
     pub fn hide_cursor(&mut self, hidden: bool) {
         self.cursor_hidden = hidden;
