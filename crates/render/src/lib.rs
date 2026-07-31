@@ -11,8 +11,8 @@ mod widget;
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use kyerag_media::{Accuracy, Cue, Fallible, Size, Stats};
-pub use kyerag_meta::Quat;
-pub use projection::{Blend, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe};
+pub use kyerag_meta::{Quat, Readout, Sweep};
+pub use projection::{Blend, Held, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe, Rolling};
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on

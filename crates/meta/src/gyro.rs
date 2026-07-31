@@ -80,10 +80,12 @@ impl GyroTrack {
         }
     }
 
-    /// A track built from samples rather than from bytes, which is how the
-    /// filter's own tests state a motion instead of encoding one.
-    #[cfg(test)]
-    pub(crate) fn from_samples(samples: Vec<GyroSample>) -> Self {
+    /// A track built from samples rather than from bytes, which is how a test
+    /// or an instrument states a motion instead of encoding one. What it
+    /// builds is integrated by exactly the path a recorded track takes, which
+    /// is the point of having it: a synthetic roll reaches the pass the way a
+    /// flown one does.
+    pub fn from_samples(samples: Vec<GyroSample>) -> Self {
         Self { samples }
     }
 

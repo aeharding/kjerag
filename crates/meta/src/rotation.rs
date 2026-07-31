@@ -115,6 +115,27 @@ impl Quat {
         }
     }
 
+    /// The same rotation as an axis whose length is the angle in radians,
+    /// which is what [`Self::from_rotation_vector`] reads.
+    ///
+    /// Rolling-shutter correction is the caller (issue #9): the turn the body
+    /// makes across one frame's readout is scaled by where in the readout a
+    /// row sits, and scaling wants a vector rather than a quaternion.
+    pub fn rotation_vector(self) -> [f64; 3] {
+        let length = norm(self.v);
+        if length < 1e-12 {
+            return [0.0; 3];
+        }
+        // `q` and `-q` are one rotation, and only one of the two is the short
+        // way round: without this a turn of a degree logs as 359.
+        let (w, v) = match self.w < 0.0 {
+            true => (-self.w, self.v.map(std::ops::Neg::neg)),
+            false => (self.w, self.v),
+        };
+        let angle = 2.0 * length.atan2(w);
+        v.map(|axis| axis * angle / length)
+    }
+
     /// A turn about the world vertical, which in this frame is +y (down). The
     /// yaw half of an orientation, and the only part of it a heading filter
     /// touches.
@@ -355,6 +376,38 @@ mod tests {
         }
         assert!(a.nlerp(b, 0.0).angle_to(a) < 1e-12);
         assert!(a.nlerp(b, 1.0).angle_to(b) < 1e-12);
+    }
+
+    /// The log and the exponential are each other's inverse, which is what
+    /// rolling-shutter correction rests on: a turn read off the orientation
+    /// track as a vector, scaled by a row's share of the readout, has to be
+    /// the rotation that share of the turn.
+    #[test]
+    fn a_rotation_vector_survives_the_round_trip() {
+        for v in [
+            [0.0, 0.0, 0.0],
+            [1e-9, 0.0, 0.0],
+            [0.3, -0.7, 0.2],
+            [0.0, 0.0, PI - 0.01],
+        ] {
+            let back = Quat::from_rotation_vector(v).rotation_vector();
+            near(back, v, 1e-9);
+        }
+    }
+
+    /// And the short way round is the one it reads: a turn a degree short of a
+    /// full circle is a degree back, not 359 forward. The orientation track
+    /// stores whichever representation the integration landed on, so the sign
+    /// of `w` is not the caller's to control.
+    #[test]
+    fn a_rotation_vector_takes_the_short_way_round() {
+        let turn = Quat::from_rotation_vector([0.0, 0.0, 0.02]);
+        let far = Quat {
+            w: -turn.w,
+            v: turn.v.map(std::ops::Neg::neg),
+        };
+
+        near(far.rotation_vector(), [0.0, 0.0, 0.02], 1e-12);
     }
 
     /// `q` and `-q` are one rotation, and an interpolation that does not

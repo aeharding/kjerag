@@ -88,6 +88,16 @@ pub struct Skyline {
     pub sky: [f64; 2],
     /// The share of searched scan lines that ended up on the line.
     pub agreement: f64,
+    /// How far the kept points sit from their own line, root mean square, in
+    /// pixels of the picture measured.
+    ///
+    /// A horizon is a great circle and a great circle projects to a straight
+    /// line in a rectilinear view, so this is zero for a horizon and a picture
+    /// that reproduces one. What bends it is the picture: a rolling shutter
+    /// reads the top of a view at a different instant from the bottom, so a
+    /// camera turning during the readout draws a straight thing curved
+    /// (issue #9). It is the residual that issue's correction is measured by.
+    pub spread: f64,
 }
 
 /// Find the horizon in an RGBA picture, or `None` where there is not one to
@@ -169,7 +179,8 @@ fn scan(picture: &Picture<'_>) -> Option<Skyline> {
         line = fit(&kept)?;
     }
     let agreement = kept.len() as f64 / (picture.width / STEP) as f64;
-    if agreement < KEEP || spread(&kept, line) > STRAIGHT {
+    let spread = spread(&kept, line);
+    if agreement < KEEP || spread > STRAIGHT {
         return None;
     }
 
@@ -183,6 +194,7 @@ fn scan(picture: &Picture<'_>) -> Option<Skyline> {
         through,
         sky: sky(picture, line),
         agreement,
+        spread,
     })
 }
 
@@ -388,6 +400,45 @@ mod tests {
                 (found.degrees - degrees).abs() < 0.2,
                 "read {} for {degrees}",
                 found.degrees
+            );
+        }
+    }
+
+    /// The bend (issue #9): a straight horizon sits on its own fitted line,
+    /// and a bowed one does not.
+    ///
+    /// This is the residual the rolling-shutter candidates are compared by, so
+    /// it needs the same positive control the angle has. The bow here is a
+    /// parabola, which is the shape a readout draws: the displacement grows
+    /// along the picture, so what it does to a straight line grows too.
+    #[test]
+    fn a_bowed_horizon_reads_a_bend_and_a_straight_one_does_not() {
+        let bowed = |sagitta: f64| {
+            let (width, height) = (SIZE.width as usize, SIZE.height as usize);
+            let mut pixels = vec![255u8; width * height * 4];
+            for y in 0..height {
+                for x in 0..width {
+                    let across = x as f64 / width as f64 - 0.5;
+                    let line = height as f64 / 2.0 + sagitta * (1.0 - 4.0 * across * across);
+                    let shade = match (y as f64) < line {
+                        true => 200 + (y % 16) as u8,
+                        false => 40 + (y % 16) as u8,
+                    };
+                    pixels[(y * width + x) * 4..(y * width + x) * 4 + 3].fill(shade);
+                }
+            }
+            skyline(&pixels, SIZE).expect("no horizon in the bowed picture")
+        };
+
+        assert!(bowed(0.0).spread < 0.5, "{}", bowed(0.0).spread);
+        // A parabola of this height has a root-mean-square distance from its
+        // own best straight line of 0.298 of it, which is what the instrument
+        // has to read rather than the height itself.
+        for sagitta in [4.0, 12.0] {
+            let read = bowed(sagitta).spread;
+            assert!(
+                (read - 0.298 * sagitta).abs() < 0.5 + 0.1 * sagitta,
+                "{read} for a {sagitta} px bow"
             );
         }
     }

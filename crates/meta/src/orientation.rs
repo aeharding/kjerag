@@ -154,12 +154,8 @@ impl OrientationTrack {
     /// Identity for a file with no IMU record, which is what makes horizon
     /// lock a no-op on such a file rather than an error.
     ///
-    /// **This is the hook rolling-shutter correction hangs on (issue #9).**
-    /// A row `r` of `rows` is exposed `rolling_shutter_ms * (r / rows - 0.5)`
-    /// away from the frame's own instant, so per-row correction is this call
-    /// per row with that offset added, and nothing else here has to change.
-    /// The interpolation is already finer than the readout: samples are about
-    /// 2 ms apart on the X4 Air against 15.9 ms of readout.
+    /// [`Self::turn`] is what rolling-shutter correction reads (issue #9),
+    /// and it is this call at the two ends of one frame's readout.
     pub fn at(&self, offset_us: i64) -> Quat {
         let after = self
             .samples
@@ -176,6 +172,28 @@ impl OrientationTrack {
             false => 0.0,
         };
         at_sample(previous).nlerp(at_sample(next), t)
+    }
+
+    /// How the body turned between two instants, as a rotation vector in the
+    /// body's own frame: what a direction fixed in the world does when seen
+    /// from a body that moved.
+    ///
+    /// **This is the hook rolling-shutter correction hangs on (issue #9).** A
+    /// sensor row is exposed `rolling_shutter_time * (row / rows - 0.5)` away
+    /// from the frame's own instant, so the turn across one whole readout is
+    /// this call at the two ends of it, and a row's share of that turn is the
+    /// vector scaled. Reading it as a vector rather than as one orientation
+    /// per row is what lets the shader scale it per pixel: 3840 rows would
+    /// otherwise be 3840 lookups, and the samples are 5 ms apart against
+    /// 15.9 ms of readout, so there is nothing in between them to resolve.
+    ///
+    /// Zero for a file with no IMU record, which is what silently switches
+    /// the correction off rather than erroring.
+    pub fn turn(&self, from_us: i64, to_us: i64) -> [f64; 3] {
+        self.at(to_us)
+            .conjugate()
+            .times(self.at(from_us))
+            .rotation_vector()
     }
 }
 
@@ -653,6 +671,42 @@ mod tests {
             solved.at(10_000_000),
             solved.samples().last().unwrap().world_from_body
         );
+    }
+
+    /// What rolling-shutter correction reads (issue #9): a body turning at a
+    /// constant rate turns by rate times time, and the vector it comes back
+    /// as points the way a world-fixed direction goes when seen from the body,
+    /// which is the **opposite** way round from the body's own rotation.
+    ///
+    /// That sign is the one thing in the correction that cannot be checked by
+    /// looking at a picture, and getting it backwards would double every
+    /// displacement instead of removing it.
+    #[test]
+    fn a_turn_across_a_window_is_the_rotation_the_world_makes_in_it() {
+        let solved = gyro_only().solve(
+            &track(2.0, |_| ([0.0, 0.0, 90.0], [0.0, -1.0, 0.0])),
+            Mat3::IDENTITY,
+        );
+
+        // A tenth of a second of 90 deg/s, about the body's forward axis.
+        let turn = solved.turn(500_000, 600_000);
+        assert!((turn[2] + 9f64.to_radians()).abs() < 1e-3, "{turn:?}");
+        assert!(turn[0].abs() < 1e-6 && turn[1].abs() < 1e-6, "{turn:?}");
+        // And it scales with the window rather than with anything else.
+        let half = solved.turn(525_000, 575_000);
+        assert!((half[2] - turn[2] / 2.0).abs() < 1e-4, "{half:?}");
+        // Backwards through the same window is the same turn the other way.
+        let back = solved.turn(600_000, 500_000);
+        assert!((back[2] + turn[2]).abs() < 1e-6, "{back:?}");
+    }
+
+    /// And with no IMU record there is no turn, which is what switches the
+    /// correction off on a file that carries none rather than erroring.
+    #[test]
+    fn a_file_with_no_imu_turns_by_nothing() {
+        let solved = Filter::default().solve(&GyroTrack::default(), Mat3::IDENTITY);
+
+        assert_eq!(solved.turn(-8_000, 8_000), [0.0; 3]);
     }
 
     #[test]

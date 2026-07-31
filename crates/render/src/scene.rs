@@ -32,10 +32,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
-use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack, Quat};
+use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack, Quat, Readout};
 
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
-use super::projection::{self, Held, MAX_LENSES, Reframe};
+use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -117,6 +117,19 @@ pub struct Scene {
     clock: Cell<FrameClock>,
     /// An orientation the harness has forced in place of the file's own.
     forced: Cell<Option<Quat>>,
+    /// A sensor readout the harness has forced in place of the file's own,
+    /// including a zero one, which is the correction switched off.
+    readout: Cell<Option<Readout>>,
+}
+
+/// How the picture is to be held for one redraw: the shell's own toggle, and
+/// the three overrides the headless instruments reach for.
+#[derive(Clone, Copy, Debug)]
+struct Holding {
+    horizon: Horizon,
+    clock: FrameClock,
+    forced: Option<Quat>,
+    readout: Option<Readout>,
 }
 
 /// A file on screen: its calibration, and where its frames come from.
@@ -134,19 +147,21 @@ struct Show {
 }
 
 /// What the trailer says about how the camera moved.
-#[derive(Default)]
 struct Motion {
     orientation: OrientationTrack,
     /// Lens 0's shutter track, read for its timestamps rather than its
     /// shutters: `pts_type = 2` makes it the camera's own frame clock.
     exposure: ExposureTrack,
+    /// How long one frame takes to come off the sensor and which way it
+    /// comes, which is what issue #9's correction is measured against.
+    readout: Readout,
 }
 
 impl Motion {
-    /// Where the body was when this frame was taken.
-    fn at(&self, frames: &Frames, clock: FrameClock) -> Quat {
+    /// The camera's own instant for this frame, in media time.
+    fn instant(&self, frames: &Frames, clock: FrameClock) -> i64 {
         let container = || i64::try_from(frames.timestamp.as_micros()).unwrap_or(i64::MAX);
-        let at = match clock {
+        match clock {
             // The camera's own timestamp, or the container's where the
             // exposure record does not reach: a file whose record is short is
             // a file that still plays.
@@ -155,8 +170,29 @@ impl Motion {
                 .frame_time_us(frames.index)
                 .unwrap_or_else(container),
             FrameClock::Container => container(),
-        };
-        self.orientation.at(at)
+        }
+    }
+
+    /// How the body moved while this frame came off the sensor (issue #9).
+    ///
+    /// `None` where there is nothing to correct with, or nothing known to
+    /// correct: a file with no IMU record, a trailer with no readout time,
+    /// and every camera whose readout direction has not been measured, which
+    /// today is all of them (`kyerag_meta::Sweep::Unknown`). The pass is then
+    /// what it was before issue #9, and the picture with it.
+    fn rolling(&self, at: i64, readout: Readout) -> Option<Rolling> {
+        let span = (readout.seconds * 1e6) as i64;
+        let axis = readout.sweep.axis();
+        if self.orientation.is_empty() || span <= 0 || axis == [0.0; 2] {
+            return None;
+        }
+        Some(Rolling {
+            // Centred on the frame's own instant, so the middle row is the
+            // instant the rest of the pipeline already believes in and the
+            // two ends of the window are where the turn is exact.
+            turn: self.orientation.turn(at - span / 2, at + span / 2),
+            axis,
+        })
     }
 }
 
@@ -188,6 +224,7 @@ impl Scene {
             horizon: Cell::new(Horizon::default()),
             clock: Cell::new(FrameClock::default()),
             forced: Cell::new(None),
+            readout: Cell::new(None),
         }
     }
 
@@ -435,6 +472,24 @@ impl Scene {
         self.forced.set(world_from_body);
     }
 
+    /// Read the sensor this way rather than the way the file describes, until
+    /// it is set back to `None`. A [`Readout`] with a zero span is the
+    /// rolling-shutter correction switched off.
+    ///
+    /// The same hook as [`Self::hold_at`] and for the same reason: issue #9's
+    /// answer is which way the sensor reads, and the three wrong answers have
+    /// to reach the shader by the path the right one takes, or what is
+    /// measured is the harness. Nothing in the shell calls this.
+    pub fn set_readout(&self, readout: Option<Readout>) {
+        self.readout.set(readout);
+    }
+
+    /// How one frame comes off this file's sensor, for an instrument that has
+    /// to say what it corrected for. `None` before a file is open.
+    pub fn readout(&self) -> Option<Readout> {
+        self.show.as_ref().map(|show| show.held.readout)
+    }
+
     pub fn stats(&self) -> Option<Stats> {
         self.player(Player::stats)
     }
@@ -465,15 +520,16 @@ impl Scene {
     }
 
     pub fn primitive(&self, camera: Camera) -> ScenePrimitive {
-        let (horizon, clock) = (self.horizon.get(), self.clock.get());
-        let forced = self.forced.get();
+        let held = Holding {
+            horizon: self.horizon.get(),
+            clock: self.clock.get(),
+            forced: self.forced.get(),
+            readout: self.readout.get(),
+        };
         ScenePrimitive {
             elapsed: self.started.elapsed().as_secs_f32(),
             camera,
-            view: self
-                .show
-                .as_ref()
-                .and_then(|show| show.view(horizon, clock, forced)),
+            view: self.show.as_ref().and_then(|show| show.view(held)),
             shutter: self.shutter.clone(),
         }
     }
@@ -493,15 +549,22 @@ impl Show {
         }
     }
 
-    fn view(&self, horizon: Horizon, clock: FrameClock, forced: Option<Quat>) -> Option<View> {
+    fn view(&self, held: Holding) -> Option<View> {
         let frames = self.playing.borrow().frames.clone()?;
-        let world_from_body = forced.unwrap_or_else(|| self.held.at(&frames, clock));
+        let at = self.held.instant(&frames, held.clock);
+        let world_from_body = held.forced.unwrap_or_else(|| self.held.orientation.at(at));
         Some(View {
             held: Held {
-                body_from_world: match horizon {
+                body_from_world: match held.horizon {
                     Horizon::Locked => world_from_body.conjugate(),
                     Horizon::Free => Quat::IDENTITY,
                 },
+                // Not under the horizon toggle: the readout is the camera's
+                // own motion during the frame, and a view that rides the body
+                // has the same skew in it as one that does not.
+                rolling: self
+                    .held
+                    .rolling(at, held.readout.unwrap_or(self.held.readout)),
             },
             lenses: self.lenses.clone(),
             frames,
@@ -565,6 +628,7 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>,
     let held = Motion {
         orientation,
         exposure: calibration.exposure[0].clone(),
+        readout: calibration.readout(),
     };
     Ok((lenses.into(), Arc::new(held)))
 }
@@ -1069,3 +1133,78 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), 1.0);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kyerag_meta::{Filter, GyroSample, GyroTrack, Sweep};
+
+    /// A camera rolling at a constant rate, as an orientation track: enough
+    /// for the one question this module owns, which is whether a frame's
+    /// readout reaches the pass.
+    fn turning(rate_dps: f64) -> OrientationTrack {
+        let samples = (0..2_000)
+            .map(|index| GyroSample {
+                offset_us: index * 1_000,
+                rate_dps: [0.0, 0.0, rate_dps],
+                accel_g: [0.0, -1.0, 0.0],
+            })
+            .collect();
+        Filter::default().solve(
+            &GyroTrack::from_samples(samples),
+            kyerag_meta::Mat3::IDENTITY,
+        )
+    }
+
+    fn motion(orientation: OrientationTrack) -> Motion {
+        Motion {
+            orientation,
+            exposure: ExposureTrack::default(),
+            readout: Readout {
+                seconds: 0.015_883,
+                sweep: Sweep::Right,
+            },
+        }
+    }
+
+    /// The whole of issue #9's "and if there is no gyro": a file with no IMU
+    /// record has nothing to correct with, so the pass is handed no readout at
+    /// all rather than a zero one, and it runs as it did before.
+    #[test]
+    fn a_file_with_no_gyro_track_gets_no_readout() {
+        let held = motion(OrientationTrack::default());
+
+        assert_eq!(held.rolling(1_000_000, held.readout), None);
+    }
+
+    /// And a camera whose readout direction has not been measured is the same
+    /// case, which today is every camera: `Sweep::Unknown` is a zero axis and
+    /// there is nothing to apply it along.
+    #[test]
+    fn an_unknown_sweep_gets_no_readout() {
+        let held = motion(turning(90.0));
+        let unknown = Readout {
+            sweep: Sweep::Unknown,
+            ..held.readout
+        };
+
+        assert_eq!(held.rolling(1_000_000, unknown), None);
+        assert!(held.rolling(1_000_000, held.readout).is_some());
+    }
+
+    /// With both, the turn handed to the pass is the one the body made across
+    /// that frame's readout, centred on the frame's own instant: 90 deg/s
+    /// through 15.883 ms is 1.43 degrees, about the body's forward axis.
+    #[test]
+    fn a_readout_carries_the_turn_the_body_made_during_it() {
+        let held = motion(turning(90.0));
+        let rolling = held.rolling(1_000_000, held.readout).expect("no readout");
+
+        let turn = rolling.turn[2].to_degrees();
+        assert!(
+            (turn + 1.43).abs() < 0.05,
+            "{turn} degrees across the readout"
+        );
+        assert_eq!(rolling.axis, [1.0, 0.0]);
+    }
+}

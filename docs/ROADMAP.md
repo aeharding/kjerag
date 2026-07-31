@@ -75,8 +75,24 @@ wins every stretch of two captures by 15 to 36 degrees over the runner-up.
 And the quarter-turn roll datum from issue #3 belongs to the **delivered
 picture** rather than to the sensor, which the IMU could tell apart because
 it is bolted to the sensor: that closes the last "what 4.8 does not settle".
-Next in M2: rolling-shutter correction (issue #9), whose input is the
-orientation track this landed.
+**Rolling shutter is fused into the same map, measured, and switched off**
+(issue #9), which is the third M2 item and the second time this project has
+built a correction and then measured it out (the first was #7's exposure
+match). The mechanism is there and tested: for every output ray the landing
+row is solved for, the orientation used is the one at that row's own readout
+instant, one round of the solve, no extra pass and nothing resampled. What is
+missing is the one thing the file does not record, **which way the sensor
+reads**, and two instruments built to measure it both come back null at the
+size this camera would have to have. The stronger of the two reads an applied
+displacement of that size back at 0.985 with r = 0.996 and finds 0.014 of it
+in the pictures, so shipping the direction the geometry implied would have put
+up to 1.9 degrees of misalignment into the seam that #7 just blended.
+`kyerag_meta::Sweep::Unknown` is that answer, and ten seconds of a camera
+turned hard by hand in front of close, still content would settle it
+(docs/research/insv-format.md 6.7).
+
+Next in M2: hemisphere-aware decode gating (issue #10) and high-quality zoom
+sampling (issue #11).
 
 ## Milestones
 
@@ -98,12 +114,23 @@ orientation track this landed.
   correction measured and rejected), gyro horizon lock (issue #8, done:
   complementary filter, `View > Lock horizon`, and a harness that measures
   the horizon in rendered frames because a Studio export was not available
-  overnight), rolling-shutter correction, hemisphere-aware decode gating,
-  high-quality zoom sampling.
+  overnight), rolling-shutter correction (issue #9, done: fused into the one
+  backward map, and switched off because the readout direction is not in the
+  file and could not be measured out of flying footage), hemisphere-aware
+  decode gating, high-quality zoom sampling.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback.
 
 ## Decisions log
+
+- 2026-07-31 Rolling-shutter correction ships **switched off** (issue #9).
+  The readout direction is not in the trailer, and on 30 minutes of flying
+  footage neither the seam nor a rendered horizon can find the displacement a
+  15.883 ms readout would leave. Shipping the direction the roll datum
+  implied would add up to 1.9 degrees of seam misalignment at 120 deg/s that
+  the pictures measurably do not have, so `readout_sweep` answers
+  `Sweep::Unknown` and the pass runs as it did before. One line changes when
+  a settling capture exists.
 
 - 2026-07-30 License AGPL-3.0 (Alex; matches wingover). Unlocks Gyroflow
   GPL-3.0 shader reference with attribution.
@@ -465,6 +492,26 @@ blend, at three yaws, and so does the front hemisphere of a two-lens file.
 The windowed app over the same 60 s: zero dropped and zero starved in
 every 5 s report, 30.0-30.2 redraws/s, 13.4% of one core and 295 MiB RSS
 for the whole libcosmic process.
+
+Rolling-shutter correction (issue #9) costs what a second pass through the
+lens model costs, because that is what it is: the landing row is solved for
+rather than computed, and each round of the solve is one more turn of the ray
+and one more Mei projection per lens per pixel. Two 60 s runs each at
+2560x1440, yaw 90 so the seam is down the middle, forced on through the
+harness hook over a file whose readout direction is not known:
+
+| pass, ms/redraw | measured |
+| --------------- | -------: |
+| correction off (what ships) | 1.84, 1.85 |
+| one round of the solve | 2.96, 2.97 |
+| two rounds | 3.99, 3.97 |
+
+0 dropped and 0 starved in all six runs, 29.97 fps presented and 30.0
+redraws/s throughout. Switched off it is not nearly free but exactly free: the
+same binary renders two of three test views byte for byte against the pass
+before the change, and the third differs in one channel of one pixel of a
+million by one code, which is the compiler's scheduling of a refactored
+function and not the map.
 
 Screenshots (issue #15), 3840 px wide at the window's aspect. In the
 windowed app, 20 s of playback with a still saved every 2 s and copied
