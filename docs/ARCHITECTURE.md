@@ -102,10 +102,13 @@ the next redraw can be asked for. The clock must be pumped inside the
 redraw pass, which is why `Scene::pump` takes `&self` and holds the player
 in a `RefCell`.
 
-The clock is container PTS, deliberately. `pts_type = 2`
-(`VideoPtsEexposureFile`) hints that the per-frame exposure records are the
-camera's real frame clock; that is issue #8's to settle, and only
-`Frames::timestamp` changes if it does.
+Playback still paces on container PTS, which is what a presentation clock
+wants: a monotonic grid to sleep against. **The gyro does not.** `pts_type =
+2` turned out to mean what its name says, so a frame's orientation is looked
+up at the camera's own timestamp for that frame
+(`ExposureTrack::frame_time_us`), which drifts from the container's nominal
+grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
+(issue #8, docs/research/insv-format.md 8.6).
 
 ## Trap list (each verified in the 2026-07 study)
 
@@ -199,7 +202,10 @@ shader consumes them as they come; nothing downstream rescales.
 
 The rotation is `Rz(roll - 90 deg) * Ry(yaw) * Rx(pitch)`, in a frame whose
 axes are the delivered frame's own (x right, y down, z along the optical
-axis), times a half turn about the body's vertical for lens 1. That
+axis), times a half turn about the body's vertical for lens 1. The IMU is
+bolted to the sensor rather than to the picture and wants the same three
+angles **without** the quarter-turn datum (`Pose::sensor_from_body`), which
+is how issue #8 settled where the datum comes from. That
 quarter-turn datum was measured against rendered frames from two cameras,
 not assumed: applying roll as the file writes it puts the world on its
 side. So was the half turn, which the file does not contain at all (lens
@@ -249,13 +255,57 @@ definitions have drifted apart.
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
 
+## Horizon lock (issue #8)
+
+The trailer's IMU record is read at open, integrated once, and the result is
+a `world_from_body` quaternion every 5 ms of the file
+(`kyerag_meta::OrientationTrack`). The pass composes its inverse between the
+lens mounting and the camera:
+
+```
+view_to_lens = lens_from_body * body_from_world * camera_rotation
+```
+
+Identity in the middle is the toggle off, and then the pass is bit for bit
+what it was. The drag needed no change at all, which is the finding rather
+than luck: `Camera::look` answers in whatever frame `camera_rotation` lands
+in, so with the lock on that frame is the world, the anchor a press stores is
+a world direction, and the solve puts a world direction back under the
+cursor while the picture turns underneath it.
+
+The filter is complementary and about sixty lines: integrate the gyroscope,
+turn the estimate towards the accelerometer with a 20 s time constant, and
+believe the accelerometer only while its magnitude is near 1 g, because a
+banked turn is not gravity. Roll and pitch are then locked completely; yaw is
+**high passed** with a 3 s constant instead, so a swing is cancelled and a
+deliberate turn is not. Every constant is measured, and the tables are in
+docs/research/insv-format.md 8.5.
+
+Verification without a Studio export: physics in the footage itself.
+`kyerag-spike --bin horizon` renders runs of frames through the app's own
+pass and measures the angle of the horizon in each. Residual sway is 0.23
+degrees peak to peak over 120 frames of calm flight and 2.86 through a
+61 deg/s roll, against a picture whose horizon leaves the frame entirely with
+the lock off. The same instrument's 24-way sweep of axis conventions is the
+negative control: the string telemetry-parser falls through to for this
+camera reads 54 to 65 degrees of standard deviation against 0.04 to 0.68 for
+the right one.
+
+The orientation track is also **issue #9's input**: it is kept at 200 a
+second rather than one per frame, and `OrientationTrack::at` interpolates, so
+per-row rolling-shutter correction is that call per row with
+`rolling_shutter_ms * (row / rows - 0.5)` added to the frame's instant.
+Nothing else has to change for it.
+
 ## Clock domains (the correctness minefield)
 
 Video PTS, `first_frame_timestamp`, gyro timestamps, `gyro_timestamp`
 offset when `is_has_gyro_timestamp`, per-lens exposure timestamps, and
 rolling-shutter row time (15.9 ms on the X4 Air). Failure mode is a
-swimming horizon, not a crash: build the diff-vs-Studio-export harness
-before trusting any of it.
+swimming horizon, not a crash. Two of them are now nailed down and measured
+(below and in issue #8's entry above); the harness that measures them is
+`kyerag-spike --bin horizon`, and a Studio export drops into it as one more
+row.
 
 One of those is now nailed down. **The trailer's tick is not always a
 microsecond**: `is_raw_gyro` selects it, and `first_frame_timestamp` is in
@@ -263,8 +313,9 @@ whichever tick the file uses. The X4 Air sets the flag and writes
 microseconds; the ONE X2 does not and writes milliseconds, including in
 `first_frame_timestamp`. That is the "divide by 1000 twice" of the format
 study read as what it is, and it is measured against both cameras'
-exposure tracks in `kyerag_meta::ExposureTrack`. The gyro track will want
-the same `Clock`.
+exposure tracks in `kyerag_meta::ExposureTrack`. The gyro track reads on the
+same `Clock`, and then takes `gyro_timestamp` off it as milliseconds (1.6 ms
+on the X4 Air).
 
 ## Open questions
 

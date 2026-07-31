@@ -32,10 +32,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
-use kyerag_meta::{CalibrationSet, Lens};
+use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack, Quat};
 
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
-use super::projection::{self, MAX_LENSES, Reframe};
+use super::projection::{self, Held, MAX_LENSES, Reframe};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -65,6 +65,35 @@ pub enum Next {
     Never,
 }
 
+/// Which clock a decoded frame's instant is read on, before the camera's
+/// orientation is looked up at that instant (issue #8).
+///
+/// The player uses [`Self::Exposure`] and this exists so the losing
+/// hypothesis stays measurable: `kyerag-spike --bin horizon` renders the same
+/// frames both ways and reports what the difference is worth in degrees of
+/// horizon tilt. Nothing in the shell offers the choice.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FrameClock {
+    /// The exposure record's own timestamp for this frame, which is the
+    /// camera's clock and the one `pts_type = 2` names
+    /// ([`ExposureTrack::frame_time_us`]).
+    #[default]
+    Exposure,
+    /// The container's PTS, which is a nominal 30000/1001 grid.
+    Container,
+}
+
+/// Whether the picture is held against the world or against the camera body.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Horizon {
+    /// The world stays put: the body's roll and pitch are taken out
+    /// completely, and the fast half of its heading with them.
+    #[default]
+    Locked,
+    /// The view rides the camera, as it did before issue #8.
+    Free,
+}
+
 /// The widget's state, owned by the shell.
 pub struct Scene {
     show: Option<Show>,
@@ -80,15 +109,55 @@ pub struct Scene {
     /// A [`Nudge`] the `View` menu left for the widget, which is where iced
     /// keeps the camera. Read once, by the next redraw.
     nudge: Cell<Option<Nudge>>,
+    /// `View > Lock horizon`. Read on every redraw rather than taken, because
+    /// it is a state and not an event.
+    horizon: Cell<Horizon>,
+    /// Which clock the orientation is looked up on. The instruments move it;
+    /// the shell does not.
+    clock: Cell<FrameClock>,
+    /// An orientation the harness has forced in place of the file's own.
+    forced: Cell<Option<Quat>>,
 }
 
 /// A file on screen: its calibration, and where its frames come from.
 struct Show {
     /// One per decoded stream, in stream order.
     lenses: Arc<[Lens]>,
+    /// Where the camera body was, over the whole file, and the camera's own
+    /// timestamp for each frame. Both come out of the trailer at open
+    /// (issue #8); both are empty for a file with no IMU record, and then
+    /// horizon lock is a no-op rather than an error.
+    held: Arc<Motion>,
     /// The clock and the frame it is showing. See the module docs for why
     /// this is a cell.
     playing: RefCell<Playing>,
+}
+
+/// What the trailer says about how the camera moved.
+#[derive(Default)]
+struct Motion {
+    orientation: OrientationTrack,
+    /// Lens 0's shutter track, read for its timestamps rather than its
+    /// shutters: `pts_type = 2` makes it the camera's own frame clock.
+    exposure: ExposureTrack,
+}
+
+impl Motion {
+    /// Where the body was when this frame was taken.
+    fn at(&self, frames: &Frames, clock: FrameClock) -> Quat {
+        let container = || i64::try_from(frames.timestamp.as_micros()).unwrap_or(i64::MAX);
+        let at = match clock {
+            // The camera's own timestamp, or the container's where the
+            // exposure record does not reach: a file whose record is short is
+            // a file that still plays.
+            FrameClock::Exposure => self
+                .exposure
+                .frame_time_us(frames.index)
+                .unwrap_or_else(container),
+            FrameClock::Container => container(),
+        };
+        self.orientation.at(at)
+    }
 }
 
 struct Playing {
@@ -100,8 +169,11 @@ enum Source {
     /// Playing, or paused mid-play: a decode thread and a clock. Boxed
     /// because the other arm carries nothing.
     Live(Box<Player>),
-    /// One frame, no thread. What the headless instruments use.
-    Still,
+    /// Frames pulled on this thread, no clock and no thread. What the
+    /// headless instruments use; the reader is kept so an instrument that
+    /// walks a run of frames pays the container open and the trailer parse
+    /// once rather than once per frame.
+    Stepped(Box<Reader>),
 }
 
 impl Scene {
@@ -113,6 +185,9 @@ impl Scene {
             shutter: Shutter::default(),
             cursor_hidden: false,
             nudge: Cell::new(None),
+            horizon: Cell::new(Horizon::default()),
+            clock: Cell::new(FrameClock::default()),
+            forced: Cell::new(None),
         }
     }
 
@@ -120,7 +195,7 @@ impl Scene {
     /// is parsed; the first frames arrive on the decode thread.
     pub fn open(path: &Path) -> Fallible<Self> {
         let mut player = Player::open(path)?;
-        let lenses = calibrated(path, player.size(), player.lenses())?;
+        let (lenses, held) = calibrated(path, player.size(), player.lenses())?;
         println!(
             "media:  {}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             // The older cameras write one lens per file, so this is 1 as
@@ -139,7 +214,12 @@ impl Scene {
         // and the control row's button pause it (issue #16).
         player.play();
         Ok(Self {
-            show: Some(Show::new(lenses, None, Source::Live(Box::new(player)))),
+            show: Some(Show::new(
+                lenses,
+                held,
+                None,
+                Source::Live(Box::new(player)),
+            )),
             ..Self::blank()
         })
     }
@@ -150,7 +230,7 @@ impl Scene {
     /// the frame it is checking.
     pub fn still(path: &Path, at: Cue) -> Fallible<Self> {
         let mut reader = Reader::open(path)?;
-        let lenses = calibrated(path, reader.size(), reader.lenses())?;
+        let (lenses, held) = calibrated(path, reader.size(), reader.lenses())?;
         let frames = reader.frame(at)?;
         println!(
             "frame:  {} at {:.3} s",
@@ -161,9 +241,46 @@ impl Scene {
             println!("drm:    {}", frame.describe());
         }
         Ok(Self {
-            show: Some(Show::new(lenses, Some(Arc::new(frames)), Source::Still)),
+            show: Some(Show::new(
+                lenses,
+                held,
+                Some(Arc::new(frames)),
+                Source::Stepped(Box::new(reader)),
+            )),
             ..Self::blank()
         })
+    }
+
+    /// Take the next frame of a stepped scene, on this thread. `false` at the
+    /// end of the file.
+    ///
+    /// The instrument that measures the horizon over a run of frames
+    /// (issue #8) reads consecutive frames, and a seek per frame would cost
+    /// it a keyframe walk each time.
+    pub fn advance(&mut self) -> Fallible<bool> {
+        let Some(show) = self.show.as_mut() else {
+            return Ok(false);
+        };
+        let Playing { frames, source } = show.playing.get_mut();
+        let Source::Stepped(reader) = source else {
+            return Ok(false);
+        };
+        match reader.next_frames()? {
+            Some(taken) => {
+                *frames = Some(Arc::new(taken));
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// The frame on screen, for an instrument that needs to say which one it
+    /// measured.
+    pub fn frame(&self) -> Option<(u64, Duration)> {
+        let show = self.show.as_ref()?;
+        let playing = show.playing.borrow();
+        let frames = playing.frames.as_ref()?;
+        Some((frames.index, frames.timestamp))
     }
 
     /// Takes whichever frame belongs on screen at `now`, and says when to
@@ -281,6 +398,43 @@ impl Scene {
         self.nudge.take()
     }
 
+    /// Hold the picture against the world, or let it ride the camera
+    /// (issue #8). Takes effect on the next redraw.
+    pub fn set_horizon(&self, horizon: Horizon) {
+        self.horizon.set(horizon);
+    }
+
+    pub fn horizon(&self) -> Horizon {
+        self.horizon.get()
+    }
+
+    /// Whether this file carries the IMU record horizon lock needs. A file
+    /// without one plays with the toggle on and the picture unheld.
+    pub fn has_orientation(&self) -> bool {
+        self.show
+            .as_ref()
+            .is_some_and(|show| !show.held.orientation.is_empty())
+    }
+
+    /// Which clock a frame's orientation is looked up on. The instrument that
+    /// measured the choice moves this; the shell leaves it alone
+    /// ([`FrameClock`]).
+    pub fn set_frame_clock(&self, clock: FrameClock) {
+        self.clock.set(clock);
+    }
+
+    /// Hold the picture at this orientation rather than the one the file's
+    /// own IMU solves to, until it is set back to `None`.
+    ///
+    /// The harness's hook, and the reason it is here rather than in the
+    /// harness: a deliberately wrong answer has to travel the **same** path
+    /// to the shader as the right one, or what fails is the harness's own
+    /// copy of the composition and not the thing under test (issue #8's
+    /// negative control). Nothing in the shell calls this.
+    pub fn hold_at(&self, world_from_body: Option<Quat>) {
+        self.forced.set(world_from_body);
+    }
+
     pub fn stats(&self) -> Option<Stats> {
         self.player(Player::stats)
     }
@@ -292,14 +446,14 @@ impl Scene {
         let playing = show.playing.borrow();
         match &playing.source {
             Source::Live(player) => Some(read(player)),
-            Source::Still => None,
+            Source::Stepped(_) => None,
         }
     }
 
     fn player_mut(&mut self) -> Option<&mut Player> {
         match &mut self.show.as_mut()?.playing.get_mut().source {
             Source::Live(player) => Some(player),
-            Source::Still => None,
+            Source::Stepped(_) => None,
         }
     }
 
@@ -311,40 +465,65 @@ impl Scene {
     }
 
     pub fn primitive(&self, camera: Camera) -> ScenePrimitive {
+        let (horizon, clock) = (self.horizon.get(), self.clock.get());
+        let forced = self.forced.get();
         ScenePrimitive {
             elapsed: self.started.elapsed().as_secs_f32(),
             camera,
-            view: self.show.as_ref().and_then(Show::view),
+            view: self
+                .show
+                .as_ref()
+                .and_then(|show| show.view(horizon, clock, forced)),
             shutter: self.shutter.clone(),
         }
     }
 }
 
 impl Show {
-    fn new(lenses: Arc<[Lens]>, frames: Option<Arc<Frames>>, source: Source) -> Self {
+    fn new(
+        lenses: Arc<[Lens]>,
+        held: Arc<Motion>,
+        frames: Option<Arc<Frames>>,
+        source: Source,
+    ) -> Self {
         Self {
             lenses,
+            held,
             playing: RefCell::new(Playing { frames, source }),
         }
     }
 
-    fn view(&self) -> Option<View> {
+    fn view(&self, horizon: Horizon, clock: FrameClock, forced: Option<Quat>) -> Option<View> {
+        let frames = self.playing.borrow().frames.clone()?;
+        let world_from_body = forced.unwrap_or_else(|| self.held.at(&frames, clock));
         Some(View {
+            held: Held {
+                body_from_world: match horizon {
+                    Horizon::Locked => world_from_body.conjugate(),
+                    Horizon::Free => Quat::IDENTITY,
+                },
+            },
             lenses: self.lenses.clone(),
-            frames: self.playing.borrow().frames.clone()?,
+            frames,
         })
     }
 }
 
-/// The calibration for the lenses the shader samples, checked against the
-/// streams they will be sampled from.
+/// Everything the trailer contributes to one open file: the calibration for
+/// the lenses the shader samples, checked against the streams they will be
+/// sampled from, and where the camera body went while it recorded.
 ///
-/// One entry per decoded stream, and in the same order: the trailer writes
-/// its lens blocks in the order the container carries the streams. A camera
-/// that writes one lens per file (the ONE X2 and older) calibrates two
+/// One lens entry per decoded stream, and in the same order: the trailer
+/// writes its lens blocks in the order the container carries the streams. A
+/// camera that writes one lens per file (the ONE X2 and older) calibrates two
 /// lenses in a file that decodes one, and then this is lens 0 alone and the
 /// picture is one hemisphere.
-fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Arc<[Lens]>> {
+///
+/// The orientation is integrated here, once, at open: a 30-minute X4 Air
+/// capture is 1.8 million IMU samples and costs about a fifth of a second to
+/// read and integrate, against 70 ms to open the container. Doing it per
+/// frame would be 30 times a second for a track that does not change.
+fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>, Arc<Motion>)> {
     let calibration = CalibrationSet::from_insv(path)?;
     // The calibration's pixel numbers are already in delivered-frame
     // coordinates, so they describe this texture only if the stream is the
@@ -374,7 +553,20 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Arc<[Lens]>> 
         calibration.firmware,
         calibration.lenses.len(),
     );
-    Ok(lenses.into())
+
+    let orientation = calibration.orientation(Filter::default());
+    println!(
+        "imu:    {} samples at {:.0} Hz, {} orientations, axes {}",
+        calibration.imu.samples().len(),
+        calibration.imu.rate_hz(),
+        orientation.samples().len(),
+        calibration.gyro.imu_orientation,
+    );
+    let held = Motion {
+        orientation,
+        exposure: calibration.exposure[0].clone(),
+    };
+    Ok((lenses.into(), Arc::new(held)))
 }
 
 /// What the shell hands the renderer for one frame.
@@ -396,6 +588,9 @@ pub struct ScenePrimitive {
 struct View {
     lenses: Arc<[Lens]>,
     frames: Arc<Frames>,
+    /// Where the body was when these frames were taken, already inverted for
+    /// the pass. Identity with the lock off.
+    held: Held,
 }
 
 /// The GPU state behind the widget. iced builds one of these per primitive
@@ -524,6 +719,7 @@ impl ScenePipeline {
                 &view.lenses,
                 view.frames.size,
                 primitive.camera,
+                view.held,
                 aspect,
                 self.linearize(),
             ),

@@ -522,13 +522,11 @@ real flights and this repo is public: they stay local.
   effective focal length is `fx / (1 + xi)` = 1106 px/rad, so every
   ordering agrees to about 2 px. A camera with a large yaw or pitch would
   tell them apart; none is known to exist.
-- **Where the 90 degrees comes from.** Two readings fit the same numbers:
-  the roll is measured from the delivered frame's horizontal axis rather
-  than its vertical, or the camera delivers the sensor image already
-  rotated a quarter turn (`media_data_rotate_angel`, field 52, reads
-  `Unknown` on the fixture and may be where that is stated). Nothing in
-  the file distinguishes them and nothing downstream cares, so it is
-  recorded rather than guessed at.
+- ~~**Where the 90 degrees comes from.**~~ Settled in 8.5, by the one thing
+  downstream that does care: the IMU is bolted to the sensor rather than to
+  the picture, and it wants `Rz(roll)` where the picture wants
+  `Rz(roll - 90)`. So the camera delivers the sensor image already rotated a
+  quarter turn, and the datum is the delivered frame's.
 - ~~**Lens 1.**~~ Settled in 4.9: the nominal opposed arrangement is a half
   turn about the body's vertical, multiplied on the right of the block's
   own angles.
@@ -1013,13 +1011,12 @@ Exposure records get the same treatment minus the gyro offset.
 One more wrinkle from the fixture: **`pts_type = 2 =
 VideoPtsEexposureFile`**, which by the enum's own name means the
 authoritative frame timestamps come from the exposure records rather than
-container PTS (MED, inferred from the enum name; worth confirming by
-comparing the two on real footage). If true, the exposure track is not
-just a brightness signal, it is the frame clock.
+container PTS. **Confirmed and measured in 8.6**, where the two clocks are
+compared frame by frame on two 30-minute captures.
 
 The failure mode for all of this is a **swimming horizon, not a crash**.
-Build the diff-against-Studio-export harness before trusting any of it
-(M2).
+8.5 is the harness that was built instead of the Studio diff, and where a
+Studio export drops into it.
 
 ### 8.4 IMU orientation
 
@@ -1038,6 +1035,210 @@ The gyro and accel streams are then additionally rotated by the lens
 **swapped variable names**, `let (sr, cr) = (yaw.sin(), yaw.cos())` and
 `let (sy, cy) = (roll.sin(), roll.cos())`. Read the arithmetic, not the
 identifiers.
+
+**And the deeper trap, which is why Kyerag transcribes none of it (8.5).**
+A three-letter string is only half of a convention; the other half is the
+frame it lands in, and that frame is whatever the project it came from
+composes next. Kyerag's chain is its own (`Rz(roll) Ry(yaw) Rx(pitch)`
+inverted, into the body frame of 4.8), so a string copied from a table
+written against a different composition means nothing here. The table in
+`kyerag_meta::imu_orientation` is measured against footage instead, and 8.5
+is the measurement.
+
+### 8.5 The IMU convention, the filter, and how both were settled
+
+**Confidence: HIGH for the X4 Air, and nothing here is transcribed.**
+Settled during issue #8 against real footage, with the same kind of
+instrument 4.8 and 4.9 used: render the app's own pass and look at what
+comes out, except that this time a program looks rather than a person, so
+that the answer is a number.
+
+#### The instruments
+
+`crates/spike/src/skyline.rs` finds the horizon in a rendered frame: the
+topmost strong brightness step in each scan line, a straight line through
+them weighted by sharpness, refitted twice with the outliers dropped. Three
+things make it survive this footage, and each was added because it failed
+without it:
+
+- **topmost, not sharpest**: looking down from a wing the ground has harder
+  edges than the horizon, and taking the sharpest finds a road in half the
+  columns;
+- **a step between two regions**, at least 12 codes across a band either
+  side, not just a local gradient: noise clears any gradient threshold, and
+  taking the topmost place it does so draws a perfectly straight line along
+  the top of the search band;
+- **both scan directions**: this camera is clamped rolled about a quarter
+  turn, so an unstabilized view has its horizon running *down* the picture,
+  and a line fitted as `y` against `x` cannot represent that at all.
+
+Its own tests are the positive control: a synthetic horizon tilted by a
+known angle, from -88 to +88 degrees, reads back within 0.2 degrees, and it
+resolves 0.1 degrees. Its negative control is a picture of noise, which must
+read back nothing rather than zero.
+
+`crates/spike/src/bin/horizon.rs` drives it. `sweep=1` answers the axis
+convention; with no arguments it measures the horizon across a run of frames
+several ways at once, on the same pixels.
+
+#### Which axis convention (settled)
+
+For each of the **24** three-letter conventions that are rotations (48
+strings have three different letters; half are reflections, and an IMU's
+three axes are right handed by construction), compare the accelerometer's
+idea of up against the horizon in an **unlocked** rendered frame. Unlocked,
+the view is in the camera body's own frame, so a horizon found in it names a
+great circle there and the normal of that circle is the true vertical in
+body coordinates. No lock, no filter and no gyro are involved, so what is
+being tested is the axis map alone.
+
+| stretch | frames | best | second best |
+| --- | ---: | --- | --- |
+| capture A, 700 s | 50 | **xZY, 7.66** | yzX, 32.42 |
+| capture A, 1100 s | 50 | **xZY, 8.81** | ZyX, 15.14 |
+| capture A, 1300 s | 50 | **xZY, 3.56** | yzX, 32.71 |
+| capture A, 1500 s | 50 | **xZY, 4.74** | yzX, 28.80 |
+| capture A, 1700 s | 50 | **xZY, 3.02** | yzX, 36.36 |
+| capture B, 400 s | 50 | **xZY, 12.19** | ZYx, 36.57 |
+| capture B, 1400 s | 50 | **xZY, 2.32** | YxZ, 19.30 |
+| capture B, 1600 s | 50 | **xZY, 7.74** | Zxy, 37.04 |
+
+Mean degrees between the accelerometer's up and the picture's, over frames
+where a horizon was found. `xZY` wins every stretch of both captures and the
+runner-up changes from stretch to stretch, which is what a winner and noise
+look like. What is left, 2.3 to 12.2 degrees, is the accelerometer's own
+disagreement with vertical in flight: it measures specific force, and a
+paramotor in air is not in free fall.
+
+Reproduce with
+`cargo run --release -p kyerag-spike --bin horizon -- <file.insv> from=1500 sweep=1`.
+
+#### The datum belongs to the picture, not to the sensor (settles a 4.8 leftover)
+
+4.8 recorded two readings of where its quarter turn comes from and said
+nothing downstream could tell them apart: either `roll` is measured from the
+delivered frame's horizontal axis, or the camera delivers the sensor image
+already turned a quarter turn.
+
+**The IMU tells them apart, because it is bolted to the sensor and not to
+the picture.** Held level by its accelerometer alone, an X4 Air comes out a
+quarter turn on its side when the IMU is taken through `Rz(roll - 90)` and
+level through `Rz(roll)`. So the sensor image really is delivered rotated,
+and the datum is the picture's. `kyerag_meta::Pose` carries both:
+`lens_from_body` with the datum for the reprojection pass, `sensor_from_body`
+without it for the IMU.
+
+Note also that the two are not interchangeable by moving the quarter turn
+around: `Rz(roll - 90) Ry Rx` and `Rz(roll) Ry Rx Rz(-90)` are different
+rotations wherever yaw and pitch are not zero, and on the X4 Air fixture the
+difference moves the seam crossover of 6.6 by 3 percent of the blend band.
+
+#### What the filter is, and every constant in it
+
+A complementary filter: integrate the gyroscope, and turn the estimate
+towards the accelerometer slowly. `crates/meta/src/orientation.rs`, about
+sixty lines. No Kalman filter: it would estimate the same two states with a
+covariance nobody can populate from a file that records no noise figures, and
+nothing measured here asks for one.
+
+| constant | value | why |
+| --- | ---: | --- |
+| `accel_seconds` | 1.0 s | the IMU runs at **997 Hz** and a paramotor engine at about 80, so the raw signal is mostly vibration: the raw magnitude runs 0.69 to 1.63 g between the 10th and 90th percentile and the same signal smoothed over a second runs 0.95 to 1.05 |
+| `tilt_seconds` | 20 s | it exists to cancel gyroscope bias, and it settles at `tilt_seconds * bias`. The quietest 10 s of capture A reads **0.25 deg/s**, so 20 s is worth 5 degrees at the worst and about 1 at the bias actually seen in flight. Longer rejects turns better and settles further off |
+| `yaw_seconds` | 3 s | the one number that is a judgement about flying. Measured on capture A: at 3 s the view's worst heading swing inside a second is 29 degrees against 103 unstabilized, and it still follows 946 degrees of real turning a minute against 986 unstabilized. At 10 s the swing is 16 but the turning followed drops to 697, which is a view that fights a deliberate turn |
+| `trust_g` | 0.05 to 0.20 | an accelerometer cannot tell gravity from a turn: in a 45 degree bank the specific force is 1.41 g and points along the aircraft's own vertical. Outside the window it is not believed at all |
+
+The IMU rate is **997 Hz on the X4 Air and 500 on a ONE X2**, which is 1.8
+million samples on a 30-minute capture. The solved orientation is decimated
+to 200 a second before it is stored, 14 MB instead of 72, still three times
+finer than the 15.9 ms rolling-shutter readout it exists to serve (issue #9).
+
+#### Does the horizon stay level
+
+Rendered runs of consecutive frames, 960x540 at 100 degrees, horizon angle
+measured in every frame.
+
+| stretch | frames found | mean | sd | peak to peak | worst per frame |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| capture A, 1500 s, calm | 120/120 | -0.38 | 0.04 | **0.23** | 0.15 |
+| capture A, 1043 s, 61 deg/s roll | 111/120 | 5.88 | 0.61 | **2.86** | 0.67 |
+| capture B, 1400 s | 78/120 | -1.38 | 0.68 | **2.73** | 0.61 |
+| capture A, 1500 s, **lock off** | 71/120 | 22.75 | 0.98 | 3.53 | 0.72 |
+| capture A, 1043 s, **lock off** | 0/120 | the horizon is not in the picture in any frame | | | |
+
+All in degrees. The unlocked rows are aimed at the horizon on their first
+frame and then left alone, which is the fair comparison and is also why they
+stop finding one. The 5.88 degree mean at 1043 s is the coordinated-turn
+lean the filter cannot remove and does not claim to: that stretch is a
+wingover.
+
+#### The negative control
+
+A deliberately wrong axis convention has to fail loudly, or the numbers above
+are not measuring the horizon. `Xyz`, which is what telemetry-parser falls
+through to for an `Insta360 X4 Air`, run through the same pass on the same
+frames:
+
+| stretch | frames found | mean | sd | peak to peak |
+| --- | ---: | ---: | ---: | ---: |
+| capture A, 1500 s | 111/120 | -55.23 | 65.35 | 179.63 |
+| capture A, 1043 s | 14/120 | -6.81 | 54.14 | 174.62 |
+| capture B, 1400 s | 0/120 | no horizon in any frame | | |
+
+Against 0.04 to 0.68 degrees of standard deviation for the right answer.
+The instrument can tell a wrong answer from a right one by three orders of
+magnitude, and the 24-way sweep above is the same control run 23 times.
+
+#### Where a Studio export drops in
+
+`horizon.rs` compares variants that differ only in how the picture is held.
+An Insta360 Studio export of the same clip is one more variant whose frames
+come from a second file rather than from this pass; measured with the same
+`skyline`, its row is directly comparable to ours, same frames and same
+units. That is the only change it needs, and it is written down at the top
+of that file. Until then the reference is physics: a horizon is level, and
+an accelerometer at rest reads 1 g.
+
+### 8.6 Which clock the frames are on (settled)
+
+**Confidence: HIGH.** `pts_type = 2` means what its name says: the exposure
+records are the camera's own frame clock, and Kyerag aligns the gyro to them
+(`ExposureTrack::frame_time_us`).
+
+The container's PTS is a nominal 30000/1001 grid. The camera's own
+timestamps drift away from it **linearly, at 6.4 parts per million**, which
+is a real sensor clock against a nominal rate. Measured on capture A:
+
+| frame | container PTS | exposure record | apart |
+| ---: | ---: | ---: | ---: |
+| 0 | 0.000 s | 0.000 s | 0.000 ms |
+| 5394 | 179.980 s | 179.981 s | 1.156 ms |
+| 13485 | 449.950 s | 449.952 s | 2.876 ms |
+| 26970 | 899.899 s | 899.905 s | 5.754 ms |
+| 40455 | 1349.848 s | 1349.857 s | 8.635 ms |
+| 53886 | 1797.996 s | 1798.008 s | **11.497 ms** |
+
+11.5 ms is 0.345 of a frame. Frame 0 is not sample 0: the camera writes
+eight exposure samples before it commits the first frame, so the track holds
+54017 samples for 53940 frames and reading it from index zero would put
+every frame's gyro lookup 267 ms early.
+
+**What the choice is worth**, which is the only form of the question that
+matters, because a few milliseconds cost the horizon the camera's own
+rotation over those milliseconds: looked up on both clocks and compared as
+orientations, over two 30-minute captures, the two put the camera **0.10 and
+0.15 degrees apart on average and 0.95 and 1.48 degrees apart at the worst
+instant**.
+
+**The loser, and the margin.** Rendered, the two are indistinguishable:
+0.23 against 0.22 degrees peak to peak on the calm stretch, 2.86 against
+2.69 on the rolly one, 2.73 against 2.96 on capture B, all differences
+smaller than the scatter between stretches. So the picture cannot separate
+them on this footage, and the case for the camera's clock is the ~1 degree
+bound above plus the reason it is the right one anyway: the gyro timestamps
+come off the same camera clock as the exposure timestamps, so aligning them
+to each other is self-consistent, and it costs nothing.
+`FrameClock::Container` is kept so the losing hypothesis stays measurable.
 
 ## 9. Prior art worth reading
 
@@ -1098,9 +1299,9 @@ Ordered by how much they would cost us.
    multiplied on the right of the block's own angles.
 2. **Vignetting coefficients are not in the metadata.** May show as
    rolloff in the blend band. Would need flat-field calibration.
-3. **`pts_type = VideoPtsEexposureFile` semantics.** If frame PTS really
-   come from the exposure records, that changes the clock design.
-   Confirm by comparing against container PTS.
+3. ~~**`pts_type = VideoPtsEexposureFile` semantics.**~~ Settled in 8.6:
+   they are the camera's own clock, they drift from the container's nominal
+   grid at 6.4 ppm, and Kyerag aligns the gyro to them.
 4. **Records 14 (Euler) and 18 (Quaternions).** If populated, they are
    free orientation and skip integration and drift entirely. Unknown
    whether the X4 Air writes them.

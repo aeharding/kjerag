@@ -45,6 +45,7 @@ pub enum Action {
     FileOpen,
     FileOpenRecent(usize),
     Fullscreen,
+    LockHorizon,
     NextFrame,
     PlayPause,
     PreviousFrame,
@@ -70,6 +71,7 @@ impl MenuAction for Action {
             Self::FileOpen => Message::FileOpen,
             Self::FileOpenRecent(index) => Message::FileOpenRecent(*index),
             Self::Fullscreen => Message::Fullscreen,
+            Self::LockHorizon => Message::LockHorizon,
             Self::NextFrame => Message::StepFrame(1),
             Self::PlayPause => Message::PlayPause,
             Self::PreviousFrame => Message::StepFrame(-1),
@@ -124,6 +126,11 @@ pub fn key_binds() -> HashMap<KeyBind, Action> {
     bind!([Ctrl], Key::Character("w".into()), FileClose);
     bind!([Ctrl], Key::Character("q".into()), Quit);
     bind!([Ctrl], Key::Character(",".into()), Settings);
+
+    // The horizon (issue #8). Ours, like `s`: no COSMIC app locks a horizon,
+    // so there is no precedent to copy, and the owner asked to be able to
+    // flip this one while watching rather than through a menu.
+    bind!([], Key::Character("h".into()), LockHorizon);
 
     // The frame, which issue #15 makes do something.
     bind!([], Key::Character("s".into()), SaveFrame);
@@ -201,6 +208,20 @@ mod tests {
         assert!(matches!(
             Action::CopyFrame.message(),
             Message::Capture(Destination::Copy)
+        ));
+    }
+
+    /// `h` is the one key that has to work while the pilot is watching a roll
+    /// go past, which is why it is bare (issue #8).
+    #[test]
+    fn the_horizon_key_is_bare() {
+        assert_eq!(
+            pressed(Modifiers::empty(), Key::Character("h".into())),
+            Some(Action::LockHorizon)
+        );
+        assert!(matches!(
+            Action::LockHorizon.message(),
+            Message::LockHorizon
         ));
     }
 
