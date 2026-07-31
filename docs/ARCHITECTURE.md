@@ -14,8 +14,9 @@ crates/render   kyerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
                                RGB + Mei reprojection + seam blend),
                                camera state (drag = yaw/pitch, scroll = FOV),
                                offscreen render for screenshots
-crates/media    kyerag-media   ffmpeg demux, dual VA-API HEVC decoders,
-                               frame clock, keyframe index, seek. No UI.
+crates/media    kyerag-media   ffmpeg demux, dual VA-API HEVC decoders in
+                               lockstep, presentation clock, play/pause,
+                               frames by index or timestamp. No UI.
 crates/meta     kyerag-meta    .insv trailer, read directly: per-lens Mei
                                calibration, gyro track, per-frame exposure.
                                No UI, no ffmpeg, no wgpu.
@@ -73,6 +74,31 @@ one lens. Zero-copy import is a requirement, not an optimization. (An
 earlier research note put `vaDeriveImage` at 0.53 ms/frame; that was the
 map call alone, with nothing reading the pixels through it.)
 
+## Playback (issue #4)
+
+One demuxer feeds both decoders and hands out `Frames`: every video stream
+at the same PTS, mapped and ready to import. A lens is never delivered
+without its partner, so the two streams cannot drift apart; if a head ever
+lacked a partner the reader drops it rather than pairing two instants.
+
+`Player` runs that reader on its own thread behind a two-deep channel and
+answers one question per redraw: which frame belongs on screen at this
+`Instant`. Nothing counts ticks. 29.97 fps divides evenly into no refresh
+rate anyone ships, so a frame has a due time and the shell sleeps until it
+(`iced`'s `RedrawRequest::At`, requested by the shader widget in
+`kyerag_render::widget`). Pumping the clock from a shell-side
+`window::frames()` subscription instead was written and measured first: 33
+to 46 redraws a second against a 60 Hz display, and 1 to 18 dropped frames
+every 5 s, because the redraw event has to leave iced and come back before
+the next redraw can be asked for. The clock must be pumped inside the
+redraw pass, which is why `Scene::pump` takes `&self` and holds the player
+in a `RefCell`.
+
+The clock is container PTS, deliberately. `pts_type = 2`
+(`VideoPtsEexposureFile`) hints that the per-frame exposure records are the
+camera's real frame clock; that is issue #8's to settle, and only
+`Frames::timestamp` changes if it does.
+
 ## Trap list (each verified in the 2026-07 study)
 
 - Use descriptor `pitch[]`/`offset[]` verbatim. Chroma pitch is
@@ -94,7 +120,22 @@ map call alone, with nothing reading the pixels through it.)
 - `av_hwframe_map` with `MAP_READ` calls `vaSyncSurface` first (ffmpeg
   6.1 `hwcontext_vaapi.c:1337`): the map waits for the decode to finish.
   The spike's 7.64 ms "deliver" is mostly this wait with one frame in
-  flight; keep 2-3 frames in flight to hide it.
+  flight; keep 2-3 frames in flight to hide it. Measured on the player
+  (`kyerag-spike --bin playback`): mapping the oldest queued frame rather
+  than the newest takes dual-stream decode from 2.19x realtime at depth 0
+  to 2.46x at depth 2, and 2.47x at depth 4. `Reader::lookahead` is that
+  depth and the engine sets it to 2.
+- The decoder's VA-API surface pool is fixed at `avcodec_open2` and is 20
+  surfaces per stream here (`Reader::pool_size`, read from the
+  `AVHWFramesContext` after the first frame). Every held frame, mapped or
+  not, holds one: the engine holds at most 9 per stream (2 lookahead, 2
+  queued pairs, the one on screen, the one peeked, and 3 retained on the
+  GPU). Nothing checks this at runtime; the count is the budget.
+- An imported texture aliases the decoder's surface, so dropping the
+  `Frames` while the GPU is still reading hands live memory back to the
+  decoder. `ScenePipeline` keeps the last 3 pairs alive behind the one it
+  binds; iced submits after `prepare` returns and presents later still, so
+  "the draw call was recorded" is not "the GPU is done".
 - Reference import code: `ez-ffmpeg` 0.17 `wgpu_filter/hw_interop.rs`,
   `iroh-live` `rusty-codecs/src/render/dmabuf_import.rs`, `bevy-dmabuf`.
 - GStreamer was evaluated and rejected: no wgpu or dmabuf-to-Vulkan sink.

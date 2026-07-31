@@ -8,9 +8,9 @@ mod scene;
 mod widget;
 
 pub use camera::{Camera, Viewpoint};
-pub use kyerag_media::{Fallible, Size};
+pub use kyerag_media::{Cue, Fallible, Size, Stats};
 pub use projection::{Landing, OUTSIDE_GRAY, Reframe};
-pub use scene::{Frame, Scene, ScenePipeline, ScenePrimitive};
+pub use scene::{Next, Scene, ScenePipeline, ScenePrimitive};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on
 /// `Size` because `Size` belongs to `kyerag-media`, which has no wgpu.

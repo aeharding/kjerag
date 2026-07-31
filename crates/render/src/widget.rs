@@ -7,10 +7,12 @@
 //! or the view direction; the shell only builds a `shader::Shader` around a
 //! [`Scene`], and iced keeps the [`Viewpoint`] in its widget tree.
 
+use std::time::Instant;
+
 use cosmic::iced::widget::shader::{self, Action};
 use cosmic::iced::{Event, Point, Rectangle, mouse, window};
 
-use super::{Scene, ScenePipeline, ScenePrimitive, Viewpoint};
+use super::{Next, Scene, ScenePipeline, ScenePrimitive, Viewpoint};
 
 /// Wheels report scroll in lines and touchpads report it in pixels, and iced
 /// passes both through as they came. A feel constant, not a measurement.
@@ -29,6 +31,7 @@ impl<Message> shader::Program<Message> for Scene {
     ) -> Option<Action<Message>> {
         match event {
             Event::Mouse(event) => mouse_update(viewpoint, event, bounds, cursor),
+            Event::Window(window::Event::RedrawRequested(now)) => tick(self, *now),
             // Alt-tabbing away mid-drag takes the release with it, and a grab
             // nothing can end is a camera glued to the cursor.
             Event::Window(window::Event::Unfocused) => {
@@ -133,6 +136,20 @@ fn mouse_update<Message>(
     }
 }
 
+/// The presentation clock ticks on the window's own redraw event, inside the
+/// pass that then draws the result: the scene takes the frame that is due and
+/// says when the next one is, and the returned [`Action`] is what makes iced
+/// sleep until exactly that instant. Waking per frame rather than per refresh
+/// is what keeps 29.97 fps content off a 60 Hz grid; `kyerag::app` documents
+/// the pacing, and the measurement that rejected the alternative.
+fn tick<Message>(scene: &Scene, now: Instant) -> Option<Action<Message>> {
+    match scene.pump(now) {
+        Next::At(due) => Some(Action::request_redraw_at(due)),
+        Next::Refresh => Some(Action::request_redraw()),
+        Next::Never => None,
+    }
+}
+
 fn steps(delta: mouse::ScrollDelta) -> f32 {
     match delta {
         mouse::ScrollDelta::Lines { y, .. } => y,
@@ -182,7 +199,7 @@ mod tests {
     impl Widget {
         fn new() -> Self {
             Self {
-                scene: Scene::new(None),
+                scene: Scene::blank(),
                 viewpoint: Viewpoint::default(),
                 cursor: mouse::Cursor::Available(Point::ORIGIN),
             }
