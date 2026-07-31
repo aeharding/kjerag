@@ -1448,6 +1448,160 @@ come off the same camera clock as the exposure timestamps, so aligning them
 to each other is self-consistent, and it costs nothing.
 `FrameClock::Container` is kept so the losing hypothesis stays measurable.
 
+### 8.7 The horizon dip is a bad start, not a bad constant (issue #45)
+
+**Confidence: HIGH for the mechanism and the size, measured 2026-07-31 on
+two X4 Air captures through the render path.** This section replaces an
+earlier 8.7 that went out with the revert of PR #51. What survives of that
+one is the instrument; the rest is withdrawn below.
+
+With the lock on, the horizon starts a file tens of degrees off level and
+walks back over tens of seconds. Panning a circle while it does that is
+where a pilot meets it, because a tilted estimated vertical puts the
+horizon `atan2(sin e sin(yaw - phi), cos e)` off level, which dips once
+each way per revolution.
+
+#### The mechanism
+
+`Filter::solve` seeded the estimate from whichever tilt put **the first
+tenth of a second** of accelerometer on the world vertical, and it did that
+whatever that tenth of a second read. The running filter refuses a reading
+further than `trust_g.1` from 1 g outright. Both were true of the same
+code, and the first tenth of a second is exactly the part of a paramotor
+file most likely to be a launch:
+
+| file | first 0.1 s | horizon at 6 s |
+| --- | ---: | ---: |
+| April 10 | **1.281 g** | **48.9 deg** |
+| June 23 #1 | 0.737 g | 14.7 deg |
+| June 23 #2 | 1.162 g | not measured |
+| June 23 #3 | 1.063 g | not measured |
+
+Per-file severity follows what that tenth of a second happened to read,
+which is why the same code looked fine on some files and not on others.
+The estimate then walks back at `tilt_seconds` divided by the share of
+samples the trust window lets through, which on this footage is tens of
+seconds: the correction that has to undo a bad start is the same slow one
+that exists to ignore turns.
+
+#### The fix, and what it is worth
+
+The seed now searches forward for the first window of accelerometer the
+running filter would believe **completely**, and carries it back to the
+start of the track with the gyroscope. Tilt of the estimated vertical,
+measured through the app's own projection pass with
+`kyerag-spike --bin dip`, 12 frames x 36 yaws at 100 degrees:
+
+| seconds into the file | April, before | April, after | June #1, before | June #1, after |
+| ---: | ---: | ---: | ---: | ---: |
+| 6 | 48.93 | **1.88** | 14.70 | 8.11 |
+| 10 | no fit | 1.39 | 12.88 | 6.52 |
+| 15 | no fit | 1.43 | 10.78 | 5.01 |
+| 20 | 36.59 | 0.62 | 8.56 | 3.70 |
+| 30 | 29.21 | 3.93 | 5.97 | 2.46 |
+| 45 | 18.65 | 3.41 | 4.91 | 4.42 |
+| 60 | 8.12 | 2.50 | 4.24 | 3.01 |
+| 120 | 2.71 | 1.76 | 4.71 | 4.49 |
+| 300 | 2.77 | 2.77 | 3.23 | 3.23 |
+
+Degrees. The 300 second rows agree to three decimal places on both files,
+which is the control: nothing outside the opening transient moved. The "no
+fit" rows are the defect hiding the evidence for itself, and they are also
+a measure of it: at 6 seconds on the April capture only 50 of 432 rendered
+views had a findable horizon in them at all, against **403** after, because
+a horizon 49 degrees off level is mostly outside the frame.
+
+Three choices inside the seed, each measured rather than assumed.
+
+- **The first fully trusted window, not the first partly trusted one.** The
+  running filter applies a fraction of a correction to a reading it half
+  believes; a seed is applied whole. Taking anything inside `trust_g.1`
+  leaves the April capture at **13.8** degrees at 6 seconds against **1.8**
+  for the whole of it, on the same run of 24 frames, because the window it
+  settles for is taken during the launch. Demanding the whole of `trust`
+  moves the seed from 0.2 s into the file to 3.2 s.
+- **A window as long as `accel_seconds`.** The running filter reads its
+  trust off the accelerometer smoothed over that constant, so the seed
+  applies the same test to the same kind of signal. The raw magnitude on
+  this footage runs 0.69 to 1.63 g between the 10th and 90th percentile and
+  crosses 1 g constantly, so a shorter window can take a magnitude that is
+  only passing through 1 g for stillness.
+- **Every sample carried back before it is averaged.** The window sits
+  seconds into the file and the body turns to reach it, so each reading is
+  rotated into the frame of the track's first sample before it goes into
+  the mean, which makes the answer an attitude at the start of the track
+  directly. It is also what recovers a reading from a tumbling launch at
+  all: over the April capture's first second the plain mean of the
+  accelerometer weighs 0.528 g, and the same samples de-rotated weigh
+  0.942.
+
+A second helping of the same defect went with it. The smoothed
+accelerometer was initialised to 1 g along the estimated vertical, so it
+walked from that fiction out to whatever the sensor really said, and
+everything it passed through on the way was inside the trust window and
+believed. It starts on the accelerometer now.
+
+#### What is left, and what it is
+
+The seed is as good as one second of accelerometer, and an accelerometer in
+flight measures specific force. Running the same solve with the correction
+effectively off (`tilt_seconds` 1e5) isolates it: at 6 seconds the seed
+alone is **2.8 degrees** off on the April capture and **9.8** on June #1,
+which is why June #1 still reads 8 degrees at 6 seconds where April reads
+1.9. That is the residual issue #57 was written about, now at its real size
+and in its real place, which is the seed window rather than the whole first
+minute.
+
+#### Withdrawn: the apparent-gravity attribution and the GPS prescription
+
+The 8.7 that PR #51 shipped concluded that the dip was 1.9 to 8.5 degrees
+of the filter's residual against apparent gravity, that the shipped
+constants were the optimum of 16 tried, and that the fix was to parse the
+GPS track and subtract the aircraft's own acceleration (issue #57). **The
+size and the conclusion are withdrawn**, and the numbers above replace
+them. The instrument, the axis-order result (all six orderings within 0.13
+degrees) and the mounting negative controls stand.
+
+The reason is that the instrument had a **20 degree gate**: a found line
+more than that off level was taken to be a wing or a field boundary and
+dropped. The defect is 40 to 50 degrees at the start of a file, so every
+view of the real thing was dropped and the fit ran on what was left near
+the zero crossings. The wandering phase that made apparent gravity look
+right was that selection and not the flying: refitting the phase against
+the body's own heading instead of the view's moves it by a few degrees
+(172 against 170, -77 against -77, 84 against 88), so it was never a
+coordinate error either.
+
+**The injection control passed anyway, and that is the lesson.** Tilts of
+1, 2 and -1 degrees read back as 0.97, 2.01 and -1.02, on a stretch whose
+baseline was already small, so the control never left the range the
+instrument happened to work in. A control has to span the regime being
+measured. The gate is off by default now, what it drops is counted and
+printed next to what it kept, and the acceptance run injects **45**:
+
+| injected | tilt read back |
+| ---: | ---: |
+| 0 (baseline) | 2.648 |
+| 1 | 1.689 |
+| 2 | 0.833 |
+| 45, perpendicular to the baseline | **45.101** |
+| 45, the other way round | 44.438 |
+| 45, with the 20 degree gate back on | 48 of 60 views dropped, **no fit at all** |
+
+45.101 against the 45.08 that 45 degrees combined in quadrature with a
+2.648 degree baseline predicts. The last row is the whole of the
+mis-attribution in one line: the instrument that shipped could not measure
+a 45 degree defect even when handed one deliberately.
+
+Two things about reading a dip that size. The angle-against-yaw curve is
+only a sinusoid for small tilts, so at tens of degrees the **tilt** column
+is the one to read and the fitted amplitude is a fundamental rather than a
+peak. And the horizon leaves the frame at the yaws where the tilt puts it
+furthest off centre, because at 100 degrees of field the picture reaches 34
+degrees above its own axis, so the views thin out exactly where the defect
+is worst. That is the second reason to read the count of views next to
+every number.
+
 ## 9. Prior art worth reading
 
 - **`BenjaminHenriksson/insv-stitch`** (MIT, Python, X5) is by far the
