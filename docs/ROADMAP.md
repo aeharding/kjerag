@@ -345,6 +345,40 @@ sample-to-sample step at each join puts every one of the six below the 97th
 percentile of ordinary playback, against 12 of 15 synthetic hard cuts spliced
 into the same recording that land at the 99th or above: the fades hold.
 
+**Looking around got three fixes at once** (issues #77, #63, #78, all owner
+reported). **Fullscreen no longer resets the view.** The camera was living in
+the shader widget's iced `State`, and iced rebuilds widget state whenever the
+widget tree changes shape: libcosmic pushes the header bar into the same
+column as the content, so hiding the bar moves the content up a place and
+everything under it is built fresh. Fullscreen hides the bar, which is the
+whole of the connection - and so does the two-second idle timeout, so the view
+was being reset under a pilot who was only watching, too. The `Viewpoint`
+lives on the `Scene` now, which is the shell's own and outlives its view. The
+harness gained the checks that measured it: entering and leaving fullscreen by
+both keys, and the controls hiding on their own.
+
+**The pan goes over the top** (issue #63). The pitch had a wall at 89 degrees;
+it is gone, and past a quarter turn the view is looking back over itself with
+the world upside down, on round to a whole turn and round again. It is a pitch
+and not a roll, so the horizon stays a level line either way up, and a
+vertical drag never swings the yaw. Nothing was added to get there:
+`rot_y(yaw) * rot_x(pitch)` was always the rotation and a pitch past 90 is a
+perfectly good one. What the anchor solve needed is to count to the nearest
+tilt **the short way round**. Checked through the pass on real footage and not
+only in arithmetic: rendered at yaw 180 pitch 180, the pass draws exactly the
+yaw 0 pitch 0 picture turned upside down, every pixel of it within one code of
+255.
+
+**And the wide end of the zoom drags calmly** (issue #78). Pinning the grabbed
+direction to the cursor is what makes the flat range feel like a hand on the
+picture and what makes the ball twitchy: the pinned rate at the middle of the
+ball view is 900 degrees of world per width of window, against 164 at the
+widest flat view, so a drag across the window out there turned the world two
+and a half times. Past 110 degrees the pin comes off and the drag turns the
+view at a fixed 164 degrees per window width, which is the rate the pinned
+drag itself is going at in the last view before the handover, so the two meet
+at the threshold with nothing to feel. Under 110 nothing changed at all.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
@@ -382,6 +416,10 @@ into the same recording that land at the 99th or above: the fades hold.
   ball clears the window's shorter side; the tiny-planet framing sits
   mid-scroll on the way there, and the owner chose to keep the extended
   range after trying a hard stop at the planet).
+  Three of the quality issues under it are the interaction ones the owner
+  found while flying the finished zoom: the view surviving fullscreen
+  (issue #77), the pan carrying on through the poles (issue #63), and the
+  wide end of the zoom dragging calmly (issue #78).
   **M2 is complete**, except that issue #48 reopened the seam: the two lenses
   are misaligned by up to 2.7 degrees across it, phase 1 has measured that,
   attributed it to a relative lens tilt and fitted the correction, and phase 2
@@ -405,6 +443,33 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-07-31 **The camera is the shell's state, not the widget tree's**
+  (issue #77). iced keeps a widget's state in the widget tree and rebuilds
+  it whenever the tree changes shape under it, which the header bar coming
+  and going does on every fullscreen toggle and every idle timeout. Anything
+  a pilot expects to survive the window changing shape therefore cannot live
+  in an iced `State`, however natural a home it looks. Keeping it there and
+  pinning the tree instead was the alternative and it is a trap: it makes
+  every future layout change a chance to lose the view, silently, and the
+  shell has to be free to change its layout.
+- 2026-07-31 **The pitch runs all the way round, and the wall is gone**
+  (issue #63, owner ask). The alternative reading of "keep looking up past
+  the zenith" is to fold the crossing into pitch and yaw together - pitch
+  turns back down and the yaw swings half a turn - which keeps the pitch
+  inside a quarter turn and keeps the picture upright. It was rejected
+  because it is not what was asked for: the owner asked to keep going
+  **until he sees upside down**, and a fold never shows an upside down
+  world. It also puts a discontinuity in the yaw exactly where the hand is
+  moving. Letting the pitch continue is both the thing asked for and the one
+  with no jump in it.
+- 2026-07-31 **Past the flat range the drag is a rate, not a pin**
+  (issue #78, owner ask). One threshold, `FOV_FLAT`, shared with the
+  projection's own bend, and one constant: the rate the pinned drag is
+  already turning at when it gets there. The alternative was to keep the pin
+  and damp it - a speed limit on the solve - which reads well and breaks
+  issue #63, because the same limit would have to bite hardest exactly where
+  a pole crossing legitimately turns the view fastest. Two drags with one
+  clean threshold beats one drag with a rule that has to know about poles.
 - 2026-07-31 **A saved still is a JPEG; the clipboard is still a PNG**
   (issue #15). Twelve encodings of five real 3840x2160 captures, plus
   libwebp and libjxl for reference, scored against those same pixels with
