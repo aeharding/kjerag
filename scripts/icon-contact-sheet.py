@@ -9,12 +9,17 @@ is repeated on the COSMIC light and dark desktop greys.
 Backgrounds are cosmic-theme's `gray_1`: #D7D7D7 light, #1B1B1B dark
 (pop-os/libcosmic, cosmic-theme/src/model/{light,dark}.ron).
 
+Takes a draft directory; with no argument it picks the highest-numbered
+`resources/icon-drafts/round-*`. Transparent drafts are meant to show the
+grey through, so the panels are the real desktop colours, not a checkerboard.
+
 Needs `resvg` on PATH (cargo install resvg). Writes to scratch/, which is
 gitignored: rendered PNGs are review artifacts, not source.
 """
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,14 +40,28 @@ def panel_width():
     return PAD * 2 + sum(SIZES) + GAP * len(SIZES) + 32 * MAG
 
 
+def newest_round():
+    rounds = sorted(
+        glob.glob(os.path.join(DRAFTS, "round-*")),
+        key=lambda p: int(re.search(r"(\d+)$", p).group(1)),
+    )
+    if not rounds:
+        sys.exit(f"no round-* directories in {DRAFTS}")
+    return rounds[-1]
+
+
 def main():
     if not shutil.which("resvg"):
         sys.exit("resvg not found on PATH; try: cargo install resvg")
 
-    candidates = sorted(glob.glob(os.path.join(DRAFTS, "*.svg")))
+    src = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else newest_round())
+    # Absolute: the sheet is written to scratch/, so relative hrefs would
+    # resolve against that directory instead of the draft directory.
+    candidates = sorted(glob.glob(os.path.join(src, "*.svg")))
     if not candidates:
-        sys.exit(f"no candidate SVGs in {DRAFTS}")
+        sys.exit(f"no candidate SVGs in {src}")
     os.makedirs(OUT, exist_ok=True)
+    tag = os.path.basename(os.path.normpath(src))
 
     # True 32 px rasters, for the magnified column.
     for svg in candidates:
@@ -80,13 +99,14 @@ def main():
 
     for row, path in enumerate(candidates):
         stem = os.path.splitext(os.path.basename(path))[0]
-        letter = stem[0].upper()
+        letter, _, rest = stem.partition("-")
+        letter = letter.upper()
         y = HEADER + row * row_h
         mid = y + max(SIZES) / 2
         svg.append(f'<text x="{PAD}" y="{mid - 4}" font-family="{FONT}" '
-                   f'font-size="30" font-weight="bold" fill="#FFFFFF">{letter}</text>')
+                   f'font-size="27" font-weight="bold" fill="#FFFFFF">{letter}</text>')
         svg.append(f'<text x="{PAD}" y="{mid + 18}" font-family="{FONT}" '
-                   f'font-size="11" fill="#F0F0F0">{stem[2:]}</text>')
+                   f'font-size="11" fill="#F0F0F0">{rest}</text>')
 
         for col, _ in enumerate(BACKGROUNDS):
             x = LABEL_W + col * (pw + GAP) + PAD
@@ -100,13 +120,42 @@ def main():
                        'image-rendering="optimizeSpeed"/>')
 
     svg.append("</svg>")
-    sheet = os.path.join(OUT, "contact-sheet.svg")
+    sheet = os.path.join(OUT, f"contact-sheet-{tag}.svg")
     with open(sheet, "w") as fh:
         fh.write("\n".join(svg))
 
-    out = os.path.join(OUT, "contact-sheet.png")
+    out = os.path.join(OUT, f"contact-sheet-{tag}.png")
     subprocess.run(["resvg", "--resources-dir", OUT, sheet, out], check=True)
     print(out)
+    print(seam_check(candidates, tag))
+
+
+def seam_check(candidates, tag):
+    """Composite every draft over magenta.
+
+    Abutting shapes can leave a hairline of background between them, which
+    is invisible against the greys and obvious against magenta. Anything
+    magenta inside a silhouette is a hole, not a gradient.
+    """
+    s, pad = 256, 8
+    width = pad + len(candidates) * (s + pad)
+    svg = [
+        f'<svg width="{width}" height="{s + pad * 2}" '
+        f'viewBox="0 0 {width} {s + pad * 2}" '
+        'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">',
+        f'<rect width="{width}" height="{s + pad * 2}" fill="#FF00FF"/>',
+    ]
+    for i, path in enumerate(candidates):
+        svg.append(f'<image xlink:href="{path}" x="{pad + i * (s + pad)}" '
+                   f'y="{pad}" width="{s}" height="{s}"/>')
+    svg.append("</svg>")
+
+    src = os.path.join(OUT, f"seam-{tag}.svg")
+    with open(src, "w") as fh:
+        fh.write("\n".join(svg))
+    out = os.path.join(OUT, f"seam-{tag}.png")
+    subprocess.run(["resvg", src, out], check=True)
+    return out
 
 
 if __name__ == "__main__":

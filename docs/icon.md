@@ -1,8 +1,10 @@
-# App icon: style research and round-1 candidates
+# App icon: style research and draft candidates
 
-The app has no icon yet. This is the workshop round for issue-free
-exploration: six drafts in `resources/icon-drafts/`, **none of which
-ships**. The owner picks a direction and the next round narrows.
+The app has no icon yet. Drafts live in `resources/icon-drafts/round-N/`
+and **none of them ships**: each round is something for the owner to react
+to, and the next one narrows. Round 1 explored six concepts; the owner
+picked F, a small round world wedged in a rock notch, so round 2 varies
+that one.
 
 The doctrine it serves is AGENTS.md's: **UI design defers to COSMIC system
 apps best practice**. Same method as docs/UI.md - where a first-party app
@@ -118,10 +120,10 @@ extension, and `Categories` starts with `COSMIC`. Shipping SVG inside
 `NNxNN/` dirs is unusual - those are `Type=Fixed` in the spec - but it is
 what lets each size be hand-tuned, which is the Pop habit worth keeping.
 
-## The candidates
+## Round 1: six concepts
 
-All six read as a cliff form against a wrapped sky. Letters match the
-contact sheet.
+All six read as a cliff form against a wrapped sky, each enclosed in a
+full-bleed disc. Letters match the contact sheet.
 
 | # | file                    | the idea | what it sacrifices |
 | - | ----------------------- | -------- | ------------------ |
@@ -136,14 +138,57 @@ Honest small-size verdict from the sheet: **C and F survive 32 px best**
 (C by shape, F by colour); **A and D lose their subject** and become a
 texture and a sunset respectively.
 
+## Round 2: F, with the silhouette as the subject
+
+The owner's correction after round 1: no perfect-circle full-bleed disc,
+because Pop and COSMIC icons are transparent shapes with complex outlines.
+The research above already said so - only 7 of 190 Pop app icons are
+full-bleed - so round 2 drops the enclosing disc entirely. The sky is
+transparent, and the rock masses plus the wedged world **are** the outline.
+
+| #  | file                   | the idea | what it sacrifices |
+| -- | ---------------------- | -------- | ------------------ |
+| F1 | `f1-silhouette.svg`    | Rocks and world alone, sunset gradient living on the rock faces, sky fully transparent. The baseline reading. | Any sky colour at all, so it leans hardest on the teal to carry the icon. |
+| F2 | `f2-notch-sky.svg`     | F1 plus a deliberate warm wedge of sky inside the notch, behind the world, keeping the sunset where the eye lands. | A second focal colour under the world, which at 32 px is a warm smudge rather than a shape. |
+| F3 | `f3-limb-footing.svg`  | F1 with the base rounded into a shallow horizon arc: a hint of a planet limb without being a circle. | Crispness at the bottom edge; the arc is the first thing to mush when it shrinks. |
+| F4 | `f4-cliff-shelf.svg`   | Asymmetric: one tall cliff, one low shelf, the world large and resting between them. | Symmetry, and it reads less as "wedged" and more as "resting against". |
+
+Two failed readings, recorded because both were only visible once
+rendered and both cost a rebuild:
+
+- **Thin flared arms read as a funnel, not cliffs.** A first pass narrowed
+  the masses to a chalice with a narrow base; it looked like a stemmed
+  glass. Solid, chunky masses with battered outer edges read as rock.
+- **A narrow V turns the world into a map pin.** When the notch hides
+  most of the sphere, the visible teardrop plus the dark point below it is
+  the location-marker glyph, unmistakably. The notch has to be shallow
+  enough that the world still reads as a circle.
+
+Also worth keeping: vertical outer edges plus a flat base plus radius-16
+corners rebuilt the enclosing tile the owner had just rejected. What keeps
+a silhouette freeform is angled edges and unequal masses, not the absence
+of a background.
+
+32 px verdict: **F4 survives best** - the asymmetric profile stays
+identifiable where the three symmetric ones converge on the same shape -
+with **F1** the cleanest of those three.
+
 ## Regenerating the contact sheet
 
 ```sh
-python3 scripts/icon-contact-sheet.py     # needs: cargo install resvg
+python3 scripts/icon-contact-sheet.py                     # newest round
+python3 scripts/icon-contact-sheet.py resources/icon-drafts/round-1
 ```
 
-Writes `scratch/icon/contact-sheet.png` (gitignored - rendered PNGs are
-review artifacts, not source). Each candidate appears at 128, 64 and 32 px
-as true 1:1 rasters, plus the 32 px raster magnified 4x with
+Writes `scratch/icon/contact-sheet-round-N.png` (gitignored - rendered
+PNGs are review artifacts, not source). Each candidate appears at 128, 64
+and 32 px as true 1:1 rasters, plus the 32 px raster magnified 4x with
 nearest-neighbour, on both COSMIC desktop greys: `gray_1` is `#D7D7D7`
-light and `#1B1B1B` dark (`cosmic-theme/src/model/{light,dark}.ron`).
+light and `#1B1B1B` dark (`cosmic-theme/src/model/{light,dark}.ron`). The
+panels are the real desktop colours rather than a checkerboard, so a
+transparent draft shows the grey through it.
+
+It also writes `scratch/icon/seam-round-N.png`, the same drafts over
+magenta. Abutting shapes can leave a hairline of background between them
+that is invisible against the greys; anything magenta inside a silhouette
+is a hole, not a gradient.
