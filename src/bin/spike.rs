@@ -12,29 +12,20 @@
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
 //! are personal video and this repo is public.
 
-use std::error::Error;
-use std::ffi::{CStr, c_int};
 use std::fs::{self, File};
 use std::io::BufWriter;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ash::vk;
-use ff::ffi::{
-    AV_HWFRAME_MAP_DIRECT, AV_HWFRAME_MAP_READ, AVBufferRef, AVCodecContext, AVDRMFrameDescriptor,
-    AVFrame, AVHWDeviceType, AVPixelFormat, av_buffer_ref, av_buffer_unref, av_frame_alloc,
-    av_frame_free, av_hwdevice_ctx_create, av_hwframe_map, av_hwframe_transfer_data,
-};
 use ffmpeg_next as ff;
+use kyerag::Fallible;
+use kyerag::media::{DrmFrame, HwDevice, SwFrame, open_decoder};
+use kyerag::render::{Planes, Size, dmabuf};
 use wgpu::hal::api::Vulkan;
-
-type Fallible<T> = Result<T, Box<dyn Error>>;
 
 /// Offscreen render target edge. Small on purpose: the spike measures the
 /// frame path, not a display, and reading back a 3840 square costs 59 MB.
 const OUT_EDGE: u32 = 1024;
-const VAAPI_DEVICE: &CStr = c"/dev/dri/renderD128";
 
 fn main() -> Fallible<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -51,6 +42,7 @@ fn main() -> Fallible<()> {
     ff::init()?;
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
+    println!("device: {}", dmabuf::device_report(&gpu.device));
     println!(
         "input:  {} stream {stream}, {frames} frames",
         input.display()
@@ -209,11 +201,11 @@ fn zero_copy_frame(
     stats.deliver += t.elapsed();
 
     if stats.frames == 0 {
-        println!("{}", describe(mapped.descriptor()));
+        println!("drm:    {}", mapped.describe());
     }
 
     let t = Instant::now();
-    let planes = gpu.import(mapped.descriptor(), luma)?;
+    let planes = dmabuf::import(&gpu.device, mapped.descriptor(), luma)?;
     stats.import += t.elapsed();
 
     let t = Instant::now();
@@ -244,199 +236,7 @@ fn copy_frame(
     Ok(())
 }
 
-// -------------------------------------------------------------- ffmpeg side
-
-/// An `AVBufferRef` holding a VA-API device context.
-struct HwDevice(*mut AVBufferRef);
-
-impl HwDevice {
-    fn vaapi() -> Fallible<Self> {
-        let mut raw = std::ptr::null_mut();
-        let rc = unsafe {
-            av_hwdevice_ctx_create(
-                &mut raw,
-                AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                VAAPI_DEVICE.as_ptr(),
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if rc < 0 {
-            return Err(format!("av_hwdevice_ctx_create: {}", ff::Error::from(rc)).into());
-        }
-        Ok(Self(raw))
-    }
-}
-
-impl Drop for HwDevice {
-    fn drop(&mut self) {
-        unsafe { av_buffer_unref(&mut self.0) };
-    }
-}
-
-/// Force the hardware pixel format. The default would fall back to software
-/// decoding without complaint, which would make every number here a lie.
-unsafe extern "C" fn pick_vaapi(
-    _ctx: *mut AVCodecContext,
-    mut formats: *const AVPixelFormat,
-) -> AVPixelFormat {
-    unsafe {
-        while *formats != AVPixelFormat::AV_PIX_FMT_NONE {
-            if *formats == AVPixelFormat::AV_PIX_FMT_VAAPI {
-                return AVPixelFormat::AV_PIX_FMT_VAAPI;
-            }
-            formats = formats.add(1);
-        }
-        AVPixelFormat::AV_PIX_FMT_NONE
-    }
-}
-
-fn open_decoder(
-    ictx: &ff::format::context::Input,
-    stream: usize,
-    hw: &HwDevice,
-) -> Fallible<ff::decoder::Video> {
-    let params = ictx.stream(stream).ok_or("no such stream")?.parameters();
-    let mut ctx = ff::codec::context::Context::from_parameters(params)?;
-    unsafe {
-        let raw = ctx.as_mut_ptr();
-        (*raw).hw_device_ctx = av_buffer_ref(hw.0);
-        (*raw).get_format = Some(pick_vaapi);
-    }
-    Ok(ctx.decoder().video()?)
-}
-
-/// A frame mapped to DRM_PRIME. Dropping it unmaps and closes the exported fds.
-struct DrmFrame(*mut AVFrame);
-
-impl DrmFrame {
-    fn map(src: &ff::frame::Video) -> Fallible<Self> {
-        let raw = unsafe { av_frame_alloc() };
-        if raw.is_null() {
-            return Err("av_frame_alloc".into());
-        }
-        let frame = Self(raw);
-        let rc = unsafe {
-            (*raw).format = AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
-            av_hwframe_map(
-                raw,
-                src.as_ptr(),
-                AV_HWFRAME_MAP_READ as c_int | AV_HWFRAME_MAP_DIRECT as c_int,
-            )
-        };
-        if rc < 0 {
-            return Err(format!("av_hwframe_map: {}", ff::Error::from(rc)).into());
-        }
-        Ok(frame)
-    }
-
-    fn descriptor(&self) -> &AVDRMFrameDescriptor {
-        unsafe { &*((*self.0).data[0].cast::<AVDRMFrameDescriptor>()) }
-    }
-}
-
-impl Drop for DrmFrame {
-    fn drop(&mut self) {
-        unsafe { av_frame_free(&mut self.0) };
-    }
-}
-
-/// What the driver actually exported, so the pitches in a PR are quoted
-/// rather than computed.
-fn describe(desc: &AVDRMFrameDescriptor) -> String {
-    let layers: Vec<String> = (0..desc.nb_layers as usize)
-        .map(|i| {
-            let layer = &desc.layers[i];
-            let plane = &layer.planes[0];
-            format!(
-                "layer {i}: fourcc {:#x}, object {}, pitch {}, offset {}",
-                layer.format, plane.object_index, plane.pitch, plane.offset
-            )
-        })
-        .collect();
-    format!(
-        "drm:    {} object(s), modifier {:#x}\n        {}",
-        desc.nb_objects,
-        desc.objects[0].format_modifier,
-        layers.join("\n        ")
-    )
-}
-
-/// A frame the driver copied into system memory (the fallback path).
-struct SwFrame(*mut AVFrame);
-
-impl SwFrame {
-    fn transfer(src: &ff::frame::Video) -> Fallible<Self> {
-        let raw = unsafe { av_frame_alloc() };
-        if raw.is_null() {
-            return Err("av_frame_alloc".into());
-        }
-        let frame = Self(raw);
-        let rc = unsafe { av_hwframe_transfer_data(raw, src.as_ptr(), 0) };
-        if rc < 0 {
-            return Err(format!("av_hwframe_transfer_data: {}", ff::Error::from(rc)).into());
-        }
-        Ok(frame)
-    }
-
-    /// Plane bytes and their stride, both straight from the frame.
-    fn plane(&self, index: usize, rows: u32) -> (&[u8], u32) {
-        unsafe {
-            let stride = (*self.0).linesize[index] as u32;
-            let len = stride as usize * rows as usize;
-            (
-                std::slice::from_raw_parts((*self.0).data[index], len),
-                stride,
-            )
-        }
-    }
-}
-
-impl Drop for SwFrame {
-    fn drop(&mut self) {
-        unsafe { av_frame_free(&mut self.0) };
-    }
-}
-
 // ----------------------------------------------------------------- gpu side
-
-/// NV12 arrives as two single-plane images, not one two-plane image: VA-API
-/// exports separate layers and wgpu imports one plane per texture.
-const DRM_FORMAT_R8: u32 = fourcc(b"R8  ");
-const DRM_FORMAT_GR88: u32 = fourcc(b"GR88");
-
-const fn fourcc(code: &[u8; 4]) -> u32 {
-    (code[0] as u32) | ((code[1] as u32) << 8) | ((code[2] as u32) << 16) | ((code[3] as u32) << 24)
-}
-
-#[derive(Clone, Copy)]
-struct Size {
-    width: u32,
-    height: u32,
-}
-
-impl Size {
-    fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
-    }
-
-    fn halved(self) -> Self {
-        Self::new(self.width / 2, self.height / 2)
-    }
-
-    fn extent(self) -> wgpu::Extent3d {
-        wgpu::Extent3d {
-            width: self.width,
-            height: self.height,
-            depth_or_array_layers: 1,
-        }
-    }
-}
-
-struct Planes {
-    luma: wgpu::Texture,
-    chroma: wgpu::Texture,
-}
 
 struct Gpu {
     adapter: wgpu::Adapter,
@@ -451,25 +251,15 @@ struct Gpu {
 
 impl Gpu {
     fn new() -> Fallible<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..Default::default()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         }))?;
-
-        let dmabuf = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
-        if !adapter.features().contains(dmabuf) {
-            return Err("adapter lacks VULKAN_EXTERNAL_MEMORY_DMA_BUF".into());
-        }
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("spike"),
-                required_features: dmabuf,
-                ..Default::default()
-            }))?;
+        let (device, queue) = open_device(&adapter)?;
 
         let (pipeline, layout) = build_pipeline(&device);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -504,121 +294,6 @@ impl Gpu {
             target,
             readback,
         })
-    }
-
-    /// Import one DRM_PRIME descriptor as two sampled textures.
-    fn import(&self, desc: &AVDRMFrameDescriptor, luma: Size) -> Fallible<Planes> {
-        if desc.nb_layers != 2 {
-            return Err(format!("expected 2 NV12 layers, got {}", desc.nb_layers).into());
-        }
-        Ok(Planes {
-            luma: self.import_layer(desc, 0, luma)?,
-            chroma: self.import_layer(desc, 1, luma.halved())?,
-        })
-    }
-
-    fn import_layer(
-        &self,
-        desc: &AVDRMFrameDescriptor,
-        index: usize,
-        size: Size,
-    ) -> Fallible<wgpu::Texture> {
-        let layer = &desc.layers[index];
-        let plane = &layer.planes[0];
-        let object = &desc.objects[plane.object_index as usize];
-        let (format, vk_format) = plane_format(layer.format)?;
-
-        if !self.modifier_supported(vk_format, object.format_modifier) {
-            return Err(format!(
-                "modifier {:#x} unsupported for {vk_format:?}; importing anyway would be UB",
-                object.format_modifier
-            )
-            .into());
-        }
-
-        // radeonsi exports one object for both layers, so each import needs its
-        // own fd: wgpu hands ownership to Vulkan on success and closes it on
-        // failure, consuming the one it is given either way.
-        let fd = dup_fd(object.fd)?;
-        let hal_desc = wgpu::hal::TextureDescriptor {
-            label: Some("plane"),
-            size: size.extent(),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUses::RESOURCE,
-            memory_flags: wgpu::hal::MemoryFlags::empty(),
-            view_formats: vec![],
-        };
-        // Pitch and offset verbatim from the descriptor: at 3840 wide the pitch
-        // is 4096, and computing it instead shears chroma on real footage.
-        let hal_texture = unsafe {
-            let device = self
-                .device
-                .as_hal::<Vulkan>()
-                .ok_or("not a Vulkan device")?;
-            device.texture_from_dmabuf_fd(
-                fd,
-                &hal_desc,
-                object.format_modifier,
-                plane.pitch as u64,
-                plane.offset as u64,
-            )
-        }
-        .map_err(|e| format!("texture_from_dmabuf_fd: {e}"))?;
-
-        let desc = wgpu::TextureDescriptor {
-            label: Some("plane"),
-            size: size.extent(),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        };
-        Ok(unsafe {
-            self.device.create_texture_from_hal::<Vulkan>(
-                hal_texture,
-                &desc,
-                wgpu::TextureUses::UNINITIALIZED,
-            )
-        })
-    }
-
-    /// `vkGetPhysicalDeviceImageFormatProperties2` pre-flight. Creating an
-    /// image with a modifier the driver does not support is undefined
-    /// behavior rather than a clean error, so this runs before every import.
-    fn modifier_supported(&self, format: vk::Format, modifier: u64) -> bool {
-        let Some(adapter) = (unsafe { self.adapter.as_hal::<Vulkan>() }) else {
-            return false;
-        };
-        let mut drm = vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
-            .drm_format_modifier(modifier)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let mut external = vk::PhysicalDeviceExternalImageFormatInfo::default()
-            .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-        let info = vk::PhysicalDeviceImageFormatInfo2::default()
-            .format(format)
-            .ty(vk::ImageType::TYPE_2D)
-            .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(vk::ImageUsageFlags::SAMPLED)
-            .push_next(&mut external)
-            .push_next(&mut drm);
-        let mut external_props = vk::ExternalImageFormatProperties::default();
-        let mut props = vk::ImageFormatProperties2::default().push_next(&mut external_props);
-        unsafe {
-            adapter
-                .shared_instance()
-                .raw_instance()
-                .get_physical_device_image_format_properties2(
-                    adapter.raw_physical_device(),
-                    &info,
-                    &mut props,
-                )
-                .is_ok()
-        }
     }
 
     /// Ordinary textures for the copy path to upload into.
@@ -727,7 +402,7 @@ impl Gpu {
             .map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
 
-        let view = self.readback.slice(..).get_mapped_range()?;
+        let view = self.readback.slice(..).get_mapped_range();
         let mut png = png::Encoder::new(BufWriter::new(File::create(path)?), OUT_EDGE, OUT_EDGE);
         png.set_color(png::ColorType::Rgba);
         png.set_depth(png::BitDepth::Eight);
@@ -739,20 +414,31 @@ impl Gpu {
     }
 }
 
-fn plane_format(drm_format: u32) -> Fallible<(wgpu::TextureFormat, vk::Format)> {
-    match drm_format {
-        DRM_FORMAT_R8 => Ok((wgpu::TextureFormat::R8Unorm, vk::Format::R8_UNORM)),
-        DRM_FORMAT_GR88 => Ok((wgpu::TextureFormat::Rg8Unorm, vk::Format::R8G8_UNORM)),
-        other => Err(format!("unexpected DRM plane format {other:#x}").into()),
-    }
-}
-
-fn dup_fd(fd: c_int) -> Fallible<OwnedFd> {
-    let duplicate = unsafe { libc::dup(fd) };
-    if duplicate < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+/// wgpu-hal 28 never enables `VK_EXT_image_drm_format_modifier`, so a plain
+/// `request_device` yields a device that cannot import a tiled dmabuf. This
+/// callback is the only hook that can add it, which is why the spike builds
+/// its own device instead of asking wgpu for one.
+fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    let opened = unsafe {
+        let hal = adapter.as_hal::<Vulkan>().ok_or("not a Vulkan adapter")?;
+        hal.open_with_callback(
+            wgpu::Features::empty(),
+            &wgpu::MemoryHints::default(),
+            Some(Box::new(dmabuf::force_extensions)),
+        )?
+    };
+    let (device, queue) = unsafe {
+        adapter.create_device_from_hal::<Vulkan>(
+            opened,
+            &wgpu::DeviceDescriptor {
+                label: Some("spike"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            },
+        )
+    }?;
+    Ok((device, queue))
 }
 
 const SHADER: &str = r#"
@@ -820,7 +506,7 @@ fn build_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGro
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("nv12"),
-        bind_group_layouts: &[Some(&layout)],
+        bind_group_layouts: &[&layout],
         immediate_size: 0,
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -845,17 +531,4 @@ fn build_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGro
         cache: None,
     });
     (pipeline, layout)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Straight from drm_fourcc.h: a typo here would silently pick the wrong
-    /// wgpu format for a plane, and the render would still produce an image.
-    #[test]
-    fn plane_fourccs_match_drm_fourcc_h() {
-        assert_eq!(DRM_FORMAT_R8, 0x2020_3852);
-        assert_eq!(DRM_FORMAT_GR88, 0x3838_5247);
-    }
 }

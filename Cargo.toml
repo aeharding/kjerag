@@ -7,9 +7,11 @@ edition = "2024"
 # System ffmpeg is 6.1 (Pop!_OS 24.04); the crate major must match the
 # headers it binds, so this pin moves only when the system ffmpeg does.
 ffmpeg-next = "6.1.1"
-wgpu = "30.0.0"
-# Same ash the wgpu-hal 30 Vulkan backend uses, for the DRM modifier
-# pre-flight that has no wgpu-level equivalent.
+# libcosmic vendors iced as a submodule pinned to wgpu 28, and wgpu types
+# only unify across one major: this pin IS libcosmic's pin, not a choice.
+wgpu = "28.0"
+# The dmabuf import is hand-rolled against raw Vulkan on wgpu 28, so the
+# ash major must be the one wgpu-hal 28 links.
 ash = "0.38"
 libc = "0.2"
 png = "0.17"
@@ -17,6 +19,13 @@ pollster = "0.4"
 # Decodes the .insv trailer's metadata record. Only the eleven fields
 # src/meta declares are read; protobuf skips the rest.
 prost = "0.14"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1"
+# wgpu is not a default feature: the default renderer is tiny-skia, which
+# has no shader widget and no device to import into.
+features = ["wgpu"]
 
 [dev-dependencies]
 # Reads the checked-in calibration fixture, which telemetry-parser wrote

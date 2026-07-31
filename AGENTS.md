@@ -22,8 +22,12 @@ is the version Cargo.toml pins to):
 ```sh
 sudo apt install libavcodec-dev libavdevice-dev libavfilter-dev \
   libavformat-dev libavutil-dev libpostproc-dev libswresample-dev \
-  libswscale-dev libclang-dev
+  libswscale-dev libclang-dev \
+  libdrm-dev libwayland-dev libxkbcommon-dev
 ```
+
+The last line is libcosmic's. libcosmic also needs a newer rustc than
+Ubuntu ships (`rust-version = "1.93"`); `rustup update stable`.
 
 ## Gates (run before pushing)
 
