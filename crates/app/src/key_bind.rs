@@ -2,9 +2,9 @@
 //!
 //! The map is cosmic-player's, extended with the standard application keys
 //! cosmic-edit and cosmic-files agree on; docs/UI.md cites every line of it.
-//! Nothing here is invented except `s`, which the owner asked for in issue
-//! #16 and which no COSMIC app has a precedent for because no COSMIC app
-//! captures its own view.
+//! Three bare letters are invented, because no COSMIC app has a precedent
+//! for what they do: `s` (issue #16), `h` (issue #8) and `m` (issue #13,
+//! owner approved 2026-07-31).
 //!
 //! Going through libcosmic's [`KeyBind`] rather than matching keys by hand
 //! buys two things: [`KeyBind::matches`] falls back to the physical key
@@ -46,6 +46,7 @@ pub enum Action {
     FileOpenRecent(usize),
     Fullscreen,
     LockHorizon,
+    Mute,
     NextFrame,
     PlayPause,
     PreviousFrame,
@@ -72,6 +73,9 @@ impl MenuAction for Action {
             Self::FileOpenRecent(index) => Message::FileOpenRecent(*index),
             Self::Fullscreen => Message::Fullscreen,
             Self::LockHorizon => Message::LockHorizon,
+            // The speaker button's own message, so the key mutes, persists
+            // and redraws by the path the dropdown already uses.
+            Self::Mute => Message::AudioToggle,
             Self::NextFrame => Message::StepFrame(1),
             Self::PlayPause => Message::PlayPause,
             Self::PreviousFrame => Message::StepFrame(-1),
@@ -135,6 +139,11 @@ pub fn key_binds() -> HashMap<KeyBind, Action> {
     // The frame, which issue #15 makes do something.
     bind!([], Key::Character("s".into()), SaveFrame);
     bind!([Ctrl], Key::Character("c".into()), CopyFrame);
+
+    // The sound (issue #13). cosmic-player's map has no mute key, so this is
+    // mpv's `m` rather than a COSMIC precedent; the owner asked for it on
+    // 2026-07-31.
+    bind!([], Key::Character("m".into()), Mute);
 
     binds
 }
@@ -223,6 +232,18 @@ mod tests {
             Action::LockHorizon.message(),
             Message::LockHorizon
         ));
+    }
+
+    /// `m` has to reach the speaker button's own message and not a second
+    /// mute of its own, because that message is what writes the setting and
+    /// what a file with no sound in it is checked against (issue #13).
+    #[test]
+    fn the_mute_key_is_the_speaker_button() {
+        assert_eq!(
+            pressed(Modifiers::empty(), Key::Character("m".into())),
+            Some(Action::Mute)
+        );
+        assert!(matches!(Action::Mute.message(), Message::AudioToggle));
     }
 
     /// Escape belongs to `on_escape`, so binding it here would fire twice.
