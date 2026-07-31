@@ -83,6 +83,30 @@ pub fn about_item() -> String {
     format!("About {APP_NAME}...")
 }
 
+/// Why the last open did not work, as the welcome view's second line.
+///
+/// `missing` is the codec this ffmpeg has no decoder for, which is a different
+/// failure from a file that will not open and has a different answer
+/// (issue #69): nothing is wrong with the file, and one install fixes every
+/// file of that kind at once. Inside a Flatpak it is the way this happens, and
+/// the extension is named because that name is the whole of the pilot's fix
+/// (docs/DISTRIBUTION.md 3.3). The sentence stays true off Flatpak, where a
+/// stripped ffmpeg has the same shape.
+///
+/// The codec is ffmpeg's own short name, upper-cased: `HEVC`, `H264`. Not a
+/// table of prettier spellings, because the reason to print it is that it can
+/// be searched for and repeated in a bug report.
+pub fn open_failed(missing: Option<&str>) -> String {
+    let Some(codec) = missing else {
+        return OPEN_FAILED.to_owned();
+    };
+    format!(
+        "Kyerag has no {} decoder here, so that file cannot be played. \
+         In a Flatpak, the decoder comes from the codecs-extra runtime extension.",
+        codec.to_uppercase()
+    )
+}
+
 /// `{file name} - Kyerag`, and plain `Kyerag` with nothing open.
 ///
 /// cosmic-files writes its equivalent with an em dash
@@ -210,6 +234,23 @@ mod tests {
         assert!(!about_item().contains('\u{2014}'));
         assert!(!frame_saved(Path::new("/tmp/Screenshots/a.png")).contains('\u{2014}'));
         assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
+        assert!(!open_failed(Some("hevc")).contains('\u{2014}'));
+    }
+
+    /// A missing decoder is not a broken file, and the line has to say which
+    /// codec is missing and where it comes from, or the pilot is left with a
+    /// player that refuses a file for no stated reason (issue #69).
+    ///
+    /// This is the whole of the wording, checked with no ffmpeg in sight: the
+    /// probe that decides which branch runs is one `avcodec_find_decoder` call
+    /// in `kyerag-media`, and a box whose ffmpeg has HEVC cannot exercise the
+    /// other branch of it honestly.
+    #[test]
+    fn a_missing_decoder_names_the_codec_and_the_extension() {
+        let line = open_failed(Some("hevc"));
+        assert!(line.contains("HEVC"), "{line}");
+        assert!(line.contains("codecs-extra"), "{line}");
+        assert_eq!(open_failed(None), OPEN_FAILED);
     }
 
     /// The toast answers one question, which is where to look for the still.
