@@ -66,6 +66,8 @@ fn main() -> Fallible<()> {
         readout.seconds * 1e3,
         name(readout.sweep),
     );
+    let rates = rates(&track, readout, options.instants);
+    carries(&rates, readout);
 
     match (options.model, options.find, options.pair) {
         (_, Some(count), _) => fastest(&track, readout, count),
@@ -74,6 +76,63 @@ fn main() -> Fallible<()> {
         _ => seam(&calibration, &track, readout, &options),
     }
 }
+
+// ------------------------------------------------------------ what it carries
+
+/// How fast the body turns across one readout, at evenly spaced instants of
+/// the whole file, sorted: the distribution every measurement below is scaled
+/// by.
+fn rates(track: &OrientationTrack, readout: Readout, count: usize) -> Vec<f64> {
+    let span = (readout.seconds * 1e6) as i64;
+    let first = track.samples().first().map_or(0, |s| s.offset_us);
+    let last = track.samples().last().map_or(0, |s| s.offset_us);
+    let mut rates: Vec<f64> = (0..count.max(1))
+        .map(|step| first + (last - first) * step as i64 / count.max(1) as i64)
+        .map(|at| norm(track.turn(at - span / 2, at + span / 2)).to_degrees() / readout.seconds)
+        .collect();
+    rates.sort_by(f64::total_cmp);
+    rates
+}
+
+/// Whether this file has a readout displacement in it to measure at all,
+/// printed before anything is decoded.
+///
+/// Everything below reads the displacement a readout leaves in the pictures,
+/// and that displacement is the rate the camera turned at times the readout's
+/// own length. **A file of a camera that did not turn carries none of it**,
+/// whichever way its sensor reads, so every instrument then reports its own
+/// noise and the control that would catch that has nothing to apply either.
+///
+/// It prints rather than refuses, because a still capture is worth measuring
+/// for other reasons: on 2026-07-31 one gave the seam instrument's own noise
+/// floor, 0.018 degrees frame to frame, which is the number the flight
+/// footage's 0.100 has to be read against (docs/research/insv-format.md 4.9).
+/// What it must not do is answer issue #9, and the line below is what says so:
+/// that capture's whole-frame displacement was 0.02 degrees against the 4.8
+/// a hand twist gives.
+fn carries(rates: &[f64], readout: Readout) {
+    let at = |p: f64| rates[((rates.len().max(1) - 1) as f64 * p) as usize];
+    println!(
+        "carries: {} instants, median {:.1} deg/s, 90th {:.1}, 99th {:.1}, worst {:.1}",
+        rates.len(),
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        at(1.0),
+    );
+    println!(
+        "         a whole-frame readout displaces the picture by {:.2} degrees at the 99th and \
+         {:.2} at\n         the worst. the hand twist 6.7 asks for is {TWIST:.0} deg/s, which is \
+         {:.1} degrees",
+        at(0.99) * readout.seconds,
+        at(1.0) * readout.seconds,
+        TWIST * readout.seconds,
+    );
+}
+
+/// The rate a wrist turns a camera at, which is what the settling capture of
+/// docs/research/insv-format.md 6.7 is asking for.
+const TWIST: f64 = 300.0;
 
 // ------------------------------------------------------------ frame pairs
 
@@ -113,7 +172,7 @@ fn pairs(
     // One row per patch per frame pair: the two measured components, and each
     // candidate's prediction of them.
     let mut rows: Vec<Row> = Vec::new();
-    let mut control: Vec<Row> = Vec::new();
+    let mut controls: Vec<Vec<Row>> = INJECTED.iter().map(|_| Vec::new()).collect();
     let mut steps = 0usize;
 
     println!(
@@ -142,22 +201,24 @@ fn pairs(
         }
         if let Some((before, then)) = held.front() {
             let taken = between(calibration, frame, (before, then), (&pair, &now), options);
-            // The same pass with the shipped readout applied, which has to
-            // move the measurement by exactly what it applies: the control.
-            // The control applies a readout of the trailer's length across the
-            // frame, whether or not the file's own direction is known: what
-            // it proves is that a displacement of that size can be read back.
-            let corrected = between_with(
-                calibration,
-                frame,
-                (before, then),
-                (&pair, &now),
-                options,
-                Some(Readout {
-                    sweep: Sweep::Right,
-                    ..readout
-                }),
-            );
+            // The same pass again with each direction's own readout applied,
+            // which displaces the pictures by exactly what that direction
+            // predicts: the controls. All four, because the fit answers on two
+            // axes and a control on one of them proves nothing about the
+            // other. Issue #9's answer sits on the axis #42 never injected.
+            for (sweep, control) in INJECTED.iter().zip(&mut controls) {
+                control.extend(between_with(
+                    calibration,
+                    frame,
+                    (before, then),
+                    (&pair, &now),
+                    options,
+                    Some(Readout {
+                        sweep: *sweep,
+                        ..readout
+                    }),
+                ));
+            }
             println!(
                 "{:<8} {:>9.1} {:>9.2} {:>8}",
                 pair.index,
@@ -166,7 +227,6 @@ fn pairs(
                 taken.len(),
             );
             rows.extend(taken);
-            control.extend(corrected);
             steps += 1;
         }
         held.push_back((pair, now));
@@ -176,13 +236,12 @@ fn pairs(
     }
 
     println!(
-        "\n{} patch readings, {} of them under the shipped correction",
+        "\n{} patch readings, and one run of every injected readout over the same patches",
         rows.len(),
-        control.len()
     );
     println!(
-        "{:<12} {:>9} {:>9} {:>9} {:>9} {:>10} {:>12}",
-        "measured", "across x", "", "down y", "", "residual", "predicts deg"
+        "{:<12} {:>9} {:>9} {:>9} {:>9} {:>10} {:>12} {:>11}",
+        "measured", "across x", "", "down y", "", "residual", "predicts deg", "reads back"
     );
     let uncorrected = fit(&rows);
     println!(
@@ -201,22 +260,30 @@ fn pairs(
         let mine: Vec<Row> = mine.into_iter().cloned().collect();
         println!("{:<12} {}", format!("lens {lens}"), fit(&mine));
     }
-    // The control. Correcting for a readout subtracts exactly that readout
+    // The controls. Correcting for a readout subtracts exactly that readout
     // from the pictures, so the fitted sweep has to come down by one along
-    // that axis. If it does not, this instrument cannot see a displacement of
-    // that size and nothing above it means anything.
-    let corrected = fit(&control);
-    println!(
-        "{:<12} {corrected} {:>12.3}",
-        "corrected",
-        spread(control.iter().map(|row| norm2(row.predicted[0]))),
-    );
+    // that direction's own axis. Where it does not, this instrument cannot see
+    // a displacement of that size on that axis and nothing above it means
+    // anything on that axis either.
+    for (sweep, control) in INJECTED.iter().zip(&controls) {
+        if control.len() < 8 {
+            continue;
+        }
+        let (axis, sign) = reads(*sweep);
+        let fitted = fit(control);
+        println!(
+            "{:<12} {fitted} {:>12.3} {:>11.2}",
+            format!("+ {}", name(*sweep)),
+            spread(control.iter().map(|row| norm2(row.predicted[0]))),
+            sign * (uncorrected.sweep[axis] - fitted.sweep[axis]),
+        );
+    }
     println!(
         "\nthe sweep is in whole-frame readouts of {:.3} ms: (1, 0) is a sensor read across the \n\
          delivered picture in exactly that time, (-1, 0) the other way, (0, 1) down it, and \n\
-         (0, 0) a picture with no readout displacement in it. the corrected row is the control: \n\
-         it has the shipped readout taken out of the pictures, so its across-x sweep has to \n\
-         read one lower than the row above.",
+         (0, 0) a picture with no readout displacement in it. the four rows below the lenses \n\
+         are the controls: each has that direction's own readout taken out of the pictures, so \n\
+         it has to read back at 1.00 on its own axis and leave the other axis where it was.",
         readout.seconds * 1e3,
     );
     Ok(())
@@ -597,6 +664,23 @@ fn candidates(readout: Readout) -> Vec<(String, Option<Readout>)> {
         out.push((name(sweep).to_owned(), Some(Readout { sweep, ..readout })));
     }
     out
+}
+
+/// The four readouts injected as controls: one per axis and sign, because an
+/// instrument that answers on two axes has to be shown to read both.
+const INJECTED: [Sweep; 4] = [Sweep::Right, Sweep::Left, Sweep::Down, Sweep::Up];
+
+/// Which fitted axis a direction lives on, and which way round: injecting it
+/// takes that coefficient down by one of its own sign, so a control reads back
+/// at 1.00 whichever of the four it is.
+fn reads(sweep: Sweep) -> (usize, f64) {
+    match sweep {
+        Sweep::Right => (0, 1.0),
+        Sweep::Left => (0, -1.0),
+        Sweep::Down => (1, 1.0),
+        Sweep::Up => (1, -1.0),
+        Sweep::Unknown => (0, 0.0),
+    }
 }
 
 fn name(sweep: Sweep) -> &'static str {
@@ -1122,22 +1206,7 @@ fn model(
         .map(|step| first + (last - first) * step as i64 / options.instants as i64)
         .collect();
 
-    // How fast this file turns, which is what everything below is worth
-    // multiplying by.
-    let mut rates: Vec<f64> = instants
-        .iter()
-        .map(|at| norm(track.turn(at - span / 2, at + span / 2)).to_degrees() / readout.seconds)
-        .collect();
-    rates.sort_by(f64::total_cmp);
-    let percentile = |p: f64| rates[((rates.len() - 1) as f64 * p) as usize];
-    println!(
-        "rate:   {} instants, median {:.1} deg/s, 90th {:.1}, 99th {:.1}, worst {:.1}",
-        rates.len(),
-        percentile(0.5),
-        percentile(0.9),
-        percentile(0.99),
-        percentile(1.0),
-    );
+    // How fast this file turns is the `carries` line, printed for every mode.
 
     // A straight line in time across the readout, against the track's own
     // orientation at each row's instant. This is the whole modelling

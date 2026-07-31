@@ -21,9 +21,9 @@
 //! carried through belongs to the row it lands on rather than to the frame,
 //! and [`Reframe::solve`] is that: reframing, stabilization and the readout
 //! in one backward mapping per output pixel, with nothing resampled and no
-//! pass added. It is switched off on every camera today, because which way
-//! the sensor reads is not in the file and could not be measured out of
-//! flying footage (`kyerag_meta::Sweep`).
+//! pass added. Which way the sensor reads is not in the file, so it is
+//! measured per camera and the correction is switched off on any camera it
+//! has not been measured on (`kyerag_meta::Sweep`).
 //!
 //! Written from the model description in `docs/research/insv-format.md` 5.1
 //! (Mei and Rives 2007, as OpenCV's `cv::omnidir` states it). Nothing here
