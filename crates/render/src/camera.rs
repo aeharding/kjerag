@@ -97,10 +97,15 @@ impl Viewpoint {
 
     /// Continue a drag to a new cursor position. `true` when the camera
     /// moved, which is the caller's cue to ask for a redraw.
+    ///
+    /// A move with no grab held must leave the anchor unset. `Option::replace`
+    /// reads like the right tool and is not: it arms the anchor on its way
+    /// past, so the move after it pans with no button down (issue #26).
     pub fn drag_to(&mut self, x: f32, y: f32, width: f32) -> bool {
-        let Some((from_x, from_y)) = self.anchor.replace((x, y)) else {
+        let Some((from_x, from_y)) = self.anchor else {
             return false;
         };
+        self.anchor = Some((x, y));
         self.camera.pan(x - from_x, y - from_y, width);
         true
     }
@@ -169,15 +174,33 @@ mod tests {
         assert_ne!(viewpoint.camera(), Camera::default());
     }
 
+    /// Issue #26. One move with nothing held used to arm the anchor, so the
+    /// move after it panned: the second call is the whole test.
+    #[test]
+    fn a_move_with_nothing_held_arms_nothing() {
+        let mut viewpoint = Viewpoint::default();
+
+        for x in 0..10 {
+            assert!(!viewpoint.drag_to(x as f32 * 20.0, 10.0, 1000.0));
+        }
+
+        assert!(!viewpoint.is_dragging());
+        assert_eq!(viewpoint.camera(), Camera::default());
+    }
+
     /// Releasing outside the widget must not leave the camera glued to the
     /// cursor: the next press starts a fresh drag from wherever it lands.
     #[test]
     fn releasing_ends_the_drag() {
         let mut viewpoint = Viewpoint::default();
         viewpoint.grab(10.0, 10.0);
+        assert!(viewpoint.drag_to(20.0, 10.0, 1000.0));
+        let parked = viewpoint.camera();
         viewpoint.release();
 
         assert!(!viewpoint.is_dragging());
         assert!(!viewpoint.drag_to(500.0, 500.0, 1000.0));
+        assert!(!viewpoint.drag_to(600.0, 500.0, 1000.0));
+        assert_eq!(viewpoint.camera(), parked);
     }
 }
