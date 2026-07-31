@@ -20,6 +20,7 @@ mod calibration;
 mod exposure;
 mod gyro;
 mod orientation;
+mod pair;
 mod rotation;
 mod trailer;
 
@@ -30,6 +31,7 @@ pub use calibration::{
 pub use exposure::{ExposureSample, ExposureTrack};
 pub use gyro::{GyroSample, GyroTrack};
 pub use orientation::{Filter, OrientationSample, OrientationTrack, Seed, axis_map, body_from_imu};
+pub use pair::{lens_index, sibling};
 pub use rotation::{Mat3, Quat};
 pub use trailer::record_index;
 

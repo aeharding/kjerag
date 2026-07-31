@@ -135,6 +135,7 @@ pub struct Player {
     timing: Timing,
     size: Size,
     lenses: usize,
+    files: usize,
     failure: Option<Box<dyn std::error::Error + Send + Sync>>,
     ended: bool,
     /// Which frames may go on screen, and which seek is still owed one.
@@ -239,7 +240,8 @@ impl Player {
     /// not hold the window shut.
     pub fn open(path: &Path) -> Fallible<Self> {
         let mut reader = Reader::open(path)?.lookahead(LOOKAHEAD);
-        let (timing, size, lenses) = (reader.timing(), reader.size(), reader.lenses());
+        let (timing, size) = (reader.timing(), reader.size());
+        let (lenses, files) = (reader.lenses(), reader.files());
         let beat = Arc::new(Beat::default());
         let sound = reader
             .sound_rate()
@@ -270,6 +272,7 @@ impl Player {
             timing,
             size,
             lenses,
+            files,
             failure: None,
             ended: false,
             epochs: Epochs::default(),
@@ -286,6 +289,12 @@ impl Player {
 
     pub fn lenses(&self) -> usize {
         self.lenses
+    }
+
+    /// How many files this capture was opened from: 2 for a per-lens pair
+    /// the reader put back together, 1 for everything else.
+    pub fn files(&self) -> usize {
+        self.files
     }
 
     pub fn is_playing(&self) -> bool {
@@ -1306,6 +1315,7 @@ mod tests {
                     timing,
                     size: Size::new(3840, 3840),
                     lenses: 2,
+                    files: 1,
                     failure: None,
                     ended: false,
                     epochs: Epochs::default(),

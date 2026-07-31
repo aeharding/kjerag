@@ -1,17 +1,33 @@
-//! One demuxer, every video stream of the file, frames handed out in pairs.
+//! Every video stream of a capture, frames handed out in pairs.
 //!
-//! An `.insv` carries the two lenses as two HEVC streams of one MP4, and a
-//! reframed view is a function of both of them at the same instant. So the
-//! unit this layer delivers is not a frame, it is [`Frames`]: the same PTS
-//! from every video stream, mapped and ready to import. A lens is never
-//! delivered without its partner, which is how the two streams cannot drift.
+//! An X4-class `.insv` carries the two lenses as two HEVC streams of one MP4,
+//! and a reframed view is a function of both of them at the same instant. So
+//! the unit this layer delivers is not a frame, it is [`Frames`]: the same
+//! instant from every lens, mapped and ready to import. A lens is never
+//! delivered without its partner, which is how the two cannot drift.
+//!
+//! **A capture is not always one file (issue #79).** The ONE X2 and the
+//! models before it write one lens per file, so the same invariant has to
+//! hold across two containers: [`Reader::open`] finds the sibling
+//! (`kyerag_meta::sibling`), opens a demuxer for each, and pumps whichever
+//! one is behind. Two files of one capture share a frame grid exactly -
+//! measured on all three X2 pairs on this box, both files carry `time_base`
+//! 1/30000, a `start_time` of 0 and the identical PTS series 0, 1001,
+//! 2002, ... - so there is no drift between them to correct and nothing to
+//! resample. What they do not share is their **length**: the lens 0 file
+//! runs exactly one frame longer in all three pairs, and a frame with no
+//! partner is dropped rather than shown as half a sphere.
+//!
+//! Lanes are matched on frame index rather than on raw PTS for the same
+//! reason: each file carries its own `start_time`, and media time measured
+//! from it is the one number that means the same thing in both timelines.
 //!
 //! Reading is by [`Cue`] as well as forward, because pinning every consumer
 //! to frame 0 is what issue #4's first comment asked us to stop doing: #8's
 //! Studio-diff harness and #5's seek both need to name a frame.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ffmpeg_next as ff;
@@ -148,20 +164,19 @@ impl std::fmt::Debug for Frames {
     }
 }
 
-/// One demuxer and one VA-API decoder per video stream.
+/// One demuxer per file of the capture, and one VA-API decoder per video
+/// stream of each.
 pub struct Reader {
-    input: ff::format::context::Input,
+    /// One file each. Two only for the cameras that write one lens per file;
+    /// everything else opens exactly one and reads it as it always did.
+    sources: Vec<Source>,
     lanes: Vec<Lane>,
-    /// The file's sound, when it has one and a device took it. Fed from this
-    /// same demux loop, because there is only one file handle.
+    /// The capture's sound, when it has one and a device took it. It comes
+    /// off the packets [`Source::input`] of [`SOUND_SOURCE`] is already
+    /// reading, because there is one file handle per source and no more.
     track: Option<Track>,
     timing: Timing,
     size: Size,
-    /// Stream time base, shared by both video streams (checked at open).
-    time_base: ff::Rational,
-    /// PTS of the first frame, which the container is free to start away
-    /// from zero. Media time is measured from it.
-    start: i64,
     lookahead: usize,
     skip_before: u64,
     /// Set from a seek until the frame it landed on has been handed over.
@@ -169,53 +184,135 @@ pub struct Reader {
     /// first picture comes out, which is 24 ms of a 46 ms scrub on this
     /// camera. A seek gives that up once and fills the pipeline behind it.
     landing: bool,
-    drained: bool,
     /// Held so the device outlives the decoders that reference it.
     _hw: HwDevice,
 }
 
-/// One video stream: its decoder, and the frames it has decoded but not yet
-/// been asked for.
+/// Which source the sound is taken from.
+///
+/// Both files of an X2 pair carry an AAC stream of the same length, and they
+/// are two recordings of the same moment rather than two halves of one, so
+/// one of them is the sound and the other is skipped. Lens 0's is the one
+/// kept, for the same reason its trailer is the capture's: it is the file
+/// the camera writes everything else in.
+const SOUND_SOURCE: usize = 0;
+
+/// One file: its demuxer, its own timeline, and whether it has been read to
+/// the end.
+struct Source {
+    input: ff::format::context::Input,
+    /// Stream time base, shared by every video stream of this file (checked
+    /// at open, and checked between files when there are two).
+    time_base: ff::Rational,
+    /// PTS of the first frame, which a container is free to put anywhere.
+    /// Media time is measured from it, per file.
+    start: i64,
+    drained: bool,
+}
+
+/// One video stream: which file and stream it is, its decoder, and the frames
+/// it has decoded but not yet been asked for.
 struct Lane {
+    source: usize,
     stream: usize,
     decoder: ff::decoder::Video,
     queue: VecDeque<ff::frame::Video>,
 }
 
+/// A container opened and looked at, before any decoder exists: what
+/// [`Reader::open`] needs to decide whether a second file belongs with it.
+struct Opened {
+    input: ff::format::context::Input,
+    /// One per video stream, in container order.
+    videos: Vec<Video>,
+    time_base: ff::Rational,
+    start: i64,
+}
+
+#[derive(Clone, Copy)]
+struct Video {
+    stream: usize,
+    rate: ff::Rational,
+    frames: u64,
+    size: Size,
+}
+
+/// What a file has to agree with its sibling about to be the other lens of
+/// one capture, as plain numbers. Split out from [`Opened`] because the rule
+/// below is the whole of trust-but-verify and a container is not needed to
+/// state it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Shape {
+    lenses: usize,
+    size: Size,
+    rate: (i32, i32),
+    time_base: (i32, i32),
+    frames: u64,
+}
+
+impl Shape {
+    /// Whether two files are two lenses of one capture rather than two files
+    /// that happen to be named alike.
+    ///
+    /// The name has already said they belong together; this is the verifying
+    /// half, and it is deliberately about the pictures rather than about the
+    /// trailer, because the second file of an X2 pair **has no trailer** to
+    /// check (`kyerag_meta::pair`). Two lenses of one capture are one video
+    /// stream each, the same size, the same rate, the same time base and the
+    /// same length. Measured on all three X2 pairs on this box: they agree on
+    /// every one of those, and their frame counts are exactly one apart.
+    ///
+    /// A file that fails any of it is not refused, it is left out: the
+    /// capture opens with the one lens it named, which is what the player did
+    /// before issue #79 and is never worse than it.
+    fn pairs_with(self, other: Self) -> bool {
+        self.lenses == 1
+            && other.lenses == 1
+            && self.size == other.size
+            && self.rate == other.rate
+            && self.time_base == other.time_base
+            && self.frames.abs_diff(other.frames) <= 1
+    }
+}
+
 impl Reader {
-    /// Opens the file and both decoders. Cheap: this reads the MP4 index,
-    /// not the video.
+    /// Opens the capture and every decoder it needs. Cheap: this reads the
+    /// MP4 index, not the video.
+    ///
+    /// One file is the usual case. A file that decodes a single lens is
+    /// looked up against its sibling first (issue #79), and a pair that
+    /// checks out is read as one source of two lenses.
     pub fn open(path: &Path) -> Fallible<Self> {
         ff::init()?;
-        let input = ff::format::input(&path)?;
         let hw = HwDevice::vaapi()?;
+        let named = Opened::new(path)?;
+        let sources = match partner(path, &named) {
+            // In lens order, which is not the order they were asked for:
+            // opening the `_10_` file has to deliver lens 1 second all the
+            // same, or every lens the shader reprojects is the other one's
+            // and the sphere comes out inside out.
+            Some(beside) => match kyerag_meta::lens_index(path) {
+                Some(1) => vec![beside, named],
+                _ => vec![named, beside],
+            },
+            None => vec![named],
+        };
+        Self::over(sources, hw)
+    }
 
-        let video: Vec<(usize, ff::Rational, ff::Rational, i64, i64)> = input
-            .streams()
-            .filter(|s| s.parameters().medium() == ff::media::Type::Video)
-            .map(|s| {
-                (
-                    s.index(),
-                    s.time_base(),
-                    s.avg_frame_rate(),
-                    s.frames(),
-                    s.start_time(),
-                )
-            })
-            .collect();
-        let (first, time_base, rate, frames, start) =
-            *video.first().ok_or("file has no video stream")?;
-        if video.iter().any(|s| s.1 != time_base) {
-            return Err("video streams disagree about their time base".into());
-        }
-
-        let mut lanes = Vec::with_capacity(video.len());
-        for &(stream, ..) in &video {
-            lanes.push(Lane {
-                stream,
-                decoder: decode::open_decoder(&input, stream, &hw)?,
-                queue: VecDeque::new(),
-            });
+    /// One decoder per video stream of every source, and the timing the
+    /// whole capture is read on.
+    fn over(sources: Vec<Opened>, hw: HwDevice) -> Fallible<Self> {
+        let mut lanes = Vec::new();
+        for (source, opened) in sources.iter().enumerate() {
+            for video in &opened.videos {
+                lanes.push(Lane {
+                    source,
+                    stream: video.stream,
+                    decoder: decode::open_decoder(&opened.input, video.stream, &hw)?,
+                    queue: VecDeque::new(),
+                });
+            }
         }
         let size = Size::new(lanes[0].decoder.width(), lanes[0].decoder.height());
         if let Some(lane) = lanes
@@ -223,8 +320,10 @@ impl Reader {
             .find(|l| Size::new(l.decoder.width(), l.decoder.height()) != size)
         {
             return Err(format!(
-                "stream {} is {}x{}, but stream {first} is {}x{}",
+                "lens {}, stream {} of file {}, is {}x{}, but the first lens is {}x{}",
+                lanes.len(),
                 lane.stream,
+                lane.source,
                 lane.decoder.width(),
                 lane.decoder.height(),
                 size.width,
@@ -233,22 +332,23 @@ impl Reader {
             .into());
         }
 
+        let videos = || sources.iter().flat_map(|opened| opened.videos.iter());
+        let rate = videos().next().ok_or("file has no video stream")?.rate;
+        // The shortest lens is what the capture is: a frame the other lenses
+        // cannot match is a frame that would be shown as half a sphere. The
+        // X2 pairs on this box are one frame apart, always in lens 0's
+        // favour.
+        let frames = videos().map(|video| video.frames).min().unwrap_or(0);
+
         Ok(Self {
-            input,
+            sources: sources.into_iter().map(Opened::into_source).collect(),
             lanes,
             track: None,
-            timing: Timing::new(rate, frames.max(0) as u64)?,
+            timing: Timing::new(rate, frames)?,
             size,
-            time_base,
-            start: if start == ff::ffi::AV_NOPTS_VALUE {
-                0
-            } else {
-                start
-            },
             lookahead: 0,
             skip_before: 0,
             landing: false,
-            drained: false,
             _hw: hw,
         })
     }
@@ -269,22 +369,32 @@ impl Reader {
         self
     }
 
-    /// Decode this file's sound as well, into `sound`'s ring (issue #13).
+    /// Decode this capture's sound as well, into `sound`'s ring (issue #13).
     ///
-    /// A file with no audio stream takes this and stays silent, which is what
-    /// the older cameras' per-lens files do. Nothing else about the reader
-    /// changes: the sound comes off the packets this demuxer is already
-    /// reading.
+    /// A file with no audio stream takes this and stays silent. Nothing else
+    /// about the reader changes: the sound comes off the packets a demuxer
+    /// here is already reading, and it is [`SOUND_SOURCE`]'s.
     pub fn listen(mut self, sound: &Sound) -> Fallible<Self> {
-        self.track = Track::open(&self.input, sound.pipe(), sound.rate(), sound.channels())?;
+        let Some(source) = self.sources.get(SOUND_SOURCE) else {
+            return Ok(self);
+        };
+        self.track = Track::open(
+            &source.input,
+            SOUND_SOURCE,
+            sound.pipe(),
+            sound.rate(),
+            sound.channels(),
+        )?;
         Ok(self)
     }
 
-    /// The sample rate of the file's audio stream, or `None` for a file with
+    /// The sample rate of the capture's audio stream, or `None` for one with
     /// no sound in it. Read before a device is opened, so the device can be
     /// asked for the rate that needs no resampling.
     pub fn sound_rate(&self) -> Option<u32> {
         let stream = self
+            .sources
+            .get(SOUND_SOURCE)?
             .input
             .streams()
             .find(|s| s.parameters().medium() == ff::media::Type::Audio)?;
@@ -302,10 +412,17 @@ impl Reader {
         self.size
     }
 
-    /// One per video stream: 2 for an `.insv` the camera wrote in one file,
-    /// 1 for the older per-lens files.
+    /// One per video stream of every file: 2 for an `.insv` the camera wrote
+    /// in one file, 2 for a paired per-lens capture, and 1 for a per-lens
+    /// file whose sibling is not on the card.
     pub fn lenses(&self) -> usize {
         self.lanes.len()
+    }
+
+    /// How many files this capture was opened from: 1 for everything but a
+    /// paired per-lens capture, which is 2. For the report line only.
+    pub fn files(&self) -> usize {
+        self.sources.len()
     }
 
     /// Surfaces in one lane's frame pool, which is the ceiling on how many
@@ -343,7 +460,7 @@ impl Reader {
             if let Some(frames) = self.take()? {
                 return Ok(Read::Frames(frames));
             }
-            if self.drained {
+            if self.drained() {
                 return Ok(Read::Ended);
             }
             if interrupted() {
@@ -351,6 +468,14 @@ impl Reader {
             }
             self.pump()?;
         }
+    }
+
+    /// Whether every file has been read to its end. The lens 0 file of an X2
+    /// pair is a frame longer than its partner, so one source runs out first
+    /// and the read carries on until the other does too; the frame left over
+    /// has no partner and never becomes a [`Frames`].
+    fn drained(&self) -> bool {
+        self.sources.iter().all(|source| source.drained)
     }
 
     /// The frame a [`Cue`] names, wherever it is in the file: seek to the
@@ -379,7 +504,12 @@ impl Reader {
         // before it. GOP is 1.001 s on this camera, so the walk that
         // follows is at most 30 frames (docs/research/gpu-pipeline.md 7).
         let target = self.timing.time_of(index).as_micros() as i64;
-        self.input.seek(target, ..target)?;
+        // Every file of the capture goes to the same media time. They share a
+        // frame grid exactly, so this lands both of them on the same frame.
+        for source in &mut self.sources {
+            source.input.seek(target, ..target)?;
+            source.drained = false;
+        }
         for lane in &mut self.lanes {
             lane.decoder.flush();
             lane.queue.clear();
@@ -396,31 +526,47 @@ impl Reader {
             Accuracy::Keyframe => 0,
         };
         self.landing = true;
-        self.drained = false;
         Ok(())
     }
 
-    /// Reads one packet and decodes whatever it completes.
+    /// Reads one packet from the file that is furthest behind, and decodes
+    /// whatever it completes.
+    ///
+    /// Which file is behind is what keeps a pair in step: reading them turn
+    /// and turn about would work too, but a file whose packets are laid out
+    /// differently would run ahead and the queue in front of it would grow
+    /// without bound. The lane with the fewest decoded frames is the one
+    /// holding [`Self::ready`] up, so its file is the one to read.
     fn pump(&mut self) -> Fallible<()> {
+        let source = self.hungriest();
         let mut packet = ff::Packet::empty();
-        match packet.read(&mut self.input) {
+        match packet.read(&mut self.sources[source].input) {
             Ok(()) => {
-                if let Some(track) = self.track.as_mut().filter(|t| t.stream == packet.stream()) {
+                let stream = packet.stream();
+                if let Some(track) = self
+                    .track
+                    .as_mut()
+                    .filter(|t| (t.source, t.stream) == (source, stream))
+                {
                     return track.take(&packet);
                 }
-                let Some(lane) = self.lanes.iter_mut().find(|l| l.stream == packet.stream()) else {
+                let Some(lane) = self
+                    .lanes
+                    .iter_mut()
+                    .find(|l| (l.source, l.stream) == (source, stream))
+                else {
                     return Ok(());
                 };
                 lane.decoder.send_packet(&packet)?;
                 lane.drain()
             }
             Err(ff::Error::Eof) => {
-                self.drained = true;
-                for lane in &mut self.lanes {
+                self.sources[source].drained = true;
+                for lane in self.lanes.iter_mut().filter(|l| l.source == source) {
                     lane.decoder.send_eof()?;
                     lane.drain()?;
                 }
-                if let Some(track) = &mut self.track {
+                if let Some(track) = self.track.as_mut().filter(|t| t.source == source) {
                     track.end()?;
                 }
                 Ok(())
@@ -429,16 +575,36 @@ impl Reader {
         }
     }
 
-    /// The head of every lane, if they agree on a PTS and there is enough
+    /// The file with the fewest decoded frames waiting, skipping the ones
+    /// already read to the end. Source 0 when there is only one, which is
+    /// every capture that is one file.
+    fn hungriest(&self) -> usize {
+        let queued = |source: usize| {
+            self.lanes
+                .iter()
+                .filter(|lane| lane.source == source)
+                .map(|lane| lane.queue.len())
+                .min()
+                .unwrap_or(0)
+        };
+        (0..self.sources.len())
+            .filter(|source| !self.sources[*source].drained)
+            .min_by_key(|source| queued(*source))
+            .unwrap_or(0)
+    }
+
+    /// The head of every lane, if they agree on a frame and there is enough
     /// behind them to have paid for the map.
     fn take(&mut self) -> Fallible<Option<Frames>> {
         loop {
             self.align();
-            let Some(pts) = self.ready()? else {
+            let Some(index) = self.ready()? else {
                 return Ok(None);
             };
-            let timestamp = self.media_time(pts);
-            let index = self.timing.index_at(timestamp);
+            // The first lens's own media time rather than the grid's. The
+            // index is what pairs the lanes; the container's PTS is what
+            // paces playback, and it is unchanged by the pairing.
+            let timestamp = self.head_time().unwrap_or_default();
             if index >= self.skip_before {
                 self.landing = false;
                 let mut lenses = Vec::with_capacity(self.lanes.len());
@@ -461,13 +627,19 @@ impl Reader {
         }
     }
 
-    /// The PTS every lane's head agrees on, or `None` if the queues are not
-    /// deep enough yet.
-    fn ready(&self) -> Fallible<Option<i64>> {
+    /// The frame every lane's head agrees on, or `None` if the queues are
+    /// not deep enough yet.
+    ///
+    /// A frame **index** rather than a PTS, because two files of one capture
+    /// carry their own `start_time` and a raw PTS means nothing across them.
+    /// Within one file the two are the same question asked twice: the
+    /// container writes a PTS per frame on its own grid, so equal indices
+    /// there are equal timestamps.
+    fn ready(&self) -> Fallible<Option<u64>> {
         // At the end of the file there is nothing left to hide the map
         // behind, and right after a seek there is nobody to hide it from:
         // both hand frames over as they come.
-        let depth = if self.drained || self.landing {
+        let depth = if self.drained() || self.landing {
             1
         } else {
             self.lookahead + 1
@@ -475,42 +647,67 @@ impl Reader {
         if self.lanes.iter().any(|lane| lane.queue.len() < depth) {
             return Ok(None);
         }
-        let heads: Vec<i64> = self.lanes.iter().filter_map(Lane::head).collect();
+        let heads: Vec<u64> = self.lanes.iter().filter_map(|lane| self.at(lane)).collect();
         if heads.len() != self.lanes.len() {
             return Err("a decoded frame has no timestamp".into());
         }
-        match heads.iter().all(|pts| *pts == heads[0]) {
+        match heads.iter().all(|index| *index == heads[0]) {
             true => Ok(Some(heads[0])),
             false => Ok(None),
         }
     }
 
-    /// Drops heads that have no partner. Both lenses are recorded by one
-    /// camera at one rate, so this should never fire; it exists so that a
-    /// file where it does fire loses a frame instead of pairing lens 0 with
-    /// a different instant of lens 1.
+    /// Drops heads that have no partner, so a lens is never handed over
+    /// paired with a different instant of the other one.
+    ///
+    /// Inside one file this should never fire: both lenses are recorded by
+    /// one camera at one rate. Across two files it fires exactly once per
+    /// capture, at the end, where the X2's lens 0 file runs one frame longer
+    /// than its partner.
     fn align(&mut self) {
         loop {
-            let heads: Vec<i64> = self.lanes.iter().filter_map(Lane::head).collect();
+            let heads: Vec<u64> = self.lanes.iter().filter_map(|lane| self.at(lane)).collect();
             if heads.len() != self.lanes.len() {
                 return;
             }
             let Some(&newest) = heads.iter().max() else {
                 return;
             };
-            if heads.iter().all(|pts| *pts == newest) {
+            if heads.iter().all(|index| *index == newest) {
                 return;
             }
-            for lane in &mut self.lanes {
-                if lane.head().is_some_and(|pts| pts < newest) {
+            let behind: Vec<bool> = self
+                .lanes
+                .iter()
+                .map(|lane| self.at(lane).is_some_and(|index| index < newest))
+                .collect();
+            for (lane, behind) in self.lanes.iter_mut().zip(behind) {
+                if behind {
                     lane.queue.pop_front();
                 }
             }
         }
     }
 
-    fn media_time(&self, pts: i64) -> Duration {
-        media_time(pts, self.start, self.time_base)
+    /// Which frame of the capture this lane's head is, on its own file's
+    /// timeline.
+    fn at(&self, lane: &Lane) -> Option<u64> {
+        Some(
+            self.timing
+                .index_at(self.media_time(lane.source, lane.head()?)),
+        )
+    }
+
+    /// The media time of the first lane's head, which is the instant the
+    /// pair is stamped with.
+    fn head_time(&self) -> Option<Duration> {
+        let lane = self.lanes.first()?;
+        Some(self.media_time(lane.source, lane.head()?))
+    }
+
+    fn media_time(&self, source: usize, pts: i64) -> Duration {
+        let source = &self.sources[source];
+        media_time(pts, source.start, source.time_base)
     }
 }
 
@@ -530,12 +727,180 @@ impl Lane {
     }
 }
 
+impl Opened {
+    fn new(path: &Path) -> Fallible<Self> {
+        let input = ff::format::input(&path)?;
+        let videos: Vec<Video> = input
+            .streams()
+            .filter(|s| s.parameters().medium() == ff::media::Type::Video)
+            .map(|s| {
+                // `Parameters` hands out no accessors, and opening a decoder
+                // to read two integers before deciding whether this file is
+                // even wanted is worse than reading the integers. The same
+                // reach `sound_rate` makes, for the same reason.
+                let (width, height) = unsafe {
+                    let p = *s.parameters().as_ptr();
+                    (p.width.max(0) as u32, p.height.max(0) as u32)
+                };
+                Video {
+                    stream: s.index(),
+                    rate: s.avg_frame_rate(),
+                    frames: s.frames().max(0) as u64,
+                    size: Size::new(width, height),
+                }
+            })
+            .collect();
+        let first = videos.first().ok_or("file has no video stream")?;
+        let time_base = input
+            .stream(first.stream)
+            .ok_or("the video stream went away")?
+            .time_base();
+        let starts: Vec<i64> = videos
+            .iter()
+            .filter_map(|video| input.stream(video.stream))
+            .map(|s| s.start_time())
+            .collect();
+        if videos
+            .iter()
+            .filter_map(|video| input.stream(video.stream))
+            .any(|s| s.time_base() != time_base)
+        {
+            return Err("video streams disagree about their time base".into());
+        }
+        let start = starts.first().copied().unwrap_or(0);
+        Ok(Self {
+            input,
+            videos,
+            time_base,
+            start: match start == ff::ffi::AV_NOPTS_VALUE {
+                true => 0,
+                false => start,
+            },
+        })
+    }
+
+    fn into_source(self) -> Source {
+        Source {
+            input: self.input,
+            time_base: self.time_base,
+            start: self.start,
+            drained: false,
+        }
+    }
+
+    /// This file as the numbers [`Shape::pairs_with`] compares. `None` for a
+    /// file with no video stream in it, which cannot be a lens of anything.
+    fn shape(&self) -> Option<Shape> {
+        let first = self.videos.first()?;
+        let pair = |r: ff::Rational| (r.numerator(), r.denominator());
+        Some(Shape {
+            lenses: self.videos.len(),
+            size: first.size,
+            rate: pair(first.rate),
+            time_base: pair(self.time_base),
+            frames: first.frames,
+        })
+    }
+}
+
+/// The file holding this capture's other lens, opened and checked, or `None`
+/// for a capture that is one file.
+///
+/// The lookup only happens for a container that decodes a **single** lens, so
+/// an X4-class `.insv` never touches the filesystem for it and its open path
+/// is what it always was.
+fn partner(path: &Path, first: &Opened) -> Option<Opened> {
+    let shape = first.shape()?;
+    if shape.lenses != 1 {
+        return None;
+    }
+    let beside: PathBuf = kyerag_meta::sibling(path)?;
+    let second = match Opened::new(&beside) {
+        Ok(second) => second,
+        Err(e) => {
+            eprintln!(
+                "kyerag: {} is not readable, one lens only: {e}",
+                beside.display()
+            );
+            return None;
+        }
+    };
+    if !second
+        .shape()
+        .is_some_and(|beside| shape.pairs_with(beside))
+    {
+        eprintln!(
+            "kyerag: {} is not this capture's other lens, one lens only",
+            beside.display()
+        );
+        return None;
+    }
+    Some(second)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ntsc() -> Timing {
         Timing::new(ff::Rational::new(30000, 1001), 53940).unwrap()
+    }
+
+    /// One lens of a ONE X2 pair, as the container describes it: 2880 square,
+    /// 30000/1001, time base 1/30000. The real numbers off
+    /// `VID_20251018_184419_00_001.insv`.
+    fn x2_lens(frames: u64) -> Shape {
+        Shape {
+            lenses: 1,
+            size: Size::new(2880, 2880),
+            rate: (30000, 1001),
+            time_base: (1, 30000),
+            frames,
+        }
+    }
+
+    /// The pair the naming found is accepted when the pictures agree, and the
+    /// one frame the two files differ by is inside the rule rather than
+    /// outside it: all three X2 pairs on this box have lens 0 running exactly
+    /// one frame longer.
+    #[test]
+    fn the_two_files_of_a_capture_agree_about_everything_but_their_length() {
+        assert!(x2_lens(2516).pairs_with(x2_lens(2515)));
+        assert!(x2_lens(2515).pairs_with(x2_lens(2516)));
+        assert!(x2_lens(8204).pairs_with(x2_lens(8203)));
+        assert!(x2_lens(2516).pairs_with(x2_lens(2516)));
+    }
+
+    /// And a file that disagrees is left out rather than refused. Each of
+    /// these is a way the naming could find the wrong file: another camera's
+    /// clip, a different mode, a stitched export, or a clip of another
+    /// length entirely.
+    #[test]
+    fn a_file_that_does_not_match_is_not_this_capture_s_other_lens() {
+        let lens = x2_lens(2516);
+
+        assert!(!lens.pairs_with(Shape {
+            size: Size::new(3840, 3840),
+            ..x2_lens(2516)
+        }));
+        assert!(!lens.pairs_with(Shape {
+            rate: (60000, 1001),
+            ..x2_lens(2516)
+        }));
+        assert!(!lens.pairs_with(Shape {
+            time_base: (1, 90000),
+            ..x2_lens(2516)
+        }));
+        assert!(!lens.pairs_with(x2_lens(2600)));
+        // An X4-class file, which carries both lenses itself: neither side of
+        // this is ever half a capture.
+        let both = Shape {
+            lenses: 2,
+            size: Size::new(3840, 3840),
+            ..x2_lens(4546)
+        };
+        assert!(!both.pairs_with(x2_lens(4546)));
+        assert!(!x2_lens(4546).pairs_with(both));
     }
 
     #[test]
