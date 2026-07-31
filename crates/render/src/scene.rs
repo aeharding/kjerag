@@ -477,11 +477,6 @@ impl Scene {
         self.pinned.set(None);
     }
 
-    /// Whether a drag has taken the view off the heading follow (issue #44).
-    pub fn is_view_pinned(&self) -> bool {
-        self.pinned.get().is_some()
-    }
-
     /// Whether this file carries the IMU record horizon lock needs. A file
     /// without one plays with the toggle on and the picture unheld.
     pub fn has_orientation(&self) -> bool {
