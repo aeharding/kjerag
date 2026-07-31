@@ -1,0 +1,34 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g2-ocean" x1="80" y1="148" x2="176" y2="246" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <linearGradient id="g2-fig" x1="0" y1="-91" x2="40" y2="92" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFC078"/>
+      <stop offset="1" stop-color="#E0522B"/>
+    </linearGradient>
+    <clipPath id="g2-globe"><circle cx="130" cy="198" r="49"/></clipPath>
+  </defs>
+  <circle cx="128" cy="196" r="52" fill="#FFE0B0"/>
+  <circle cx="130" cy="198" r="49" fill="url(#g2-ocean)"/>
+  <g clip-path="url(#g2-globe)">
+    <g transform="translate(130 198) scale(1.1951) translate(-130 -146)">
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
+    </g>
+  </g>
+  <g transform="translate(128 100) scale(0.95)" fill="url(#g2-fig)">
+    <rect x="5" y="-42" width="59" height="24" rx="12"/>
+    <rect x="-64" y="-42" width="59" height="24" rx="12"/>
+    <rect x="41" y="-41" width="60.8" height="22" rx="11" transform="rotate(-78.1 52 -30)"/>
+    <rect x="-63" y="-41" width="60.8" height="22" rx="11" transform="rotate(-101.9 -52 -30)"/>
+    <rect x="1" y="-1" width="66.5" height="26" rx="13" transform="rotate(32.9 14 12)"/>
+    <rect x="-27" y="-1" width="66.5" height="26" rx="13" transform="rotate(147.1 -14 12)"/>
+    <rect x="37" y="23" width="58.9" height="22" rx="11" transform="rotate(77.5 48 34)"/>
+    <rect x="-59" y="23" width="58.9" height="22" rx="11" transform="rotate(102.5 -48 34)"/>
+    <rect x="-9" y="-77" width="18" height="36" rx="9"/>
+    <rect x="-19" y="-53" width="38" height="86" rx="19"/>
+    <circle cx="0" cy="-72" r="17"/>
+  </g>
+</svg>

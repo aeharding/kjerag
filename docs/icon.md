@@ -4,7 +4,8 @@ The app has no icon yet. Drafts live in `resources/icon-drafts/round-N/`
 and **none of them ships**: each round is something for the owner to react
 to, and the next one narrows. Round 1 explored six concepts; the owner
 picked F, a small round world wedged in a rock notch, so round 2 varies
-that one.
+that one. Round 3 explores a separate owner concept - a freefall figure
+diving at the same world - and stands alongside round 2, not after it.
 
 The doctrine it serves is AGENTS.md's: **UI design defers to COSMIC system
 apps best practice**. Same method as docs/UI.md - where a first-party app
@@ -172,6 +173,48 @@ of a background.
 32 px verdict: **F4 survives best** - the asymmetric profile stays
 identifiable where the three symmetric ones converge on the same shape -
 with **F1** the cleanest of those three.
+
+## Round 3: a freefall figure diving at the world
+
+A separate concept from the owner, explored alongside round 2 rather than
+replacing it: the same small round world, with a human figure in freefall
+diving at it, the figure partly outside the world's outline so the
+silhouette stays freeform. No canopy, by instruction - and one would not
+survive the small sizes anyway.
+
+| #  | file                  | the idea | what it sacrifices |
+| -- | --------------------- | -------- | ------------------ |
+| G1 | `g1-dive-in.svg`      | Figure entering from the upper corner, world in the lower-opposite one; the diagonal is the motion. | Figure legibility - rotated off upright it stops reading as a person well before 32 px. |
+| G2 | `g2-arch-over.svg`    | Upright arch centred over the world, legs breaking into its top edge. | Dynamism, and it is the narrowest composition of the three; it reads as held above rather than diving at. |
+| G3 | `g3-figure-leads.svg` | Figure large and leading, world small and low; the subject is the jump, not the planet. | The world, which at 32 px nearly disappears, plus the same rotation cost as G1. |
+
+**Does a human figure survive 32 px? Only upright, and only when it fills
+most of the canvas.** G2 still reads as a person at 32 px: head, arms up,
+legs out. G1 and G3 do not - rotated, they are an orange limbed blob
+beside a ball. The body plan is what carries the reading, and it is only
+recognisable head-up. If this concept wins, the figure wants to be upright
+and dominant.
+
+Three construction results, each measured by rendering rather than assumed:
+
+- **A detached head plus bent arms is what makes the figure read.** The
+  first attempt used straight limbs and a head merged into the torso; at
+  every size it was a starfish. Separating the head and bending the arms
+  up at the elbow - the box position, whose silhouette is a W above the
+  head - turned it into a person at 128 and 64 px.
+- **A head-down dive is not a person, it is an arrow.** Built properly,
+  legs together and arms out, it read as a downward dart at 128 px, never
+  mind 32. Rejected on that evidence rather than on taste, which is why
+  the centred variation is an upright arch instead.
+- **A rotated figure needs a neck.** With the head merely close to the
+  torso, rotating it so the head leads left the head reading as a separate
+  floating dot beside the world. A short neck capsule bridges it, and
+  costs nothing upright, where it is hidden.
+
+The figure is a saturated warm orange on purpose. With the sky
+transparent, a dark figure disappears against the COSMIC dark grey and a
+pale one disappears against the light grey; a mid-saturation warm reads on
+both, and is complementary to the world's teal.
 
 ## Regenerating the contact sheet
 
