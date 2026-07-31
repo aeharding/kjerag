@@ -1,13 +1,16 @@
-# App icon: style research and draft candidates
+# App icon: style research, the six draft rounds, and what ships
 
-The app has no icon yet. Drafts live in `resources/icon-drafts/round-N/`
-and **none of them ships**: each round is something for the owner to react
-to, and the next one narrows. Round 1 explored six concepts; the owner
-picked F, a small round world wedged in a rock notch, so round 2 varies
-that one. Round 3 explores a separate owner concept, a freefall figure
-diving at the same world, and stands alongside round 2 rather than after
-it; rounds 4 and 5 are that concept reworked to the owner's notes,
-round 5 converging on a single composition.
+The icon is round 6's N2, and the assets built from it are in
+`resources/icons/` (see "What ships" at the end, and that directory's
+README). Everything above that section is the workshop that got there, kept
+because it records what was measured and what each choice cost. Drafts live
+in `resources/icon-drafts/round-N/` and none of them ships as it stands.
+Round 1 explored six concepts; the owner picked F, a small round world
+wedged in a rock notch, so round 2 varies that one. Round 3 explores a
+separate owner concept, a freefall figure diving at the same world, and
+stands alongside round 2 rather than after it; rounds 4 and 5 are that
+concept reworked to the owner's notes, round 5 converging on a single
+composition, and round 6 pinning the world to the platform's circle.
 
 The doctrine it serves is AGENTS.md's: **UI design defers to COSMIC system
 apps best practice**. Same method as docs/UI.md - where a first-party app
@@ -113,7 +116,8 @@ publishing them, so the honest word is *unpublished*, not *nonexistent*.
 
 ## Shipping, when something is chosen
 
-Not this round, recorded so it is not re-researched. The official template
+Researched before anything was picked, so that the choosing round did not
+have to stop and find it out. The official template
 (`cosmic-app-template`) ships one
 `resources/icons/hicolor/scalable/apps/icon.svg`; all four first-party apps
 instead ship **seven fixed-size dirs containing SVGs**,
@@ -388,13 +392,57 @@ overlap. The contact sheet draws a faint canvas edge behind every cell,
 since a transparent icon otherwise gives no way to see how the art sits in
 the square.
 
-## Regenerating the contact sheet
+## What ships
+
+The owner picked N2, so `resources/icons/hicolor/` is that drawing laid out
+as an icon theme tree: the scalable SVG plus one PNG per size from 16 to
+256, every basename the application ID `dev.harding.Kjerag` (issue #66).
+Sizes 48 and up are renders of that single drawing, and **16, 24 and 32 each
+have a drawing of their own**, which is a convention rather than an apology
+for this art: the median app icon in `pop-os/icon-theme` `1a575a8` carries 6
+elements at 16 and 24 against 6.5 at 32 and above, and where the art is busy
+the cut is a real redraw (`accessories-clock` 8 against 21,
+`accessories-text-editor` 6 against 19). The two smallest also sit on their
+own pixel grid, `viewBox="0 0 16 16"` and `0 0 24 24`, which is what every
+16 px file in that theme and in cosmic-{player,files,edit} does, and it is
+what buys back the margin round 6 measured away: rendered at 16 or 24 the
+256 art reaches the boundary pixel, while `accessories-clock`, drawn on the
+small grid, holds one clear pixel, and so now do these. On that grid the
+world is a circle of radius 7 at 16 and 11 at 24, centred, one pixel inside
+the canvas; the coastline is the master's three cubics reduced to one and
+scaled to that radius, so the same coast survives instead of a second one
+drawn by eye; the pale band under the crest is kept at 24 and dropped at 16;
+and the figure is a head and a tapering tail on the same -45 degree entry
+line, crossing the rim so that about two pixels of it sit outside the
+circle. What the small sizes give up is the figure itself: from 32 down the
+world carries the icon and the mark says only that something is entering it,
+which is the accepted design round 4 flagged and every sheet since has shown.
+
+| size             | drawing                    | margin        |
+| ---------------- | -------------------------- | ------------- |
+| 256, 128, 64, 48 | `hicolor/scalable/apps/`   | 8, 4, 2, 1 px |
+| 32               | its own SVG, 256 grid      | 1 px          |
+| 24, 16           | its own SVG, own pixel grid | 1 px         |
+
+The fixed-size directories carry PNGs, which is what `Type=Fixed` means in
+the spec and what issue #67 asks for by size; where a size has its own
+drawing, that SVG sits beside its PNG. Margins are measured off the rendered
+alpha by `scripts/icon-export.py`, which refuses to finish if any size has
+less than one clear pixel on any side, or any transparent pixel enclosed by
+ink.
+
+## Regenerating the assets and the sheets
 
 ```sh
-python3 scripts/icon-diver.py                             # round 4 art
-python3 scripts/icon-contact-sheet.py                     # newest round
+python3 scripts/icon-diver.py                             # every SVG
+python3 scripts/icon-export.py                            # PNGs, checks, sheet
+python3 scripts/icon-contact-sheet.py                     # newest draft round
 python3 scripts/icon-contact-sheet.py resources/icon-drafts/round-1
 ```
+
+`icon-export.py` writes `scratch/icon/final-sheet.png`: every shipped size
+at 1:1 and the four smallest magnified 6x, on both desktop greys. That is
+the picture to look at before merging a change to the art.
 
 Writes `scratch/icon/contact-sheet-round-N.png` (gitignored - rendered
 PNGs are review artifacts, not source). Each candidate appears at 128, 64

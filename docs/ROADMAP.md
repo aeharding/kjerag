@@ -325,6 +325,16 @@ into the same recording that land at the 99th or above: the fades hold.
 
 ## Decisions log
 
+- 2026-07-31 **The app has an icon** (issue #67, six workshop rounds recorded
+  in docs/icon.md). A round teal world with a green coast and a warm rim, and
+  a small figure entering it from the upper left, drawn by
+  `scripts/icon-diver.py` from a joint skeleton rather than traced.
+  `resources/icons/hicolor/` is the theme tree: a scalable SVG, PNGs from 256
+  down to 16, and a drawing of its own for 32, 24 and 16, because both COSMIC
+  and the Pop theme redraw those sizes instead of exporting. The files are
+  named for the application ID `dev.harding.Kjerag`, the one issue #66
+  settled and issue #75 will put in the code; until that rename lands the
+  binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
 - 2026-07-31 **The orientation filter starts only from a reading it would
   believe completely** (issue #45). The rule that covers every other sample
   covers the first one: the seed searches forward for the first
