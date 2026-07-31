@@ -29,6 +29,8 @@ dual-stream decode runs 2.4× realtime at 17% CPU.
 
 ## License
 
-AGPL-3.0. Portions of the projection math reference GPL-3.0 code from
-[Gyroflow](https://github.com/gyroflow/gyroflow) (GPL-3.0 is one-way
-compatible with AGPL-3.0); such files carry their own SPDX headers.
+AGPL-3.0. GPL-3.0 code from
+[Gyroflow](https://github.com/gyroflow/gyroflow) may be used where it helps
+(GPL-3.0 is one-way compatible with AGPL-3.0), and any file that takes it
+carries its own SPDX header. None does today: the projection math is written
+from the published Mei/OpenCV-omnidir description of the model.

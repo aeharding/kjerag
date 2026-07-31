@@ -48,6 +48,38 @@ pub fn force_extensions(args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_
     }
 }
 
+/// A device that can import, for the headless binaries in `kyerag-spike`,
+/// which build their own instead of using iced's.
+///
+/// A plain `request_device` yields a device that cannot import a tiled
+/// dmabuf, because wgpu-hal 28 never enables
+/// `VK_EXT_image_drm_format_modifier`; [`force_extensions`] through
+/// `open_with_callback` is the only hook that can add it. The app needs none
+/// of this: its device is iced's, and the `[patch.crates-io]` wgpu entry is
+/// what puts the extension on that one.
+pub fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    let opened = unsafe {
+        let hal = adapter.as_hal::<Vulkan>().ok_or("not a Vulkan adapter")?;
+        hal.open_with_callback(
+            wgpu::Features::empty(),
+            &wgpu::MemoryHints::default(),
+            Some(Box::new(force_extensions)),
+        )?
+    };
+    let (device, queue) = unsafe {
+        adapter.create_device_from_hal::<Vulkan>(
+            opened,
+            &wgpu::DeviceDescriptor {
+                label: Some("headless"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            },
+        )
+    }?;
+    Ok((device, queue))
+}
+
 /// The first of [`REQUIRED`] this device does not have, if any. Creating an
 /// image with a disabled extension's structures is undefined behavior rather
 /// than an error, so this guards every import. It should never fire: the

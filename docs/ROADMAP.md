@@ -4,16 +4,18 @@ Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
 **Status 2026-07-31:** feasibility study complete (docs/research/), repo
-bootstrapped, M0 done. `cargo run --release -p kyerag-spike -- <file.insv>`
-decodes one 3840x3840 lens on VA-API, imports the dmabuf planes into wgpu
-with no copy, and renders to PNG at 103 fps (3.4x realtime). `cargo run
---release -- <file.insv>` shows that frame in a libcosmic window, imported
-zero-copy onto the device iced created and sampled inside iced's own render
+bootstrapped, M0 done, and the first reframed frame is on screen.
+`cargo run --release -p kyerag-spike -- <file.insv>` decodes one 3840x3840
+lens on VA-API, imports the dmabuf planes into wgpu with no copy, and
+renders to PNG at 103 fps (3.4x realtime). `cargo run --release --
+<file.insv>` shows that frame in a libcosmic window, imported zero-copy
+onto the device iced created and reprojected inside iced's own render
 pass: the shell, the shader widget and the wgpu-28 import all confirmed on
-screen. M1 has started: `crates/meta/` reads the trailer's calibration
-(issue #2), and the source tree is now a workspace with one crate per layer
-(issue #19). Next: dual decode and the Mei reprojection (issue #3), which
-consumes the `CalibrationSet` as it stands.
+screen. M1 is under way: `crates/meta/` reads the trailer's calibration
+(issue #2), the source tree is a workspace with one crate per layer
+(issue #19), and one lens is now reprojected through its Mei/UCM model with
+drag to look around and scroll to zoom (issue #3). Next: the playback core
+(issue #4), which is what turns one frame into moving pictures.
 
 ## Milestones
 
@@ -23,6 +25,7 @@ consumes the `CalibrationSet` as it stands.
   widget, and the wgpu-28 port of the import.
 - **M1 Reframing player** — dual decode, calibrated Mei reprojection,
   drag to reframe, scroll to zoom, play/pause/seek, screenshots. The MVP.
+  Reprojection and the mouse are done (issue #3, one lens, one frame).
 - **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
   lock (+ Studio-diff test harness), rolling-shutter correction,
   hemisphere-aware decode gating, high-quality zoom sampling.
@@ -105,6 +108,29 @@ consumes the `CalibrationSet` as it stands.
   forwarding newtypes in the app crate, is more code for the same wiring;
   they live in `crates/render/src/widget.rs` and nothing else in the crate
   mentions iced.
+
+- 2026-07-31 The lens pose composes as `Rz(roll - 90) * Ry(yaw) * Rx(pitch)`
+  in the delivered frame's own axes (x right, y down, z along the optical
+  axis). The quarter-turn datum is measured, not assumed: applying `roll` as
+  `offset_v3` writes it renders an X4 Air on its side, and dropping `roll`
+  renders a ONE X2 on its side. Four candidate rotations were rendered
+  against plumb references on both cameras
+  (docs/research/insv-format.md 4.8). This closes the last open question
+  from the format study's section 10.
+- 2026-07-31 The Mei forward map is written from the model description
+  (Mei/Rives, OpenCV `omnidir`) rather than transcribed from Gyroflow's
+  `insta360.wgsl`, so `crates/render/src/projection.rs` is plain AGPL-3.0
+  with no SPDX header. The Gyroflow route stays open and stays licensed:
+  any file that takes it carries its own header.
+- 2026-07-31 The forward map exists twice, in WGSL and in Rust, sharing one
+  `Reframe` uniform block. The Rust copy is what `cargo test` can check
+  against known angles on a box with no GPU and no footage, and
+  `min_binding_size` is what makes wgpu reject a pipeline whose two
+  definitions have drifted.
+- 2026-07-31 The camera lives in the shader widget's own iced state
+  (`Viewpoint`), not in the app's model. Panning is a widget concern, the
+  shell has no opinion about it, and no message round trip happens per
+  mouse move.
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 

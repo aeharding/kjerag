@@ -7,25 +7,28 @@ a dependency it does not declare, so the diagram below is enforced by
 `cargo build` rather than by good intentions.
 
 ```
-crates/app      kyerag         libcosmic shell + input (drag = yaw/pitch,
-                               scroll = FOV zoom, timeline). The view is an
-                               `iced::widget::shader` around a Scene.
+crates/app      kyerag         libcosmic shell + window. The view is an
+                               `iced::widget::shader` around a Scene, and
+                               the mouse reaches it through that widget.
 crates/render   kyerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
                                RGB + Mei reprojection + seam blend),
+                               camera state (drag = yaw/pitch, scroll = FOV),
                                offscreen render for screenshots
 crates/media    kyerag-media   ffmpeg demux, dual VA-API HEVC decoders,
                                frame clock, keyframe index, seek. No UI.
 crates/meta     kyerag-meta    .insv trailer, read directly: per-lens Mei
                                calibration, gyro track, per-frame exposure.
                                No UI, no ffmpeg, no wgpu.
-crates/spike    kyerag-spike   the M0 measuring instrument (`spike`), kept
-                               out of the app's dependency graph
+crates/spike    kyerag-spike   the headless instruments, kept out of the
+                               app's dependency graph: `spike` (M0 frame-path
+                               timings) and `reframe` (the projection pass to
+                               a PNG, no compositor needed)
 ```
 
-`app` -> `render` -> `media`, and `meta` depends on nothing but `prost`.
-That last one is the point of the split: `cargo test -p kyerag-meta` passes
-on a box with no libav headers, and a CI job that installs nothing proves
-it on every push.
+`app` -> `render` -> `media`, `render` -> `meta` for the calibration the
+shader runs on, and `meta` depends on nothing but `prost`. That last one is
+the point of the split: `cargo test -p kyerag-meta` passes on a box with no
+libav headers, and a CI job that installs nothing proves it on every push.
 
 `media` and `meta` know nothing about the shell. `render` names libcosmic
 for exactly one file, `crates/render/src/widget.rs`: those three
@@ -127,15 +130,30 @@ map call alone, with nothing reading the pixels through it.)
 Insta360 stores a full Mei/UCM camera model per lens in the trailer
 (`offset_v3`): xi, fx/fy, cx/cy, k1-k3, p1/p2, per-lens extrinsics
 (~33 mm baseline). The X4 Air fixture: xi = 2.31494. The forward map is
-~20 lines of WGSL; Gyroflow's `distortion_models/insta360.wgsl` (GPL-3.0,
-AGPL-compatible) is the reference implementation. Static calibrated warp
-with a smooth blend; no optical flow (measured to not help). A reframed
+~20 lines of WGSL, written from the Mei/OpenCV-omnidir description in
+docs/research/insv-format.md 5.1; Gyroflow's
+`distortion_models/insta360.wgsl` (GPL-3.0, AGPL-compatible) remains an
+available reference for anything the description does not cover, and a file
+that takes it carries an SPDX header. Nothing does today. Static calibrated
+warp with a smooth blend; no optical flow (measured to not help). A reframed
 view centered near a lens axis contains no seam at all.
 
 `kyerag-meta` turns that string into a `CalibrationSet` whose pixel numbers
 are already in delivered-frame coordinates (3840x3840 per lens), not the
 15360x7680 side-by-side calibration canvas the file writes them on. The
 shader consumes them as they come; nothing downstream rescales.
+
+The rotation is `Rz(roll - 90 deg) * Ry(yaw) * Rx(pitch)`, in a frame whose
+axes are the delivered frame's own (x right, y down, z along the optical
+axis). That quarter-turn datum was measured against rendered frames from two
+cameras, not assumed: applying roll as the file writes it puts the world on
+its side. docs/research/insv-format.md 4.8 has the frames and the table.
+
+The forward map exists twice, in `crates/render/src/projection.rs`: once in
+WGSL for the GPU and once in Rust so `cargo test` can check known angles
+with no GPU and no footage. Both read one `Reframe` uniform block, and the
+bind group's `min_binding_size` makes wgpu reject a pipeline whose two
+definitions have drifted apart.
 
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
@@ -152,7 +170,7 @@ a crash: build the diff-vs-Studio-export harness before trusting any of it.
 
 - Vignetting coefficients are not in the metadata; the seam band may show
   rolloff. Needs flat-field calibration if it bites.
-- Slot 8 is `roll`, not `half_fov` (a ONE X2 puts -179.717 in it, and a
-  half-FOV cannot be negative). How to compose `yaw`/`pitch`/`roll` into
-  a rotation, signs included, is still unverified against a rendered
-  frame; settle it during the first shader bring-up.
+- The **order** of `yaw`, `pitch` and `roll` within the lens pose. Their
+  composition is settled (above); the order is not, and no known camera can
+  distinguish it, because every one of them records sub-degree yaw and
+  pitch (docs/research/insv-format.md 4.8).

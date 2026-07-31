@@ -1,17 +1,27 @@
-//! The one shader pass the bring-up surface draws.
+//! The one shader pass the player draws.
 //!
 //! With no file it is an animated gradient, which proves only that a custom
-//! wgpu pass runs inside libcosmic. With a file it samples a real VA-API frame
-//! imported by [`super::dmabuf`], which proves the import works on the device
-//! iced created, inside iced's own render pass.
+//! wgpu pass runs inside libcosmic. With a file it reprojects one lens of a
+//! real VA-API frame imported by [`super::dmabuf`]: for every output pixel,
+//! a view ray through the camera's yaw, pitch and field of view, rotated
+//! into the lens frame and pushed through the Mei/UCM model in
+//! [`super::projection`], sampled from the NV12 planes and converted to RGB.
+//! One pass, no intermediate target.
 
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use kyerag_media::{self as media, DrmFrame};
+use kyerag_meta::{CalibrationSet, Lens};
 
-use super::{Extent, Fallible, Planes, Size, dmabuf};
+use super::projection::{self, Reframe};
+use super::{Camera, Extent, Fallible, Planes, Size, dmabuf};
+
+/// Issue #3 reframes one lens. The second stream is the seam's business
+/// (issue #7), and a view centred near a lens axis contains no seam at all.
+const LENS: usize = 0;
 
 /// A file the shell was asked to show. Decoding waits for the first
 /// [`ScenePipeline::prepare`], because the import needs iced's device and
@@ -45,9 +55,10 @@ impl Scene {
         self.elapsed += step;
     }
 
-    pub fn primitive(&self) -> ScenePrimitive {
+    pub fn primitive(&self, camera: Camera) -> ScenePrimitive {
         ScenePrimitive {
             elapsed: self.elapsed.as_secs_f32(),
+            camera,
             frame: self.frame.clone(),
         }
     }
@@ -57,6 +68,7 @@ impl Scene {
 #[derive(Debug)]
 pub struct ScenePrimitive {
     elapsed: f32,
+    camera: Camera,
     frame: Option<Arc<Frame>>,
 }
 
@@ -76,20 +88,28 @@ pub struct ScenePipeline {
 }
 
 enum Source {
-    /// The mapped frame must outlive the textures: dropping it returns the
-    /// surface to the decoder's pool.
-    Imported {
-        _frame: DrmFrame,
-        _planes: Planes,
-    },
+    /// Boxed because the other arm carries nothing: an enum that is 300
+    /// bytes wide whichever way the load went is what `clippy` objects to,
+    /// and it is right that the failed case should cost a pointer.
+    Imported(Box<Imported>),
     Failed,
+}
+
+/// One imported frame and the calibration that reprojects it. The mapped
+/// frame must outlive the textures: dropping it returns the surface to the
+/// decoder's pool.
+struct Imported {
+    lens: Lens,
+    size: Size,
+    _frame: DrmFrame,
+    _planes: Planes,
 }
 
 impl ScenePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{}\n{SHADER}", projection::wgsl()).into()),
         });
         let layout = bind_group_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -128,7 +148,7 @@ impl ScenePipeline {
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene"),
-            size: std::mem::size_of::<[f32; 4]>() as u64,
+            size: std::mem::size_of::<Reframe>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -151,28 +171,34 @@ impl ScenePipeline {
         }
     }
 
+    /// `aspect` is the output's width over its height, which is what decides
+    /// the vertical field of view. The widget reads it from its bounds.
     pub fn prepare(
         &mut self,
         primitive: &ScenePrimitive,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        aspect: f32,
     ) {
         if !self.reported {
             self.reported = true;
-            println!("iced device: {}", dmabuf::device_report(device));
+            println!("device: {}", dmabuf::device_report(device));
         }
         if let Some(frame) = primitive.frame.as_ref() {
             self.load_once(frame, device);
         }
 
-        let has_frame = matches!(self.source, Some(Source::Imported { .. }));
-        let params: [f32; 4] = [
-            primitive.elapsed,
-            f32::from(u8::from(has_frame)),
-            f32::from(u8::from(self.linearize)),
-            0.0,
-        ];
-        queue.write_buffer(&self.uniforms, 0, bytes_of(&params));
+        let reframe = match &self.source {
+            Some(Source::Imported(imported)) => Reframe::new(
+                &imported.lens,
+                imported.size,
+                primitive.camera,
+                aspect,
+                self.linearize,
+            ),
+            _ => Reframe::gradient(primitive.elapsed, aspect, self.linearize),
+        };
+        queue.write_buffer(&self.uniforms, 0, reframe.bytes());
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -195,18 +221,44 @@ impl ScenePipeline {
     }
 
     fn load(&mut self, frame: &Frame, device: &wgpu::Device) -> Fallible<Source> {
-        let (mapped, size) = media::first_frame(&frame.path, 0)?;
+        let calibration = CalibrationSet::from_insv(&frame.path)?;
+        let lens = calibration
+            .lenses
+            .get(LENS)
+            .ok_or("calibration describes no lens 0")?
+            .clone();
+
+        let (mapped, size) = media::first_frame(&frame.path, LENS)?;
+        // The calibration's pixel numbers are already in delivered-frame
+        // coordinates, so they describe this texture only if the stream is
+        // the size the trailer says it is. A mismatch reprojects at the
+        // wrong scale, which reads as a mild lens error rather than a bug.
+        if (calibration.dimension.width, calibration.dimension.height) != (size.width, size.height)
+        {
+            return Err(format!(
+                "trailer says lens frames are {}x{} but stream {LENS} decodes {}x{}",
+                calibration.dimension.width, calibration.dimension.height, size.width, size.height
+            )
+            .into());
+        }
+
         println!("drm:    {}", mapped.describe());
         let planes = dmabuf::import(device, mapped.descriptor(), size)?;
         self.bind_group = bind(device, &self.layout, &self.uniforms, &planes, &self.sampler);
         println!(
-            "import: {} x {} imported into iced's device",
-            size.width, size.height
+            "lens:   {} {}, lens {LENS} of {}, {} x {} imported",
+            calibration.camera_model,
+            calibration.firmware,
+            calibration.lenses.len(),
+            size.width,
+            size.height
         );
-        Ok(Source::Imported {
+        Ok(Source::Imported(Box::new(Imported {
+            lens,
+            size,
             _frame: mapped,
             _planes: planes,
-        })
+        })))
     }
 }
 
@@ -262,7 +314,11 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    // The one place the Rust and WGSL definitions of the
+                    // uniform block are checked against each other: pipeline
+                    // creation fails if the shader's struct wants more bytes
+                    // than `Reframe` has.
+                    min_binding_size: NonZeroU64::new(std::mem::size_of::<Reframe>() as u64),
                 },
                 count: None,
             },
@@ -299,13 +355,9 @@ fn blank_planes(device: &wgpu::Device) -> Planes {
     }
 }
 
-fn bytes_of(params: &[f32; 4]) -> &[u8] {
-    // `[f32; 4]` has no padding and no invalid bit patterns.
-    unsafe {
-        std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(params))
-    }
-}
-
+/// The half of the shader that belongs to this file. `projection::WGSL`
+/// declares the uniform block, the view ray and the forward map, and is
+/// concatenated ahead of this.
 const SHADER: &str = r#"
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
@@ -322,9 +374,6 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
   return out;
 }
 
-// x: seconds since start, y: 1 when a frame is bound, z: 1 when the target
-// is sRGB and the GPU will encode whatever this shader writes.
-@group(0) @binding(0) var<uniform> params: vec4<f32>;
 @group(0) @binding(1) var luma: texture_2d<f32>;
 @group(0) @binding(2) var chroma: texture_2d<f32>;
 @group(0) @binding(3) var samp: sampler;
@@ -355,9 +404,13 @@ fn linearize(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  // Both branches are evaluated because `textureSample` needs uniform control
-  // flow; picking afterwards is the WGSL-legal way to write this.
-  let rgb = select(gradient(in.uv, params.x), nv12(in.uv), params.y > 0.5);
-  return vec4<f32>(select(rgb, linearize(rgb), params.z > 0.5), 1.0);
+  let landing = project(view_ray(in.uv));
+  // Every branch is evaluated because `textureSample` needs uniform control
+  // flow; picking afterwards is the WGSL-legal way to write this. A ray that
+  // missed the lens would otherwise read a clamped edge texel and smear it
+  // across the whole invalid region.
+  let lens = select(OUTSIDE_GRAY, nv12(frame_uv(landing.pixel)), landing.inside);
+  let rgb = select(gradient(in.uv, reframe.elapsed), lens, reframe.has_frame > 0.5);
+  return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), 1.0);
 }
 "#;

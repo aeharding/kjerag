@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ff;
 use kyerag_media::{DrmFrame, Fallible, HwDevice, SwFrame, open_decoder};
 use kyerag_render::{Extent, Planes, Size, dmabuf};
-use wgpu::hal::api::Vulkan;
 
 /// Offscreen render target edge. Small on purpose: the spike measures the
 /// frame path, not a display, and reading back a 3840 square costs 59 MB.
@@ -258,7 +257,7 @@ impl Gpu {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         }))?;
-        let (device, queue) = open_device(&adapter)?;
+        let (device, queue) = dmabuf::open_device(&adapter)?;
 
         let (pipeline, layout) = build_pipeline(&device);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -411,33 +410,6 @@ impl Gpu {
         println!("wrote {}", path.display());
         Ok(())
     }
-}
-
-/// wgpu-hal 28 never enables `VK_EXT_image_drm_format_modifier`, so a plain
-/// `request_device` yields a device that cannot import a tiled dmabuf. This
-/// callback is the only hook that can add it, which is why the spike builds
-/// its own device instead of asking wgpu for one.
-fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Queue)> {
-    let opened = unsafe {
-        let hal = adapter.as_hal::<Vulkan>().ok_or("not a Vulkan adapter")?;
-        hal.open_with_callback(
-            wgpu::Features::empty(),
-            &wgpu::MemoryHints::default(),
-            Some(Box::new(dmabuf::force_extensions)),
-        )?
-    };
-    let (device, queue) = unsafe {
-        adapter.create_device_from_hal::<Vulkan>(
-            opened,
-            &wgpu::DeviceDescriptor {
-                label: Some("spike"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits(),
-                ..Default::default()
-            },
-        )
-    }?;
-    Ok((device, queue))
 }
 
 const SHADER: &str = r#"

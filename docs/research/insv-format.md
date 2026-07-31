@@ -402,8 +402,7 @@ the canvas agrees between blocks). A half-FOV cannot be negative, so slot
 camera's lenses are rolled about 180 degrees apart where the X4 Air's are
 90.534 and 89.076.
 
-What remains open is only the **sign and order convention** the shader
-must apply, which still wants a rendered frame.
+How to compose it is 4.8, which the first rendered frames settled.
 
 The original reasoning, kept because it is the argument for the X4 Air
 specifically: an independent X5 reverse-engineer labels slot 8 `half_fov`
@@ -418,6 +417,93 @@ in the same block supports "these are tolerances, and 90 is a deliberate
 sensor rotation".
 
 Gyroflow uses it as roll, and so does Kyerag.
+
+### 4.8 Composing yaw, pitch and roll (settled 2026-07-31)
+
+**Confidence: HIGH**, and this is the first thing in this document
+verified against pixels rather than against other people's source. It was
+settled during the first shader bring-up (issue #3), which is the job
+section 10 assigned to it.
+
+The rotation that renders a lens upright is
+
+```
+ray_lens = Rz(roll - 90 deg) * Ry(yaw) * Rx(pitch) * ray_body
+```
+
+in a right-handed frame whose axes are the delivered frame's own: **x
+right, y down, z out along the optical axis**, with the image plane in the
+ordinary photographic sense (`px = fx*x' + cx`, `py = fy*y' + cy`).
+
+**The 90 degree datum is the finding.** Applying `roll` as the file writes
+it renders the world a quarter turn on its side. Kyerag carries the
+correction as `ROLL_DATUM_DEG` in `crates/render/src/projection.rs`.
+
+### The frames that settled it
+
+The three candidates the shader could apply differ by a rotation about the
+lens axis, so at yaw and pitch 0 they are rotations of one square output,
+and one frame per candidate decides between them. Two cameras were used
+because their rolls are nothing alike: an X4 Air at 90.534 and a ONE X2 at
+-179.717, so a rule that fits both is a rule about the convention rather
+than about one camera.
+
+| rotation applied | X4 Air, roll 90.534 | ONE X2, roll -179.717 |
+| --- | --- | --- |
+| `roll` | quarter turn, world up to the left | quarter turn, world up to the left |
+| `-roll` | quarter turn, world up to the right | 0.57 degrees from the row above |
+| `0` | **upright** | quarter turn, world up to the right |
+| `roll - 90` | **upright** | **upright** |
+
+Every cell was rendered and looked at except the ONE X2's `-roll`, which
+on that camera is 0.57 degrees from `roll` and therefore the same picture.
+Note what the table says about doing the easy thing: dropping roll happens
+to be right for an X4 Air and is a quarter turn wrong on a ONE X2.
+
+The plumb references, chosen because they are level or vertical by
+physics rather than by eye:
+
+- **X4 Air**: a paramotor pilot seated in his harness, 65 degrees off the
+  lens axis, with his wing overhead. A pilot hanging under a wing is a
+  plumb bob, and the harness cannot be at 90 degrees to gravity in level
+  flight. The horizon crossing the same frame agrees.
+- **ONE X2**: a river valley. A water surface is level by definition, and
+  the windsock mast on the far bank is vertical.
+
+**There is no mirror.** Text on the wing ("OZONE", printed along the
+span) reads the right way round in a reframe after a pure rotation, which
+rules out the y-up reading of the image plane: that reading differs from
+this one by a reflection, and a reflection would have shown up as
+reversed lettering.
+
+Reproduce any row with the headless instrument, which runs the app's own
+pass and writes a PNG:
+
+```sh
+cargo run --release -p kyerag-spike --bin reframe -- <file.insv> \
+  yaw=-24 pitch=-63 fov=60
+```
+
+PNGs land in `scratch/`, which is gitignored. They are frames of somebody's
+real flights and this repo is public: they stay local.
+
+### What 4.8 does not settle
+
+- **The order of the three angles.** Both test cameras have sub-degree yaw
+  and pitch (0.103 and 0.07 on the X4 Air), and near the axis the model's
+  effective focal length is `fx / (1 + xi)` = 1106 px/rad, so every
+  ordering agrees to about 2 px. A camera with a large yaw or pitch would
+  tell them apart; none is known to exist.
+- **Where the 90 degrees comes from.** Two readings fit the same numbers:
+  the roll is measured from the delivered frame's horizontal axis rather
+  than its vertical, or the camera delivers the sensor image already
+  rotated a quarter turn (`media_data_rotate_angel`, field 52, reads
+  `Unknown` on the fixture and may be where that is stated). Nothing in
+  the file distinguishes them and nothing downstream cares, so it is
+  recorded rather than guessed at.
+- **Lens 1.** This was lens 0 only. The nominal opposed arrangement that
+  4.3 says is *not* in the extrinsics still has to be composed with these
+  angles, and that is the seam's problem (issue #7).
 
 ## 5. The projection model
 
@@ -792,9 +878,12 @@ word "insta360". Kyerag is filling real empty space.
 
 Ordered by how much they would cost us.
 
-1. **The sign and order convention for `yaw`/`pitch`/`roll`.** Slot 8 is
-   settled as roll (4.7); how to compose the three into a rotation is
-   not. Verify at first shader bring-up.
+1. ~~**The sign and order convention for `yaw`/`pitch`/`roll`.**~~ Settled
+   against rendered frames on two cameras, 2026-07-31: `Rz(roll - 90) *
+   Ry(yaw) * Rx(pitch)`, and the quarter-turn datum is the finding (4.8).
+   What is left of it is the **order** of the three, which no known camera
+   can distinguish because every one of them records sub-degree yaw and
+   pitch.
 2. **Vignetting coefficients are not in the metadata.** May show as
    rolloff in the blend band. Would need flat-field calibration.
 3. **`pts_type = VideoPtsEexposureFile` semantics.** If frame PTS really

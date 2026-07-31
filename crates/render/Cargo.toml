@@ -5,6 +5,10 @@ edition.workspace = true
 
 [dependencies]
 kyerag-media = { workspace = true }
+# The per-lens Mei calibration the reprojection pass runs on. This is the
+# only edge into `kyerag-meta` in the graph; the trailer layer itself still
+# depends on nothing but prost, which is what its ffmpeg-free CI job checks.
+kyerag-meta = { workspace = true }
 ash = { workspace = true }
 libc = { workspace = true }
 wgpu = { workspace = true }
