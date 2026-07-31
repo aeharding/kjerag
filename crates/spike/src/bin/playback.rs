@@ -63,10 +63,10 @@ fn main() -> Fallible<()> {
     // lens axis holds one lens, and only a view across the seam proves a
     // still carries both.
     let yaw: f32 = parse(&args, 5, 0.0)?;
-    // Issue #9's cost: the file's own readout is what the app uses, and a
-    // named sweep forces the correction on over a file whose direction has
-    // not been measured, which is what the cost of switching it on is
-    // measured through.
+    // Issue #9's cost: the file's own readout is what the app uses, `off` is
+    // the pass as it was before issue #9, and a named sweep forces a
+    // direction over a file's own. Now that an X4's direction is measured and
+    // the correction ships on, `off` is the arm the cost is measured against.
     let readout: String = parse(&args, 6, "file".to_owned())?;
     // Degrees. A wide view is the one that puts a large area of both lenses on
     // screen at once, which is where the cost of sampling two of them is
@@ -102,8 +102,38 @@ fn main() -> Fallible<()> {
     )
 }
 
-const USAGE: &str = "usage: playback <file.insv> [seconds] [hz] [shots] [yaw] [readout] [fov] \
-     [bilinear|luma|sharp]";
+const USAGE: &str = "usage: playback <file.insv> [seconds] [hz] [shots] [yaw] \
+     [file|off|right|left|down|up] [fov] [bilinear|luma|sharp]";
+
+/// What the readout argument does to the file's own (issue #9): a direction
+/// forces that one, `off` is a readout of no length at all, which is the pass
+/// as it was before the correction existed, and anything else leaves the file
+/// alone.
+fn forced(readout: &str) -> Option<fn(Readout) -> Readout> {
+    match readout {
+        "right" => Some(|file| Readout {
+            sweep: Sweep::Right,
+            ..file
+        }),
+        "left" => Some(|file| Readout {
+            sweep: Sweep::Left,
+            ..file
+        }),
+        "down" => Some(|file| Readout {
+            sweep: Sweep::Down,
+            ..file
+        }),
+        "up" => Some(|file| Readout {
+            sweep: Sweep::Up,
+            ..file
+        }),
+        "off" => Some(|file| Readout {
+            seconds: 0.0,
+            ..file
+        }),
+        _ => None,
+    }
+}
 
 fn parse<T: std::str::FromStr>(args: &[String], i: usize, fallback: T) -> Fallible<T>
 where
@@ -167,15 +197,8 @@ fn play(
     println!("device: {}", dmabuf::device_report(&gpu.device));
 
     let mut scene = Scene::open(input)?;
-    let sweep = match readout {
-        "right" => Some(Sweep::Right),
-        "left" => Some(Sweep::Left),
-        "down" => Some(Sweep::Down),
-        "up" => Some(Sweep::Up),
-        _ => None,
-    };
-    if let (Some(sweep), Some(file)) = (sweep, scene.readout()) {
-        scene.set_readout(Some(Readout { sweep, ..file }));
+    if let (Some(forced), Some(file)) = (forced(readout), scene.readout()) {
+        scene.set_readout(Some(forced(file)));
     }
     println!("shutter: readout {readout}");
     scene.set_sampling(sampling);

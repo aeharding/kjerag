@@ -156,14 +156,12 @@ pub struct Readout {
 /// as a direction in its own pixel coordinates (x right, y down).
 ///
 /// The direction is **not in the file**, and it is what decides whether a
-/// correction removes the skew or doubles it. Every candidate was measured
-/// against real footage for issue #9 and **none of them is settled**, which
-/// is what [`Self::Unknown`] is and why it is the default: the two
-/// measurements that can see a readout displacement at all bound the one this
-/// camera family would have to have, and neither of them finds it.
+/// correction removes the skew or doubles it, so it is measured per camera in
+/// [`readout_sweep`] and is [`Self::Unknown`] on any camera nobody has
+/// measured. Unknown is a zero axis, which switches the correction off
+/// entirely rather than guessing at it.
 ///
-/// docs/research/insv-format.md 6.7 has the method, the numbers and the
-/// capture that would settle it.
+/// docs/research/insv-format.md 6.7 has the method and the numbers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Sweep {
     /// Not measured on this camera, and therefore not corrected for. The
@@ -520,35 +518,39 @@ fn imu_orientation(camera_model: &str) -> &'static str {
 }
 
 /// Which way across the delivered frame this camera's sensor reads out
-/// ([`Sweep`]), which on every camera measured so far is **not known**.
+/// ([`Sweep`]), measured on real footage because the file does not say.
 ///
-/// **Measured, and not shipped (issue #9),** the way the exposure match of
-/// issue #7 was. The file records how long a readout takes and says nothing
-/// about which way it runs, so the direction was measured on real footage
-/// two ways, and the answer both times was that the displacement a readout of
-/// that length would leave is not in the pictures:
+/// **The X4 Air reads down the delivered picture** (issue #9, settled
+/// 2026-07-31). One lens against itself a few frames apart, with the horizon
+/// lock's rigid rotation and the camera's own translation fitted out
+/// alongside, over five stretches of a 30-minute capture rolling 68 to 145
+/// deg/s: the readout runs **down** the delivered frame at 1.00 +-0.12 of a
+/// whole frame in the trailer's own 15.883 ms, and across it at 0.02 +-0.07,
+/// which is nothing. Both lenses read down their own pictures, measured
+/// separately. Nothing in that fit knows how long a readout takes, so the
+/// size landing on the span the trailer records is the check on the shape.
 ///
-/// - **across the seam**, where the two lenses' pictures of one direction are
-///   compared: the disagreement carries 0.014 of what a readout running in
-///   opposite world directions predicts, on a measurement that reads an
-///   applied displacement of that size back at 0.985 (r = 0.996). So whatever
-///   the sensors do, they do not do it in opposite world directions, and a
-///   correction that assumed they did would put up to 1.9 degrees of
-///   misalignment into the seam at 120 deg/s where the pictures have none.
-/// - **inside one lens**, where a horizon has to stay straight: the four
-///   candidates move the horizon's own fit residual by less than the
-///   instrument's own scatter, on frames rolling up to 130 deg/s where an
-///   uncorrected readout would bend it by 1.7 to 2.1 px.
+/// What took two rounds to get here is that a control has to be injected on
+/// **each axis the fit answers on**. Issue #42 injected a readout across the
+/// frame only, read it back at 0.79 to 0.84, and reported the down-frame term
+/// of the same fits as not repeating. It repeats wherever an injected control
+/// works; the stretch that disagreed is the one where injecting a known
+/// displacement reads back at -0.10. `kyerag-spike --bin rolling pair=1` now
+/// injects all four directions and prints what each reads back.
 ///
-/// Returning [`Sweep::Unknown`] is therefore the measurement's answer and not
-/// a placeholder: the correction is built, fused into the map and tested, and
-/// it is switched off because no readout displacement could be found to
-/// correct. docs/research/insv-format.md 6.7 has both tables, and the capture
-/// that would settle it in a minute: a camera turned hard by hand in front of
-/// close, sharp, still content.
+/// The seam says nothing about this and cannot: two sensors reading down
+/// their own delivered pictures sweep the **same** world direction, which
+/// cancels between them, and the relative displacement a down sweep puts into
+/// the seam band measures 0.000 degrees. That is also why switching this on
+/// cannot disturb issue #7's blend, where a sweep across the frame would have
+/// put 1.9 degrees of misalignment into it.
+///
+/// X5 and everything else stay [`Sweep::Unknown`], which is a zero axis and
+/// therefore no correction: the direction is not in the file and no X5 has
+/// been measured. docs/research/insv-format.md 6.7 has the tables.
 fn readout_sweep(camera_model: &str) -> Sweep {
     match camera_model {
-        m if m.starts_with("Insta360 X4") => Sweep::Unknown,
+        m if m.starts_with("Insta360 X4") => Sweep::Down,
         m if m.starts_with("Insta360 X5") => Sweep::Unknown,
         _ => Sweep::Unknown,
     }
@@ -752,20 +754,24 @@ mod tests {
         assert_eq!(gyro.gyro_timestamp, Some(1.6));
     }
 
-    /// The readout the trailer describes, and the direction it does not
-    /// (issue #9): the span is the file's, and the sweep is `Unknown`, which
-    /// is a zero axis and therefore no correction at all.
+    /// The readout the trailer describes, and the direction it does not: the
+    /// span is the file's, and the sweep is the one measured for issue #9,
+    /// down the delivered frame on an X4.
     ///
-    /// This is the measured answer rather than a default waiting to be
-    /// filled in; docs/research/insv-format.md 6.7 is what it rests on.
+    /// A camera nobody has measured keeps `Unknown`, which is a zero axis and
+    /// therefore no correction at all rather than a guess.
+    /// docs/research/insv-format.md 6.7 is what both rest on.
     #[test]
-    fn the_readout_span_is_the_files_and_the_direction_is_not_known() {
+    fn the_readout_span_is_the_files_and_the_direction_is_measured() {
         let readout = calibration().readout();
 
         near(readout.seconds, 0.015_883, 1e-6);
-        assert_eq!(readout.sweep, Sweep::Unknown);
-        assert_eq!(readout.sweep.axis(), [0.0, 0.0]);
-        assert_eq!(readout_sweep("Insta360 X4 Air"), Sweep::Unknown);
+        assert_eq!(readout.sweep, Sweep::Down);
+        assert_eq!(readout.sweep.axis(), [0.0, 1.0]);
+        assert_eq!(readout_sweep("Insta360 X4 Air"), Sweep::Down);
+        assert_eq!(readout_sweep("Insta360 X5"), Sweep::Unknown);
+        assert_eq!(readout_sweep("GoPro Max"), Sweep::Unknown);
+        assert_eq!(Sweep::Unknown.axis(), [0.0, 0.0]);
     }
 
     /// The four directions a sensor could be read in, as the map reads them:

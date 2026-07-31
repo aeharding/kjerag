@@ -635,11 +635,32 @@ displacement of the same size and shape back at **0.985 with r = 0.996**.
 Whatever the two sensors do, they do not do it in opposite world directions,
 and none of the -0.36 to -1.20 degrees measured here is theirs.
 
-So the along-seam residual is unchanged and still unattributed, with one
-candidate fewer: parallax cannot reach that axis by construction, rolling
-shutter is measured out of it, and what is left is calibration. Pinning it
-still wants a capture from a camera that is not moving, and 6.7 asks for the
-same capture for its own reasons.
+**And now the direction is known, it is ruled out twice (6.7).** The readout
+runs down the delivered frame, which is the same world direction in both
+lenses, so it cancels between them: the relative displacement it puts into a
+seam direction measures 0.000 degrees. The seam residual cannot be the
+readout, whatever the camera is doing.
+
+**Measured from a camera that is not moving (2026-07-31).** The capture this
+section asks for arrived: an X4 Air standing on a deck, 0.0 deg/s median and
+0.1 at the worst, so no readout displacement, no changing parallax and no
+lock residual can be in it. 11 patches round the seam circle over 6 frames,
+correlated above 0.5:
+
+- **along the seam, -0.78 degrees**, spread 0.409 across patches. That is the
+  same size and the same sign as the -0.36 to -1.20 measured in flight, from
+  a camera doing nothing at all. A second still capture, indoors with the
+  seam looking at a desk half a metre away, reads -0.96 on the one patch that
+  correlates there.
+- **frame to frame the same patch moves by 0.018 degrees**, against 0.100 in
+  flight. So the instrument's own noise on a still camera is a fifth of what
+  the flying numbers move by, and four fifths of that movement is the flying.
+- across the seam it reads 2.31 degrees, which is the deck 10 cm under the
+  camera and is parallax doing exactly what 6.1 says it does.
+
+So the along-seam residual is **calibration**, and issue #48 has one fewer
+thing to consider: it is there with the camera still, parallax cannot reach
+that axis by construction, and rolling shutter cancels on it.
 
 None of it blocked the blend, which needed the band and not the boundary:
 a weight field over a 14-degree overlap does not need a sub-pixel-perfect
@@ -857,9 +878,11 @@ correctable from the gyro. On a vibrating airframe it dominates.
 
 Correct it in the same backward mapping as everything else; see 8.
 
-**That was the expectation. 6.7 is what measuring it found**, and the
-displacement this section predicts is not in the delivered pictures at the
-magnitude it predicts.
+**That was the expectation, and 6.7 is what measuring it found.** The
+displacement is in the pictures at about the magnitude this section predicts,
+but not on the axis it assumes: the sensor reads **down** the delivered
+frame, not across it, so the two lenses sweep the same world direction and it
+cancels at the seam instead of doubling there.
 
 ### 6.6 Optical flow does not help
 
@@ -908,15 +931,27 @@ centred on the seam. Outside it exactly one lens claims anything, its
 weight is exactly 1, and the pass costs the one texture fetch it did
 before the blend existed.
 
-### 6.7 The readout direction, and why the correction ships switched off (issue #9)
+### 6.7 The readout direction, and how it was measured (issue #9)
 
-**Confidence: HIGH for the measurements, and the answer they give is a
-negative.** The correction is built the way 6.5 asks for and fused into the
-one backward map (`crates/render/src/projection.rs`); which way the sensor
-reads is not in the file, and neither of the two instruments that can see a
-readout displacement finds the one this camera would have to have. So
-`kyerag_meta::Sweep::Unknown` is what the calibration answers, the correction
-is a no-op, and everything below is what it would take to change that.
+**Confidence: HIGH.** The correction is built the way 6.5 asks for and fused
+into the one backward map (`crates/render/src/projection.rs`). Which way the
+sensor reads is not in the file, so it was measured off the pictures, and on
+an X4 Air the answer is that **the readout runs down the delivered frame**:
+`1.00 +-0.12` of a whole frame in the trailer's own 15.883 ms, against
+`0.02 +-0.07` across it. `kyerag_meta::Sweep::Down` is what the calibration
+answers for an X4 and the correction is on. Every other camera keeps
+`Sweep::Unknown`, which is a zero axis and no correction at all.
+
+It took two rounds to get there, and the reason is worth more than the
+answer. Issue #42 measured the same thing on the same footage, found nothing,
+and shipped `Unknown`. What it was missing is that the fit answers on **two**
+axes and only one of them ever had a control: an injected readout across the
+frame read back at 0.79 to 0.84, so the across-frame answer was trusted and
+reported as null, while the down-frame answer of the same fits was reported
+as not repeating. It repeats wherever an injected control works. The stretch
+that disagreed is the one where injecting a known displacement reads back at
+-0.10, which is an instrument saying it cannot see, read as a measurement
+saying there is nothing there.
 
 #### What the correction is
 
@@ -1012,6 +1047,16 @@ would do), and a readout running **down** the delivered frame rather than
 across it. Both predict a seam disagreement of 0.002 to 0.003 degrees, which
 is nothing to measure.
 
+**That blind spot is where the answer was.** Re-run on the same 30 frames
+after the direction was settled, the seam reads the down candidate's own
+relative displacement as **0.000 degrees** while it reads the across ones as
+0.131 and hands them back at -0.93 and -1.05. So the seam is not merely
+uninformative about a down sweep, it is provably untouched by one: the two
+lenses' pictures of a seam direction move together. That is why switching the
+correction on cannot disturb #7's blend, and it is the same fact from the
+other side as "both sensors read down their own delivered pictures", because
+lens 1 is mounted a half turn round and down is down in both.
+
 #### Instrument 2: inside one lens, where a horizon has to stay straight
 
 A great circle projects to a straight line in a rectilinear view, so a bend in
@@ -1049,56 +1094,143 @@ say, and say it with the signature the physics predicts: the correction
 improves the residual and its reverse costs about twice as much as the
 correction gained. Two of the five say the opposite. The bend a readout would
 draw at these rates is 0.8 to 2.1 px against a horizon whose own residual is 3
-to 7 px, so the instrument is at the edge of resolving it, and **this is not a
-verdict**. It is why the answer is `Unknown` rather than "right".
+to 7 px, so the instrument is at the edge of resolving it, and **this was not
+a verdict**. It is why #42 answered `Unknown` rather than "right".
+
+Read again with the answer in hand it says more than it did. The same stretch
+re-run over 40 frames instead of 22, rolling 1 to 71 deg/s, as the bend
+against the correction switched off:
+
+| candidate | bend px | against off | angle sd |
+| --- | ---: | ---: | ---: |
+| off | 0.70 | | 0.23 deg |
+| right | 0.91 | +0.21 +-0.04 | 0.22 |
+| left | 0.56 | -0.13 +-0.04 | 0.28 |
+| **down** | **0.60** | **-0.09 +-0.02** | **0.14** |
+| up | 0.79 | +0.10 +-0.02 | 0.34 |
+
+**Down and up reproduce and right and left do not.** Against #42's run of the
+same stretch, down was -0.10 and is -0.09, up was +0.14 and is +0.10, while
+right and left swapped signs entirely (-0.22 and +0.35 became +0.21 and
+-0.13) when the frame set changed. A candidate the camera does not have moves
+this measurement around by whatever the frames happen to hold; the one it has
+moves it the same way twice. Down also leaves the straightest horizon of any
+variant in the table, including the shipped pass, and it is the only readout
+candidate that improves the angle's own scatter rather than costing some.
 
 #### Instrument 3: one lens against itself, a few frames apart
 
-The strongest design available on this footage, and still not enough. The same
-lens at two instants is turning at two different rates, so far-off content
-that has not moved in the world is displaced differently in each, and the
-difference is what a readout predicts and nothing else does. Patches are
-correlated between frames four apart through the stabilized map, and the fit
-is eight unknowns least squares: three for the rotation the horizon lock
-leaves between the frames, three for the camera's own translation, whose flow
-field over far content is a dipole and looks enough like a readout's to be
-worth taking out, and **two for how far the readout sweeps across the frame
-and down it**, fitted together because separately each reads the other's
-displacement as its own.
+**This is the one that answers it.** The same lens at two instants is turning
+at two different rates, so far-off content that has not moved in the world is
+displaced differently in each, and the difference is what a readout predicts
+and nothing else does. Patches are correlated between frames a chosen distance
+apart through the stabilized map, and the fit is eight unknowns least squares:
+three for the rotation the horizon lock leaves between the frames, three for
+the camera's own translation, whose flow field over far content is a dipole
+and looks enough like a readout's to be worth taking out, and **two for how
+far the readout sweeps across the frame and down it**, fitted together because
+separately each reads the other's displacement as its own.
 
-The control works: correcting for a readout takes the fitted across-frame
-sweep down by 0.79 to 0.84 where 1.0 is exact, and leaves the down-frame term
-alone. The measurement does not repeat.
+Five stretches of capture A, `pair=1 count=14 gap=2 search=3`, each one of the
+file's hardest rolls (`find=n` picks them). Every row is 150 to 400 patch
+readings:
 
-| stretch | across x | down y | residual |
-| --- | ---: | ---: | ---: |
-| A 1414.5 s, 20 pairs | +0.72 +-0.32 | +1.16 +-0.37 | 0.44 deg |
-| A 1150.5 s, 24 pairs | +0.39 +-0.20 | -0.47 +-0.21 | 0.57 deg |
+| stretch | roll deg/s | across x | **down y** | predictor |
+| --- | ---: | ---: | ---: | ---: |
+| 66.0 s | up to 195 | +0.05 +-0.08 | **+1.30 +-0.07** | 0.225 deg |
+| 878.4 s | up to 158 | -0.26 +-0.17 | **+0.72 +-0.18** | 0.146 |
+| 1263.6 s | up to 155 | +0.04 +-0.07 | **+0.76 +-0.09** | 0.207 |
+| 1325.4 s | up to 145 | +0.15 +-0.07 | **+0.92 +-0.09** | 0.184 |
+| 1414.5 s | up to 71 | +0.12 +-0.30 | **+1.29 +-0.28** | 0.086 |
 
-The predictor between frames four apart is worth 0.05 to 0.11 degrees against
-a residual of half a degree of parallax, lock error and content change, so the
-error bars are the whole story: two stretches disagree about the sign of one
-axis and about a factor of two on the other.
+Mean **1.00 +-0.12 down** and **0.02 +-0.07 across**, the error being the
+scatter between stretches, which is wider than any one stretch's own. Both
+lenses read down separately, 0.51 to 1.93 on lens 0 and 0.69 to 1.67 on lens
+1, which is the thing the seam cannot see.
 
-#### What would settle it, and it is a minute of footage
+**Nothing in that fit knows how long a readout takes.** The unit is a sweep
+that crosses the whole delivered frame in the trailer's 15.883 ms, and the
+fitted size landing on 1.0 is a check on the shape rather than a fit to it: a
+displacement of some other origin has no reason to come out at exactly one
+frame per 15.883 ms.
 
-Every instrument above is starved of the same thing: a **large** turn with
-**still, close, sharp** content and **no translation**. In flight the camera
-is always moving over ground that is far away, the rate is 20 deg/s at the
-median, and the readout displacement is small where the parallax and the
-stabilization residual are not.
+**The controls, all four.** `pair=1` now runs the whole pass again with each
+direction's own readout taken out of the pictures, which has to move the fit
+by exactly one along that direction's axis and leave the other axis alone:
 
-A hand-held twist in a room does all of it at once. Ten seconds of an X4 Air
-turned as fast as a wrist will turn it, in front of a bookshelf or a brick
-wall, standing still, is a capture where the predicted displacement is degrees
-rather than tenths, translation is nothing, and content is sharp enough to
-correlate anywhere in the frame. Instrument 3 reads the answer straight off
-it, with instrument 1 as the check on the between-lens half. That is the
-retest this section is waiting on.
+| stretch | + right | + left | + down | + up |
+| --- | ---: | ---: | ---: | ---: |
+| 66.0 s | 0.98 | 0.85 | 0.99 | 0.89 |
+| 878.4 s | 0.85 | 0.79 | 0.71 | 0.18 |
+| 1263.6 s | 0.94 | 1.02 | 1.02 | 0.91 |
+| 1325.4 s | 0.96 | 0.93 | 0.99 | 0.96 |
+| 1414.5 s | 0.98 | 1.19 | 0.93 | 1.27 |
 
-Until then: the machinery is in the map, the instruments are in
-`kyerag-spike --bin rolling` and `--bin horizon`, and `readout_sweep` in
-`kyerag_meta` is the one line that changes.
+1.00 is exact. The down column is the one #42 never ran, and it is the one
+the answer is on.
+
+**Robustness, and the two rows that are not measurements.** At 1325.4 s the
+answer is +0.72 +-0.09, +0.92 +-0.09 and +0.87 +-0.15 at gaps of 1, 2 and 6
+frames, and at 66.0 s it is +1.30 +-0.07 and +1.15 +-0.13 at gaps of 2 and 4,
+so it does not live in the frame spacing. Against that:
+
+- **1150.5 s**, the stretch #42 read -0.47 +-0.21 off: the injected
+  displacement there is 0.019 degrees, which is a sixth of the correlator's
+  own 0.12 degree step, and the four controls read back at 0.58, 0.67, -0.10
+  and 2.60. The instrument is blind at that stretch and says so.
+- **1790.0 s**, the camera lying on the ground: predictor 0.004 degrees, and
+  the answer is +0.37 +-0.60, consistent with nothing, with an error bar
+  seven times the working stretches. That is the null this instrument gives
+  when there is no motion to carry a readout.
+
+So the rule the instrument now prints for itself: the injected displacement
+has to be worth several correlator steps before any row of it means anything.
+
+#### What it cost to switch on
+
+`playback 60 60 0 90` at 2560x1440, yaw 90 so the seam is down the middle,
+five 60 s runs alternating the file's own readout against `off`, which is the
+pass as it was before issue #9: **4.00 and 4.23 ms per redraw off, 4.28, 4.82
+and 5.00 on**, so about half a millisecond. **0 dropped and 0 starved in all
+five**, 29.97 fps presented, 30.0 redraws/s. (The 1.84 ms in ROADMAP's cost
+table is the same measurement before issues #10 and #11 changed what a redraw
+does; the arms above are from one build.)
+
+#### The settling capture, and why it answered nothing
+
+This section used to ask for ten seconds of a camera turned as fast as a wrist
+will turn it, in front of close, still, sharp content. Two captures arrived on
+2026-07-31 and **neither of them turns**: one is the camera standing on a desk
+indoors while somebody walks through the room, the other is the camera sitting
+on a deck outdoors. Their IMU records agree with their pictures at 0.2 and 0.0
+deg/s median, 1.5 and 0.1 deg/s at the worst.
+
+At those rates a whole-frame readout displaces the picture by **0.02
+degrees**, and what the seam instrument's control could apply on them is
+**0.003 degrees** against the 0.686 it applies on flying footage. All five
+candidates read identically to three decimals, because they are the same
+pictures. **A still capture cannot answer this question in either direction**,
+and reporting one as a negative would have been the same mistake as #42's,
+one axis further along.
+
+Two things follow, and both are shipped. `--bin rolling` prints a `carries:`
+line before it decodes anything, giving the file's own rate distribution and
+the displacement a whole-frame readout comes to at it, next to what a hand
+twist would give; that is three seconds and it names the wrong file before an
+hour of measuring does. And `pair=1` injects all four directions rather than
+one, so an axis that cannot be read says so in its own control column.
+
+The still captures are worth keeping for a different question. 4.9 asks for a
+capture from a camera that is not moving, and these are it.
+
+#### Would a hand twist still be worth capturing?
+
+Yes, but as a check rather than as the answer. It would put degrees of
+predicted displacement where the flying stretches above have tenths, and the
+one thing the current answer rests on is a single 30-minute capture: five
+stretches of it are five stretches of one camera on one day. What it would
+have to be, in one line, is a file whose `carries:` line reads in the
+hundreds of deg/s.
 
 ## 7. What was ruled out
 

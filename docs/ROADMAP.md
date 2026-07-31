@@ -75,20 +75,20 @@ wins every stretch of two captures by 15 to 36 degrees over the runner-up.
 And the quarter-turn roll datum from issue #3 belongs to the **delivered
 picture** rather than to the sensor, which the IMU could tell apart because
 it is bolted to the sensor: that closes the last "what 4.8 does not settle".
-**Rolling shutter is fused into the same map, measured, and switched off**
-(issue #9), which is the third M2 item and the second time this project has
-built a correction and then measured it out (the first was #7's exposure
-match). The mechanism is there and tested: for every output ray the landing
-row is solved for, the orientation used is the one at that row's own readout
-instant, one round of the solve, no extra pass and nothing resampled. What is
-missing is the one thing the file does not record, **which way the sensor
-reads**, and two instruments built to measure it both come back null at the
-size this camera would have to have. The stronger of the two reads an applied
-displacement of that size back at 0.985 with r = 0.996 and finds 0.014 of it
-in the pictures, so shipping the direction the geometry implied would have put
-up to 1.9 degrees of misalignment into the seam that #7 just blended.
-`kyerag_meta::Sweep::Unknown` is that answer, and ten seconds of a camera
-turned hard by hand in front of close, still content would settle it
+**Rolling shutter is fused into the same map, measured, and on** (issue #9),
+which is the third M2 item. For every output ray the landing row is solved
+for and the orientation used is the one at that row's own readout instant,
+one round of the solve, no extra pass and nothing resampled. The one thing
+the file does not record is **which way the sensor reads**, and on an X4 Air
+it reads **down the delivered frame**: 1.00 +-0.12 of a whole frame in the
+trailer's own 15.883 ms, measured over five stretches of a 30-minute capture
+by fitting one lens against itself a few frames apart, with the horizon
+lock's rigid rotation and the camera's own translation fitted out alongside.
+That direction is the one the seam cannot see, because two lenses reading
+down their own pictures sweep the same world direction and it cancels between
+them; that is both why #42 shipped it switched off and why switching it on
+cannot disturb the seam #7 blended. It costs about half a millisecond per
+redraw at 2560x1440, 0 dropped and 0 starved
 (docs/research/insv-format.md 6.7).
 
 **Hemisphere-aware decode gating is half done and half cut** (issue #10),
@@ -250,8 +250,8 @@ into the same recording that land at the 99th or above: the fades hold.
   complementary filter, `View > Lock horizon`, and a harness that measures
   the horizon in rendered frames because a Studio export was not available
   overnight), rolling-shutter correction (issue #9, done: fused into the one
-  backward map, and switched off because the readout direction is not in the
-  file and could not be measured out of flying footage), hemisphere-aware
+  backward map, and on, the readout direction measured off the pictures
+  because the file does not record it), hemisphere-aware
   gating (issue #10, done: the pass skips the lens a ray cannot reach, and
   the decode gate under the same test is measured and cut), scrub
   responsiveness (issue #46, done: a newer drag position takes the decode
@@ -498,14 +498,31 @@ into the same recording that land at the 99th or above: the fades hold.
   stays measurable. What would change the answer is a shorter GOP or a
   format with cheaper random access, and the instrument would say so.
 
-- 2026-07-31 Rolling-shutter correction ships **switched off** (issue #9).
-  The readout direction is not in the trailer, and on 30 minutes of flying
-  footage neither the seam nor a rendered horizon can find the displacement a
-  15.883 ms readout would leave. Shipping the direction the roll datum
-  implied would add up to 1.9 degrees of seam misalignment at 120 deg/s that
-  the pictures measurably do not have, so `readout_sweep` answers
-  `Sweep::Unknown` and the pass runs as it did before. One line changes when
-  a settling capture exists.
+- 2026-07-31 An X4's sensor reads **down the delivered frame**, so
+  rolling-shutter correction ships **on** (issue #9). Measured at 1.00 +-0.12
+  whole-frame readouts down and 0.02 +-0.07 across, over five stretches of a
+  30-minute capture, by one lens against itself a few frames apart. The
+  trailer records how long a readout takes and nothing about its direction,
+  and a direction applied backwards doubles the skew it should remove, so the
+  bar was a control on **each** axis the fit answers on: injecting each of the
+  four candidates reads back at 0.85 to 1.02 on its own axis and leaves the
+  other where it was. Cameras nobody has measured keep `Sweep::Unknown`,
+  which is a zero axis and no correction.
+
+  Same day, and this is the transferable part: **#42 had the answer in its
+  own tables and read it as noise**, because it controlled one of the two
+  axes it fitted. The uncontrolled axis was reported as "does not repeat" on
+  the strength of two stretches, one of which turns out to be a stretch where
+  an injected control reads back at -0.10. An instrument that cannot see says
+  so in a control column, not in a scatter.
+
+  Same day, second lesson: **a still capture cannot answer a motion
+  question.** The settling capture this issue waited on arrived with the
+  camera standing on a desk (0.2 deg/s median, 1.5 worst), where a whole-frame
+  readout displaces the picture by 0.02 degrees and the instruments' own
+  controls can apply 0.003. `--bin rolling` now prints a `carries:` line
+  before it decodes anything, which is the file's own rate distribution
+  against what the measurement needs.
 
 - 2026-07-30 License AGPL-3.0 (Alex; matches wingover). Unlocks Gyroflow
   GPL-3.0 shader reference with attribution.
@@ -888,20 +905,30 @@ lens model costs, because that is what it is: the landing row is solved for
 rather than computed, and each round of the solve is one more turn of the ray
 and one more Mei projection per lens per pixel. Two 60 s runs each at
 2560x1440, yaw 90 so the seam is down the middle, forced on through the
-harness hook over a file whose readout direction is not known:
+harness hook before the direction was known:
 
 | pass, ms/redraw | measured |
 | --------------- | -------: |
-| correction off (what ships) | 1.84, 1.85 |
+| correction off | 1.84, 1.85 |
 | one round of the solve | 2.96, 2.97 |
 | two rounds | 3.99, 3.97 |
 
 0 dropped and 0 starved in all six runs, 29.97 fps presented and 30.0
-redraws/s throughout. Switched off it is not nearly free but exactly free: the
-same binary renders two of three test views byte for byte against the pass
-before the change, and the third differs in one channel of one pixel of a
-million by one code, which is the compiler's scheduling of a refactored
+redraws/s throughout. Switched off it was not nearly free but exactly free:
+the same binary rendered two of three test views byte for byte against the
+pass before the change, and the third differed in one channel of one pixel of
+a million by one code, which is the compiler's scheduling of a refactored
 function and not the map.
+
+**Re-measured when it was switched on** (2026-07-31, an X4 reads down the
+frame): five 60 s runs of one build, the same view, alternating the file's
+own readout against `playback ... off`, which is the pass as it was before
+issue #9. **4.00 and 4.23 ms off, 4.28, 4.82 and 5.00 on**, so about half a
+millisecond per redraw, and 0 dropped and 0 starved in all five with 29.97
+fps presented. Both arms are dearer than the table above because issues #10
+and #11 changed what a redraw does; what the table above is still good for is
+the shape, which is that a second round would cost as much again as the
+first.
 
 Hemisphere gating (issue #10), `cargo run --release -p kyerag-spike --bin
 gating`. How much of the sphere a view could gate a lens off for at all, with
