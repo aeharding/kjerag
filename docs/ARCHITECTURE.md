@@ -56,9 +56,16 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
   -> two single-plane wgpu textures per frame:
        R8Unorm  from layer 0 (luma,   DRM_FORMAT_R8)
        Rg8Unorm from layer 1 (chroma, DRM_FORMAT_GR88 - note GR, not RG)
-  -> single fragment pass: sample both lenses, Mei inverse-project,
-     blend, YUV->RGB, to swapchain at display resolution
+  -> single fragment pass: Mei-project the ray into BOTH lenses, take the
+     one whose optical axis it is nearer, sample that one's planes,
+     YUV->RGB, to swapchain at display resolution
 ```
+
+The shader consumes both lenses (issue #27), so a view anywhere on the
+sphere has a picture in it. One lens is *sampled* per output pixel, not
+two: the choice is a branch and the seam it leaves is hard. Issue #7 is
+what turns that branch into a weight, and nothing else has to move for it,
+because both lenses are bound and both landings are already computed.
 
 No queue-family EXTERNAL acquire step is needed, on either wgpu version:
 `create_texture_from_hal` offers no hook for it, `TextureUses::
@@ -186,9 +193,20 @@ shader consumes them as they come; nothing downstream rescales.
 
 The rotation is `Rz(roll - 90 deg) * Ry(yaw) * Rx(pitch)`, in a frame whose
 axes are the delivered frame's own (x right, y down, z along the optical
-axis). That quarter-turn datum was measured against rendered frames from two
-cameras, not assumed: applying roll as the file writes it puts the world on
-its side. docs/research/insv-format.md 4.8 has the frames and the table.
+axis), times a half turn about the body's vertical for lens 1. That
+quarter-turn datum was measured against rendered frames from two cameras,
+not assumed: applying roll as the file writes it puts the world on its
+side. So was the half turn, which the file does not contain at all (lens
+1's recorded yaw is 0.039 degrees, not 180) and which the pictures of the
+two lenses have to agree across the seam to settle.
+docs/research/insv-format.md 4.8 and 4.9 have the frames, the method and
+the tables.
+
+A ray is shown from the lens whose optical axis it is nearer, and from the
+other one where the nearer lens has run out of coverage. Nothing is shown
+from neither: the two 97.5-degree caps overlap by about 15 degrees, which
+is checked over the whole sphere by `cargo test` and over a 40-view sweep
+of real footage by counting the pixels the shader painted grey.
 
 The forward map exists twice, in `crates/render/src/projection.rs`: once in
 WGSL for the GPU and once in Rust so `cargo test` can check known angles
@@ -215,3 +233,8 @@ a crash: build the diff-vs-Studio-export harness before trusting any of it.
   composition is settled (above); the order is not, and no known camera can
   distinguish it, because every one of them records sub-degree yaw and
   pitch (docs/research/insv-format.md 4.8).
+- What is left of the seam once the composition is right: 0.4 degrees along
+  the seam circle, and an across-seam disagreement that the measurement in
+  4.9 could not pin down. Neither is a convention left to choose; the
+  candidates are the reduced calibration model at the extreme edge, the
+  focal scale, and the angle order above. Issue #7's, with the blend.

@@ -13,14 +13,18 @@ zero-copy onto the device iced created and reprojected inside iced's own
 render pass: the shell, the shader widget and the wgpu-28 import all
 confirmed on screen. M1 is under way: `crates/meta/` reads the trailer's calibration
 (issue #2), the source tree is a workspace with one crate per layer
-(issue #19), one lens is reprojected through its Mei/UCM model with drag to
-look around and scroll to zoom (issues #3, #26), and the playback core plays
-it (issue #4): one demuxer, both lenses decoded in lockstep and delivered as
-pairs, a presentation clock that paces 29.97 fps content by due time, space
-to pause, and frames pullable by index or timestamp. Measured over 60 s of
-real footage: 29.94 fps presented, zero dropped, zero starved. Next:
-sampling the second lens in the shader (issue #27), which the pairs are
-already waiting for, and seek (issue #5) on the same pull API.
+(issue #19), the picture is reprojected through the lenses' own Mei/UCM
+models with drag to look around and scroll to zoom (issues #3, #26), and the
+playback core plays it (issue #4): one demuxer, both lenses decoded in
+lockstep and delivered as pairs, a presentation clock that paces 29.97 fps
+content by due time, space to pause, and frames pullable by index or
+timestamp. Measured over 60 s of real footage: 29.94 fps presented, zero
+dropped, zero starved. **The sphere is closed** (issue #27): the shader
+projects every ray into both lenses and samples the one whose optical axis
+it is nearer, so turning around shows the back hemisphere, upright and
+unmirrored, with a hard seam and an exposure step where the two meet. Next:
+the seam blend and exposure match (issue #7), which is what makes that seam
+disappear, and seek (issue #5) on the same pull API.
 
 ## Milestones
 
@@ -32,6 +36,8 @@ already waiting for, and seek (issue #5) on the same pull API.
   drag to reframe, scroll to zoom, play/pause/seek, screenshots. The MVP.
   Reprojection and the mouse are done (issue #3), and so is playback:
   dual-stream decode, the presentation clock and play/pause (issue #4).
+  Full 360-degree look-around lands here too (issue #27): both lenses
+  sampled, hard seam, which #7 blends in M2.
 - **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
   lock (+ Studio-diff test harness), rolling-shutter correction,
   hemisphere-aware decode gating, high-quality zoom sampling.
@@ -153,7 +159,27 @@ already waiting for, and seek (issue #5) on the same pull API.
   #30). Past that turning point the map folds rays from behind the camera
   back inside the circle, which showed as a raw circular fisheye hanging
   behind the reframed view. The bound comes out of the calibration's own
-  xi, so no maximum field of view has to be guessed at.
+  xi, so no maximum field of view has to be guessed at. It is per lens: a
+  fold in one lens is now a ghost printed over a picture the other lens is
+  drawing correctly.
+- 2026-07-31 The pick between lenses is nearest axis, and it is a branch
+  rather than a blend (issue #27). One lens is sampled per output pixel,
+  which halves the texture fetches against sampling both and selecting; the
+  cost is a hard seam and an exposure step, and both are #7's. A lens that
+  has the ray beats one that does not, so the overlap covers a lens running
+  out of coverage before the halfway line, and nothing is left grey: the
+  two 97.5-degree caps overlap by about 15 degrees. The branch samples with
+  an explicit mip level, because a `textureSample` needs uniform control
+  flow to compute one and every imported texture has a single level anyway.
+- 2026-07-31 Lens 1's nominal arrangement is a half turn about the body's
+  vertical, multiplied on the right of the block's own angles (issue #27,
+  docs/research/insv-format.md 4.9). The file does not contain the flip at
+  all, and the two orders differ by twice lens 1's roll residual, so this
+  was measured rather than picked: each lens rendered alone across the
+  seam, and the far-field content correlated between the two pictures.
+  0.4 degrees of along-seam residual for this order against 1.5 for the
+  other, and the half turn about x, which is a rear sensor upside down,
+  correlates with nothing at all.
 - 2026-07-31 The shell's design is written down before it is built, in
   docs/UI.md, from the cosmic-player / cosmic-files / cosmic-edit sources
   (issue #16). Every decision in it cites the first-party file it copies,
@@ -166,8 +192,8 @@ already waiting for, and seek (issue #5) on the same pull API.
 - 2026-07-31 Frames are delivered in pairs, not one stream at a time
   (issue #4). `Frames` carries every video stream at one PTS, so the two
   lenses cannot drift apart: there is no code path that delivers lens 0
-  without lens 1. Both are imported into wgpu; the shader samples one until
-  issue #27 lands.
+  without lens 1. Both are imported into wgpu, and since issue #27 both are
+  sampled.
 - 2026-07-31 Playback is paced by due time, not by counting refreshes. Each
   frame's due time comes off a monotonic clock anchored to the first frame
   presented, and the shell sleeps until it (`RedrawRequest::At`). The
@@ -227,6 +253,16 @@ Playback, both lenses, 60 s of a 3840x3840 29.97 fps file, rendering
 | worst late                  | 6.6 ms    |
 | reprojection pass           | 1.31 ms/redraw |
 | CPU (decode + import + pass) | 9.1% of one core |
+
+Sampling both lenses (issue #27) costs the pass about a quarter more, and
+nothing else: measured back to back against the same binary before the
+change, three runs each at 2560x1440, 1.26 to 1.48 ms/redraw with one lens
+against 1.59 to 1.90 with two, still 0 dropped and 0 starved either way.
+Every output pixel now runs the Mei map twice, once per lens, and samples
+once. Sampling both and selecting afterwards would have cost the fetches
+too; skipping the second projection where the first lands well inside its
+own hemisphere is the obvious saving and is not taken, because 1.6 ms of a
+33 ms frame is not a problem yet (see also issue #10).
 
 The windowed app over the same 60 s: zero dropped and zero starved in
 every 5 s report, 30.0-30.2 redraws/s, 13.4% of one core and 295 MiB RSS

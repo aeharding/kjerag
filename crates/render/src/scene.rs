@@ -1,19 +1,19 @@
 //! The one shader pass the player draws.
 //!
 //! With no file it is an animated gradient, which proves only that a custom
-//! wgpu pass runs inside libcosmic. With a file it reprojects one lens of a
-//! real VA-API frame imported by [`super::dmabuf`]: for every output pixel,
-//! a view ray through the camera's yaw, pitch and field of view, rotated
-//! into the lens frame and pushed through the Mei/UCM model in
-//! [`super::projection`], sampled from the NV12 planes and converted to RGB.
-//! One pass, no intermediate target.
+//! wgpu pass runs inside libcosmic. With a file it reprojects a real VA-API
+//! frame imported by [`super::dmabuf`]: for every output pixel, a view ray
+//! through the camera's yaw, pitch and field of view, rotated into each
+//! lens's frame and pushed through the Mei/UCM model in
+//! [`super::projection`], sampled from the NV12 planes of whichever lens
+//! wins and converted to RGB. One pass, no intermediate target.
 //!
-//! The frames move now (issue #4). A [`Player`] decodes both lenses on its
-//! own thread and this file asks it, on every redraw, which pair belongs on
+//! The frames move (issue #4): a [`Player`] decodes both lenses on its own
+//! thread and this file asks it, on every redraw, which pair belongs on
 //! screen; [`ScenePipeline::prepare`] imports that pair and binds it. Both
-//! lenses are imported. Only lens 0 is sampled, because the shader has one
-//! lens in it: issue #27 adds the second binding and the per-ray choice, and
-//! the frames are already on the GPU when it does.
+//! lenses are now sampled as well as imported, so the picture is the whole
+//! sphere (issue #27). The pass still samples one lens per pixel: the choice
+//! is a branch, not a blend, and the visible seam it leaves is issue #7's.
 //!
 //! [`Scene::pump`] takes `&self` and keeps the clock behind a [`RefCell`],
 //! which is not how a player would be written on its own. It is how iced's
@@ -32,11 +32,11 @@ use std::time::{Duration, Instant};
 use kyerag_media::{Cue, Frames, Player, Reader, Stats};
 use kyerag_meta::{CalibrationSet, Lens};
 
-use super::projection::{self, Reframe};
+use super::projection::{self, MAX_LENSES, Reframe};
 use super::{Camera, Extent, Fallible, Planes, Size, dmabuf};
 
-/// The lens the shader samples. Issue #27 makes this a per-ray choice.
-const LENS: usize = 0;
+/// The sampler binding, which sits after every lens's two planes.
+const SAMPLER_BINDING: u32 = 1 + 2 * MAX_LENSES as u32;
 
 /// Frames kept alive behind the one being drawn.
 ///
@@ -71,7 +71,8 @@ pub struct Scene {
 
 /// A file on screen: its calibration, and where its frames come from.
 struct Show {
-    lens: Arc<Lens>,
+    /// One per decoded stream, in stream order.
+    lenses: Arc<[Lens]>,
     /// The clock and the frame it is showing. See the module docs for why
     /// this is a cell.
     playing: RefCell<Playing>,
@@ -103,7 +104,7 @@ impl Scene {
     /// is parsed; the first frames arrive on the decode thread.
     pub fn open(path: &Path) -> Fallible<Self> {
         let mut player = Player::open(path)?;
-        let lens = calibrated(path, player.size())?;
+        let lenses = calibrated(path, player.size(), player.lenses())?;
         println!(
             "media:  {}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             // The older cameras write one lens per file, so this is 1 as
@@ -122,7 +123,7 @@ impl Scene {
         // means playing it. Space pauses.
         player.play();
         Ok(Self {
-            show: Some(Show::new(lens, None, Source::Live(Box::new(player)))),
+            show: Some(Show::new(lenses, None, Source::Live(Box::new(player)))),
             ..Self::blank()
         })
     }
@@ -133,16 +134,18 @@ impl Scene {
     /// the frame it is checking.
     pub fn still(path: &Path, at: Cue) -> Fallible<Self> {
         let mut reader = Reader::open(path)?;
-        let lens = calibrated(path, reader.size())?;
+        let lenses = calibrated(path, reader.size(), reader.lenses())?;
         let frames = reader.frame(at)?;
         println!(
             "frame:  {} at {:.3} s",
             frames.index,
             frames.timestamp.as_secs_f64()
         );
-        println!("drm:    {}", frames.lenses[LENS].describe());
+        for frame in &frames.lenses {
+            println!("drm:    {}", frame.describe());
+        }
         Ok(Self {
-            show: Some(Show::new(lens, Some(Arc::new(frames)), Source::Still)),
+            show: Some(Show::new(lenses, Some(Arc::new(frames)), Source::Still)),
             ..Self::blank()
         })
     }
@@ -231,24 +234,30 @@ impl Scene {
 }
 
 impl Show {
-    fn new(lens: Arc<Lens>, frames: Option<Arc<Frames>>, source: Source) -> Self {
+    fn new(lenses: Arc<[Lens]>, frames: Option<Arc<Frames>>, source: Source) -> Self {
         Self {
-            lens,
+            lenses,
             playing: RefCell::new(Playing { frames, source }),
         }
     }
 
     fn view(&self) -> Option<View> {
         Some(View {
-            lens: self.lens.clone(),
+            lenses: self.lenses.clone(),
             frames: self.playing.borrow().frames.clone()?,
         })
     }
 }
 
-/// The calibration for the lens the shader samples, checked against the
-/// stream it will be sampled from.
-fn calibrated(path: &Path, size: Size) -> Fallible<Arc<Lens>> {
+/// The calibration for the lenses the shader samples, checked against the
+/// streams they will be sampled from.
+///
+/// One entry per decoded stream, and in the same order: the trailer writes
+/// its lens blocks in the order the container carries the streams. A camera
+/// that writes one lens per file (the ONE X2 and older) calibrates two
+/// lenses in a file that decodes one, and then this is lens 0 alone and the
+/// picture is one hemisphere.
+fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Arc<[Lens]>> {
     let calibration = CalibrationSet::from_insv(path)?;
     // The calibration's pixel numbers are already in delivered-frame
     // coordinates, so they describe this texture only if the stream is the
@@ -261,18 +270,24 @@ fn calibrated(path: &Path, size: Size) -> Fallible<Arc<Lens>> {
         )
         .into());
     }
-    let lens = calibration
+    let sampled = streams.min(MAX_LENSES);
+    let lenses = calibration
         .lenses
-        .get(LENS)
-        .ok_or("calibration describes no lens 0")?
-        .clone();
+        .get(..sampled)
+        .ok_or_else(|| {
+            format!(
+                "file decodes {streams} lens streams but the trailer calibrates {}",
+                calibration.lenses.len()
+            )
+        })?
+        .to_vec();
     println!(
-        "lens:   {} {}, lens {LENS} of {}",
+        "lens:   {} {}, sampling {sampled} of {} calibrated",
         calibration.camera_model,
         calibration.firmware,
         calibration.lenses.len(),
     );
-    Ok(Arc::new(lens))
+    Ok(lenses.into())
 }
 
 /// What the shell hands the renderer for one frame.
@@ -288,7 +303,7 @@ pub struct ScenePrimitive {
 /// two atomic increments.
 #[derive(Clone, Debug)]
 struct View {
-    lens: Arc<Lens>,
+    lenses: Arc<[Lens]>,
     frames: Arc<Frames>,
 }
 
@@ -299,6 +314,9 @@ pub struct ScenePipeline {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
+    /// One black pixel, bound wherever a lens has no stream: before a file is
+    /// open, and in the second slot of a file that carries one lens.
+    blank: Planes,
     bind_group: wgpu::BindGroup,
     /// The frame the bind group points at, and the ones still in flight
     /// behind it. Newest first.
@@ -365,14 +383,15 @@ impl ScenePipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // Views keep their textures alive, so the blank pair needs no field.
-        let bind_group = bind(device, &layout, &uniforms, &blank_planes(device), &sampler);
+        let blank = blank_planes(device);
+        let bind_group = bind(device, &layout, &uniforms, [&blank; MAX_LENSES], &sampler);
 
         Self {
             pipeline,
             layout,
             sampler,
             uniforms,
+            blank,
             bind_group,
             live: VecDeque::new(),
             failed: false,
@@ -404,7 +423,7 @@ impl ScenePipeline {
 
         let reframe = match &primitive.view {
             Some(view) if self.is_bound(view) => Reframe::new(
-                &view.lens,
+                &view.lenses,
                 view.frames.size,
                 primitive.camera,
                 aspect,
@@ -439,7 +458,11 @@ impl ScenePipeline {
                     device,
                     &self.layout,
                     &self.uniforms,
-                    &planes[LENS],
+                    // A file with one lens stream leaves the second slot on
+                    // the blank pixel. Nothing samples it: `Reframe`'s lens
+                    // count says one, and a bind group still needs an entry
+                    // for every binding the layout declares.
+                    std::array::from_fn(|lens| planes.get(lens).unwrap_or(&self.blank)),
                     &self.sampler,
                 );
                 self.live.push_front(Live {
@@ -455,9 +478,7 @@ impl ScenePipeline {
         }
     }
 
-    /// Every lens of the pair, not just the one the shader samples: issue
-    /// #27 needs lens 1 on the GPU, and importing it here is what shows the
-    /// second stream's dmabufs arrive whole.
+    /// Every lens of the pair: both are sampled, one per output pixel.
     fn import(&self, device: &wgpu::Device, view: &View) -> Fallible<Vec<Planes>> {
         view.frames
             .lenses
@@ -467,35 +488,44 @@ impl ScenePipeline {
     }
 }
 
+/// The uniform block, then each lens's luma and chroma planes in lens order,
+/// then the sampler they share. The shader names those textures rather than
+/// indexing them, so the count is [`MAX_LENSES`] on both sides.
 fn bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     uniforms: &wgpu::Buffer,
-    planes: &Planes,
+    lenses: [&Planes; MAX_LENSES],
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
-    let view = |texture: &wgpu::Texture| texture.create_view(&Default::default());
+    // The views have to outlive the descriptor that borrows them, so they are
+    // built before it rather than inside it.
+    let views: Vec<wgpu::TextureView> = lenses
+        .iter()
+        .flat_map(|planes| [&planes.luma, &planes.chroma])
+        .map(|texture| texture.create_view(&Default::default()))
+        .collect();
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: uniforms.as_entire_binding(),
+    }];
+    entries.extend(
+        views
+            .iter()
+            .enumerate()
+            .map(|(plane, view)| wgpu::BindGroupEntry {
+                binding: 1 + plane as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            }),
+    );
+    entries.push(wgpu::BindGroupEntry {
+        binding: SAMPLER_BINDING,
+        resource: wgpu::BindingResource::Sampler(sampler),
+    });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scene"),
         layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&view(&planes.luma)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(&view(&planes.chroma)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-        ],
+        entries: &entries,
     })
 }
 
@@ -510,32 +540,29 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         },
         count: None,
     };
+    let mut entries = vec![wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            // The one place the Rust and WGSL definitions of the uniform
+            // block are checked against each other: pipeline creation fails
+            // if the shader's struct wants more bytes than `Reframe` has.
+            min_binding_size: NonZeroU64::new(std::mem::size_of::<Reframe>() as u64),
+        },
+        count: None,
+    }];
+    entries.extend((1..SAMPLER_BINDING).map(texture));
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: SAMPLER_BINDING,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    });
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("scene"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    // The one place the Rust and WGSL definitions of the
-                    // uniform block are checked against each other: pipeline
-                    // creation fails if the shader's struct wants more bytes
-                    // than `Reframe` has.
-                    min_binding_size: NonZeroU64::new(std::mem::size_of::<Reframe>() as u64),
-                },
-                count: None,
-            },
-            texture(1),
-            texture(2),
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
+        entries: &entries,
     })
 }
 
@@ -579,9 +606,14 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
   return out;
 }
 
-@group(0) @binding(1) var luma: texture_2d<f32>;
-@group(0) @binding(2) var chroma: texture_2d<f32>;
-@group(0) @binding(3) var samp: sampler;
+// Two planes per lens, in lens order, then the sampler they share. WGSL has
+// no texture array to index here, so `picture` branches on the lens the ray
+// picked; `SAMPLER_BINDING` is the Rust half of these numbers.
+@group(0) @binding(1) var luma0: texture_2d<f32>;
+@group(0) @binding(2) var chroma0: texture_2d<f32>;
+@group(0) @binding(3) var luma1: texture_2d<f32>;
+@group(0) @binding(4) var chroma1: texture_2d<f32>;
+@group(0) @binding(5) var samp: sampler;
 
 fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
   let d = length(uv - vec2<f32>(0.5, 0.5));
@@ -589,11 +621,28 @@ fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
   return vec3<f32>(wave * uv.x, wave * uv.y, wave);
 }
 
+// What the lens that won has at that pixel, or grey where no lens had the
+// ray. Sampling every lens and selecting afterwards would double the texture
+// fetches; the explicit mip level is what makes the branch legal, because a
+// `textureSample` computes its own level from derivatives and needs uniform
+// control flow to do it. Every one of these textures has a single level, so
+// the two calls read the same texel.
+fn picture(chosen: Pick) -> vec3<f32> {
+  if !chosen.landing.inside {
+    return OUTSIDE_GRAY;
+  }
+  let uv = frame_uv(chosen.landing.pixel);
+  if chosen.lens == 1u {
+    return nv12(luma1, chroma1, uv);
+  }
+  return nv12(luma0, chroma0, uv);
+}
+
 // BT.709 full range: ffprobe reports bt709 and the camera writes yuvj420p.
 // DRM_FORMAT_GR88 is little endian G:R, so .r is Cb and .g is Cr.
-fn nv12(uv: vec2<f32>) -> vec3<f32> {
-  let y = textureSample(luma, samp, uv).r;
-  let c = textureSample(chroma, samp, uv).rg - vec2<f32>(0.5, 0.5);
+fn nv12(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
+  let y = textureSampleLevel(luma, samp, uv, 0.0).r;
+  let c = textureSampleLevel(chroma, samp, uv, 0.0).rg - vec2<f32>(0.5, 0.5);
   return vec3<f32>(
     y + 1.5748 * c.g,
     y - 0.1873 * c.r - 0.4681 * c.g,
@@ -609,12 +658,7 @@ fn linearize(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  let landing = project(view_ray(in.uv));
-  // Every branch is evaluated because `textureSample` needs uniform control
-  // flow; picking afterwards is the WGSL-legal way to write this. A ray that
-  // missed the lens would otherwise read a clamped edge texel and smear it
-  // across the whole invalid region.
-  let lens = select(OUTSIDE_GRAY, nv12(frame_uv(landing.pixel)), landing.inside);
+  let lens = picture(pick(view_ray(in.uv)));
   let rgb = select(gradient(in.uv, reframe.elapsed), lens, reframe.has_frame > 0.5);
   return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), 1.0);
 }
