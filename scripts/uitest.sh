@@ -403,6 +403,7 @@ with_media() {
 	saves_a_still
 	flips_the_horizon
 	survives_fullscreen
+	fullscreen_holds_the_view
 
 	# Space again, and this time the app's own report line is the evidence.
 	# A file that never paused is still playing, so its report lines would
@@ -419,6 +420,7 @@ with_media() {
 			"log: $log"
 	fi
 
+	idle_controls_hold_the_view
 	exits_clean
 }
 
@@ -508,16 +510,25 @@ BALL_PRESSES=20
 ROOM_SPREAD=4
 ROOM_DARK=60
 
-zooms_out_to_the_ball() {
-	local before after try=0
-	before=$(patch_rgb "$(grab zoom-before)")
+# reach_the_ball <name>: press ctrl+- until the patch reads the room, and
+# say whether it got there. The capture it went by is left under <name>.
+reach_the_ball() {
+	local try=0
 	while [ "$try" -lt "$BALL_PRESSES" ]; do
 		key -M ctrl -k minus -m ctrl
-		alive || lost "ctrl+- zooms out to the ball"
-		after=$(patch_rgb "$(grab zoom-ball)")
-		is_room "$after" && break
+		alive || return 1
+		is_room "$(patch_rgb "$(grab "$1")")" && return 0
 		try=$((try + 1))
 	done
+	return 1
+}
+
+zooms_out_to_the_ball() {
+	local before after
+	before=$(patch_rgb "$(grab zoom-before)")
+	reach_the_ball zoom-ball
+	alive || lost "ctrl+- zooms out to the ball"
+	after=$(patch_rgb "$session/zoom-ball.ppm")
 	if ! is_room "$after"; then
 		fail "ctrl+- zooms out to the ball" \
 			"after $BALL_PRESSES presses the patch reads $after, which is not the room \
@@ -619,6 +630,104 @@ survives_fullscreen() {
 	else
 		fail "f survives fullscreen" "alive: $(alive && echo yes || echo no)" "$shot"
 	fi
+	# Back to windowed, so the checks after this one start where they expect.
+	key -k Escape
+}
+
+# Issue #77: the view survives fullscreen, both ways, every time.
+#
+# Entering fullscreen hides the header bar, which changes the shape of the
+# window's widget tree, so the camera must not live anywhere that is rebuilt
+# with it.
+#
+# The zoom is what stands in for the pan here, because the zoom is the whole
+# of what a keyboard can move: yaw, pitch and field of view are one
+# `Viewpoint` in one place, and a transition that keeps one keeps all three.
+# The instrument is the room around the ball (`is_room`), which is the app's
+# own flat grey rather than footage, so it reads the same however the window
+# is shaped underneath and whether the picture is paused or playing.
+#
+# The two ways in a keyboard has, and the two ways out. The other three ways
+# in - the View menu, the button in the control row, a double click on the
+# video - send this same message and need a pointer the harness has not got.
+# A dropped key leaves the view where it already was, so it can only cost a
+# real failure, never invent one.
+fullscreen_holds_the_view() {
+	if ! reach_the_ball fullscreen-ball; then
+		alive || lost "fullscreen holds the view"
+		fail "fullscreen holds the view" \
+			"the view never reached the ball" "$session/fullscreen-ball.ppm"
+		return
+	fi
+
+	held_the_view f -k f &&
+		held_the_view escape -k Escape &&
+		held_the_view alt-enter -M alt -k Return -m alt &&
+		held_the_view f-again -k f &&
+		pass "fullscreen holds the view (f, escape, alt+enter, f)"
+
+	# However that went, leave the window windowed: the check after this one
+	# is about the header bar, which fullscreen keeps hidden whatever else
+	# happens.
+	key -k Escape
+}
+
+# Issue #77 again, on the path with no fullscreen in it: the header bar also
+# goes away on its own, two seconds after the last pointer input, while
+# playing (`CONTROLS_TIMEOUT`). It is the header bar coming and going that
+# reshapes the window, so this is the same defect met the way a pilot meets
+# it most often - watching a video, hands off - and it is what says the cause
+# is the header bar rather than anything about fullscreen.
+#
+# `h` is pressed first because it is a message that shows the controls, so
+# the bar is known to be up before the wait. It leaves the horizon lock back
+# on, which nothing after this reads.
+CONTROLS_HIDE=4
+
+idle_controls_hold_the_view() {
+	if ! reach_the_ball idle-ball; then
+		alive || lost "the view survives the controls hiding"
+		fail "the view survives the controls hiding" \
+			"the view never reached the ball" "$session/idle-ball.ppm"
+		return
+	fi
+
+	# The bar is up from here and nothing is pressed after it, so the two
+	# seconds run out inside the wait below and the hide is inside the
+	# check rather than before it.
+	key -k h
+	local shown hidden
+	shown=$(patch_rgb "$(grab idle-shown)")
+	sleep "$CONTROLS_HIDE"
+	alive || lost "the view survives the controls hiding"
+	hidden=$(patch_rgb "$(grab idle-hidden)")
+
+	if ! is_room "$shown"; then
+		fail "the view survives the controls hiding" \
+			"showing the controls moved the view: the patch reads $shown, which is \
+picture rather than the room around the ball" "$session/idle-shown.ppm"
+	elif is_room "$hidden"; then
+		pass "the view survives the controls hiding"
+	else
+		fail "the view survives the controls hiding" \
+			"after $CONTROLS_HIDE s with no input the patch reads $hidden, which is \
+picture rather than the room around the ball" "$session/idle-hidden.ppm"
+	fi
+}
+
+# held_the_view <name> <key...>: press it, and the view is still at the ball.
+held_the_view() {
+	local name=$1 patch file
+	shift
+	key "$@"
+	alive || lost "fullscreen holds the view"
+	file=$(grab "fullscreen-$name")
+	patch=$(patch_rgb "$file")
+	is_room "$patch" && return 0
+	fail "fullscreen holds the view" \
+		"the view reset on $name: the patch reads $patch, which is picture rather \
+than the room around the ball" "$file"
+	return 1
 }
 
 exits_clean() {
