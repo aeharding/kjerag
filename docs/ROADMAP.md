@@ -198,6 +198,26 @@ measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
 as before, and the sound goes with it, because a preempted read stops
 without reading another packet and the seek behind it flushes the ring.
 
+**A fast drag no longer freezes the picture** (issue #55). What #46 measured
+and could not fix inside itself: `Player::pump` showed a frame only while its
+own seek was still the newest, so a hand faster than a landing starved the
+display instead of slowing it, and at 60 slider positions a second not one
+picture reached the screen for the length of the drag. The pump now takes a
+frame from any seek newer than the position on screen, so the pilot sees the
+landings their finger has passed over rather than nothing, and picture
+updates rise with the hand instead of falling off a cliff: 10.0, 15.0, 19.5,
+29.0, 38.5, 45.5 and 43.0 a second at 10 to 90 positions/s, against 10.0,
+15.0, 12.5, 10.5, 5.0, 0.0 and 0.0. The two questions the old rule answered
+with one flag are now separate: which frames may take the screen, and which
+seek is still owed one. The second is what keeps a paused window redrawing,
+and it ends on the newest seek's own frame, so the release still lands the
+exact frame under the handle (49 of 49 drags, both arms). At 60 positions/s
+the picture now changes every 22.0 ms, which is about what one keyframe
+decode costs on this camera (21.1 ms at the reader): the drag runs at the
+decoder's rate, which is also the answer to #46's open question about a
+100 ms drag cycle. There was no 100 ms cycle. Three landings in four were
+being thrown away.
+
 M2 is done. #44 and #45 closed against it (the seed fix, owner-verified),
 and #48 has now reopened the seam.
 
@@ -315,7 +335,9 @@ into the same recording that land at the 99th or above: the fades hold.
   gating (issue #10, done: the pass skips the lens a ray cannot reach, and
   the decode gate under the same test is measured and cut), scrub
   responsiveness (issue #46, done: a newer drag position takes the decode
-  thread off the lookahead refill, 59 ms to 26 ms per scrub), high-quality
+  thread off the lookahead refill, 59 ms to 26 ms per scrub; and issue #55,
+  done: a drag faster than a landing shows the landings it has passed over
+  instead of freezing, 0 to 46 picture updates a second), high-quality
   zoom sampling (issue #11, done: a Catmull-Rom kernel on the luma plane
   wherever the map's own Jacobian says an output pixel has landed inside a
   texel, and the chroma half of it measured and cut). **M2 is complete**,
@@ -346,6 +368,53 @@ into the same recording that land at the 99th or above: the fades hold.
   above the bottom edge, which puts it across the middle of the control row
   while that row is up; accepted rather than forked, and measured: the
   buttons and both clocks stay clear.
+
+- 2026-07-31 **Which frames may take the screen and which seek is still owed
+  one are two questions** (issue #55). `Player::pump` answered both with one
+  epoch comparison: a frame was shown only while its own seek was the newest,
+  and showing anything cleared `is_seeking`. That is what froze a fast drag,
+  and the obvious repair breaks the other half, because `is_seeking` is what
+  keeps a paused window redrawing and an intermediate picture would end the
+  wait before the release's frame arrived. `Epochs` now carries `asked`,
+  `shown` and a `Wait`, and the two questions are separate methods:
+  `accepts` decides what may take the screen, and only the newest seek's own
+  frame ends the wait. Three states rather than a flag, because the wait is
+  not one thing: a **seek** wants a position newer than the one on screen
+  (the reader is still handing over frames of the position being left, and
+  they are a picture of nowhere the pilot asked to be, which the exact scrub
+  measured at 79 ms of wrong picture), a **step** wants the very next frame
+  of the position on screen and sends no seek at all, and **playback** wants
+  whatever the clock is due. The landing is applied where the frame arrives
+  rather than where the seek was asked for, so several outstanding seeks each
+  get their own picture at their own time; `Presenter::advance` takes the
+  seek's own frame however many pictures have already gone up, which is what
+  makes the release's exact frame the last picture of a drag rather than a
+  picture that never comes.
+
+- 2026-07-31 **A picture from a seek the pilot has dragged past is better
+  than a frozen one** (issue #55). Frames arrive in the order they were asked
+  for, so a landing tagged after the picture on screen is a picture of
+  somewhere the pilot has been since, and putting it up can only move the
+  picture forwards. Sweeping the fixture end to end, 2 s a rate, interleaved
+  arms, medians of 7 runs:
+
+  | positions/s | 10   | 15   | 20   | 30   | 45   | 60   | 90   |
+  | ----------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | before      | 10.0 | 15.0 | 12.5 | 10.5 |  5.0 |  0.0 |  0.0 |
+  | after       | 10.0 | 15.0 | 19.5 | 29.0 | 38.5 | 45.5 | 43.0 |
+
+  Below 20 positions/s the decoder keeps up and both arms show one picture a
+  position. Above it the old rule falls away to nothing while the new one
+  climbs to the decoder's own rate and stays there: 45.5 pictures a second is
+  22.0 ms each against a 21.1 ms keyframe decode at the reader. That also
+  answers what #46 could not, which was what made a drag cycle cost 100 ms
+  where a scrub through the same player cost 26. Nothing did: three landings
+  in four were being decoded and thrown away. The release lands the exact
+  frame in 49 of 49 drags on each arm, a median of 239 ms after letting go
+  before and 281 ms after, which is not a difference the measurement supports
+  (permutation p = 0.23): the per-drag spread is 24 to 446 ms on both arms
+  and it is set by where in the GOP the release falls, since an exact seek
+  decodes forward from the keyframe before it.
 
 - 2026-07-31 **The orientation filter starts only from a reading it would
   believe completely** (issue #45). The rule that covers every other sample
@@ -511,12 +580,15 @@ into the same recording that land at the 99th or above: the fades hold.
   after. The interruptible read helps here too, but the ceiling is not the
   refill and this change does not move it: at 60 positions/s neither arm
   puts a single picture on the screen, and that is what a fast drag on the
-  scrubber does today. Whatever costs the difference between a 26 ms scrub
-  and a 100 ms drag cycle has not been found yet, and an all-or-nothing
-  epoch rule is what turns it into a frozen picture rather than a slow one.
-  It is not the page cache: a sweep confined to one warm 36 s window of the
-  file measures the same 10.0, 11.5, 10.5, 5.5 and 0.0 against the full
-  file's 10.0, 12.0, 10.0, 5.5 and 0.0, interleaved on a quiet box.
+  scrubber did until issue #55, whose entry above is where that ends.
+  Whatever costs the difference between a 26 ms scrub and a 100 ms drag
+  cycle was not found here, and an all-or-nothing epoch rule is what turns
+  it into a frozen picture rather than a slow one. It is not the page cache:
+  a sweep confined to one warm 36 s window of the file measures the same
+  10.0, 11.5, 10.5, 5.5 and 0.0 against the full file's 10.0, 12.0, 10.0,
+  5.5 and 0.0, interleaved on a quiet box. (#55's answer to the 100 ms: the
+  cycle cost one keyframe decode all along, and the epoch rule discarded
+  three landings in four.)
 - 2026-07-31 The pass **skips the lens a ray cannot reach** (issue #10). Each
   lens's picture is one cap around its own axis; the cap is solved out of the
   calibration by finding where the model's own landing leaves the image
@@ -1167,14 +1239,17 @@ The same instrument measures a drag, which asks for a position per pointer
 move rather than waiting for each picture, sweeping the file end to end for
 2 s per rate:
 
-| positions/s     | 10   | 20   | 30   | 45  | 60  |
-| --------------- | ---: | ---: | ---: | --: | --: |
-| picture updates | 10.0 | 12.0 | 10.0 | 5.5 | 0.0 |
+| positions/s     | 10   | 15   | 20   | 30   | 45   | 60   | 90   |
+| --------------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| picture updates | 10.0 | 15.0 | 19.5 | 29.0 | 38.5 | 45.5 | 43.0 |
 
-A picture reaches the screen only while its own seek is still the newest, so
-past about 30 positions a second the landings arrive stale and the picture
-stops moving until the hand does. The release lands on the exact frame every
-time regardless.
+A picture reaches the screen while its own seek is newer than the position on
+screen (issue #55), so a hand faster than a landing sees the landings it has
+passed over: the rate rises with the hand to the decoder's own ceiling of
+about 45 a second, which is one keyframe decode each. Under the rule that
+shipped before #55 the same sweep read 10.0, 15.0, 12.5, 10.5, 5.0, 0.0 and
+0.0, the last two being a frozen picture for the length of the drag. The
+release lands on the exact frame every time either way.
 
 ## Ideas parked (complexity needs an observed failure first)
 

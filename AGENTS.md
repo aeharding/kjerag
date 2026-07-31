@@ -93,7 +93,11 @@ error` (measured), so a GPU-less runner would be checking nothing.
   includes "goodwill" bug reports and backport offers to dependencies.
   Forking a dependency into the owner's account for our own use is fine;
   interacting with the upstream project is not. Third-party findings are
-  documented in our own docs and issues only.
+  documented in our own docs and issues only. ONE scoped exception
+  (owner-granted 2026-07-31): Flathub publishing for this app, done
+  together with the owner and with him told before every outward action;
+  everything is prepared and previewed in this repo first. Self-hosted
+  flatpak distribution is declined by the owner; Flathub is the channel.
 - Subagents may write and commit directly on working branches (explicitly
   authorized by the owner, 2026-07-30); main changes only land via PR.
 - Work queue is GitHub issues. Claim an issue by commenting; close via PR.
