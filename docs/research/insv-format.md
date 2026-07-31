@@ -1232,6 +1232,203 @@ stretches of it are five stretches of one camera on one day. What it would
 have to be, in one line, is a file whose `carries:` line reads in the
 hundreds of deg/s.
 
+### 6.8 The seam is misaligned by degrees, and it is calibration (issue #48)
+
+**Confidence: HIGH for the measurement and the attribution, MED for the
+fitted numbers.** Measured 2026-07-31 on two captures from a camera that was
+**not moving**, which is the retest 4.9 and 6.7 both asked for: no parallax
+worth the name in the far field, no rolling shutter (0.1 deg/s rms, 0.3 deg/s
+peak), no motion blur, and an accelerometer that is gravity and nothing else
+(100 percent of the samples inside the filter's own trust window). Instrument:
+`kyerag-spike --bin seam`.
+
+The headline is not the along-seam residual 4.9 left open. It is the axis 4.9
+declined to put a number on:
+
+| | as shipped | fitted correction applied |
+| --- | ---: | ---: |
+| along the seam, round the circle | -0.30 to -1.25 deg | -0.02 to +0.02 |
+| **across the seam** | **-2.36 to +2.65 deg** | -0.06 to +0.23 |
+
+At the rim the picture is 948 px per radian, so 2.6 degrees is **43 px of the
+delivered frame** and about 55 px of a 1920-wide 90-degree view (6.1). It is visible
+as a doubled tree trunk in a blended view and as a broken horizon in a hard
+cut, on this capture and on the owner's flight footage.
+
+#### The structure names the error
+
+The measurement is 4.9's, sharpened: both lenses sampled on the same angular
+grid around 72 directions on the seam circle, correlated to a sub-step peak.
+What is new is that it is taken **round the whole circle** and decomposed into
+harmonics of the azimuth, because each harmonic is a different error. A
+relative rotation `w` displaces a direction `d` on the circle by `w x d`,
+whose along-seam component is `w.z` for **every** direction on that circle, so
+the two axes separate the causes rather than mixing them.
+
+Measured on the outdoor capture, and against what the shipped map itself says
+each calibration field is worth (the instrument prints both tables, so the
+attribution is read off the model rather than derived by hand):
+
+| term | measured along | measured across | what only this can be |
+| --- | ---: | ---: | --- |
+| constant | **-0.762** | 0.491 | relative **roll** (along); focal or `xi` (across) |
+| one cycle | **0.457** | **2.678** | principal point (both); lens **tilt** (across only) |
+| two cycles | 0.037 | 0.289 | focal aspect, `fx` against `fy` |
+| left over | **0.012** | **0.055** | |
+
+A constant and one cycle account for all of it: 0.012 degrees of the
+along-seam column and 0.055 of the across-seam column survive them, against
+readings of 1.2 and 2.6. The knob table says a lens tilt reaches the
+across-seam column at 1.0000 degrees per degree and the along-seam column at
+0.0000, and that a principal-point shift reaches both, at 0.0318 and 0.0607
+degrees per pixel. Only a tilt can put 2.7 degrees of one cycle across the
+seam while leaving 0.46 along it.
+
+#### The fitted correction, and what it is worth
+
+Fitted through the shipped map (`kyerag_render::Reframe`) by perturbing one
+field of **lens 1** at a time and reading what that does to the same patches,
+so the answer is in the units `offset_v3` writes. The seam sees only the two
+lenses' disagreement and cannot say which lens is wrong; quoting it all on
+lens 1 is a convention.
+
+| knob | correction | +/- | leaves |
+| --- | ---: | ---: | --- |
+| roll | **+0.801 deg** | 0.054 | |
+| yaw | **-2.293 deg** | 0.245 | |
+| pitch | **-0.817 deg** | 0.093 | |
+| cx | -4.59 px | 4.01 | |
+| cy | -14.73 px | 1.04 | |
+| | | | along 0.766 -> **0.077**, across 2.333 -> **0.108** |
+
+A pure rotation, three numbers instead of five, gets across to the same 0.108
+and along only to 0.298: the principal-point pair is what takes the last of
+the along-seam column. Fitting all eight fields including `fx`, `fy` and `xi`
+reaches 0.033 and 0.045 with focal corrections of 300 percent, which is a fit
+running away, not a calibration.
+
+**The correction is not a fitted parameter until it is applied and the
+measurement is taken again**, so it was: re-measured on the same capture with
+it in place, every patch reads within 0.02 degrees along and 0.23 across, and
+a **hard cut with no blending at all** is continuous through a tree trunk, a
+fern bed and a deck board that were visibly broken before.
+
+#### Why this is the camera and not the scene
+
+Four controls, and the first two are the ones that matter.
+
+- **Injected errors, read back off the same pixels** (`control=1`, the lesson
+  of #45 applied at the size being reported): roll +0.50 deg reads back at
+  **0.990** of what the map predicts and roll -0.25 at 0.993; yaw +0.50 reads
+  back across the seam at **0.998 with r = 1.000**; a 20 px principal-point
+  shift at 1.021 along and 1.057 across. An instrument that reads a known half
+  degree at 0.99 can see the 2.6 degrees it is reporting.
+- **A second capture of a different scene.** The camera was picked up and put
+  down between them and they share no content; a calibration residual is fixed
+  in the camera's frame and a scene's is not. The correction fitted on the
+  first capture makes the second capture's hard cut continuous as well, on a
+  straight edge that was broken by about 15 px before.
+- **Parallax cannot reach the along-seam axis at all** (4.9, by construction),
+  and cannot produce the sign change the across-seam column has: the baseline
+  is along the lens axis, so a subject's distance displaces it towards the
+  front lens at **every** azimuth. A one-cycle term is positive at one azimuth
+  and negative at the opposite one. Far-field parallax on this capture is 0.1
+  to 0.2 degrees, and the measured across-seam constant is 0.49.
+- **The near field behaves exactly as parallax says it must.** The camera
+  stands on a deck, so patches looking down at it are 5 to 30 cm away, where
+  the disparity is 6 to 38 degrees. The overlap band is 14 degrees wide.
+  Every one of those patches fails to pair, because the two lenses' pictures
+  of that content are not in the band together at all, which is the prediction
+  and not a limitation.
+
+#### Against Insta360's own stitch
+
+The owner exported the same capture from Insta360's app, which makes their
+output the parity benchmark. What it is, fitted by rendering our own pass
+under a candidate view and correlating: a **square 1440x1440 reframe**, one
+frame per source frame, about 95 degrees across, near level, and mildly
+compressed rather than strictly rectilinear (0.79 to 0.87 on a family where
+1.0 is rectilinear and 0 is equidistant). It is not an equirect crop; an
+equirect would be 2:1 and would carry the whole sphere.
+
+A global fit good to about a degree cannot measure a disagreement of a degree,
+so the comparison is each stitch **against itself**: mean squared gradient
+within 5 degrees of the seam, over the same statistic 9 to 25 degrees off it
+in the same picture. A doubled edge is a blurred edge; a tone curve, a
+sharpening pass and a lens are in both terms and divide out.
+
+| picture | band over its own surroundings |
+| --- | ---: |
+| Insta360's export | **0.83 to 0.88** |
+| ours, as shipped | **0.573** |
+| ours, correction applied | **0.689** |
+
+Read directly: their stitch keeps six sevenths of its own sharpness across the
+seam and ours keeps four sevenths. The calibration correction closes about a
+third of that gap; the rest is the blend band, which 6.6 left as wide as the
+overlap. Independently, the projection fit's own score, which
+is our whole rendered picture against theirs, rises from 0.45 to 0.68 with the
+correction applied: the same change makes our picture agree with theirs away
+from the seam as well as at it.
+
+Confirmed by eye on one feature, which is what started this: a bare trunk that
+their export draws once, ours draws twice about 1.3 degrees apart, and ours
+draws once again with the correction applied.
+
+#### What a narrower blend is worth, in numbers
+
+`--bin blend` renders the same frame under the shipped weights and under
+crossovers of a stated width, and scores each on gradient energy over the
+overlap against the front lens alone over the same pixels. Measured on the
+owner's flight footage at a view where the wing lines and the harness cross
+the seam, where the two lenses disagree by 1.72 degrees as shipped and 0.84
+with the correction applied (the second being mostly real parallax at half a
+metre):
+
+| crossover | doubled band | sharpness, as shipped | shear | sharpness, corrected |
+| --- | ---: | ---: | ---: | ---: |
+| shipped weights | 10.55 deg | 0.538 | 0.16 | 0.518 |
+| 14 deg | 11.20 | 0.516 | 0.15 | 0.488 |
+| 8 deg | 6.40 | 0.630 | 0.27 | 0.596 |
+| 4 deg | 3.20 | 0.696 | 0.54 | 0.658 |
+| **2 deg** | **1.60** | **0.731** | **1.07** | **0.687** |
+| 1 deg | 0.76 | 0.753 | 2.25 | 0.703 |
+| 0.5 deg | 0.25 | 0.773 | 6.76 | 0.712 |
+| hard cut | 0 | 0.815 | cut | 0.721 |
+
+Shear is the disparity divided by the band: a picture crossed by `d` degrees
+of disagreement inside `w` degrees of blend is locally compressed by `d / w`,
+and above 1 the crossover is a fold rather than a blend. That is the whole
+trade, and it says the two halves of this issue are not independent. **At
+today's 1.7 degree disparity a 2 degree band sits exactly on the fold.** With
+the calibration corrected the same band sits at 0.52 and takes 80 percent of
+the sharpness a hard cut would give.
+
+So the number to ship is **about 2 degrees, and only after the calibration
+correction**. Narrowing the band first would trade a soft wide ghost for a
+hard visible tear.
+
+#### What is left open
+
+- **Where the 2.4 degrees comes from.** The recorded extrinsics are all
+  sub-degree, so no re-composition of them produces it: neither the angle
+  order (4.8), nor the choice of nominal arrangement (4.9, which is a roll
+  difference and shows in the other column). Either this unit's factory
+  extrinsics are wrong by that much, or Insta360's own pipeline refines them
+  per clip and the string is a starting point. The measurement does not
+  distinguish those, and the fix is the same either way.
+- **The split of the tilt between yaw and pitch.** Its magnitude, 2.44
+  degrees, is steady; the axis is not. Fitting the two captures pooled puts
+  the same magnitude at a different azimuth, because the azimuths each capture
+  has content at are different and neither covers the circle. A capture with
+  content all the way round would settle it, and a per-file fit at load would
+  not need it settled.
+- **Whether one correction serves every file from one camera.** The two
+  captures here are minutes apart. Both were fitted with the calibration
+  string byte-identical, and the correction transfers to flight footage from
+  five weeks earlier, which is consistent with a per-unit constant and does
+  not prove one.
+
 ## 7. What was ruled out
 
 ### 7.1 ffmpeg `v360=dfisheye`
