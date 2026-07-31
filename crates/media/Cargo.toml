@@ -1,0 +1,7 @@
+[package]
+name = "kyerag-media"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ffmpeg-next = { workspace = true }

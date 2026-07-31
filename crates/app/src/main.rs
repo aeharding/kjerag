@@ -5,6 +5,8 @@
 //! cargo run --release -- <file.insv>  # frame 0 of stream 0, imported zero-copy
 //! ```
 
+mod app;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    kyerag::app::run(std::env::args().nth(1).map(std::path::PathBuf::from))
+    app::run(std::env::args().nth(1).map(std::path::PathBuf::from))
 }

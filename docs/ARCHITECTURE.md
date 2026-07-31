@@ -2,21 +2,46 @@
 
 ## Layers
 
+One crate per layer, in a cargo workspace (issue #19). A layer cannot use
+a dependency it does not declare, so the diagram below is enforced by
+`cargo build` rather than by good intentions.
+
 ```
-app      libcosmic shell + input (drag = yaw/pitch, scroll = FOV zoom,
-         timeline). The view is an `iced::widget::shader` whose primitive
-         draws into iced's own render pass.
-render   wgpu: dmabuf import, one WGSL pass (NV12 -> RGB + Mei reprojection
-         + seam blend), offscreen render for screenshots
-media    ffmpeg demux, dual VA-API HEVC decoders, frame clock, keyframe
-         index, seek. No UI dependencies.
-meta     .insv trailer, read directly: per-lens Mei calibration, gyro
-         track, per-frame exposure. No UI or ffmpeg dependencies.
+crates/app      kyerag         libcosmic shell + input (drag = yaw/pitch,
+                               scroll = FOV zoom, timeline). The view is an
+                               `iced::widget::shader` around a Scene.
+crates/render   kyerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
+                               RGB + Mei reprojection + seam blend),
+                               offscreen render for screenshots
+crates/media    kyerag-media   ffmpeg demux, dual VA-API HEVC decoders,
+                               frame clock, keyframe index, seek. No UI.
+crates/meta     kyerag-meta    .insv trailer, read directly: per-lens Mei
+                               calibration, gyro track, per-frame exposure.
+                               No UI, no ffmpeg, no wgpu.
+crates/spike    kyerag-spike   the M0 measuring instrument (`spike`), kept
+                               out of the app's dependency graph
 ```
 
-`media` and `meta` know nothing about the shell. The shell is libcosmic,
-which pins wgpu 28, so `render` is written against 28 and owns the one
-module that wgpu 30 would delete (`render/dmabuf.rs`).
+`app` -> `render` -> `media`, and `meta` depends on nothing but `prost`.
+That last one is the point of the split: `cargo test -p kyerag-meta` passes
+on a box with no libav headers, and a CI job that installs nothing proves
+it on every push.
+
+`media` and `meta` know nothing about the shell. `render` names libcosmic
+for exactly one file, `crates/render/src/widget.rs`: those three
+`iced::widget::shader` impls put a foreign trait on types `render` owns, and
+Rust's coherence rules will not let the shell crate write them. The
+alternative was a set of forwarding newtypes in `app`, which is more code
+for the same wiring. Nothing else in `render` mentions iced.
+
+The shell is libcosmic, which pins wgpu 28, so `render` is written against
+28 and owns the one module that wgpu 30 would delete
+(`crates/render/src/dmabuf.rs`).
+
+`Size` and `Fallible` live in `media`: they are frame types, and `render`
+depends on `media` rather than the other way round. `render` re-exports both
+and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`
+that cannot live in a crate with no wgpu.
 
 ## The frame path (zero-copy)
 
@@ -77,8 +102,8 @@ map call alone, with nothing reading the pixels through it.)
   `VK_EXT_external_memory_dma_buf` whenever the adapter has them, but never
   `VK_EXT_image_drm_format_modifier`, and `iced_wgpu` builds its device from
   a fixed `DeviceDescriptor` with no hook. The `[patch.crates-io]` entry in
-  Cargo.toml is what turns the third one on, for iced's device and ours
-  alike; the spike additionally forces it through wgpu-hal's
+  the workspace root manifest is what turns the third one on, for iced's
+  device and ours alike; the spike additionally forces it through wgpu-hal's
   `open_with_callback` because it builds its own device. `dmabuf::import`
   still checks `enabled_device_extensions()` and refuses: creating an image
   with a disabled extension's structures is UB, not an error, so the day
@@ -107,7 +132,7 @@ AGPL-compatible) is the reference implementation. Static calibrated warp
 with a smooth blend; no optical flow (measured to not help). A reframed
 view centered near a lens axis contains no seam at all.
 
-`src/meta/` turns that string into a `CalibrationSet` whose pixel numbers
+`kyerag-meta` turns that string into a `CalibrationSet` whose pixel numbers
 are already in delivered-frame coordinates (3840x3840 per lens), not the
 15360x7680 side-by-side calibration canvas the file writes them on. The
 shader consumes them as they come; nothing downstream rescales.

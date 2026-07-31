@@ -11,8 +11,29 @@ use ff::ffi::{
 };
 use ffmpeg_next as ff;
 
-use crate::Fallible;
-use crate::render::Size;
+/// Errors cross thread boundaries here because iced's shader primitives are
+/// `Send + Sync`, so the plain `Box<dyn Error>` a binary would use will not do.
+pub type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// A frame size in pixels. NV12 chroma is half of luma in both axes, and
+/// getting that halving wrong is a silent half-image, so it has a name.
+/// `kyerag-render` turns one of these into a `wgpu::Extent3d`; that half
+/// cannot live here, because this crate has no wgpu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Size {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Size {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    pub fn halved(self) -> Self {
+        Self::new(self.width / 2, self.height / 2)
+    }
+}
 
 const VAAPI_DEVICE: &CStr = c"/dev/dri/renderD128";
 

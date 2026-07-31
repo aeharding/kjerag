@@ -1,0 +1,17 @@
+[package]
+name = "kyerag-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kyerag-media = { workspace = true }
+ash = { workspace = true }
+libc = { workspace = true }
+wgpu = { workspace = true }
+# Only for `ffi::AVDRMFrameDescriptor`, the descriptor an import reads. No
+# demuxing and no decoding happen here.
+ffmpeg-next = { workspace = true }
+# The three `iced::widget::shader` impls in src/widget.rs. Rust's coherence
+# rules put them in the crate that owns the types, so the layer that draws
+# the pass is also the layer that names iced. The shell stays in `kyerag`.
+libcosmic = { workspace = true }

@@ -25,6 +25,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # The point of the workspace (issue #19): the trailer layer builds and
+  # tests on a box with no libav headers. This job installs nothing, so it
+  # fails the day something drags ffmpeg into kyerag-meta's graph.
+  meta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # pkg-config is pointed at nothing as well, so this job still fails on a
+      # runner image that happens to ship libav headers. Verified positively:
+      # the same environment fails `cargo check -p kyerag-media` on
+      # `libavutil.pc` not found.
+      - run: PKG_CONFIG_LIBDIR=/nonexistent cargo test -p kyerag-meta

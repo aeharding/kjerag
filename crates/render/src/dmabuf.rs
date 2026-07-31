@@ -18,8 +18,7 @@ use ash::vk;
 use ffmpeg_next::ffi::AVDRMFrameDescriptor;
 use wgpu::hal::api::Vulkan;
 
-use super::{Planes, Size};
-use crate::Fallible;
+use super::{Extent, Fallible, Planes, Size};
 
 /// NV12 arrives as two single-plane layers, not one two-plane image.
 const DRM_FORMAT_R8: u32 = fourcc(b"R8  ");

@@ -6,8 +6,8 @@
 //! the file.
 //!
 //! ```no_run
-//! let calibration = kyerag::meta::CalibrationSet::from_insv("VID.insv")?;
-//! # Ok::<(), kyerag::meta::Error>(())
+//! let calibration = kyerag_meta::CalibrationSet::from_insv("VID.insv")?;
+//! # Ok::<(), kyerag_meta::Error>(())
 //! ```
 //!
 //! The trailer format, the `offset_v3` grammar and the provenance of
@@ -88,7 +88,7 @@ impl From<prost::DecodeError> for Error {
 /// trailer walk by re-encoding it into a synthetic `.insv`.
 #[cfg(test)]
 mod fixture {
-    pub const JSON: &str = include_str!("../../docs/research/x4air-calibration.json");
+    pub const JSON: &str = include_str!("../../../docs/research/x4air-calibration.json");
 
     pub fn metadata() -> super::trailer::ExtraMetadata {
         serde_json::from_str(JSON).expect("fixture matches the metadata shape")

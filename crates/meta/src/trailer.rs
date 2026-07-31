@@ -179,7 +179,7 @@ fn metadata_record<S: Read + Seek>(source: &mut S) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::fixture;
+    use crate::fixture;
     use std::io::Cursor;
 
     /// A minimal `.insv`: some payload bytes standing in for the mp4,

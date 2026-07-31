@@ -2783,15 +2783,47 @@ dependencies = [
 name = "kyerag"
 version = "0.1.0"
 dependencies = [
- "ash",
- "ffmpeg-next",
- "libc",
+ "kyerag-render",
  "libcosmic",
- "png 0.17.16",
- "pollster",
+]
+
+[[package]]
+name = "kyerag-media"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+]
+
+[[package]]
+name = "kyerag-meta"
+version = "0.1.0"
+dependencies = [
  "prost",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kyerag-render"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "ffmpeg-next",
+ "kyerag-media",
+ "libc",
+ "libcosmic",
+ "wgpu",
+]
+
+[[package]]
+name = "kyerag-spike"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "kyerag-media",
+ "kyerag-render",
+ "png 0.17.16",
+ "pollster",
  "wgpu",
 ]
 

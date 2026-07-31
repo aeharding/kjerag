@@ -1,14 +1,24 @@
-[package]
-name = "kyerag"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# Plain `cargo run` starts the app, as it did before the split. Everything
+# else is reached with `-p`, and the gates use `--workspace` so no member is
+# skipped (AGENTS.md).
+default-members = ["crates/app"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-# `spike` is a measuring instrument, `kyerag` is the app: plain `cargo run`
-# should start the app.
-default-run = "kyerag"
 
-[dependencies]
+[workspace.dependencies]
+kyerag-media = { path = "crates/media" }
+kyerag-meta = { path = "crates/meta" }
+kyerag-render = { path = "crates/render" }
+
 # System ffmpeg is 6.1 (Pop!_OS 24.04); the crate major must match the
 # headers it binds, so this pin moves only when the system ffmpeg does.
+# `kyerag-meta` is deliberately not a dependent: the trailer needs a file
+# handle, not libav (issue #19).
 ffmpeg-next = "6.1.1"
 # libcosmic vendors iced as a submodule pinned to wgpu 28, and wgpu types
 # only unify across one major: this pin IS libcosmic's pin, not a choice.
@@ -20,10 +30,14 @@ libc = "0.2"
 png = "0.17"
 pollster = "0.4"
 # Decodes the .insv trailer's metadata record. Only the eleven fields
-# src/meta declares are read; protobuf skips the rest.
+# kyerag-meta declares are read; protobuf skips the rest.
 prost = "0.14"
+# Reads the checked-in calibration fixture, which telemetry-parser wrote
+# as JSON. Tests only: nothing in the shipped binary parses JSON.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
-[dependencies.libcosmic]
+[workspace.dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic"
 rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1"
 # wgpu is not a default feature: the default renderer is tiny-skia, which
@@ -43,11 +57,8 @@ features = ["wgpu"]
 # and two wgpu-types in one graph is two incompatible `TextureFormat`s.
 # `wgpu` is the only crate in that workspace anything outside it depends on,
 # so patching it pulls the whole stack from one consistent source.
+#
+# Cargo reads a patch section only from the workspace root, so no member
+# manifest may carry one.
 [patch.crates-io]
 wgpu = { git = "https://github.com/aeharding/wgpu", branch = "v28-drm-modifier-backport" }
-
-[dev-dependencies]
-# Reads the checked-in calibration fixture, which telemetry-parser wrote
-# as JSON. Tests only: nothing in the shipped binary parses JSON.
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"

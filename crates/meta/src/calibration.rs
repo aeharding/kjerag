@@ -358,7 +358,7 @@ impl LensBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::fixture;
+    use crate::fixture;
 
     fn calibration() -> CalibrationSet {
         CalibrationSet::from_metadata(&fixture::metadata()).unwrap()

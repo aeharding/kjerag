@@ -15,9 +15,21 @@ Performance is a feature; the target is full use of modern hardware
 
 ## Building
 
+The repo is a cargo workspace, one crate per layer: `crates/meta`,
+`crates/media`, `crates/render`, `crates/app` (the `kyerag` binary) and
+`crates/spike`. `cargo run` still starts the app, because `default-members`
+is the app; everything else takes `-p`
+(`cargo run --release -p kyerag-spike -- <file.insv>`). The
+`[patch.crates-io]` wgpu entry lives in the root manifest, which is the
+only place cargo reads one.
+
+`kyerag-meta` depends on no C library and must stay that way:
+`cargo test -p kyerag-meta` is expected to pass on a box with no libav
+headers, and CI has a job with nothing installed that proves it.
+
 `ffmpeg-sys-next` binds the system ffmpeg headers through bindgen, so a
-bare box cannot build this. On Pop!_OS / Ubuntu 24.04 (ffmpeg 6.1, which
-is the version Cargo.toml pins to):
+bare box cannot build the other layers. On Pop!_OS / Ubuntu 24.04
+(ffmpeg 6.1, which is the version the root manifest pins to):
 
 ```sh
 sudo apt install libavcodec-dev libavdevice-dev libavfilter-dev \
@@ -32,10 +44,13 @@ Ubuntu ships (`rust-version = "1.93"`); `rustup update stable`.
 ## Gates (run before pushing)
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
+
+The `--workspace` and `--all` are load-bearing: without them cargo only
+looks at `default-members`, which is the app crate alone.
 
 ## Hard rules
 
