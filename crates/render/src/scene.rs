@@ -239,12 +239,19 @@ impl Scene {
         let mut player = Player::open(path)?;
         let (lenses, held) = calibrated(path, player.size(), player.lenses())?;
         println!(
-            "media:  {}, {}x{}, {:.3} fps, {} frames, {:.1} s",
-            // The older cameras write one lens per file, so this is 1 as
-            // often as it is 2.
+            "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
                 1 => "1 lens stream".to_owned(),
                 n => format!("{n} lens streams"),
+            },
+            // Two files is a capture the camera wrote one lens per file and
+            // the player paired at open (issue #79). Printed because it is
+            // the one thing about an open file the pilot cannot otherwise
+            // see: half a sphere and a whole one look the same until the
+            // view is turned round.
+            match player.files() {
+                1 => String::new(),
+                n => format!(" from {n} files"),
             },
             player.size().width,
             player.size().height,
@@ -605,22 +612,29 @@ impl Show {
     }
 }
 
-/// Everything the trailer contributes to one open file: the calibration for
-/// the lenses the shader samples, checked against the streams they will be
-/// sampled from, and where the camera body went while it recorded.
+/// Everything the trailer contributes to one open capture: the calibration
+/// for the lenses the shader samples, checked against the streams they will
+/// be sampled from, and where the camera body went while it recorded.
 ///
 /// One lens entry per decoded stream, and in the same order: the trailer
-/// writes its lens blocks in the order the container carries the streams. A
-/// camera that writes one lens per file (the ONE X2 and older) calibrates two
-/// lenses in a file that decodes one, and then this is lens 0 alone and the
-/// picture is one hemisphere.
+/// writes its lens blocks in the order the container carries the streams,
+/// and a paired per-lens capture opens lens 0's file first, so the two
+/// orders are the same one (`kyerag_meta::lens_index`).
+///
+/// **The calibration belongs to the capture, not to the file** (issue #79).
+/// A camera that writes one lens per file writes one trailer for the pair
+/// and keeps it with lens 0, so opening the second file reads the first
+/// file's trailer. Before that, opening it failed outright with "file has no
+/// Insta360 trailer". A per-lens file whose sibling is not on the card still
+/// calibrates two lenses and decodes one, and then this is lens 0 alone and
+/// the picture is one hemisphere, exactly as it was.
 ///
 /// The orientation is integrated here, once, at open: a 30-minute X4 Air
 /// capture is 1.8 million IMU samples and costs about a fifth of a second to
 /// read and integrate, against 70 ms to open the container. Doing it per
 /// frame would be 30 times a second for a track that does not change.
 fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>, Arc<Motion>)> {
-    let calibration = CalibrationSet::from_insv(path)?;
+    let calibration = CalibrationSet::from_capture(path)?;
     // The calibration's pixel numbers are already in delivered-frame
     // coordinates, so they describe this texture only if the stream is the
     // size the trailer says it is. A mismatch reprojects at the wrong scale,
@@ -1177,7 +1191,14 @@ fn linearize(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  let mix = blend(view_ray(in.uv));
+  let look = view_ray(in.uv);
+  // Zero, which is every weight zero: the room around the ball at the far end
+  // of the zoom (issue #47) is a fragment no lens has, and `picture` already
+  // paints that. Nothing is sampled for it and no model is run.
+  var mix: Blend;
+  if look.w > 0.0 {
+    mix = blend(look.xyz);
+  }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
   // the neighbouring lanes landed on is exactly what this asks about, so the

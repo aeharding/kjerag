@@ -384,6 +384,19 @@ Notes:
   the same way, and cosmic-edit's source notes why those three characters
   in particular: they are not special to terminals, so they are free
   (`src/key_bind.rs:41`).
+- **The zoom range runs from 20 degrees to the whole sphere** (issue #47).
+  Scrolling out does not stop at a wide flat view any more: past 110 degrees
+  the picture bends, through the tiny planet at 220, and ends with the whole
+  sphere as a ball sitting in the middle of the window with room around it.
+  The far end is where the ball fills 0.8 of the window's shorter side, so it
+  is further out on a wide window than on a square one; the room around the
+  ball is the same grey the player paints anywhere it has no picture. It is
+  one continuous scroll out and back, the ball can be grabbed and turned like
+  any other view, and Ctrl+0 comes back to the default in one press. Nothing
+  about the ordinary range changed. Dragging the view down on the way out is
+  what puts the nadir in the middle, which is the tiny planet as Insta360
+  frames it; dragging it up gives the same picture inside out, with the sky in
+  the middle and the ground wrapped round the rim.
 - **`s` for save frame** has no first-party precedent, because no COSMIC
   app captures its own view. Bare unmodified letters are idiomatic in this
   app class though: cosmic-player binds `f` and `a` with no modifier. The
@@ -488,6 +501,11 @@ hand group holds the actions that are about the view rather than the
 transport (subtitles, speed, fullscreen, volume: `src/main.rs:2013-2051`).
 A frame capture is exactly that kind of action.
 
+- **Format:** a JPEG at quality 93 with full size chroma, because a still is
+  a file to share and 12 MB is not (issue #15): 0.7 to 1.8 MB a still against
+  5.3 to 13.3 MB as a lossless PNG, 52 to 54 dB PSNR over five real captures,
+  and it opens on a stock desktop with nothing installed. The clipboard stays
+  PNG.
 - **Button:** `camera-photo-symbolic` in the control row, immediately left
   of fullscreen.
 - **Menu:** `File > Save frame`, showing the `s` accelerator. No ellipsis,

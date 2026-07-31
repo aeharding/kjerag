@@ -28,6 +28,16 @@ compositor:
 The `[patch.crates-io]` wgpu entry lives in the root manifest, which is the
 only place cargo reads one.
 
+**Two checkouts must not share a `CARGO_TARGET_DIR`.** Pointing a worktree's
+build at the main checkout's `target/` to reuse its dependency cache works
+until the moment something is built from the other tree: the uplifted
+binaries in `target/release/` are one name each, so `target/release/reframe`
+silently became the main checkout's while `target/release/zoom` stayed the
+worktree's, and an instrument then measured the wrong code and rendered the
+wrong picture (issue #47, 2026-07-31). If a comparison against another commit
+is what is wanted, build each side into its own target directory, or check
+the binary carries the change before believing a number it prints.
+
 `kyerag-meta` depends on no C library and must stay that way:
 `cargo test -p kyerag-meta` is expected to pass on a box with no libav
 headers, and CI has a job with nothing installed that proves it.

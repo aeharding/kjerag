@@ -1707,8 +1707,18 @@ impl View {
                     (y as f32 + 0.5) / size as f32,
                 ];
                 // The camera is baked into the map, so a view ray is all the
-                // pass itself is ever handed.
-                let ray = reframe.view_ray(uv).map(f64::from);
+                // pass itself is ever handed. At this instrument's fields of
+                // view every pixel has a ray; the void case exists only past
+                // the tiny planet, so an empty ray just keeps the grids
+                // aligned.
+                let Some(ray) = reframe.view_ray(uv) else {
+                    view.luma.push(0.0);
+                    view.past.push(0.0);
+                    view.mixed.push(0.0);
+                    view.both.push(false);
+                    continue;
+                };
+                let ray = ray.map(f64::from);
                 let (weights, landings) = weighting.at(reframe, unit(ray));
                 let mut luma = 0.0;
                 let mut total = 0.0;

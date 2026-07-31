@@ -31,7 +31,7 @@ stillness while playing and never while paused. The scrubber scrubs (issue
 #5): dragging it seeks to keyframes, 21 ms each wherever in the 37.9 GB file
 they land, and letting go seeks to the exact frame. **The view can be
 photographed** (issue #15): `s`, the camera button and `File > Save frame`
-write a 3840 px wide PNG of the reframed view, at the window's aspect and
+write a 3840 px wide JPEG of the reframed view, at the window's aspect and
 not its size, into the desktop's screenshots folder; `Ctrl+C` puts the same
 picture on the clipboard as `image/png`. The capture is the window's own
 pipeline and bind group drawn a second time into a texture of the surface's
@@ -198,6 +198,46 @@ measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
 as before, and the sound goes with it, because a preempted read stops
 without reading another packet and the seek behind it flushes the ring.
 
+**The zoom goes all the way out to the blue ball** (issue #47, owner ask). The
+scroll used to stop at 110 degrees, because that is where a flat window stops
+being one. It now keeps going: past that threshold the output projection bends
+out of perspective through **stereographic**, which is the **tiny planet**
+Insta360 names and the owner calls the blue ball, and on until the whole
+sphere is a ball with room around it. One
+family does the whole range, `r = tan(shrink * theta) / shrink`, with `shrink`
+running 1 to about 0.18, so nothing is switched over and there is nowhere to
+pop. The far end is where the ball fills 0.8 of the window's **shorter** side,
+which is 605 degrees of field of view on a 16:9 window and 406 on a square
+one, and past 360 the frame is simply wider than the sphere: that extra is the
+room the ball sits in, painted the same grey the pass has always painted where
+no lens has the ray. Ctrl+0 comes back in one press.
+
+Measured on real footage at 2560x1440 (`kyerag-spike --bin ball`): one scroll
+from 20 degrees to the ball, a notch at a time, rendered, and the largest
+single step is 64.3 codes at fov 402, with the largest growth of a step over
+the step before it 1.32x at fov 173 - against 1.15x inside the flat range this
+change did not touch, and nothing standing out at the threshold or at
+stereographic. Cost, interleaved across the range and three runs agreeing
+within 0.01 ms a cell, 0.71 ms/redraw at the default view against 0.81 at the
+ball, on a 33 ms frame; the flat range costs what it cost, `--bin zoom` off
+this branch against the same binary built off main, alternated on one box,
+within 0.04 ms a cell in both directions. Playback at the ball, with three
+3840 px captures taken during it: 29.97 fps presented, **0 dropped, 0
+starved**, and a still of the ball is byte for byte the ball. The drag took no new mathematics: it was
+already written against the projection's own rays rather than against a
+tangent, so it inverts whichever map the view is in, and grabbing the ball and
+turning it works because of that rather than despite it.
+
+What is **not** fixed is aliasing. Out wide the map minifies rather than
+magnifies (7.6 delivered texels to the output pixel at the middle of the
+ball), so issue #11's kernel correctly switches off and the pass is plain
+bilinear on a single mip level: against the same view supersampled 4x4 the
+ball is 4.1 codes out over the pixels that have picture and 107 at worst,
+against 1.1 and 11 at the default view. High-contrast edges will shimmer in a
+moving ball. A prefilter is the fix and it is deliberately not built yet: the
+imported dmabuf textures have one level and no room to generate another in
+place, so it means a downsample pass per frame per lens, for a view the player
+is in for a few seconds at a time. Numbers first, then the owner decides.
 **A fast drag no longer freezes the picture** (issue #55). What #46 measured
 and could not fix inside itself: `Player::pump` showed a frame only while its
 own seek was still the newest, so a hand faster than a landing starved the
@@ -340,14 +380,34 @@ into the same recording that land at the 99th or above: the fades hold.
   instead of freezing, 0 to 46 picture updates a second), high-quality
   zoom sampling (issue #11, done: a Catmull-Rom kernel on the luma plane
   wherever the map's own Jacobian says an output pixel has landed inside a
-  texel, and the chroma half of it measured and cut). **M2 is complete**,
-  except that issue #48 reopened the seam: the two lenses are misaligned by up
-  to 2.7 degrees across it, phase 1 has measured that, attributed it to a
-  relative lens tilt and fitted the correction, and phase 2 will apply it.
+  texel, and the chroma half of it measured and cut), and the zoom out to the
+  tiny planet and the whole ball (issue #47: one projection family from
+  perspective through stereographic to a finite disc, capped where the
+  ball clears the window's shorter side; the tiny-planet framing sits
+  mid-scroll on the way there, and the owner chose to keep the extended
+  range after trying a hard stop at the planet).
+  **M2 is complete**, except that issue #48 reopened the seam: the two lenses
+  are misaligned by up to 2.7 degrees across it, phase 1 has measured that,
+  attributed it to a relative lens tilt and fitted the correction, and phase 2
+  will apply it. Issue #79 opened a second camera: the ONE X2 writes one lens
+  per file, and the player now pairs the two at open and holds an X2's horizon
+  with that camera's own IMU convention.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
   row).
+
+## Scope doctrine (owner, 2026-07-31)
+
+Kjerag is a VIEWER: view, reframe, screenshot, and at most a simple clip
+export (mark in and out, export the current view or a lossless cut). It
+must be an awesome viewer before any of that export work starts, so
+quality owns the roadmap until the owner says the bar is met. Keyframed
+reframing and timeline editing are OUT OF SCOPE, not deferred: that is an
+editor, a different product (Kdenlive's bigsh0t filters already cover
+keyframed 360 export on Linux). The one editor-adjacent idea parked with
+no commitment: export that follows the view the pilot actually flies
+live, no keyframe UI ever.
 
 ## Decisions log
 
@@ -380,6 +440,72 @@ into the same recording that land at the 99th or above: the fades hold.
   notice it: transient chrome must leave the header band and the control-row
   band byte for byte identical, which the shipped-first placement fails.
 
+- 2026-07-31 **A capture is not always one file, and the ONE X2's IMU is
+  not mounted like an X4's** (issue #79, owner-reported). Three symptoms on
+  the owner's X2 footage were two defects and one thing that was never
+  broken. Half a sphere was the camera writing one lens per file: the two
+  are paired at open, matched on frame index, and either file of a pair now
+  opens the whole capture. The horizon being "way wrong" was the IMU axis
+  convention, which fell through to the X4's `xZY` and is 121 degrees out on
+  this camera; measured against pixels it is `Zxy`. "Upside down" was the
+  same defect seen through a horizon lock that is on by default, and the
+  delivered-frame datum it appeared to accuse turned out to be right: the
+  unlocked picture is upright on a plumb reference, and the seam's own
+  arithmetic agrees to 0.16 degrees.
+
+  Two method notes worth keeping. The 24-way sweep **cannot** finish this
+  job on a camera whose two best candidates are a half turn apart when the
+  footage has no true horizon in it - a mountain ridge is not level - and
+  what finished it was aiming the view along the accelerometer on a still
+  frame and looking at whether the sky was there. And a wrong picture datum
+  and a wrong axis convention are not separately observable in a locked
+  view, because each cancels the other; only the unlocked picture pins the
+  datum.
+
+- 2026-07-31 **A saved still is a JPEG; the clipboard is still a PNG**
+  (issue #15). Twelve encodings of five real 3840x2160 captures, plus
+  libwebp and libjxl for reference, scored against those same pixels with
+  ffmpeg's `psnr` and `ssim` filters. Nothing lossless got near the size a
+  file that gets shared wants: PNG's own levels bottom out at 3.2 to 8.7 MB
+  and take 3 to 7 s to do it, oxipng reaches 2.9 to 7.6 MB in 5 to 7 s, and
+  lossless WebP, the best of them per second, 3.0 to 7.9 MB. Of the lossy
+  ones only JPEG has a maintained pure Rust encoder: lossy WebP and JPEG XL
+  are C libraries, and the one pure Rust JXL encoder does lossless only.
+  Skipping them costs nothing measurable. At quality 93 with no chroma
+  subsampling a still is 0.7 to 1.8 MB, a seventh of the PNG or less, and
+  scores higher on SSIM than libwebp at quality 95 and libjxl at distance 1
+  on all five captures, at 1.3 to 2.5 times their file size. The encode is
+  65 to 74 ms against the PNG's 33 to 45 ms, on the worker thread that has
+  already waited for the GPU and reads back 33 MB before it starts.
+- 2026-07-31 **The UI harness builds the binary it drives, every run**
+  (`scripts/uitest.sh`). It used to build only when `target/release/kyerag`
+  was missing, so a binary left over from before a `git revert` is what it
+  drove: the ball check failed twice on a tree whose source passes it four
+  runs out of four, and the capture it filed was the reverted design rather
+  than the restored one. A harness that reports on code it did not run is
+  worse than no harness, and cargo costs nothing when the binary is already
+  fresh. `KYERAG_BIN` stays the way to point it at a binary on purpose,
+  which is how the stale one was identified.
+- 2026-07-31 **The zoom out to the ball is one projection family, not a second
+  projection** (issue #47). Perspective and tiny planet are two ends of
+  `r = tan(shrink * theta) / shrink`: `shrink` 1 is rectilinear exactly,
+  1/2 is stereographic exactly, and below that the sphere closes into a finite
+  disc. Blending two separately-written maps was the obvious alternative and
+  is worse in the way that matters, because the thing being asked for is that
+  there be no seam in the scroll: a family has no crossover to hide. The
+  schedule is `shrink = 110 degrees / fov`, which holds `shrink * fov / 2`
+  constant past the threshold - the frame keeps the half angle of the widest
+  flat view and the world shrinks into it - and that is not a taste: it is
+  what makes zooming out zoom out at every point of the frame, where a
+  smoothed schedule that overshoots hands back a scroll that reverses in the
+  middle (`the_picture_only_ever_shrinks`).
+- 2026-07-31 **The field of view is allowed past 360 degrees** (issue #47),
+  rather than capping there or switching to a second control. At 360 the
+  frame's edges are half a turn out and the sphere is exactly as wide as the
+  frame; the owner asked for the ball to sit in frame **with room around it**,
+  and room means the frame reaching further than the sphere does. Anything
+  else needs a second zoom parameter with a different meaning at the far end,
+  which is a worse thing to explain and a worse thing to test.
 - 2026-07-31 **Which frames may take the screen and which seek is still owed
   one are two questions** (issue #55). `Player::pump` answered both with one
   epoch comparison: a frame was shown only while its own seek was the newest,

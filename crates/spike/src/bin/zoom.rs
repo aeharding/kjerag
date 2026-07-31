@@ -46,13 +46,7 @@ use kyerag_meta::{CalibrationSet, Lens};
 use kyerag_render::{
     Camera, Cue, Held, Horizon, Reframe, Request, Sampling, Scene, ScenePipeline, Size, sampling,
 };
-use kyerag_spike::{Gpu, Offscreen};
-
-/// Not sRGB, so the pass writes the video's own numbers: the same choice the
-/// `reframe` instrument makes, and the one that keeps a difference between
-/// two renders a difference in the sampling rather than in a transfer
-/// function.
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+use kyerag_spike::{Difference, FORMAT, Gpu, Offscreen, Picture, Render, aspect};
 
 /// The zoom range, in degrees: `Camera`'s own limits, the default, and the
 /// places between them where the two planes cross their thresholds.
@@ -237,7 +231,11 @@ fn ratios(options: &Options) -> Fallible<(Vec<Lens>, Size)> {
 
 /// The ratio at one place of the output, from whichever lens has the ray.
 fn lit(reframe: &Reframe, uv: [f32; 2], output: Size) -> f32 {
-    let blend = reframe.blend(reframe.view_ray(uv));
+    let Some(ray) = reframe.view_ray(uv) else {
+        // The room around the ball, which is not a magnification of anything.
+        return f32::INFINITY;
+    };
+    let blend = reframe.blend(ray);
     let lens = (0..blend.weights.len())
         .max_by(|a, b| blend.weights[*a].total_cmp(&blend.weights[*b]))
         .unwrap_or(0);
@@ -246,111 +244,6 @@ fn lit(reframe: &Reframe, uv: [f32; 2], output: Size) -> f32 {
 
 fn engaged(ratio: f32, plane_width: f32, frame_width: f32) -> f32 {
     sampling::sharpen(sampling::plane_ratio(ratio, plane_width, frame_width), 1.0)
-}
-
-/// What the pass draws, both ways, into a target of any size.
-struct Render<'a> {
-    gpu: &'a Gpu,
-    scene: &'a Scene,
-    pipeline: &'a mut ScenePipeline,
-}
-
-impl Render<'_> {
-    /// One view, one setting, one target's worth of pixels.
-    fn frame(&mut self, camera: Camera, sampling: Sampling, size: Size) -> Fallible<Picture> {
-        self.scene.set_sampling(sampling);
-        let primitive = self.scene.primitive(camera);
-        self.pipeline
-            .prepare(&primitive, &self.gpu.device, &self.gpu.queue, aspect(size));
-        let target = Offscreen::new(&self.gpu.device, size, FORMAT);
-        target.render(&self.gpu.device, &self.gpu.queue, self.pipeline)?;
-        Ok(Picture {
-            rgba: target.read(&self.gpu.device, &self.gpu.queue)?,
-            size,
-        })
-    }
-}
-
-/// One rendered view, and the questions asked of a pair of them.
-struct Picture {
-    rgba: Vec<u8>,
-    size: Size,
-}
-
-impl Picture {
-    fn write(&self, gpu: &Gpu, name: &str) -> Fallible<PathBuf> {
-        let out = PathBuf::from("scratch").join(name);
-        let target = Offscreen::new(&gpu.device, self.size, FORMAT);
-        target.write_png(&self.rgba, &out)?;
-        Ok(out)
-    }
-
-    /// How much detail the picture holds: the mean absolute Laplacian of its
-    /// luma, in codes. A resampling that resolves what bilinear smeared has
-    /// to raise this, and one that only rings raises it too, which is why the
-    /// pictures are looked at as well as measured.
-    fn detail(&self) -> f64 {
-        let luma = self.luma();
-        let (w, h) = (self.size.width as usize, self.size.height as usize);
-        let mut total = 0.0;
-        for y in 1..h - 1 {
-            for x in 1..w - 1 {
-                let at = |dx: usize, dy: usize| f64::from(luma[(y + dy - 1) * w + x + dx - 1]);
-                total += (4.0 * at(1, 1) - at(0, 1) - at(2, 1) - at(1, 0) - at(1, 2)).abs();
-            }
-        }
-        total / ((w - 2) * (h - 2)) as f64
-    }
-
-    fn luma(&self) -> Vec<f32> {
-        self.rgba
-            .chunks_exact(4)
-            .map(|p| 0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2]))
-            .collect()
-    }
-
-    /// What separates this picture from another one of the same size.
-    fn against(&self, other: &Self) -> Difference {
-        let mut moved = 0u64;
-        let mut total = 0u64;
-        let mut worst = 0u8;
-        for (a, b) in self.rgba.chunks_exact(4).zip(other.rgba.chunks_exact(4)) {
-            let step = (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
-            moved += u64::from(step > 0);
-            total += u64::from(step);
-            worst = worst.max(step);
-        }
-        Difference {
-            pixels: self.rgba.len() as u64 / 4,
-            moved,
-            mean: total as f64 / (self.rgba.len() as f64 / 4.0),
-            worst,
-        }
-    }
-}
-
-/// Two pictures, compared. `worst` and `mean` are in 8-bit codes of the
-/// channel that moved furthest.
-struct Difference {
-    pixels: u64,
-    moved: u64,
-    mean: f64,
-    worst: u8,
-}
-
-impl Difference {
-    fn is_identical(&self) -> bool {
-        self.moved == 0
-    }
-
-    fn report(&self) -> String {
-        format!(
-            "{:.2}% of pixels moved, {:.3} codes mean, {} worst",
-            100.0 * self.moved as f64 / self.pixels as f64,
-            self.mean,
-            self.worst,
-        )
-    }
 }
 
 /// The quality question: the same zoomed view, three ways.
@@ -684,7 +577,3 @@ impl Options {
 
 const USAGE: &str = "usage: zoom <file.insv> [yaw=deg] [pitch=deg] [fov=deg] \
      [frame=n | time=seconds] [size=px] [shot=px] [lock=0]";
-
-fn aspect(size: Size) -> f32 {
-    size.width as f32 / size.height as f32
-}

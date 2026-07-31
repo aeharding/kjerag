@@ -96,8 +96,20 @@ for tool in cage wtype grim ffmpeg; do
 	command -v "$tool" >/dev/null || die "$tool is not installed (AGENTS.md, UI verification)"
 done
 
-bin=${KYERAG_BIN:-$root/target/release/kyerag}
-if [ ! -x "$bin" ]; then
+# The build is part of the run, not a fallback for a missing binary. Cargo
+# is a no-op on a fresh one, and the version that only built when the file
+# was absent drove whatever happened to be there instead: on 2026-07-31 a
+# binary built before a `git revert` failed the ball check for an hour while
+# the source it was meant to be checking passed on every run.
+#
+# KYERAG_BIN is the way to point the harness at a binary on purpose, which is
+# how that was measured, so it is taken as given and never rebuilt.
+if [ -n "${KYERAG_BIN:-}" ]; then
+	bin=$KYERAG_BIN
+	[ -x "$bin" ] || die "no binary at $bin (KYERAG_BIN)"
+	printf 'binary %s (KYERAG_BIN: not rebuilt)\n' "$bin"
+else
+	bin=$root/target/release/kyerag
 	printf 'building %s\n' "$bin"
 	(cd "$root" && cargo build --release) || die "the app did not build"
 	[ -x "$bin" ] || die "no binary at $bin"
@@ -387,6 +399,7 @@ with_media() {
 		toast_clears_the_controls
 	fi
 
+	zooms_out_to_the_ball
 	saves_a_still
 	flips_the_horizon
 	survives_fullscreen
@@ -476,15 +489,88 @@ toast_clears_the_controls() {
 	fi
 }
 
+# Ctrl+- keeps zooming out past the flat range now, until the whole sphere
+# is a ball with room around it (issue #47). The room is the one thing in
+# the window whose colour the app decides rather than the footage:
+# OUTSIDE_GRAY, flat and neutral, where a frame of video at the same place
+# is neither. So the check reads one patch a fourteenth of the way in from
+# the left, level with the middle, which is outside the ball at the far end
+# of the zoom and inside the picture at the default view.
+#
+# Presses one at a time and looks after each, because the zoom is a clamp
+# rather than a state: pressing past the end is free, and a dropped key
+# costs a press rather than the check.
+# Measured on this harness's 1280x672 widget: the room reaches the patch on
+# the fifth press (90, 129, 185, 265, 380, 544 degrees, and the patch is off
+# the ball past about 403). wtype drops about one key in twenty, so the rest
+# is headroom, and the loop breaks on success so headroom costs nothing.
+BALL_PRESSES=20
+ROOM_SPREAD=4
+ROOM_DARK=60
+
+zooms_out_to_the_ball() {
+	local before after try=0
+	before=$(patch_rgb "$(grab zoom-before)")
+	while [ "$try" -lt "$BALL_PRESSES" ]; do
+		key -M ctrl -k minus -m ctrl
+		alive || lost "ctrl+- zooms out to the ball"
+		after=$(patch_rgb "$(grab zoom-ball)")
+		is_room "$after" && break
+		try=$((try + 1))
+	done
+	if ! is_room "$after"; then
+		fail "ctrl+- zooms out to the ball" \
+			"after $BALL_PRESSES presses the patch reads $after, which is not the room \
+around the ball" "$session/zoom-ball.ppm"
+		return
+	fi
+	pass "ctrl+- zooms out to the ball (patch $after, was $before)"
+
+	key -M ctrl -k 0 -m ctrl
+	after=$(patch_rgb "$(grab zoom-reset)")
+	if is_room "$after"; then
+		fail "ctrl+0 comes back from the ball" \
+			"the patch still reads $after, which is the room around the ball" \
+			"$session/zoom-reset.ppm"
+	else
+		pass "ctrl+0 comes back from the ball (patch $after)"
+	fi
+}
+
+# The mean colour of a small patch of a capture, as three decimal codes.
+# `scale=1:1` is the averaging, and rawvideo is what makes `od` the whole
+# reader.
+patch_rgb() {
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=iw*0.05:ih*0.05:iw*0.07:ih*0.47,scale=1:1" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+# Whether a patch is the flat neutral grey the pass paints where the frame
+# has no sphere in it, rather than a piece of picture: dark, and the three
+# channels within a code or two of each other. Measured on this harness, the
+# room reads 25 25 25, which is OUTSIDE_GRAY through the surface's own sRGB
+# round trip, and the same patch of the default view read 185 224 241 on the
+# owner's footage, which is sky.
+is_room() {
+	local rgb=($1) hi lo
+	[ "${#rgb[@]}" = 3 ] || return 1
+	hi=$(printf '%s\n' "${rgb[@]}" | sort -n | tail -1)
+	lo=$(printf '%s\n' "${rgb[@]}" | sort -n | head -1)
+	[ "$hi" -le "$ROOM_DARK" ] && [ $((hi - lo)) -le "$ROOM_SPREAD" ]
+}
+
 # `s` writes a still into the session's screenshots folder, which is inside
-# scratch/ and not the developer's own.
+# scratch/ and not the developer's own. The name it looks for is the one the
+# app writes: a JPEG since issue #15, and ffmpeg reads what it finds, so a
+# file that is not the format its name claims fails the decode below.
 saves_a_still() {
 	local still shrunk=$session/still.ppm
 	local try=0
 	while [ "$try" -lt "$PRESSES" ]; do
 		key -k s
 		alive || lost "s saves a still"
-		still=$(find "$session/shots" -name '*.png' | head -1)
+		still=$(find "$session/shots" -name '*.jpg' | head -1)
 		[ -n "$still" ] && break
 		try=$((try + 1))
 	done
@@ -496,7 +582,7 @@ saves_a_still() {
 	if nonblack "$shrunk"; then
 		pass "s saves a still"
 	else
-		fail "s saves a still" "the PNG is black: $still"
+		fail "s saves a still" "the still is black: $still"
 	fi
 }
 
