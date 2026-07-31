@@ -7,7 +7,7 @@ mod projection;
 mod scene;
 mod widget;
 
-pub use camera::{Camera, Viewpoint};
+pub use camera::{Camera, Nudge, Viewpoint};
 pub use kyerag_media::{Cue, Fallible, Size, Stats};
 pub use projection::{Landing, OUTSIDE_GRAY, Reframe};
 pub use scene::{Next, Scene, ScenePipeline, ScenePrimitive};

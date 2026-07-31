@@ -18,9 +18,14 @@ look around and scroll to zoom (issues #3, #26), and the playback core plays
 it (issue #4): one demuxer, both lenses decoded in lockstep and delivered as
 pairs, a presentation clock that paces 29.97 fps content by due time, space
 to pause, and frames pullable by index or timestamp. Measured over 60 s of
-real footage: 29.94 fps presented, zero dropped, zero starved. Next:
-sampling the second lens in the shader (issue #27), which the pairs are
-already waiting for, and seek (issue #5) on the same pull API.
+real footage: 29.94 fps presented, zero dropped, zero starved. The window
+is a COSMIC app now (issue #16, built to docs/UI.md): the menu bar in the
+header, a welcome view, the portal file chooser, drag and drop, recent
+files, the whole key map, fullscreen, Settings and About drawers, and a
+control overlay that takes itself and the pointer away after 2 s of
+stillness while playing and never while paused. Next: sampling the second
+lens in the shader (issue #27), which the pairs are already waiting for,
+and seek (issue #5), which is what makes the scrubber a scrubber.
 
 ## Milestones
 
@@ -30,8 +35,9 @@ already waiting for, and seek (issue #5) on the same pull API.
   widget, and the wgpu-28 port of the import.
 - **M1 Reframing player** — dual decode, calibrated Mei reprojection,
   drag to reframe, scroll to zoom, play/pause/seek, screenshots. The MVP.
-  Reprojection and the mouse are done (issue #3), and so is playback:
-  dual-stream decode, the presentation clock and play/pause (issue #4).
+  Reprojection and the mouse are done (issue #3), so is playback:
+  dual-stream decode, the presentation clock and play/pause (issue #4),
+  and so is the app shell around them (issue #16).
 - **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
   lock (+ Studio-diff test harness), rolling-shutter correction,
   hemisphere-aware decode gating, high-quality zoom sampling.
@@ -187,6 +193,17 @@ already waiting for, and seek (issue #5) on the same pull API.
   `av_hwframe_map`: 2.19x realtime at depth 0, 2.46x at depth 2, 2.47x at
   depth 4, so depth 2 takes the whole win. docs/ARCHITECTURE.md's "2-3
   frames in flight" now has a number behind it.
+- 2026-07-31 The shell is built to docs/UI.md, which reads the first-party
+  COSMIC apps and cites one for every call (issue #16). Three things in it
+  are ours rather than theirs, each for a reason recorded there: scrubbing
+  seeks keyframes until release (#5), the video does not toggle playback on
+  click because the press is the look-around grab, and there is no nav bar.
+  Two more the implementation added: the auto-hide timeout is checked by a
+  250 ms timer that runs only while playing, because this player sends no
+  per-frame message to hang it on (that is the whole point of the pacing
+  design), and the `text/uri-list` drop is handled while the portal's
+  file-transfer mime is not, because that one is a D-Bus round trip rather
+  than a payload and nothing here is sandboxed.
 - 2026-07-31 `media::first_frame` is gone. Everything reads through
   `Reader`, which takes a `Cue` (frame index or timestamp), seeks to the
   keyframe at or before it and walks forward without mapping what it
