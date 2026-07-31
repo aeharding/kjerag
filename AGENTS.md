@@ -127,6 +127,14 @@ error` (measured), so a GPU-less runner would be checking nothing.
   the agent's model of the bug, not the bug) and re-learned on PR #59
   (merged on its measurements before the owner's retest, against his
   explicit instruction).
+- Accepted tradeoffs are owner decisions (owner root-cause, 2026-07-31):
+  when an agent measures a user-visible compromise and decides to accept
+  it (placement, overlap, quality, feel), that acceptance goes in a
+  clearly-labeled "Accepted tradeoffs" list at the TOP of the PR body,
+  and the coordinator relays each item to the owner as an explicit
+  question before the owner is asked to test. Documenting a tradeoff in
+  prose is not surfacing it: the toast-over-scrubber call was measured,
+  disclosed mid-report, relayed by nobody, and found by the owner.
 - UI copy: plain words, no em dashes.
 - UI design defers to COSMIC system apps best practice (owner doctrine,
   2026-07-31): use libcosmic's stock widgets and the patterns of
