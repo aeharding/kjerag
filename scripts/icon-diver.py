@@ -138,14 +138,33 @@ ROUND6 = [
      entry(*_W6, _A6, _S, KNEE + 4), entry(*_W6, _A6, 1.0, -22)),
 ]
 
+# Round 7 grows the figure while the legs keep clearing the rim by the same
+# absolute amount, so scale and depth have to move together: everything past
+# the crossing point is outside the world, so a bigger figure must be
+# crossed lower down to jut the same distance. The growth goes inward and
+# the head reaches further along the entry line, deeper into open water.
+#
+# Both depths hold the outermost point at N2's 27.1 units past the rim.
+# They are solved against the drawn geometry rather than named landmarks the
+# way KNEE - 8 is, so they read as arbitrary; icon-export.py measures how far
+# past the rim each rendered raster reaches, which keeps them honest.
+ROUND7 = [
+    ("q1-grown-9", *_W6[2:], _W6[0], _W6[1],
+     entry(*_W6, _A6, 0.600, -58.11), entry(*_W6, _A6, 1.0, -22)),
+    ("q2-grown-18", *_W6[2:], _W6[0], _W6[1],
+     entry(*_W6, _A6, 0.649, -61.53), entry(*_W6, _A6, 1.0, -22)),
+]
+
 # Land shift is in land-local units, positive = down, and exists so open
 # water sits under the diver's head. Round 6 needs far less of it than
 # round 5: at the full radius the head sits further up the entry line, so 6
-# is for balance and margin rather than to fix an overlap.
+# is for balance and margin rather than to fix an overlap. Round 7 sinks the
+# head back toward the coast and still needs no more of it.
 ROUNDS = {
     "round-4": (ROUND4, ("#D9481F", "#F5A056"), 0),
     "round-5": (ROUND5, ("#EE9048", "#B8371A"), 14),
     "round-6": (ROUND6, ("#EE9048", "#B8371A"), 6),
+    "round-7": (ROUND7, ("#EE9048", "#B8371A"), 6),
 }
 
 
@@ -233,14 +252,14 @@ def draft(key, radius, cx, cy, transform, body, y0, y1, stops, land_shift=0):
 
 # --- What ships -------------------------------------------------------------
 #
-# Round 6's N2 is the approved drawing, so the scalable icon and the 32 px
+# Round 7's Q2 is the approved drawing, so the scalable icon and the 32 px
 # redraw are that candidate under the app's own name. 16 and 24 are separate
 # drawings rather than exports of it, because that is what both icon sets do:
 # in pop-os/icon-theme 1a575a8 the median app icon has 6 elements at 16 and 24
 # against 6.5 at 32 and up, and the redraw is a real one where the art is busy
 # (accessories-clock 8 against 21, accessories-text-editor 6 against 19).
-FINAL = ROUND6[1]
-FINAL_STOPS, FINAL_LAND_SHIFT = ROUNDS["round-6"][1], ROUNDS["round-6"][2]
+FINAL = ROUND7[1]
+FINAL_STOPS, FINAL_LAND_SHIFT = ROUNDS["round-7"][1], ROUNDS["round-7"][2]
 
 # The coastline in world radii from the world's centre: the master drawing's
 # three cubics reduced to one, measured off that path after its transform so

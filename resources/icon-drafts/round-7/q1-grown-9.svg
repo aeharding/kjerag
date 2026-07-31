@@ -1,24 +1,24 @@
 <svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="kjerag-ocean" x1="16" y1="16" x2="248" y2="248" gradientUnits="userSpaceOnUse">
+    <linearGradient id="q1-ocean" x1="16" y1="16" x2="248" y2="248" gradientUnits="userSpaceOnUse">
       <stop stop-color="#5CD0E2"/>
       <stop offset="1" stop-color="#1B7B9C"/>
     </linearGradient>
-    <linearGradient id="kjerag-fig" x1="0" y1="-104" x2="30" y2="98" gradientUnits="userSpaceOnUse">
+    <linearGradient id="q1-fig" x1="0" y1="-104" x2="30" y2="98" gradientUnits="userSpaceOnUse">
       <stop stop-color="#EE9048"/>
       <stop offset="1" stop-color="#B8371A"/>
     </linearGradient>
-    <clipPath id="kjerag-globe"><circle cx="130" cy="130" r="117"/></clipPath>
+    <clipPath id="q1-globe"><circle cx="130" cy="130" r="117"/></clipPath>
   </defs>
   <circle cx="128" cy="128" r="120" fill="#FFE0B0"/>
-  <circle cx="130" cy="130" r="117" fill="url(#kjerag-ocean)"/>
-  <g clip-path="url(#kjerag-globe)">
+  <circle cx="130" cy="130" r="117" fill="url(#q1-ocean)"/>
+  <g clip-path="url(#q1-globe)">
     <g transform="translate(130 130) scale(2.8537) translate(-130 -140)">
       <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
       <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
     </g>
   </g>
-  <g transform="translate(71.4 71.4) rotate(-45) scale(0.649)" fill="url(#kjerag-fig)">
+  <g transform="translate(67.8 67.8) rotate(-45) scale(0.6)" fill="url(#q1-fig)">
     <path d="M3.1 42.4L-23.7 26.7L-33.0 40.9L-7.9 59.1Z"/>
     <path d="M-21.2 28.9L-39.8 4.1L-50.7 11.2L-35.4 38.2Z"/>
     <path d="M-40.3 3.5L-46.7 -3.1L-55.8 4.7L-50.2 12.0Z"/>

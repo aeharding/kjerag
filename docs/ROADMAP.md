@@ -325,10 +325,13 @@ into the same recording that land at the 99th or above: the fades hold.
 
 ## Decisions log
 
-- 2026-07-31 **The app has an icon** (issue #67, six workshop rounds recorded
-  in docs/icon.md). A round teal world with a green coast and a warm rim, and
-  a small figure entering it from the upper left, drawn by
-  `scripts/icon-diver.py` from a joint skeleton rather than traced.
+- 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
+  recorded in docs/icon.md). A round teal world with a green coast and a warm
+  rim, and a small figure entering it from the upper left, drawn by
+  `scripts/icon-diver.py` from a joint skeleton rather than traced. The
+  figure's size and how far its feet clear the rim are set together, because
+  the rim crossing is what decides both: round 7 grew it 18 percent inward,
+  holding the feet at the same 27.1 units past the rim.
   `resources/icons/hicolor/` is the theme tree: a scalable SVG, PNGs from 256
   down to 16, and a drawing of its own for 32, 24 and 16, because both COSMIC
   and the Pop theme redraw those sizes instead of exporting. The files are

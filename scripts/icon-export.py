@@ -15,6 +15,10 @@ before in this repo's icon work:
   shapes is invisible on the desktop greys and obvious as a hole in the
   silhouette, so the fill is flood-checked from the outside in.
 
+Each line also reports how far past the world's rim the drawing reaches.
+That is the quantity round 7 holds fixed while the figure grows, so a change
+to the art that moves it shows up here (docs/icon.md).
+
 Writes the PNGs next to their SVG under resources/icons/hicolor/, and the
 review sheet to scratch/icon/final-sheet.png, which is gitignored: rendered
 sheets are review artifacts, not source.
@@ -22,6 +26,7 @@ sheets are review artifacts, not source.
 Needs `resvg` on PATH (cargo install resvg).
 """
 
+import math
 import os
 import shutil
 import struct
@@ -39,6 +44,10 @@ REDRAWN = (32, 24, 16)  # sizes with a drawing of their own
 BLOWUP = (48, 32, 24, 16)
 MAG = 6
 MIN_MARGIN = 1  # clear pixels required on every side, at every size
+
+# The world's radius in each raster. Everything off the 256 grid carries the
+# full-bleed circle, r=120 of 128; 24 and 16 are drawn on their own grid.
+SMALL_RIM = {24: 11, 16: 7}
 
 # cosmic-theme's gray_1, light and dark (pop-os/libcosmic,
 # cosmic-theme/src/model/{light,dark}.ron).
@@ -112,6 +121,20 @@ def margins(rows):
     return min(xs), min(ys), w - 1 - max(xs), h - 1 - max(ys)
 
 
+def past_rim(rows):
+    """How far the drawing reaches beyond the world's rim, in this raster's px.
+
+    The diver's feet are the only thing outside the circle, so this measures
+    the jut the drawing was placed for, off the rendered alpha rather than
+    off the skeleton that asked for it.
+    """
+    size = len(rows)
+    centre = size / 2
+    ink = max(math.hypot(x + 0.5 - centre, y + 0.5 - centre)
+              for y in range(size) for x in range(size) if rows[y][x][3])
+    return ink - SMALL_RIM.get(size, size * 120 / 256)
+
+
 def holes(rows):
     """Transparent pixels enclosed by ink: a seam between abutting shapes."""
     h, w = len(rows), len(rows[0])
@@ -145,7 +168,8 @@ def export():
             failures.append(f"{size}: margin {edge}, want >= {MIN_MARGIN} px")
         if hole:
             failures.append(f"{size}: {hole} enclosed transparent pixels")
-        print(f"{size:>4}  margins l/t/r/b {edge}  holes {hole}  ({note})")
+        print(f"{size:>4}  margins l/t/r/b {edge}  holes {hole}  "
+              f"past rim {past_rim(rows):+.1f}px  ({note})")
     return failures
 
 

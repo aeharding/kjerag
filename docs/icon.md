@@ -1,6 +1,6 @@
-# App icon: style research, the six draft rounds, and what ships
+# App icon: style research, the seven draft rounds, and what ships
 
-The icon is round 6's N2, and the assets built from it are in
+The icon is round 7's Q2, and the assets built from it are in
 `resources/icons/` (see "What ships" at the end, and that directory's
 README). Everything above that section is the workshop that got there, kept
 because it records what was measured and what each choice cost. Drafts live
@@ -10,7 +10,8 @@ wedged in a rock notch, so round 2 varies that one. Round 3 explores a
 separate owner concept, a freefall figure diving at the same world, and
 stands alongside round 2 rather than after it; rounds 4 and 5 are that
 concept reworked to the owner's notes, round 5 converging on a single
-composition, and round 6 pinning the world to the platform's circle.
+composition, round 6 pinning the world to the platform's circle, and round 7
+growing the figure without letting its feet reach any further out.
 
 The doctrine it serves is AGENTS.md's: **UI design defers to COSMIC system
 apps best practice**. Same method as docs/UI.md - where a first-party app
@@ -392,9 +393,56 @@ overlap. The contact sheet draws a faint canvas edge behind every cell,
 since a transparent icon otherwise gives no way to see how the art sits in
 the square.
 
+## Round 7: a bigger diver, the same jut
+
+Looking at the finals the owner asked for the figure a bit bigger, with the
+legs still off the world by the same absolute amount. Those two pull against
+each other, and which way is not obvious: `entry()` places the figure by
+naming the local y the rim crosses, and **everything past that point is
+outside the circle**, so scaling the figure up without touching the depth
+lengthens the jut in proportion. Holding the jut therefore means crossing a
+bigger figure lower down its legs, which pushes the growth inward - the head
+travels further along the entry line, deeper into open water, while the feet
+stop exactly where they stopped before.
+
+Both candidates hold the outermost point at N2's 27.1 units past the rim,
+solved against the drawn geometry rather than dialled in by eye:
+
+| #  | file                | scale        | rim crosses at | head from centre |
+| -- | ------------------- | ------------ | -------------- | ---------------- |
+| Q1 | `q1-grown-9.svg`    | 0.600 (+9%)  | y = -58.11     | 36.1 (0.30 R)    |
+| Q2 | `q2-grown-18.svg`   | 0.649 (+18%) | y = -61.53     | 27.0 (0.23 R)    |
+
+N2, for comparison, is scale 0.550 crossing at y = -54 with the head 45.3
+from centre. The depths are not landmarks the way round 5's `KNEE - 8` is,
+so they read as arbitrary numbers; `scripts/icon-export.py` prints how far
+past the rim each rendered raster actually reaches, which is what keeps them
+honest.
+
+Nothing else moves. Measured on the rendered alpha, the corner margins are
+identical to N2's at every size - 8 px at 256, 4 at 128, 2 at 64, 1 at 48 -
+because at 147.1 units the extreme point is still well inside the 169.7 that
+the world's own bounding box reaches along the diagonal. The world governs
+the square; the diver never touches it.
+
+The head stays over open water without moving the landmass, so the shift
+stays at 6. The clear water between the head and the coast falls from 40.1
+px at 256 (N2) to 30.5 (Q1) to **21.1** (Q2), which is a real reduction and
+still a wide gap. That zero-overlap result is worth only as much as the
+instrument behind it, so the check was shown able to fail: driving the head
+past the world's centre and into the landmass makes the same detector report
+461 to 682 land pixels under it.
+
+### The small sizes do not change
+
+32, 24 and 16 keep the drawings they had. That is consistency rather than an
+omission - the 32 mark's head is already **0.117 of the world's radius**
+against the master figure's 0.083, so growing the figure to 0.098 narrows
+the gap between the big art and the small marks instead of opening one.
+
 ## What ships
 
-The owner picked N2, so `resources/icons/hicolor/` is that drawing laid out
+The owner picked Q2, so `resources/icons/hicolor/` is that drawing laid out
 as an icon theme tree: the scalable SVG plus one PNG per size from 16 to
 256, every basename the application ID `dev.harding.Kjerag` (issue #66).
 Sizes 48 and up are renders of that single drawing, and **16, 24 and 32 each
