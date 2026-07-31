@@ -57,6 +57,30 @@ cargo test --workspace
 The `--workspace` and `--all` are load-bearing: without them cargo only
 looks at `default-members`, which is the app crate alone.
 
+## UI verification
+
+A change to the window, the keys or the frame path gets one run of the
+headless harness before it ships:
+
+```sh
+scripts/uitest.sh ~/Videos/<file>.insv   # or set KYERAG_TEST_MEDIA
+scripts/uitest.sh                        # no footage: the checks that
+                                         # need none, and it says so
+```
+
+It runs the release binary inside `cage` on a headless wlroots backend,
+presses keys with `wtype`, captures the output with `grim`, and reads the
+app's own report lines. The session is isolated: its own Wayland socket
+and its own XDG directories, so it neither sees the desktop you are
+looking at nor writes anything into it. Captures land in gitignored
+`scratch/uitest/`, because a frame of real footage is personal video.
+Needs `cage wtype grim ffmpeg` installed.
+
+CI does not run it and cannot: decode is VA-API against
+`/dev/dri/renderD128` (`crates/media/src/decode.rs`), and with no such
+device every file is refused with `av_hwdevice_ctx_create: Input/output
+error` (measured), so a GPU-less runner would be checking nothing.
+
 ## Hard rules
 
 - Branch + PR for all work after the bootstrap commits. Never force-push.
