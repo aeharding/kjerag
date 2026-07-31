@@ -2,12 +2,14 @@
 //! takes frames from `kyerag-media` and hands the pass to iced (src/widget.rs).
 
 mod camera;
+mod capture;
 pub mod dmabuf;
 mod projection;
 mod scene;
 mod widget;
 
 pub use camera::{Camera, Viewpoint};
+pub use capture::{Request, Shot, Shutter, Then};
 pub use kyerag_media::{Cue, Fallible, Size, Stats};
 pub use projection::{Landing, MAX_LENSES, OUTSIDE_GRAY, Pick, Reframe};
 pub use scene::{Next, Scene, ScenePipeline, ScenePrimitive};

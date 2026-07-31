@@ -17,6 +17,12 @@
 //! frame is no longer always frame 0 (issue #4's first comment): a seek and
 //! a decode-forward walk get to any of them.
 //!
+//! `srgb=1` renders into an sRGB target instead, which is what the window
+//! and its captures use. It exists to be compared against the default:
+//! the shader linearizes for an sRGB target and the target re-encodes on
+//! store, so the two PNGs are the same picture if and only if that round
+//! trip is neither doubled nor dropped (issue #15).
+//!
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
 //! are personal video and this repo is public.
 
@@ -30,8 +36,10 @@ use kyerag_media::Fallible;
 use kyerag_render::{Camera, Cue, Extent, Scene, ScenePipeline, Size, dmabuf};
 
 /// Not sRGB, so the shader writes the video's own gamma-encoded numbers
-/// straight out and a PNG viewer shows what the window shows.
+/// straight out and a PNG viewer shows what the window shows. `srgb=1`
+/// swaps it for the format a window surface has.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// The output is square, which is load bearing for the roll check: at yaw
 /// and pitch 0 the candidate roll conventions differ by a rotation about the
@@ -44,6 +52,7 @@ struct Options {
     camera: Camera,
     at: Cue,
     edge: u32,
+    format: wgpu::TextureFormat,
     out: PathBuf,
 }
 
@@ -64,10 +73,10 @@ fn main() -> Fallible<()> {
 
     let scene = Scene::still(&options.input, options.at)?;
     let primitive = scene.primitive(options.camera);
-    let mut pipeline = ScenePipeline::new(&device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&device, options.format);
     pipeline.prepare(&primitive, &device, &queue, 1.0);
 
-    let target = Target::new(&device, options.edge);
+    let target = Target::new(&device, options.edge, options.format);
     target.render(&device, &queue, &pipeline)?;
     target.write_png(&device, &queue, &options.out)?;
 
@@ -87,6 +96,7 @@ impl Options {
         let mut camera = Camera::default();
         let mut at = Cue::Index(0);
         let mut edge = DEFAULT_EDGE;
+        let mut format = FORMAT;
         let mut out = None;
 
         for arg in args {
@@ -98,6 +108,12 @@ impl Options {
                 "frame" => at = Cue::Index(value.parse()?),
                 "time" => at = Cue::Time(Duration::from_secs_f64(value.parse()?)),
                 "size" => edge = value.parse()?,
+                "srgb" => {
+                    format = match value.parse::<u32>()? {
+                        0 => FORMAT,
+                        _ => SRGB,
+                    }
+                }
                 "out" => out = Some(value.to_owned()),
                 _ => return Err(format!("unknown argument {key}. {USAGE}").into()),
             }
@@ -120,13 +136,14 @@ impl Options {
             camera,
             at,
             edge,
+            format,
             out: PathBuf::from("scratch").join(name),
         })
     }
 }
 
 const USAGE: &str = "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] \
-     [frame=n | time=seconds] [size=px] [out=name.png]";
+     [frame=n | time=seconds] [size=px] [srgb=1] [out=name.png]";
 
 /// An offscreen colour target and the buffer its pixels are read back into.
 struct Target {
@@ -136,7 +153,7 @@ struct Target {
 }
 
 impl Target {
-    fn new(device: &wgpu::Device, edge: u32) -> Self {
+    fn new(device: &wgpu::Device, edge: u32, format: wgpu::TextureFormat) -> Self {
         Self {
             texture: device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("reframe"),
@@ -144,7 +161,7 @@ impl Target {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: FORMAT,
+                format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             }),
