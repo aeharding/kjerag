@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# System ffmpeg is 6.1 (Pop!_OS 24.04); the crate major must match the
+# headers it binds, so this pin moves only when the system ffmpeg does.
+ffmpeg-next = "6.1.1"
+wgpu = "30.0.0"
+# Same ash the wgpu-hal 30 Vulkan backend uses, for the DRM modifier
+# pre-flight that has no wgpu-level equivalent.
+ash = "0.38"
+libc = "0.2"
+png = "0.17"
+pollster = "0.4"
