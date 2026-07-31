@@ -329,6 +329,65 @@ Same size-specific `*-32.svg` as round 4. The jut is 5.5 to 8.7 px at 128
 but only 2.7 to 4.4 px at 32, so the broken outline is faint but no longer
 absent the way it was at the earlier, shallower depths.
 
+## Round 6: the world at the platform's full circular size
+
+Before picking, the owner asked whether the jutting feet would force the
+world to be shrunk or offset in a real desktop icon. The requirement that
+came out of it: **the world sits at the platform's standard full-bleed
+circular size, centred, always** - the diver never gets room by making the
+world smaller or moving it. The jut instead lives in the square's corner
+headroom, outside the inscribed circle but inside the canvas.
+
+### The convention, measured
+
+Pop's full-bleed circular app icons draw a **238-240 wide circle centred in
+the 256 baseplate, spanning 8..248 - a uniform 8-unit margin** (observed at
+icon-theme `1a575a8`: `accessories-clock` and `alarm-clock` at 240,
+`avatar-default` and the browser icons at 238-239; the other circular icons
+in the set, weather and audio-player, are objects rather than full-bleed and
+sit at 206-208). That 8..248 span is the same live area the COSMIC app icons
+use for wide art, measured independently in round 1, so two sources agree.
+
+Round 6 therefore pins the world to **r=120 at (128,128)**.
+
+### Corner headroom, and what actually fits
+
+The canvas corner is 181.0 units from centre and the circle's edge is 120,
+so the top-left diagonal has **61 units of headroom** past the rim. Holding
+the extreme point to the same 8-unit margin the circle itself uses caps the
+jut at about 49.7 units. Entry runs at -45 degrees so the feet travel
+straight at that corner.
+
+Measured from the rendered alpha, not calculated from the skeleton:
+
+| #  | file                | past the rim | corner-most ink | nearest canvas edge |
+| -- | ------------------- | ------------ | --------------- | ------------------- |
+| N1 | `n1-shin-out.svg`   | 20.7 units   | (29, 27)        | 27 units            |
+| N2 | `n2-calf-out.svg`   | 27.1 units   | (25, 22)        | 22 units            |
+| N3 | `n3-knee-out.svg`   | 34.2 units   | (20, 17)        | 17 units            |
+
+Even N3, the deepest, keeps more margin than the circle itself does.
+
+### Clipping across the export sizes
+
+Rendered at 16, 24, 32, 48, 64, 128 and 256: **nothing is cut off.** At 16
+and 24 the ink does reach the boundary pixel, because the circle's own
+8-unit margin is 0.5 px at 16 and antialiasing spills into the edge pixel.
+That is the convention behaving normally, not a fault in this art - the
+control proves it: **Pop's own `accessories-clock` rendered the same way
+reports the same zero margins at 16 and 24**, and tighter margins than ours
+at 32 and 64. It is also exactly why the Pop theme hand-redraws its 16 and
+24, which is the plan here too.
+
+### Head over water at the full radius
+
+The larger radius pushes the head further up the entry line, so the head
+clears the crest on geometry alone. The landmass shift drops from 14 units
+(round 5) to **6**, and now serves balance and margin rather than fixing an
+overlap. The contact sheet draws a faint canvas edge behind every cell,
+since a transparent icon otherwise gives no way to see how the art sits in
+the square.
+
 ## Regenerating the contact sheet
 
 ```sh

@@ -129,9 +129,14 @@ def main():
         svg.append(f'<text x="{PAD}" y="{mid + 18}" font-family="{FONT}" '
                    f'font-size="11" fill="#F0F0F0">{rest}</text>')
 
-        for col, _ in enumerate(BACKGROUNDS):
+        for col, (_, _, fg) in enumerate(BACKGROUNDS):
             x = LABEL_W + col * (pw + GAP) + PAD
             for s in SIZES:
+                # Faint canvas edge: these are transparent icons, so the
+                # only way to judge how art sits in the square is to draw it.
+                svg.append(f'<rect x="{x}" y="{mid - s / 2}" width="{s}" '
+                           f'height="{s}" fill="none" stroke="{fg}" '
+                           'stroke-opacity="0.22" stroke-width="1"/>')
                 svg.append(f'<image xlink:href="{path}" x="{x}" '
                            f'y="{mid - s / 2}" width="{s}" height="{s}"/>')
                 x += s + GAP

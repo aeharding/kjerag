@@ -111,9 +111,36 @@ ROUND5 = [
 # landmass so open water sits under the diver's head; moving the world or
 # the diver cannot do it, because entry() places the figure relative to the
 # world and the head/land relationship travels with them.
+# Round 6 pins the world to the platform's full-bleed circular convention:
+# 240 diameter, centred, spanning 8..248 on the 256 grid. Measured, not
+# guessed - Pop's circular app icons (accessories-clock, alarm-clock,
+# avatar-default, web-browser at icon-theme 1a575a8) all draw a 238-240 wide
+# circle centred in the 256 baseplate, and that 8-unit margin is the same
+# live area the COSMIC app icons use for wide art.
+#
+# The world can therefore never move or shrink to make room for the diver.
+# The jut instead goes into the corner headroom: entry runs along the
+# top-left diagonal, so the feet reach into the square's corner, outside the
+# inscribed circle but inside the canvas.
+_W6 = (128, 128, 120)
+_A6 = -45
+ROUND6 = [
+    ("n1-shin-out", *_W6[2:], _W6[0], _W6[1],
+     entry(*_W6, _A6, _S, ANKLE + 20), entry(*_W6, _A6, 1.0, -22)),
+    ("n2-calf-out", *_W6[2:], _W6[0], _W6[1],
+     entry(*_W6, _A6, _S, KNEE - 8), entry(*_W6, _A6, 1.0, -22)),
+    ("n3-knee-out", *_W6[2:], _W6[0], _W6[1],
+     entry(*_W6, _A6, _S, KNEE + 4), entry(*_W6, _A6, 1.0, -22)),
+]
+
+# Land shift is in land-local units, positive = down, and exists so open
+# water sits under the diver's head. Round 6 needs far less of it than
+# round 5: at the full radius the head sits further up the entry line, so 6
+# is for balance and margin rather than to fix an overlap.
 ROUNDS = {
     "round-4": (ROUND4, ("#D9481F", "#F5A056"), 0),
     "round-5": (ROUND5, ("#EE9048", "#B8371A"), 14),
+    "round-6": (ROUND6, ("#EE9048", "#B8371A"), 6),
 }
 
 
