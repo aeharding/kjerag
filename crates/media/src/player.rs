@@ -21,11 +21,11 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Fallible, Frames, Reader, Size, Timing};
+use super::{Accuracy, Cue, Fallible, Frames, Reader, Size, Timing};
 
 /// Pairs the decode thread may have ready and waiting.
 const QUEUED: usize = 2;
@@ -88,16 +88,45 @@ impl Stats {
     }
 }
 
+/// What the decode thread sends back.
+enum Note {
+    /// A pair, and which seek it belongs to. A seek leaves frames from before
+    /// it in the channel, and the epoch is how they are told apart.
+    Frames(u64, Frames),
+    /// The file has been read to the end. The thread stays alive, because a
+    /// seek can send it back into the file.
+    Ended(u64),
+    Failed(Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// What the decode thread is told to do. There is one thing: everything else
+/// it does, it does by reading forward.
+enum Command {
+    Seek {
+        epoch: u64,
+        to: Cue,
+        accuracy: Accuracy,
+    },
+}
+
 /// A file, decoding on its own thread, and the clock that decides which of
 /// its frames belongs on screen.
 pub struct Player {
-    frames: Receiver<Fallible<Frames>>,
+    notes: Receiver<Note>,
+    commands: Sender<Command>,
     presenter: Presenter,
     timing: Timing,
     size: Size,
     lenses: usize,
     failure: Option<Box<dyn std::error::Error + Send + Sync>>,
     ended: bool,
+    /// Bumped by every seek. Frames tagged with an older one were decoded
+    /// before it and are no longer what the pilot asked to see.
+    epoch: u64,
+    /// Set from a seek until the frame it asked for is on screen. The picture
+    /// is about to change even when the clock is not running, which is what
+    /// tells a paused caller to keep redrawing.
+    seeking: bool,
 }
 
 impl Player {
@@ -107,19 +136,26 @@ impl Player {
     pub fn open(path: &Path) -> Fallible<Self> {
         let reader = Reader::open(path)?.lookahead(LOOKAHEAD);
         let (timing, size, lenses) = (reader.timing(), reader.size(), reader.lenses());
-        let (sender, frames) = sync_channel(QUEUED);
+        let (sender, notes) = sync_channel(QUEUED);
+        // Unbounded, because a drag asks for a position per pointer move and
+        // the player must never block on handing one over. The thread throws
+        // away everything but the newest before each read.
+        let (commands, orders) = channel();
         thread::Builder::new()
             .name("kyerag-decode".to_owned())
-            .spawn(move || decode_ahead(reader, sender))?;
+            .spawn(move || decode_ahead(reader, &sender, &orders))?;
 
         Ok(Self {
-            frames,
+            notes,
+            commands,
             presenter: Presenter::new(timing.interval()),
             timing,
             size,
             lenses,
             failure: None,
             ended: false,
+            epoch: 0,
+            seeking: false,
         })
     }
 
@@ -150,6 +186,18 @@ impl Player {
         self.presenter.clock.position(now)
     }
 
+    /// The frame on screen, counting from the first of the file.
+    pub fn index(&self) -> Option<u64> {
+        Some(self.presenter.current.as_ref()?.index)
+    }
+
+    /// A seek has been asked for and the frame it asked for is not on screen
+    /// yet. A paused caller has to keep redrawing while this is true, because
+    /// there is no clock running to tell it the picture will change.
+    pub fn is_seeking(&self) -> bool {
+        self.seeking
+    }
+
     pub fn stats(&self) -> Stats {
         self.presenter.stats
     }
@@ -176,22 +224,90 @@ impl Player {
         }
     }
 
+    /// Move the picture to `to`.
+    ///
+    /// [`Accuracy::Keyframe`] is what a slider being dragged asks for and
+    /// [`Accuracy::Exact`] is what letting go of it does (issue #5). Both
+    /// return immediately: the seek happens on the decode thread, and
+    /// [`Player::is_seeking`] is true until its first frame arrives.
+    pub fn seek(&mut self, to: Cue, accuracy: Accuracy) {
+        self.epoch += 1;
+        self.ended = false;
+        self.seeking = true;
+        self.presenter.reseek(to.time(self.timing));
+        let command = Command::Seek {
+            epoch: self.epoch,
+            to,
+            accuracy,
+        };
+        if self.commands.send(command).is_err() {
+            self.seeking = false;
+            return;
+        }
+        // Frames decoded before the seek are still in the channel, and the
+        // thread may be blocked handing over one more; the epoch is what
+        // drops them, and emptying the channel here is what lets the thread
+        // reach the command.
+        while self.notes.try_recv().is_ok() {}
+    }
+
+    /// One frame forward or back, which is what `.` and `,` do.
+    ///
+    /// Forward by one needs no seek at all: the reader is already sitting on
+    /// the next pair, so this only lets the clock take it. Every other step
+    /// is a seek, because the frame wanted is behind the decoder and HEVC
+    /// cannot be read backwards.
+    pub fn step(&mut self, now: Instant, frames: i64) {
+        self.pause(now);
+        let Some(index) = self.index() else {
+            return;
+        };
+        let target = index.saturating_add_signed(frames).min(self.last_index());
+        match frames == 1 && target == index + 1 {
+            true => {
+                self.presenter.reseek(self.timing.time_of(target));
+                self.seeking = true;
+            }
+            false => self.seek(Cue::Index(target), Accuracy::Exact),
+        }
+    }
+
+    /// The last frame of the file, or 0 for a container that does not say how
+    /// many it has.
+    fn last_index(&self) -> u64 {
+        self.timing.frames.saturating_sub(1)
+    }
+
     /// The frame that belongs on screen at `now`, or `None` when the picture
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
-        let (frames, failure, ended) = (&self.frames, &mut self.failure, &mut self.ended);
-        let shown = self.presenter.advance(now, || match frames.try_recv() {
-            Ok(Ok(frames)) => Some(frames),
-            Ok(Err(e)) => {
-                *failure = Some(e);
-                None
-            }
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                *ended = true;
-                None
+        let epoch = self.epoch;
+        let (notes, failure, ended) = (&self.notes, &mut self.failure, &mut self.ended);
+        let shown = self.presenter.advance(now, || {
+            loop {
+                match notes.try_recv() {
+                    Ok(Note::Frames(tag, frames)) if tag == epoch => return Some(frames),
+                    // Decoded before the seek that is now in force.
+                    Ok(Note::Frames(..)) => continue,
+                    Ok(Note::Ended(tag)) => {
+                        *ended = tag == epoch;
+                        return None;
+                    }
+                    Ok(Note::Failed(e)) => {
+                        *failure = Some(e);
+                        return None;
+                    }
+                    Err(TryRecvError::Empty) => return None,
+                    Err(TryRecvError::Disconnected) => {
+                        *ended = true;
+                        return None;
+                    }
+                }
             }
         });
+        if shown.is_some() {
+            self.seeking = false;
+        }
         match self.failure.take() {
             Some(e) => Err(e),
             None => Ok(shown),
@@ -202,17 +318,50 @@ impl Player {
 /// Decodes ahead of the picture until the player goes away. The bounded
 /// channel is the throttle: a full one blocks here, so a paused player
 /// stops decoding after `QUEUED` pairs instead of eating the file.
-fn decode_ahead(mut reader: Reader, sender: SyncSender<Fallible<Frames>>) {
+fn decode_ahead(mut reader: Reader, notes: &SyncSender<Note>, commands: &Receiver<Command>) {
+    let mut epoch = 0;
+    let mut ended = false;
     loop {
-        let message = match reader.next_frames() {
-            Ok(Some(frames)) => Ok(frames),
-            // End of file. Dropping the sender closes the channel, which is
-            // how the player learns there is no more.
-            Ok(None) => return,
-            Err(e) => Err(e),
+        // At the end of the file there is nothing to read and nothing to do
+        // but wait for a seek, so the thread blocks rather than spinning.
+        let mut order = match ended {
+            true => match commands.recv() {
+                Ok(order) => Some(order),
+                Err(_) => return,
+            },
+            false => None,
         };
-        let failed = message.is_err();
-        if sender.send(message).is_err() || failed {
+        // Only the newest command is still wanted. A drag asks for a position
+        // per pointer move, and serving the ones behind the last would spend
+        // a keyframe decode each on pictures nobody waited to see.
+        loop {
+            match commands.try_recv() {
+                Ok(newer) => order = Some(newer),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+        if let Some(Command::Seek { epoch: to, .. }) = &order {
+            epoch = *to;
+            ended = false;
+        }
+        if let Some(Command::Seek { to, accuracy, .. }) = order
+            && let Err(e) = reader.seek(to, accuracy)
+        {
+            let _ = notes.send(Note::Failed(e));
+            return;
+        }
+
+        let note = match reader.next_frames() {
+            Ok(Some(frames)) => Note::Frames(epoch, frames),
+            Ok(None) => {
+                ended = true;
+                Note::Ended(epoch)
+            }
+            Err(e) => Note::Failed(e),
+        };
+        let failed = matches!(note, Note::Failed(_));
+        if notes.send(note).is_err() || failed {
             return;
         }
     }
@@ -291,9 +440,20 @@ impl Presenter {
     }
 
     /// Paused with a picture on screen, nothing may change. Paused with no
-    /// picture yet is the file that was just opened: it gets one frame.
+    /// picture yet is the file that was just opened, or one that has just
+    /// been seeked: it gets one frame.
     fn is_frozen(&self) -> bool {
         !self.clock.playing && self.current.is_some()
+    }
+
+    /// Throw away the picture and put the clock where the seek is going. The
+    /// frame that arrives next anchors it again, at its own timestamp: a
+    /// keyframe seek lands before what it was asked for, and the clock has to
+    /// say where the picture really is rather than where it was aimed.
+    fn reseek(&mut self, to: Duration) {
+        self.current = None;
+        self.peeked = None;
+        self.clock.seek(to);
     }
 
     /// Whether this frame's moment has come. Also anchors the clock when
@@ -384,6 +544,13 @@ impl Clock {
     fn anchor(&mut self, now: Instant, at: Duration) {
         self.position = at;
         self.origin = Some(now);
+    }
+
+    /// Where the clock reads until the frame that was seeked to arrives.
+    /// Unanchoring is what makes that frame anchor it, whenever it comes.
+    fn seek(&mut self, to: Duration) {
+        self.position = to;
+        self.origin = None;
     }
 }
 
@@ -517,6 +684,45 @@ mod tests {
         assert_eq!(shown.map(|f| f.index), Some(0));
         assert_eq!(presenter.stats.dropped, 0);
         assert_eq!(presenter.stats.starved, 0);
+    }
+
+    /// A seek while paused has to produce exactly one picture, or the pilot
+    /// is left looking at the frame they seeked away from. It is the case
+    /// that matters most, because dragging the scrubber pauses.
+    #[test]
+    fn a_seek_while_paused_shows_one_frame_and_then_stands_still() {
+        let mut presenter = Presenter::new(NTSC);
+        let start = Instant::now();
+        let mut next = 0;
+        presenter.advance(start, feed(&mut next));
+        assert!(presenter.advance(start, feed(&mut next)).is_none());
+
+        presenter.reseek(NTSC * 900);
+        assert_eq!(presenter.clock.position(start), NTSC * 900);
+
+        let mut landed = Some(frame(900));
+        assert_eq!(
+            presenter.advance(start, || landed.take()).map(|f| f.index),
+            Some(900)
+        );
+        assert!(presenter.advance(start, feed(&mut next)).is_none());
+    }
+
+    /// A keyframe seek lands at or before what it was asked for, and the
+    /// clock has to read where the picture really is: a clock left on the
+    /// request would make the next frame look late and drop it.
+    #[test]
+    fn the_clock_takes_the_landing_time_and_not_the_request() {
+        let mut presenter = Presenter::new(NTSC);
+        presenter.clock.play();
+        let start = Instant::now();
+
+        presenter.reseek(NTSC * 950);
+        let mut landed = Some(frame(900));
+        presenter.advance(start, || landed.take());
+
+        assert_eq!(presenter.clock.position(start), NTSC * 900);
+        assert_eq!(presenter.stats.dropped, 0);
     }
 
     #[test]

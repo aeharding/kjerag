@@ -70,29 +70,11 @@ pub fn menu_bar<'a>(
                     strings::PLAYBACK.to_owned(),
                     vec![
                         enabled(has_file, strings::PLAY_PAUSE, Action::PlayPause),
-                        // Seeking is issue #5, which is why these four are
-                        // disabled even with a file open.
-                        Item::ButtonDisabled(
-                            strings::BACK_10.to_owned(),
-                            None,
-                            Action::SeekBackward,
-                        ),
-                        Item::ButtonDisabled(
-                            strings::FORWARD_10.to_owned(),
-                            None,
-                            Action::SeekForward,
-                        ),
+                        enabled(has_file, strings::BACK_10, Action::SeekBackward),
+                        enabled(has_file, strings::FORWARD_10, Action::SeekForward),
                         Item::Divider,
-                        Item::ButtonDisabled(
-                            strings::PREVIOUS_FRAME.to_owned(),
-                            None,
-                            Action::PreviousFrame,
-                        ),
-                        Item::ButtonDisabled(
-                            strings::NEXT_FRAME.to_owned(),
-                            None,
-                            Action::NextFrame,
-                        ),
+                        enabled(has_file, strings::PREVIOUS_FRAME, Action::PreviousFrame),
+                        enabled(has_file, strings::NEXT_FRAME, Action::NextFrame),
                     ],
                 ),
                 (

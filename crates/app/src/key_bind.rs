@@ -25,6 +25,10 @@ use kyerag_render::Nudge;
 
 use crate::app::{ContextPage, Message};
 
+/// Seconds a jump key or button moves the position (cosmic-player
+/// `src/main.rs:1933-1977`).
+pub const JUMP: f64 = 10.0;
+
 pub use cosmic::widget::menu::key_bind::{KeyBind, Modifier};
 
 /// One thing the pilot can ask for, from a key or from a menu item. The menu
@@ -65,13 +69,13 @@ impl MenuAction for Action {
             Self::FileOpen => Message::FileOpen,
             Self::FileOpenRecent(index) => Message::FileOpenRecent(*index),
             Self::Fullscreen => Message::Fullscreen,
-            Self::NextFrame => Message::NotYet,
+            Self::NextFrame => Message::StepFrame(1),
             Self::PlayPause => Message::PlayPause,
-            Self::PreviousFrame => Message::NotYet,
+            Self::PreviousFrame => Message::StepFrame(-1),
             Self::Quit => Message::Quit,
             Self::SaveFrame => Message::NotYet,
-            Self::SeekBackward => Message::NotYet,
-            Self::SeekForward => Message::NotYet,
+            Self::SeekBackward => Message::SeekRelative(-JUMP),
+            Self::SeekForward => Message::SeekRelative(JUMP),
             Self::Settings => Message::ToggleContextPage(ContextPage::Settings),
             Self::ZoomIn => Message::Look(Nudge::ZoomIn),
             Self::ZoomOut => Message::Look(Nudge::ZoomOut),

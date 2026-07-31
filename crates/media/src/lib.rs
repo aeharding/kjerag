@@ -19,7 +19,7 @@ mod reader;
 
 pub use decode::{DrmFrame, HwDevice, SwFrame, open_decoder};
 pub use player::{Player, Stats};
-pub use reader::{Cue, Frames, Reader, Timing};
+pub use reader::{Accuracy, Cue, Frames, Reader, Timing};
 
 /// Errors cross thread boundaries here because iced's shader primitives are
 /// `Send + Sync`, so the plain `Box<dyn Error>` a binary would use will not do.
