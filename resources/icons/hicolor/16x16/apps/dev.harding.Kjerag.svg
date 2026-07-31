@@ -1,0 +1,24 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="kjerag-ocean" x1="1.49" y1="1.49" x2="15" y2="15" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <linearGradient id="kjerag-fig" x1="0" y1="-3.18" x2="1.75" y2="2.7" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EE9048"/>
+      <stop offset="1" stop-color="#B8371A"/>
+    </linearGradient>
+    <clipPath id="kjerag-globe"><circle cx="8" cy="8" r="6.8"/></clipPath>
+  </defs>
+  <circle cx="8" cy="8" r="7" fill="#FFE0B0"/>
+  <circle cx="8" cy="8" r="6.8" fill="url(#kjerag-ocean)"/>
+  <g clip-path="url(#kjerag-globe)">
+    <path d="M0.65 10.38C5.2 9.96 9.75 5.9 15.35 8.98L15.35 17.8L0.65 17.8Z" fill="#73C48F"/>
+  </g>
+  <g transform="translate(4.1 4.1) rotate(-45) scale(1)" fill="url(#kjerag-fig)">
+    <path d="M1.1 1.4L0.6 -0.6L-1.0 -0.4L-1.1 1.6Z"/>
+    <path d="M0.6 -0.7L-0.4 -3.0L-1.0 -2.9L-1.0 -0.4Z"/>
+    <circle cx="0" cy="1.6" r="1.1"/>
+    <circle cx="-0.2" cy="-0.4" r="0.85"/>
+  </g>
+</svg>

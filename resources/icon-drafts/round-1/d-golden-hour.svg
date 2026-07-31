@@ -1,0 +1,28 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="d-sky" x1="128" y1="8" x2="128" y2="238" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3E3A8C"/>
+      <stop offset="0.34" stop-color="#B8478C"/>
+      <stop offset="0.62" stop-color="#FF7A3C"/>
+      <stop offset="0.86" stop-color="#FFD46B"/>
+      <stop offset="1" stop-color="#FFF2C8"/>
+    </linearGradient>
+    <linearGradient id="d-land" x1="128" y1="168" x2="128" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5A2A4E"/>
+      <stop offset="1" stop-color="#2A1430"/>
+    </linearGradient>
+    <clipPath id="d-disc"><circle cx="128" cy="128" r="120"/></clipPath>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#d-sky)"/>
+  <g clip-path="url(#d-disc)">
+    <circle cx="66" cy="168" r="36" fill="#FFF6D4"/>
+    <path d="M38 82C38 76.4772 42.4772 72 48 72H114C119.523 72 124 76.4772 124 82C124 87.5228 119.523 92 114 92H48C42.4772 92 38 87.5228 38 82Z" fill="#FFE3AE" fill-opacity="0.5"/>
+    <path d="M154 112C154 107.582 157.582 104 162 104H214C218.418 104 222 107.582 222 112C222 116.418 218.418 120 214 120H162C157.582 120 154 116.418 154 112Z" fill="#FFE3AE" fill-opacity="0.42"/>
+    <circle cx="130" cy="195" r="35" fill="#FFD79A"/>
+    <circle cx="130" cy="200" r="32" fill="url(#d-land)"/>
+    <path d="M-20 268L-20 206C16 198 56 193 98 192L128 230L128 268Z" fill="url(#d-land)"/>
+    <path d="M276 268L276 214C238 206 200 201 162 200L128 230L128 268Z" fill="url(#d-land)"/>
+    <path d="M-20 206C16 198 56 193 98 192L101 197C58 198 17 203 -20 212Z" fill="#FFC894"/>
+    <path d="M276 214C238 206 200 201 162 200L159 205C199 206 237 211 276 220Z" fill="#FFB87E"/>
+  </g>
+</svg>

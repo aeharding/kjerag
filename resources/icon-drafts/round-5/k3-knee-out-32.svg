@@ -1,0 +1,27 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="k3-ocean" x1="58" y1="86" x2="218" y2="246" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <linearGradient id="k3-fig" x1="0" y1="-38" x2="30" y2="36" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EE9048"/>
+      <stop offset="1" stop-color="#B8371A"/>
+    </linearGradient>
+    <clipPath id="k3-globe"><circle cx="136" cy="164" r="81"/></clipPath>
+  </defs>
+  <circle cx="134" cy="162" r="84" fill="#FFE0B0"/>
+  <circle cx="136" cy="164" r="81" fill="url(#k3-ocean)"/>
+  <g clip-path="url(#k3-globe)">
+    <g transform="translate(136 164) scale(1.9756) translate(-130 -132)">
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
+    </g>
+  </g>
+  <g transform="translate(79.3 132.9) rotate(-62) scale(1.0)" fill="url(#k3-fig)">
+    <path d="M13.5 18.4L8.6 0.1L-13.0 2.4L-14.0 21.3Z"/>
+    <path d="M8.2 -1.0L-5.3 -35.5L-13.0 -34.0L-13.0 3.0Z"/>
+    <circle cx="0" cy="22" r="14"/>
+    <circle cx="-2" cy="3" r="11"/>
+  </g>
+</svg>

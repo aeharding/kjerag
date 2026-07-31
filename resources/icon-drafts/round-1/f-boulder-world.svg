@@ -1,0 +1,39 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="f-sky" x1="128" y1="8" x2="128" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6A4BA8"/>
+      <stop offset="0.55" stop-color="#FF8A4A"/>
+      <stop offset="1" stop-color="#FFD070"/>
+    </linearGradient>
+    <linearGradient id="f-left" x1="20" y1="100" x2="110" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4A4154"/>
+      <stop offset="1" stop-color="#241F2C"/>
+    </linearGradient>
+    <linearGradient id="f-right" x1="240" y1="116" x2="150" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3A3244"/>
+      <stop offset="1" stop-color="#1B1723"/>
+    </linearGradient>
+    <linearGradient id="f-ocean" x1="98" y1="106" x2="170" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <clipPath id="f-disc"><circle cx="128" cy="128" r="120"/></clipPath>
+    <clipPath id="f-globe"><circle cx="130" cy="146" r="41"/></clipPath>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#f-sky)"/>
+  <g clip-path="url(#f-disc)">
+    <circle cx="60" cy="60" r="14" fill="#FFF0BC"/>
+    <circle cx="128" cy="144" r="44" fill="#FFE0B0"/>
+    <circle cx="130" cy="146" r="41" fill="url(#f-ocean)"/>
+    <g clip-path="url(#f-globe)">
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
+    </g>
+    <path d="M-20 268L-20 124C20 112 55 102 84 100L128 178L128 268Z" fill="url(#f-left)"/>
+    <path d="M276 268L276 140C245 128 210 118 174 116L128 178L128 268Z" fill="url(#f-right)"/>
+    <path d="M-20 124C20 112 55 102 84 100L88.6 108C58 110 22 121 -20 133Z" fill="#6B6079"/>
+    <path d="M276 140C245 128 210 118 174 116L168.8 124C208 126 243 136 276 149Z" fill="#584E66"/>
+    <path d="M84 100L128 178L117.5 183.9L73.5 105.9Z" fill="#5E5470"/>
+    <path d="M174 116L128 178L137.6 185.2L183.6 123.2Z" fill="#4C4359"/>
+  </g>
+</svg>

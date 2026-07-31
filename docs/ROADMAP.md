@@ -460,6 +460,19 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
+  recorded in docs/icon.md). A round teal world with a green coast and a warm
+  rim, and a small figure entering it from the upper left, drawn by
+  `scripts/icon-diver.py` from a joint skeleton rather than traced. The
+  figure's size and how far its feet clear the rim are set together, because
+  the rim crossing is what decides both: round 7 grew it 18 percent inward,
+  holding the feet at the same 27.1 units past the rim.
+  `resources/icons/hicolor/` is the theme tree: a scalable SVG, PNGs from 256
+  down to 16, and a drawing of its own for 32, 24 and 16, because both COSMIC
+  and the Pop theme redraw those sizes instead of exporting. The files are
+  named for the application ID `dev.harding.Kjerag`, the one issue #66
+  settled and issue #75 will put in the code; until that rename lands the
+  binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
 - 2026-07-31 Seam bar raised (owner): "I want the best seam support out
   there." The prod gate is not good-enough but best-shipping, Insta360's
   stitcher included. Two tracks: the per-camera geometric foundation
