@@ -384,21 +384,19 @@ Notes:
   the same way, and cosmic-edit's source notes why those three characters
   in particular: they are not special to terminals, so they are free
   (`src/key_bind.rs:41`).
-- **The zoom range runs from 20 degrees to the tiny planet** (issue #47).
+- **The zoom range runs from 20 degrees to the whole sphere** (issue #47).
   Scrolling out does not stop at a wide flat view any more: past 110 degrees
-  the picture bends, through the tiny planet's own projection at 220, and out
-  to a far end where the earth is a ball inside the picture and the sky is
-  wrapped round it into every corner. **The window is full of video the whole
-  way**, at every zoom level: the ball is a ball because the sky is warped
-  round it, not because the picture stopped. The far end is a little further
-  out on a wide window than on a square one, because what it is measured by is
-  the window's own corner. It is one continuous scroll out and back, the
-  planet can be grabbed and turned like any other view, and Ctrl+0 comes back
-  to the default in one press. Nothing about the ordinary range changed.
-  Dragging the view down on the way out is what puts the nadir in the middle,
-  which is the tiny planet as Insta360 frames it; dragging it up gives the
-  same picture inside out, with the sky in the middle and the ground wrapped
-  round the rim.
+  the picture bends, through the tiny planet at 220, and ends with the whole
+  sphere as a ball sitting in the middle of the window with room around it.
+  The far end is where the ball fills 0.8 of the window's shorter side, so it
+  is further out on a wide window than on a square one; the room around the
+  ball is the same grey the player paints anywhere it has no picture. It is
+  one continuous scroll out and back, the ball can be grabbed and turned like
+  any other view, and Ctrl+0 comes back to the default in one press. Nothing
+  about the ordinary range changed. Dragging the view down on the way out is
+  what puts the nadir in the middle, which is the tiny planet as Insta360
+  frames it; dragging it up gives the same picture inside out, with the sky in
+  the middle and the ground wrapped round the rim.
 - **`s` for save frame** has no first-party precedent, because no COSMIC
   app captures its own view. Bare unmodified letters are idiomatic in this
   app class though: cosmic-player binds `f` and `a` with no modifier. The

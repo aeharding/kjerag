@@ -194,59 +194,46 @@ measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
 as before, and the sound goes with it, because a preempted read stops
 without reading another packet and the seek behind it flushes the ring.
 
-**The zoom goes all the way out to the tiny planet** (issue #47, owner ask).
-The scroll used to stop at 110 degrees, because that is where a flat window
-stops being one. It now keeps going: past that threshold the output projection
-bends out of perspective through **stereographic**, which is the tiny planet
-Insta360 names and the owner calls the blue ball, and on to a far end where
-the earth is a ball inside the picture and the sky is wrapped round it into
-every corner. One family does the whole range,
-`r = tan(shrink * theta) / shrink`, with `shrink` running 1 to about 0.35, so
-nothing is switched over and there is nowhere to pop. **The frame is video at
-every field of view**: what stops the zoom is the frame's own corner reaching
-170 degrees off the view axis, which is 319 degrees of field of view on a 16:9
-window and 294 on a square one, and leaves 10 degrees of margin off the
-antipode, where the map spreads one direction over a whole circle. Ctrl+0
-comes back in one press.
-
-The first build of this went further, to the whole sphere as a disc with grey
-room around it (0.8 of the window's shorter side, 605 degrees on 16:9). **The
-owner tested it and rejected that far end**: "the video should still render on
-the entire video - the earth is a ball effect is because the sky is so
-warped". The void state is gone rather than tuned; `Screen::ray` answers a
-direction for every point of every frame, and the two headless UI checks that
-asserted grey around the ball now assert that no pixel of the window is grey.
-170 was picked by rendering the candidates on real footage and looking at the
-corners: grain still reads as grain at 165 and 170, is visibly combed into
-arcs at 173, and by 179 the outer third of the frame is smear.
+**The zoom goes all the way out to the blue ball** (issue #47, owner ask). The
+scroll used to stop at 110 degrees, because that is where a flat window stops
+being one. It now keeps going: past that threshold the output projection bends
+out of perspective through **stereographic**, which is the **tiny planet**
+Insta360 names and the owner calls the blue ball, and on until the whole
+sphere is a ball with room around it. One
+family does the whole range, `r = tan(shrink * theta) / shrink`, with `shrink`
+running 1 to about 0.18, so nothing is switched over and there is nowhere to
+pop. The far end is where the ball fills 0.8 of the window's **shorter** side,
+which is 605 degrees of field of view on a 16:9 window and 406 on a square
+one, and past 360 the frame is simply wider than the sphere: that extra is the
+room the ball sits in, painted the same grey the pass has always painted where
+no lens has the ray. Ctrl+0 comes back in one press.
 
 Measured on real footage at 2560x1440 (`kyerag-spike --bin ball`): one scroll
-from 20 degrees to the far end, a notch at a time, rendered, and the largest
-single step is 41.3 codes at the last notch, with the largest growth of a step
-over the step before it 1.07x at fov 25 - which is inside the flat range this
-change did not touch, so nothing in the bent range steps harder than the range
-that was already shipping, and nothing stands out at the threshold or at
-stereographic. Cost, interleaved across the range, 0.93 ms/redraw at the
-default view against 0.97 at the far end, on a 33 ms frame. Playback at the
-far end, 20 s with three 3840 px captures taken during it: 29.97 fps
-presented, **0 dropped, 0 starved**, 3.43 ms per redraw in the pass, against a
-control at the default view in the same session that reads 3.75 ms and also 0
-and 0. The drag took no new mathematics: it was already written against the
-projection's own rays rather than against a tangent, so it inverts whichever
-map the view is in, and grabbing the planet and turning it works because of
-that rather than despite it.
+from 20 degrees to the ball, a notch at a time, rendered, and the largest
+single step is 64.3 codes at fov 402, with the largest growth of a step over
+the step before it 1.32x at fov 173 - against 1.15x inside the flat range this
+change did not touch, and nothing standing out at the threshold or at
+stereographic. Cost, interleaved across the range and three runs agreeing
+within 0.01 ms a cell, 0.71 ms/redraw at the default view against 0.81 at the
+ball, on a 33 ms frame; the flat range costs what it cost, `--bin zoom` off
+this branch against the same binary built off main, alternated on one box,
+within 0.04 ms a cell in both directions. Playback at the ball, with three
+3840 px captures taken during it: 29.97 fps presented, **0 dropped, 0
+starved**, and a still of the ball is byte for byte the ball. The drag took no new mathematics: it was
+already written against the projection's own rays rather than against a
+tangent, so it inverts whichever map the view is in, and grabbing the ball and
+turning it works because of that rather than despite it.
 
 What is **not** fixed is aliasing. Out wide the map minifies rather than
-magnifies (5.8 delivered texels to the output pixel at the middle of the
-planet), so issue #11's kernel correctly switches off and the pass is plain
-bilinear on a single mip level: against the same view supersampled 4x4 the far
-end is 2.5 codes out over the pixels that moved and 82 at worst, against 1.3
-and 13 at the default view. High-contrast edges will shimmer in a moving
-planet, most of it out at the corner where the antipode is spread. A prefilter
-is the fix and it is deliberately not built yet: the imported dmabuf textures
-have one level and no room to generate another in place, so it means a
-downsample pass per frame per lens, for a view the player is in for a few
-seconds at a time. Numbers first, then the owner decides.
+magnifies (7.6 delivered texels to the output pixel at the middle of the
+ball), so issue #11's kernel correctly switches off and the pass is plain
+bilinear on a single mip level: against the same view supersampled 4x4 the
+ball is 4.1 codes out over the pixels that have picture and 107 at worst,
+against 1.1 and 11 at the default view. High-contrast edges will shimmer in a
+moving ball. A prefilter is the fix and it is deliberately not built yet: the
+imported dmabuf textures have one level and no room to generate another in
+place, so it means a downsample pass per frame per lens, for a view the player
+is in for a few seconds at a time. Numbers first, then the owner decides.
 
 M2 is done. #44 and #45 closed against it (the seed fix, owner-verified),
 and #48 has now reopened the seam.
@@ -369,9 +356,11 @@ into the same recording that land at the 99th or above: the fades hold.
   zoom sampling (issue #11, done: a Catmull-Rom kernel on the luma plane
   wherever the map's own Jacobian says an output pixel has landed inside a
   texel, and the chroma half of it measured and cut), and the zoom out to the
-  tiny planet (issue #47, done: one projection family from perspective
-  through stereographic and past it, capped where the frame's corner reaches
-  170 degrees off the axis, with the frame full of video the whole way).
+  tiny planet and the whole ball (issue #47: one projection family from
+  perspective through stereographic to a finite disc, capped where the
+  ball clears the window's shorter side; the tiny-planet framing sits
+  mid-scroll on the way there, and the owner chose to keep the extended
+  range after trying a hard stop at the planet).
   **M2 is complete**, except that issue #48 reopened the seam: the two lenses
   are misaligned by up to 2.7 degrees across it, phase 1 has measured that,
   attributed it to a relative lens tilt and fitted the correction, and phase 2
@@ -396,19 +385,13 @@ into the same recording that land at the 99th or above: the fades hold.
   what makes zooming out zoom out at every point of the frame, where a
   smoothed schedule that overshoots hands back a scroll that reverses in the
   middle (`the_picture_only_ever_shrinks`).
-- 2026-07-31 **The far end of the zoom is the tiny planet, and the frame is
-  100% video at every zoom level** (issue #47, owner's own test of the first
-  build). That build ended at the whole sphere as a disc with grey room
-  around it, on a reading of "the ball comfortably in frame with some margin"
-  that put the margin outside the picture. It is the wrong reading: the tiny
-  planet is the earth curling into a ball **inside** the picture while the sky
-  wraps round it and fills the corners, which is what Insta360's own tiny
-  planet is and what the owner asked for. So the cap moved to the frame's own
-  corner, 170 degrees off the view axis, and the void state was deleted rather
-  than made harder to reach - `Screen::ray` cannot answer "nothing" any more,
-  and neither can `Camera::look`. What decided 170 was rendered evidence on
-  real footage rather than arithmetic: past it the corner stops being picture
-  and starts being the antipode smeared round the rim.
+- 2026-07-31 **The field of view is allowed past 360 degrees** (issue #47),
+  rather than capping there or switching to a second control. At 360 the
+  frame's edges are half a turn out and the sphere is exactly as wide as the
+  frame; the owner asked for the ball to sit in frame **with room around it**,
+  and room means the frame reaching further than the sphere does. Anything
+  else needs a second zoom parameter with a different meaning at the far end,
+  which is a worse thing to explain and a worse thing to test.
 - 2026-07-31 **The orientation filter starts only from a reading it would
   believe completely** (issue #45). The rule that covers every other sample
   covers the first one: the seed searches forward for the first

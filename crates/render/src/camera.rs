@@ -19,18 +19,19 @@ pub struct Camera {
     /// frame's left and right edges, twice. The vertical field of view is
     /// whatever the output's aspect ratio leaves.
     ///
-    /// **Past 180 degrees it keeps meaning that** (issue #47): the frame goes
-    /// on wrapping round the view axis, and at the far end of the zoom its
-    /// edges are most of a half turn out. The corner is further still, and
-    /// `projection::CORNER_MAX` is what stops it.
+    /// **Past a full turn it keeps meaning that** (issue #47). At 360 degrees
+    /// the frame's own edges are half a turn out, which is as far as a
+    /// direction goes, so the whole sphere is exactly as wide as the frame;
+    /// wider than that and the frame reaches past the sphere altogether,
+    /// which is the room the ball sits in.
     pub fov: f32,
 }
 
 /// The near end of the zoom: under 20 degrees a 3840 px lens is being
 /// magnified about 8x and has nothing left to show. The far end is
-/// `projection::fov_ceiling`, which depends on the window shape, because the
-/// corner of a wide window is a different angle out from the middle of its
-/// edge than the corner of a square one.
+/// `projection::fov_ceiling`, which depends on the window shape, because
+/// fitting a round picture in a wide window is not the same as fitting it in
+/// a square one.
 const FOV_MIN: f32 = 20.0 * PI / 180.0;
 
 /// Straight up and straight down are where a yaw/pitch camera loses its
@@ -75,12 +76,12 @@ impl Camera {
     /// about and never rolls about, so a direction's height above the horizon
     /// is `-y` and its bearing is `atan2(x, z)`.
     ///
-    /// Every point of the output has one, at every field of view the zoom
-    /// offers (issue #47). Whatever map the view is in is the map this reads
-    /// its rays from, so this is the drag's inverse of the projection rather
-    /// than an assumption about it.
-    pub fn look(&self, uv: [f32; 2], aspect: f32) -> [f32; 3] {
-        normalize(world_ray(*self, view_ray(uv, *self, aspect)))
+    /// `None` where the output is looking at nothing: the room around the
+    /// ball at the far end of the zoom (issue #47), which a narrower view has
+    /// none of. The projection answers that, not this: whatever map the view
+    /// is in is the map this reads its rays from.
+    pub fn look(&self, uv: [f32; 2], aspect: f32) -> Option<[f32; 3]> {
+        Some(normalize(world_ray(*self, view_ray(uv, *self, aspect)?)))
     }
 
     /// Turn the view until `direction` lands at `uv`.
@@ -98,8 +99,15 @@ impl Camera {
     /// Where it cannot, the pitch clamps: that leaves the direction on the
     /// cursor's own meridian but short of it, so the drag reads as a wall
     /// rather than as a slip.
+    ///
+    /// A cursor in the room around the ball (issue #47) is asking for a
+    /// direction to be put where there are no directions, so the view holds
+    /// still until it comes back over the picture.
     pub fn aim(&mut self, direction: [f32; 3], uv: [f32; 2], aspect: f32) {
-        let ray = normalize(view_ray(uv, *self, aspect));
+        let Some(ray) = view_ray(uv, *self, aspect) else {
+            return;
+        };
+        let ray = normalize(ray);
 
         // Pitch turns the view in one plane and yaw turns that plane about
         // the world vertical, so the cursor's ray splits in two: `sideways`
@@ -124,10 +132,9 @@ impl Camera {
             ),
             // A cursor a quarter turn out along the frame's own horizontal
             // axis, which only a view past 180 degrees has any of (issue
-            // #47, and the tiny planet is one): its ray is the axis pitch
-            // turns about, so no pitch moves it and the height solve is zero
-            // over zero. The pitch the view holds is as good as any, and the
-            // bearing below still answers.
+            // #47): its ray is the axis pitch turns about, so no pitch moves
+            // it and the height solve is zero over zero. The pitch the view
+            // holds is as good as any, and the bearing below still answers.
             false => self.pitch + rise,
         };
         self.pitch = (tilt - rise).clamp(-PITCH_LIMIT, PITCH_LIMIT);
@@ -227,8 +234,11 @@ impl Viewpoint {
     /// cursor position: a position only says how far the last move went, and
     /// the same move means a different turn depending on where in the view it
     /// happens.
+    ///
+    /// A press on the room around the ball takes hold of nothing, because
+    /// there is nothing there to take hold of.
     pub fn grab(&mut self, uv: [f32; 2], aspect: f32) {
-        self.anchor = Some(self.camera.look(uv, aspect));
+        self.anchor = self.camera.look(uv, aspect);
     }
 
     pub fn release(&mut self) {
@@ -260,7 +270,7 @@ impl Viewpoint {
     pub fn zoom(&mut self, steps: f32, uv: [f32; 2], aspect: f32) {
         self.camera.zoom(steps, aspect);
         if self.anchor.is_some() {
-            self.anchor = Some(self.camera.look(uv, aspect));
+            self.anchor = self.camera.look(uv, aspect);
         }
     }
 
@@ -285,7 +295,7 @@ impl Viewpoint {
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use super::super::projection::{CORNER_MAX, FOV_FLAT};
+    use super::super::projection::FOV_FLAT;
     use super::*;
 
     /// A drag is exact when the direction it grabbed comes back within a
@@ -293,12 +303,16 @@ mod tests {
     /// wide output subtends **there**.
     ///
     /// Measured off the projection rather than off the field of view, because
-    /// past issue #47's threshold the two are not the same question: a bent
-    /// map spends its pixels unevenly, and out at the corner of the tiny
-    /// planet one pixel holds several degrees of azimuth.
+    /// past issue #47's threshold the two are not the same question: a
+    /// bent map spends its pixels unevenly, and the ball's rim holds a whole
+    /// turn of azimuth in a pixel or two. A place with no ray next to it is a
+    /// place the drag cannot be exact at, and half a turn says so.
     fn pixel(camera: Camera, uv: [f32; 2], aspect: f32) -> f32 {
         let step = [uv[0] + 0.001, uv[1]];
-        angle_between(camera.look(uv, aspect), camera.look(step, aspect))
+        match (camera.look(uv, aspect), camera.look(step, aspect)) {
+            (Some(here), Some(along)) => angle_between(here, along),
+            _ => PI,
+        }
     }
 
     /// The angle between two unit directions, by cross and dot rather than by
@@ -318,9 +332,13 @@ mod tests {
             .atan2(dot)
     }
 
-    /// How far the drag left the grabbed direction from the cursor.
+    /// How far the drag left the grabbed direction from the cursor. Half a
+    /// turn where the cursor is over no direction at all, which is as far
+    /// apart as two directions get.
     fn slip(camera: Camera, direction: [f32; 3], uv: [f32; 2], aspect: f32) -> f32 {
-        angle_between(camera.look(uv, aspect), direction)
+        camera
+            .look(uv, aspect)
+            .map_or(PI, |under| angle_between(under, direction))
     }
 
     fn degrees(camera: Camera) -> (f32, f32) {
@@ -391,10 +409,10 @@ mod tests {
     }
 
     /// Both ends are clamps and not states, so the notch that lands on one is
-    /// undone by the notch after it: a scroll out to the tiny planet and back
-    /// in is one gesture, not a gesture and a stuck view (issue #47).
+    /// undone by the notch after it: a scroll out to the ball and back in is
+    /// one gesture, not a gesture and a stuck view (issue #47).
     #[test]
-    fn the_scroll_comes_back_from_the_tiny_planet() {
+    fn the_scroll_comes_back_from_the_ball() {
         let aspect = 16.0 / 9.0;
         let mut camera = Camera::default();
         for _ in 0..40 {
@@ -416,35 +434,22 @@ mod tests {
         assert_eq!(camera.fov, FOV_MIN);
     }
 
-    /// The far end depends on the window and the near end does not: what the
-    /// cap holds fixed is the angle out to the **corner**, and a wide
-    /// window's corner is nearer the middle of its own edge than a square
-    /// window's, so it can be zoomed out further to reach the same angle.
-    ///
-    /// Which is the point of stating the cap that way: every window shape
-    /// ends up looking at the same picture, with the same margin off the
-    /// antipode, however far apart their fields of view read.
+    /// A wider window has to zoom out further before a round picture clears
+    /// its top and bottom, so the far end depends on the window and the near
+    /// end does not.
     #[test]
-    fn every_window_shape_stops_at_the_same_corner() {
-        let shapes = [0.5, 1.0, 4.0 / 3.0, 16.0 / 9.0, 21.0 / 9.0];
-        let ceilings: Vec<f32> = shapes.iter().map(|&aspect| fov_ceiling(aspect)).collect();
+    fn a_wider_window_zooms_out_further() {
+        let ceilings: Vec<f32> = [1.0, 4.0 / 3.0, 16.0 / 9.0, 21.0 / 9.0]
+            .iter()
+            .map(|&aspect| fov_ceiling(aspect))
+            .collect();
         assert!(
             ceilings.windows(2).all(|pair| pair[1] > pair[0]),
             "{ceilings:?} is not one ceiling per window shape",
         );
-
-        for (aspect, ceiling) in shapes.iter().zip(&ceilings) {
-            let camera = Camera {
-                fov: *ceiling,
-                ..Camera::default()
-            };
-            let corner = angle_between(camera.look([0.0, 0.0], *aspect), [0.0, 0.0, 1.0]);
-            assert!(
-                (corner - CORNER_MAX).abs() < 1e-3,
-                "at aspect {aspect} the corner is {} degrees off the axis",
-                corner.to_degrees(),
-            );
-        }
+        // Portrait windows are held by their width, which is the same
+        // question turned on its side and the same answer.
+        assert_eq!(fov_ceiling(0.5), fov_ceiling(1.0));
     }
 
     #[test]
@@ -507,19 +512,22 @@ mod tests {
         for yaw in [-2.9, -0.4, 0.0, 1.1, 3.0] {
             for pitch in [-1.55, -1.2, -0.6, 0.0, 0.85, 1.5] {
                 for aspect in [0.6, 1.0, 16.0 / 9.0] {
-                    // The whole range and not the old one: the flat views,
-                    // the threshold the bend starts at, stereographic, and
-                    // the tiny planet itself (issue #47).
+                    // The whole range and not the old one: the flat views, the
+                    // threshold the bend starts at, stereographic, and the ball
+                    // itself (issue #47).
                     let ceiling = fov_ceiling(aspect);
                     for fov in [FOV_MIN, 1.0, FOV_FLAT, 2.0 * FOV_FLAT, ceiling] {
                         let camera = Camera { yaw, pitch, fov };
                         for &from in &places {
-                            let direction = camera.look(from, aspect);
+                            let Some(direction) = camera.look(from, aspect) else {
+                                continue;
+                            };
                             for &to in &places {
                                 let mut aimed = camera;
                                 aimed.aim(direction, to, aspect);
 
-                                let short = reach(direction, to, camera, aspect) < 0.0;
+                                let short = reach(direction, to, camera, aspect)
+                                    .is_none_or(|spare| spare < 0.0);
                                 let stopped = aimed.pitch.abs() >= PITCH_LIMIT;
                                 if short || stopped {
                                     clamped += 1;
@@ -551,11 +559,12 @@ mod tests {
     /// How much angle a level horizon has to spare in putting `direction` at
     /// `uv`: the direction is this far from the pole, and the cursor's own
     /// ray leans this far off the plane the pole lives in. Negative is a
-    /// direction no view without roll can put there.
-    fn reach(direction: [f32; 3], uv: [f32; 2], camera: Camera, aspect: f32) -> f32 {
-        let ray = normalize(view_ray(uv, camera, aspect));
+    /// direction no view without roll can put there, and `None` is a cursor
+    /// over no direction at all, which is nothing to spare either.
+    fn reach(direction: [f32; 3], uv: [f32; 2], camera: Camera, aspect: f32) -> Option<f32> {
+        let ray = normalize(view_ray(uv, camera, aspect)?);
         let from_pole = FRAC_PI_2 - direction[1].abs().asin();
-        from_pole - ray[0].abs().asin()
+        Some(from_pole - ray[0].abs().asin())
     }
 
     /// The pilot's body: a view pitched most of the way down sees past the
@@ -571,7 +580,9 @@ mod tests {
             pitch: -80f32.to_radians(),
             fov: 100f32.to_radians(),
         };
-        let direction = start.look([0.5, 0.95], aspect);
+        let direction = start
+            .look([0.5, 0.95], aspect)
+            .expect("a flat view is all sphere");
         assert!(direction[1] > 0.0, "grabbed something above the horizon");
         assert!(direction[2] < 0.0, "grabbed something in front of the view");
 
@@ -614,7 +625,7 @@ mod tests {
             fov: FRAC_PI_2,
         };
         let up = [0.5, 0.5 - 10f32.to_radians().tan() / 2.0];
-        let direction = camera.look(up, 1.0);
+        let direction = camera.look(up, 1.0).expect("a flat view is all sphere");
         assert!(direction[1] < -0.9999, "{direction:?} is not straight up");
 
         for x in 0..=10 {
@@ -638,7 +649,9 @@ mod tests {
             pitch: 85f32.to_radians(),
             fov: FRAC_PI_2,
         };
-        let direction = camera.look([0.51, 0.46], 1.0);
+        let direction = camera
+            .look([0.51, 0.46], 1.0)
+            .expect("a flat view is all sphere");
 
         for step in 0..=400 {
             let along = step as f32 / 400.0;
@@ -675,17 +688,11 @@ mod tests {
         assert!(!viewpoint.is_dragging());
     }
 
-    /// The tiny planet can be grabbed and turned like anything else (issue
-    /// #47): the drag is one solve over the whole range, and the projection
-    /// it inverts is whichever one the view is in.
-    ///
-    /// It follows the cursor until the pitch limit stops it, which comes up
-    /// quickly out here because a tenth of the frame is tens of degrees of
-    /// world. That is the same wall
-    /// `content_past_the_nadir_follows_the_cursor_then_stops` is about, and
-    /// not a slip: what is checked is that every step before it is exact.
+    /// The ball can be grabbed and turned like anything else (issue #47): the
+    /// drag is one solve over the whole range, and the projection it inverts
+    /// is whichever one the view is in.
     #[test]
-    fn the_tiny_planet_turns_under_the_cursor() {
+    fn the_ball_turns_under_the_cursor() {
         let aspect = 16.0 / 9.0;
         let mut viewpoint = Viewpoint::default();
         for _ in 0..40 {
@@ -693,64 +700,61 @@ mod tests {
         }
         assert_eq!(viewpoint.camera().fov, fov_ceiling(aspect));
 
-        // From the middle of the planet out across its rim and into the sky
-        // wrapped round it, which is the part of this view that has no
-        // counterpart in a flat one.
+        // Across the middle of the ball, which at this zoom is a couple of
+        // tenths of the frame either side of the centre.
         let from = [0.46, 0.52];
         viewpoint.grab(from, aspect);
-        let held = viewpoint.camera().look(from, aspect);
-        let mut followed = 0;
+        let held = viewpoint
+            .camera()
+            .look(from, aspect)
+            .expect("the middle of the ball is picture");
         for step in 1..=20 {
-            let to = [from[0] + 0.022 * step as f32, from[1] - 0.004 * step as f32];
-            assert!(viewpoint.drag_to(to, aspect), "the planet did not turn");
+            let to = [from[0] + 0.004 * step as f32, from[1] - 0.002 * step as f32];
+            assert!(viewpoint.drag_to(to, aspect), "the ball did not turn");
             let camera = viewpoint.camera();
             assert!(camera.yaw.is_finite() && camera.pitch.is_finite());
-            // The pitch limit is the one thing that can hold the direction
-            // off the cursor, and it says so by clamping rather than by
-            // slipping: past it the drag reads as a wall, which
-            // `content_past_the_nadir_follows_the_cursor_then_stops` is about.
-            if camera.pitch.abs() >= PITCH_LIMIT {
-                break;
-            }
-            followed += 1;
             let slip = slip(camera, held, to, aspect);
             assert!(
                 slip <= pixel(camera, to, aspect),
-                "the planet slipped {slip} rad under the cursor at step {step}",
+                "the ball slipped {slip} rad under the cursor at step {step}",
             );
-        }
-        assert!(followed >= 8, "{followed} of 20 steps turned the planet");
-    }
-
-    /// The corner of the widest view is picture like everywhere else, so it
-    /// is a handle like everywhere else (issue #47). This is the check the
-    /// owner's correction turned round: there is no room around the ball to
-    /// press on, because there is no room.
-    #[test]
-    fn the_corner_of_the_widest_view_is_a_handle() {
-        for aspect in [0.6, 1.0, 16.0 / 9.0] {
-            let mut viewpoint = Viewpoint::default();
-            for _ in 0..40 {
-                viewpoint.zoom(-1.0, MIDDLE, aspect);
-            }
-            assert_eq!(viewpoint.camera().fov, fov_ceiling(aspect));
-
-            let corner = [0.005, 0.005];
-            viewpoint.grab(corner, aspect);
-            assert!(viewpoint.is_dragging(), "the corner took hold of nothing");
-            assert!(
-                viewpoint.drag_to([0.2, 0.3], aspect),
-                "a drag from the corner turned nothing at aspect {aspect}",
-            );
-            let camera = viewpoint.camera();
-            assert!(camera.yaw.is_finite() && camera.pitch.is_finite());
         }
     }
 
-    /// Ctrl+0 comes back from the tiny planet in one press, which is the way
-    /// out of the far end that does not need fourteen scrolls.
+    /// The room around the ball holds nothing, so a press on it takes hold of
+    /// nothing and a drag into it holds the view still rather than hauling it
+    /// somewhere arbitrary.
     #[test]
-    fn the_default_view_comes_back_from_the_tiny_planet() {
+    fn the_room_around_the_ball_is_not_a_handle() {
+        let aspect = 16.0 / 9.0;
+        let mut viewpoint = Viewpoint::default();
+        for _ in 0..40 {
+            viewpoint.zoom(-1.0, MIDDLE, aspect);
+        }
+        let corner = [0.01, 0.01];
+        assert!(
+            viewpoint.camera().look(corner, aspect).is_none(),
+            "the corner of the ball view is still picture",
+        );
+
+        viewpoint.grab(corner, aspect);
+        assert!(!viewpoint.is_dragging());
+        assert!(!viewpoint.drag_to([0.5, 0.5], aspect));
+
+        // And a drag that starts on the ball and wanders off it stops rather
+        // than jumping.
+        viewpoint.grab([0.5, 0.5], aspect);
+        assert!(viewpoint.is_dragging());
+        viewpoint.drag_to([0.53, 0.5], aspect);
+        let parked = viewpoint.camera();
+        assert!(!viewpoint.drag_to(corner, aspect));
+        assert_eq!(viewpoint.camera(), parked);
+    }
+
+    /// Ctrl+0 comes back from the ball in one press, which is the way out of
+    /// the far end that does not need fourteen scrolls.
+    #[test]
+    fn the_default_view_comes_back_from_the_ball() {
         let aspect = 16.0 / 9.0;
         let mut viewpoint = Viewpoint::default();
         for _ in 0..40 {

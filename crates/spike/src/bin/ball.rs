@@ -1,5 +1,4 @@
-//! What the zoom out to the tiny planet looks like, costs, and steps by
-//! (issue #47).
+//! What the zoom out to the ball looks like, costs, and steps by (issue #47).
 //!
 //! Four questions, all of them against real footage through the app's own
 //! pass, because the projection is the pass and nothing about it is visible
@@ -10,17 +9,17 @@
 //!   [frame=n | time=s] [yaw=deg] [pitch=deg] [size=px] [lock=1]
 //! ```
 //!
-//! - **sweep**: one scroll from the narrowest view to the far end, a notch at
-//!   a time, rendered. A projection that popped would put one step far outside
+//! - **sweep**: one scroll from the narrowest view to the ball, a notch at a
+//!   time, rendered. A projection that popped would put one step far outside
 //!   the trend of the steps either side of it, so what is reported is each
 //!   step against the one before it as well as the largest of them; and then
 //!   the same walk at a quarter of a notch, because a step that is a step
 //!   stays the same size however finely the scroll is cut and a walk through
 //!   a continuous map shrinks with it.
 //! - **cost**: ms/redraw across the range, interleaved. The bend costs an
-//!   `atan` and a `sin_cos` per fragment and the far end costs nearly a whole
-//!   sphere's worth of both lenses; the narrow range is meant to cost exactly
-//!   what it cost before, which is the other half of the table.
+//!   `atan` and a `sin_cos` per fragment and the ball costs a whole sphere's
+//!   worth of both lenses; the narrow range is meant to cost exactly what it
+//!   cost before, which is the other half of the table.
 //! - **ratio**: how far the map magnifies or minifies at each end, which is
 //!   what issue #11's kernel switches on. Out wide it is minification, and
 //!   the kernel has to be off.
@@ -43,9 +42,9 @@ use kyerag_spike::{FORMAT, Gpu, Offscreen, Picture, Render, aspect};
 
 /// The window the player's own cost numbers are taken at, and what every
 /// picture here is rendered at unless `size=` says otherwise. Its shape is
-/// half the answer: the far end of the zoom is where the window's own corner
-/// reaches `projection::CORNER_MAX`, so a 16:9 window zooms out further than a
-/// square one and both stop at the same picture.
+/// half the answer: the far end of the zoom is where the ball clears the
+/// shorter side of the window, so a 16:9 window zooms out further than a
+/// square one.
 const WINDOW: Size = Size {
     width: 2560,
     height: 1440,
@@ -58,12 +57,11 @@ const NOTCH: f32 = 0.12;
 
 /// Fields of view the cost and ratio tables are read at, in degrees: the
 /// default view, the threshold the bend starts at, stereographic, and two
-/// past it. The far end itself is added at the window's own ceiling, which on
-/// a 16:9 window is 319.
-const FOVS: [f32; 5] = [90.0, 110.0, 150.0, 220.0, 280.0];
+/// past it. The ball itself is added at the window's own ceiling.
+const FOVS: [f32; 5] = [90.0, 110.0, 150.0, 220.0, 320.0];
 
 /// Where in the output the ratio is read: the middle, and most of the way out
-/// towards the corner.
+/// towards the ball's rim.
 const PLACES: [(&str, [f32; 2]); 3] = [
     ("centre", [0.5, 0.5]),
     ("halfway", [0.5, 0.28]),
@@ -343,7 +341,10 @@ fn ratios(options: &Options) -> Fallible<()> {
 
 /// The ratio at one place of the output, from whichever lens has the ray.
 fn lit(reframe: &Reframe, uv: [f32; 2], output: Size) -> f32 {
-    let blend = reframe.blend(reframe.view_ray(uv));
+    let Some(ray) = reframe.view_ray(uv) else {
+        return f32::INFINITY;
+    };
+    let blend = reframe.blend(ray);
     let lens = (0..blend.weights.len())
         .max_by(|a, b| blend.weights[*a].total_cmp(&blend.weights[*b]))
         .unwrap_or(0);
@@ -379,9 +380,9 @@ fn alias(render: &mut Render, options: &Options) -> Fallible<()> {
             Size::new(options.output.width * SUPER, options.output.height * SUPER),
         )?;
         let against = plain.against(&boxed(&dense, SUPER));
-        // Over the pixels that moved rather than over the frame: a pixel
-        // the two agree on to the code has nothing in it to alias and would
-        // divide the number down for the wrong reason.
+        // Over the pixels that moved rather than over the frame: at the ball
+        // most of the frame is the room around it, which has nothing in it to
+        // alias and would divide the number down for the wrong reason.
         println!(
             "        {:3.0} | {:6.3} codes over the {:5.2}% that moved, {} worst",
             fov.to_degrees(),
@@ -392,11 +393,11 @@ fn alias(render: &mut Render, options: &Options) -> Fallible<()> {
         if fov
             == *fovs(options.output)
                 .last()
-                .expect("the far end is in the table")
+                .expect("the ball is in the table")
         {
-            plain.write(render.gpu, "planet-plain.png")?;
-            boxed(&dense, SUPER).write(render.gpu, "planet-supersampled.png")?;
-            println!("        wrote scratch/planet-plain.png, planet-supersampled.png");
+            plain.write(render.gpu, "ball-plain.png")?;
+            boxed(&dense, SUPER).write(render.gpu, "ball-supersampled.png")?;
+            println!("        wrote scratch/ball-plain.png, ball-supersampled.png");
         }
     }
     Ok(())
@@ -423,8 +424,8 @@ fn boxed(dense: &Picture, by: u32) -> Picture {
     Picture { rgba, size }
 }
 
-/// The fields of view the tables are read at: the fixed ones, and the tiny
-/// planet at this window's own ceiling.
+/// The fields of view the tables are read at: the fixed ones, and the ball at
+/// this window's own ceiling.
 fn fovs(output: Size) -> Vec<f32> {
     let mut fovs: Vec<f32> = FOVS.iter().map(|fov| fov.to_radians()).collect();
     fovs.push(ceiling(output));

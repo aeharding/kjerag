@@ -231,7 +231,11 @@ fn ratios(options: &Options) -> Fallible<(Vec<Lens>, Size)> {
 
 /// The ratio at one place of the output, from whichever lens has the ray.
 fn lit(reframe: &Reframe, uv: [f32; 2], output: Size) -> f32 {
-    let blend = reframe.blend(reframe.view_ray(uv));
+    let Some(ray) = reframe.view_ray(uv) else {
+        // The room around the ball, which is not a magnification of anything.
+        return f32::INFINITY;
+    };
+    let blend = reframe.blend(ray);
     let lens = (0..blend.weights.len())
         .max_by(|a, b| blend.weights[*a].total_cmp(&blend.weights[*b]))
         .unwrap_or(0);
