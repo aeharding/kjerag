@@ -9,7 +9,7 @@ mod widget;
 
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use kyerag_media::{Cue, Fallible, Size, Stats};
-pub use projection::{Landing, OUTSIDE_GRAY, Reframe};
+pub use projection::{Landing, MAX_LENSES, OUTSIDE_GRAY, Pick, Reframe};
 pub use scene::{Next, Scene, ScenePipeline, ScenePrimitive};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on

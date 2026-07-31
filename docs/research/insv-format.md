@@ -501,9 +501,81 @@ real flights and this repo is public: they stay local.
   `Unknown` on the fixture and may be where that is stated). Nothing in
   the file distinguishes them and nothing downstream cares, so it is
   recorded rather than guessed at.
-- **Lens 1.** This was lens 0 only. The nominal opposed arrangement that
-  4.3 says is *not* in the extrinsics still has to be composed with these
-  angles, and that is the seam's problem (issue #7).
+- ~~**Lens 1.**~~ Settled in 4.9: the nominal opposed arrangement is a half
+  turn about the body's vertical, multiplied on the right of the block's
+  own angles.
+
+### 4.9 The nominal arrangement of lens 1 (settled 2026-07-31)
+
+**Confidence: HIGH for the choice, MED for what is left over.** Settled
+during issue #27, the pass that samples both lenses.
+
+4.3 says the 180-degree flip is not in the extrinsics: lens 1's recorded
+yaw is 0.039 degrees. Something has to supply it, and there are three
+candidates that all point lens 1 backwards:
+
+```
+lens_1 = Rz(roll - 90) * Ry(yaw) * Rx(pitch) * Ry(180)     <- Kyerag
+lens_1 = Ry(180) * Rz(roll - 90) * Ry(yaw) * Rx(pitch)
+lens_1 = Rz(roll - 90) * Ry(yaw) * Rx(pitch) * Rx(180)
+```
+
+The first two differ by **twice lens 1's roll residual** (conjugating a
+z-rotation by a half turn about y negates it), which is 1.85 degrees on
+the X4 Air fixture: a real difference, at the one place in the picture
+where two lenses have to agree. The third differs from the first by 180
+degrees of roll, i.e. a rear sensor mounted upside down, which is what
+`roll` already records.
+
+### How it was measured
+
+Parallax at the seam is the reason a naive "does it line up" test is
+useless, and also the reason this one works. The baseline is along the
+lens axis (`tz` dominates), so **every direction on the seam great circle
+is perpendicular to the baseline**: parallax there displaces a subject
+only *across* the seam, never *along* it, whatever its distance. The
+along-seam displacement is therefore a clean measure of the relative roll
+of the two lenses, with parallax subtracted by geometry rather than by
+assumption.
+
+So: render the same view twice with `kyerag-spike --bin reframe`, once
+from each lens (a temporary two-line patch to the pick), on an X4 Air
+frame with distant content sitting on the seam, and correlate a patch of
+the overlap band between the two. The residual is the shift that
+correlates best.
+
+| composition | along-seam residual | correlation |
+| --- | --- | --- |
+| `... * Ry(180)` (Kyerag) | **0.4 degrees** | 0.97 to 0.99 |
+| `Ry(180) * ...` | 1.5 degrees | 0.95 to 0.97 |
+| `... * Rx(180)` | no peak at all | 0.02 to 0.18 |
+
+Three far-field patches on a treeline 90 degrees off the front lens's
+axis, plus two on the ground under the camera at the other end of the
+seam circle, which agree in sign. The two orders measured 1.82 degrees
+apart against 1.85 predicted from the file, which is the check that the
+instrument is measuring the thing it is named after; and the `Rx(180)`
+row is the check that it can tell a wrong answer from a right one, since
+that candidate turns the rear picture upside down and nothing correlates.
+
+Confirmed independently by reading the picture: text on the wing
+("OZONE", printed along the span) is legible and **not mirrored** in the
+back hemisphere, and the horizon runs into the seam from both sides at
+the same angle.
+
+### What is left over
+
+**0.4 degrees along the seam, and an across-seam disagreement that is not
+characterised here.** Neither candidate order lands on zero, so the
+remainder is not an order to choose between; candidates for it are the
+reduced calibration model at the extreme edge (5.3: the polynomial
+dominates exactly there), the focal scale of 4.3, and the unsettled
+**order** of yaw/pitch/roll from 4.8. Across the seam the measured shift
+varied between patches by more than parallax explains, and the patches
+that disagreed were the low-correlation ones, so no number for it is
+claimed. It is issue #7's, along with the blend that will hide it: a
+weight field over a 15-degree overlap band does not need a
+sub-pixel-perfect boundary, it needs to know where the boundary is.
 
 ## 5. The projection model
 
@@ -883,7 +955,9 @@ Ordered by how much they would cost us.
    Ry(yaw) * Rx(pitch)`, and the quarter-turn datum is the finding (4.8).
    What is left of it is the **order** of the three, which no known camera
    can distinguish because every one of them records sub-degree yaw and
-   pitch.
+   pitch. Lens 1's nominal arrangement, which the same entry used to leave
+   open, is settled in 4.9: a half turn about the body's vertical,
+   multiplied on the right of the block's own angles.
 2. **Vignetting coefficients are not in the metadata.** May show as
    rolloff in the blend band. Would need flat-field calibration.
 3. **`pts_type = VideoPtsEexposureFile` semantics.** If frame PTS really
