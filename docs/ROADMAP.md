@@ -115,20 +115,82 @@ this camera's is 29 frames. Expected saving: **0.14 W**, for a state machine
 and a packet ring through the frame path. `kyerag-spike --bin gating` is the
 measurement and it stays runnable.
 
-**A scrub no longer waits for pictures nobody asked for** (issue #46), which
-is the fifth M2 item. The decode thread used to look at its command queue
-only between reads, so a drag position arriving while it refilled the
-lookahead behind the last landing waited out three pair decodes first: 33 of
-the 39 ms between a keyframe seek at the reader (21 ms) and the same seek
-through the player (59 ms). It now asks between packet reads and gives the
-read up, and a scrub costs 26 ms: about 38 picture updates a second where
-there were 17. The read a seek itself asked for is never given up, because
-drag positions arrive faster than landings come out of them and a rule that
-always took the newest would show no picture at all. Playback is untouched
-by construction and by measurement: 29.97 fps presented, 0 dropped, 0
-starved, and the same 73.2 pairs/s decode rate as before.
+**Two defects the owner found flying the lock** are fixed and measured
+(issues #44 and #45), and they answer to different halves of it.
+
+The **view no longer drifts back after a drag** (#44). The camera's yaw was
+read inside the stabilized frame, and that frame's own heading is the body's
+heading low passed with #8's 3 s constant, so the number a drag set survived
+but the frame it was measured in did not: within seconds of any change of the
+camera's heading the view was carried along with it. The two requirements
+compete for one constant, because a view that holds its world direction
+indefinitely cannot also swing round with a deliberate 360, so the follow is
+now **drag relative**: the camera's heading drives the view until a drag
+moves it, the drag pins the follow where it found it, and `View > Reset view`
+hands it back. Five minutes of a wandering body heading through the real
+filter now moves the view by less than 0.05 degrees, against the 25 degrees
+of the body's own turn that used to carry it.
+
+The **once-per-revolution horizon dip** (#45) is measured and **not fixed**,
+and that is the finding. `kyerag-spike --bin dip` sweeps a locked view round
+the circle, reads the horizon in every render, and reports the defect twice
+over: as the tilt of the estimated vertical, which one render answers, and as
+the sinusoid a pilot sees, fitted over the whole pan. It reads an injected
+1 degree tilt back as 0.97. Over 12 stretches of two captures the tilt is
+**1.9 to 8.5 degrees, mean 3.7**, and none of the three suspects is it: the
+unsettled angle order is worth 0.13 degrees, both wrong mountings find no
+horizon at all, and `gyro_calib` as a bias makes it worse in all four
+readings. It is the complementary filter's own residual against an
+accelerometer that in flight is not gravity, the shipped constants are the
+best of 16 settings tried across four axes, and the real fix is to subtract
+the aircraft's own acceleration using the GPS track the file carries and this
+project does not yet read. docs/research/insv-format.md 8.7 has all of it.
+
+**A scrub no longer waits for pictures nobody asked for** (issue #46). The
+decode thread used to look at its command queue only between reads, so a
+drag position arriving while it refilled the lookahead behind the last
+landing waited out three pair decodes first: 33 of the 39 ms between a
+keyframe seek at the reader (21 ms) and the same seek through the player
+(59 ms). It now asks between packet reads and gives the read up, and a scrub
+costs 26 ms: about 38 picture updates a second where there were 17. The read
+a seek itself asked for is never given up, because drag positions arrive
+faster than landings come out of them and a rule that always took the newest
+would show no picture at all. Playback is untouched by construction and by
+measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
+as before, and the sound goes with it, because a preempted read stops
+without reading another packet and the seek behind it flushes the ring.
 
 Next in M2: high-quality zoom sampling (issue #11).
+
+**M3 has started, and the player has sound** (issue #13). The file's AAC track
+is decoded off the same demuxer as the two lens streams, resampled by
+`swresample` into the device's own format, and written to a ring that a cpal
+output stream drains. **The picture stays the clock.** Every device callback
+asks the presentation clock where the picture will be when the samples it is
+about to write are heard, and moves the sound to meet it: a splice when the
+two are more than 30 ms apart, which only a start, a seek landing or a
+recovered stall ever is, and a resampling ratio of a few parts per million the
+rest of the time, which is what holds two crystals together over a half-hour
+flight. A seek throws the ring away on the shell's thread rather than waiting
+for the decode thread to reach the seek, so no stale sound survives a scrub,
+and every start and stop is a 5 ms ramp rather than a step, so a pause does
+not click. In the control row: a speaker button after fullscreen, opening
+cosmic-player's own volume dropdown, with both settings remembered in
+cosmic-config. The wheel stayed on zoom (docs/UI.md, "Conflict 2"). Nothing is
+processed: a paramotor track is mostly wind, and it is played as recorded.
+
+`kyerag-spike --bin sync` is the measurement, and it drives the real player
+with no GPU in it: play, pause, resume, two scrubs and a frame step on a
+printed schedule, with the app's own five-second report. Over a 325 s run of
+real footage, past those, the sound sat **0.0 ms** from the picture in 40 of
+44 windows and never further than **0.8 ms**, with zero underruns and zero
+dropped chunks; the target was 40. The same binary with the drift correction
+switched off and nothing else changed sits at **+28.1 ms** and stays there,
+which is what the correction is for and is the control that says the number
+above means something. Recording the output device's monitor and measuring the
+sample-to-sample step at each join puts every one of the six below the 97th
+percentile of ordinary playback, against 12 of 15 synthetic hard cuts spliced
+into the same recording that land at the 99th or above: the fades hold.
 
 ## Milestones
 
@@ -159,9 +221,40 @@ Next in M2: high-quality zoom sampling (issue #11).
   thread off the lookahead refill, 59 ms to 26 ms per scrub), high-quality
   zoom sampling.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
-  time-range remux), audio playback.
+  time-range remux), audio playback (issue #13, done: AAC off the same
+  demuxer, cpal out, slaved to the video clock, volume and mute in the control
+  row).
 
 ## Decisions log
+
+- 2026-07-31 **The sound goes out through cpal, and follows the picture's
+  clock** (issue #13). cosmic-player was read first, as the doctrine asks, and
+  it has no audio output code to copy: it is `iced_video_player`, which is
+  GStreamer `playbin` with only the *video* sink replaced by an appsink
+  (`src/video.rs:20-26`), so its sound leaves through playbin's default
+  `autoaudiosink` and its volume and mute are playbin properties
+  (`src/main.rs:1225-1235`). No COSMIC first-party binary on this box links an
+  audio library for playback at all: `cosmic-settings-daemon` links
+  libpipewire, and that is routing. GStreamer is already rejected here for the
+  frame path, so the choice was issue #13's own pair, cpal or PipeWire
+  directly, and cpal is the smaller by a wide margin. PipeWire still plays
+  what it writes, through `pipewire-alsa`. The cost is one apt package,
+  `libasound2-dev`, because cpal's Linux target links `alsa` whatever host it
+  ends up using.
+
+  The clock is **not** re-anchored on the sound, and that was not a
+  free choice either: the pictures are paced by due time against a monotonic
+  clock (issue #4), a reframing player must not judder, and a sound card is
+  the one clock in the room that cannot be asked to wait. So the sound follows
+  instead, in two corrections of different kinds. A **splice** when the ring's
+  head is more than 30 ms from where the picture will be: sound whose moment
+  has passed is dropped, sound whose moment has not come waits under silence,
+  and the gain ramps down before the join and up after it. Only a start, a
+  seek landing or a recovered stall is ever that far out. A **resampling
+  ratio** the rest of the time, through `swr_set_compensation`, capped at
+  0.5% and settling near 0.005%: that is the difference between the sound
+  card's crystal and `CLOCK_MONOTONIC`, and without it a ring that is right
+  now is tens of milliseconds out half an hour later.
 
 - 2026-07-31 **A scrub takes the decode thread off the lookahead refill**
   (issue #46). The thread used to look at its command queue only between
@@ -186,10 +279,18 @@ Next in M2: high-quality zoom sampling (issue #11).
   276 ms to 237 ms against a 230 ms reader.
 
   **The read a seek itself asked for is never interrupted**, and that is
-  load-bearing rather than an omission. Drag positions arrive up to every
-  16.7 ms and a landing costs 21, so a rule that gave up whatever was newest
-  would give up every landing too and a fast drag would show no picture at
-  all.
+  load-bearing rather than an omission. A drag asks for positions faster than
+  pictures come out of them (10 to 12 a second against 20 to 60 asked for, in
+  the table below), so a rule that gave up whatever was newest would give up
+  every landing too and a fast drag would show no picture at all.
+
+  It composes with the sound (issue #13) without a rule of its own. A read
+  that is given up stops before reading another packet, so it feeds the ring
+  nothing more, and the seek it was given up for flushes the ring twice over:
+  `Player::hush` on the shell's thread as the command is sent, and
+  `Reader::seek` on the decode thread when it arrives. Preempting only
+  shortens the gap between those two, which is the window in which the old
+  position could still be decoded into the ring.
 
 - 2026-07-31 **Skipping the map for a frame that will be overtaken is not
   worth its line** (issue #46, measured and rejected). Under
@@ -227,7 +328,6 @@ Next in M2: high-quality zoom sampling (issue #11).
   It is not the page cache: a sweep confined to one warm 36 s window of the
   file measures the same 10.0, 11.5, 10.5, 5.5 and 0.0 against the full
   file's 10.0, 12.0, 10.0, 5.5 and 0.0, interleaved on a quiet box.
-
 - 2026-07-31 The pass **skips the lens a ray cannot reach** (issue #10). Each
   lens's picture is one cap around its own axis; the cap is solved out of the
   calibration by finding where the model's own landing leaves the image

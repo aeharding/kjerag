@@ -40,11 +40,15 @@ bare box cannot build the other layers. On Pop!_OS / Ubuntu 24.04
 sudo apt install libavcodec-dev libavdevice-dev libavfilter-dev \
   libavformat-dev libavutil-dev libpostproc-dev libswresample-dev \
   libswscale-dev libclang-dev \
-  libdrm-dev libwayland-dev libxkbcommon-dev
+  libdrm-dev libwayland-dev libxkbcommon-dev \
+  libasound2-dev
 ```
 
-The last line is libcosmic's. libcosmic also needs a newer rustc than
-Ubuntu ships (`rust-version = "1.93"`); `rustup update stable`.
+The second to last line is libcosmic's. The last one is cpal's, which the
+sound goes out through (issue #13): its Linux target links `alsa` whatever
+host it ends up using, and PipeWire is what actually plays what it writes,
+through `pipewire-alsa`. libcosmic also needs a newer rustc than Ubuntu ships
+(`rust-version = "1.93"`); `rustup update stable`.
 
 ## Gates (run before pushing)
 
