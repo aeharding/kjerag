@@ -62,6 +62,51 @@ its playback source). Kyerag does **not** depend on it (see the decisions
 log in ROADMAP.md): the proxy may be absent, so full-resolution decode
 has to stand alone.
 
+### 1.1 The two-file layout, first-hand (issue #79, 2026-07-31)
+
+**Confidence: HIGH**, measured on all three ONE X2 pairs on this box
+(firmware `v1.0.62_build2`). The second layout above is not a rumour, and
+it is not symmetric, which is the part no published source says.
+
+Each file is **one video stream** of 2880x2880 HEVC plus **its own AAC
+stream**. Both files of a pair agree exactly on the frame grid:
+`time_base` 1/30000, `start_time` 0, and the identical PTS series 0,
+1001, 2002, ... So there is no drift between two clocks to correct and
+nothing to resample, and a player needs no policy for two files
+disagreeing about when a frame is.
+
+They do **not** agree on length. The `_00_` file runs exactly one frame
+longer in all three pairs, so the last frame of lens 0 has no partner. A
+capture is the shorter of the two.
+
+| capture | lens 0 frames | lens 1 frames | duration |
+| --- | ---: | ---: | ---: |
+| 20251018_184419 | 2516 | 2515 | 83.95 s |
+| 20251018_191318 | 8204 | 8203 | 273.74 s |
+| 20251018_193615 | 7810 | 7809 | 260.59 s |
+
+**Only the `_00_` file carries a trailer.** Every `_10_` file ends in
+ordinary mp4 bytes with no magic at EOF, so the trailer reader answers
+`NoTrailer` on it. The calibration, the IMU track and the exposure track
+therefore exist once per capture and live with lens 0, and a player that
+opens the `_10_` file has to reach across to the `_00_` one or it has
+nothing to reproject with. That is also the argument for which file is
+which lens: the trailer writes record 4 and no record 12, i.e. lens 0's
+shutter track and not lens 1's (section 2, and 6.3).
+
+The `LRV_..._11_XXX.insv` proxy beside the pair is a third thing again:
+736x368, **both fisheyes in one track**, and it carries a full copy of
+the trailer. It is not a lens of anything, and a pairing rule that
+matched "the marker field differs" rather than `00` and `10`
+specifically would swallow it.
+
+Kyerag pairs at open: `kyerag_meta::sibling` for the name,
+`kyerag_media::Reader` for two demuxers in lockstep matched on frame
+index, and `CalibrationSet::from_capture` for the trailer reach. Opening
+either file of a pair renders the same sphere, byte for byte. A per-lens
+file whose partner is not on the card renders exactly what it rendered
+before, byte for byte as well: half a sphere, which is all there is.
+
 ## 2. The trailer
 
 **Confidence: HIGH.** Three independent implementations agree byte for
@@ -503,6 +548,42 @@ span) reads the right way round in a reframe after a pure rotation, which
 rules out the y-up reading of the image plane: that reading differs from
 this one by a reflection, and a reflection would have shown up as
 reversed lettering.
+
+**Re-checked on the ONE X2 with a number, 2026-07-31 (issue #79).** The
+owner reported X2 footage rendering upside down, which reads like an
+accusation against this row, and it is not: the datum is right and the
+defect was the IMU convention (8.5). Two things say so.
+
+The first is a plumb reference and its wrong-answer control. On a ground
+frame of capture 191318 the unlocked view at yaw and pitch 0 shows a pilot
+**standing upright** on level ground with his wing laid out beside him,
+terrain below and sky above. At yaw and pitch 0 the only other candidate
+consistent with the seam is exactly a half turn away, which is that same
+picture rotated 180 degrees: the pilot hangs head down with the sky under
+his feet.
+
+The second is arithmetic the seam can check. Under a datum of `roll + d`
+the two lenses disagree at the seam by `roll_0 + roll_1 + 2d`, so the X2's
+own numbers predict:
+
+| datum `d` | predicted along-seam disagreement |
+| --- | ---: |
+| `-90` (shipped) | **+1.246 deg** |
+| `+90` | +1.246 deg |
+| `0` or `180` | 181 deg |
+
+`kyerag-spike --bin seam` measures **+1.086** on a still frame of 191318
+and **+1.188** on 193615, within 0.16 degrees of the prediction, at an
+instrument repeatability of 0.02. The two quarter-turn datums are
+indistinguishable there by construction, which is what the plumb reference
+above settles; `0` and `180` are ruled out outright, because a correlator
+searching plus or minus 2 degrees could not have found 181.
+
+Note what this does **not** claim. A wrong picture datum and a wrong axis
+convention are not separately observable in a **locked** view: an error in
+one is cancelled exactly by the compensating error in the other, so the
+sweep of 8.5 would have absorbed a bad datum silently. It is the unlocked
+picture, which has no IMU in it at all, that pins the datum's own half.
 
 Reproduce any row with the headless instrument, which runs the app's own
 pass and writes a PNG:
@@ -1725,6 +1806,98 @@ frames:
 Against 0.04 to 0.68 degrees of standard deviation for the right answer.
 The instrument can tell a wrong answer from a right one by three orders of
 magnitude, and the 24-way sweep above is the same control run 23 times.
+
+#### The ONE X2 is a different mounting, and the sweep alone cannot settle it (issue #79)
+
+**Confidence: HIGH for the answer, and the interesting part is the
+method.** Measured 2026-07-31 on three ONE X2 captures, after issue #79's
+pairing made the whole sphere available to look at.
+
+The X2 wants **`Zxy`**, not the X4's `xZY`. Held by the X4's string, an X2's
+accelerometer points **121 degrees** from where the picture says up is. That
+is the owner's "horizon is way wrong", and most of his "upside down" as
+well: the player locks the horizon by default, so a wrong vertical arrives
+as a picture turned over.
+
+**The 24-way sweep narrows it to two and stops.** Eight stretches of the
+three captures, 120 rendered frames each:
+
+| stretch | frames | best | second |
+| --- | ---: | --- | --- |
+| 191318, 28 s | 120/120 | **zYX, 8.99** | Zxy, 19.66 |
+| 191318, 60 s | 52/120 | **Zxy, 10.37** | zYX, 14.48 |
+| 191318, 120 s | 91/120 | **zYX, 18.25** | Zxy, 19.70 |
+| 191318, 200 s | 120/120 | **Zxy, 17.49** | zYX, 29.38 |
+| 193615, 5 s | 120/120 | **Zxy, 19.36** | zYX, 20.68 |
+| 193615, 30 s | 120/120 | **zYX, 9.65** | Zxy, 19.45 |
+| 184419, 5 s | 120/120 | **Zxy, 5.86** | zyx, 25.92 |
+| 184419, 40 s | 64/120 | **zYX, 35.52** | XZy, 57.17 |
+
+`zYX` and `Zxy` take first and second between them in seven of the eight,
+and the other 22 are nowhere. Read against 8.5's own criterion that is not
+a winner and noise, it is two winners: the pair are a **half turn apart
+about `(1, -1, 0)`**, and on this camera's resting attitudes that half turn
+moves the accelerometer's up by as little as 13 degrees, so which of them
+wins a stretch is decided by whatever else is in the error.
+
+**What else is in the error is the reference.** This footage is a mountain
+launch and there is no true horizon in it: the sky-to-ground line
+`skyline` locks onto is a **ridge**, and a ridge is not level. That is the
+same limitation PR #51 recorded for the X2 clip, and it is why the residual
+here is 6 to 35 degrees where an X4's is 2 to 12.
+
+#### So the last step is not a horizon at all
+
+**Aim the view along what the accelerometer calls up, on a frame where the
+camera is not moving, and look at what is there.** At rest the
+accelerometer is gravity and nothing else, so the right convention points
+at the sky by physics, with no line to fit and nothing to be level.
+
+Three instants across two captures, each with the camera under 5 deg/s and
+inside 0.015 g of 1 g, chosen because at each of them the two candidates
+point a half turn apart rather than 13 degrees apart:
+
+| capture, instant | `zYX` points at | `Zxy` points at |
+| --- | --- | --- |
+| 184419, 1.0 s | bare dirt | sky, and a helmet from below |
+| 184419, 5.0 s | dirt, and a pair of boots | sky, a helmet and the lines |
+| 191318, 1.0 s | dirt, and a pair of boots | sky, and a helmet from below |
+
+A pair of boots seen from above is the nadir. Three for three, and the
+renders are one command each:
+
+```sh
+cargo run --release -p kyerag-spike --bin reframe -- <file.insv> \
+  time=5 yaw=15.1 pitch=39.4 fov=90
+```
+
+The yaw and pitch come from the candidate itself: `body_from_imu(axes,
+lens0) * accel`, aimed with `pitch = -asin(d.y)` and `yaw = atan2(d.x,
+d.z)`. Run the same command with the other candidate's angles and the
+picture is the ground.
+
+#### The negative control, on the X2
+
+The shipped `xZY` run through the same pass on the same frames, and the
+answer is the loudest kind there is:
+
+| variant | frames with a horizon | mean | sd | p-p |
+| --- | ---: | ---: | ---: | ---: |
+| `Zxy` (the file's own now) | 10/120 | 4.92 | **0.11** | **0.33** |
+| `xZY` (what shipped) | **0/120** | | | |
+| `Xyz` (telemetry-parser's X4 fall-through) | 0/120 | | | |
+| `Xyz`, on a rollier stretch | 12/120 | -72.04 | **48.69** | 179.14 |
+
+A horizon 121 degrees off level is not in a picture aimed at where it ought
+to be, which is the same failure #40 saw and is why the count of frames is
+read next to every number. The 4.92 degree mean is the ridge's own slope,
+not a lock error; the 0.11 and 0.33 are the lock.
+
+**telemetry-parser's own X2 string is `xZy`, and it is not this answer.**
+In Kyerag's frame `xZy` has determinant -1, so it is a reflection rather
+than a mounting and the sweep does not enumerate it at all; `horizon`
+carries it as a standing wrong answer, where it puts the line 22 degrees
+from where `Zxy` puts it. That is 8.4's point with a number on it.
 
 #### Where a Studio export drops in
 

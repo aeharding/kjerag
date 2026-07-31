@@ -2896,6 +2896,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "ffmpeg-next",
+ "kyerag-meta",
 ]
 
 [[package]]

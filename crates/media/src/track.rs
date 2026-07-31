@@ -30,6 +30,13 @@ type Resampler = ff::software::resampling::Context;
 
 /// One audio stream, decoded and resampled into the device's own format.
 pub struct Track {
+    /// Which of the reader's files this stream is in. A capture written as
+    /// one file per lens has an audio stream in **both** of them, and they
+    /// are two recordings of the same moment rather than two halves of one,
+    /// so the packets of the other file's stream have to be told apart from
+    /// these and skipped. Without it they arrive at the same stream index
+    /// and are fed to the ring twice.
+    pub source: usize,
     pub stream: usize,
     decoder: ff::decoder::Audio,
     /// Built from the first decoded frame rather than at open: a decoder does
@@ -58,6 +65,7 @@ impl Track {
     /// silently rather than by refusing to open.
     pub fn open(
         input: &ff::format::context::Input,
+        source: usize,
         pipe: Pipe,
         rate: u32,
         channels: usize,
@@ -72,6 +80,7 @@ impl Track {
         let context = ff::codec::context::Context::from_parameters(stream.parameters())?;
 
         Ok(Some(Self {
+            source,
             stream: index,
             decoder: context.decoder().audio()?,
             resampler: None,
