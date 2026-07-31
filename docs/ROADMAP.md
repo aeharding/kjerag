@@ -7,8 +7,10 @@ GitHub issues; this doc is the map, issues are the tasks.
 bootstrapped, M0 frame path proven end to end on real footage.
 `cargo run --release --bin spike -- <file.insv>` decodes one 3840x3840 lens
 on VA-API, imports the dmabuf planes into wgpu with no copy, and renders to
-PNG at 103 fps (3.4x realtime). Next: libcosmic bring-up (issue #1), dual
-decode, and the Mei reprojection.
+PNG at 103 fps (3.4x realtime). M1 has started: `src/meta/` reads the
+trailer's calibration (issue #2). Next: libcosmic bring-up (issue #1),
+dual decode, and the Mei reprojection (issue #3), which consumes the
+`CalibrationSet` as it stands.
 
 ## Milestones
 
@@ -52,6 +54,15 @@ decode, and the Mei reprojection.
 - 2026-07-30 PR policy (Alex): the coordinator self-merges once CI is
   green and the diff is reviewed. Alex steers via issues, the roadmap,
   and check-ins.
+- 2026-07-30 The trailer is read directly (`src/meta/trailer.rs`, ~45
+  lines) instead of through `telemetry-parser`. The published 0.2.6
+  aborts on our X4 Air footage: it serializes the metadata protobuf's
+  enum fields with `unsafe { transmute }` of the raw i32, and the file
+  carries a value no enum in that schema has. The fix exists only on an
+  unpublished master that pulls two further git forks. Kyerag was already
+  bypassing that crate's lens profile (wrong on the Air) and would have
+  had to bypass its merged exposure records (M2), so what remained was
+  the record walk. `prost` decodes the eleven fields we read.
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 
