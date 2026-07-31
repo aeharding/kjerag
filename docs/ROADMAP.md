@@ -383,6 +383,17 @@ view at a fixed 164 degrees per window width, which is the rate the pinned
 drag itself is going at in the last view before the handover, so the two meet
 at the threshold with nothing to feel. Under 110 nothing changed at all.
 
+**And the zoom key no longer lets go of the drag** (issue #83, pre-existing
+and surfaced by the three above). `Ctrl+=` and `Ctrl+-` took a held drag's
+hold again at the middle of the frame while the hand was somewhere else, so
+the next move of the pointer hauled the picture over to whatever the middle
+had been pointing at: 33 degrees of yaw for a cursor that did not move, in
+the widget-level check that reproduced it. A held drag already knows where
+the cursor is, because that is what the wide regime measures its travel from,
+and the key zooms there now, which is what the wheel has always done. With
+nothing held it still zooms about the middle, which is where a keyboard with
+no hand on the picture is pointing.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
