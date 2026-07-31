@@ -154,6 +154,14 @@ already waiting for, and seek (issue #5) on the same pull API.
   back inside the circle, which showed as a raw circular fisheye hanging
   behind the reframed view. The bound comes out of the calibration's own
   xi, so no maximum field of view has to be guessed at.
+- 2026-07-31 The shell's design is written down before it is built, in
+  docs/UI.md, from the cosmic-player / cosmic-files / cosmic-edit sources
+  (issue #16). Every decision in it cites the first-party file it copies,
+  and the places where no COSMIC precedent exists are listed as open
+  questions rather than answered by us. The written guidelines turned out
+  to cover almost none of this: `system76/hig` is one README about dialogs
+  and copy that defers to the elementary HIG, which has no keyboard,
+  header-bar or media page either. The source is the guideline.
 
 - 2026-07-31 Frames are delivered in pairs, not one stream at a time
   (issue #4). `Frames` carries every video stream at one PTS, so the two
