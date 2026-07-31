@@ -12,17 +12,25 @@
 //! attached, and this is where the number comes from.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin playback -- <file.insv> [seconds] [hz]
+//! cargo run --release -p kyerag-spike --bin playback -- <file.insv> [seconds] [hz] [shots]
 //! ```
 //!
-//! Nothing is written to disk: this instrument reports, it does not render
-//! pictures of real footage.
+//! `shots` is issue #15's measurement: that many screen captures, spread
+//! over the run, taken through the same [`Scene::capture`] the `s` key
+//! reaches, while the file plays. What has to stay true is the pacing
+//! report underneath it, so the number this instrument exists to produce is
+//! dropped and starved with a capture burst running.
+//!
+//! Nothing is written to disk unless `shots` asks for captures, which land
+//! in ./scratch/ (gitignored): frames of real footage are personal video
+//! and this repo is public.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use kyerag_media::{Fallible, Reader};
-use kyerag_render::{Camera, Extent, Next, Scene, ScenePipeline, Size, dmabuf};
+use kyerag_render::{Camera, Extent, Next, Request, Scene, ScenePipeline, Shot, Size, dmabuf};
 
 /// Not sRGB, so the pass writes the video's own numbers: the same choice the
 /// `reframe` instrument makes.
@@ -38,20 +46,33 @@ const OUTPUT: Size = Size {
 /// Pairs each depth of the decode-side benchmark pulls.
 const BENCH_PAIRS: usize = 200;
 
+/// What the app asks for (`kyerag::shot::WIDTH`), so the burst costs what a
+/// pilot's `s` key costs.
+const SHOT_WIDTH: u32 = 3840;
+
 fn main() -> Fallible<()> {
     let args: Vec<String> = std::env::args().collect();
     let input = PathBuf::from(
         args.get(1)
-            .ok_or("usage: playback <file.insv> [seconds] [hz]")?,
+            .ok_or("usage: playback <file.insv> [seconds] [hz] [shots] [yaw]")?,
     );
     let seconds: u64 = parse(&args, 2, 60)?;
     let hz: u32 = parse(&args, 3, 60)?;
+    let shots: u32 = parse(&args, 4, 0)?;
+    // Degrees, and the reason it is here is the captures: a view down a
+    // lens axis holds one lens, and only a view across the seam proves a
+    // still carries both.
+    let yaw: f32 = parse(&args, 5, 0.0)?;
 
     for lookahead in [0, 2, 4] {
         println!("{}", drain(&input, lookahead)?);
     }
     println!();
-    play(&input, Duration::from_secs(seconds), hz)
+    let camera = Camera {
+        yaw: yaw.to_radians(),
+        ..Camera::default()
+    };
+    play(&input, Duration::from_secs(seconds), hz, shots, camera)
 }
 
 fn parse<T: std::str::FromStr>(args: &[String], i: usize, fallback: T) -> Fallible<T>
@@ -102,7 +123,7 @@ fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
 /// (`iced`'s `RedrawRequest::At`, from `kyerag_render`'s widget), so this
 /// does too. `hz` is the display's refresh rate, and caps how often a redraw
 /// can happen when the scene asks for one as soon as possible.
-fn play(input: &Path, run: Duration, hz: u32) -> Fallible<()> {
+fn play(input: &Path, run: Duration, hz: u32, shots: u32, camera: Camera) -> Fallible<()> {
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
     println!("device: {}", dmabuf::device_report(&gpu.device));
@@ -111,15 +132,17 @@ fn play(input: &Path, run: Duration, hz: u32) -> Fallible<()> {
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let refresh = Duration::from_secs_f64(1.0 / f64::from(hz));
     println!(
-        "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{}",
+        "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{} at yaw {:.0}",
         run.as_secs(),
         OUTPUT.width,
-        OUTPUT.height
+        OUTPUT.height,
+        camera.yaw.to_degrees(),
     );
 
     let start = Instant::now();
     let cpu = Cpu::now();
     let (mut redraws, mut render) = (0u64, Duration::ZERO);
+    let mut burst = Burst::new(shots, run);
 
     while start.elapsed() < run {
         let now = Instant::now();
@@ -128,13 +151,20 @@ fn play(input: &Path, run: Duration, hz: u32) -> Fallible<()> {
             Next::Refresh => now + refresh,
             Next::Never => break,
         };
-        let primitive = scene.primitive(Camera::default());
+        let armed = burst.due(start.elapsed());
+        if armed {
+            scene.capture(burst.request());
+        }
+        let primitive = scene.primitive(camera);
+
+        let began = Instant::now();
         pipeline.prepare(
             &primitive,
             &gpu.device,
             &gpu.queue,
             OUTPUT.width as f32 / OUTPUT.height as f32,
         );
+        burst.prepared(armed, began.elapsed());
 
         let drawn = Instant::now();
         gpu.render(&pipeline)?;
@@ -159,8 +189,142 @@ fn play(input: &Path, run: Duration, hz: u32) -> Fallible<()> {
         render.as_secs_f64() * 1000.0 / redraws as f64,
         cpu.percent(elapsed),
     );
+    burst.report();
     pause(&mut scene, Duration::from_secs(1));
     Ok(())
+}
+
+/// A run of captures during playback, and what they cost the redraw they
+/// were armed on.
+///
+/// The whole of issue #15's performance claim is the difference between the
+/// two `prepare` numbers this prints: a capture adds a target, a pass and a
+/// copy to one redraw, and everything after the submit belongs to a worker
+/// thread. If that difference ever grew to a frame's worth of time the
+/// pilot would see the flight stutter as they photographed it.
+struct Burst {
+    left: u32,
+    every: Duration,
+    next: Duration,
+    written: Sender<String>,
+    reports: mpsc::Receiver<String>,
+    /// Worst and total `prepare` with a capture armed, and without.
+    with: Cost,
+    without: Cost,
+}
+
+#[derive(Default)]
+struct Cost {
+    worst: Duration,
+    total: Duration,
+    count: u32,
+}
+
+impl Cost {
+    fn add(&mut self, took: Duration) {
+        self.worst = self.worst.max(took);
+        self.total += took;
+        self.count += 1;
+    }
+
+    fn mean_ms(&self) -> f64 {
+        self.total.as_secs_f64() * 1000.0 / f64::from(self.count.max(1))
+    }
+}
+
+impl Burst {
+    fn new(shots: u32, run: Duration) -> Self {
+        let (written, reports) = mpsc::channel();
+        // Spread over the run, the first one a beat in so that the file is
+        // actually playing when it fires.
+        let every = run / shots.max(1);
+        Self {
+            left: shots,
+            every,
+            next: every / 2,
+            written,
+            reports,
+            with: Cost::default(),
+            without: Cost::default(),
+        }
+    }
+
+    /// Whether a capture should be armed on the redraw about to happen.
+    fn due(&mut self, elapsed: Duration) -> bool {
+        if self.left == 0 || elapsed < self.next {
+            return false;
+        }
+        self.left -= 1;
+        self.next += self.every;
+        true
+    }
+
+    fn request(&self) -> Request {
+        let written = self.written.clone();
+        Request {
+            width: SHOT_WIDTH,
+            then: Box::new(move |taken| {
+                let _ = written.send(match taken.and_then(|shot| write_png(&shot)) {
+                    Ok(line) => line,
+                    Err(e) => format!("failed: {e}"),
+                });
+            }),
+        }
+    }
+
+    fn prepared(&mut self, armed: bool, took: Duration) {
+        match armed {
+            true => self.with.add(took),
+            false => self.without.add(took),
+        }
+    }
+
+    fn report(&self) {
+        if self.with.count == 0 {
+            return;
+        }
+        println!(
+            "shots:  {} captures at {SHOT_WIDTH} px, prepare {:.2} ms with one armed \
+             against {:.2} ms without (worst {:.2} against {:.2})",
+            self.with.count,
+            self.with.mean_ms(),
+            self.without.mean_ms(),
+            self.with.worst.as_secs_f64() * 1000.0,
+            self.without.worst.as_secs_f64() * 1000.0,
+        );
+        // The workers are still developing the last of them, and a capture
+        // nobody waited for is not a capture that happened.
+        for _ in 0..self.with.count {
+            match self.reports.recv() {
+                Ok(line) => println!("shot:   {line}"),
+                Err(e) => println!("shot:   lost: {e}"),
+            }
+        }
+    }
+}
+
+/// Worker thread: the spike's own version of what the app does with a
+/// [`Shot`], which is a PNG on disk. No naming policy here; the app owns
+/// that (`kyerag::shot`).
+fn write_png(shot: &Shot) -> Fallible<String> {
+    let began = Instant::now();
+    let out = PathBuf::from("scratch").join(format!("playback-frame{}.png", shot.index));
+    std::fs::create_dir_all("scratch")?;
+
+    let file = std::io::BufWriter::new(std::fs::File::create(&out)?);
+    let mut encoder = png::Encoder::new(file, shot.width, shot.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&shot.rgba)?;
+
+    Ok(format!(
+        "{} at {:.3} s, {}x{}, encoded in {:.0} ms",
+        out.display(),
+        shot.time.as_secs_f64(),
+        shot.width,
+        shot.height,
+        began.elapsed().as_secs_f64() * 1000.0,
+    ))
 }
 
 /// What the space bar does, without a keyboard: the clock stops where it is

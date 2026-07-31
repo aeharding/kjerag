@@ -26,6 +26,10 @@ wgpu = "28.0"
 # The dmabuf import is hand-rolled against raw Vulkan on wgpu 28, so the
 # ash major must be the one wgpu-hal 28 links.
 ash = "0.38"
+# Resolves the XDG user directories, which is where a still goes. Already in
+# the tree through libcosmic, and the crate the COSMIC screenshot portal
+# itself asks for the folder we write into.
+dirs = "6.0"
 libc = "0.2"
 # Hands a URL to the desktop, for the About page's links. cosmic-edit and
 # cosmic-files both open theirs with this crate.

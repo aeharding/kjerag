@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
 use kyerag_meta::{CalibrationSet, Lens};
 
+use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, MAX_LENSES, Reframe};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
 
@@ -67,6 +68,8 @@ pub struct Scene {
     show: Option<Show>,
     /// Wall-clock origin for the no-file gradient.
     started: Instant,
+    /// Where a capture waits for the redraw that takes it (issue #15).
+    shutter: Shutter,
     /// Set while the shell has hidden the controls, which is when the pointer
     /// goes with them: `mouse_interaction` answers `Hidden` instead of `Grab`
     /// (docs/UI.md, "The cursor"). One bit of shell state, and the only one
@@ -105,6 +108,7 @@ impl Scene {
         Self {
             show: None,
             started: Instant::now(),
+            shutter: Shutter::default(),
             cursor_hidden: false,
             nudge: Cell::new(None),
         }
@@ -297,11 +301,19 @@ impl Scene {
         }
     }
 
+    /// Asks for a still of whatever the next redraw draws, at the size the
+    /// request names. The pixels come back on a worker thread, through the
+    /// request's own `then`; nothing here waits.
+    pub fn capture(&self, request: Request) {
+        self.shutter.arm(request);
+    }
+
     pub fn primitive(&self, camera: Camera) -> ScenePrimitive {
         ScenePrimitive {
             elapsed: self.started.elapsed().as_secs_f32(),
             camera,
             view: self.show.as_ref().and_then(Show::view),
+            shutter: self.shutter.clone(),
         }
     }
 }
@@ -369,6 +381,10 @@ pub struct ScenePrimitive {
     elapsed: f32,
     camera: Camera,
     view: Option<View>,
+    /// A handle on the [`Scene`]'s shutter, not a copy of it: the request
+    /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
+    /// first, and one that never does is still armed for the next.
+    shutter: Shutter,
 }
 
 /// A pair of decoded lenses and the calibration that reprojects them. Both
@@ -397,7 +413,10 @@ pub struct ScenePipeline {
     /// Set when an import fails, so the message is printed once rather than
     /// on every redraw.
     failed: bool,
-    linearize: bool,
+    /// The target this pass was built for, which is iced's surface format.
+    /// A capture renders into a texture of the same format, so that what it
+    /// reads back is what the compositor would have been handed.
+    format: wgpu::TextureFormat,
     reported: bool,
 }
 
@@ -468,13 +487,17 @@ impl ScenePipeline {
             bind_group,
             live: VecDeque::new(),
             failed: false,
-            // iced picks an sRGB surface when it gamma-corrects, and the GPU
-            // then encodes whatever the shader writes. Video is already
-            // gamma-encoded, so it has to be decoded back to linear first or
-            // the picture washes out.
-            linearize: format.is_srgb(),
+            format,
             reported: false,
         }
+    }
+
+    /// iced picks an sRGB surface when it gamma-corrects, and the GPU then
+    /// encodes whatever the shader writes. Video is already gamma-encoded,
+    /// so it has to be decoded back to linear first or the picture washes
+    /// out.
+    fn linearize(&self) -> bool {
+        self.format.is_srgb()
     }
 
     /// `aspect` is the output's width over its height, which is what decides
@@ -500,11 +523,116 @@ impl ScenePipeline {
                 view.frames.size,
                 primitive.camera,
                 aspect,
-                self.linearize,
+                self.linearize(),
             ),
-            _ => Reframe::gradient(primitive.elapsed, aspect, self.linearize),
+            _ => Reframe::gradient(primitive.elapsed, aspect, self.linearize()),
         };
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());
+
+        // After the uniform write, and only after it: the write lands at the
+        // next submit on this queue, and the capture's own submit is that
+        // one. Taken here rather than in `draw` because this is the call
+        // that has a device to render with.
+        if let Some(request) = primitive.shutter.take() {
+            self.shoot(device, queue, request, aspect, primitive.view.as_ref());
+        }
+    }
+
+    /// Draws the view a second time, offscreen, at the size the capture
+    /// asked for. Everything after the submit is the worker thread's
+    /// (`super::capture`).
+    fn shoot(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        request: Request,
+        aspect: f32,
+        view: Option<&View>,
+    ) {
+        let at = view.map_or_else(Stamp::default, |view| Stamp {
+            index: view.frames.index,
+            time: view.frames.timestamp,
+        });
+        capture::deliver(
+            self.expose(device, queue, request.width, aspect, at),
+            request.then,
+        );
+    }
+
+    /// The render-thread half: a target, one pass into it, and the copy that
+    /// will be read back. The frame it samples is the one the bind group
+    /// already points at, and `RETAINED` is what keeps that frame's decoder
+    /// surfaces alive long enough for this pass to finish: three frames of
+    /// slack against a pass that costs a few milliseconds.
+    fn expose(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        aspect: f32,
+        at: Stamp,
+    ) -> Fallible<Pending> {
+        let order = Order::of(self.format)?;
+        let size = capture::fitted(width, aspect)?;
+        let stride = capture::stride(size.width);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("capture"),
+            size: size.extent(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture"),
+            size: u64::from(stride) * u64::from(size.height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("capture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            self.draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(size.height),
+                },
+            },
+            size.extent(),
+        );
+
+        Ok(Pending {
+            device: device.clone(),
+            _texture: texture,
+            readback,
+            submission: queue.submit([encoder.finish()]),
+            size,
+            stride,
+            order,
+            at,
+        })
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {

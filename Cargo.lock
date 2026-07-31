@@ -2802,9 +2802,11 @@ dependencies = [
 name = "kyerag"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "kyerag-render",
  "libcosmic",
  "open",
+ "png 0.17.16",
  "serde",
  "url",
 ]

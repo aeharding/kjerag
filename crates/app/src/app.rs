@@ -43,9 +43,11 @@ use cosmic::app::{Core, Settings, Task, context_drawer};
 use cosmic::cosmic_config;
 use cosmic::dialog::file_chooser::{self, FileFilter};
 use cosmic::iced::event::{self, Event};
+use cosmic::iced::futures::channel::oneshot;
 use cosmic::iced::keyboard::key::{Key, Physical};
 use cosmic::iced::keyboard::{Event as KeyEvent, Modifiers};
 use cosmic::iced::mouse::Event as MouseEvent;
+use cosmic::iced::runtime::clipboard;
 use cosmic::iced::widget::shader;
 use cosmic::iced::window::{self, Mode};
 use cosmic::iced::{Alignment, Length, Limits, Subscription, time};
@@ -55,12 +57,13 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Nudge, Scene, Stats};
+use kyerag_render::{Accuracy, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
 use crate::key_bind::{Action, JUMP, key_binds};
-use crate::{menu, strings};
+use crate::shot::{Destination, Done};
+use crate::{menu, shot, strings};
 
 /// Icons for the two jump buttons, which are not in the icon theme.
 /// cosmic-player ships them in its own `res/` and so do we (`res/icons/`,
@@ -124,11 +127,11 @@ pub enum Message {
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
-    /// An action whose capability has not landed yet: the two frame ones
-    /// (issue #15). They are in the key map and in the menu so that the menu
-    /// is complete and draws their accelerators; this is what they do until
-    /// then.
-    NotYet,
+    /// Take a still of the view as it stands: `s`, `Ctrl+C`, the camera
+    /// button, or either File menu item (issue #15).
+    Capture(Destination),
+    /// One came back, some milliseconds later, off the render thread.
+    Captured(Result<Done, String>),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -333,8 +336,11 @@ impl cosmic::Application for App {
                 // stay up long enough to see what it did.
                 self.show_controls(now);
             }
-            // Issue #15 is what makes these do something.
-            Message::NotYet => {}
+            Message::Capture(to) => {
+                self.show_controls(now);
+                return self.capture(to);
+            }
+            Message::Captured(still) => return report_still(still),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -604,6 +610,35 @@ impl App {
         }
     }
 
+    /// Arms a still of the next frame drawn, and waits for it (issue #15).
+    ///
+    /// Nothing here touches the picture. The render pass takes the request on
+    /// its next redraw, a worker thread reads the pixels back and either
+    /// writes the PNG or encodes it for the clipboard, and this task is woken
+    /// when that is done. The clipboard is the one step that has to come back
+    /// to the shell, because on Wayland it is the window that offers the data.
+    fn capture(&self, to: Destination) -> Task<Message> {
+        let Some(open) = &self.open else {
+            return Task::none();
+        };
+        let video = open.path.clone();
+        let (finished, waiting) = oneshot::channel();
+        open.scene.capture(Request {
+            width: shot::WIDTH,
+            then: Box::new(move |taken| {
+                let done = taken
+                    .and_then(|still| shot::finish(&still, &video, to))
+                    .map_err(|e| e.to_string());
+                let _ = finished.send(done);
+            }),
+        });
+        Task::perform(waiting, |done| {
+            action::app(Message::Captured(done.unwrap_or_else(|_| {
+                Err("the capture was replaced before a redraw took it".to_owned())
+            })))
+        })
+    }
+
     fn report(&mut self, now: Instant) {
         let Some(stats) = self.open.as_ref().and_then(|open| open.scene.stats()) else {
             return;
@@ -699,9 +734,10 @@ impl App {
                 // Issue #15. A frame capture is about the view rather than
                 // the transport, so it joins fullscreen in the right hand
                 // group (cosmic-player `src/main.rs:2013-2051`).
-                .push(widget::button::icon(
-                    icon::from_name("camera-photo-symbolic").size(16),
-                ))
+                .push(
+                    widget::button::icon(icon::from_name("camera-photo-symbolic").size(16))
+                        .on_press(Message::Capture(Destination::Save)),
+                )
                 .push(
                     widget::button::icon(icon::from_name("view-fullscreen-symbolic").size(16))
                         .on_press(Message::Fullscreen),
@@ -746,6 +782,30 @@ impl App {
                 .into(),
         ])
         .into()
+    }
+}
+
+/// Says where the still went, and puts it on the clipboard when that is what
+/// was asked for.
+///
+/// A line on the terminal is all the feedback there is today. docs/UI.md asks
+/// for a toast here and leaves its wording, and whether it carries an action,
+/// as an open question for the owner (its "Open questions", 2): not this
+/// PR's to settle.
+fn report_still(still: Result<Done, String>) -> Task<Message> {
+    match still {
+        Ok(Done::Saved(path)) => {
+            println!("shot:   {}", path.display());
+            Task::none()
+        }
+        Ok(Done::Copied(png)) => {
+            println!("shot:   copied");
+            clipboard::write_data(png)
+        }
+        Err(e) => {
+            eprintln!("kyerag: no still: {e}");
+            Task::none()
+        }
     }
 }
 

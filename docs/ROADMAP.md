@@ -29,9 +29,17 @@ recent files, the whole key map, fullscreen, Settings and About drawers, and
 a control overlay that takes itself and the pointer away after 2 s of
 stillness while playing and never while paused. The scrubber scrubs (issue
 #5): dragging it seeks to keyframes, 21 ms each wherever in the 37.9 GB file
-they land, and letting go seeks to the exact frame. Next: the seam blend and
-exposure match (issue #7), which is what makes that seam disappear, and
-screenshots (issue #15), which is the last of the MVP.
+they land, and letting go seeks to the exact frame. **The view can be
+photographed** (issue #15): `s`, the camera button and `File > Save frame`
+write a 3840 px wide PNG of the reframed view, at the window's aspect and
+not its size, into the desktop's screenshots folder; `Ctrl+C` puts the same
+picture on the clipboard as `image/png`. The capture is the window's own
+pipeline and bind group drawn a second time into a texture of the surface's
+format, so the numbers in the file are the numbers on the screen, and
+everything after the submit runs on a worker thread: 13 captures over 20 s
+of playback, zero dropped and zero starved in every report. Next: the seam
+blend and exposure match (issue #7), which is what makes that seam
+disappear, and M1 is done.
 
 ## Milestones
 
@@ -45,8 +53,10 @@ screenshots (issue #15), which is the last of the MVP.
   dual-stream decode, the presentation clock and play/pause (issue #4).
   Full 360-degree look-around lands here too (issue #27): both lenses
   sampled, hard seam, which #7 blends in M2. The app shell around all of
-  it is issue #16, and seeking is issue #5. Screenshots (#15) are what
-  is left.
+  it is issue #16, seeking is issue #5, and screenshots are issue #15.
+  What is left of the MVP's UI is the two Settings rows for the capture
+  folder and resolution, and the toast that says where a still went; both
+  wait on docs/UI.md's open question about the wording.
 - **M2 Quality** — seam blend + per-frame exposure match, gyro horizon
   lock (+ Studio-diff test harness), rolling-shutter correction,
   hemisphere-aware decode gating, high-quality zoom sampling.
@@ -303,6 +313,16 @@ own hemisphere is the obvious saving and is not taken, because 1.6 ms of a
 The windowed app over the same 60 s: zero dropped and zero starved in
 every 5 s report, 30.0-30.2 redraws/s, 13.4% of one core and 295 MiB RSS
 for the whole libcosmic process.
+
+Screenshots (issue #15), 3840 px wide at the window's aspect. In the
+windowed app, 20 s of playback with a still saved every 2 s and copied
+every 7 s: zero dropped and zero starved in all four 5 s reports, 28.9 to
+30.0 fps presented. Headless, five captures over 10 s
+(`playback <file> 10 60 5`): 29.77 fps presented, zero dropped, zero
+starved, and `prepare` costs 2.19 ms on the redraw that takes a capture
+against 0.57 ms on one that does not (worst 6.26 ms against 3.29 ms). What
+is left is the readback and the encode, and both belong to a worker
+thread: 45 to 53 ms to encode one 8.5 MB PNG.
 
 Seeking, 12 places from 1% to 97% of the 37.9 GB file, warm
 (`cargo run --release -p kyerag-spike --bin seek`):

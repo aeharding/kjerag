@@ -14,6 +14,7 @@ mod config;
 mod dnd;
 mod key_bind;
 mod menu;
+mod shot;
 mod strings;
 
 use std::process::ExitCode;
