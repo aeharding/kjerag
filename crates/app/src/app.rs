@@ -293,6 +293,13 @@ impl cosmic::Application for App {
                 self.show_controls(now);
             }
             Message::AudioToggle => {
+                // A file with no sound in it draws the speaker button
+                // disabled, and a key has no disabled state: the guard the
+                // two ways in share lives here, so `m` on a silent file
+                // leaves the setting and the icon alone.
+                if !self.has_sound() {
+                    return Task::none();
+                }
                 self.stored.config.muted = !self.stored.config.muted;
                 self.stored.write_config();
                 self.hold_sound();
@@ -645,6 +652,14 @@ impl App {
         };
         open.scene.set_volume(self.stored.config.volume as f32);
         open.scene.set_muted(self.stored.config.muted);
+    }
+
+    /// Whether there is anything to mute: `false` for no file, for a file
+    /// with no sound in it, and for a box with no working output.
+    fn has_sound(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_some_and(|open| open.scene.has_sound())
     }
 
     fn retitle(&mut self) -> Task<Message> {
