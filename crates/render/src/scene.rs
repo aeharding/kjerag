@@ -181,9 +181,9 @@ impl Motion {
     ///
     /// `None` where there is nothing to correct with, or nothing known to
     /// correct: a file with no IMU record, a trailer with no readout time,
-    /// and every camera whose readout direction has not been measured, which
-    /// today is all of them (`kyerag_meta::Sweep::Unknown`). The pass is then
-    /// what it was before issue #9, and the picture with it.
+    /// and any camera whose readout direction has not been measured
+    /// (`kyerag_meta::Sweep::Unknown`, which today is everything but an X4).
+    /// The pass is then what it was before issue #9, and the picture with it.
     fn rolling(&self, at: i64, readout: Readout) -> Option<Rolling> {
         let span = (readout.seconds * 1e6) as i64;
         let axis = readout.sweep.axis();
@@ -1243,8 +1243,8 @@ mod tests {
     }
 
     /// And a camera whose readout direction has not been measured is the same
-    /// case, which today is every camera: `Sweep::Unknown` is a zero axis and
-    /// there is nothing to apply it along.
+    /// case, which today is everything that is not an X4: `Sweep::Unknown` is
+    /// a zero axis and there is nothing to apply it along.
     #[test]
     fn an_unknown_sweep_gets_no_readout() {
         let held = motion(turning(90.0));

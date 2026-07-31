@@ -408,7 +408,7 @@ has already smoothed is 0.41 codes on 40% of pixels and no measurable change
 in detail at all. `Sampling::Sharp` keeps it renderable, one line from
 shipping, for the footage that would change the answer.
 
-## Rolling shutter (issue #9): fused, measured, and switched off
+## Rolling shutter (issue #9): fused, measured, and on
 
 A frame does not leave the sensor at an instant. `rolling_shutter_time` is
 15.883 ms on the X4 Air, so the row a ray lands on was read up to 8 ms from
@@ -433,16 +433,21 @@ motion during the frame, not the display's, so a view that rides the body has
 the same skew in it as one that does not. With no IMU record it disables
 itself and the pass is what it was before, down to the bits.
 
-**And it is off**, because which way the sensor reads is not in the file and
-could not be measured. The two instruments that can see a readout displacement
-both come back null at the magnitude this camera would have to have, one of
-them with a control that reads an applied displacement of that size back at
-0.985 (r = 0.996). Shipping the direction that the geometry implied would have
-put up to 1.9 degrees of misalignment into the seam at 120 deg/s, where the
-pictures measurably have none. `kyerag_meta::Sweep::Unknown` is that answer,
-`readout_sweep` is the one line that changes when a capture settles it, and
-docs/research/insv-format.md 6.7 has both instruments, the numbers, and the
-ten seconds of footage that would decide it.
+**Which way the sensor reads is not in the file**, and it decides everything:
+applied backwards, a correction does not fail to remove the skew, it doubles
+it. So it is measured per camera in `readout_sweep`, and an X4 reads **down
+the delivered frame**, 1.00 +-0.12 of a whole frame in the trailer's own
+15.883 ms, against 0.02 +-0.07 across it. Both lenses read down their own
+pictures, which is the same world direction, so it cancels at the seam and a
+seam measurement is blind to it: that is why issue #42 shipped
+`Sweep::Unknown`, and it is also why switching this on cannot put any of the
+1.9 degrees of misalignment that an across-frame sweep would have put into
+the band #7 blends.
+
+A camera nobody has measured keeps `Sweep::Unknown`, which is a zero axis and
+therefore no correction at all rather than a guess. docs/research/insv-format.md
+6.7 has the three instruments, the injected controls on each axis of the fit,
+and why a still capture cannot answer this question.
 
 ## Horizon lock (issue #8)
 
@@ -518,17 +523,13 @@ on the X4 Air).
 - What is left of the seam once the composition is right. Still open after
   issue #7: re-measured on delivered frames rather than rendered views, the
   along-seam residual is consistently negative on every patch that
-  correlates, -0.4 to -1.2 degrees. Issue #9 has now removed one of the two
-  candidates for it: **rolling shutter is measured out**, at 0.014 of the
-  displacement the opposed-rows model predicts, on an instrument that reads
-  an applied displacement of that size back at 0.985. Near-field parallax
-  cannot reach the along-seam axis by construction. What is left is
-  calibration, and pinning it wants a capture from a camera that is not
-  moving. docs/research/insv-format.md 4.9 and 6.7 have the numbers.
-- **Which way the sensor reads** (issue #9). Not in the file, and not
-  settled by 30 minutes of flying: the displacement it would leave is
-  smaller than the parallax, the stabilization residual and the horizon's
-  own raggedness on this footage, and the two candidate readings the seam
-  cannot separate predict 0.003 degrees there. Ten seconds of a camera
-  turned hard by hand in front of close, still content settles it;
-  docs/research/insv-format.md 6.7 says exactly how.
+  correlates, -0.4 to -1.2 degrees. Issue #9 has now removed the other two
+  candidates for it: **rolling shutter is measured out** twice over, at 0.014
+  of the displacement the opposed-rows model predicts, and then at 0.000
+  degrees once the direction turned out to be down the frame, which is the
+  same world direction in both lenses and cancels between them. Near-field
+  parallax cannot reach the along-seam axis by construction. What is left is
+  calibration, and a capture from a camera that is not moving now says so
+  directly: -0.78 degrees along the seam with the camera doing nothing at
+  all, moving 0.018 frame to frame against 0.100 in flight.
+  docs/research/insv-format.md 4.9 and 6.7 have the numbers.
