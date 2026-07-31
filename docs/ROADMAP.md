@@ -7,8 +7,8 @@ GitHub issues; this doc is the map, issues are the tasks.
 bootstrapped, M0 frame path proven end to end on real footage.
 `cargo run --release --bin spike -- <file.insv>` decodes one 3840x3840 lens
 on VA-API, imports the dmabuf planes into wgpu with no copy, and renders to
-PNG at 103 fps (3.4x realtime). Next: the shell decision, then dual decode
-and the Mei reprojection.
+PNG at 103 fps (3.4x realtime). Next: libcosmic bring-up (issue #1), dual
+decode, and the Mei reprojection.
 
 ## Milestones
 
@@ -43,9 +43,15 @@ and the Mei reprojection.
   ffmpeg. The 8.x APIs in the research notes are not present.
 - 2026-07-30 Zero-copy import is not a hand-rolled ash routine: wgpu 30's
   `Device::texture_from_dmabuf_fd` (wgpu-hal Vulkan) imports the VA-API
-  planes as they come, 0.12 ms/frame for both. Open for Alex: this is a
-  point for winit + wgpu 30 over libcosmic's wgpu 28, where the same import
-  has to be written by hand.
+  planes as they come, 0.12 ms/frame for both. On libcosmic's wgpu 28 the
+  same import is written by hand (see next entry).
+- 2026-07-30 Shell: libcosmic from day one (Alex). Native COSMIC chrome is
+  part of the product identity. We accept the hand-rolled ash dmabuf
+  import against libcosmic's wgpu 28, and delete it the day libcosmic
+  reaches wgpu 30.
+- 2026-07-30 PR policy (Alex): the coordinator self-merges once CI is
+  green and the diff is reviewed. Alex steers via issues, the roadmap,
+  and check-ins.
 
 ## Measured on the target box (AMD Phoenix, RADV, 3840x3840 HEVC)
 
