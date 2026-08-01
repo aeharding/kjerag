@@ -15,13 +15,14 @@
 //! refused as somebody else's.
 //!
 //! What each signature is, and where it was measured (`~/Videos/samples`,
-//! 2026-08-01, 17 files from seven cameras):
+//! 2026-08-01, 18 files from seven cameras):
 //!
 //! - **Insta360**: the trailer magic on the last 32 bytes. Checked first, so
 //!   a capture that carries it plays whatever it is named.
 //! - **GoPro**: `moov/udta` holds GoPro's own boxes, `FIRM` `GPMF` `CAME`
-//!   `MUID`. Present in all four GoPro files here: a Max `.360`, its `.LRV`
-//!   proxy, a Max hero-mode `.MP4`, and a Fusion `.mp4`.
+//!   `MUID`. Present in all six GoPro files here: a Max `.360`, its `.LRV`
+//!   proxy, a Max hero-mode `.MP4`, two of GoPro's own published samples, and
+//!   a Fusion `.mp4`.
 //! - **DJI**: a track whose sample entry is `djmd` or `dbgi`, DJI's telemetry
 //!   and debug tracks. The Osmo 360 `.OSV` writes two of each; its handler
 //!   names and `©too` tag say `CAM` and `Osmo 360`, which are weaker.
@@ -352,9 +353,9 @@ mod tests {
         read(&mut Cursor::new(bytes)).unwrap_or(Format::Unknown)
     }
 
-    /// GoPro's `udta`, as `GS010350.360` and three other GoPro files here
-    /// write it. The maker is in the container, so a Max `.360` and a
-    /// hero-mode `.MP4` are the same answer.
+    /// GoPro's `udta`, as all six GoPro files in the corpus write it. The
+    /// maker is in the container rather than in the extension, so a Max
+    /// `.360` and a hero-mode `.MP4` are the same answer.
     #[test]
     fn gopros_own_boxes_name_gopro() {
         for kind in [b"FIRM", b"GPMF", b"CAME", b"MUID"] {
@@ -549,8 +550,8 @@ mod tests {
     /// The name is the last word and only where the bytes had none.
     #[test]
     fn the_extension_names_a_maker_the_container_did_not() {
-        assert_eq!(named(Path::new("GS010350.360")), Some(Foreign::GoPro));
-        assert_eq!(named(Path::new("CAM_0003_D.OSV")), Some(Foreign::Dji));
+        assert_eq!(named(Path::new("holiday.360")), Some(Foreign::GoPro));
+        assert_eq!(named(Path::new("holiday.OSV")), Some(Foreign::Dji));
         assert_eq!(named(Path::new("VID_00_001.insv")), None);
         assert_eq!(named(Path::new("holiday.mp4")), None);
         assert_eq!(named(Path::new("no-extension")), None);
