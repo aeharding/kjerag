@@ -2,125 +2,64 @@ name: release
 # A version tag is the whole trigger, and what comes out is one file a person
 # can install (issue #106): `flatpak install --user ./kjerag-….flatpak`.
 #
-# A tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
-# 2026-08-01). The pattern below is the same statement: it fires on a
-# digit-led tag and on nothing else, so a tag named `test` or `nightly`
-# starts no release at all.
+# Both halves are stock. The build is Flatpak's own action, running in the
+# image Flathub builds with; the release is softprops/action-gh-release with
+# the notes GitHub writes itself. Nothing here knows anything about this
+# project that the manifest does not already say.
 #
-# Nothing here decides what a release is. The version lives in the workspace
-# manifest, the notes live in the metainfo, and the tag has to agree with both
-# or the run stops before it builds anything (scripts/version-check.sh).
+# The tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
+# 2026-08-01), and the pattern is the same statement: a digit-led tag starts a
+# release, a tag named `test` or `nightly` starts nothing.
 on:
   push:
     tags: ['[0-9]*']
 
-# What `gh release create` writes with. Everything else stays read-only.
+# What the release step writes with. Everything else stays read-only.
 permissions:
   contents: write
 
 jobs:
-  # First, because it is five seconds and the rest is ten minutes: a tag
-  # naming a version the tree does not carry is a mistake at the keyboard,
-  # not something to find out after a build.
-  version:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: scripts/version-check.sh "$GITHUB_REF_NAME"
-
   # The gates a pull request runs, on the tagged commit, by calling the same
-  # workflow rather than restating it: fmt, clippy, the tests, the no-libav
-  # build of kjerag-meta, cargo-sources against the lock file, the name check
-  # and the metainfo. A copy here would drift from that file the first time
-  # one of them changed.
+  # workflow rather than restating it. It is what keeps a red commit from
+  # becoming a published artifact.
   #
   # scripts/uitest.sh is not among them and cannot be: it decodes on VA-API
-  # against /dev/dri/renderD128 and a runner has no GPU (AGENTS.md). It is a
-  # human step before the tag, and docs/RELEASING.md is where it is written
-  # down.
+  # against /dev/dri/renderD128 and a runner has no GPU (AGENTS.md). It runs
+  # on the way to the tag instead, out of release.toml.
   gates:
     uses: ./.github/workflows/ci.yml
 
   bundle:
-    needs: [version, gates]
+    needs: gates
     runs-on: ubuntu-latest
+    # The image Flathub's own builds run in, on the runtime branch our
+    # manifest names. It carries flatpak-builder and the two tools its last
+    # steps need, `eu-strip` and gdk-pixbuf's SVG loader, which a bare runner
+    # does not have and this job used to install by hand.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
     steps:
       - uses: actions/checkout@v4
-
-      # Two packages that are nobody's declared dependency and are both the
-      # last thing a build finds out about, after the whole workspace has
-      # compiled. The flatpak the development box builds with
-      # (org.flatpak.Builder) carries its own copies, so this is runner-only.
-      #
-      # elfutils: every module is stripped into a .Debug ref with `eu-strip`,
-      # and without it the build dies with `Failed to execute child process
-      # "eu-strip"` (measured, run 30699251764).
-      #
-      # librsvg2-common: the last step is `appstreamcli compose`, which
-      # renders the icon sizes AppStream ships (64 and 128, at both scale
-      # factors) out of the scalable icon through gdk-pixbuf, and that is the
-      # package holding gdk-pixbuf's SVG loader. Without it the compose fails
-      # with `file-read-error` on the icon and takes the build with it
-      # (measured, run 30699647159; run 30700204410 ran the same compose twice
-      # on one runner, failing without the package and printing `Success!`
-      # with it).
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            flatpak flatpak-builder elfutils librsvg2-common
-
-      # --install-deps-from reads the runtime, the SDK and the two SDK
-      # extensions out of the manifest and installs exactly those, so the
-      # runtime version is stated once, in the manifest, and this file cannot
-      # disagree with it.
-      - run: |
-          flatpak remote-add --user --if-not-exists flathub \
-            https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak-builder --user --install-deps-from=flathub --force-clean \
-            --state-dir="$RUNNER_TEMP/flatpak-builder" \
-            --repo="$RUNNER_TEMP/repo" \
-            "$RUNNER_TEMP/build" flatpak/dev.harding.Kjerag.yml
-
-      # A single-file bundle, which is a file and not a channel: it installs
-      # with no remote configured (docs/DISTRIBUTION.md 4.2). --runtime-repo
-      # is what makes that true on a machine that has never seen Flathub: it
-      # records where the freedesktop runtime comes from, and without it the
-      # install fails on a stranger's box with nothing to fetch the runtime
-      # from.
-      - id: bundle
-        run: |
-          name="kjerag-$GITHUB_REF_NAME-x86_64.flatpak"
-          flatpak build-bundle \
-            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-            "$RUNNER_TEMP/repo" "$name" dev.harding.Kjerag
-          sha256sum "$name" > "$name.sha256"
-          ls -l "$name"
-          echo "name=$name" >> "$GITHUB_OUTPUT"
-
-      # The notes are the metainfo's, which is the changelog a software centre
-      # shows, so the release body and the app's own changelog cannot say
-      # different things.
-      - run: |
-          name='${{ steps.bundle.outputs.name }}'
-          {
-            scripts/version-check.sh --notes
-            printf '\n## Install\n\n```sh\nflatpak install --user ./%s\nflatpak run dev.harding.Kjerag\n```\n' "$name"
-            printf '\nThe first install fetches the freedesktop runtime under it as well. The download can be checked against `%s.sha256`.\n' "$name"
-            printf '\nKjerag decodes on the GPU through VA-API, so it needs one: with no render device a file is refused rather than played slowly.\n'
-          } > "$RUNNER_TEMP/notes.md"
-          cat "$RUNNER_TEMP/notes.md"
-
-      # A tag with a label after the version (0.1.0-something) is a
-      # prerelease, and GitHub is told so rather than left to guess.
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          name='${{ steps.bundle.outputs.name }}'
-          case "$GITHUB_REF_NAME" in
-          *-*) flag=--prerelease ;;
-          *) flag= ;;
-          esac
-          gh release create "$GITHUB_REF_NAME" $flag \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            "$name" "$name.sha256"
+      # Runs flatpak-builder against the committed manifest and
+      # flatpak/cargo-sources.json, installs the runtime and the two SDK
+      # extensions the manifest declares, and exports the single-file bundle
+      # with the runtime repository recorded in it, so it installs on a
+      # machine that has never had Flathub configured.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: flatpak/dev.harding.Kjerag.yml
+          bundle: kjerag-${{ github.ref_name }}-x86_64.flatpak
+          # The Release is where the bundle goes; a second copy as a workflow
+          # artifact would expire in 90 days and confuse which is which.
+          upload-artifact: false
+      - run: sha256sum kjerag-*.flatpak > kjerag-${{ github.ref_name }}-x86_64.flatpak.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            kjerag-${{ github.ref_name }}-x86_64.flatpak
+            kjerag-${{ github.ref_name }}-x86_64.flatpak.sha256
+          generate_release_notes: true
+          # A label after the version (0.1.0-rc1) is a prerelease, and GitHub
+          # is told rather than left to guess.
+          prerelease: ${{ contains(github.ref_name, '-') }}

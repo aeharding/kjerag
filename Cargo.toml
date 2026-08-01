@@ -9,6 +9,11 @@ default-members = ["crates/app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# Nothing here goes to crates.io: the crates are one application split into
+# layers, and `cargo publish` on any of them would be a mistake rather than a
+# step nobody got round to. cargo-release reads this too and skips the publish
+# step it would otherwise run before tagging (issue #106).
+publish = false
 
 [workspace.dependencies]
 kjerag-media = { path = "crates/media" }

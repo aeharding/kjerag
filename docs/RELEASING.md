@@ -1,120 +1,48 @@
 # Cutting a release
 
-What a person does, in order. Everything after the tag push is
-`.github/workflows/release.yml`: it runs the gates on the tagged commit,
-builds the Flatpak with flatpak-builder from `flatpak/dev.harding.Kjerag.yml`
-and the committed `flatpak/cargo-sources.json`, and publishes a GitHub Release
-carrying one installable `kjerag-<version>-x86_64.flatpak` and its
-`.sha256`.
-
-The version is one string in three places: `[workspace.package] version` in
-`Cargo.toml` (the source of truth, and what `kjerag --version` prints), the
-newest `<release>` in `resources/dev.harding.Kjerag.metainfo.xml` (the
-changelog a software centre shows, and the GitHub Release body), and the tag.
-`scripts/version-check.sh` is what says they agree, and the tag build stops on
-its answer before it builds anything.
-
-## 1. Bump and write the notes
-
-In `Cargo.toml`:
-
-```toml
-[workspace.package]
-version = "0.2.0"
-```
-
-In `resources/dev.harding.Kjerag.metainfo.xml`, a new entry at the **top** of
-`<releases>`, newest first, with today's date:
-
-```xml
-<release version="0.2.0" type="development" date="2026-08-14">
-  <description>
-    <p>What changed, in plain words. No em dashes.</p>
-  </description>
-</release>
-```
-
-`<p>` and `<ul><li>` are what the release body renders; anything else is
-refused by `scripts/version-check.sh --notes` rather than silently dropped.
-Drop `type="development"` when the app is no longer pre-alpha.
-
-Then `cargo check` once, so `Cargo.lock` records the new version for the
-workspace's own crates. That does not touch `flatpak/cargo-sources.json`, and
-the rule that a change to `Cargo.lock` is a change to that file does not bite
-here: path crates carry no `source` entry, so they are not sources. Measured
-on a 0.1.0 to 0.2.0 bump: five lines of `Cargo.lock` move and
-`scripts/cargo-sources.sh --check` still passes.
-
-## 2. Check it here, including the one CI cannot
+Once per machine:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-scripts/name-check.sh
-scripts/cargo-sources.sh --check
-scripts/version-check.sh 0.2.0
-scripts/uitest.sh ~/Videos/<file>.insv
+cargo install cargo-release   # 1.1.3 is what this was set up against
 ```
 
-The last one is the reason this list exists. CI runs every other line, and it
-cannot run that one: decode is VA-API against `/dev/dri/renderD128` and a
-runner has no GPU, so the window, the keys and the frame path are checked on
-this box or not at all.
-
-## 3. Land the bump, then tag what landed
-
-The bump goes to `main` through a pull request like any other change. Then,
-on the merged commit:
+Then, on `main` with a clean tree:
 
 ```sh
-git tag -m 'Kjerag 0.2.0' 0.2.0 && git push origin 0.2.0
+cargo release patch             # dry run, which is cargo-release's default
+cargo release patch --execute   # or minor, major, or a version: 0.2.0
 ```
 
-That is the release. Watch it with `gh run watch` or the Actions tab. Measured
-on the pipeline's own test tags: 10m36s and 10m44s end to end, about nine
-minutes of it the Flatpak build.
+The dry run is not a preview. It runs `scripts/uitest.sh`, the headless GPU
+harness CI has no device for, so a build that would not open a window cannot
+reach a tag. Give it an idle box, and set
+`KJERAG_TEST_MEDIA=~/Videos/<file>.insv` to include the playback checks.
 
-The tag is the plain version, with no `v` in front of it (owner). The
-workflow only fires on a digit-led tag, so a `v0.2.0` starts nothing at all,
-and `scripts/version-check.sh` refuses it too.
+`--execute` then bumps `[workspace.package] version`, refreshes `Cargo.lock`,
+stamps a dated `<release>` entry at the top of the metainfo's changelog,
+commits that as `release: 0.2.0`, tags it `0.2.0` (the plain version, no `v`),
+and pushes both. Configuration is `release.toml`.
 
-The `-m` is not decoration on this box: `tag.gpgsign` is on, a signed tag is
-an annotated tag, and a bare `git tag 0.2.0` stops with `fatal: no tag
-message?` before it makes anything.
-
-## 4. Verify the artifact
+The tag is what builds the app. `.github/workflows/release.yml` runs the CI
+gates on the tagged commit, builds the Flatpak with Flatpak's own GitHub
+action, and publishes a Release carrying `kjerag-0.2.0-x86_64.flatpak` and its
+`.sha256`, with notes GitHub generates from what merged since the last tag.
+About ten minutes. Then check what shipped:
 
 ```sh
 gh release download 0.2.0
-sha256sum -c kjerag-0.2.0-x86_64.flatpak.sha256
 flatpak install --user ./kjerag-0.2.0-x86_64.flatpak
-flatpak run dev.harding.Kjerag --version
+flatpak run dev.harding.Kjerag
 ```
 
-## If it goes wrong
-
-A tag is cheap to withdraw before anybody has it:
+If the tag run fails, take the tag back, fix, and tag again:
 
 ```sh
 gh release delete 0.2.0 --yes --cleanup-tag
 ```
 
-Fix, land the fix, tag again. Re-pushing a tag to a different commit is not
-the move: the tag is what a downloaded bundle claims to be.
-
-To exercise the pipeline without spending a version number, tag a prerelease
-of the version the tree already carries:
-
-```sh
-git tag -m 'Pipeline test' 0.2.0-rc1 && git push origin 0.2.0-rc1
-```
-
-The version in front of the dash still has to be the workspace's, the build is
-the same build, and GitHub marks the release a prerelease.
-
-## What this does not do
-
-Flathub. The submission is owner-led and owner-coordinated
-(docs/DISTRIBUTION.md 4.1); this pipeline publishes to this repository's own
-Releases and nowhere else.
+Two things this does not do. It writes no prose: the changelog entry carries a
+version and a date, and if a release deserves words in a software centre, add
+a `<description>` to its entry in `resources/dev.harding.Kjerag.metainfo.xml`
+and push it like any other commit. And it does not submit to Flathub, which is
+owner-led and owner-coordinated (docs/DISTRIBUTION.md 4.1).

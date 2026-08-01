@@ -144,18 +144,13 @@ error` (measured), so a GPU-less runner would be checking nothing.
 
 ## Releasing
 
-A version tag is the whole trigger (issue #106), written plain with no `v` in
-front of it, `0.1.0` (owner): `.github/workflows/release.yml`
-runs the gates above on the tagged commit, builds the Flatpak from the
-committed manifest and `flatpak/cargo-sources.json`, and publishes one
-installable `.flatpak` bundle and its checksum as a GitHub Release. The
-version is one string in the workspace manifest, the metainfo's newest
-`<release>` and the tag, and `scripts/version-check.sh` is what says they
-agree.
-
-docs/RELEASING.md is the ritual, step by step. The step CI cannot do for you
-is the one above: `scripts/uitest.sh` needs a GPU, so a local run on the
-commit being tagged is part of tagging it.
+`cargo release patch --execute` on `main`, and that is the whole of it
+(issue #106): cargo-release bumps the version, stamps a dated entry into the
+metainfo changelog, tags the plain version with no `v`, and pushes. The tag is
+what makes `.github/workflows/release.yml` build the Flatpak and publish it as
+a GitHub Release. Its config is `release.toml`; its dry run, which is the
+default, runs `scripts/uitest.sh`, so the harness above is not skippable on
+the way to a tag. docs/RELEASING.md is one page and says the rest.
 
 ## Sound etiquette
 

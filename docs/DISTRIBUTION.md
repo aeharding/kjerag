@@ -967,12 +967,12 @@ at all, which is how the owner gets a build to click a `.insv` against
 before anything is published.
 
 Since issue #106 that bundle is what a version tag produces: the release
-workflow builds this manifest on a runner and attaches the bundle and its
-`.sha256` to a GitHub Release (docs/RELEASING.md). It is exported with
-`--runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo`, which is
-what lets it install on a machine that has never had Flathub configured. The
-bundle carries the app; that URL is where the runtime under it is fetched
-from, and without it the install fails with nowhere to get one.
+workflow builds this manifest with Flatpak's own GitHub action and attaches
+the bundle and its `.sha256` to a GitHub Release (docs/RELEASING.md). The
+action records the Flathub repository in the bundle as it exports it, which is
+what lets it install on a machine that has never had Flathub configured: the
+bundle carries the app, and that URL is where the runtime under it comes
+from.
 
 ---
 
