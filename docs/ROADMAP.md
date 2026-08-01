@@ -806,8 +806,8 @@ live, no keyframe UI ever.
 
   **Cost, priced with the box divided out** (`--bin band mode=cost`, the slope
   over sixteen extra dispatches, minimum of several runs at 1440x1440):
-  **0.63-0.71 ms per redraw in steady state, 3.8 to 4.3 percent of the 16.6 ms
-  a 60 fps frame has**, and 2.3-3.6 ms once on the frame a seek lands on -
+  **0.58-0.71 ms per redraw in steady state, 3.5 to 4.3 percent of the 16.6 ms
+  a 60 fps frame has**, and 1.3-2.9 ms once on the frame a seek lands on -
   which now sweeps the whole ring where stage 5's swept half of it. Stage 5's
   form measures 0.89-0.93 ms; its reported +2.55 ms was `--bin playback`'s
   whole-redraw delta on a box building four worktrees, and six alternating runs
@@ -821,6 +821,22 @@ live, no keyframe UI ever.
   spread on both - so it is not in the branch. The cadence the cost ruling
   asked for has been in the pass since stage 2: `SLICES` reads half the ring
   per frame.
+
+  **The owner's second reference view is a different defect** (issue #130). His
+  October capture is a ONE X2, and that camera refuses its own fit on every
+  file: `only 2 of 72 azimuths on the seam had content both lenses could be
+  matched on`, 3 / 2 / 2 across three captures against the 10 a five-knob fit
+  needs, so it can never build a pool entry and plays on the factory
+  calibration forever. The reason is a trap: the residual there is 1.1-1.6 deg
+  along the seam and 0.9-2.8 across, which is larger than the probe's window,
+  and widening the window makes it strictly worse because the back patch is
+  sampled as ONE rectangle grown by the whole search - at `along=3.0
+  across=6.0` every single try is refused for leaving the overlap. At that view
+  one degree epipolar moves the horizon 12 rows and one degree along the seam
+  moves it 3, the content at the seam is half a metre away, and the step is
+  5 to 6 DEGREES. Measured on `main`, on stage 5 and here it moves by about a
+  pixel in each direction, which is the right outcome for a fix aimed at
+  another axis.
 
 - 2026-08-01 **The seam has two axes and the campaign had only ever measured
   one** (issue #103, stage 5, docs/research/seam-two-axis.md). The owner
