@@ -474,7 +474,7 @@ const RIDGE: f32 = 1.0;
 /// the ring holds and its pivots are never zero, even with no evidence at all.
 ///
 /// WGSL twin: `solve5`.
-fn solve(mut normal: [[f32; 5]; 5], mut right: [f32; 5]) -> [f32; 5] {
+pub fn solve(mut normal: [[f32; 5]; 5], mut right: [f32; 5]) -> [f32; 5] {
     for pivot in 0..5 {
         let scale = normal[pivot][pivot];
         let leading = normal[pivot];

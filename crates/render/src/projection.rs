@@ -115,7 +115,7 @@ const CAP_AZIMUTHS: usize = 8;
 /// stays at exactly this everywhere else, which is the whole far field, every
 /// direction that has never correlated, and every file with one lens stream
 /// ([`super::band::width`]).
-const CROSSOVER_DEG: f32 = 2.0;
+pub const CROSSOVER_DEG: f32 = 2.0;
 
 /// How many lenses one pass can sample.
 ///
