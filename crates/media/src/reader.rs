@@ -288,10 +288,25 @@ impl Reader {
     /// looked up against its sibling first (issue #79), and a pair that
     /// checks out is read as one source of two lenses.
     pub fn open(path: &Path) -> Fallible<Self> {
+        Self::open_with(path, &[])
+    }
+
+    /// The same, told about the other files the pilot picked alongside this
+    /// one.
+    ///
+    /// Beside is where a capture's other lens is, and every way a file
+    /// normally arrives leaves it there. A sandbox has one way that does not:
+    /// a file picked in the chooser can arrive as a document, in a directory
+    /// holding it alone, and then the only place the other half can come from
+    /// is the pilot picking that too (issue #123). Those picks arrive here,
+    /// are matched by name, and are preferred over the file beside, because a
+    /// pilot who named both halves has answered a question the directory
+    /// could not.
+    pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
         ff::init()?;
         let hw = HwDevice::vaapi()?;
         let named = Opened::new(path)?;
-        let sources = match partner(path, &named) {
+        let sources = match partner(path, &named, alongside) {
             // In lens order, which is not the order they were asked for:
             // opening the `_10_` file has to deliver lens 1 second all the
             // same, or every lens the shader reprojects is the other one's
@@ -813,12 +828,14 @@ impl Opened {
 /// The lookup only happens for a container that decodes a **single** lens, so
 /// an X4-class `.insv` never touches the filesystem for it and its open path
 /// is what it always was.
-fn partner(path: &Path, first: &Opened) -> Option<Opened> {
+fn partner(path: &Path, first: &Opened, alongside: &[PathBuf]) -> Option<Opened> {
     let shape = first.shape()?;
     if shape.lenses != 1 {
         return None;
     }
-    let beside: PathBuf = kjerag_meta::sibling(path)?;
+    let beside: PathBuf = kjerag_meta::capture::mate_among(path, alongside)
+        .map(Path::to_path_buf)
+        .or_else(|| kjerag_meta::sibling(path))?;
     let second = match Opened::new(&beside) {
         Ok(second) => second,
         Err(e) => {

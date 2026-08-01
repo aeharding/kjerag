@@ -254,8 +254,11 @@ precedent. Wrap the shader widget in
 type whose `AllowedMimeTypes::allowed()` is `["text/uri-list"]`, modelled
 on cosmic-files' `ClipboardPaste` (`src/clipboard.rs:108-160`); the widget
 is `src/widget/dnd_destination.rs:16-27` in libcosmic and the wiring
-example is cosmic-files `src/app.rs:6491-6496`. First file wins, others are
-ignored. `FILE_TRANSFER_MIME` (`src/widget/dnd_destination.rs:33`) is the
+example is cosmic-files `src/app.rs:6491-6496`. The first file is the one
+that opens; the rest are offered to it as the set it might be part of, so
+dragging both halves of a two-file capture in together plays the whole
+sphere (issue #123). Files the naming rule does not pair with the first are
+still ignored. `FILE_TRANSFER_MIME` (`src/widget/dnd_destination.rs:33`) is the
 other half, and it did not come for free as this line once hoped: it is how
 a drop reaches a sandboxed app, and what arrives under it is a key rather
 than a payload, so it is `on_file_transfer` and a call to the document

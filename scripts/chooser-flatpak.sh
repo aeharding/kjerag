@@ -3,6 +3,7 @@
 # What does the file chooser hand the sandboxed app? (issue #123)
 #
 #   scripts/chooser-flatpak.sh <file.insv>      # READONLY=1 ticks the box
+#   MULTI=1 scripts/chooser-flatpak.sh <file.insv>   # picks the whole folder
 #
 # The other half of scripts/chooser-probe.py: that one asks the document
 # portal what it would do, this one drives a real dialog and reads what the
@@ -254,7 +255,35 @@ for attempt in 1 2 3; do
 	printf 'typing the path\n'
 	press -M ctrl -k l -m ctrl
 	sleep 2
-	press -d 30 "$target"
+	# MULTI picks both halves of a capture the way a pilot would, which is
+	# the answer the guidance names (issue #123): the location bar goes to
+	# the folder, a row is clicked to put the focus in the list, and Ctrl+A
+	# takes everything the filter left in it, which for a capture folder is
+	# the capture. Ctrl+A is a character key and those are the only ones
+	# wtype delivers here.
+	case "${MULTI:-}" in
+	"") press -d 30 "$target" ;;
+	*)
+		# No trailing slash: the location bar completes inline, and after a
+		# slash it completes to the first name in the folder, which is a
+		# path to a file nobody asked for.
+		press -d 30 "$(dirname "$target")"
+		sleep 3
+		click 1238 22
+		sleep 5
+		click 400 134
+		sleep 2
+		# The second row with shift held, which is the selection a pilot
+		# makes. The modifier is held by a wtype that sits on it and lets go
+		# on its own, because a modifier only lasts as long as the process
+		# holding it (wtype(1)), and the click is a process of its own.
+		press -M shift -s 6000 -m shift &
+		holder=$!
+		sleep 1
+		click 400 163
+		wait "$holder" 2>/dev/null
+		;;
+	esac
 	sleep 3
 	shot "typed-$attempt"
 	click 1234 22

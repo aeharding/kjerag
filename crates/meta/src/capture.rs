@@ -111,6 +111,27 @@ fn named_members(picked: &Path) -> Vec<PathBuf> {
     pair::sibling_path(picked).into_iter().collect()
 }
 
+/// Which of these files, if any, is the picked file's other lens, by name
+/// alone.
+///
+/// The names are compared and the directories are not, which is the whole
+/// point of it: this is the case where the pilot picked both halves in the
+/// chooser and each came back as a document of its own, in a directory of its
+/// own, with nothing beside it. Two files the naming rule pairs are two halves
+/// of one capture wherever they now sit.
+///
+/// Agreeing names is a claim about the capture and not a promise about the
+/// pixels. The reader still opens the candidate and checks that its shape
+/// pairs with the first before it reads a frame out of it.
+pub fn mate_among<'a>(picked: &Path, candidates: &'a [PathBuf]) -> Option<&'a Path> {
+    let named = pair::sibling_path(picked)?;
+    let wanted = named.file_name()?;
+    candidates
+        .iter()
+        .find(|candidate| candidate.file_name() == Some(wanted))
+        .map(PathBuf::as_path)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -221,6 +242,42 @@ mod tests {
         let capture = resolve(&proxy);
         assert_eq!(capture.files, vec![proxy]);
         assert_eq!(capture.missing, Missing::Nothing);
+    }
+
+    /// Two halves picked together are one capture even when each is in a
+    /// directory of its own, which is what the document portal does to a
+    /// multiple pick: one directory per file, nothing beside either.
+    #[test]
+    fn a_mate_is_found_among_picked_files_wherever_they_sit() {
+        let picked = Path::new("/run/user/1000/doc/aaaa/VID_20000101_100000_00_001.insv");
+        let candidates = [
+            PathBuf::from("/run/user/1000/doc/aaaa/VID_20000101_100000_00_001.insv"),
+            PathBuf::from("/run/user/1000/doc/bbbb/VID_20000101_100000_10_001.insv"),
+        ];
+        assert_eq!(
+            mate_among(picked, &candidates),
+            Some(candidates[1].as_path())
+        );
+        // And the other way round, because the pilot picks in any order.
+        assert_eq!(
+            mate_among(&candidates[1], &candidates),
+            Some(candidates[0].as_path())
+        );
+    }
+
+    /// Another capture's file is not this one's other half, however it was
+    /// picked. A pilot who selects a whole folder gets the capture he clicked
+    /// and not a stitched-together one.
+    #[test]
+    fn another_captures_file_is_not_a_mate() {
+        let picked = Path::new("/doc/a/VID_20000101_100000_00_001.insv");
+        let candidates = [
+            PathBuf::from("/doc/b/VID_20000101_110000_10_002.insv"),
+            PathBuf::from("/doc/c/LRV_20000101_100000_11_001.insv"),
+        ];
+        assert_eq!(mate_among(picked, &candidates), None);
+        assert_eq!(mate_among(picked, &[]), None);
+        assert_eq!(mate_among(Path::new("holiday.insv"), &candidates), None);
     }
 
     /// One capture's file does not pull in another capture's, which is what

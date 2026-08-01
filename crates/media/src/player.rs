@@ -19,7 +19,7 @@
 //! otherwise, [`Frames::timestamp`] is the value that changes and nothing
 //! above this module needs to know.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
 use std::thread;
@@ -239,7 +239,14 @@ impl Player {
     /// is parsed: the first frame arrives on the thread, so a big file does
     /// not hold the window shut.
     pub fn open(path: &Path) -> Fallible<Self> {
-        let mut reader = Reader::open(path)?.lookahead(LOOKAHEAD);
+        Self::open_with(path, &[])
+    }
+
+    /// The same, told about the other files the pilot picked alongside this
+    /// one, which is how a capture picked in a sandbox's file chooser finds
+    /// its other lens ([`Reader::open_with`], issue #123).
+    pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
+        let mut reader = Reader::open_with(path, alongside)?.lookahead(LOOKAHEAD);
         let (timing, size) = (reader.timing(), reader.size());
         let (lenses, files) = (reader.lenses(), reader.files());
         let beat = Arc::new(Beat::default());

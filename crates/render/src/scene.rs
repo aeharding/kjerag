@@ -280,8 +280,17 @@ impl Scene {
     /// Opens a file and starts playing it. Returns as soon as the container
     /// is parsed; the first frames arrive on the decode thread.
     pub fn open(path: &Path) -> Fallible<Self> {
+        Self::open_with(path, &[])
+    }
+
+    /// The same, told about the other files the pilot picked alongside this
+    /// one. A capture written one lens per file finds its other half beside
+    /// itself, except when a sandbox's file chooser hands over a document
+    /// with nothing beside it, and then the pilot's own second pick is the
+    /// only place it can come from (issue #123).
+    pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
         ours(path)?;
-        let mut player = Player::open(path)?;
+        let mut player = Player::open_with(path, alongside)?;
         let calibrated = calibrated(path, player.size(), player.lenses())?;
         println!(
             "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
@@ -571,6 +580,16 @@ impl Scene {
     pub fn duration(&self) -> Duration {
         self.player(|player| player.timing().duration())
             .unwrap_or_default()
+    }
+
+    /// How many lenses the open capture is read as: two for a whole sphere,
+    /// whether they came out of one file or two, one for half of one.
+    ///
+    /// The shell asks because half a sphere is the one thing about an open
+    /// file the pilot cannot see. It looks like a whole one until the view is
+    /// turned round (issue #123).
+    pub fn lenses(&self) -> usize {
+        self.player(Player::lenses).unwrap_or_default()
     }
 
     /// Whether this file has a sound track that a device took (issue #13).
