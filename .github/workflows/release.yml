@@ -44,8 +44,8 @@ jobs:
 
       # Two packages that are nobody's declared dependency and are both the
       # last thing a build finds out about, after the whole workspace has
-      # compiled. The flatpak the development box builds with (org.flatpak.Builder)
-      # carries its own copies, so both lines are runner-only.
+      # compiled. The flatpak the development box builds with
+      # (org.flatpak.Builder) carries its own copies, so this is runner-only.
       #
       # elfutils: every module is stripped into a .Debug ref with `eu-strip`,
       # and without it the build dies with `Failed to execute child process
@@ -100,8 +100,8 @@ jobs:
           {
             scripts/version-check.sh --notes
             printf '\n## Install\n\n```sh\nflatpak install --user ./%s\nflatpak run dev.harding.Kjerag\n```\n' "$name"
-            printf '\nThe download can be checked against `%s.sha256`.\n' "$name"
-            printf '\nKjerag decodes on the GPU through VA-API; the README says what it needs.\n'
+            printf '\nThe first install fetches the freedesktop runtime under it as well. The download can be checked against `%s.sha256`.\n' "$name"
+            printf '\nKjerag decodes on the GPU through VA-API, so it needs one: with no render device a file is refused rather than played slowly.\n'
           } > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
 
