@@ -173,11 +173,11 @@ error` (measured), so a GPU-less runner would be checking nothing.
 (issue #106): cargo-release bumps the version, stamps a dated entry into the
 metainfo changelog, tags the plain version with no `v`, and pushes. The tag is
 what makes `.github/workflows/release.yml` build the Flatpak, publish it as a
-GitHub Release, and export it into the signed repository at
-kjerag.harding.dev, which is the channel (issue #137, docs/DISTRIBUTION.md 4).
-Its config is `release.toml`; its dry run, which is the
-default, runs `scripts/uitest.sh`, so the harness above is not skippable on
-the way to a tag. docs/RELEASING.md is one page and says the rest.
+GitHub Release, and export it into the signed repository at kjerag.harding.dev,
+which is the channel (issue #137, docs/DISTRIBUTION.md 4). Its config is
+`release.toml`; its dry run, which is the default, runs `scripts/uitest.sh`, so
+the harness above is not skippable on the way to a tag. docs/RELEASING.md is
+one page and says the rest.
 
 ## Sound etiquette
 
