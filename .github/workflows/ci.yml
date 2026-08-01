@@ -8,8 +8,26 @@ on:
   workflow_call:
 
 jobs:
+  # The gates that compile run on both arches, natively: ubuntu-24.04-arm is a
+  # real aarch64 runner rather than emulation, and it is free for public
+  # repositories the same way the x86 one is.
+  #
+  # One provisioning path covers both, because the PPA below carries arm64.
+  # Measured on the arm runner 2026-08-01: candidate libavcodec-dev
+  # 7:7.1.1-0build1~ubuntu2404 out of the PPA's noble/main arm64 index, and
+  # pkg-config reports 61.19.101 after installing it.
+  #
+  # Pinned labels rather than ubuntu-latest on the x86 side, because the two
+  # have to stay the same distro: the PPA publishes noble builds only, and
+  # there is no ubuntu-latest-arm for the other half to drift with.
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      # Both arches answer. A failure on one is a thing to read next to the
+      # other, not a reason to cancel it.
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       # ffmpeg-sys-next binds the system headers, and bindgen needs libclang
@@ -85,6 +103,11 @@ jobs:
   # The point of the workspace (issue #19): the trailer layer builds and
   # tests on a box with no libav headers. This job installs nothing, so it
   # fails the day something drags ffmpeg into kjerag-meta's graph.
+  #
+  # One arch is enough here and the matrix above is why: `cargo test
+  # --workspace` already builds and runs kjerag-meta on aarch64. What is left
+  # for this job to assert is the shape of a dependency graph, which is the
+  # same on both.
   meta:
     runs-on: ubuntu-latest
     steps:
