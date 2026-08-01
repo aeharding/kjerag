@@ -45,7 +45,10 @@ use prost::Message;
 
 use super::{CalibrationSet, Error};
 
-const MAGIC: &[u8] = b"8db42d694ccc418790edff439fe026bf";
+/// The last 32 bytes of a file the camera wrote a trailer onto.
+/// `super::format` reads the same 32 bytes to say what a file is before
+/// anything tries to open it (issue #107).
+pub(crate) const MAGIC: &[u8] = b"8db42d694ccc418790edff439fe026bf";
 /// `padding[32] | extra_size u32 | version u32 | magic[32]`.
 const FOOTER_LEN: i64 = 32 + 4 + 4 + 32;
 /// `format u8 | id u8 | size u32`, trailing its own payload.

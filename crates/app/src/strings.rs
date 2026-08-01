@@ -13,6 +13,8 @@
 
 use std::path::Path;
 
+use kjerag_render::Foreign;
+
 use crate::shot::Destination;
 
 pub const APP_NAME: &str = "Kjerag";
@@ -123,6 +125,28 @@ pub fn open_failed(missing: Option<&str>) -> String {
          In a Flatpak, the decoder comes from the codecs-extra runtime extension.",
         codec.to_uppercase()
     )
+}
+
+/// The other 360 cameras, named (issue #107).
+///
+/// A GoPro `.360` or a DJI `.osv` is a valid MP4 that Kjerag cannot read a
+/// lens calibration out of, so before this it got the line a corrupt file
+/// gets. Naming the format is the whole point: it says the file is fine and
+/// the player is the wrong one, which is a thing the pilot can act on.
+///
+/// Second sentence over the three, because a refusal that does not say what
+/// Kjerag does take leaves the pilot to guess at it.
+pub fn foreign(format: Foreign) -> String {
+    let what = match format {
+        Foreign::GoPro => "a GoPro video",
+        Foreign::Dji => "a DJI video",
+        // The spherical arm: an MP4 with 360 metadata in it, which is what
+        // every one of these cameras' desktop apps exports. Kjerag reads the
+        // raw dual fisheye and reprojects it; a stitched file has already had
+        // that done to it.
+        Foreign::Spherical => "a stitched 360 video",
+    };
+    format!("That is {what}. Kjerag plays Insta360 .insv only.")
 }
 
 /// `{file name} - Kjerag`, and plain `Kjerag` with nothing open.
@@ -269,6 +293,29 @@ mod tests {
         assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
         assert!(!view_is_from(Path::new("a.insv")).contains('\u{2014}'));
         assert!(!open_failed(Some("hevc")).contains('\u{2014}'));
+        for format in [Foreign::GoPro, Foreign::Dji, Foreign::Spherical] {
+            assert!(!foreign(format).contains('\u{2014}'));
+        }
+    }
+
+    /// A refusal that names the format, one line per format, and every one of
+    /// them saying what Kjerag does take (issue #107). The pilot is holding a
+    /// file that is not broken and a player that is the wrong one, and only
+    /// the second half of that is something he can act on.
+    #[test]
+    fn a_foreign_format_is_named_and_so_is_the_one_kjerag_takes() {
+        assert_eq!(
+            foreign(Foreign::GoPro),
+            "That is a GoPro video. Kjerag plays Insta360 .insv only."
+        );
+        assert_eq!(
+            foreign(Foreign::Dji),
+            "That is a DJI video. Kjerag plays Insta360 .insv only."
+        );
+        assert_eq!(
+            foreign(Foreign::Spherical),
+            "That is a stitched 360 video. Kjerag plays Insta360 .insv only."
+        );
     }
 
     /// A missing decoder is not a broken file, and the line has to say which

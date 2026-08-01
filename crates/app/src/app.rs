@@ -57,7 +57,9 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kjerag_render::{Accuracy, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
+use kjerag_render::{
+    Accuracy, Foreign, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats,
+};
 
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -820,7 +822,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("kjerag: {} not shown: {e}", path.display());
-                self.failed = Some(strings::open_failed(missing_decoder(&*e)));
+                self.failed = Some(refusal(&*e));
                 self.open = None;
             }
         }
@@ -1525,6 +1527,17 @@ fn missing_decoder(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Optio
     Some(e.downcast_ref::<MissingDecoder>()?.codec)
 }
 
+/// Which line a failed open leaves on the welcome view. Three of them, in the
+/// order of how much they can tell the pilot: the file is another camera's
+/// format (issue #107), this build has no decoder for it (issue #69), or
+/// nothing more is known than that it did not open.
+fn refusal(e: &(dyn std::error::Error + Send + Sync + 'static)) -> String {
+    match e.downcast_ref::<Foreign>() {
+        Some(foreign) => strings::foreign(*foreign),
+        None => strings::open_failed(missing_decoder(e)),
+    }
+}
+
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
 fn chooser() -> Task<Message> {
     Task::perform(
@@ -1704,6 +1717,23 @@ mod tests {
             strings::open_failed(missing_decoder(&*broken)),
             strings::OPEN_FAILED
         );
+    }
+
+    /// And the three lines a failed open can leave, told apart by the type in
+    /// the box rather than by anything in the message (issue #107). The
+    /// foreign one names the format; the other two are what they were.
+    #[test]
+    fn another_cameras_format_gets_a_line_of_its_own() {
+        let gopro: Box<dyn std::error::Error + Send + Sync> = Box::new(Foreign::GoPro);
+        assert_eq!(refusal(&*gopro), strings::foreign(Foreign::GoPro));
+        assert!(refusal(&*gopro).contains("GoPro"), "{}", refusal(&*gopro));
+
+        let missing: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(MissingDecoder { codec: "hevc" });
+        assert!(refusal(&*missing).contains("HEVC"));
+
+        let broken: Box<dyn std::error::Error + Send + Sync> = "file has no video stream".into();
+        assert_eq!(refusal(&*broken), strings::OPEN_FAILED);
     }
 
     fn lines(toasts: &Toasts) -> Vec<&str> {
