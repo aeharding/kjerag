@@ -385,8 +385,14 @@ wide as the frame, and wider still is the frame reaching past the sphere. That
 is where the room around the ball comes from, and it is why the far end
 (`fov_ceiling`) depends on the **window shape**: the ball is round and fills
 0.8 of the frame's shorter side there, which is 406 degrees on a square window
-and 605 on a 16:9 one. Outside the ball there is no ray at all, and the pass
-paints the same `OUTSIDE_GRAY` it has always painted where no lens has one.
+and 605 on a 16:9 one. Outside the ball there is no ray at all, and since
+issue #100 the pass writes nothing there: transparent black, through a
+premultiplied blend, so **what fills the room is whatever the shell put behind
+the video** (`app::backdrop`). In a window that is libcosmic's own pane, which
+is a translucent copy of the background colour over the compositor's blur
+while the theme is frosted and the same colour opaque when it is not; in
+fullscreen it is black; and a still, which runs the same pass into a texture
+cleared black, comes out black with no alpha left in it.
 
 The drag needed no new mathematics, which is the finding rather than luck:
 `Camera::look` and `Camera::aim` were already written against `view_ray`

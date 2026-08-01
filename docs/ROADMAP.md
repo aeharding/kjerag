@@ -538,6 +538,29 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The room around the ball belongs to the window** (issue #100).
+  The pass wrote a flat 0.10 grey wherever no lens has a ray; it now writes
+  transparent black through a premultiplied blend and paints nothing there at
+  all, so what fills the room is the one layer behind the video
+  (`app::backdrop`). In a window that layer is empty, which leaves libcosmic's
+  own pane showing: darkened translucency over the compositor's blur with a
+  frosted theme, the same colour opaque without one, and no fallback of our
+  own for the no-blur case, because it is the same line of libcosmic either
+  way. In fullscreen the layer is black, on the owner's call: there is no
+  desktop behind a fullscreen window to frost. A still is black too, for a
+  different reason: the capture pass clears black and the transparent room
+  flattens onto that, so a JPEG carries no alpha and needs no channel for one.
+
+  **Nothing with a picture in it moved.** Measured over `reframe` renders from
+  both builds, three fields of view (40, 90, 150) in both target formats:
+  byte-identical PNGs. At the ball every differing pixel is the room and every
+  one of them the same substitution, 25 25 25 to 0 0 0 on a linear target and
+  26 26 26 to 0 0 0 on an sRGB one (193,084 of 262,144 pixels, 73.7%). The
+  blend's cost is under this box's noise: the median ms/redraw over six
+  interleaved `ball` runs a side moves between -0.03 and +0.15 ms at 2560x1440
+  on a Radeon 760M, against a spread of 0.4 ms between runs of one build and a
+  33 ms frame.
+
 - 2026-08-01 **The project is Kjerag** (issue #75), in one mechanical sweep:
   five crates, the binary, `App::APP_ID`, the four `resources/` and
   `flatpak/` file names, the cosmic-config identifiers, the report prefixes,

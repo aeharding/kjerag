@@ -392,6 +392,10 @@ impl cosmic::Application for App {
         // than bare blur. cosmic-files leaves the container on for the same
         // reason and never paints a background of its own
         // (`src/app.rs:2352-2367`, container off in desktop mode only).
+        //
+        // Since issue #100 the room around the ball is that pane as well:
+        // the pass writes it transparent, so turning the container off would
+        // take the picture's surroundings with the window's background.
         core.window.border_padding = Some(0);
 
         let mut app = App {
@@ -1214,7 +1218,8 @@ impl App {
             .into()
     }
 
-    /// The video, with the controls over the bottom of it.
+    /// The video, on whatever is behind it, with the controls over the bottom
+    /// of it.
     ///
     /// A single click on the video does not toggle playback, which is the one
     /// place cosmic-player's pointer map cannot be copied: the same press
@@ -1228,8 +1233,12 @@ impl App {
                 .height(Length::Fill),
         )
         .on_double_press(Message::Fullscreen);
+        let stage = widget::container(video)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .class(backdrop(self.fullscreen));
 
-        let mut popover = widget::popover(video).position(widget::popover::Position::Bottom);
+        let mut popover = widget::popover(stage).position(widget::popover::Position::Bottom);
         if self.controls.shown {
             popover = popover.popup(self.control_rows(open));
         }
@@ -1352,6 +1361,32 @@ fn toast_line(toast: &Toast, spacing: cosmic_theme::Spacing) -> Element<'_, Mess
         ])
         .class(theme::Container::Tooltip)
         .into()
+}
+
+/// What sits behind the video, which is what the room around the ball is made
+/// of (issue #100).
+///
+/// The pass writes that room transparent rather than painting it, so this one
+/// layer decides what shows there and the shader decides nothing:
+///
+/// - **In a window, nothing.** What comes through is libcosmic's own pane,
+///   `background(theme.transparent).base` (`src/app/mod.rs:856-874`): a
+///   translucent copy of the background colour while the theme is frosted, so
+///   the ball floats on the compositor's blurred desktop, and the same colour
+///   opaque when it is not. The welcome view sits on that same fill, which is
+///   the look this matches, and the no-blur case needs no fallback of its own
+///   because it is the same line of libcosmic either way.
+/// - **In fullscreen, black.** There is no desktop behind a fullscreen window
+///   to show through, and black is what a player puts around a picture.
+///
+/// cosmic-player paints exactly this black under its video and nothing under
+/// its welcome view (`src/main.rs:1711-1714`).
+fn backdrop(fullscreen: bool) -> theme::Container<'static> {
+    theme::Container::custom(move |_| widget::container::Style {
+        background: fullscreen
+            .then_some(cosmic::iced::Background::Color(cosmic::iced::Color::BLACK)),
+        ..Default::default()
+    })
 }
 
 /// One row of the overlay: cosmic-player's padding and background
@@ -1544,6 +1579,25 @@ fn about() -> About {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the room around the ball is made of (issue #100), read out of the
+    /// theme the way iced reads it. The pass writes that room transparent, so
+    /// this one style is the whole of the decision: nothing behind the video
+    /// in a window, which leaves libcosmic's own pane showing through the
+    /// room, and black in fullscreen.
+    #[test]
+    fn a_window_leaves_the_room_to_the_pane_and_fullscreen_fills_it_black() {
+        use cosmic::iced::widget::container::Catalog;
+
+        let theme = <theme::Theme as Default>::default();
+        let behind = |fullscreen| theme.style(&backdrop(fullscreen)).background;
+
+        assert_eq!(behind(false), None);
+        assert_eq!(
+            behind(true),
+            Some(cosmic::iced::Background::Color(cosmic::iced::Color::BLACK))
+        );
+    }
 
     /// A line of the open file's own, as the clipboard would hold it: the
     /// name alone, which is all a copy ever carries.

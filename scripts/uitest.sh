@@ -437,7 +437,8 @@ with_media() {
 
 	zooms_out_to_the_ball
 	saves_a_still
-	# Both before `i`, which prints view lines of its own: while the only
+	a_ball_still_has_a_black_room
+	# All three before `i`, which prints view lines of its own: while the only
 	# thing that has printed one is a capture, the two counts can be compared.
 	a_still_says_where_it_was_looking
 	copies_the_view
@@ -445,6 +446,7 @@ with_media() {
 	flips_the_horizon
 	survives_fullscreen
 	fullscreen_holds_the_view
+	the_room_belongs_to_the_window
 
 	# Space again, and this time the app's own report line is the evidence.
 	# A file that never paused is still playing, so its report lines would
@@ -534,11 +536,11 @@ toast_clears_the_controls() {
 
 # Ctrl+- keeps zooming out past the flat range now, until the whole sphere
 # is a ball with room around it (issue #47). The room is the one thing in
-# the window whose colour the app decides rather than the footage:
-# OUTSIDE_GRAY, flat and neutral, where a frame of video at the same place
-# is neither. So the check reads one patch a fourteenth of the way in from
-# the left, level with the middle, which is outside the ball at the far end
-# of the zoom and inside the picture at the default view.
+# the window whose colour the app decides rather than the footage: flat and
+# neutral, where a frame of video at the same place is neither. So the check
+# reads one patch a fourteenth of the way in from the left, level with the
+# middle, which is outside the ball at the far end of the zoom and inside the
+# picture at the default view.
 #
 # Presses one at a time and looks after each, because the zoom is a clamp
 # rather than a state: pressing past the end is free, and a dropped key
@@ -548,10 +550,15 @@ toast_clears_the_controls() {
 # the ball past about 403). wtype drops about one key in twenty, so the rest
 # is headroom, and the loop breaks on success so headroom costs nothing.
 BALL_PRESSES=20
-# The room is the app's own flat OUTSIDE_GRAY and reads 25 25 25 here, so a
-# patch is the room when it is both nearly neutral and nearly black. Two
-# measurements set the two numbers and they were made against different
-# failures, so the merge takes the tighter half of each rather than one side:
+# The room is flat and dark whichever treatment it has (issue #100): the
+# window's own pane behind the video, which reads 27 27 27 under cage, and
+# pure black in fullscreen and in a saved still. So a patch is the room when
+# it is both nearly neutral and nearly black, which is what these two numbers
+# say. They cannot tell the two treatments apart, and nothing here asks them
+# to: `the room belongs to the window` is the check that does.
+#
+# Two measurements set them and they were made against different failures, so
+# the merge takes the tighter half of each rather than one side:
 #
 # - spread 1, not 4. On the owner's deck capture the foliage at the ball's rim
 #   reads 15 19 15, a spread of exactly 4, so at 4 the zoom-out loop stopped
@@ -564,7 +571,7 @@ BALL_PRESSES=20
 #
 # Both exclusions hold at once: the foliage fails on spread (4 > 1) and the
 # hillside on brightness (35 > 30), while the room itself passes both at
-# 25 25 25, spread 0.
+# 27 27 27 and at 0 0 0, spread 0 either way.
 ROOM_SPREAD=1
 ROOM_DARK=30
 
@@ -632,18 +639,32 @@ mark_rgb() {
 # `video-x-generic-symbolic` it replaced (issue #93).
 MARK_SPREAD=20
 
-# Whether a patch is the flat neutral grey the pass paints where the frame
-# has no sphere in it, rather than a piece of picture: dark, and the three
-# channels within a code or two of each other. Measured on this harness, the
-# room reads 25 25 25, which is OUTSIDE_GRAY through the surface's own sRGB
-# round trip, and the same patch of the default view read 185 224 241 on the
-# owner's footage, which is sky.
+# Whether a patch is the room around the ball rather than a piece of picture:
+# dark, and the three channels within a code or two of each other. Measured on
+# this harness, the room reads 27 27 27 in a window, which is the theme's
+# window background showing through the transparent room (issue #100), and
+# 0 0 0 in fullscreen; the same patch of the default view read 185 224 241 on
+# the owner's footage, which is sky.
 is_room() {
 	local rgb=($1) hi lo
 	[ "${#rgb[@]}" = 3 ] || return 1
 	hi=$(printf '%s\n' "${rgb[@]}" | sort -n | tail -1)
 	lo=$(printf '%s\n' "${rgb[@]}" | sort -n | head -1)
 	[ "$hi" -le "$ROOM_DARK" ] && [ $((hi - lo)) -le "$ROOM_SPREAD" ]
+}
+
+# How far off black a patch may be and still be called black. A capture off
+# the compositor is lossless and reads exactly 0 0 0; a JPEG is not, and this
+# is the whole of the allowance it gets. It uses none of it: measured 0 0 0
+# over a patch that sits a fifth of the frame inside the room, far from the
+# ball's rim and any ringing around it.
+BLACK_MAX=2
+
+is_black() {
+	local rgb=($1) hi
+	[ "${#rgb[@]}" = 3 ] || return 1
+	hi=$(printf '%s\n' "${rgb[@]}" | sort -n | tail -1)
+	[ "$hi" -le "$BLACK_MAX" ]
 }
 
 # The mark above "No video open" is the app icon, which the binary carries as
@@ -706,6 +727,121 @@ saves_a_still() {
 	else
 		fail "s saves a still" "the still is black: $still"
 	fi
+}
+
+# A still of a ball view (issue #100). In the window the room around the ball
+# is transparent and the theme's pane fills it, and a JPEG has no alpha to
+# carry that with: the capture pass clears black and the room flattens onto
+# that, so what the pilot double clicks months later is the ball on black
+# rather than a hole or a grey box.
+#
+# Two halves, and both are needed. The still has to be a picture at all
+# (`nonblack`, which a still of nothing but room would fail), and the room in
+# it has to be black. Against the main build of 2026-08-01 the same patch of
+# the same still reads 25 25 25, which is what makes the second half a check
+# rather than a restatement.
+#
+# The newest still rather than the first: `saves_a_still` has already written
+# one from the default view.
+a_ball_still_has_a_black_room() {
+	local check="a still of the ball has black around it"
+	local shots still room shrunk=$session/ball-still.ppm
+	if ! reach_the_ball ball-still-view; then
+		alive || lost "$check"
+		fail "$check" "the view never reached the ball" "$session/ball-still-view.ppm"
+		return
+	fi
+
+	shots=$(grep -c '^shot:' "$log")
+	local try=0
+	while [ "$try" -lt "$PRESSES" ]; do
+		key -k s
+		alive || lost "$check"
+		[ "$(grep -c '^shot:' "$log")" -gt "$shots" ] && break
+		try=$((try + 1))
+	done
+	still=$(ls -t "$session"/shots/*.jpg 2>/dev/null | head -1)
+	if [ "$(grep -c '^shot:' "$log")" -le "$shots" ] || [ -z "$still" ]; then
+		fail "$check" "no still landed after $PRESSES presses of s" "log: $log"
+		return
+	fi
+
+	ffmpeg -y -loglevel error -i "$still" -vf scale=160:-1 "$shrunk" 2>>"$log"
+	room=$(patch_rgb "$still")
+	if ! nonblack "$shrunk"; then
+		fail "$check" "the still is black all through, so there is no ball in it" "$still"
+	elif is_black "$room"; then
+		pass "$check (room $room)"
+	else
+		fail "$check" "the room in the still reads $room, which is not black" "$still"
+	fi
+
+	# Back to the default view, which is where the checks after this one start
+	# from. A dropped key leaves them at the ball, which costs them nothing:
+	# every one of them moves the view itself.
+	key -M ctrl -k 0 -m ctrl
+}
+
+# Set by the check below, read by its two predicates: what the room reads in a
+# window, measured rather than assumed, so nothing here holds a theme colour.
+room_pane=
+
+room_is_black() {
+	is_black "$(patch_rgb "$(grab "$1")")"
+}
+
+room_is_the_pane() {
+	[ "$(patch_rgb "$(grab "$1")")" = "$room_pane" ]
+}
+
+# Issue #100: the room around the ball belongs to the window, not to the pass.
+#
+# The pass writes that room transparent, and what shows through it is whatever
+# the shell put behind the video: nothing in a window, so libcosmic's own pane
+# is what fills it, and black in fullscreen, where there is no desktop behind
+# the window for a pane to be translucent over. The view does not move across
+# any of this, so what the patch reads is the treatment and nothing else.
+#
+# This is the check a pass that paints its own colour there fails: against the
+# main build of 2026-08-01 the three captures read 25 25 25 all through, and
+# this requires the middle one to be black and the two ends to be the pane.
+#
+# What it cannot see is the blur. cage implements no
+# `ext-background-effect-v1`, so the theme is never frosted under this harness
+# and libcosmic paints its pane opaque whichever branch it takes (the same
+# limit `draws_the_app_icon` records). That the room is the pane rather than a
+# colour of the app's own is what is under test here; that the pane is
+# translucent over a blurred desktop is libcosmic's own line, and the owner's
+# eyes.
+the_room_belongs_to_the_window() {
+	local check="the room around the ball belongs to the window"
+	if ! reach_the_ball room-pane; then
+		alive || lost "$check"
+		fail "$check" "the view never reached the ball" "$session/room-pane.ppm"
+		return
+	fi
+	room_pane=$(patch_rgb "$session/room-pane.ppm")
+	if is_black "$room_pane"; then
+		fail "$check" "the windowed room already reads $room_pane, which is the \
+fullscreen treatment: nothing below could tell the two apart" "$session/room-pane.ppm"
+		return
+	fi
+
+	if ! press_until room_is_black room-black -k f; then
+		alive || lost "$check"
+		fail "$check" "in fullscreen the room reads $(patch_rgb "$session/room-black.ppm"), \
+which is not black" "$session/room-black.ppm"
+		key -k Escape
+		return
+	fi
+	if ! press_until room_is_the_pane room-pane-again -k Escape; then
+		alive || lost "$check"
+		fail "$check" "leaving fullscreen left the room at \
+$(patch_rgb "$session/room-pane-again.ppm") rather than the pane's $room_pane" \
+			"$session/room-pane-again.ppm"
+		return
+	fi
+	pass "$check (pane $room_pane, fullscreen $(patch_rgb "$session/room-black.ppm"))"
 }
 
 # The arguments half of a view line, which is `reframe`'s own syntax: the same
@@ -923,9 +1059,12 @@ survives_fullscreen() {
 # The zoom is what stands in for the pan here, because the zoom is the whole
 # of what a keyboard can move: yaw, pitch and field of view are one
 # `Viewpoint` in one place, and a transition that keeps one keeps all three.
-# The instrument is the room around the ball (`is_room`), which is the app's
-# own flat grey rather than footage, so it reads the same however the window
-# is shaped underneath and whether the picture is paused or playing.
+# The instrument is the room around the ball (`is_room`), which is flat and
+# dark rather than footage, so it reads as the room however the window is
+# shaped underneath and whether the picture is paused or playing. Its two
+# treatments both pass that test (issue #100: the theme's pane in a window,
+# black in fullscreen), which is what keeps this check about the view while
+# `the room belongs to the window` is about the treatments.
 #
 # The two ways in a keyboard has, and the two ways out. The other three ways
 # in - the View menu, the button in the control row, a double click on the
