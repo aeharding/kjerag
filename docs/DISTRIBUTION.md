@@ -1181,6 +1181,28 @@ One thing to expect: **GitHub Pages answered one pull with HTTP 503** and the
 same command succeeded on retry a minute later. It is a static host with a
 free tier, not a CDN anyone is paying for.
 
+**And the update crosses the rebuild**, which is the one claim the bullet about
+deltas above puts at risk: a repository built from an empty cache shares no
+history with the one a client already has. Second dry run,
+`0.1.1-pipelinetest2`, against a client installed from the first:
+
+```
+deployed x86_64 ref: 7d8c4c824c63202e215ea3642bfed94b16fdb54277340b7748ff467ea29b0d6d
+installed before:    edc488803015a25cd8e3fec366e4ca0fee4712d788fc84a6c68c3babfe67f095
+$ flatpak update dev.harding.Kjerag
+Updates complete.
+installed after:     7d8c4c824c63202e215ea3642bfed94b16fdb54277340b7748ff467ea29b0d6d
+```
+
+An OSTree client resolves the ref to whatever the summary now names and pulls
+it; ancestry is not a condition. The same client asked between the two tags,
+after the aarch64 half of the first run had deployed over the x86_64 half, said
+`Nothing to do`, which is the other half of the check: the second arch's deploy
+does not churn the first arch's ref.
+
+Both dry runs ran under a scratch `FLATPAK_USER_DIR`, so nothing in them
+touched the installation this desktop uses.
+
 ### 4.4 The single-file bundle stays
 
 Because it is not a distribution channel and never was: `flatpak build-bundle`
