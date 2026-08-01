@@ -1676,21 +1676,38 @@ stalls() {
 		pass "$check"
 	else
 		alive || lost "$check"
-		fail "$check" "the window did not change when Escape was pressed, so either \
-nothing was drawn over it or nothing took that away" \
-			"$session/stalled-alert.ppm" "$session/stalled-dismissed.ppm"
+		fail "$check" "the window did not settle to anything other than what it was \
+when Escape was pressed, so either nothing was drawn over it or nothing took \
+that away" \
+			"$session/stalled-alert.ppm" "$session/stalled-dismissed-b.ppm"
 	fi
 
 	exits_clean
 	wrap=()
 }
 
-# The window is not what it was with the alert up. Only sound while the picture
-# underneath is known to be held, which `stalls` checks first.
+# Whatever was drawn over the window is gone. Only means anything while the
+# picture underneath is known to be held, which `stalls` checks first.
+#
+# Two things have to be true and neither is enough on its own. The window has
+# settled, because a dialog part way through fading out is already not what it
+# was. And it has changed by more than a rounding error, because a window
+# changes a little on its own: measured on this branch, with the alert left up
+# the settled window differs from the alert capture by 2113 bytes of 2764816,
+# and with Escape taking it away it differs by 355691. One percent sits two
+# orders of magnitude clear of both.
+#
+# This is what "the window is not what it was" cost: written that way the check
+# passed a run in which the alert never went away at all, and the capture it
+# filed as its evidence still had the dialog in it.
 alert_dismissed() {
-	local shot
-	shot=$(grab "$1")
-	! cmp -s "$session/stalled-alert.ppm" "$shot"
+	local a b changed
+	a=$(grab "$1-a")
+	sleep 0.7
+	b=$(grab "$1-b")
+	cmp -s "$a" "$b" || return 1
+	changed=$(cmp -l "$session/stalled-alert.ppm" "$b" | wc -l)
+	[ "$changed" -gt $(($(stat -c%s "$b") / 100)) ]
 }
 
 # ------------------------------------------------- the checks, with a drop
