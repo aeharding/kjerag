@@ -26,12 +26,12 @@
       the camera and press play. Zero configuration.
     </p>
     <ul>
-      <li>No stitching step, no proxy files, no export round trip</li>
-      <li>Drag to reframe, scroll to zoom, with gyro horizon lock</li>
-      <li>The lens seam is calibrated, aligned and blended automatically</li>
-      <li>Screenshots of the current view</li>
-      <li>Copy a view reference and jump back to that exact framing</li>
-      <li>Hardware decode end to end, even over a network share</li>
+      <li>Drag to reframe, scroll to zoom</li>
+      <li>Gyro horizon lock</li>
+      <li>Blended lens seam</li>
+      <li>Screenshots</li>
+      <li>Copyable view references</li>
+      <li>Zero-copy hardware decode</li>
     </ul>
     <p>
       The dual fisheye footage is decoded on the GPU and reprojected through

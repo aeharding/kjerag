@@ -15,13 +15,12 @@ the camera and press play. Zero configuration.
 
 ## Features
 
-- No stitching step, no proxy files, no export round trip
-- Drag to reframe, scroll to zoom, with gyro horizon lock
-- The lens seam is calibrated, aligned and blended automatically
-- Screenshots of the current view
-- Copy a view reference and jump back to that exact moment and framing
-- Hardware decode end to end; a 30 minute flight file opens instantly,
-  even over a network share
+- Drag to reframe, scroll to zoom
+- Gyro horizon lock
+- Blended lens seam
+- Screenshots
+- Copyable view references
+- Zero-copy hardware decode
 
 ## Status
 
