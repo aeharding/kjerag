@@ -15,6 +15,13 @@
 # keyboard protocol and `grim` copies the output out. The app is the release
 # binary, unchanged: nothing here is a test hook.
 #
+# One check is louder than that and says so where it stands: `stalls` needs a
+# frame import to fail, so it preloads twenty lines of C that make `dup(2)`
+# answer EMFILE on the app's own main thread while a file exists. The binary
+# is still the unchanged release build and the failure it meets is a real
+# errno from a real syscall on the real import path; what is arranged is the
+# scarcity, not the handling of it (issue #124).
+#
 # What the checks are allowed to believe, strongest first:
 #
 #   1. the app's own stdout: a report line every 5 s while playing, and one
@@ -200,6 +207,10 @@ cage_pid=
 runtime=
 log=
 
+# Set by `stalls` for its own sessions and empty for every other one: what to
+# wrap the app in, which is the fault shim and the file that arms it.
+wrap=()
+
 # boot <label> [file]
 #
 # The runtime directory is the session's own, which is what keeps the socket
@@ -221,7 +232,7 @@ boot() {
 		XDG_SCREENSHOTS_DIR="$session/shots" \
 		WLR_BACKENDS=headless \
 		WLR_LIBINPUT_NO_DEVICES=1 \
-		cage -- "${launch[@]}" ${file:+"$file"} >"$log" 2>&1 &
+		cage -- "${wrap[@]}" "${launch[@]}" ${file:+"$file"} >"$log" 2>&1 &
 	cage_pid=$!
 
 	local waited=0
@@ -1510,6 +1521,167 @@ pooled_calibration() {
 	exits_clean
 }
 
+# ---------------------------------------- the checks, with the import failing
+#
+# Issue #124. A frame import can fail for reasons that pass: the box runs out
+# of file descriptors, the driver runs out of device memory. Until this branch
+# the first one of those was the last frame the player ever drew, and the whole
+# of what was said about it was one line on a terminal a launcher-started
+# Flatpak sends nowhere: measured on main's own binary, one 0.3 s squeeze left
+# the picture frozen for good while the sound played on at 15745 of 32767 and
+# the clock ran on at 30.00 fps.
+#
+# So there are two claims and they pull in opposite directions, which is why
+# both are checked: a failure that passes must cost frames and nothing else,
+# and one that does not must stop the file, sound and all, and put the alert up.
+#
+# The instrument is a shim over `dup(2)`, which the import calls once per plane
+# (`crates/render/src/dmabuf.rs`) on the thread iced prepares the pass on. The
+# decode thread's own descriptors come out of `av_hwframe_map` and never
+# through `dup`, so failing it on the main thread alone leaves the decoder
+# delivering frames into an import that cannot take them, which is the shape of
+# the hiccup this is about. Nothing in the app is compiled differently and no
+# code path is stood in for; what the shim arranges is the scarcity.
+
+# How long the app is given to notice, which is the render layer's own bound
+# (`STUCK_FOR`, two seconds) and then some.
+STUCK_BY=8
+# How long a hiccup lasts. Well under the bound, and long enough to cover
+# several frames at 30 fps.
+HICCUP=0.4
+
+stalls() {
+	local check
+	printf '\n-- import failure checks (%s)\n' "$media"
+
+	if [ -n "${KJERAG_FLATPAK:-}" ]; then
+		skip "a stuck import stops the file and says so (no preload into a sandbox)"
+		return
+	fi
+	if ! command -v cc >/dev/null; then
+		skip "a stuck import stops the file and says so (no cc to build the shim)"
+		return
+	fi
+
+	local shim=$session/dupfail.so gate=$session/dup-fail
+	rm -f "$gate"
+	cat >"$session/dupfail.c" <<-'EOF'
+		#define _GNU_SOURCE
+		#include <dlfcn.h>
+		#include <errno.h>
+		#include <stdlib.h>
+		#include <sys/syscall.h>
+		#include <unistd.h>
+
+		static int (*real_dup)(int);
+
+		int dup(int fd) {
+		        if (!real_dup) {
+		                real_dup = dlsym(RTLD_NEXT, "dup");
+		        }
+		        const char *gate = getenv("KJERAG_DUP_FAIL");
+		        if (gate && syscall(SYS_gettid) == getpid() && access(gate, F_OK) == 0) {
+		                errno = EMFILE;
+		                return -1;
+		        }
+		        return real_dup(fd);
+		}
+	EOF
+	if ! cc -shared -fPIC -O2 -o "$shim" "$session/dupfail.c" -ldl 2>>"$session/cc.log"; then
+		skip "a stuck import stops the file and says so (the shim did not build)"
+		return
+	fi
+
+	wrap=(env "LD_PRELOAD=$shim" "KJERAG_DUP_FAIL=$gate")
+	boot stall "$media"
+	if ! await '^play:' "$READY"; then
+		fail "the file plays under the shim" "no report line in $READY s" "log: $log"
+		teardown
+		wrap=()
+		return
+	fi
+	pass "the file plays under the shim"
+
+	# (1) The hiccup. Failing imports for a fraction of the bound costs the
+	# frames it covers and must cost nothing else: no line, no alert, and a
+	# picture still moving on the other side of it.
+	check="a transient import failure costs frames and not the file"
+	: >"$gate"
+	sleep "$HICCUP"
+	rm -f "$gate"
+	sleep "$SETTLE"
+	if said 'stopped:'; then
+		fail "$check" "$(grep 'stopped:' "$log")" "log: $log"
+	elif moving_picture hiccup; then
+		pass "$check"
+	else
+		alive || lost "$check"
+		fail "$check" "the picture did not come back after a ${HICCUP}s squeeze" \
+			"$session/hiccup-a.ppm" "$session/hiccup-b.ppm"
+	fi
+
+	# (2) The one that does not pass. From here the file is stopped for good,
+	# so every check after this one is about a window that has already given up.
+	check="a stuck import stops the file and says so"
+	local reports
+	reports=$(grep -c '^play:' "$log")
+	: >"$gate"
+	if ! await 'stopped:' "$STUCK_BY"; then
+		alive || lost "$check"
+		fail "$check" "nothing said the picture had gone, after $STUCK_BY s" "log: $log"
+		teardown
+		wrap=()
+		return
+	fi
+	pass "$check ($(grep -o 'stopped:.*' "$log" | tail -1))"
+
+	# The report subscription runs only while playing, so a line that never
+	# arrives is the clock stopped, and the sound follows the clock: this is
+	# how the harness sees silence without a microphone.
+	check="a stopped file stops its sound too"
+	sleep "$REPORT"
+	if [ "$(grep -c '^play:' "$log")" -gt "$reports" ]; then
+		fail "$check" "the clock ran on for $REPORT s after the picture died" \
+			"$(grep '^play:' "$log" | tail -1)"
+	else
+		pass "$check (no report line in $REPORT s: the clock is stopped)"
+	fi
+
+	# And the pilot's own surface. No capture can read the words in an alert,
+	# so what is checked is the pair: something is drawn over a window whose
+	# picture is provably not moving any more, and Escape takes that something
+	# away again.
+	check="the stall puts an alert over the window"
+	if ! still_picture stalled; then
+		alive || lost "$check"
+		fail "$check" "the picture is still moving, so nothing below means anything" \
+			"$session/stalled-a.ppm" "$session/stalled-b.ppm"
+		teardown
+		wrap=()
+		return
+	fi
+	cp "$session/stalled-b.ppm" "$session/stalled-alert.ppm"
+	if press_until alert_dismissed stalled-dismissed -k Escape; then
+		pass "$check"
+	else
+		alive || lost "$check"
+		fail "$check" "the window did not change when Escape was pressed, so either \
+nothing was drawn over it or nothing took that away" \
+			"$session/stalled-alert.ppm" "$session/stalled-dismissed.ppm"
+	fi
+
+	exits_clean
+	wrap=()
+}
+
+# The window is not what it was with the alert up. Only sound while the picture
+# underneath is known to be held, which `stalls` checks first.
+alert_dismissed() {
+	local shot
+	shot=$(grab "$1")
+	! cmp -s "$session/stalled-alert.ppm" "$shot"
+}
+
 # ------------------------------------------ the checks, with nothing open
 
 welcome() {
@@ -1684,6 +1856,7 @@ foreign() {
 if [ -n "$media" ]; then
 	with_media
 	pooled_calibration
+	stalls
 else
 	welcome
 fi
