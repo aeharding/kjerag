@@ -24,10 +24,14 @@ the camera and press play. Zero configuration.
 
 ## Status
 
-Alpha. Watching, reframing and screenshots work and see daily use; the
-first tagged release and a Flathub listing are in progress. Verified with
-Insta360 X4 Air and ONE X2 footage, with X3, X4 and X5 samples in the
-test corpus. DJI and GoPro 360 formats are not supported.
+Alpha. The first tagged release and a Flathub listing are in progress.
+
+| Camera | Support |
+|---|---|
+| Insta360 X4 Air | Verified, daily use |
+| Insta360 ONE X2 | Verified |
+| Insta360 X3, X4, X5 | Sample tested |
+| DJI, GoPro | Not supported |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for where things stand and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
