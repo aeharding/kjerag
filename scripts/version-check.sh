@@ -7,7 +7,7 @@
 # builds from.
 #
 #   scripts/version-check.sh            the workspace and the metainfo agree
-#   scripts/version-check.sh v0.1.0     ... and the tag names that version
+#   scripts/version-check.sh 0.1.0      ... and the tag names that version
 #   scripts/version-check.sh --notes    print the newest release's notes
 #
 # The workspace manifest is the source of truth. Nothing here edits anything:
@@ -15,7 +15,10 @@
 # workflow means the tag build stops before it produces an artifact claiming a
 # version nothing else says.
 #
-# A tag may carry a prerelease suffix, `v<version>-<label>`, and that is not a
+# A tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
+# 2026-08-01).
+#
+# It may carry a prerelease suffix, `<version>-<label>`, and that is not a
 # loophole in the check: the version in front of the dash still has to be the
 # workspace's. It is how the pipeline itself is exercised without spending the
 # version number a real release will use, and the workflow marks such a
@@ -74,8 +77,7 @@ python3 - "$root/Cargo.toml" "$root/resources/dev.harding.Kjerag.metainfo.xml" \
 	    )
 
 	if tag:
-	    named = tag[1:] if tag.startswith("v") else tag
-	    label = ""
+	    named, label = tag, ""
 	    if named.startswith(f"{version}-"):
 	        named, label = version, named[len(version) + 1 :]
 	    if named != version:

@@ -557,7 +557,8 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
-- 2026-08-01 **A version tag is the release** (issue #106). Pushing `v*`
+- 2026-08-01 **A version tag is the release** (issue #106). Pushing a tag
+  that is the plain version, `0.1.0` with no `v` in front of it (owner),
   builds the Flatpak on a runner from the committed manifest and
   `flatpak/cargo-sources.json` and publishes one installable
   `kjerag-<version>-x86_64.flatpak` and its `.sha256` as a GitHub Release,
@@ -565,7 +566,7 @@ live, no keyframe UI ever.
   keeping. The workspace manifest is the one place a version is written, and
   `scripts/version-check.sh` makes the metainfo and the tag agree with it
   before the build starts, so a bundle cannot claim a version the tree does
-  not carry; a tag may add a prerelease label (`v0.1.0-rc1`) and the version
+  not carry; a tag may add a prerelease label (`0.1.0-rc1`) and the version
   in front of the dash is still checked, which is how the pipeline is
   exercised without spending a version number. The release workflow **calls**
   `ci.yml` rather than restating it, so a tag runs the gates a pull request

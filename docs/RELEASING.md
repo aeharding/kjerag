@@ -53,7 +53,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/name-check.sh
 scripts/cargo-sources.sh --check
-scripts/version-check.sh v0.2.0
+scripts/version-check.sh 0.2.0
 scripts/uitest.sh ~/Videos/<file>.insv
 ```
 
@@ -68,21 +68,25 @@ The bump goes to `main` through a pull request like any other change. Then,
 on the merged commit:
 
 ```sh
-git tag -m 'Kjerag 0.2.0' v0.2.0 && git push origin v0.2.0
+git tag -m 'Kjerag 0.2.0' 0.2.0 && git push origin 0.2.0
 ```
 
 That is the release. Watch it with `gh run watch` or the Actions tab. Measured
 on the pipeline's own test tags: 10m36s and 10m44s end to end, about nine
 minutes of it the Flatpak build.
 
+The tag is the plain version, with no `v` in front of it (owner). The
+workflow only fires on a digit-led tag, so a `v0.2.0` starts nothing at all,
+and `scripts/version-check.sh` refuses it too.
+
 The `-m` is not decoration on this box: `tag.gpgsign` is on, a signed tag is
-an annotated tag, and a bare `git tag v0.2.0` stops with `fatal: no tag
+an annotated tag, and a bare `git tag 0.2.0` stops with `fatal: no tag
 message?` before it makes anything.
 
 ## 4. Verify the artifact
 
 ```sh
-gh release download v0.2.0
+gh release download 0.2.0
 sha256sum -c kjerag-0.2.0-x86_64.flatpak.sha256
 flatpak install --user ./kjerag-0.2.0-x86_64.flatpak
 flatpak run dev.harding.Kjerag --version
@@ -93,7 +97,7 @@ flatpak run dev.harding.Kjerag --version
 A tag is cheap to withdraw before anybody has it:
 
 ```sh
-gh release delete v0.2.0 --yes --cleanup-tag
+gh release delete 0.2.0 --yes --cleanup-tag
 ```
 
 Fix, land the fix, tag again. Re-pushing a tag to a different commit is not
@@ -103,7 +107,7 @@ To exercise the pipeline without spending a version number, tag a prerelease
 of the version the tree already carries:
 
 ```sh
-git tag -m 'Pipeline test' v0.2.0-rc1 && git push origin v0.2.0-rc1
+git tag -m 'Pipeline test' 0.2.0-rc1 && git push origin 0.2.0-rc1
 ```
 
 The version in front of the dash still has to be the workspace's, the build is

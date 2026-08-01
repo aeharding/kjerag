@@ -2,12 +2,17 @@ name: release
 # A version tag is the whole trigger, and what comes out is one file a person
 # can install (issue #106): `flatpak install --user ./kjerag-….flatpak`.
 #
+# A tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
+# 2026-08-01). The pattern below is the same statement: it fires on a
+# digit-led tag and on nothing else, so a tag named `test` or `nightly`
+# starts no release at all.
+#
 # Nothing here decides what a release is. The version lives in the workspace
 # manifest, the notes live in the metainfo, and the tag has to agree with both
 # or the run stops before it builds anything (scripts/version-check.sh).
 on:
   push:
-    tags: ['v*']
+    tags: ['[0-9]*']
 
 # What `gh release create` writes with. Everything else stays read-only.
 permissions:
@@ -84,7 +89,7 @@ jobs:
       # from.
       - id: bundle
         run: |
-          name="kjerag-${GITHUB_REF_NAME#v}-x86_64.flatpak"
+          name="kjerag-$GITHUB_REF_NAME-x86_64.flatpak"
           flatpak build-bundle \
             --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
             "$RUNNER_TEMP/repo" "$name" dev.harding.Kjerag
@@ -105,7 +110,7 @@ jobs:
           } > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
 
-      # A tag with a label after the version (v0.1.0-something) is a
+      # A tag with a label after the version (0.1.0-something) is a
       # prerelease, and GitHub is told so rather than left to guess.
       - env:
           GH_TOKEN: ${{ github.token }}

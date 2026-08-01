@@ -144,7 +144,8 @@ error` (measured), so a GPU-less runner would be checking nothing.
 
 ## Releasing
 
-A `v*` tag is the whole trigger (issue #106): `.github/workflows/release.yml`
+A version tag is the whole trigger (issue #106), written plain with no `v` in
+front of it, `0.1.0` (owner): `.github/workflows/release.yml`
 runs the gates above on the tagged commit, builds the Flatpak from the
 committed manifest and `flatpak/cargo-sources.json`, and publishes one
 installable `.flatpak` bundle and its checksum as a GitHub Release. The
