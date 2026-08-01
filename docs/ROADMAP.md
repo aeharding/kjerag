@@ -700,6 +700,57 @@ live, no keyframe UI ever.
   third is free because the filter is paced in seconds of media time, so a
   direction read at 15 Hz and one read at 30 settle in the same wall time.
 
+- 2026-08-01 **The seam has two axes and the campaign had only ever measured
+  one** (issue #103, stage 5, docs/research/seam-two-axis.md). The owner
+  rejected the horizon on `main` after stages 1 to 4 all merged on good
+  numbers, and the reason is that every acceptance number those stages carry
+  is a statistic of the **epipolar** axis, which is the axis a horizon cannot
+  show. At his fov-20 reference view one degree epipolar moves that horizon
+  **0.6 rows** and one degree **along the seam** moves it **53**, and the whole
+  band campaign moves that view by 2.6 view px of 32.8. `Cell::off_epi` had
+  measured the other axis since stage 2 and never applied it, and its search
+  saturated: three offsets at 0.30 degrees, with 44 percent of measured
+  directions cold and 67 percent warm sitting ON the limit against a corpus
+  range of 0.17 to 0.67.
+
+  Stage 5 measures it properly and puts it in the picture. The search is now
+  nineteen offsets at 0.90 degrees on the same 0.10 grid the epipolar axis
+  uses, with the same parabola between whole steps; nothing rails on any
+  camera tried. The channel has its own confidence, refused on its own,
+  because a reading pinned on the along-seam limit is a camera outside
+  anything measured and refusing the epipolar channel for it would throw
+  stage 2 away on that footage. One time constant, `TAU_FAR_S`, wherever the
+  direction looks: parallax cannot reach this axis at any distance, so what it
+  holds is the camera, and the camera does not move.
+
+  **Two things it had to learn by being built first.** Applied per direction
+  it scallops - far fewer than 128 directions correlate on a real frame, and a
+  field with holes in it applied over a hemisphere warps a horizon instead of
+  moving it (18.5 view px of correction at one end of a four-degree fit and
+  4.7 at the other). So the ring is fitted to the shape the phenomenon has:
+  constant, one cycle and two cycles, which are relative roll, principal point
+  and focal aspect, the decomposition `--bin seam` has printed since #48. Five
+  numbers, a ridge of one direction's worth of evidence, no time constant of
+  its own. And applied only across the band it does nothing - 0.03 view px of
+  32.8 - because a pose error is wrong everywhere and not only at the
+  handover, so it goes where the calibration it belongs to goes: to lens 1,
+  over its whole picture, scaled by the ray flattened into the seam plane,
+  which is exactly the `cos(elevation)` a relative roll produces.
+
+  The owner's reference view goes **32.8 to 10.1 view px cold** and **30.2 to
+  23.2 warm**, which is short of the low single digits the ruling asked for
+  and is capped by the measurement rather than by the application: at the
+  azimuths carrying his step the band reads 0.06 to 0.20 degrees where
+  `--bin seam mode=residual` reads 0.41 to 0.46 on the same directions of the
+  same file, while the two agree to 0.01 degrees on the opposite side of the
+  ring. That disagreement is the next thing to diagnose and it is what stands
+  between this and a pixel-perfect horizon. Cost is **+2.55 ms per redraw**
+  under live decode, which is out of the campaign's class and is the search's
+  and not the application's: the same width at a 0.30 grid is +0.86 ms and
+  reads 15.9 cold, and a two-pass coarse-to-fine search measured worse on both
+  counts on this GPU because sixty-four workgroups' worth of extra barriers
+  cost more than the candidates they save.
+
 - 2026-08-01 **The near end of the seam correction is now the search window,
   not the fold** (issue #103, stage 4). The crossover width and the shear
   clamp turned out to be one inequality read two ways, so the band now opens
