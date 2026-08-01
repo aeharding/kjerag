@@ -8,10 +8,6 @@
   repository says "AGPL-3.0" and carries no per-file "or any later version"
   grant, and the SPDX identifier for that is the -only one.
 
-  One thing here is still the owner's to supply, and docs/DISTRIBUTION.md
-  section 5 says so: the screenshots, which Flathub requires and which need
-  a real window with real footage in it.
-
   The id is the application ID issue #66 settled and issue #75 put in the
   code, so it is also this file's name, the binary's `APP_ID`, the icon
   basenames and the cosmic-config directories (docs/DISTRIBUTION.md 3.6).
@@ -26,10 +22,17 @@
 
   <description>
     <p>
-      Kjerag plays Insta360 .insv files directly: no stitching step, no proxy
-      files, no export round trip. Drag to reframe, scroll to zoom, take
-      screenshots.
+      Kjerag plays Insta360 .insv files directly: open the file straight off
+      the camera and press play. Zero configuration.
     </p>
+    <ul>
+      <li>Drag to reframe, scroll to zoom</li>
+      <li>Gyro horizon lock</li>
+      <li>Blended lens seam</li>
+      <li>Screenshots</li>
+      <li>Copyable view references</li>
+      <li>Zero-copy hardware decode</li>
+    </ul>
     <p>
       The dual fisheye footage is decoded on the GPU and reprojected through
       the calibrated lens model that every .insv carries, so the horizon is
@@ -67,21 +70,25 @@
   </keywords>
 
   <!--
-    Flathub will not accept a submission without at least one screenshot.
-    Ours has to be a real window over real footage, which is the owner's to
-    take and to agree to publish.
+    Real windows over real footage, taken and approved for publication by
+    the owner (2026-08-01). The images live in this repository so the URLs
+    below resolve once this lands on main.
+  -->
   <screenshots>
     <screenshot type="default">
-      <image>https://…/kjerag-reframe.png</image>
-      <caption>Reframing a shot</caption>
+      <image>https://raw.githubusercontent.com/aeharding/kjerag/main/resources/screenshots/reframe.png</image>
+      <caption>Watching a flight, reframed by dragging</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/aeharding/kjerag/main/resources/screenshots/planet.png</image>
+      <caption>Zoomed all the way out to a little planet</caption>
     </screenshot>
   </screenshots>
-  -->
 
   <releases>
     <release version="0.1.0" type="development" date="2026-07-31">
       <description>
-        <p>Pre-alpha. Playback, reframing and stills work; nothing is stable.</p>
+        <p>Beta. Playback, reframing and stills work.</p>
       </description>
     </release>
   </releases>

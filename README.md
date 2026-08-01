@@ -6,14 +6,39 @@
 
 <p align="center">Native 360° video player for the COSMIC desktop, written in Rust.</p>
 
-Kjerag plays Insta360 `.insv` files directly: no stitching step, no proxy
-files, no export round-trip. Drag to reframe, scroll to zoom, take
-screenshots. The dual-fisheye footage is hardware-decoded and reprojected
-on the GPU using the calibrated lens model embedded in every `.insv` file.
+<p align="center">
+  <img src="resources/screenshots/planet.png" width="720" alt="Kjerag playing a flight zoomed all the way out to a little planet">
+</p>
 
-**Status: pre-alpha.** See [docs/ROADMAP.md](docs/ROADMAP.md) for where
-things stand and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it
-works.
+Kjerag plays Insta360 `.insv` files directly: open the file straight off
+the camera and press play. Zero configuration.
+
+## Features
+
+- Drag to reframe, scroll to zoom
+- Gyro horizon lock
+- Blended lens seam
+- Screenshots
+- Copyable view references
+- Zero-copy hardware decode
+
+## Status
+
+Beta.
+
+| Camera | Support |
+|---|---|
+| Insta360 X4 Air | ✅ Fully Supported |
+| Insta360 ONE X2 | ✅ Fully Supported |
+| Insta360 X3, X4, X5 | ⚠️ Unverified |
+| DJI, GoPro | ❌ Not supported |
+
+Have a camera that is unverified or missing?
+[Open an issue](https://github.com/aeharding/kjerag/issues) with a short
+raw clip straight off the camera.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for where things stand and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
 
 ## Why
 
