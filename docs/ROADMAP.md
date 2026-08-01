@@ -557,6 +557,36 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **A version tag is the release, and nothing about it is ours**
+  (issue #106). `cargo release patch --execute` on main bumps the version,
+  stamps a dated entry into the metainfo changelog, tags the plain version
+  with no `v` in front of it, and pushes; the tag makes a workflow build the
+  Flatpak and publish `kjerag-<version>-x86_64.flatpak` and its `.sha256` as a
+  GitHub Release. The owner's rule for the whole path was that Kjerag is the
+  simplest project Flathub will ever see and its releases should be too, so
+  every piece is either an upstream tool used as its documentation intends or
+  it is gone. cargo-release owns the version, the changelog entry, the commit
+  and the tag; Flatpak's own GitHub action owns the build, in the image
+  Flathub builds with, which took a hand-written `apt-get` block and its two
+  archaeology comments (`eu-strip`, gdk-pixbuf's SVG loader) out of the tree
+  the day it arrived; softprops/action-gh-release and GitHub's own generated
+  notes own the release. What that left of our own is four lines: a tag
+  pattern, a bundle name, a `sha256sum`, and `release.toml`. An earlier
+  version of this work had a `scripts/version-check.sh` holding three copies
+  of the version in agreement, and it was deleted rather than kept: with one
+  tool writing all three from one number, the thing it verified cannot
+  disagree, and cargo-release's own `exactly = 1` on the changelog stamp is
+  the guard that the metainfo was really written. The release workflow calls
+  `ci.yml` rather than restating it, so a tag runs the gates a pull request
+  runs, and `scripts/uitest.sh` is in neither: a runner has no
+  `/dev/dri/renderD128`, so it is a cargo-release hook, which means the dry
+  run that precedes every release is also the harness run. Measured on the
+  pipeline's own test tags: about ten minutes end to end, an 8.1 MB bundle,
+  and `flatpak install --user` of it followed by `flatpak run
+  dev.harding.Kjerag --version` printing `kjerag 0.1.0`. The channel question
+  is not reopened by any of this: Flathub is still where a published app goes
+  (docs/DISTRIBUTION.md 4.1), and a single-file bundle is a file rather than a
+  channel.
 - 2026-08-01 **The room around the ball belongs to the window** (issue #100).
   The pass wrote a flat 0.10 grey wherever no lens has a ray; it now writes
   transparent black through a premultiplied blend and paints nothing there at

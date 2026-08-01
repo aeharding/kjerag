@@ -310,9 +310,8 @@ WARNING: Icon referenced in desktop file but not exported: dev.harding.Kjerag
 ```
 
 flatpak exports an icon only when its basename starts with the app ID, so a
-launcher showed a generic placeholder. The export has not been re-run since
-the rename; what is known is that the two names it compares are now the same
-string.
+launcher showed a generic placeholder. **Re-run on 2026-08-01** (§3.8, the
+third build): the warning is gone and the eleven icons are exported by name.
 
 The About page and the welcome view read
 `hicolor/scalable/apps/dev.harding.Kjerag.svg` as bytes rather than asking
@@ -868,15 +867,16 @@ WARNING: Icon referenced in desktop file but not exported: dev.harding.Kjerag
 No network, no patch, no tarball. The eleven icon files are in the app
 (`files/share/icons/hicolor/*/apps/dev.harding.Kjerag.*`), and the warning is
 §2.4's: at the time of this run the entry named an ID the icons did not
-carry, and flatpak exports only what starts with the app ID. Issue #75 made
-the two one name, and this build has not been repeated since. The
+carry, and flatpak exports only what starts with the app ID. The
 binary links the runtime's ffmpeg and says which one, which is the check
 AGENTS.md asks for: `readelf -d` reports `libavcodec.so.61`, so ffmpeg 7.1.
 
 Three things about that second build to be exact about.
 
 - **It was not installed and not run.** §3.2's playback numbers stand on the
-  first build and have not been re-measured against this one.
+  first build and have not been re-measured against this one, nor against the
+  third build below, which was installed and asked its version and nothing
+  more.
 - **`--state-dir` is not decoration.** flatpak-builder's cache defaults to
   `.flatpak-builder` in the working directory, which for this manifest is the
   repository root, and the `dir` source copies the whole repository into the
@@ -888,6 +888,17 @@ Three things about that second build to be exact about.
   That name is the generator's, cargo still reads it, and the day it stops is
   the day this breaks; it is a thing to watch rather than a thing to patch
   around here.
+
+**The third build is the release pipeline's** (issue #106, 2026-08-01), the
+same command from the branch that added the workflow, and it is the first
+repeat of any of this since the rename. **The icon warning is gone**: the
+export names the icons instead of complaining about them
+(`Exporting share/icons/hicolor/32x32/apps/dev.harding.Kjerag.png` and ten
+more) and the log carries no `WARNING:` line at all, which is what §2.4 said
+was untested. The cargo build inside the sandbox took 1m58s and the bundle is
+8.1 MB. That one was installed: `flatpak install --user
+./kjerag-0.1.0-x86_64.flatpak` and then `flatpak run dev.harding.Kjerag
+--version` prints `kjerag 0.1.0`.
 
 The MIME package rides along: the first build's flatpak exported it to
 `~/.local/share/flatpak/exports/share/mime/packages/dev.harding.Kjerag.xml`,
@@ -954,6 +965,14 @@ management on us permanently. One channel, and it is Flathub.
 `flatpak build-bundle` produces one `.flatpak` that installs with no remote
 at all, which is how the owner gets a build to click a `.insv` against
 before anything is published.
+
+Since issue #106 that bundle is what a version tag produces: the release
+workflow builds this manifest with Flatpak's own GitHub action and attaches
+the bundle and its `.sha256` to a GitHub Release (docs/RELEASING.md). The
+action records the Flathub repository in the bundle as it exports it, which is
+what lets it install on a machine that has never had Flathub configured: the
+bundle carries the app, and that URL is where the runtime under it comes
+from.
 
 ---
 

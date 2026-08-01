@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow calls this one on the tagged commit, so a release
+  # runs the gates a pull request runs and there is one copy of them.
+  workflow_call:
 
 jobs:
   check:
@@ -64,6 +67,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/name-check.sh
+
+  # The metainfo is the changelog a software centre shows and the file
+  # Flathub reads hardest, and cargo-release stamps a <release> entry into it
+  # on every release (release.toml, issue #106). Checked on every pull request
+  # rather than at the tag, because a tag that fails here fails on something
+  # that was true days earlier.
+  metainfo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends appstream
+      - run: appstreamcli validate resources/dev.harding.Kjerag.metainfo.xml
 
   # The point of the workspace (issue #19): the trailer layer builds and
   # tests on a box with no libav headers. This job installs nothing, so it
