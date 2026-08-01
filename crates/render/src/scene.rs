@@ -711,6 +711,25 @@ impl Scene {
         self.shutter.arm(request);
     }
 
+    /// The map this scene would draw one view through, for an instrument that
+    /// wants to ask where a pixel is looking without opening a window.
+    ///
+    /// The same `Reframe` `prepare` builds, minus the frame it would be bound
+    /// to: what it answers about is geometry, which the pictures do not
+    /// change.
+    pub fn mapped(&self, camera: Camera, aspect: f32) -> Option<Reframe> {
+        let view = self.primitive(camera).view?;
+        Some(Reframe::new(
+            &view.lenses,
+            view.frames.size,
+            camera,
+            view.held,
+            aspect,
+            false,
+            self.sampling.get(),
+        ))
+    }
+
     pub fn primitive(&self, camera: Camera) -> ScenePrimitive {
         let held = Holding {
             horizon: self.horizon.get(),

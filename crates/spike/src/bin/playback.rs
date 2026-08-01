@@ -96,14 +96,16 @@ fn main() -> Fallible<()> {
         Duration::from_secs(seconds),
         hz,
         shots,
-        camera,
-        &readout,
-        match sample.as_str() {
-            "bilinear" => Sampling::Bilinear,
-            "luma" => Sampling::Luma,
-            _ => Sampling::Sharp,
+        Drawn {
+            camera,
+            readout: &readout,
+            sampling: match sample.as_str() {
+                "bilinear" => Sampling::Bilinear,
+                "luma" => Sampling::Luma,
+                _ => Sampling::Sharp,
+            },
+            band: band != "noband",
         },
-        band != "noband",
     )
 }
 
@@ -188,16 +190,24 @@ fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
 /// (`iced`'s `RedrawRequest::At`, from `kjerag_render`'s widget), so this
 /// does too. `hz` is the display's refresh rate, and caps how often a redraw
 /// can happen when the scene asks for one as soon as possible.
-fn play(
-    input: &Path,
-    run: Duration,
-    hz: u32,
-    shots: u32,
+/// What one run is asked to draw, as against how long for: the arguments that
+/// describe the picture rather than the measurement.
+struct Drawn<'a> {
     camera: Camera,
-    readout: &str,
+    readout: &'a str,
     sampling: Sampling,
+    /// Whether the per-frame seam band measures (issue #103). Off is the pass
+    /// as it was before it, which is what its cost is measured against.
     band: bool,
-) -> Fallible<()> {
+}
+
+fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> Fallible<()> {
+    let Drawn {
+        camera,
+        readout,
+        sampling,
+        band,
+    } = drawn;
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
     println!("device: {}", dmabuf::device_report(&gpu.device));

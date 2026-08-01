@@ -37,7 +37,9 @@ use std::time::Duration;
 
 use kjerag_media::Fallible;
 use kjerag_render::Cue;
-use kjerag_render::{AZIMUTHS, Camera, Cell, Horizon, Sampling, Scene, ScenePipeline, Size};
+use kjerag_render::{
+    AZIMUTHS, Camera, Cell, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size,
+};
 use kjerag_spike::{FORMAT, Gpu, Picture, Render};
 
 /// How many view pixels one degree is at the width the seam residuals are
@@ -79,6 +81,10 @@ struct Read {
     at: Duration,
     cells: Vec<Cell>,
     picture: Picture,
+    /// The map this frame was drawn through. Kept because the horizon lock
+    /// turns the body under the view, so which pixels are near the seam is a
+    /// question about one frame and not about the run.
+    mapped: Reframe,
 }
 
 /// Plays `count` frames from `from`, letting the shipped pass measure and draw
@@ -117,6 +123,9 @@ fn play(
             at,
             cells: pipeline.band_state(&gpu.device, &gpu.queue)?,
             picture,
+            mapped: scene
+                .mapped(options.camera(), 1.0)
+                .ok_or("no frame to map")?,
         });
         if reads.len() >= options.count || !scene.advance()? {
             break;
@@ -144,6 +153,10 @@ fn field(options: &Options) -> Fallible<()> {
         last.at.as_secs_f64(),
     );
 
+    if let Some(path) = &options.save {
+        std::fs::write(path, Cell::write(&last.cells))?;
+        println!("state:  written to {}", path.display());
+    }
     table(last);
     coverage(&reads);
     geometry(last);
@@ -343,24 +356,25 @@ fn render(options: &Options) -> Fallible<()> {
     std::fs::create_dir_all(&out)?;
     let stem = options.stem();
 
-    let draw = |off: bool| -> Fallible<Picture> {
+    // The same frame both ways, so the two differ by the band and by nothing
+    // else: same file, same instant, same run length, same pass, two opens.
+    let draw = |off: bool| -> Fallible<Read> {
         let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
         let mut options = options.clone();
         options.off = off;
         let mut reads = play(&gpu, &options, &mut pipeline, |_, _| Ok(()))?;
-        Ok(reads
-            .pop()
-            .expect("play returns at least one frame")
-            .picture)
+        Ok(reads.pop().expect("play returns at least one frame"))
     };
-    let plain = draw(true)?;
-    let banded = draw(false)?;
+    let stage1 = draw(true)?;
+    let last = draw(false)?;
+    let (plain, banded) = (&stage1.picture, &last.picture);
     plain.save(&gpu, &out.join(format!("{stem}-1-stage1.png")))?;
     banded.save(&gpu, &out.join(format!("{stem}-2-band.png")))?;
     banded
-        .amplified(&plain)
+        .amplified(plain)
         .save(&gpu, &out.join(format!("{stem}-4-what-moved.png")))?;
-    let against = plain.against(&banded);
+    let against = plain.against(banded);
+    share(options, &last.mapped, plain, banded)?;
     println!(
         "\nwrote three pictures into {} at yaw {:.1}, pitch {:.1}, fov {:.1}.\n{}",
         out.display(),
@@ -370,6 +384,95 @@ fn render(options: &Options) -> Fallible<()> {
         against.report(),
     );
     Ok(())
+}
+
+/// The seam band's share of the picture's own sharpness, before and after.
+///
+/// The same statistic `--bin seam mode=parity` scores a rival stitch with, and
+/// the same definition: mean squared horizontal luma gradient over the pixels
+/// within 5 degrees of the seam, over the same statistic 9 to 25 degrees off
+/// it in the same picture. A doubled edge lowers it and a single one does not,
+/// so an alignment that stops drawing content twice RAISES it.
+///
+/// Scored here on **our own two pictures** rather than against the camera
+/// maker's export, and that is the whole point of doing it here: each picture
+/// is its own control, no projection has to be fitted, and there is no view
+/// for a fit to get wrong. What it cannot say is how we compare to them.
+fn share(options: &Options, reframe: &Reframe, plain: &Picture, banded: &Picture) -> Fallible<()> {
+    let size = options.size();
+    let width = size.width as usize;
+    // How far past the seam each output pixel is, in degrees: the angle off
+    // the plane the two lenses hand over across, which is the body's own
+    // xy plane.
+    let past: Vec<f64> = (0..(size.width * size.height) as usize)
+        .map(|index| {
+            let uv = [
+                (index % width) as f32 / size.width as f32,
+                (index / width) as f32 / size.height as f32,
+            ];
+            let Some(ray) = reframe.view_ray(uv) else {
+                return f64::INFINITY;
+            };
+            let body = reframe.body_ray(ray);
+            let length = (body[0] * body[0] + body[1] * body[1] + body[2] * body[2]).sqrt();
+            match length > 0.0 {
+                true => f64::from((body[2] / length).asin().to_degrees().abs()),
+                false => f64::INFINITY,
+            }
+        })
+        .collect();
+    println!(
+        "\n{:<14} {:>13} {:>13} {:>9} {:>9} {:>9}",
+        "picture", "in the band", "either side", "share", "band px", "side px"
+    );
+    for (name, picture) in [("ours, stage 1", plain), ("ours, band", banded)] {
+        let luma = picture.luma();
+        let inside = gradient(&luma, &past, width, (0.0, 5.0));
+        let outside = gradient(&luma, &past, width, (9.0, 25.0));
+        println!(
+            "{name:<14} {:>13.1} {:>13.1} {:>9.3} {:>9} {:>9}",
+            inside.0,
+            outside.0,
+            inside.0 / outside.0,
+            inside.1,
+            outside.1,
+        );
+    }
+    Ok(())
+}
+
+/// Mean squared horizontal luma gradient over the pixels whose distance past
+/// the seam falls inside `band`, and how many pixels that was.
+///
+/// The count is printed beside every ratio because a band that lands on
+/// nothing reads 0.000, which looks like a picture with no sharpness rather
+/// than a mask with no pixels.
+fn gradient(luma: &[f32], past: &[f64], width: usize, band: (f64, f64)) -> (f64, usize) {
+    let mut total = 0.0;
+    let mut count = 0;
+    for index in 1..luma.len() - 1 {
+        if index % width == 0 || index % width == width - 1 {
+            continue;
+        }
+        if !(band.0..=band.1).contains(&past[index]) {
+            continue;
+        }
+        // A pixel no lens reached is not a pixel, and its edge against the
+        // room around the ball is not an edge in the picture.
+        if [index - 1, index, index + 1]
+            .iter()
+            .any(|at| luma[*at] <= 0.0)
+        {
+            continue;
+        }
+        let step = f64::from(luma[index + 1] - luma[index - 1]);
+        total += step * step;
+        count += 1;
+    }
+    match count > 0 {
+        true => (total / count as f64, count),
+        false => (0.0, 0),
+    }
 }
 
 // ------------------------------------------------------------ options
@@ -391,6 +494,8 @@ struct Options {
     /// simply not applied.
     off: bool,
     out: Option<PathBuf>,
+    /// Where to write the settled state, for `--bin seam band=`.
+    save: Option<PathBuf>,
 }
 
 impl Options {
@@ -408,6 +513,7 @@ impl Options {
             control: false,
             off: false,
             out: None,
+            save: None,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -430,6 +536,7 @@ impl Options {
                 Some(("control", value)) => options.control = value.parse::<u32>()? != 0,
                 Some(("off", value)) => options.off = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
+                Some(("save", value)) => options.save = Some(PathBuf::from(value)),
                 Some((key, _)) => return Err(format!("no argument called {key}").into()),
             }
         }
@@ -470,4 +577,4 @@ impl Options {
 
 const USAGE: &str = "usage: band <file.insv> [mode=field|sequence|render] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
-     [out=dir]";
+     [out=dir] [save=state.txt]";

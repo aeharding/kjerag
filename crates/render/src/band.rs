@@ -239,6 +239,43 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// The whole state as one line per direction, for an instrument to hand to
+    /// another instrument.
+    ///
+    /// The band lives on the GPU and no shipped path ever writes it down. This
+    /// is how `kjerag-spike --bin band` gives what the pass measured to
+    /// `--bin seam`, whose parity render is a CPU one: the camera maker's own
+    /// export is in a projection family the app's own pass does not draw, so
+    /// scoring against it has to go through [`super::Reframe::blend_bent`]
+    /// rather than through the window.
+    pub fn write(cells: &[Self]) -> String {
+        cells
+            .iter()
+            .map(|cell| {
+                format!(
+                    "{} {} {} {}\n",
+                    cell.disparity, cell.confidence, cell.reach_m, cell.off_epi
+                )
+            })
+            .collect()
+    }
+
+    /// The same, read back. `None` on any line that is not four numbers.
+    pub fn read(text: &str) -> Option<Vec<Self>> {
+        text.lines()
+            .map(|line| {
+                let mut numbers = line.split_whitespace().map(str::parse::<f32>);
+                let mut next = || numbers.next()?.ok();
+                Some(Self {
+                    disparity: next()?,
+                    confidence: next()?,
+                    reach_m: next()?,
+                    off_epi: next()?,
+                })
+            })
+            .collect()
+    }
+
     /// The distance to whatever is in this direction, in metres, or `None`
     /// where the disparity is zero or the wrong way round, which is
     /// everything far enough away to be at infinity as far as a 33 mm

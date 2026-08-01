@@ -676,6 +676,26 @@ impl Reframe {
             .then(|| super::band::Ring::at([body[0] / reach, body[1] / reach, 0.0], self.baseline))
     }
 
+    /// What the band holds at a ray's azimuth, in radians, interpolated
+    /// between the two cells it lands between.
+    ///
+    /// The field is a circle, so the lookup wraps: a step between neighbouring
+    /// cells would be a step in the picture.
+    ///
+    /// WGSL twin: the `band[..]` lookup inside `band_bend`.
+    pub fn disparity_at(&self, view_ray: [f32; 3], cells: &[super::band::Cell]) -> f32 {
+        if cells.is_empty() {
+            return 0.0;
+        }
+        let body = self.body_ray(view_ray);
+        let turn = body[1].atan2(body[0]) / std::f32::consts::TAU * cells.len() as f32;
+        let low = turn.floor();
+        let held = |step: usize| {
+            cells[(low.rem_euclid(cells.len() as f32) as usize + step) % cells.len()].disparity
+        };
+        held(0) + (held(1) - held(0)) * (turn - low)
+    }
+
     /// The offset one lens's ray takes for a whole disparity, in view space,
     /// scaled by the ray's own length so that adding it turns the ray by
     /// `disparity` radians.
