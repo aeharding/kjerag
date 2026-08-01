@@ -417,8 +417,8 @@ video, exactly as in a window.
 ## The keyboard
 
 The map is cosmic-player's, extended with the standard app keys the other
-two first-party apps agree on. Three bare letters are invented, because no
-COSMIC app does what they do: `s`, `h` and `m`.
+two first-party apps agree on. Four bare letters are invented, because no
+COSMIC app does what they do: `s`, `h`, `m` and `i`.
 
 | key             | action                    | precedent                                            |
 | --------------- | ------------------------- | ---------------------------------------------------- |
@@ -441,6 +441,7 @@ COSMIC app does what they do: `s`, `h` and `m`.
 | `Ctrl+C`        | copy frame                | cosmic-files `src/key_bind.rs:73`                    |
 | `h`             | lock the horizon          | none; see below                                      |
 | `m`             | mute                      | none; mpv's key, see below                           |
+| `i`             | copy view                 | none; mpv's key, see below                           |
 
 Notes:
 
@@ -480,6 +481,29 @@ Notes:
   speaker button's own message, so it is remembered the same way the button
   is, and a file with no sound in it ignores it exactly as the disabled
   button does.
+- **`i` copies the view**, which is mpv's information key and lands here for
+  the same reason `m` did: no COSMIC app has the action, and mpv is the
+  player this app's users already have. What it copies is one line naming
+  the video, the frame and the framing, in `reframe`'s own argument syntax:
+
+  ```text
+  VID_20260410_185407_00_004.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1
+  ```
+
+  It is a sentence and a command at once. Pasted into an issue it says
+  exactly which picture is being talked about; pasted after
+  `cargo run --release -p kyerag-spike --bin reframe -- <path>` it renders
+  that picture again on any box (`crates/render/src/framing.rs` writes the
+  line, reframe's own parser reads it, and a test in reframe holds the two
+  together). The same line goes to the terminal with the whole path in front
+  of it, and **the copy carries the file's name alone**: a pilot's report
+  lands in a public issue, and the directories above a video are nobody's
+  business.
+
+  Every capture prints the line too, because a still cannot carry it: the
+  JPEG's name says which video and which moment (issue #15) and nothing
+  anywhere says which direction, so a picture sent back months later would
+  otherwise be unplaceable.
 - Implement this as libcosmic's `HashMap<KeyBind, Action>` plus a
   `Message::Key(modifiers, physical_key, key)` from a global subscription,
   matched with `KeyBind::matches` (cosmic-player `src/main.rs:1207-1213`,
@@ -660,6 +684,13 @@ the bottom placement this PR replaced, that check fails.
 | `Copy frame` worked  | `Frame copied to the clipboard`             |
 | `Save frame` failed  | `Frame not saved: {reason}`                 |
 | `Copy frame` failed  | `Frame not copied: {reason}`                |
+| `Copy view` worked   | `View copied to the clipboard`              |
+
+`Copy view` is the same sentence as `Copy frame` with the menu's other noun
+in it, and it names the destination for the reason the frame's does: a copy
+that does not say where it went is a copy nobody trusts enough to paste. It
+has no failure line, because there is nothing in it that can fail: the line
+is built out of numbers the window is already holding.
 
 The destination is the folder's own name in quotes and never a path, which
 is how cosmic-files names one in its toasts: `copied = Copied {$items} items
@@ -723,12 +754,17 @@ File                      Playback                 View
   ---                       ---                      ---
   Save frame                Previous frame           Fullscreen
   Copy frame                Next frame               ---
-  ---                                                Settings...
-  Quit                                               About Kyerag...
+  Copy view                                          Settings...
+  ---                                                About Kyerag...
+  Quit
 ```
 
 - Ellipsis on items that open a dialog, none on items that act
   (cosmic-player `Open media...` vs `Close file`, `src/menu.rs:119-121`).
+- `Copy view` sits under the two picture items rather than in `View`, which
+  holds the things that move the view; these three all take something away
+  from the window and hand it over. It is there at all because the menu is
+  where a shortcut is advertised, and `i` is worth finding.
 - `Settings...` then a divider then `About <app>...` at the end of `View`
   is the shared convention: cosmic-files `src/menu.rs:762-764`, cosmic-edit
   `src/menu.rs:346-350`.

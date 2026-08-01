@@ -41,7 +41,15 @@ of playback, zero dropped and zero starved in every report. **A capture says
 so**, in a toast built the way cosmic-files builds its own: `Frame saved to
 "Screenshots"`, `Frame copied to the clipboard`, or the reason it did not
 happen (docs/UI.md, "The capture toast"). 11 captures over 30 s of playback
-with the toasts in: zero dropped and zero starved in all six reports.
+with the toasts in: zero dropped and zero starved in all six reports. **And
+the view can be quoted**: `i` copies one line naming the video, the frame
+and the framing, written as `reframe`'s own arguments, so a report about a
+360 video carries the direction it was pointing rather than leaving everyone
+to guess it. Every capture prints the same line, because a still's name
+carries the video and the moment and nothing carries the direction. The line
+is written in `crates/render/src/framing.rs` and read back by reframe's real
+parser in a test, so the two cannot drift; the copy carries the file's name
+alone and the terminal line carries the path.
 
 **M1 is done.** The seam blend (issue #7) is the first M2 quality item and
 it has landed: where the two lenses overlap the pass mixes them by
