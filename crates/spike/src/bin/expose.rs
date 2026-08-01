@@ -116,9 +116,6 @@ struct Column {
     count: f64,
     sum0: f64,
     sum1: f64,
-    /// For the affine fit `lens1 = gain * lens0 + offset`.
-    sum00: f64,
-    sum01: f64,
     /// Cb and Cr, each lens, in signed codes.
     chroma: [f64; 4],
     chroma_count: f64,
@@ -146,8 +143,6 @@ impl Column {
         self.count += other.count;
         self.sum0 += other.sum0;
         self.sum1 += other.sum1;
-        self.sum00 += other.sum00;
-        self.sum01 += other.sum01;
         self.chroma_count += other.chroma_count;
         for (held, more) in self.chroma.iter_mut().zip(other.chroma) {
             *held += more;
@@ -235,8 +230,6 @@ fn columns(
             held.count += 1.0;
             held.sum0 += one;
             held.sum1 += two;
-            held.sum00 += one * one;
-            held.sum01 += one * two;
             if let (Some(a), Some(b)) = (front.1, back.1) {
                 held.chroma_count += 1.0;
                 held.chroma[0] += a.0;
@@ -404,8 +397,6 @@ struct Model {
     name: &'static str,
     gain: f64,
     offset: f64,
-    /// Root mean square of what the model does not explain, in codes.
-    residual: f64,
 }
 
 impl Model {
@@ -461,26 +452,16 @@ impl Model {
         let y = sum(&|p| p.2 * p.1);
         let xx = sum(&|p| p.2 * p.0 * p.0);
         let xy = sum(&|p| p.2 * p.0 * p.1);
-        let leftover = |gain: f64, offset: f64| {
-            (points
-                .iter()
-                .map(|p| p.2 * (p.1 - gain * p.0 - offset).powi(2))
-                .sum::<f64>()
-                / n)
-                .sqrt()
-        };
         let mut all = vec![
             Self {
                 name: "nothing at all",
                 gain: 1.0,
                 offset: 0.0,
-                residual: leftover(1.0, 0.0),
             },
             Self {
                 name: "gain, least squares in codes",
                 gain: xy / xx,
                 offset: 0.0,
-                residual: leftover(xy / xx, 0.0),
             },
             Self {
                 name: "gain, equal weight in logs",
@@ -496,19 +477,16 @@ impl Model {
                     }
                 },
                 offset: 0.0,
-                residual: 0.0,
             },
             Self {
                 name: "gain, ratio of totals",
                 gain: y / x,
                 offset: 0.0,
-                residual: leftover(y / x, 0.0),
             },
             Self {
                 name: "offset alone (lens1 = lens0 + o)",
                 gain: 1.0,
                 offset: (y - x) / n,
-                residual: leftover(1.0, (y - x) / n),
             },
         ];
         let spread = xx - x * x / n;
@@ -519,11 +497,7 @@ impl Model {
                 name: "gain and offset together",
                 gain,
                 offset,
-                residual: leftover(gain, offset),
             });
-        }
-        for model in &mut all {
-            model.residual = leftover(model.gain, model.offset);
         }
         all
     }
@@ -888,7 +862,6 @@ fn models(field: &Field, shipped: Option<f64>) {
                 name: "what the shipped pass drew with",
                 gain: shipped.exp(),
                 offset: 0.0,
-                residual: 0.0,
             });
         }
         for model in &all {
