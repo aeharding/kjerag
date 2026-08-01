@@ -557,6 +557,45 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The volume popup closes on a press in the video, the way
+  cosmic-player's dropdowns do** (issue #126, owner-reported). It was a
+  hand-toggled bool that only the speaker button flipped, so the only way out
+  of it was the button that opened it. cosmic-player's way out is
+  `widget::mouse_area(video).on_press(Message::VideoAreaClick)`
+  (`src/main.rs:1771-1773`), whose handler closes an open dropdown and
+  otherwise plays or pauses (`1507-1513`); it also closes one on play/pause,
+  on the scrubber and its release, and on fullscreen. All of that is ours now
+  except the play/pause branch, which is the look-around grab here and was
+  already resolved against it (docs/UI.md, conflict 1). Escape is unchanged,
+  because cosmic-player's `on_escape` only leaves fullscreen.
+
+  **A comment is what kept it out.** docs/UI.md said a press in the video
+  "fires before a `mouse_area` around it could see it", which is not true and
+  was checkable: the pass returns `ButtonPressed` uncaptured on purpose, and
+  says in `crates/render/src/widget.rs` that capturing it would take the
+  double click to fullscreen away. One line justifying a choice, read as
+  settled by everyone after it (AGENTS.md, "comments record, they do not
+  argue").
+
+  **The harness grew a pointer**, because nothing in it could press anything:
+  every check before this one is a key press. `wlrctl pointer` is the packaged
+  tool for the job and cannot do it - cage advertises the seat's pointer
+  capability only while a pointer device exists, and a one-shot client's
+  device is gone before a client can bind `wl_pointer`. Measured 2026-08-01: a
+  `wlrctl` wheel that should have zoomed the view did nothing, twenty in a row
+  did nothing, and the same zoom off the keyboard reached the ball every time.
+  `crates/spike/src/bin/pointer.rs` holds the device open for half a second
+  before it moves anything, which is the whole of the difference, and the
+  clicks land.
+
+  **And a sound device**, because the speaker button is drawn disabled when
+  the box has no output, and the session's own runtime directory has no
+  PipeWire socket in it: every harness run until now said "playing silently",
+  so the popup could not be opened there at all. The session now gets the
+  desktop's socket, and the stream goes to the same null sink
+  `scripts/quiet.sh` uses. Verified rather than assumed: the app's stream sits
+  on `kjerag_quiet` while the harness runs, and `PIPEWIRE_NODE` is what puts
+  it there, because pipewire-alsa is what plays what cpal writes.
 - 2026-08-01 **The shipped Flatpak took no drops, and nothing could have
   caught it** (issue #118). A drop into a sandbox arrives as
   `application/vnd.portal.filetransfer`, which is a key the target exchanges
