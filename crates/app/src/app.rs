@@ -707,6 +707,16 @@ impl cosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
+        kjerag_render::trace(|| {
+            format!(
+                "view open={} controls={} header={} fullscreen={} ctx={}",
+                self.open.is_some(),
+                self.controls.shown,
+                self.core.window.show_headerbar,
+                self.fullscreen,
+                self.core.window.show_context,
+            )
+        });
         let shown = match &self.open {
             Some(open) => self.playing(open),
             None => self.welcome(),
