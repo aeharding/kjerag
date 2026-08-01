@@ -26,9 +26,15 @@ pub const REPOSITORY_URL: &str = "https://github.com/aeharding/kjerag";
 pub const SUPPORT: &str = "Support";
 pub const SUPPORT_URL: &str = "https://github.com/aeharding/kjerag/issues";
 
-/// The welcome view, and the line that says an open did not work.
+/// The welcome view.
 pub const NOTHING_OPEN: &str = "No video open";
 pub const OPEN_BUTTON: &str = "Open video";
+
+/// The alert a file that would not open puts up, which is a stock dialog in
+/// the middle of the window (owner's call, 2026-08-01). The title says what
+/// happened, the body below says why, and the one button takes it away.
+pub const CANNOT_OPEN: &str = "Cannot open file";
+pub const CLOSE: &str = "Close";
 pub const OPEN_FAILED: &str = "That file could not be opened.";
 
 /// The file chooser.
@@ -103,7 +109,7 @@ pub fn about_item() -> String {
     format!("About {APP_NAME}...")
 }
 
-/// Why the last open did not work, as the welcome view's second line.
+/// Why the open did not work, as the alert's body.
 ///
 /// `missing` is the codec this ffmpeg has no decoder for, which is a different
 /// failure from a file that will not open and has a different answer
@@ -130,7 +136,7 @@ pub fn open_failed(missing: Option<&str>) -> String {
 /// The other 360 cameras, named (issue #107).
 ///
 /// A GoPro `.360` or a DJI `.osv` is a valid MP4 that Kjerag cannot read a
-/// lens calibration out of, so before this it got the line a corrupt file
+/// lens calibration out of, so before this it got the words a corrupt file
 /// gets. Naming the format is the whole point: it says the file is fine and
 /// the player is the wrong one, which is a thing the pilot can act on.
 ///
@@ -251,6 +257,8 @@ mod tests {
             NOTHING_OPEN,
             OPEN_BUTTON,
             OPEN_FAILED,
+            CANNOT_OPEN,
+            CLOSE,
             OPEN_TITLE,
             INSV_FILTER,
             FILE,

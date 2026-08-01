@@ -574,6 +574,16 @@ live, no keyframe UI ever.
   own footage is the one failure this must not have. Verified on 18 real
   files from seven cameras; the spherical arm alone has hand-built fixtures
   only, because no such file exists here and ffmpeg 7.1 cannot write one.
+  **What says it is an alert, not the welcome view** (owner, 2026-08-01, on
+  the first cut: "a normal alert, not some weird bespoke string on the splash
+  page"). Every cannot-open line moved with it, the missing-decoder one of
+  issue #69 included: `Application::dialog` returns the stock
+  `widget::dialog` shaped the way cosmic-files shapes its failed-operation
+  dialog (`src/app.rs:5665-5678`), one title, the reason as the body, the
+  `dialog-error` icon, and one button, dismissed by that button or by Escape.
+  A failed open now takes nothing away either: whatever was playing carries
+  on playing behind the alert, where before the shell dropped the open file
+  to show a line on the welcome view.
   The other half is what was **not** built: an `.insv` from a camera outside
   the verified set opens and plays with nothing said about it. The support
   tiers are the README's and the listing's, where somebody deciding whether

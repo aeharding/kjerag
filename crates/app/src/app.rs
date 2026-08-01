@@ -139,6 +139,9 @@ pub struct Flags {
 
 #[derive(Clone, Debug)]
 pub enum Message {
+    /// The alert's own button, and Escape, which is the whole of what a
+    /// dialog with nothing to decide can be answered with.
+    AlertClose,
     /// The speaker button in the control row: show the volume slider, or take
     /// it away (cosmic-player `src/main.rs:1049-1053`, one dropdown of its
     /// four).
@@ -221,10 +224,10 @@ pub struct App {
     core: Core,
     /// The file on screen, if there is one.
     open: Option<Open>,
-    /// The line under the welcome view's first, set when the last attempt to
-    /// open a file did not work. It holds the line rather than a flag because
-    /// which line it is depends on why the open failed (issue #69).
-    failed: Option<String>,
+    /// What a file that would not open said, while the alert saying it is on
+    /// screen. It holds the line rather than a flag because which line it is
+    /// depends on why the open failed (issues #69 and #107).
+    alert: Option<String>,
     stored: Stored,
     key_binds: HashMap<KeyBind, Action>,
     about: About,
@@ -403,7 +406,7 @@ impl cosmic::Application for App {
         let mut app = App {
             core,
             open: None,
-            failed: None,
+            alert: None,
             stored: flags.stored,
             key_binds: key_binds(),
             about: about(),
@@ -441,6 +444,7 @@ impl cosmic::Application for App {
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         let now = Instant::now();
         match message {
+            Message::AlertClose => self.alert = None,
             Message::AudioDropdown => {
                 self.controls.volume = !self.controls.volume;
                 self.show_controls(now);
@@ -484,7 +488,7 @@ impl cosmic::Application for App {
                 // First file wins, others are ignored.
                 let Some(path) = dropped.and_then(|files| files.0.into_iter().next()) else {
                     eprintln!("kjerag: that drop carried no local file");
-                    self.failed = Some(strings::open_failed(None));
+                    self.alert = Some(strings::open_failed(None));
                     return Task::none();
                 };
                 return self.update(Message::FileLoad(path));
@@ -496,7 +500,6 @@ impl cosmic::Application for App {
             Message::FileClose => {
                 self.pool_seam();
                 self.open = None;
-                self.failed = None;
                 self.show_controls(now);
                 return self.retitle();
             }
@@ -662,10 +665,17 @@ impl cosmic::Application for App {
         Task::none()
     }
 
-    /// Escape closes the context drawer first and leaves fullscreen second
-    /// (cosmic-edit `src/main.rs:1583-1592`). libcosmic gives Escape to the
-    /// app through this hook, which is why the key map does not bind it.
+    /// Escape takes the alert away first, then closes the context drawer,
+    /// then leaves fullscreen (cosmic-edit `src/main.rs:1583-1592`, and the
+    /// dialog goes first the way cosmic-files does it, `src/app.rs:2769-2776`
+    /// on master). One press, one thing, outermost first. libcosmic gives
+    /// Escape to the app through this hook, which is why the key map does not
+    /// bind it.
     fn on_escape(&mut self) -> Task<Self::Message> {
+        if self.alert.is_some() {
+            self.alert = None;
+            return Task::none();
+        }
         if self.core.window.show_context {
             self.core.window.show_context = false;
             return Task::none();
@@ -674,6 +684,32 @@ impl cosmic::Application for App {
             return self.update(Message::Fullscreen);
         }
         Task::none()
+    }
+
+    /// A file that would not open, as an alert in the middle of the window
+    /// (owner's call, 2026-08-01: the line it used to leave on the welcome
+    /// view was the wrong surface for it).
+    ///
+    /// The stock dialog, shaped the way cosmic-files shapes the one it puts
+    /// up for an operation that failed: a title, the error as the body, the
+    /// `dialog-error` icon at 64, and one button (`src/app.rs:5665-5678` on
+    /// master). The button is `suggested` rather than that dialog's
+    /// `standard`, because there is nothing here to cancel: it is the primary
+    /// action and the only one, which is what cosmic-edit's primary action is
+    /// (`src/main.rs:1657-1671`). libcosmic centres whatever this returns
+    /// over the view in a modal popover (`src/app/mod.rs:877-884`).
+    fn dialog(&self) -> Option<Element<'_, Self::Message>> {
+        let said = self.alert.as_deref()?;
+        Some(
+            widget::dialog()
+                .title(strings::CANNOT_OPEN)
+                .body(said)
+                .icon(icon::from_name("dialog-error").size(64))
+                .primary_action(
+                    widget::button::suggested(strings::CLOSE).on_press(Message::AlertClose),
+                )
+                .into(),
+        )
     }
 
     /// The menu bar and nothing else, which is unanimous across the three
@@ -799,15 +835,19 @@ impl App {
             .is_some_and(|open| open.scene.is_playing())
     }
 
-    /// Opens a file, or leaves the welcome view up with a line saying it did
-    /// not work. cosmic-player only logs (`src/video.rs:63`), which leaves the
-    /// pilot staring at an unchanged window; a player with exactly one job
-    /// should say when it cannot do it.
+    /// Opens a file, or says why it did not in an alert over whatever the
+    /// window was already showing. cosmic-player only logs
+    /// (`src/video.rs:63`), which leaves the pilot staring at an unchanged
+    /// window; a player with exactly one job should say when it cannot do it.
+    ///
+    /// A failed open takes nothing away (owner's call, 2026-08-01): the video
+    /// that was playing carries on playing behind the alert, because a file
+    /// that would not open is not a reason to stop the one that did.
     fn load(&mut self, path: &Path) {
         self.pool_seam();
         match Scene::open(path) {
             Ok(scene) => {
-                self.failed = None;
+                self.alert = None;
                 self.hold_seam(&scene);
                 self.open = Some(Open {
                     path: path.to_path_buf(),
@@ -822,8 +862,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("kjerag: {} not shown: {e}", path.display());
-                self.failed = Some(refusal(&*e));
-                self.open = None;
+                self.alert = Some(refusal(&*e));
             }
         }
     }
@@ -1200,14 +1239,11 @@ impl App {
     /// same shape. It used to be `video-x-generic-symbolic`, which said
     /// "video" where the window can already say which video player this is.
     fn welcome(&self) -> Element<'_, Message> {
-        let mut said = widget::column::with_capacity(3)
+        let said = widget::column::with_capacity(2)
             .align_x(Alignment::Center)
             .spacing(8)
             .push(icon::from_svg_bytes(APP_ICON).icon().size(128))
             .push(widget::text::body(strings::NOTHING_OPEN));
-        if let Some(line) = &self.failed {
-            said = said.push(widget::text::body(line.as_str()));
-        }
         widget::column::with_capacity(4)
             .align_x(Alignment::Center)
             .spacing(24)
@@ -1527,10 +1563,10 @@ fn missing_decoder(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Optio
     Some(e.downcast_ref::<MissingDecoder>()?.codec)
 }
 
-/// Which line a failed open leaves on the welcome view. Three of them, in the
-/// order of how much they can tell the pilot: the file is another camera's
-/// format (issue #107), this build has no decoder for it (issue #69), or
-/// nothing more is known than that it did not open.
+/// What the alert says a failed open failed for. Three lines, in the order of
+/// how much they can tell the pilot: the file is another camera's format
+/// (issue #107), this build has no decoder for it (issue #69), or nothing
+/// more is known than that it did not open.
 fn refusal(e: &(dyn std::error::Error + Send + Sync + 'static)) -> String {
     match e.downcast_ref::<Foreign>() {
         Some(foreign) => strings::foreign(*foreign),
@@ -1585,8 +1621,8 @@ fn about() -> About {
         ])
 }
 
-/// What the shell decides on its own: which line a failed open leaves on the
-/// welcome view, what a paste turns out to be asking for, and the three rules
+/// What the shell decides on its own: which line a failed open puts in the
+/// alert, what a paste turns out to be asking for, and the three rules
 /// of the toast queue, which is ours now rather than libcosmic's and so is
 /// tested rather than taken on trust.
 #[cfg(test)]
