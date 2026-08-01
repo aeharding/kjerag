@@ -79,6 +79,27 @@ Three pieces hold it up.
   message type implementing `From<Stall>`. The shell cannot compile the video
   widget without a way to receive one.
 
+**What the alert says is not the funnel's to write** (owner ruling,
+2026-08-01, AGENTS.md "Errors are the error"). The funnel decides the surface
+and the title; the body is the failure's own message, shown word for word. A
+sentence written in the shell can only ever say less than the one written
+where the failure happened, and the shape that proved it was live: the pilot
+read "That file could not be opened." while the terminal read "trailer says
+lens frames are 2880x2880 but the stream decodes 736x368".
+
+Three lines of the app's own survive over an error, and they are the whole
+list (`fail::refusal`): another camera's format (issue #107), a codec whose
+decoder is one install away (issue #69), and a path the sandbox was never
+shown (issue #118). Each is allowed because it knows something the error does
+not and turns it into something the pilot can do. There is no line under them
+for a failure nobody anticipated, which is the part that makes this hold:
+there is nothing to fall back to, so nothing can be masked by falling back.
+
+That makes the error messages in `meta`, `media` and `render` pilot-facing
+copy. They are still the layer's own to write, and they are still written at
+the failure site; what changed is that they are read by a person, so plain
+words and no em dashes bind them the way they bind `strings.rs`.
+
 A stop is final for the capture it happened to, which is the owner's second
 ruling on the issue (2026-08-01). The `Stalled` that gave up says so for the
 rest of that capture's life: the pass stops importing into it, and `Scene`

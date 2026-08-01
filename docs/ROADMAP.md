@@ -557,6 +557,39 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **Errors are the error** (owner ruling, on reading the funnel's
+  own output). He watched the terminal say "trailer says lens frames are
+  2880x2880 but the stream decodes 736x368" while the window said "That file
+  could not be opened.", and ruled the raw message is what the pilot gets,
+  everywhere, as a rule and not as a fix. So the alert's body is the
+  failure's own message and the generic line is deleted rather than demoted.
+  Nothing falls back to it, because there is no it: a failure nobody
+  anticipated says what it says. Three lines of the app's own sit over an
+  error and they are the whole list (`fail::refusal`): the format refusal
+  (#107), the missing decoder (#69), the sandbox reach line (#118). Each
+  names a fix the error does not know about, and each is one sentence away
+  from being a mask, which is why the list is written down rather than left
+  to judgement.
+
+  **Two failures had no reason to show and now do.** A drop the document
+  portal refused printed its answer to the terminal and put the generic line
+  in the window; it carries the portal's own words now. A drop with nothing
+  openable in it has no error at all to show, because libcosmic keeps only
+  what converted (`dnd_destination.rs:119-120` calls `.ok()`, read at the
+  pinned revision), so it says that instead of blaming a file nobody named.
+  Nothing else in the shell was masking a reason; what the audit found
+  besides was the opposite defect, failures with no surface at all (the file
+  chooser's own errors, and issue #131's About links).
+
+  **The engine's error strings are UI copy now.** They were always written at
+  the failure site; what is new is that a person reads them, so the copy
+  rules bind them and the tests do too. `kjerag-meta` checks every `Error`
+  variant through a wildcard-free match, so a variant added later has to be
+  looked at. The harness proves the words reach the screen rather than only
+  the log: two files that fail for two different reasons must draw two
+  different dialogs, which is a check that fails on the commit before this
+  one.
+
 - 2026-08-01 **A transient import error costs a frame, and every failure the
   pilot meets goes through the alert** (issue #124, owner-reported at flatpak
   verification). One failed frame import set a flag on the pipeline for good:
