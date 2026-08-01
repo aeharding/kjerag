@@ -21,13 +21,15 @@ mod scene;
 pub mod seam;
 mod widget;
 
-pub use band::{AZIMUTHS, Cell, KEEP, Ring, Tone, ease, time_constant};
+pub use band::{
+    AZIMUTHS, Along, Cell, KEEP, PERP_DEG, Reading, Ring, Tone, depth_leak, ease, time_constant,
+};
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;
 pub use kjerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
 pub use kjerag_meta::{Foreign, Quat, Readout, Sweep};
-pub use projection::{Blend, Held, Landing, MAX_LENSES, Reframe, Rolling};
+pub use projection::{Bend, Blend, Held, Landing, MAX_LENSES, Reframe, Rolling};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, Harvest, SeamFit};

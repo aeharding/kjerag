@@ -217,7 +217,7 @@ fn residual(options: &Options) -> Fallible<()> {
     for path in options.inputs() {
         let calibration = CalibrationSet::from_insv(&path)?;
         let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-        let ring = ring(options.patches);
+        let ring = options.ring();
         let lenses = options.corrected(&path, &calibration.lenses, frame);
         let base = mapped(&lenses, frame);
         // Every candidate is measured on the same frames, and each is compared
@@ -258,7 +258,7 @@ fn residual(options: &Options) -> Fallible<()> {
         candidates,
     } = first.ok_or("no input file")?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let ring = ring(options.patches);
+    let ring = options.ring();
 
     if sweeps.len() > 1 {
         agreement(&sweeps);
@@ -996,6 +996,16 @@ struct Options {
     /// degrees in the near field.
     along: f64,
     across: f64,
+    /// How far off the seam circle the whole ring is tilted before anything is
+    /// read, in degrees towards the front lens (issue #103, stage 6).
+    ///
+    /// Zero is the seam itself, which is where every earlier reading of this
+    /// residual was taken and where the band pass measures. It is an argument
+    /// because the along-seam residual turned out **not to be constant across
+    /// the seam**: a horizon fitted from content a few degrees either side
+    /// shows more misregistration than the correlation at the seam reports,
+    /// and this is what says whether that is the trace or the optics.
+    off: f64,
     keep: f64,
     contrast: f64,
     knobs: Vec<Knob>,
@@ -1035,6 +1045,7 @@ impl Options {
             step: 0.08,
             along: 2.0,
             across: 4.0,
+            off: 0.0,
             keep: 0.80,
             contrast: 6.0,
             knobs: vec![Knob::Roll, Knob::Cx, Knob::Cy],
@@ -1088,6 +1099,7 @@ impl Options {
                 "step" => options.step = value.parse()?,
                 "along" => options.along = value.parse()?,
                 "across" => options.across = value.parse()?,
+                "off" => options.off = value.parse()?,
                 "keep" => options.keep = value.parse()?,
                 "contrast" => options.contrast = value.parse()?,
                 "both" => options.both = value.parse::<u32>()? != 0,
@@ -1102,6 +1114,26 @@ impl Options {
             }
         }
         Ok(options)
+    }
+
+    /// The directions this run reads, which is the seam circle itself unless
+    /// [`Self::off`] tilts it (issue #103, stage 6).
+    ///
+    /// A tilt turns the whole local frame about the along-seam axis, so the
+    /// triad stays orthonormal and the `along` column keeps meaning the same
+    /// thing: degrees of world angle along the seam's own tangent. What moves
+    /// is only which content is being asked about.
+    fn ring(&self) -> Vec<Where> {
+        let (sin, cos) = self.off.to_radians().sin_cos();
+        ring(self.patches)
+            .into_iter()
+            .map(|at| Where {
+                phi: at.phi,
+                centre: std::array::from_fn(|c| at.centre[c] * cos + at.across[c] * sin),
+                along: at.along,
+                across: std::array::from_fn(|c| at.across[c] * cos - at.centre[c] * sin),
+            })
+            .collect()
     }
 
     /// How the seam is read, which is the shipped fitter's own knobs with
@@ -1227,7 +1259,7 @@ fn turns(value: &str) -> Fallible<Vec<(Knob, f64)>> {
 const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend|parity|fit] [also=<other.insv>] \
      [fix=roll:0.8,yaw:-2] [fit=1] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [bands=14,8,4] [out=x.png] \
      [from=seconds] [count=frames] [patches=n] \
-     [span=deg] [step=deg] [along=deg] [across=deg] [keep=r] [contrast=codes] \
+     [span=deg] [step=deg] [along=deg] [across=deg] [off=deg] [keep=r] [contrast=codes] \
      [knobs=roll,cx,cy,...] [control=1]";
 
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
@@ -1300,7 +1332,10 @@ impl Weighting {
         cells: &[kjerag_render::Cell],
     ) -> ([f64; 2], [Landing; 2]) {
         let ray32 = ray.map(|c| c as f32);
-        let shipped = reframe.blend_bent(ray32, reframe.disparity_at(ray32, cells));
+        let shipped = reframe.blend_bent(
+            ray32,
+            reframe.reading_at(ray32, cells, kjerag_render::Along::fit(cells)),
+        );
         let landings = shipped.landings;
         let covered = |lens: usize| landings[lens].inside;
         let weights = match self {
@@ -1574,7 +1609,7 @@ fn blend(options: &Options) -> Fallible<()> {
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
     let lenses = options.corrected(&options.input, &calibration.lenses, frame);
     let reframe = viewed(&lenses, frame, options.camera());
-    let ring = ring(options.patches);
+    let ring = options.ring();
 
     // The band the sharpness is measured over: the whole overlap, so every
     // width is scored on the same pixels rather than on its own band.
