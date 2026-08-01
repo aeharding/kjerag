@@ -6,6 +6,10 @@
 
 <p align="center">Native 360° video player for the COSMIC desktop, written in Rust.</p>
 
+<p align="center">
+  <img src="resources/screenshots/planet.png" width="720" alt="Kjerag playing a flight zoomed all the way out to a little planet">
+</p>
+
 Kjerag plays Insta360 `.insv` files directly: no stitching step, no proxy
 files, no export round-trip. Drag to reframe, scroll to zoom, take
 screenshots. The dual-fisheye footage is hardware-decoded and reprojected
