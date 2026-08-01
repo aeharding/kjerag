@@ -196,7 +196,12 @@ fn play(
     println!("gpu:    {}", gpu.adapter.get_info().name);
     println!("device: {}", dmabuf::device_report(&gpu.device));
 
+    // An instrument has no stored calibration to read: the app keeps that in
+    // its own config, and this is not the app. So the seam is fitted off this
+    // file, which is what every instrument did before the calibration moved
+    // to the camera (issue #48).
     let mut scene = Scene::open(input)?;
+    scene.fit_seam(true);
     if let (Some(forced), Some(file)) = (forced(readout), scene.readout()) {
         scene.set_readout(Some(forced(file)));
     }

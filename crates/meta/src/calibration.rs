@@ -16,6 +16,24 @@ use super::{Error, ExposureTrack, GyroTrack};
 /// p2, calib_w, calib_h, lensType`.
 const FIELDS_PER_LENS: usize = 19;
 
+/// FNV-1a, which is what [`CalibrationSet::camera_key`] is taken with.
+///
+/// Written out rather than taken from `std::hash`, whose `DefaultHasher` is
+/// explicitly allowed to answer differently between releases: this number is
+/// written into the pilot's config and read back by a later build. A hash
+/// rather than a cryptographic digest because nothing here defends against a
+/// chosen collision; the worst one could do is hand one camera another's seam
+/// correction.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// A width and height in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Size {
@@ -344,6 +362,59 @@ impl CalibrationSet {
             Some(lens) => body_from_imu(self.gyro.imu_orientation, &lens.pose),
             None => Mat3::IDENTITY,
         }
+    }
+
+    /// What names the camera this capture came off, without naming the unit:
+    /// the model, and the calibration the factory wrote into it.
+    ///
+    /// The seam correction is a property of one camera rather than of one
+    /// file (issue #48), so it is stored under this. Two things make these
+    /// bytes the right ones to take it over:
+    ///
+    /// - **They are per unit.** `offset_v3` is a factory measurement of two
+    ///   lenses that were glued into one body, so two cameras of the same
+    ///   model do not share it, and the same camera writes the same string
+    ///   into every file: byte-identical over the owner's captures from
+    ///   April to July.
+    /// - **They are not the serial.** The serial and the GPS track are in the
+    ///   same metadata record and neither is in here; nothing in this hash
+    ///   comes from anywhere but the model name and the lens numbers, and
+    ///   those numbers are already public in
+    ///   `docs/research/x4air-calibration.json`.
+    ///
+    /// It covers the **delivered** geometry rather than the canvas one: the
+    /// principal point half of a seam correction is in delivered-frame
+    /// pixels, so a capture mode that delivers a different frame size is a
+    /// different key and gets its own calibration rather than one scaled
+    /// wrong.
+    ///
+    /// 0 for a calibration with no lenses in it, which is not a camera.
+    pub fn camera_key(&self) -> u64 {
+        if self.lenses.is_empty() {
+            return 0;
+        }
+        let mut hash = FNV_OFFSET;
+        let mut eat = |bytes: &[u8]| hash = fnv1a(hash, bytes);
+        eat(self.camera_model.as_bytes());
+        eat(&self.dimension.width.to_le_bytes());
+        eat(&self.dimension.height.to_le_bytes());
+        for lens in &self.lenses {
+            let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
+            let Distortion { k1, k2, k3, p1, p2 } = lens.distortion;
+            let Pose {
+                yaw_deg,
+                pitch_deg,
+                roll_deg,
+                translation_m: [tx, ty, tz],
+            } = lens.pose;
+            for number in [
+                xi, fx, fy, cx, cy, k1, k2, k3, p1, p2, yaw_deg, pitch_deg, roll_deg, tx, ty, tz,
+            ] {
+                eat(&number.to_le_bytes());
+            }
+            eat(&lens.lens_type.to_le_bytes());
+        }
+        hash
     }
 
     /// How one frame is read off this camera's sensor (issue #9): the span
@@ -732,6 +803,42 @@ mod tests {
         );
         assert_eq!(calibration.lenses[0].lens_type, 131);
         near(calibration.rolling_shutter_ms, 15.883, 0.001);
+    }
+
+    /// The seam correction is stored under this key, so what it answers has
+    /// to be the same for two files off one camera and different for two
+    /// cameras: a firmware string that changed and a capture that is a
+    /// different length are the same camera, and a lens that sits a
+    /// hundredth of a degree elsewhere is not.
+    #[test]
+    fn the_camera_key_names_the_camera_and_not_the_capture() {
+        let key = calibration().camera_key();
+        assert_ne!(key, 0);
+
+        let mut later_firmware = fixture::metadata();
+        later_firmware.fw_version = "v1.3.0_build4".to_owned();
+        let later_firmware = CalibrationSet::from_metadata(&later_firmware).unwrap();
+        assert_eq!(later_firmware.camera_key(), key);
+
+        // Lens 1's yaw, a hundredth of a degree off: another unit off the
+        // same line, with its own factory measurement.
+        let another_unit = with_offset_tokens(|tokens| tokens[1 + FIELDS_PER_LENS + 5] += 0.01);
+        let another_unit = CalibrationSet::from_metadata(&another_unit).unwrap();
+        assert_ne!(another_unit.camera_key(), key);
+    }
+
+    /// A correction fitted in delivered-frame pixels does not survive a
+    /// change of delivered frame size, so a capture mode that delivers a
+    /// different one is a different camera as far as the store is concerned.
+    #[test]
+    fn a_different_delivered_frame_is_a_different_key() {
+        let mut smaller = fixture::metadata();
+        if let Some(dimension) = smaller.dimension.as_mut() {
+            dimension.x = 2880;
+            dimension.y = 2880;
+        }
+        let smaller = CalibrationSet::from_metadata(&smaller).unwrap();
+        assert_ne!(smaller.camera_key(), calibration().camera_key());
     }
 
     /// The headline check: both principal points land near the centre of

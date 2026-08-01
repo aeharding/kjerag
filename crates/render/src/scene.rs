@@ -27,8 +27,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
@@ -37,6 +37,7 @@ use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack,
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
+use super::seam::{self, Correction, Harvest, SeamFit};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -156,8 +157,31 @@ struct Holding {
 
 /// A file on screen: its calibration, and where its frames come from.
 struct Show {
-    /// One per decoded stream, in stream order.
+    /// The capture itself, kept because a seam fit reads its own frames off
+    /// it, minutes into the file, long after it was opened (issue #48).
+    path: PathBuf,
+    /// The size of one lens's decoded frame, which the seam fit reads
+    /// through the same map the pass draws with.
+    frame: Size,
+    /// One per decoded stream, in stream order, as the camera calibrated
+    /// them.
     lenses: Arc<[Lens]>,
+    /// What names the camera these came off, serial-free
+    /// ([`CalibrationSet::camera_key`]). The seam calibration is stored under
+    /// it.
+    camera: u64,
+    /// The same lenses with the seam correction in them (issue #48): what the
+    /// pool knows about this camera, landed at open, or a fit off this file's
+    /// own frames where it knows nothing. The factory calibration until one of
+    /// those arrives, and for good on a file with no seam.
+    ///
+    /// Shared rather than owned because the fallback fit runs on a thread of
+    /// its own and hands its answer back through this.
+    corrected: Arc<Correction>,
+    /// What a fallback fit off this file came to, for the pool to keep if it
+    /// is good enough. The shell reads it when the file is closed or another
+    /// is opened; nothing in the render path touches it.
+    harvested: Harvested,
     /// Where the camera body was, over the whole file, and the camera's own
     /// timestamp for each frame. Both come out of the trailer at open
     /// (issue #8); both are empty for a file with no IMU record, and then
@@ -256,7 +280,7 @@ impl Scene {
     /// is parsed; the first frames arrive on the decode thread.
     pub fn open(path: &Path) -> Fallible<Self> {
         let mut player = Player::open(path)?;
-        let (lenses, held) = calibrated(path, player.size(), player.lenses())?;
+        let calibrated = calibrated(path, player.size(), player.lenses())?;
         println!(
             "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
@@ -280,11 +304,13 @@ impl Scene {
         );
         // Opening a file plays it, which is what every player does. Space
         // and the control row's button pause it (issue #16).
+        let frame = player.size();
         player.play();
         Ok(Self {
             show: Some(Show::new(
-                lenses,
-                held,
+                path,
+                frame,
+                calibrated,
                 None,
                 Source::Live(Box::new(player)),
             )),
@@ -298,7 +324,8 @@ impl Scene {
     /// the frame it is checking.
     pub fn still(path: &Path, at: Cue) -> Fallible<Self> {
         let mut reader = Reader::open(path)?;
-        let (lenses, held) = calibrated(path, reader.size(), reader.lenses())?;
+        let calibrated = calibrated(path, reader.size(), reader.lenses())?;
+        let frame = reader.size();
         let frames = reader.frame(at)?;
         println!(
             "frame:  {} at {:.3} s",
@@ -310,13 +337,104 @@ impl Scene {
         }
         Ok(Self {
             show: Some(Show::new(
-                lenses,
-                held,
+                path,
+                frame,
+                calibrated,
                 Some(Arc::new(frames)),
                 Source::Stepped(Box::new(reader)),
             )),
             ..Self::blank()
         })
+    }
+
+    /// What names the camera this file came off, which is what its seam
+    /// calibration is stored under (issue #48). `None` with nothing open.
+    pub fn camera_key(&self) -> Option<u64> {
+        Some(self.show.as_ref()?.camera)
+    }
+
+    /// Whether this file has a seam at all: two lens streams, sampled from
+    /// one body. A one-stream capture has nothing to hand over and nothing to
+    /// calibrate.
+    pub fn has_seam(&self) -> bool {
+        self.show
+            .as_ref()
+            .is_some_and(|show| show.lenses.len() >= 2)
+    }
+
+    /// Draw this file with what the pool knows about its camera. Applied here
+    /// and now, with no walk, so it is in the first frame.
+    pub fn use_seam(&self, fit: SeamFit) {
+        let Some(show) = &self.show else {
+            return;
+        };
+        show.corrected.land(fit);
+    }
+
+    /// Ask for this correction, walking to it rather than landing it. What a
+    /// freshly pooled fit does to the file it was measured on: the picture is
+    /// already up, so it must not jump.
+    pub fn aim_seam(&self, fit: SeamFit) {
+        if let Some(show) = &self.show {
+            show.corrected.ask(fit);
+        }
+    }
+
+    /// Fit this file's seam from its own frames, best effort
+    /// (`kyerag_render::seam`).
+    ///
+    /// On its own thread for a file that is playing, because a fit is a
+    /// second or two of decode and the picture is not waiting for it; on this
+    /// one for a still, which has no later to correct itself in.
+    ///
+    /// A fit that lands while the file plays is **asked for** rather than
+    /// landed: the picture walks to it over the next few seconds, because by
+    /// then there is a picture to jump.
+    /// `drive` puts the answer into the picture as well as into the pool,
+    /// which is what a camera with nothing pooled needs. A camera that already
+    /// has a pooled answer is drawing with it, and this file's own fit is
+    /// evidence for the next median rather than a picture of its own: the
+    /// shell folds it in and asks for the median that comes out.
+    pub fn fit_seam(&self, drive: bool) {
+        let Some(show) = &self.show else {
+            return;
+        };
+        if show.lenses.len() < 2 {
+            return;
+        }
+        if drive {
+            println!(
+                "seam:   nothing pooled for this camera yet, so it is fitted from this file, \
+                 best effort, while it plays"
+            );
+        }
+        let stepped = matches!(show.playing.borrow().source, Source::Stepped(_));
+        let (path, lenses, frame) = (show.path.clone(), show.lenses.clone(), show.frame);
+        let (corrected, kept) = (show.corrected.clone(), show.harvested.clone());
+        let into = drive.then(|| corrected.clone());
+        if stepped {
+            fit_into(&path, &lenses, frame, into.as_ref(), &kept, true);
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("seam fit".to_owned())
+            .spawn(move || fit_into(&path, &lenses, frame, into.as_ref(), &kept, false));
+        if let Err(e) = spawned {
+            eprintln!("kyerag: the seam fit did not start: {e}");
+        }
+    }
+
+    /// What this file's own frames came to, for the pool to keep if it is good
+    /// enough. `None` until a fallback fit has landed, and on a file whose
+    /// camera the pool already knew, which fits nothing.
+    ///
+    /// **Taken, not read.** The shell asks on a timer as well as on the way
+    /// out, because the way out is not always taken: `Ctrl+Q` is
+    /// `std::process::exit(0)` and runs no shutdown. Taking it means the
+    /// answer is folded into the pool exactly once however many times it is
+    /// asked for, so the timer costs a lock and nothing else.
+    pub fn seam_harvest(&self) -> Option<Harvest> {
+        self.show.as_ref()?.harvested.lock().ok()?.take()
     }
 
     /// Take the next frame of a stepped scene, on this thread. `false` at the
@@ -611,16 +729,28 @@ impl Scene {
 
 impl Show {
     fn new(
-        lenses: Arc<[Lens]>,
-        held: Arc<Motion>,
+        path: &Path,
+        frame: Size,
+        calibrated: Calibrated,
         frames: Option<Arc<Frames>>,
         source: Source,
     ) -> Self {
         Self {
-            lenses,
-            held,
+            path: path.to_path_buf(),
+            frame,
+            corrected: Arc::new(Correction::none(&calibrated.lenses)),
+            harvested: Harvested::default(),
+            lenses: calibrated.lenses,
+            camera: calibrated.camera,
+            held: calibrated.held,
             playing: RefCell::new(Playing { frames, source }),
         }
+    }
+
+    /// What the pass runs on this redraw: the correction as it stands, which
+    /// is one step further along its walk than it was on the last one.
+    fn lenses(&self) -> Arc<[Lens]> {
+        self.corrected.lenses()
     }
 
     fn view(&self, held: Holding) -> Option<View> {
@@ -640,11 +770,58 @@ impl Show {
                     .held
                     .rolling(at, held.readout.unwrap_or(self.held.readout)),
             },
-            lenses: self.lenses.clone(),
+            lenses: self.lenses(),
             frames,
         })
     }
 }
+
+/// A fallback fit off one file's own frames, into the correction it will be
+/// drawn with and the slot the pool reads it out of.
+///
+/// `land` for a still, which has no later moment to correct itself in, and
+/// `ask` for a file that is playing, which does: by the time this returns
+/// there is a picture on screen, and a picture that jumps is worse than a
+/// picture that is briefly a degree out.
+fn fit_into(
+    path: &Path,
+    lenses: &Arc<[Lens]>,
+    frame: Size,
+    into: Option<&Arc<Correction>>,
+    kept: &Harvested,
+    now: bool,
+) -> Option<Harvest> {
+    let started = Instant::now();
+    let fitted = seam::fit_file(path, lenses, frame, &seam::Plan::default())?;
+    println!(
+        "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, cy {:+.2} px ({})",
+        fitted.fit.roll_deg,
+        fitted.fit.yaw_deg,
+        fitted.fit.pitch_deg,
+        fitted.fit.cx_px,
+        fitted.fit.cy_px,
+        fitted.describe(started.elapsed().as_secs_f64()),
+    );
+    if let Some(into) = into {
+        match now {
+            true => into.land(fitted.fit),
+            false => into.ask(fitted.fit),
+        }
+    }
+    let harvest = Harvest {
+        fit: fitted.fit,
+        patches: fitted.patches,
+        residual_deg: fitted.after[0].hypot(fitted.after[1]),
+    };
+    if let Ok(mut slot) = kept.lock() {
+        *slot = Some(harvest);
+    }
+    Some(harvest)
+}
+
+/// Where a fallback fit leaves its answer for the shell to pool. Shared,
+/// because the fit that fills it runs on a thread of its own.
+type Harvested = Arc<Mutex<Option<Harvest>>>;
 
 /// Everything the trailer contributes to one open capture: the calibration
 /// for the lenses the shader samples, checked against the streams they will
@@ -667,7 +844,7 @@ impl Show {
 /// capture is 1.8 million IMU samples and costs about a fifth of a second to
 /// read and integrate, against 70 ms to open the container. Doing it per
 /// frame would be 30 times a second for a track that does not change.
-fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>, Arc<Motion>)> {
+fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
     let calibration = CalibrationSet::from_capture(path)?;
     // The calibration's pixel numbers are already in delivered-frame
     // coordinates, so they describe this texture only if the stream is the
@@ -691,11 +868,16 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>,
             )
         })?
         .to_vec();
+    // The camera key is printed because it is what a seam calibration is
+    // filed under, and a pilot with two cameras or a bug report to write has
+    // no other way to see which one this file came off. It names the unit
+    // without naming it: model and factory calibration, hashed, no serial.
     println!(
-        "lens:   {} {}, sampling {sampled} of {} calibrated",
+        "lens:   {} {}, sampling {sampled} of {} calibrated, camera {:016x}",
         calibration.camera_model,
         calibration.firmware,
         calibration.lenses.len(),
+        calibration.camera_key(),
     );
 
     let orientation = calibration.orientation(Filter::default());
@@ -711,7 +893,19 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>,
         exposure: calibration.exposure[0].clone(),
         readout: calibration.readout(),
     };
-    Ok((lenses.into(), Arc::new(held)))
+    Ok(Calibrated {
+        lenses: lenses.into(),
+        camera: calibration.camera_key(),
+        held: Arc::new(held),
+    })
+}
+
+/// Everything one open capture's trailer contributes, in one piece so that
+/// opening a file hands it over in one piece.
+struct Calibrated {
+    lenses: Arc<[Lens]>,
+    camera: u64,
+    held: Arc<Motion>,
 }
 
 /// What the shell hands the renderer for one frame.

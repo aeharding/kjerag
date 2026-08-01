@@ -159,7 +159,11 @@ fn pairs(
     options: &Options,
 ) -> Fallible<()> {
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let mut walk = Walk::open(&options.input, options.from, calibration.dimension)?;
+    let mut walk = Walk::open(
+        &options.input,
+        options.from,
+        Size::new(calibration.dimension.width, calibration.dimension.height),
+    )?;
     // A ring of frames, so that a pair can be taken a chosen distance apart:
     // consecutive frames are turning at nearly the same rate and so carry
     // nearly the same readout displacement, which cancels in the difference.
@@ -737,7 +741,11 @@ fn seam(
 ) -> Fallible<()> {
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
     let candidates = candidates(readout);
-    let mut walk = Walk::open(&options.input, options.from, calibration.dimension)?;
+    let mut walk = Walk::open(
+        &options.input,
+        options.from,
+        Size::new(calibration.dimension.width, calibration.dimension.height),
+    )?;
     if walk.streams() < 2 {
         return Err("this file carries one lens stream, so it has no seam".into());
     }

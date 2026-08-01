@@ -64,7 +64,12 @@ fn main() -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
 
+    // An instrument has no stored calibration to read: the app keeps that in
+    // its own config, and this is not the app. So the seam is fitted off this
+    // file, which is what every instrument did before the calibration moved
+    // to the camera (issue #48).
     let mut scene = Scene::still(&options.input, options.at())?;
+    scene.fit_seam(true);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);
     let aspect = options.size.width as f32 / options.size.height as f32;
@@ -660,7 +665,12 @@ fn conventions_against_the_picture(
 ) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
+    // An instrument has no stored calibration to read: the app keeps that in
+    // its own config, and this is not the app. So the seam is fitted off this
+    // file, which is what every instrument did before the calibration moved
+    // to the camera (issue #48).
     let mut scene = Scene::still(&options.input, options.at())?;
+    scene.fit_seam(true);
     scene.set_horizon(Horizon::Free);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);

@@ -340,6 +340,45 @@ Nothing in the shader changed: phase 1 is measurement, and the fitted
 parameters are for the owner to validate before phase 2 applies any of them.
 Method and every number: docs/research/insv-format.md 6.8.
 
+**Phase 2 applies it, per camera, and then narrows the band** (issue #48, the
+owner's "2 deg looks good"). The correction is five knobs, a relative rotation
+and a principal point, **fitted once against a capture from a camera standing
+still and stored under that camera** rather than fitted per file. Which of
+those two is right was measured rather than argued, and not on the number a
+per-file fit minimizes for itself. **The per-file fits disagree with each
+other**: fitted file by file, the same glued pair of lenses asks for yaws from
+-1.69 to -2.58 degrees and principal points 13 px apart, which is 15 px of
+picture at the seam between two answers for one camera that did not change
+between April and July. **The static capture's answer, applied unchanged to
+all five flights, reads the same along-seam number their own fits do** (0.15
+to 0.22 degrees, within 0.002 of the per-file answer on three of five) and
+well inside the 0.31 to 0.40 the per-file rotation left. That axis is the one
+parallax cannot reach, so it is calibration and nothing else. On the
+far-field control the per-camera answer leaves **0.022 degrees along and 0.106
+across**, which is 1.8 view pixels, against 6.7 for the per-file rotation.
+
+That deletes three things this milestone used to carry: the two second wait
+before a first play was corrected, the cache under the file's own hash, and
+the thin-file failure mode where a capture with seven usable azimuths got a
+fit of its own. `View > Calibrate seam from this video` is the one action, on
+a worker thread, about two seconds, with a toast when it lands; a camera with
+nothing stored still gets a best-effort fit off the file being played, which
+is the old path demoted to a fallback and labelled as one in the report line.
+The store is cosmic-config **state**, keyed by a serial-free camera key: the
+model, the delivered frame size and the factory calibration string, hashed.
+
+**Then the crossover, 2 degrees instead of the 14-degree overlap.** On flight
+footage the doubled band goes from 10.60 degrees to 1.50 and its sharpness
+against the front lens alone from 0.723 to 1.074. Against Insta360's own
+stitch, the benchmark: they keep 0.92 to 0.97 of their own sharpness across
+the seam, we kept **0.579**, the calibration alone took us to 0.689 and the
+band takes us to **0.871** -- four fifths of the gap, closed. The pass costs
+what it cost (3.77 ms per redraw before, 3.59 after, interleaved at
+2560x1440), which took two attempts: reading the two lenses' angles back out
+of the `Blend` array after the loop that fills it costs 5.5 ms against 3.6,
+and only `--bin playback` under live decode can see that -- `--bin zoom` reads
+the two as equal.
+
 **M3 has started, and the player has sound** (issue #13). The file's AAC track
 is decoded off the same demuxer as the two lens streams, resampled by
 `swresample` into the device's own format, and written to a ring that a cpal
@@ -470,12 +509,16 @@ be seen from.
   found while flying the finished zoom: the view surviving fullscreen
   (issue #77), the pan carrying on through the poles (issue #63), and the
   wide end of the zoom dragging calmly (issue #78).
-  **M2 is complete**, except that issue #48 reopened the seam: the two lenses
-  are misaligned by up to 2.7 degrees across it, phase 1 has measured that,
-  attributed it to a relative lens tilt and fitted the correction, and phase 2
-  will apply it. Issue #79 opened a second camera: the ONE X2 writes one lens
-  per file, and the player now pairs the two at open and holds an X2's horizon
-  with that camera's own IMU convention.
+  **M2 is complete**: issue #48 reopened the seam, and both halves of it have
+  now shipped. The two lenses were misaligned by up to 2.7 degrees across the
+  seam; phase 1 measured that and attributed it to a relative lens tilt, and
+  phase 2 calibrates it per camera off a capture the pilot points at and hands
+  the picture over in a 2 degree crossover instead of the whole 14 degree
+  overlap. What is left at the seam on flight footage is parallax, which is
+  depth rather than geometry and is the next thing to look at. Issue #79 opened
+  a second camera: the ONE X2 writes one lens per file, and the player now
+  pairs the two at open and holds an X2's horizon with that camera's own IMU
+  convention.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
@@ -494,6 +537,22 @@ no commitment: export that follows the view the pilot actually flies
 live, no keyframe UI ever.
 
 ## Decisions log
+
+- 2026-08-01 **The calibration menu action is deleted, and the store with it.**
+  Zero-config playback (AGENTS.md) leaves no room for it, and the reason is
+  stronger than the doctrine: the action fitted whichever file was open, so on
+  this box it stored the May 1 flight's fit and then the April 10 flight's,
+  reported "Seam calibrated for this camera" both times, and never once fitted
+  the static capture it existed for. A fit taken through a flight's seam
+  absorbs that flight's parallax (6.8), so both answers were wrong and nothing
+  on screen could show it. That is the whole explanation of the owner's "I have
+  never once seen a before and after that improved". The single-entry
+  `seam_calibration` is replaced by a per-camera `seam_pool` of quality-gated
+  fits, medianed, filled by watching; the old key is discarded rather than
+  migrated, because its contents are exactly the contamination the pool exists
+  to average out. The correction is no longer landed once either: a
+  `Correction` walks from what is drawn to what is asked for at 0.25 deg/s, so
+  a fit that lands mid-playback is never a jump.
 
 - 2026-07-31 **The sound reads on a demuxer of its own** (issue #97, owner
   defect). One file handle for all three streams was the simpler design and

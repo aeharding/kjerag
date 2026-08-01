@@ -37,8 +37,10 @@ fn main() -> Fallible<()> {
 
     println!("file:   {}", path.display());
     println!(
-        "camera: {} {}",
-        calibration.camera_model, calibration.firmware
+        "camera: {} {}, key {:016x}",
+        calibration.camera_model,
+        calibration.firmware,
+        calibration.camera_key(),
     );
     print!("records:");
     for (id, format, size) in record_index(&path)? {

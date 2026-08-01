@@ -744,6 +744,11 @@ frame's does below, and it is the only thing the window can usefully say: a
 copied reference carries the file's name alone, which is enough to say which
 video and not enough to open it.
 
+There is **no calibration toast**, because there is no calibration action
+(owner ruling, 2026-07-31, in AGENTS.md as zero-config playback). The seam
+corrects itself from what the app sees while a file plays, and the only place
+that is said out loud is the terminal report line.
+
 The destination is the folder's own name in quotes and never a path, which
 is how cosmic-files names one in its toasts: `copied = Copied {$items} items
 from "{$from}" to "{$to}"` (`i18n/en/cosmic_files.ftl:231-234`) built from
@@ -804,16 +809,30 @@ File                              Playback              View
   Open recent >                     Back 10 seconds       Default view
   Close video                       Forward 10 seconds    Zoom out
   ---                               ---                   ---
-  Save frame                        Previous frame        Fullscreen
+  Save frame                        Previous frame        [x] Lock horizon
   Copy frame                        Next frame            ---
-  Copy current view reference                             Settings...
-  Go to copied view reference                             About Kyerag...
-  ---
-  Quit
+  Copy current view reference                             Fullscreen
+  Go to copied view reference                             ---
+  ---                                                     Settings...
+  Quit                                                    About Kyerag...
 ```
 
 - Ellipsis on items that open a dialog, none on items that act
   (cosmic-player `Open media...` vs `Close file`, `src/menu.rs:119-121`).
+- `Lock horizon` is a checkbox rather than a pair of items, because it is a
+  state (issue #8); cosmic-files spells `Show hidden files` the same way.
+- **There is no seam item, and there must never be one.** A
+  `Calibrate seam from this video` action shipped on this branch and was
+  ruled out (owner, 2026-07-31): "The menu item for calibration is a
+  nonstarter. All videos must play seamlessly without anything weird like
+  'click a calibration button'." It was not only taste. The action fitted
+  whichever file was open, and a fit taken through a flight's seam absorbs
+  that flight's own parallax into the answer
+  (docs/research/insv-format.md 6.8); pressed twice on this box it stored the
+  May 1 flight's fit and then the April 10 flight's, said "Seam calibrated
+  for this camera" both times, and left the picture worse than the static
+  capture's answer with nothing on screen able to show it. A control that can
+  silently store a wrong answer and report success is worse than no control.
 - **The two view items are named the owner's way**, and the first is his
   wording verbatim. `Copy view` was the first spelling and it said nothing to
   anyone who had not already been told what it did; a menu item has to work
@@ -883,7 +902,18 @@ first-party app uses:
 
 - `Config` (`CONFIG_VERSION: u64 = 1`): things the pilot chose.
   `app_theme`, `screenshot_dir`, `screenshot_scale`.
-- `ConfigState`: things the app remembers. `recent_files`.
+- `ConfigState`: things the app remembers. `recent_files`, and `seam_pool`,
+  one pool per camera under a serial-free fingerprint of that camera's own
+  factory calibration (issue #48).
+
+`seam_pool` is state and not config for the same reason `recent_files` is: it
+is something the app measured rather than something the pilot expressed, and it
+has no row on the Settings page. It **is** a cache, which is what changed: no
+action fills it, so deleting it costs a few seconds of watching and nothing
+else. The superseded `seam_calibration` key is left on disk unread rather than
+migrated, because its entries were made by the removed action off whichever
+file was open and carry exactly the contamination the pool exists to average
+out.
 
 Both derive `CosmicConfigEntry` and both get a `cosmic_config` subscription
 so an external change applies live (cosmic-player `src/config.rs`,
