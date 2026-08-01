@@ -313,9 +313,7 @@ pub struct Reframe {
     /// older cameras write one lens per file, and then this is 1 and the
     /// picture is one hemisphere, exactly as it was before issue #27.
     lens_count: f32,
-    has_frame: f32,
     linearize: f32,
-    elapsed: f32,
     /// Which way across the delivered frame the sensor's rows advance
     /// (`kjerag_meta::Sweep`), and whether the correction runs at all: both
     /// components are zero for a file with no IMU record, and then the pass
@@ -331,7 +329,7 @@ pub struct Reframe {
     /// matrices in [`LensBlock`] make 16 bytes. WGSL does that itself;
     /// `repr(C)` does not, and the two sizes have to agree or
     /// `min_binding_size` rejects the pipeline.
-    _pad: [f32; 2],
+    _pad: [f32; 4],
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -490,20 +488,26 @@ impl Reframe {
             frame_width: frame.width as f32,
             frame_height: frame.height as f32,
             lens_count: lenses.len().min(MAX_LENSES) as f32,
-            has_frame: 1.0,
             linearize: f32::from(u8::from(linearize)),
-            elapsed: 0.0,
             row_axis: held
                 .rolling
                 .map_or([0.0; 2], |rolling| rolling.axis.map(|c| c as f32)),
             sharpen: sampling.limits(),
-            _pad: [0.0; 2],
+            _pad: [0.0; 4],
         }
     }
 
-    /// No file open: the shader draws its bring-up gradient. One lens that
-    /// has no picture in it, so the map still runs and every ray still misses.
-    pub fn gradient(elapsed: f32, aspect: f32, linearize: bool) -> Self {
+    /// No frame to draw: one lens with no picture in it, so the map still runs
+    /// and every ray misses.
+    ///
+    /// Missing every lens is the room around the ball, which the pass leaves
+    /// transparent (issue #100), so a pane with no frame is all room and what
+    /// shows is the backdrop the shell paints behind the widget. That is the
+    /// whole of what this block does, and it is why nothing here says which
+    /// case it is: a file that has not delivered its first frame yet and a
+    /// window with no file are the same picture, and it is the same one the
+    /// far end of the zoom already draws around the ball.
+    pub fn blank(aspect: f32, linearize: bool) -> Self {
         Self {
             lenses: [LensBlock::EMPTY; MAX_LENSES],
             view_to_body: Mat3::IDENTITY.columns(),
@@ -515,14 +519,11 @@ impl Reframe {
             frame_width: 1.0,
             frame_height: 1.0,
             lens_count: 1.0,
-            has_frame: 0.0,
             linearize: f32::from(u8::from(linearize)),
-            elapsed,
             row_axis: [0.0; 2],
-            // Every ray misses every lens, so no plane is ever sampled and
-            // the gradient reaches the target either way.
+            // Every ray misses every lens, so no plane is ever sampled.
             sharpen: Sampling::default().limits(),
-            _pad: [0.0; 2],
+            _pad: [0.0; 4],
         }
     }
 
@@ -1544,9 +1545,7 @@ struct Reframe {
   frame_width: f32,
   frame_height: f32,
   lens_count: f32,
-  has_frame: f32,
   linearize: f32,
-  elapsed: f32,
   // Which way across the delivered frame the sensor reads, and zero on both
   // components where there is no readout to correct.
   row_axis_x: f32,
@@ -1559,6 +1558,8 @@ struct Reframe {
   // `Reframe::_pad`, which is what makes the two sizes agree.
   pad0: f32,
   pad1: f32,
+  pad2: f32,
+  pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;

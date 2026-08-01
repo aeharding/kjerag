@@ -1174,10 +1174,14 @@ than the room around the ball" "$file"
 # Measured on the main build of 2026-08-01: one capture caught the gap at
 # time=0, twenty caught it at time=1500 of a 1799.8 s file.
 
-# How many captures are taken once the app says it has loaded the file. grim
-# answers in about 17 ms here, so 40 covers 0.7 s against a gap measured at
-# 0.33 s.
-OPEN_BURST=40
+# How many captures are taken once the app says it has loaded the file, and
+# how many times the whole open is repeated when a round catches nothing of
+# the gap. grim answers in about 17 ms here, so a burst covers 0.4 s; the gap
+# has measured 0.33 s on a cold window and 0.05 s on a warm one, and a round
+# whose every capture landed after the first frame has seen nothing rather
+# than seen something good.
+OPEN_BURST=24
+OPEN_ROUNDS=3
 
 # What separates the test pattern from a picture and from the backdrop.
 #
@@ -1243,6 +1247,47 @@ opens_onto_the_backdrop() {
 		return
 	fi
 
+	local seconds deep round=1
+	seconds=$(sed -n 's/^media:.*, \([0-9.]*\) s$/\1/p' "$log" | head -1)
+	deep=$(awk -v s="${seconds:-0}" 'BEGIN { printf "%.3f", s * 0.9 }')
+
+	while [ "$round" -le "$OPEN_ROUNDS" ]; do
+		open_once "$check" "$deep" || return
+		case $verdict in
+		pattern)
+			fail "$check" \
+				"the pane drew the test pattern: its mirrored halves read \
+$(mirror_rgb "$caught" left) and $(mirror_rgb "$caught" right), which no picture is" \
+				"$caught"
+			return
+			;;
+		backdrop)
+			pass "$check ($held captures of backdrop, then the frame)"
+			return
+			;;
+		esac
+		round=$((round + 1))
+	done
+	fail "$check" \
+		"$OPEN_ROUNDS opens went by with every capture already a frame, so nothing \
+was seen of the gap and this proves nothing" "$caught"
+}
+
+# Set by open_once, read by the check around it: what the burst caught, the
+# capture that says so, and how much backdrop was in it.
+verdict=
+caught=
+held=0
+
+# open_once <check> <time>: close the file, open it again from the window that
+# is still up, and classify the burst of captures that follows. Answers
+# through `verdict`; a non-zero return is a failure it has already filed.
+open_once() {
+	local check=$1 deep=$2 taken shot
+	verdict=missed
+	caught=
+	held=0
+
 	# The default view first: the band this check reads is the room itself
 	# while the view is at the ball, whatever is playing behind it.
 	key -M ctrl -k 0 -m ctrl
@@ -1251,19 +1296,15 @@ opens_onto_the_backdrop() {
 		fail "$check" \
 			"ctrl+w left the pane reading $(pane_rgb "$session/closed.ppm"), which is \
 still a picture" "$session/closed.ppm"
-		return
+		return 1
 	fi
-	local welcome=$session/closed.ppm
 
-	local seconds deep
-	seconds=$(sed -n 's/^media:.*, \([0-9.]*\) s$/\1/p' "$log" | head -1)
-	deep=$(awk -v s="${seconds:-0}" 'BEGIN { printf "%.3f", s * 0.9 }')
 	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
 		wl-copy "$media time=$deep yaw=0.00 pitch=0.00 fov=90.00 lock=1" 2>>"$log"
 
 	# No settle after the key, and the burst starts on the app's own line
-	# rather than on a sleep: everything this check is about happens in the
-	# third of a second after `goto:` is printed, which is the moment the
+	# rather than on a sleep: all of what this check is about happens in the
+	# fraction of a second after `goto:` is printed, which is the moment the
 	# file has been loaded and the pane is about to be drawn for the first
 	# time.
 	local gotos try=0 waited
@@ -1272,7 +1313,8 @@ still a picture" "$session/closed.ppm"
 		env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
 			wtype -M ctrl -k v -m ctrl 2>>"$log"
 		waited=0
-		while [ "$(grep -c '^goto:' "$log")" -le "$gotos" ] && [ "$waited" -lt $((READY * 100)) ]; do
+		while [ "$(grep -c '^goto:' "$log")" -le "$gotos" ] &&
+			[ "$waited" -lt $((READY * 100)) ]; do
 			alive || lost "$check"
 			sleep 0.01
 			waited=$((waited + 1))
@@ -1282,52 +1324,49 @@ still a picture" "$session/closed.ppm"
 	done
 	if [ "$(grep -c '^goto:' "$log")" -le "$gotos" ]; then
 		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
-		return
+		return 1
 	fi
 
-	local taken shot
 	for taken in $(seq 1 "$OPEN_BURST"); do
 		alive || lost "$check"
 		grab "$(printf 'open-%02d' "$taken")" >/dev/null
 	done
 
-	local seen=0 backdrop=0 pattern= picture=
 	for taken in $(seq 1 "$OPEN_BURST"); do
 		shot=$(printf '%s/open-%02d.ppm' "$session" "$taken")
 		[ -s "$shot" ] || continue
 		# The control row is what says the file is open, because the window
 		# the paste came from had none: its bottom band is pane and this one
 		# is a row of buttons.
-		band_changed "$welcome" "$shot" bottom "$CONTROL_BAND" || continue
-		seen=$((seen + 1))
+		band_changed "$session/closed.ppm" "$shot" bottom "$CONTROL_BAND" || continue
 		if pane_is_backdrop "$shot"; then
-			backdrop=$((backdrop + 1))
+			held=$((held + 1))
+			verdict=backdrop
+			caught=$shot
 			continue
 		fi
 		if is_test_pattern "$(mirror_rgb "$shot" left)" "$(mirror_rgb "$shot" right)"; then
-			pattern=$shot
-			break
+			verdict=pattern
+			caught=$shot
+		elif [ -z "$caught" ]; then
+			# A frame, and nothing before it: the burst started after the gap
+			# had closed, and this capture is what says so.
+			caught=$shot
 		fi
-		# Neither: the frame has landed and the gap is over.
-		picture=$shot
+		# Either way the gap is over: the frame has landed, or the pattern
+		# this check exists for is on screen and there is nothing to add to
+		# it.
 		break
 	done
 
-	if [ -n "$pattern" ]; then
-		fail "$check" \
-			"the pane drew the test pattern: its mirrored halves read \
-$(mirror_rgb "$pattern" left) and $(mirror_rgb "$pattern" right), which no picture is" \
-			"$pattern"
-	elif [ "$backdrop" -gt 0 ]; then
-		pass "$check ($backdrop captures of backdrop, then the frame)"
-	elif [ "$seen" = 0 ]; then
-		fail "$check" "no capture caught the window with the file open in it, so this \
-proves nothing" "$session/open-01.ppm"
-	else
-		fail "$check" "the first capture of the open window was already a frame \
-($(pane_rgb "$picture")), so nothing was seen of the gap and this proves nothing" \
-			"$picture"
+	# One capture of the verdict is kept and the rest of the burst goes: two
+	# dozen captures a round of a window full of somebody's flight is a lot of
+	# personal video to leave lying about for no reading.
+	if [ -n "$caught" ]; then
+		cp "$caught" "$session/open-$verdict.ppm"
+		caught=$session/open-$verdict.ppm
 	fi
+	rm -f "$session"/open-[0-9][0-9].ppm
 }
 
 exits_clean() {

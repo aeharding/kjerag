@@ -1,8 +1,10 @@
 //! The one shader pass the player draws.
 //!
-//! With no file it is an animated gradient, which proves only that a custom
-//! wgpu pass runs inside libcosmic. With a file it reprojects a real VA-API
-//! frame imported by [`super::dmabuf`]: for every output pixel, a view ray
+//! With no frame it draws nothing at all: every ray misses every lens, which
+//! is the transparent room the ball floats in (issue #100), so what the pilot
+//! sees between opening a file and its first frame is the backdrop the shell
+//! paints behind this widget. With a frame it reprojects a real VA-API frame
+//! imported by [`super::dmabuf`]: for every output pixel, a view ray
 //! through the camera's yaw, pitch and field of view, rotated into each
 //! lens's frame and pushed through the Mei/UCM model in
 //! [`super::projection`], sampled from the NV12 planes of whichever lens
@@ -58,9 +60,8 @@ const RETAINED: usize = 3;
 /// polling, so 29.97 fps content costs 29.97 redraws a second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Next {
-    /// Whenever the compositor will take a frame. The gradient animates on
-    /// every refresh, and so does playback that is still waiting for its
-    /// first decoded frame.
+    /// Whenever the compositor will take a frame: playback that is still
+    /// waiting for its first decoded frame, and a seek that has not landed.
     Refresh,
     /// At this instant, when the frame after the one just taken is due.
     At(Instant),
@@ -100,8 +101,6 @@ pub enum Horizon {
 /// The widget's state, owned by the shell.
 pub struct Scene {
     show: Option<Show>,
-    /// Wall-clock origin for the no-file gradient.
-    started: Instant,
     /// Where a capture waits for the redraw that takes it (issue #15).
     shutter: Shutter,
     /// Set while the shell has hidden the controls, which is when the pointer
@@ -260,11 +259,10 @@ enum Source {
 }
 
 impl Scene {
-    /// No file: the animated gradient.
+    /// No file: nothing on the pane but the backdrop behind it.
     pub fn blank() -> Self {
         Self {
             show: None,
-            started: Instant::now(),
             shutter: Shutter::default(),
             cursor_hidden: false,
             viewpoint: Cell::new(Viewpoint::default()),
@@ -474,8 +472,12 @@ impl Scene {
     /// come back. Call it on every redraw: this is the presentation clock's
     /// only tick.
     pub fn pump(&self, now: Instant) -> Next {
+        // Nothing open is nothing that changes by itself: no clock, no decode
+        // thread, and a pane the shell paints. This asked for a redraw on
+        // every compositor refresh while the pass carried an animation, which
+        // was a window kept awake to draw a test pattern.
         let Some(show) = &self.show else {
-            return Next::Refresh;
+            return Next::Never;
         };
         // Out of the cell in one step: the borrow checker splits the fields
         // of a `&mut Playing`, but not those of a `RefMut`.
@@ -738,7 +740,6 @@ impl Scene {
             readout: self.readout.get(),
         };
         ScenePrimitive {
-            elapsed: self.started.elapsed().as_secs_f32(),
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
             sampling: self.sampling.get(),
@@ -931,7 +932,6 @@ struct Calibrated {
 /// What the shell hands the renderer for one frame.
 #[derive(Debug)]
 pub struct ScenePrimitive {
-    elapsed: f32,
     camera: Camera,
     view: Option<View>,
     /// How the pass samples a magnified picture, which is a property of the
@@ -1198,7 +1198,9 @@ impl ScenePipeline {
                 self.linearize(),
                 primitive.sampling,
             ),
-            _ => Reframe::gradient(primitive.elapsed, aspect, self.linearize()),
+            // No frame yet, or none this pipeline has managed to bind: the
+            // pane is all room, which the shell's backdrop shows through.
+            _ => Reframe::blank(aspect, self.linearize()),
         };
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());
         // After the uniform write, because the band reads the same block: the
@@ -1744,12 +1746,6 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 @group(0) @binding(4) var chroma1: texture_2d<f32>;
 @group(0) @binding(5) var samp: sampler;
 
-fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
-  let d = length(uv - vec2<f32>(0.5, 0.5));
-  let wave = 0.5 + 0.5 * sin(d * 24.0 - t * 3.0);
-  return vec3<f32>(wave * uv.x, wave * uv.y, wave);
-}
-
 // Each lens's picture at that ray, mixed by its weight, or the room where no
 // lens has the ray. A lens weighted zero is not sampled at all, so outside the
 // overlap this is the single fetch the hard pick took before issue #7, and
@@ -1834,12 +1830,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[1].pixel),
   );
   let lens = picture(mix, ratio);
-  let rgb = select(gradient(in.uv, reframe.elapsed), lens.rgb, reframe.has_frame > 0.5);
-  // The gradient is opaque wherever it is drawn: it stands in for a file
-  // rather than sitting in a room, so the only transparency a redraw can
-  // carry is a room the file left.
-  let alpha = select(1.0, lens.a, reframe.has_frame > 0.5);
-  return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), alpha);
+  return vec4<f32>(
+    select(lens.rgb, linearize(lens.rgb), reframe.linearize > 0.5),
+    lens.a,
+  );
 }
 "#;
 
