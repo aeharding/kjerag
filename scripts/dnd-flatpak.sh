@@ -23,7 +23,8 @@
 #   uri-list   a source that hands over a path, which is cosmic-files and
 #              most of the rest. The path is the host's own, so it only opens
 #              where the sandbox can see it, which since issue #118 is the
-#              videos folder (`--filesystem=xdg-videos:ro`).
+#              videos folder and the file manager's own network mounts
+#              (`--filesystem=xdg-videos:ro`, `--filesystem=xdg-run/gvfs:ro`).
 #
 # So the same drop is made twice for the second one, inside the grant and
 # outside it. Outside it the file must not open and the window must say why:
@@ -130,15 +131,18 @@ env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=wayland-0 \
 
 failures=0
 
-# drop <name> <offer> <file>: drag it in and say whether the app opened it.
+# drop <name> <offer> <file...>: drag them in and say whether the app opened
+# anything. More than one file is what a file manager sends when more than one
+# is selected, and the app takes the first.
 drop() {
-	local name=$1 offer=$2 file=$3
+	local name=$1 offer=$2
+	shift 2
 	local report=$session/drag-$name.log
 	local before waited=0 pid opened
 
 	before=$(grep -c '^media:' "$log")
 	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=wayland-0 \
-		"$dragsource" "$file" "offer=$offer" "linger=$OPEN" >"$report" 2>&1 &
+		"$dragsource" "$@" "offer=$offer" "linger=$OPEN" >"$report" 2>&1 &
 	pid=$!
 	while [ "$waited" -le $((OPEN * 2)) ]; do
 		kill -0 "$cage_pid" 2>/dev/null || break
@@ -161,21 +165,35 @@ drop() {
 # outside the videos folder. Nothing is copied: what is under test is the path,
 # and the sandbox has no mount for this one either way.
 outside=$session/out-of-reach.insv
+also=$session/out-of-reach-too.insv
 ln -sf "$media" "$outside"
+ln -sf "$media" "$also"
 
 printf '\n'
 drop portal portal "$media" || failures=$((failures + 1))
 drop in-videos uri-list "$media" || failures=$((failures + 1))
 
-# And the one that must NOT open, because the grant is a folder and not the
+# The library on a network share, which is where a footage library that
+# outgrew a laptop lives (issue #118). Machine-specific, so it is named rather
+# than searched for, and a box with nothing mounted says so instead of passing.
+if [ -n "${KJERAG_TEST_GVFS:-}" ]; then
+	drop on-a-share uri-list "$KJERAG_TEST_GVFS" || failures=$((failures + 1))
+else
+	printf '%-22s skipped (set KJERAG_TEST_GVFS to a file on a mounted share)\n' on-a-share
+fi
+
+# And the one that must NOT open, because the grants are folders and not the
 # filesystem. What is required of it is the honest refusal rather than the
-# words a corrupt file gets (issue #118).
+# words a corrupt file gets, and one refusal rather than one per file: two are
+# dropped together, which is what a file manager sends from a multiple
+# selection (issue #118).
 before=$(grep -c '^kjerag: .* not shown' "$log")
-if drop outside-it uri-list "$outside"; then
-	printf 'FAIL   a file outside the videos folder opened, so the grant is wider than it says\n'
+if drop outside-it uri-list "$outside" "$also"; then
+	printf 'FAIL   a file outside the granted folders opened, so a grant is wider than it says\n'
 	failures=$((failures + 1))
-elif [ "$(grep -c '^kjerag: .* not shown' "$log")" -le "$before" ]; then
-	printf 'FAIL   nothing was refused, so the drop never reached the open\n'
+elif [ "$(grep -c '^kjerag: .* not shown' "$log")" -ne $((before + 1)) ]; then
+	printf 'FAIL   %s refusals for one drop of two files, expected 1\n' \
+		"$(($(grep -c '^kjerag: .* not shown' "$log") - before))"
 	failures=$((failures + 1))
 else
 	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=wayland-0 \
@@ -184,8 +202,8 @@ else
 		printf 'FAIL   the window is unchanged, so nothing was said about the refusal\n'
 		failures=$((failures + 1))
 	else
-		printf '%-22s refused, and the window says so: %s\n' "" \
-			"$session/refused.ppm"
+		printf '%-22s two files, one refusal, and the window says so: %s\n' \
+			outside-it "$session/refused.ppm"
 	fi
 fi
 
