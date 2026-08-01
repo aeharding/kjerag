@@ -548,14 +548,24 @@ toast_clears_the_controls() {
 # the ball past about 403). wtype drops about one key in twenty, so the rest
 # is headroom, and the loop breaks on success so headroom costs nothing.
 BALL_PRESSES=20
-ROOM_SPREAD=4
-# The room is the app's own flat OUTSIDE_GRAY and reads 25 25 25 here, so this
-# is five codes of headroom and not thirty five. It was 60, and 60 is wide
-# enough to let real footage through: measured 2026-07-31, a hillside in
-# shadow read 35 35 36 a fifth of the way out of the zoom, `reach_the_ball`
-# took it for the room and stopped there, and every check downstream then
-# compared two pictures that were never at the ball. Two of them failed
-# saying the view had reset when the captures show it holding.
+# The room is the app's own flat OUTSIDE_GRAY and reads 25 25 25 here, so a
+# patch is the room when it is both nearly neutral and nearly black. Two
+# measurements set the two numbers and they were made against different
+# failures, so the merge takes the tighter half of each rather than one side:
+#
+# - spread 1, not 4. On the owner's deck capture the foliage at the ball's rim
+#   reads 15 19 15, a spread of exactly 4, so at 4 the zoom-out loop stopped
+#   one press early on a patch that was picture and `fullscreen holds the
+#   view` then failed on the same patch reading 18 22 17.
+# - dark 30, not 60. Measured 2026-07-31, a hillside in shadow read 35 35 36 a
+#   fifth of the way out of the zoom, so at 60 `reach_the_ball` took it for the
+#   room and stopped there, and every check downstream compared two pictures
+#   that were never at the ball.
+#
+# Both exclusions hold at once: the foliage fails on spread (4 > 1) and the
+# hillside on brightness (35 > 30), while the room itself passes both at
+# 25 25 25, spread 0.
+ROOM_SPREAD=1
 ROOM_DARK=30
 
 # reach_the_ball <name>: press ctrl+- until the patch reads the room, and
@@ -1005,6 +1015,73 @@ exits_clean() {
 	fi
 }
 
+# ------------------------------- the checks, with a pool to remember
+#
+# The seam correction is pooled per camera, and nothing asks the pilot for it
+# (AGENTS.md, zero-config playback). The claim under test is that a camera the
+# pool knows is corrected before the first frame rather than two seconds into
+# it, so it is checked through the app: open the file once with an empty pool
+# and read the camera out of the report line, write a pool for that camera into
+# the session's own state directory, open it again, and require the app to say
+# it drew from the pool and never to say it was fitting.
+#
+# It is also the control for the failure it clears: with the first session's
+# empty pool, the app says it is fitting off the file, which is the line the
+# second session must not print.
+
+pooled_calibration() {
+	local check="a pooled calibration is in the first frame"
+	printf '\n-- calibration checks (%s)\n' "$media"
+
+	# The session's directories persist between runs, so a pool a previous run
+	# stored is still there and would make this session take the path it is
+	# here to rule out. The superseded single-entry key goes too: it is
+	# derived data and nothing reads it any more.
+	local state=$session/state/cosmic/app.kyerag.Kyerag/v1
+	rm -f "$state/seam_pool" "$state/seam_calibration"
+
+	boot fallback "$media"
+	if ! await '^seam:' "$READY"; then
+		fail "$check" "no seam line in $READY s" "log: $log"
+		teardown
+		return
+	fi
+	local camera
+	camera=$(sed -n 's/^lens:.*camera \([0-9a-f]*\).*/\1/p' "$log" | head -1)
+	if ! grep -q 'nothing pooled for this camera yet' "$log"; then
+		fail "$check" "the empty pool did not fall back to fitting" "log: $log"
+		teardown
+		return
+	fi
+	quit >/dev/null 2>&1 || teardown
+	if [ -z "$camera" ]; then
+		fail "$check" "no camera key in the lens line" "log: $log"
+		return
+	fi
+
+	# The owner's own answer, which is what 6.8 fitted on his static capture,
+	# as a pool of one. Any five numbers would do here: what is under test is
+	# that they reach the first frame, not what they are.
+	mkdir -p "$state"
+	printf '{"%s":(samples:[(roll_deg:0.789,yaw_deg:-2.450,pitch_deg:-0.668,cx_px:-2.55,cy_px:-13.84,patches:13,residual_deg:0.108)])}\n' \
+		"$camera" >"$state/seam_pool"
+
+	boot calibrated "$media"
+	if ! await 'pooled over 1 fits' "$READY"; then
+		fail "$check" "the pooled calibration was not read" \
+			"$(grep '^seam:' "$log" || echo 'no seam line')" "log: $log"
+		teardown
+		return
+	fi
+	if grep -q 'nothing pooled for this camera yet' "$log"; then
+		fail "$check" "it fitted off the file anyway" "log: $log"
+		teardown
+		return
+	fi
+	pass "$check (camera $camera)"
+	exits_clean
+}
+
 # ------------------------------------------ the checks, with nothing open
 
 welcome() {
@@ -1070,6 +1147,7 @@ dud() {
 
 if [ -n "$media" ]; then
 	with_media
+	pooled_calibration
 else
 	welcome
 fi

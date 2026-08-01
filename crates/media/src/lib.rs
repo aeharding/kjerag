@@ -17,6 +17,9 @@
 //! - [`player`] is the presentation clock around a [`Reader`] on its own
 //!   thread: play, pause, and "which frame is due now". The sound follows that
 //!   clock; it never sets it.
+//! - [`walk`] is the other delivery: the same frames in **system memory**,
+//!   which is what anything reading the delivered pixels at angles needs
+//!   (the seam fit of issue #48, and `kyerag-spike --bin rolling`).
 //!
 //! [`kyerag_render`]: <https://docs.rs/kyerag-render>
 
@@ -26,6 +29,7 @@ mod player;
 mod reader;
 mod sound;
 mod track;
+mod walk;
 
 use std::time::Duration;
 
@@ -35,6 +39,7 @@ pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
 pub use player::{Player, Stats};
 pub use reader::{Accuracy, Cue, Frames, Read, Reader, Timing};
+pub use walk::{Pair, Plane, Walk};
 
 const NANOS: u64 = 1_000_000_000;
 

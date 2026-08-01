@@ -97,7 +97,12 @@ fn main() -> Fallible<()> {
 
     let (lenses, frame) = ratios(&options)?;
 
+    // An instrument has no stored calibration to read: the app keeps that in
+    // its own config, and this is not the app. So the seam is fitted off this
+    // file, which is what every instrument did before the calibration moved
+    // to the camera (issue #48).
     let scene = Scene::still(&options.input, options.at)?;
+    scene.fit_seam(true);
     scene.set_horizon(options.horizon);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let render = Render {

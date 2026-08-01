@@ -710,7 +710,14 @@ fn export_frame(path: &Path, options: &Options) -> Fallible<(kyerag_spike::Plane
         height: video.height(),
     };
     drop(input);
-    let mut walk = Walk::open(path, options.from, size)?;
+    let mut walk = Walk::open(
+        path,
+        options.from,
+        kyerag_render::Size {
+            width: size.width,
+            height: size.height,
+        },
+    )?;
     let mut pair = walk
         .next_pair()?
         .ok_or("no frame decoded from the export")?;

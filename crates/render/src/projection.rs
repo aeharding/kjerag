@@ -13,8 +13,9 @@
 //! Two lenses cover the sphere and overlap by about 14 degrees around the
 //! seam, so most rays near it are in both pictures and the shader has to
 //! decide how much of each to show. [`Reframe::blend`] is that decision: a
-//! weight per lens, one outside the overlap and a smooth crossover inside it
-//! (issue #7). A ray is dropped only where **no** lens has it.
+//! weight per lens, one outside the crossover and a smooth handover across
+//! [`CROSSOVER_DEG`] of it (issues #7 and #48). A ray is dropped only where
+//! **no** lens has it.
 //!
 //! The map also carries **when** each ray was seen (issue #9). A frame comes
 //! off the sensor a row at a time over 15.9 ms, so the orientation a ray is
@@ -87,6 +88,27 @@ const CAP_MARGIN_DEG: f32 = 0.5;
 /// `the_cap_is_tight_against_the_support` measures rather than assumes, and
 /// [`CAP_MARGIN_DEG`] is what covers the rest.
 const CAP_AZIMUTHS: usize = 8;
+
+/// How wide the handover between the two lenses is, in degrees of world
+/// angle, centred on the seam (issue #48).
+///
+/// The overlap is 14 degrees and until this it was the band: the weights
+/// crossed over across the whole of it, so anything the two lenses disagree
+/// about was drawn twice across 10 degrees of picture. Two degrees is what
+/// the owner validated, and it is a trade with a number on each side
+/// (docs/research/insv-format.md 6.8): scored against the front lens alone,
+/// a 2 degree band keeps 0.687 of that sharpness where the shipped weights
+/// keep 0.518 and a hard cut would keep 0.721, so it takes 80 percent of what
+/// a cut would give while staying a blend.
+///
+/// What bounds it from below is **shear**, the two lenses' disagreement
+/// divided by the band: above 1 the crossover folds the picture rather than
+/// blending it. That is why this constant could not ship before the
+/// calibration fit above it. At the 1.7 degrees the factory calibration
+/// leaves, a 2 degree band sits at 1.07, on the fold; at the 0.5 to 0.8 the
+/// fitted correction leaves it sits near 0.4, and a 1 degree band would be
+/// the next thing to measure rather than the next thing to assume.
+const CROSSOVER_DEG: f32 = 2.0;
 
 /// How many lenses one pass can sample.
 ///
@@ -512,13 +534,24 @@ impl Reframe {
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
+        let reach = norm3(view_ray);
+        // Both axis cosines, once: the crossover below needs them together
+        // and the cap test needs them one at a time, and computing them here
+        // is what keeps this pass costing what it cost before the crossover
+        // existed ([`Self::handover`]).
+        let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
+        let front = self.handover(axis, reach);
         for lens in 0..MAX_LENSES {
-            if !self.within(lens, view_ray) {
+            if !self.covers(lens, axis[lens], reach) {
                 continue;
             }
             landings[lens] = self.project(lens, view_ray);
             if lens < self.lens_count as usize {
-                weights[lens] = claim(landings[lens]);
+                let share = match lens {
+                    0 => front,
+                    _ => 1.0 - front,
+                };
+                weights[lens] = claim(landings[lens], share);
             }
         }
         let total: f32 = weights.iter().sum();
@@ -528,6 +561,49 @@ impl Reframe {
             }
         }
         Blend { landings, weights }
+    }
+
+    /// The front lens's share of this ray, which is what hands the picture
+    /// from one lens to the other across the seam (issue #48).
+    ///
+    /// Taken from the **mounting** rather than from the two landings, and
+    /// that is the whole reason it is a step of its own rather than two lines
+    /// inside [`Self::blend`]'s loop. A value read back out of the `Blend`
+    /// array after the loop that filled it cannot stay in registers: measured
+    /// on RADV 2026-07-31 at 2560x1440 under live decode, doing it that way
+    /// costs **5.5 ms per redraw against 3.6**, which is the same scratch
+    /// memory trap the loop's own comment describes. `kyerag-spike --bin
+    /// zoom`, which renders the pass with nothing else on the GPU, reads the
+    /// two versions as equal; `--bin playback`, which runs it under live
+    /// decode, is where the difference is.
+    ///
+    /// The cosines are the ray's own, before the readout turns it, where
+    /// [`Landing::axis`] is the turned ray's. That is the better question
+    /// anyway: both lenses read down their own pictures, which is one world
+    /// direction, so the readout moves no content across the seam at all
+    /// (0.000 degrees measured, docs/research/insv-format.md 6.7) and a
+    /// crossover that followed it would swing with the camera for nothing.
+    ///
+    /// 1 for a file with one lens stream: it has no seam and takes no
+    /// crossover, and its picture runs to the edge of its own coverage, 7
+    /// degrees past where a seam would have been
+    /// (`one_stream_keeps_the_whole_of_its_picture`).
+    ///
+    /// WGSL twin: `handover`.
+    fn handover(&self, axis: [f32; MAX_LENSES], reach: f32) -> f32 {
+        match self.lens_count > 1.0 {
+            true => crossover(axis[0] - axis[1], reach),
+            false => 1.0,
+        }
+    }
+
+    /// How far a ray is off one lens's axis, as an unnormalized cosine: one
+    /// row of the mounting against the ray.
+    ///
+    /// WGSL twin: `axis_of`.
+    fn axis_of(&self, lens: usize, view_ray: [f32; 3]) -> f32 {
+        let block = &self.lenses[lens];
+        (0..3).map(|c| block.view_to_lens[c][2] * view_ray[c]).sum()
     }
 
     /// How many delivered-frame texels one output pixel covers where it
@@ -645,9 +721,14 @@ impl Reframe {
     ///
     /// WGSL twin: `within`.
     pub fn within(&self, lens: usize, view_ray: [f32; 3]) -> bool {
-        let block = &self.lenses[lens];
-        let axis: f32 = (0..3).map(|c| block.view_to_lens[c][2] * view_ray[c]).sum();
-        axis >= block.axis_min * norm3(view_ray)
+        self.covers(lens, self.axis_of(lens, view_ray), norm3(view_ray))
+    }
+
+    /// The same test with the ray's own numbers already in hand, which is how
+    /// [`Self::blend`] asks it: a dot product it has computed once for the
+    /// crossover is not computed again here.
+    fn covers(&self, lens: usize, axis: f32, reach: f32) -> bool {
+        axis >= self.lenses[lens].axis_min * reach
     }
 
     /// The forward map: a view ray, through one lens's extrinsics and the
@@ -821,27 +902,24 @@ fn inside_anywhere(block: &LensBlock, axis: f32) -> bool {
 /// One lens's unnormalized claim on a ray, which [`Reframe::blend`] weighs
 /// against the other lens's.
 ///
-/// Two factors, per docs/research/insv-format.md 6.6, and neither of them is
-/// a feather width to be chosen:
+/// Two factors, and neither of them is a feather width chosen by taste:
 ///
-/// - **longitude preference**, [`longitude`], which is what puts the
-///   crossover on the seam great circle rather than wherever the two
-///   coverages happen to meet;
+/// - this lens's **share of the crossover**, [`crossover`], which is
+///   [`CROSSOVER_DEG`] wide and centred where the two lenses are equally far
+///   off their own axes;
 /// - **coverage depth**, `landing.depth`, the distance transform from this
 ///   lens's own validity boundary. It reaches zero exactly where the picture
 ///   stops, so a lens fades out as it runs out of picture, and the rim of
 ///   the image circle, which is where vignetting lands and where the
 ///   distortion polynomial is least trustworthy (5.3), is down-weighted for
-///   free.
-///
-/// The band the product blends over is therefore the overlap itself: on the
-/// X4 Air fixture it runs 83.4 to 97.4 degrees off the front axis, because
-/// that is where both lenses have any picture at all.
+///   free. Outside the crossover it is multiplied by a share of exactly 1 or
+///   exactly 0, so it decides nothing there and the rim it protects is the
+///   band's own edge.
 ///
 /// WGSL twin: `claim`.
-fn claim(landing: Landing) -> f32 {
+fn claim(landing: Landing, share: f32) -> f32 {
     match landing.inside {
-        true => longitude(landing.axis) * landing.depth,
+        true => share * landing.depth,
         false => 0.0,
     }
 }
@@ -902,18 +980,33 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|axis| a[axis] * b[axis]).sum()
 }
 
-/// How much this lens is preferred for a ray `theta` off its axis, from
-/// `cos(theta)`: `cos^2(theta / 2)`, i.e. 1 straight down the axis, 1/2 on
-/// the seam great circle, 0 straight out the back.
+/// The **front** lens's share of a ray, from how far apart the two lenses'
+/// axis dot products are: 1 well inside its own hemisphere, 1/2 on the seam,
+/// 0 once the ray is half a crossover past it (issue #48).
 ///
-/// It is never zero anywhere in the overlap, so it only tilts the crossover;
-/// the coverage depth is what closes it. Being exactly 1/2 for both lenses
-/// on the seam is the whole job, and it is the reason the crossover does not
-/// drift to wherever the two image circles happen to end.
+/// `apart` is the difference of the two unnormalized dot products and `reach`
+/// is the ray's length, so the division that normalizes them happens once
+/// here rather than twice at the call site.
 ///
-/// WGSL twin: `longitude`.
-fn longitude(axis: f32) -> f32 {
-    0.5 * (1.0 + axis)
+/// How far past the seam a ray looks is half the difference of the two
+/// lenses' angles off their own axes. Written that way rather than as "ninety
+/// degrees off the front lens" so that it still names the crossover when the
+/// two axes are not exactly opposed, which is not hypothetical: the per-file
+/// fit in [`super::seam`] moves one axis by a couple of degrees, and a band
+/// centred on the front lens alone would then sit off the overlap.
+///
+/// The angles arrive as their cosines and stay there. Near the seam
+/// `cos(theta) = -sin(theta - 90 deg)`, so the difference of the two cosines
+/// **is** the difference of the two angles in radians, and what the third
+/// term of the sine costs at the edge of a 2 degree band is 0.00005 degrees
+/// of band width (`the_crossover_is_the_width_it_says_it_is` measures the
+/// band itself at 2.00). Past the band the clamp has closed and how it got
+/// there does not matter. No trig anywhere, and one multiply fewer than the
+/// `cos^2(theta / 2)` preference this replaces.
+///
+/// WGSL twin: `crossover`.
+fn crossover(apart: f32, reach: f32) -> f32 {
+    (0.5 + apart / (2.0 * reach * CROSSOVER_DEG.to_radians())).clamp(0.0, 1.0)
 }
 
 impl LensBlock {
@@ -1176,7 +1269,8 @@ pub(crate) fn wgsl() -> String {
     // whole number, and `vec3<f32>(1)` is a type error in WGSL.
     format!(
         "const OUTSIDE_GRAY = vec3<f32>({OUTSIDE_GRAY:?});\nconst MAX_LENSES = {MAX_LENSES}u;\n\
-         const READOUT_STEPS = {READOUT_STEPS}u;\n{WGSL}"
+         const READOUT_STEPS = {READOUT_STEPS}u;\nconst CROSSOVER = {:?};\n{WGSL}",
+        CROSSOVER_DEG.to_radians(),
     )
 }
 
@@ -1285,15 +1379,23 @@ fn blend(ray: vec3<f32>) -> Blend {
   var out: Blend;
   var total = 0.0;
   let reach = length(ray);
+  // Both axis cosines before the loop: the crossover needs them together,
+  // the cap test needs them one at a time, and reading them back out of
+  // `out` after the loop instead costs 5.5 ms a redraw against 3.6. Rust
+  // twin: `Reframe::blend`.
+  let axis0 = axis_of(reframe.lenses[0], ray);
+  let axis1 = axis_of(reframe.lenses[1], ray);
+  let front = handover(axis0, axis1, reach);
   for (var index = 0u; index < MAX_LENSES; index += 1u) {
     let lens = reframe.lenses[index];
     // Zero, which is `Landing::MISSED`: a lens the ray cannot reach is never
     // projected and its landing is never read.
     var landing: Landing;
     var claimed = 0.0;
-    if within(lens, ray, reach) {
+    if within(lens, select(axis1, axis0, index == 0u), reach) {
       landing = project(lens, ray);
-      claimed = select(0.0, claim(landing), f32(index) < reframe.lens_count);
+      let share = select(1.0 - front, front, index == 0u);
+      claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
     }
     out.landings[index] = landing;
     out.weights[index] = claimed;
@@ -1308,19 +1410,24 @@ fn blend(ray: vec3<f32>) -> Blend {
 }
 
 // Whether this lens can have any of this ray, before the model runs. Rust
-// twin: `Reframe::within`.
+// twin: `Reframe::covers`.
 //
 // The mounting is a rotation, so the cosine `mei` would read off the
 // normalized ray is one row of it against the ray over the ray's own length.
-// Multiplying the cap by the length rather than dividing keeps it to a dot
-// product and a compare. `reach` is the same for every lens.
-fn within(lens: LensBlock, ray: vec3<f32>, reach: f32) -> bool {
-  let axis = dot(vec3<f32>(
+// Multiplying the cap by the length rather than dividing keeps it to a
+// compare. `reach` is the same for every lens.
+fn within(lens: LensBlock, axis: f32, reach: f32) -> bool {
+  return axis >= lens.axis_min * reach;
+}
+
+// How far a ray is off one lens's axis, as an unnormalized cosine: one row of
+// the mounting against the ray. Rust twin: `Reframe::axis_of`.
+fn axis_of(lens: LensBlock, ray: vec3<f32>) -> f32 {
+  return dot(vec3<f32>(
     lens.view_to_lens[0].z,
     lens.view_to_lens[1].z,
     lens.view_to_lens[2].z,
   ), ray);
-  return axis >= lens.axis_min * reach;
 }
 
 // One claim's share of all of them, the lone claimant's written rather than
@@ -1332,17 +1439,28 @@ fn share(claim: f32, total: f32) -> f32 {
   return claim / total;
 }
 
-// Longitude preference times coverage depth. Rust twin: `claim`.
-fn claim(landing: Landing) -> f32 {
+// This lens's share of the crossover times its coverage depth. Rust twin:
+// `claim`.
+fn claim(landing: Landing, share: f32) -> f32 {
   if !landing.inside {
     return 0.0;
   }
-  return longitude(landing.axis) * landing.depth;
+  return share * landing.depth;
 }
 
-// cos^2(theta / 2), from cos(theta). Rust twin: `longitude`.
-fn longitude(axis: f32) -> f32 {
-  return 0.5 * (1.0 + axis);
+// The front lens's share of the ray, and 1 for a one-stream file, which has
+// no seam to hand over at. Rust twin: `Reframe::handover`.
+fn handover(axis0: f32, axis1: f32, reach: f32) -> f32 {
+  if reframe.lens_count <= 1.0 {
+    return 1.0;
+  }
+  return crossover(axis0 - axis1, reach);
+}
+
+// The front lens's share, from how far apart the two dot products are. Rust
+// twin: `crossover`.
+fn crossover(apart: f32, reach: f32) -> f32 {
+  return clamp(0.5 + apart / (2.0 * reach * CROSSOVER), 0.0, 1.0);
 }
 
 // The forward map, with the readout taken out of it. Rust twin:
@@ -1441,13 +1559,13 @@ fn texel_ratio(pixel: vec2<f32>) -> f32 {
 "#;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use kyerag_meta::{Distortion, Sweep};
 
     use crate::sampling;
 
-    const FRAME: Size = Size {
+    pub(crate) const FRAME: Size = Size {
         width: 3840,
         height: 3840,
     };
@@ -1457,7 +1575,7 @@ mod tests {
     /// tests assert. Copied rather than parsed because the path from the
     /// fixture to a `CalibrationSet` runs through a private constructor in a
     /// crate this one only reads types from.
-    fn fixture_lenses() -> Vec<Lens> {
+    pub(crate) fn fixture_lenses() -> Vec<Lens> {
         vec![
             Lens {
                 intrinsics: Intrinsics {
@@ -1682,24 +1800,37 @@ mod tests {
         }
     }
 
-    /// Round the seam great circle, at the seam and either side of it: both
-    /// lenses have the ray, because the overlap is about 14 degrees wide, and
-    /// the one that leads is the one the ray leans toward.
+    /// Round the seam great circle, at the seam and either side of it: inside
+    /// the crossover both lenses are in the picture, outside it one of them
+    /// carries the ray alone, and either way something has it.
+    ///
+    /// The handover used to run the whole 14-degree overlap; since issue #48
+    /// it runs [`CROSSOVER_DEG`], so the offsets that are mixed and the
+    /// offsets that are not have swapped places. What has not changed is that
+    /// the lens the ray leans toward is the one that leads.
     #[test]
     fn the_seam_is_a_mix_of_two_pictures_and_not_a_gap() {
         let reframe = fixture(Camera::default());
 
         for phi in 0..360 {
             let phi = phi as f32;
-            for offset in [-5.0, -1.0, 0.0, 1.0, 5.0] {
+            // Well inside the crossover and well outside it. The edges
+            // themselves are half a degree of lens tilt away, which is what
+            // `the_crossover_is_the_width_it_says_it_is` measures rather than
+            // asserts.
+            for offset in [-5.0, -1.5, -0.3, 0.0, 0.3, 1.5, 5.0] {
                 let ray = direction(90.0 + offset, phi);
                 let blend = reframe.blend(ray);
-                assert!(
-                    blend.weights.iter().all(|weight| *weight > 0.0),
-                    "the overlap does not reach {offset} degrees from the seam at {phi}",
+                let mixed = blend.weights.iter().all(|weight| *weight > 0.0);
+                assert!(blend.is_covered(), "nothing has {offset} degrees at {phi}");
+                assert_eq!(
+                    mixed,
+                    offset.abs() < 1.0,
+                    "{offset} degrees from the seam at {phi} weighs {:?}",
+                    blend.weights,
                 );
                 // Which side of the seam leads is only settled a lens tilt
-                // away from it: the two axes are 0.2 degrees off exactly
+                // away from it: the two axes are 0.3 degrees off exactly
                 // opposed, so on the halfway line itself either lens is a
                 // fair answer.
                 if offset == 0.0 {
@@ -1711,6 +1842,46 @@ mod tests {
                     usize::from(offset > 0.0),
                     "{offset} degrees past the seam at {phi} leads with lens {leader}",
                 );
+            }
+        }
+    }
+
+    /// The two halves of issue #48 against each other: with this file's own
+    /// seam correction on lens 1, the narrow crossover still hands the picture
+    /// over and still leaves nothing grey.
+    ///
+    /// The correction turns one lens by a couple of degrees, so the seam and
+    /// the crossover on it turn with it. What has to survive is the margin:
+    /// the band is 2 degrees wide inside an overlap of 14, so the lens the
+    /// crossover hands to has 6 degrees of its own picture in hand. This is
+    /// the check that the fit cannot eat that margin at the size it comes in.
+    #[test]
+    fn a_fitted_lens_still_hands_the_picture_over() {
+        let correction = crate::seam::SeamFit {
+            roll_deg: 0.801,
+            yaw_deg: -2.293,
+            pitch_deg: -0.817,
+            ..crate::seam::SeamFit::default()
+        };
+        let reframe = Reframe::new(
+            &correction.applied(&fixture_lenses()),
+            FRAME,
+            Camera::default(),
+            Held::default(),
+            1.0,
+            false,
+            Sampling::default(),
+        );
+
+        for theta in 0..=720 {
+            for phi in 0..72 {
+                let theta = theta as f32 * 0.25;
+                let blend = reframe.blend(direction(theta, phi as f32 * 5.0));
+                assert!(
+                    blend.is_covered(),
+                    "no lens has {theta} degrees off the front axis"
+                );
+                near(blend.weights.iter().sum::<f32>(), 1.0, 1e-6);
             }
         }
     }
@@ -1760,22 +1931,25 @@ mod tests {
         }
     }
 
-    /// The crossover sits on the seam great circle, which is what the
-    /// longitude preference buys: without it the two coverage depths cross
-    /// wherever the two image circles happen to end, which is 0.2 degrees off
-    /// on this fixture and camera-dependent in general.
+    /// The crossover sits on the seam, which is what naming it by the two
+    /// lenses' own angles buys: without that it would cross wherever the two
+    /// image circles happen to end.
     ///
-    /// Not exactly half: lens 1's image circle is 8 px smaller than lens 0's,
-    /// so it runs out of coverage marginally sooner and carries marginally
-    /// less of the seam.
+    /// Not exactly half, and further off than it was before issue #48: this
+    /// fixture's two axes are 0.3 degrees from opposed, so a direction 90
+    /// degrees off lens 0 is up to 0.3 degrees off the line where the two
+    /// lenses are equally far off theirs. A 2-degree crossover turns that into
+    /// 0.06 of weight where the 14-degree one turned it into 0.008. The
+    /// picture is centred on the lenses either way; what moved is how quickly
+    /// weight answers an angle.
     #[test]
     fn the_crossover_sits_on_the_seam() {
         let reframe = fixture(Camera::default());
 
         for phi in 0..36 {
             let blend = reframe.blend(direction(90.0, phi as f32 * 10.0));
-            near(blend.weights[0], 0.5, 0.03);
-            near(blend.weights[1], 0.5, 0.03);
+            near(blend.weights[0], 0.5, 0.08);
+            near(blend.weights[1], 0.5, 0.08);
         }
     }
 
@@ -1810,23 +1984,35 @@ mod tests {
         }
     }
 
-    /// And the band is the overlap itself rather than a width chosen here:
-    /// the weights are mixed exactly where both lenses have a picture, which
-    /// on this fixture is 83.4 to 97.4 degrees off the front axis, and the
-    /// two lenses hand over across the whole of it.
+    /// And the band is [`CROSSOVER_DEG`] wide, in degrees of world angle, at
+    /// every azimuth: the number the owner validated is the number the
+    /// picture gets (issue #48).
+    ///
+    /// This is also the check on the small-angle step in [`crossover`], which
+    /// reads the two angles off their cosines and never takes an arc cosine:
+    /// a band measured 0.01 degrees at a time comes out 2.00 degrees wide,
+    /// and any error in that reading would show here as a band of the wrong
+    /// size. Before issue #48 the same sweep read 83.2 to 97.4 degrees, the
+    /// whole overlap.
     #[test]
-    fn the_blend_band_is_the_overlap_itself() {
+    fn the_crossover_is_the_width_it_says_it_is() {
         let reframe = fixture(Camera::default());
-        let mixed: Vec<f32> = (0..3000)
-            .map(|step| 70.0 + step as f32 * 0.01)
-            .filter(|theta| {
-                let weights = reframe.blend(direction(*theta, 0.0)).weights;
-                weights.iter().all(|weight| *weight > 0.0)
-            })
-            .collect();
 
-        near(*mixed.first().expect("nothing is mixed at all"), 83.2, 0.2);
-        near(*mixed.last().expect("nothing is mixed at all"), 97.4, 0.2);
+        for phi in [0.0, 90.0, 180.0, 270.0] {
+            let mixed: Vec<f32> = (0..3000)
+                .map(|step| 70.0 + step as f32 * 0.01)
+                .filter(|theta| {
+                    let weights = reframe.blend(direction(*theta, phi)).weights;
+                    weights.iter().all(|weight| *weight > 0.0)
+                })
+                .collect();
+            let (first, last) = (
+                *mixed.first().expect("nothing is mixed at all"),
+                *mixed.last().expect("nothing is mixed at all"),
+            );
+            near(last - first, CROSSOVER_DEG, 0.02);
+            near(0.5 * (first + last), 90.0, 0.2);
+        }
     }
 
     /// Issue #10's pre-test, and the only property it has to have: what it
@@ -2263,9 +2449,19 @@ mod tests {
     fn weighed_without_the_cap(reframe: &Reframe, ray: [f32; 3]) -> [f32; MAX_LENSES] {
         let landings: [Landing; MAX_LENSES] =
             std::array::from_fn(|lens| reframe.project(lens, ray));
+        let front = reframe.handover(
+            std::array::from_fn(|lens| reframe.axis_of(lens, ray)),
+            norm3(ray),
+        );
         let mut weights: [f32; MAX_LENSES] =
             std::array::from_fn(|lens| match lens < reframe.lens_count as usize {
-                true => claim(landings[lens]),
+                true => claim(
+                    landings[lens],
+                    match lens {
+                        0 => front,
+                        _ => 1.0 - front,
+                    },
+                ),
                 false => 0.0,
             });
         let total: f32 = weights.iter().sum();
@@ -2432,6 +2628,34 @@ mod tests {
         assert_eq!(lens, 0);
         assert!(landing.pixel[1] < 1927.21 - 100.0, "{landing:?}");
         near(landing.pixel[0], 1918.94, 40.0);
+    }
+
+    /// A one-stream file keeps every ray its lens has, out past 96 degrees
+    /// off its axis on this fixture, which is 6 degrees past where the seam
+    /// would be. (The rim itself is 96.9 to 97.4 depending on the azimuth,
+    /// because the boundary is not a circle; this stays inside the nearest of
+    /// it, since what is being checked is the band and not the cap.)
+    ///
+    /// The crossover of issue #48 is two lenses handing over to each other,
+    /// and with nothing to hand over to it would have cut this picture off a
+    /// degree past the seam and painted the rest grey. That band is the
+    /// picture the older cameras deliver.
+    #[test]
+    fn one_stream_keeps_the_whole_of_its_picture() {
+        let reframe = one_lens(Camera::default());
+
+        for theta in (0..=965).step_by(5) {
+            for phi in (0..360).step_by(20) {
+                let ray = direction(theta as f32 * 0.1, phi as f32);
+                let blend = reframe.blend(ray);
+                assert_eq!(
+                    blend.weights,
+                    [1.0, 0.0],
+                    "{} degrees off the axis at phi {phi}",
+                    theta as f32 * 0.1,
+                );
+            }
+        }
     }
 
     /// A file with one stream is the camera it was before: one hemisphere,
