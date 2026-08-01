@@ -70,6 +70,12 @@ tokio = { version = "1", default-features = false, features = ["time"] }
 # The portal file chooser answers in URLs, and a drop's `text/uri-list` is
 # URLs too. Everything past the edge of the shell is a `PathBuf` (docs/UI.md).
 url = "2"
+# The headless harness's pointer (`crates/spike/src/bin/pointer.rs`). Both are
+# already in the tree under libcosmic, which speaks these two protocols
+# through smithay-client-toolkit, so neither adds a crate to the lock or a
+# source to the Flatpak's list.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [workspace.dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic"

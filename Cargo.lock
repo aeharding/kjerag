@@ -2889,6 +2889,8 @@ dependencies = [
  "kjerag-render",
  "png 0.17.16",
  "pollster",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "wgpu",
 ]
 

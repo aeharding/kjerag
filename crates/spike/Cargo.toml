@@ -24,3 +24,7 @@ ffmpeg-next = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }
 wgpu = { workspace = true }
+# The harness's pointer (`src/bin/pointer.rs`), and nothing else in the tree:
+# the app reaches Wayland through libcosmic and never speaks it directly.
+wayland-client = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
