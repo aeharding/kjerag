@@ -268,6 +268,21 @@ fn flicker(reads: &[Read], options: &Options) {
         measured.0 * VIEW_PX_PER_DEG,
         measured.1,
     );
+    // The far field on its own, which is where the horizon is and where the
+    // pixel-perfect claim lives. A direction reading under the near knee is
+    // looking at something that does not move, so its frame-to-frame step is
+    // the alignment's own repeatability and nothing else: the residual.
+    let far = stepped_far(reads);
+    println!(
+        "\nhorizon: {:.4} deg rms frame to frame at the {} directions the band reads as far \n\
+         field, which is {:.2} view px at 1920 across 90 degrees and {:.2} at the benchmark \n\
+         view's 24.1. the bend at those directions IS what was measured, so what is left over \n\
+         is the measurement's own repeatability.",
+        far.0,
+        far.1,
+        far.0 * VIEW_PX_PER_DEG,
+        far.0 * 1920.0 / 24.1,
+    );
     if !options.control {
         println!("         (control=1 puts a known step in and reads it back.)");
         return;
@@ -286,6 +301,39 @@ fn flicker(reads: &[Read], options: &Options) {
             shaken.0,
         );
     }
+}
+
+/// The frame-to-frame step of the settled disparity at the directions the band
+/// reads as far field, and how many of them there were.
+///
+/// Far field is where nothing moves, so the step is not the scene changing: it
+/// is what the same measurement of the same unchanging thing comes back as
+/// twice, which is the residual an alignment cannot get below.
+fn stepped_far(reads: &[Read]) -> (f64, usize) {
+    // Judged on where each direction ENDED UP, so a direction that was near
+    // field for part of the run is not counted as far field for the rest.
+    let last = reads.last().expect("play returns at least one frame");
+    let far: Vec<usize> = (0..AZIMUTHS)
+        .filter(|index| {
+            let cell = last.cells[*index];
+            cell.confidence > 0.0 && f64::from(cell.disparity.to_degrees()).abs() < 0.19
+        })
+        .collect();
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    for frame in 1..reads.len() {
+        for index in &far {
+            let step = f64::from(reads[frame].cells[*index].disparity)
+                - f64::from(reads[frame - 1].cells[*index].disparity);
+            sum += step * step;
+            count += 1.0;
+        }
+    }
+    let rms = match count > 0.0 {
+        true => (sum / count).sqrt().to_degrees(),
+        false => 0.0,
+    };
+    (rms, far.len())
 }
 
 /// The rms and worst frame-to-frame step of the bend, at [`WATCHED`]
