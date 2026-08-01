@@ -56,7 +56,9 @@ impl<Message> shader::Program<Message> for Scene {
     }
 
     /// The one place that knows a redraw reached this widget, which is why
-    /// the shape it drew into is recorded here (issue #102).
+    /// [`Scene::drew`] is called from here and nowhere else (issue #102).
+    ///
+    /// [`Scene::drew`]: super::Scene::drew
     fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> ScenePrimitive {
         self.drew();
         self.primitive(self.viewpoint().camera())

@@ -103,15 +103,16 @@ const CONTROLS_TIMEOUT: Duration = Duration::from_secs(2);
 /// around, and for a reframing player that is the normal way to use it.
 const CONTROLS_POLL: Duration = Duration::from_millis(250);
 
-/// How often a paused window is asked to redraw itself while it has not yet
-/// proved it drew its frame (issue #102, `Scene::is_settled`).
+/// How often a paused window is poked to redraw itself while a redraw still
+/// owes it one (issue #102, `Scene::is_settled`).
 ///
 /// A paused scene asks for no redraws of its own, so the last frame the
 /// window presented is the one it holds. Measured under the harness at load
 /// 18: the redraw that follows the pause key can present a frame carrying
 /// none of the window's content, and the empty pane then stood for 1.9 s,
-/// until an unrelated key press. This is the poke that ends it, and it runs
-/// only until two redraws running have drawn the same picture.
+/// until an unrelated key press. This is the poke that ends it, and it stops
+/// as soon as a redraw reaches the widget: measured in the same run, a poke
+/// put one through 1 ms later.
 const SETTLE_POLL: Duration = Duration::from_millis(100);
 
 /// How often the playback report is printed while playing. It is the only
