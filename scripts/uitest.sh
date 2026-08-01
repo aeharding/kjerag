@@ -1692,6 +1692,14 @@ STUCK_BY=8
 # How long a hiccup lasts. Well under the bound, and long enough to cover
 # several frames at 30 fps.
 HICCUP=0.4
+# The line the funnel prints when the picture is what stopped, which names the
+# file it stopped (`crates/app/src/fail.rs`). It is spelled with the file in it
+# because the sound has a `stopped:` line of its own: cpal reports an underrun
+# as "kjerag: sound stopped", a loaded box produces one at startup, and a
+# pattern of plain `stopped:` reads that as the picture dying. Measured: it
+# failed the hiccup check that way on 2026-08-01, on two underruns that landed
+# before the file's first report line.
+STOPPED='.insv stopped:'
 
 stalls() {
 	local check
@@ -1753,8 +1761,8 @@ stalls() {
 	sleep "$HICCUP"
 	rm -f "$gate"
 	sleep "$SETTLE"
-	if said 'stopped:'; then
-		fail "$check" "$(grep 'stopped:' "$log")" "log: $log"
+	if said "$STOPPED"; then
+		fail "$check" "$(grep -- "$STOPPED" "$log")" "log: $log"
 	elif moving_picture hiccup; then
 		pass "$check"
 	else
@@ -1769,14 +1777,14 @@ stalls() {
 	local reports
 	reports=$(grep -c '^play:' "$log")
 	: >"$gate"
-	if ! await 'stopped:' "$STUCK_BY"; then
+	if ! await "$STOPPED" "$STUCK_BY"; then
 		alive || lost "$check"
 		fail "$check" "nothing said the picture had gone, after $STUCK_BY s" "log: $log"
 		teardown
 		wrap=()
 		return
 	fi
-	pass "$check ($(grep -o 'stopped:.*' "$log" | tail -1))"
+	pass "$check ($(grep -- "$STOPPED" "$log" | grep -o 'stopped:.*' | tail -1))"
 
 	# The report subscription runs only while playing, so a line that never
 	# arrives is the clock stopped, and the sound follows the clock: this is
