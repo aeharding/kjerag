@@ -42,16 +42,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # elfutils is not flatpak-builder's dependency and is its last step:
-      # every module is stripped into a .Debug ref with `eu-strip`, and
-      # without it a build that has already compiled everything dies with
-      # `Failed to execute child process "eu-strip"` (measured, run
-      # 30699251764). The flatpak the development box builds with carries its
-      # own copy, so this is a runner-only line.
+      # Two packages that are nobody's declared dependency and are both the
+      # last thing a build finds out about, after the whole workspace has
+      # compiled. The flatpak the development box builds with (org.flatpak.Builder)
+      # carries its own copies, so both lines are runner-only.
+      #
+      # elfutils: every module is stripped into a .Debug ref with `eu-strip`,
+      # and without it the build dies with `Failed to execute child process
+      # "eu-strip"` (measured, run 30699251764).
+      #
+      # librsvg2-common: the last step is `appstreamcli compose`, which
+      # renders the icon sizes AppStream ships (64 and 128, at both scale
+      # factors) out of the scalable icon through gdk-pixbuf, and that is the
+      # package holding gdk-pixbuf's SVG loader. Without it the compose fails
+      # with `file-read-error` on the icon and takes the build with it
+      # (measured, run 30699647159; run 30700204410 ran the same compose twice
+      # on one runner, failing without the package and printing `Success!`
+      # with it).
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            flatpak flatpak-builder elfutils
+            flatpak flatpak-builder elfutils librsvg2-common
 
       # --install-deps-from reads the runtime, the SDK and the two SDK
       # extensions out of the manifest and installs exactly those, so the
