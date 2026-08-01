@@ -2569,6 +2569,58 @@ and 180 and differs at yaw 90; and the 12:07 static capture is byte-identical
 even across its seam, which is its own result -- it is the capture whose
 calibration already lands, and the band finds nothing there to correct.
 
+**A reading expires when its evidence does** (owner-reported, 2026-08-01).
+The first version of this held a refused direction's last reading for a fixed
+1.5 s. On the owner's own footage two directions were then applying **4.54 and
+4.61 view px** of warp to a treeline at hundreds of metres, from a reading of
+his boot at **3.2 m** taken 1.3 and 2.1 seconds earlier. The decay identified
+the path exactly: five consecutive frames falling by 0.95739, 0.95734,
+0.95737, 0.95738 and 0.95740 against an `ease(2 frames, 1.5 s)` hold ratio of
+0.957447, so those directions were refusing on **every** frame. A patch that
+holds both a boot at 3 m and a field at 300 m has no single shift that
+correlates; it refuses, and the refusal was holding an expired near-field
+number for 45 frames while the seam swept the scene at **197 deg/s** and the
+content in that direction changed completely in under one.
+
+It is an occlusion defect and not an aircraft one: a selfie stick, a hand on
+the mount, a helmet or a passer-by produces the same thing. What was wrong is
+that the refusal branch decayed the **measurement**. The measurement was true
+when it was taken and may be true still; what is absent is anything confirming
+it. So refusal now erodes the **evidence** alone, and the pass applies a
+reading in proportion to how well it is being confirmed. Three variants,
+measured rather than reasoned about:
+
+| refusal branch | the two reported directions | 05-01 far-field residual | 04-10 |
+| --- | ---: | ---: | ---: |
+| hold the value 1.5 s | 4.54, 4.61 view px | 1.09 | 0.75 |
+| decay the value at the learn rate | 0.64, 0.36 | 2.88 | 3.16 |
+| decay the value at the near rate | - | 2.52 | 2.74 |
+| **decay the evidence, keep the value** | **0.01, 0.00** | **1.09** | **0.56** |
+
+The two that decay the value are worse in the far field for a reason worth
+recording: a far direction refuses intermittently, and destroying its
+measurement each time means learning the answer again, so the correction
+blinks. **No constant was added and one was removed.** The fade rate is the
+direction's own learn rate, so a near reading expires as fast as it was
+learned, out of the same geometric knee at 0.19 degrees; the trust threshold
+is `KEEP`, the bar a single reading must already clear before it may move the
+state at all.
+
+**The same numbers on other cameras and other shooters**, from the local-only
+sample corpus, handheld and selfie-stick rather than airborne, so that none of
+this is fitted to one aircraft:
+
+| camera | directions read | flicker, deg rms | far-field residual, view px at fov 24.1 |
+| --- | ---: | ---: | ---: |
+| Insta360 X5 | 127 of 128 | 0.0149 | 0.44 |
+| Insta360 X4 (non-Air) | 95 of 128 | 0.0263 | 2.16 |
+| Insta360 X3 | 76 of 128 | 0.0193 | 0.69 |
+| Insta360 ONE X2 | one lens stream: no seam, no band | | |
+
+The owner's own six clips read 0.0088 to 0.0198 degrees of flicker and 0.08 to
+1.73 view px of residual over the same run length, so the corpus sits inside
+his range on every column.
+
 **The benchmark this section does not reach.** 6.8's band-over-surroundings
 share cannot score the 0:09 wing dip against the camera maker's export: the
 projection fit correlates 0.7262 there against the 0.977 to 0.9996 a locked fit
