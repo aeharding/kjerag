@@ -287,10 +287,14 @@ struct Field {
     /// measurement, so a spread that treats them as independent reads the
     /// standard error too small by the square root of the frame count.
     seen: Vec<(usize, Vec<Column>)>,
-    /// How far lens 1's picture of each of those had to be moved to become the
-    /// same content, in degrees. Near-field content moves by degrees and far
-    /// field by hundredths, so this is what separates "the two lenses differ"
-    /// from "the alignment of the near field is harder".
+    /// How far lens 1's picture of each of those had to be moved ACROSS the
+    /// seam to become the same content, in degrees.
+    ///
+    /// Across and not the whole shift, because across is the axis a distance
+    /// displaces content along and along-seam is what the calibration left
+    /// (6.8). This is the same quantity the shipped pass gates on, so the cut
+    /// below is the pass's own cut and not a stricter one that would score a
+    /// different set of directions.
     shifts: Vec<f64>,
     frames: usize,
     refused: usize,
@@ -709,7 +713,7 @@ fn harvest(
             continue;
         };
         field.seen.push((index, columns));
-        field.shifts.push(hit.along.hypot(hit.across));
+        field.shifts.push(hit.across.abs());
     }
 }
 
@@ -804,7 +808,7 @@ fn field(options: &Options) -> Fallible<()> {
         100.0 * (gain.mean.exp() - 1.0),
     );
 
-    models(truth);
+    models(truth, options.gain);
     let [cb, cr] = truth.chroma();
     println!(
         "\nchroma: Cb {:+.2} codes (spread {:.2}, {:.1} se), Cr {:+.2} codes (spread {:.2}, \n\
@@ -829,7 +833,7 @@ fn field(options: &Options) -> Fallible<()> {
 /// look identical on any one patch and are told apart only by a fit that spans
 /// brightnesses, so a correction chosen without this table is a correction
 /// chosen by assumption.
-fn models(field: &Field) {
+fn models(field: &Field, shipped: Option<f64>) {
     println!(
         "\nmodels: what the two lenses' difference actually looks like, and what each \n\
          \tcandidate correction LEAVES of it. an exposure difference is a GAIN; veiling \n\
@@ -875,6 +879,18 @@ fn models(field: &Field) {
             "  {:<30} {:>9} {:>9} {:>11} {:>10} {:>9}",
             "correction", "gain", "offset", "step codes", "step pct", "worst"
         );
+        let mut all = all;
+        if let Some(shipped) = shipped {
+            // The number the GPU pass actually drew with, scored beside the
+            // fits made here, so "the instrument and the pass agree" is a row
+            // of this table rather than a claim about two separate runs.
+            all.push(Model {
+                name: "what the shipped pass drew with",
+                gain: shipped.exp(),
+                offset: 0.0,
+                residual: 0.0,
+            });
+        }
         for model in &all {
             let (codes, percent, worst) = model.leaves(&points);
             println!(
@@ -1449,21 +1465,51 @@ fn trace(options: &Options) -> Fallible<()> {
             100.0 * (gain.exp() - 1.0),
         );
     }
-    let steps: Vec<f64> = held
-        .windows(2)
-        .map(|pair| (pair[1].1 - pair[0].1).abs())
-        .collect();
-    let flicker = (steps.iter().map(|s| s * s).sum::<f64>() / steps.len().max(1) as f64).sqrt();
-    let worst = steps.iter().fold(0.0, |held: f64, s| held.max(*s));
+    let stepped = |shake: f64| {
+        let steps: Vec<f64> = held
+            .windows(2)
+            .enumerate()
+            .map(|(index, pair)| {
+                let shaken = |at: usize, value: f64| match at % 2 {
+                    0 => value + shake,
+                    _ => value - shake,
+                };
+                (shaken(index + 1, pair[1].1) - shaken(index, pair[0].1)).abs()
+            })
+            .collect();
+        let rms = (steps.iter().map(|s| s * s).sum::<f64>() / steps.len().max(1) as f64).sqrt();
+        (rms, steps.iter().fold(0.0, |held: f64, s| held.max(*s)))
+    };
+    let (flicker, worst) = stepped(0.0);
+    // One code at a mid grey of 128 is ln(129/128).
+    let one_code = (129.0f64 / 128.0).ln();
     println!(
         "\n  frame to frame: {:.6} ln rms, which is {:.4} percent of brightness, and a worst \n\
-         single step of {:.6} ln, {:.4} percent. a step of one code at a mid grey of 128 is \n\
-         0.0078 ln, so anything under that cannot reach the picture at all.",
+         \x20 single step of {:.6} ln, {:.4} percent. one code at a mid grey of 128 is {:.4} ln, \n\
+         \x20 so the rms is {:.0}x under what an 8-bit picture can carry and the worst single \n\
+         \x20 step is {:.0}x under it. a gain that cannot move one code between two frames \n\
+         \x20 cannot pump.",
         flicker,
         100.0 * flicker,
         worst,
         100.0 * worst,
+        one_code,
+        one_code / flicker.max(f64::MIN_POSITIVE),
+        one_code / worst.max(f64::MIN_POSITIVE),
     );
+    println!(
+        "\n  the positive control, which this column means nothing without: a known step put \n\
+         \x20 in each frame with alternating sign has to come back at 2s, in quadrature with \n\
+         \x20 what was already there.\n\n\
+         \x20            step        read    expected"
+    );
+    for step in [0.002f64, 0.010] {
+        println!(
+            "         {step:>9.4} {:>11.5} {:>11.5}",
+            stepped(step).0,
+            flicker.hypot(2.0 * step),
+        );
+    }
     Ok(())
 }
 
@@ -1476,6 +1522,9 @@ struct Options {
     count: usize,
     /// How many places in the file the run is spread over.
     places: usize,
+    /// A gain to score beside the fitted ones, as a natural log: what the
+    /// shipped pass read on the same footage.
+    gain: Option<f64>,
     patches: usize,
     keep: f64,
     fit: bool,
@@ -1497,6 +1546,7 @@ impl Options {
             from: 0.0,
             count: 8,
             places: 1,
+            gain: None,
             patches: 72,
             keep: 0.80,
             fit: true,
@@ -1524,6 +1574,7 @@ impl Options {
                 Some(("from", value)) => options.from = value.parse()?,
                 Some(("count", value)) => options.count = value.parse()?,
                 Some(("places", value)) => options.places = value.parse()?,
+                Some(("gain", value)) => options.gain = Some(value.parse()?),
                 Some(("patches", value)) => options.patches = value.parse()?,
                 Some(("keep", value)) => options.keep = value.parse()?,
                 Some(("seam", value)) => options.fit = value != "factory",
@@ -1574,5 +1625,5 @@ impl Options {
 }
 
 const USAGE: &str = "usage: expose <file.insv> [mode=field|annulus|render|trace] [from=seconds] \
-     [count=frames] [places=n] [patches=n] [keep=r] [seam=factory] [verbose=1] [yaw=deg] [pitch=deg] \
+     [count=frames] [places=n] [gain=ln] [patches=n] [keep=r] [seam=factory] [verbose=1] [yaw=deg] [pitch=deg] \
      [fov=deg] [size=px] [lock=0] [out=dir] [tag=name]";

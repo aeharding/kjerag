@@ -246,16 +246,23 @@ const TAU_GAIN_S: f32 = TAU_FAR_S;
 /// Not a taste and not a margin, and derived the way [`super::seam`]'s
 /// `RUNAWAY_DEG` is - from what was measured, times four. Fitted over whole
 /// captures at the directions this pass actually pools,
-/// `kjerag-spike --bin expose` reads **0.953 to 1.006** across seven of them:
-/// four of the owner's flights and an X5, an X4 and an X3 from other
-/// shooters. That is -0.0486 to +0.0056 ln, and four times the widest is
-/// 0.194. Nothing this stage measured is clipped by this, which is what keeps
-/// it a guard rather than a tuning knob.
+/// `kjerag-spike --bin expose` reads **0.946 to 1.004** on the seven with
+/// more than seventy far-field readings behind them, which is four of the
+/// owner's flights and an X5, an X4 and an X3 from other shooters. That is
+/// -0.0558 to +0.0044 ln, and four times the widest is 0.223. Two thin
+/// captures of the owner's, with two and four readings each, ask for 0.908
+/// and 0.948; this admits both rather than clipping them, because a capture
+/// whose seam has almost nothing far-field on it is a capture this should be
+/// quiet about and not one it should be half-correcting.
+///
+/// Nothing measured is clipped by this, which is what keeps it a guard rather
+/// than a tuning knob. What it is here for is the case none of those captures
+/// is: a seam correlating on content that is not the same content at all.
 ///
 /// What it is here for is the case none of those captures is: a seam
 /// correlating on content that is not the same content at all, which would
 /// otherwise reach the picture as a hemisphere washing out.
-const LIMIT_LN: f32 = 0.20;
+const LIMIT_LN: f32 = 0.25;
 
 /// The exposure the two lenses hand the same content over at, pooled over the
 /// whole ring, smoothed, and split between them (issue #103, stage 3).
@@ -357,11 +364,11 @@ pub struct Cell {
     ///
     /// Here because the pooling is a **least squares in codes** and needs the
     /// brightness as well as the ratio. That is not a taste between two
-    /// averages: three poolings were run over the same readings on seven
+    /// averages: three poolings were run over the same readings on nine
     /// captures from three camera models and two shooters, and weighting each
     /// direction by its own brightness squared leaves the smallest step at
-    /// the seam on all seven, while an equal-weight average of log ratios
-    /// leaves a larger one than doing nothing at all on three of them
+    /// the seam on all nine, while an equal-weight average of log ratios
+    /// leaves a larger one than doing nothing at all on four of them
     /// (`kjerag-spike --bin expose`, the `models` table). The reason is in
     /// that table too: what a dark patch's ratio carries is not only the
     /// exposure, so a pooling that leans on the dark patches reads the part
@@ -1901,22 +1908,23 @@ mod tests {
 
     #[test]
     fn a_runaway_reading_cannot_wash_a_hemisphere_out() {
-        // The guard, and the bound it guards at. Nothing measured reaches it:
-        // fitted over whole captures the gain runs 0.950 to 1.007, and this
-        // is four times the widest of those, the same multiple `seam`'s own
-        // runaway bound uses.
+        // The guard, and what it bounds the damage to. A ring correlating on
+        // content that is not the same content at all cannot move either
+        // hemisphere by more than an eighth, whatever it reads.
         let broken: Vec<Cell> = (0..AZIMUTHS).map(|_| lit_cell(0.02, 0.5, 4.0)).collect();
         let (read, _) = pooled_gain(&broken).expect("a ring that correlated");
         assert_eq!(read, LIMIT_LN);
         let split = Tone::read(read, 1.0).split();
         assert!(
-            split[0] < 1.11 && split[1] > 0.90,
+            split[0] < 1.14 && split[1] > 0.88,
             "the guard let through {split:?}",
         );
         // And the widest thing any capture measured is nowhere near it: the
-        // bound is four times that, the same multiple `seam`'s own runaway
-        // bound uses, so nothing measured is clipped by the guard.
-        assert!(0.9526f32.ln().abs() * 4.0 < LIMIT_LN);
+        // bound is four times the widest well-sampled reading, the same
+        // multiple `seam`'s own runaway bound uses, and it admits the two
+        // thin captures whole rather than half-correcting them.
+        assert!(0.9457f32.ln().abs() * 4.0 < LIMIT_LN);
+        assert!(0.9076f32.ln().abs() < LIMIT_LN);
     }
 
     #[test]
