@@ -557,6 +557,46 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The chooser hands back a document because the grant is read
+  only, not because it is a chooser** (issue #123, measured, no fix yet). A
+  file picked in `File > Open video` arrives as `/run/user/<uid>/doc/<id>/
+  <name>`, a directory holding that one file, so a capture written as two
+  files plays one lens. The reason is one permission wide. xdg-desktop-portal
+  1.18.4 passes every picked file to the document portal with
+  `AS_NEEDED_BY_APP` (`src/file-chooser.c`, `src/documents.c`), the document
+  portal skips the store when `flatpak info --file-access` says the app
+  already has the access being asked for, and the access being asked for
+  includes write unless the backend answers `writable: false`.
+  xdg-desktop-portal-cosmic never answers it (`FileChooserResult` has no such
+  field) and xdg-desktop-portal-gtk answers it only when the pilot ticks "Open
+  files read-only". So `xdg-videos:ro` says `read-only`, the request wanted
+  write, and a document is registered.
+
+  Both answers were produced, which is what makes the first one believable.
+  `scripts/chooser-probe.py` makes the chooser's own `Documents.AddFull` call
+  with each permission set: write asked returns a doc id for a file under
+  `~/Videos` and for one on the file manager's network mount, read only
+  returns an empty doc id for both, which is the real path. With the two
+  grants temporarily made read-write through `flatpak override`, all four
+  return the real path. `scripts/chooser-flatpak.sh` then drove a real dialog
+  end to end: the whole portal stack runs a second time inside a headless cage
+  session on its own D-Bus bus, so the backend draws its dialog there and
+  nothing lands on the desktop, and the evidence is the portal's own
+  `Request.Response` signal. Default: a document path, `not shown`. The same
+  pick with the read-only box ticked: the real path, `sampling 2 of 2
+  calibrated`, `2 lens streams from 2 files`.
+
+  That harness needed one thing the repo did not have: `wtype` delivers
+  character keys into a cage session and no named ones (Return, BackSpace, the
+  arrows never arrive), so a dialog answered by a button could not be answered
+  at all. `kjerag-spike --bin click` presses it with the same wlr virtual
+  pointer `dragsource` uses.
+
+  What is left is a decision rather than a fix, and it is the owner's: keeping
+  `:ro` and asking the pilot for what the sandbox cannot see, or trading the
+  read-only half of the two footage grants for a chooser that answers with
+  real paths and pairs silently. Nothing is in the app yet either way.
+
 - 2026-08-01 **The shipped Flatpak took no drops, and nothing could have
   caught it** (issue #118). A drop into a sandbox arrives as
   `application/vnd.portal.filetransfer`, which is a key the target exchanges
@@ -615,9 +655,8 @@ live, no keyframe UI ever.
   and pairs both lenses (`2 of 2 calibrated`, `2 lens streams from 2 files`),
   because both the document portal's `RetrieveFiles` and flatpak's file
   forwarding skip the document store for a file the app can already read.
-  The file chooser does not: xdg-desktop-portal 1.18.4 registers a document
-  for every sandboxed app whatever its permissions
-  (`src/file-chooser.c`, `send_response`), so a file picked there arrives as
+  The file chooser is one permission short of skipping it too, which the
+  2026-08-01 entry above measures: a file picked there arrives as
   `/run/user/1000/doc/<id>/<name>`, its mate is not in that directory, and
   the capture still plays one lens. Issue #123 stands for that path alone.
 
