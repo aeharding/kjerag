@@ -108,6 +108,13 @@ const CAP_AZIMUTHS: usize = 8;
 /// leaves, a 2 degree band sits at 1.07, on the fold; at the 0.5 to 0.8 the
 /// fitted correction leaves it sits near 0.4, and a 1 degree band would be
 /// the next thing to measure rather than the next thing to assume.
+///
+/// Since issue #103's stage 4 this is the **floor** rather than the width.
+/// The shear that bounds it is measured per direction on every frame instead
+/// of quoted, so the band opens where a reading would otherwise fold it and
+/// stays at exactly this everywhere else, which is the whole far field, every
+/// direction that has never correlated, and every file with one lens stream
+/// ([`super::band::width`]).
 const CROSSOVER_DEG: f32 = 2.0;
 
 /// How many lenses one pass can sample.
@@ -577,7 +584,13 @@ impl Reframe {
     /// what the handover asked for, so a handover that then followed the bend
     /// would be its own input.
     ///
-    /// WGSL twin: `blend`, whose `bend` argument is `band_bend`'s answer.
+    /// **How wide the handover is, is the same question** (issue #103, stage
+    /// 4). The bend runs from zero to the whole disparity across the band, so
+    /// the band has to be wide enough to carry it, and
+    /// [`Self::crossover_at`] is that width. It is the floor everywhere the
+    /// disparity is small, so the far field is the picture it always was.
+    ///
+    /// WGSL twin: `blend`, whose `band` argument is `band_bend`'s answer.
     pub fn blend_bent(&self, view_ray: [f32; 3], disparity: f32) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
@@ -587,8 +600,9 @@ impl Reframe {
         // is what keeps this pass costing what it cost before the crossover
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
-        let front = self.handover(axis, reach);
-        let bend = self.bend(view_ray, disparity);
+        let band = self.crossover_at(disparity);
+        let front = self.handover(axis, reach, band);
+        let bend = self.bent(view_ray, disparity, band);
         for lens in 0..MAX_LENSES {
             if !self.covers(lens, axis[lens], reach) {
                 continue;
@@ -645,11 +659,25 @@ impl Reframe {
     /// (`one_stream_keeps_the_whole_of_its_picture`).
     ///
     /// WGSL twin: `handover`.
-    fn handover(&self, axis: [f32; MAX_LENSES], reach: f32) -> f32 {
+    fn handover(&self, axis: [f32; MAX_LENSES], reach: f32, band: f32) -> f32 {
         match self.lens_count > 1.0 {
-            true => crossover(axis[0] - axis[1], reach),
+            true => crossover(axis[0] - axis[1], reach, band),
             false => 1.0,
         }
+    }
+
+    /// How wide the crossover opens at a ray whose measured disparity is
+    /// `disparity`, in radians (issue #103, stage 4).
+    ///
+    /// [`CROSSOVER_DEG`] wherever that already carries the reading without
+    /// folding, which is every direction under 1.8 degrees of disparity, so
+    /// the far field's handover is the one it has always had. Wider exactly
+    /// where the reading would otherwise be clamped, and only by as much as
+    /// the reading needs.
+    ///
+    /// WGSL twin: `band_width`.
+    pub fn crossover_at(&self, disparity: f32) -> f32 {
+        super::band::width(disparity, CROSSOVER_DEG.to_radians())
     }
 
     /// A view-space ray in the camera body's own frame, which is where the
@@ -715,13 +743,23 @@ impl Reframe {
     /// (`super::band::carried`), which is the guard the record has wanted
     /// since the band narrowed: the bend's own gradient across the band **is**
     /// the shear, and past 1 the mapping prints the picture back over itself.
+    /// Since stage 4 the crossover it is clamped against is the one that
+    /// direction's own reading opened ([`Self::crossover_at`]), so the clamp
+    /// bites only where the band has run out of room to open.
     ///
     /// WGSL twin: `band_bend`.
     pub fn bend(&self, view_ray: [f32; 3], disparity: f32) -> [f32; 3] {
+        self.bent(view_ray, disparity, self.crossover_at(disparity))
+    }
+
+    /// The same with the width already in hand, which is how [`Self::blend_bent`]
+    /// asks for it: the handover needs the same number and neither of them may
+    /// have its own copy.
+    fn bent(&self, view_ray: [f32; 3], disparity: f32, band: f32) -> [f32; 3] {
         let Some(at) = self.seam_at(view_ray) else {
             return [0.0; 3];
         };
-        let carried = super::band::carried(disparity, CROSSOVER_DEG.to_radians());
+        let carried = super::band::carried(disparity, band);
         let scale = carried * norm3(view_ray);
         // Back out of the body's frame. `view_to_body` is a rotation, so its
         // transpose is its inverse.
@@ -1122,7 +1160,10 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 ///
 /// `apart` is the difference of the two unnormalized dot products and `reach`
 /// is the ray's length, so the division that normalizes them happens once
-/// here rather than twice at the call site.
+/// here rather than twice at the call site. `band` is how wide the crossover
+/// is at this ray, which since issue #103's stage 4 is a measurement rather
+/// than [`CROSSOVER_DEG`] itself, and is that constant exactly wherever the
+/// reading is small enough for it ([`Reframe::crossover_at`]).
 ///
 /// How far past the seam a ray looks is half the difference of the two
 /// lenses' angles off their own axes. Written that way rather than as "ninety
@@ -1141,8 +1182,8 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// `cos^2(theta / 2)` preference this replaces.
 ///
 /// WGSL twin: `crossover`.
-fn crossover(apart: f32, reach: f32) -> f32 {
-    (0.5 + apart / (2.0 * reach * CROSSOVER_DEG.to_radians())).clamp(0.0, 1.0)
+fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
+    (0.5 + apart / (2.0 * reach * band)).clamp(0.0, 1.0)
 }
 
 impl LensBlock {
@@ -1500,6 +1541,20 @@ struct Blend {
   weights: array<f32, MAX_LENSES>,
 };
 
+// What the band says about one ray: the offset that puts the two lenses'
+// pictures on top of each other, and how wide the handover has to be to carry
+// it without folding. Both come out of one measurement and neither may be
+// taken without the other, which is why they arrive together.
+//
+// Declared here rather than beside `band_bend`, which fills it, because the
+// compute half of the band is compiled with this file and without that one,
+// and a shader that names a type it has not been given does not compile.
+// Rust twins: `Reframe::bend` and `Reframe::crossover_at`.
+struct Band {
+  offset: vec3<f32>,
+  crossover: f32,
+};
+
 // x right, y down, z forward, matching the lens frame the model projects in.
 // Rust twin: `Screen::ray`, whose `Option` this `w` is: 1 where the frame is
 // looking at the sphere and 0 in the room around the ball, which no lens can
@@ -1526,12 +1581,12 @@ fn view_ray(uv: vec2<f32>) -> vec4<f32> {
 
 // Every lens's claim on the ray, normalized. Rust twin: `Reframe::blend_bent`.
 //
-// `bend` is what the band says the two lenses disagree by at this direction,
-// as an offset to add to the ray (`band_bend`). It is zero on a file with one
-// lens stream and on every direction the band has not measured, and then this
-// pass is what it was before issue #103. It is taken from the UNBENT ray, like
-// the crossover below: a bend that moved its own lookup would be its own
-// input.
+// `band` is what the band says at this direction (`band_bend`): the offset the
+// two lenses disagree by, and how wide the handover has to be to carry it. On
+// a file with one lens stream and on every direction the band has not
+// measured, the offset is zero and the width is the shipped crossover, and
+// then this pass is what it was before issue #103. Both are taken from the
+// UNBENT ray: a bend that moved its own lookup would be its own input.
 //
 // The loop runs MAX_LENSES times whatever the file holds, and the lens count
 // zeroes the claim of a slot that has no stream rather than shortening the
@@ -1539,7 +1594,7 @@ fn view_ray(uv: vec2<f32>) -> vec4<f32> {
 // puts it in scratch memory and costs more than the blend does; the numbers
 // are on the Rust twin. The array writes stay unconditional for the same
 // reason; what `within` skips is the model, not the bookkeeping.
-fn blend(ray: vec3<f32>, bend: vec3<f32>) -> Blend {
+fn blend(ray: vec3<f32>, band: Band) -> Blend {
   var out: Blend;
   var total = 0.0;
   let reach = length(ray);
@@ -1549,7 +1604,7 @@ fn blend(ray: vec3<f32>, bend: vec3<f32>) -> Blend {
   // twin: `Reframe::blend`.
   let axis0 = axis_of(reframe.lenses[0], ray);
   let axis1 = axis_of(reframe.lenses[1], ray);
-  let front = handover(axis0, axis1, reach);
+  let front = handover(axis0, axis1, reach, band.crossover);
   for (var index = 0u; index < MAX_LENSES; index += 1u) {
     let lens = reframe.lenses[index];
     // Zero, which is `Landing::MISSED`: a lens the ray cannot reach is never
@@ -1562,7 +1617,7 @@ fn blend(ray: vec3<f32>, bend: vec3<f32>) -> Blend {
       // sign that puts the two of them one whole disparity apart. Rust twin:
       // `Reframe::blend_bent`.
       let carry = select(1.0 - share, share - 1.0, index == 0u);
-      landing = project(lens, ray + carry * bend);
+      landing = project(lens, ray + carry * band.offset);
       claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
     }
     out.landings[index] = landing;
@@ -1618,17 +1673,18 @@ fn claim(landing: Landing, share: f32) -> f32 {
 
 // The front lens's share of the ray, and 1 for a one-stream file, which has
 // no seam to hand over at. Rust twin: `Reframe::handover`.
-fn handover(axis0: f32, axis1: f32, reach: f32) -> f32 {
+fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
   if reframe.lens_count <= 1.0 {
     return 1.0;
   }
-  return crossover(axis0 - axis1, reach);
+  return crossover(axis0 - axis1, reach, band);
 }
 
-// The front lens's share, from how far apart the two dot products are. Rust
+// The front lens's share, from how far apart the two dot products are, across
+// a band this ray's own reading decided the width of (`band_width`). Rust
 // twin: `crossover`.
-fn crossover(apart: f32, reach: f32) -> f32 {
-  return clamp(0.5 + apart / (2.0 * reach * CROSSOVER), 0.0, 1.0);
+fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
+  return clamp(0.5 + apart / (2.0 * reach * band), 0.0, 1.0);
 }
 
 // The forward map, with the readout taken out of it. Rust twin:
@@ -2183,6 +2239,70 @@ pub(crate) mod tests {
         }
     }
 
+    /// And it opens to the width a near-field reading asks for, still centred
+    /// on the seam (issue #103, stage 4).
+    ///
+    /// The same sweep as above, drawn through the bent blend, so what is
+    /// measured is the band the shipped pass actually hands over across and
+    /// not the arithmetic that decided it.
+    #[test]
+    fn a_near_reading_opens_the_crossover_to_what_it_needs() {
+        let reframe = fixture(Camera::default());
+        for disparity_deg in [0.0f32, 1.8, 2.2, 2.6] {
+            let disparity = disparity_deg.to_radians();
+            let wanted = reframe.crossover_at(disparity).to_degrees();
+            for phi in [0.0, 90.0, 180.0, 270.0] {
+                let mixed: Vec<f32> = (0..3000)
+                    .map(|step| 70.0 + step as f32 * 0.01)
+                    .filter(|theta| {
+                        let weights = reframe
+                            .blend_bent(direction(*theta, phi), disparity)
+                            .weights;
+                        weights.iter().all(|weight| *weight > 0.0)
+                    })
+                    .collect();
+                let (first, last) = (
+                    *mixed.first().expect("nothing is mixed at all"),
+                    *mixed.last().expect("nothing is mixed at all"),
+                );
+                near(last - first, wanted, 0.02);
+                near(0.5 * (first + last), 90.0, 0.2);
+            }
+        }
+    }
+
+    /// The bound the widest band is not allowed to cross, measured off the
+    /// calibration fixture rather than quoted from the format study.
+    ///
+    /// A band that opened past the overlap would hand over to a lens that has
+    /// no picture there, and a lens with no picture is a weight that steps to
+    /// zero rather than fading, which is a seam of its own. What has to fit is
+    /// half the widest band **plus the whole bend it carries**: at the edge of
+    /// the band one lens's weight is 1, so the other lens is sampled a whole
+    /// disparity away from where the ray points.
+    #[test]
+    fn the_widest_band_and_its_bend_stay_inside_the_overlap() {
+        let reframe = fixture(Camera::default());
+        let cap = |lens: usize| {
+            reframe
+                .coverage(lens)
+                .expect("the fixture has two lenses")
+                .to_degrees()
+                // The cap the pass carries is deliberately generous, and a
+                // generous cap would make this check generous with it.
+                - CAP_MARGIN_DEG
+        };
+        let overlap = cap(0) + cap(1) - 180.0;
+        let widest = crate::band::WIDEST_DEG;
+        let reach = 0.5 * widest + widest * 0.9;
+        assert!(
+            reach < 0.5 * overlap,
+            "the widest band reaches {reach:.2} deg off the seam into an overlap of \
+             {overlap:.2} deg, which is {:.2} deg a side",
+            0.5 * overlap,
+        );
+    }
+
     /// Issue #10's pre-test, and the only property it has to have: what it
     /// drops, the weight field was going to weigh at zero anyway.
     ///
@@ -2620,6 +2740,9 @@ pub(crate) mod tests {
         let front = reframe.handover(
             std::array::from_fn(|lens| reframe.axis_of(lens, ray)),
             norm3(ray),
+            // No band and no reading, so the width is the floor, which is the
+            // width this test was written against.
+            reframe.crossover_at(0.0),
         );
         let mut weights: [f32; MAX_LENSES] =
             std::array::from_fn(|lens| match lens < reframe.lens_count as usize {
