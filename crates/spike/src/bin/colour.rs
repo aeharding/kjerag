@@ -1408,6 +1408,7 @@ fn profile(options: &Options) -> Fallible<()> {
     for (name, picture) in [("the band held off", &before), ("as it draws", &after)] {
         println!("\n=== {name} ===");
         across_seam(&mapped, picture, size, options.window);
+        eye(&mapped, picture, size, options.window, options.reach);
     }
     Ok(())
 }
@@ -1456,6 +1457,322 @@ fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
     Picture {
         rgba,
         size: picture.size,
+    }
+}
+
+// ------------------------------------------------------------ the eye
+
+/// The lags the local contrast is read over, in pixels of the delivered view.
+///
+/// A step and a ramp are the same number of codes and not the same artifact,
+/// and the only thing that separates them is the distance the codes are spread
+/// over. One pixel is the sharpest thing a display can show; 32 is a quarter of
+/// a degree at the view the owner complained at, which is around where a
+/// gradient stops being an edge and starts being shading.
+const LAGS: [usize; 6] = [1, 2, 4, 8, 16, 32];
+
+/// The contrast an eye is held to. Weber, so it is a ratio and not a count of
+/// codes: 1 percent is the standard just-noticeable difference on a large flat
+/// field, and it is the bar stage 8 is scored against.
+const JND: f64 = 0.01;
+
+/// What a seam is worth to an eye, at one view: the steepest local Weber
+/// contrast anywhere across the handover (issue #103, stage 8).
+///
+/// **Why this replaces a step in codes.** A step of 6.5 codes is 31 percent of
+/// 21-code soil and 3.4 percent of 190-code sky, and an eye reads the second
+/// one as a tenth of the first. Every acceptance number before stage 8 was
+/// counted in codes, which is a loss that spends its whole budget on bright
+/// content, and it is why the owner's wide view could be scored as improved
+/// while he was looking at the artifact (docs/research/seam-blending.md 4).
+///
+/// **Why LOCAL, and why in pixels.** A correction that spreads a difference
+/// over enough of the picture is a difference an eye cannot find, because the
+/// contrast sensitivity of the eye falls away at low spatial frequency: what a
+/// seam shows is not the total change but the steepest part of it. So the
+/// profile is binned at one pixel of the DELIVERED view, and the statistic is
+/// the largest change between two bins a given number of pixels apart. The same
+/// residual reads five times sharper at the owner's fov 114 than at the fov 20
+/// stage 5 was judged on, and nothing about the correction changed between them
+/// (6.5).
+#[derive(Clone, Copy, Debug, Default)]
+struct Eye {
+    /// The steepest local Weber contrast at each of [`LAGS`], worst channel.
+    steepest: [f64; LAGS.len()],
+    /// The whole step across the handover as a ratio: each side's own trend
+    /// extrapolated to the seam, over the mean of the two. The statistic
+    /// stage 3 and stage 7 reported in codes, in the space an eye reads.
+    step: f64,
+    /// How many degrees of view one pixel is, at the seam, which is what turns
+    /// the two into each other.
+    degrees_per_pixel: f64,
+    /// How many one-pixel bins the profile was read over.
+    bins: usize,
+}
+
+impl Eye {
+    /// The one number the bar is set on: the steepest contrast an eye can find
+    /// at any of the lags, worst channel.
+    fn worst(&self) -> f64 {
+        self.steepest.iter().copied().fold(0.0, f64::max)
+    }
+
+    fn report(&self) -> String {
+        let lags = LAGS
+            .iter()
+            .zip(&self.steepest)
+            .map(|(lag, held)| format!("{lag}px {:.2}%", 100.0 * held))
+            .collect::<Vec<_>>()
+            .join("  ");
+        format!(
+            "step {:+.2}%  steepest {lags}  ({:.4} deg/px over {} bins)",
+            100.0 * self.step,
+            self.degrees_per_pixel,
+            self.bins,
+        )
+    }
+}
+
+/// How many degrees of the seam's own axis one output pixel covers, near the
+/// seam: the median of what neighbouring pixels' distances differ by.
+///
+/// Measured off the picture rather than derived from the field of view, because
+/// the output projection bends past [`FOV_FLAT`](kjerag_render) and the rate
+/// at the seam is not the rate at the middle of the frame.
+fn degrees_per_pixel(distance: &[Option<f64>], size: Size) -> Option<f64> {
+    let width = size.width as usize;
+    let mut steps: Vec<f64> = Vec::new();
+    for index in 0..distance.len() {
+        if index % width + 1 >= width {
+            continue;
+        }
+        let (Some(here), Some(next)) = (distance[index], distance[index + 1]) else {
+            continue;
+        };
+        if here.abs() > 2.0 {
+            continue;
+        }
+        let step = (next - here).abs();
+        if step > 0.0 {
+            steps.push(step);
+        }
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    steps.sort_by(f64::total_cmp);
+    Some(steps[steps.len() / 2])
+}
+
+/// The picture's profile across the seam, one bin per pixel of the delivered
+/// view: how far from the seam the bin is in degrees, its mean code per
+/// channel, and how many pixels answered.
+fn binned(
+    planes: &[Vec<f64>; 3],
+    distance: &[Option<f64>],
+    rate: f64,
+    reach: f64,
+) -> Vec<(f64, [f64; 3], f64)> {
+    let bins = (reach / rate).round().max(1.0) as usize;
+    // Sums first and means after: one pass over the picture rather than one
+    // pass per bin, because a wide view is a megapixel and the bins are
+    // thousands of it.
+    let mut held = vec![([0.0f64; 3], 0.0f64); 2 * bins + 1];
+    for (index, at) in distance.iter().enumerate() {
+        let Some(at) = at else { continue };
+        let bin = (at / rate).round();
+        if bin.abs() > bins as f64 {
+            continue;
+        }
+        if (0..3).any(|channel| planes[channel][index] <= 0.0) {
+            continue;
+        }
+        let slot = &mut held[(bin as isize + bins as isize) as usize];
+        for channel in 0..3 {
+            slot.0[channel] += planes[channel][index];
+        }
+        slot.1 += 1.0;
+    }
+    held.into_iter()
+        .enumerate()
+        .filter(|(_, (_, count))| *count > 0.0)
+        .map(|(slot, (sums, count))| {
+            (
+                (slot as f64 - bins as f64) * rate,
+                std::array::from_fn(|channel| sums[channel] / count),
+                count,
+            )
+        })
+        .collect()
+}
+
+/// The metric itself, over one picture and one great circle.
+///
+/// `reach` is how far either side of the circle the profile is read, in
+/// degrees: the whole overlap and a little more, because past there the two
+/// lenses have no common picture and there is nothing a handover could still
+/// be doing.
+///
+/// **Every pair the maximum is taken over STRADDLES the circle**, which is
+/// what makes this a statistic about a handover rather than about a scene. A
+/// pair of bins both on one side is the scene's own texture, and on a wide
+/// view of ploughed soil that is larger than the artifact; the same pair
+/// measured across the seam is the handover plus that texture, and the decoy
+/// circle is what says how much of it is which.
+fn eye_at(
+    planes: &[Vec<f64>; 3],
+    distance: &[Option<f64>],
+    size: Size,
+    reach: f64,
+) -> Option<Eye> {
+    let rate = degrees_per_pixel(distance, size)?;
+    let bins = binned(planes, distance, rate, reach);
+    if bins.len() < 8 {
+        return None;
+    }
+    let mut out = Eye {
+        degrees_per_pixel: rate,
+        bins: bins.len(),
+        ..Eye::default()
+    };
+    for (slot, lag) in LAGS.iter().enumerate() {
+        let mut worst = 0.0f64;
+        for low in 0..bins.len().saturating_sub(*lag) {
+            let high = low + lag;
+            // Straddling, and by the degrees rather than by the index: a bin
+            // with no pixels in it is not in the list at all.
+            if bins[low].0 > 0.0 || bins[high].0 < 0.0 {
+                continue;
+            }
+            for channel in 0..3 {
+                let (a, b) = (bins[low].1[channel], bins[high].1[channel]);
+                let mean = 0.5 * (a + b);
+                if mean <= 0.0 {
+                    continue;
+                }
+                worst = worst.max((b - a).abs() / mean);
+            }
+        }
+        out.steepest[slot] = worst;
+    }
+    let at = |from: f64, to: f64| -> Option<(f64, f64)> {
+        let rows: Vec<(f64, f64)> = bins
+            .iter()
+            .filter(|(degrees, _, _)| (from..=to).contains(degrees))
+            .map(|(degrees, codes, _)| {
+                (
+                    *degrees,
+                    LUMA[0] * codes[0] + LUMA[1] * codes[1] + LUMA[2] * codes[2],
+                )
+            })
+            .collect();
+        if rows.len() < 4 {
+            return None;
+        }
+        let n = rows.len() as f64;
+        let mean_x = rows.iter().map(|r| r.0).sum::<f64>() / n;
+        let mean_y = rows.iter().map(|r| r.1).sum::<f64>() / n;
+        let mut covariance = 0.0;
+        let mut variance = 0.0;
+        for (x, y) in &rows {
+            covariance += (x - mean_x) * (y - mean_y);
+            variance += (x - mean_x).powi(2);
+        }
+        (variance > 0.0).then(|| (mean_y - covariance / variance * mean_x, mean_y))
+    };
+    if let (Some((low, level_low)), Some((high, level_high))) = (at(-reach, -1.5), at(1.5, reach)) {
+        let mean = 0.5 * (level_low + level_high);
+        if mean > 0.0 {
+            out.step = (high - low) / mean;
+        }
+    }
+    Some(out)
+}
+
+/// BT.709's luma weights, which is what the three channels are pooled into
+/// where the statistic wants a brightness rather than a colour.
+const LUMA: [f64; 3] = [0.2126, 0.7152, 0.0722];
+
+/// A flat field of one level, with a change of a known ratio put across the
+/// circle over a known number of pixels: the positive control for [`eye_at`].
+///
+/// A control and not a second code path. The metric is run over the same
+/// geometry the picture was measured through - the pass's own distances, at
+/// the pass's own view - and the only thing that changes is what is written
+/// into the pixels. Three things have to come back, and each of them is a
+/// property the whole stage rests on:
+///
+/// - a ratio of 1 reads **zero** at every lag;
+/// - a ratio of `r` spread over ONE pixel reads `(r - 1) / ((r + 1) / 2)` at
+///   every lag, because a step is the same size however far apart the two bins
+///   reading it are;
+/// - the same ratio spread over `n` pixels reads the same whole step and a
+///   `lag / n` share of it at each lag, which is the entire claim stage 8
+///   makes about spreading a difference out.
+fn flat(distance: &[Option<f64>], rate: f64, level: f64, ratio: f64, pixels: f64) -> [Vec<f64>; 3] {
+    let ramp = |at: f64| -> f64 {
+        let t = ((at / rate / pixels) + 0.5).clamp(0.0, 1.0);
+        level * (1.0 + (ratio - 1.0) * t)
+    };
+    std::array::from_fn(|_| {
+        distance
+            .iter()
+            .map(|at| at.map_or(0.0, ramp))
+            .collect()
+    })
+}
+
+/// What one view is worth to an eye, with its nulls and its plants under it.
+fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64, f64), reach: f64) {
+    let planes = channels(picture);
+    let seam = distances(reframe, size, 2, window);
+    // The whole frame for the decoy and the window for the seam: the window
+    // is there to hold one kind of content across the HANDOVER, and the decoy
+    // circle is a quarter turn away from it.
+    let decoy = distances(reframe, size, 0, (0.0, 0.0, 1.0, 1.0));
+    let Some(here) = eye_at(&planes, &seam, size, reach) else {
+        println!("\n  the eye: not enough of the seam is inside the window to profile");
+        return;
+    };
+    println!("\n  the eye, in Weber contrast across the seam, worst channel:");
+    println!("    the seam            {}", here.report());
+    println!(
+        "    THE BAR             the worst lag is {:.2}%, against a {:.0}% just-noticeable \
+         difference: {}",
+        100.0 * here.worst(),
+        100.0 * JND,
+        match here.worst() <= JND {
+            true => "AT OR UNDER",
+            false => "OVER",
+        },
+    );
+    println!("\n  controls, the same statistic through the same geometry:");
+    match eye_at(&planes, &decoy, size, reach) {
+        Some(there) => println!(
+            "    a circle with no handover on it, which is what the scene contributes\n      {}",
+            there.report()
+        ),
+        None => println!("    the decoy circle is outside the window on this view"),
+    }
+    let rate = here.degrees_per_pixel;
+    for (ratio, pixels) in [(1.0, 1.0), (1.02, 1.0), (1.05, 1.0), (1.05, 64.0)] {
+        let Some(read) = eye_at(&flat(&seam, rate, 100.0, ratio, pixels), &seam, size, reach)
+        else {
+            continue;
+        };
+        let want = (ratio - 1.0) / ((ratio + 1.0) / 2.0);
+        let lags = LAGS
+            .iter()
+            .zip(&read.steepest)
+            .map(|(lag, held)| format!("{lag}px {:.3}%", 100.0 * held))
+            .collect::<Vec<_>>()
+            .join("  ");
+        println!(
+            "    a flat field with {ratio:.2} across it over {pixels:.0} px: step {:+.3}% \
+             against {:+.3}% planted, {lags}",
+            100.0 * read.step,
+            100.0 * want,
+        );
     }
 }
 
