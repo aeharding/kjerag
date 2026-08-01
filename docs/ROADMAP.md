@@ -769,6 +769,59 @@ live, no keyframe UI ever.
   third is free because the filter is paced in seconds of media time, so a
   direction read at 15 Hz and one read at 30 settle in the same wall time.
 
+- 2026-08-01 **The two instruments disagreed because the band was wrong twice,
+  and the ruler was wrong once** (issue #103, stage 6,
+  docs/research/seam-two-axis.md sections 9 and 10). Stage 5 was capped by the
+  band's along-seam channel reading +0.06 to +0.20 deg where `--bin seam
+  mode=residual` read -0.41 to -0.46 on the same directions of the same file,
+  while the two agreed to 0.01 deg on the far side of the ring. Three faults,
+  each needed for one half of that. **(a)** `Ring::perp` was built `centre x
+  epi`, the negative of `seam::ring`'s own axis: the pass drew correctly for it
+  because it measures and applies through the same axis, but every number it
+  printed was the probe's with the sign turned over. **(b)** `reset` was a
+  property of a FRAME and the state it throws away is per DIRECTION, and a
+  frame reads every `SLICES`-th direction - so a seek reset half the ring and
+  the other half crept toward the new content at `TAU_FAR`, reaching 0.56 of
+  the truth after 120 frames. **(c)** `--bin band` had no way to be handed a
+  stored fit, so the two instruments were read under different calibrations,
+  which differ by 0.04 deg on the far side of the ring and 0.32 on the arc
+  carrying the step. After (a) and (b) the band reads **0.99 of the probe on
+  both parities**, and `--bin band` takes `seam=` so (c) cannot recur.
+
+  **The ruler was wrong too.** `--bin step` extrapolates a straight line to the
+  seam from four degrees out, on the premise that a horizon is a great circle.
+  What it traces is a ridge, and the same frame with the band held off reads
+  10.4, 20.9, 30.5, 32.8 and 37.8 view px at `guard` 1.2, 1.6, 2.0, 2.5 and
+  3.5. Every DIFFERENCE between two builds survives that - the correction
+  rotates one hemisphere and moves its whole trace by a constant, 23.2 px in
+  all three windows - so the campaign's deltas stand and its absolute numbers
+  carry the hill. It prints a `close:` column now, over the two degrees just
+  outside the frame's own crossover, with each fit's rms beside it.
+
+  At the owner's reference view, close-in column: **+17.3 view px on `main`,
+  -5.2 cold and +8.1 warm on stage 5, -6.0 cold and -5.8 warm here**. The
+  campaign's own wide column reads 32.8/30.2 on main, 10.1/23.3 on stage 5 and
+  9.4/15.4 here. What stage 6 buys is that **cold and warm now agree**: 0.2 px
+  apart where stage 5 was 13.3, because the reset reaches every direction.
+
+  **Cost, priced with the box divided out** (`--bin band mode=cost`, the slope
+  over sixteen extra dispatches, minimum of several runs at 1440x1440):
+  **0.63-0.71 ms per redraw in steady state, 3.8 to 4.3 percent of the 16.6 ms
+  a 60 fps frame has**, and 2.3-3.6 ms once on the frame a seek lands on -
+  which now sweeps the whole ring where stage 5's swept half of it. Stage 5's
+  form measures 0.89-0.93 ms; its reported +2.55 ms was `--bin playback`'s
+  whole-redraw delta on a box building four worktrees, and six alternating runs
+  of two builds under a load average of 21 came back 5.1 to 20.3 ms with the
+  builds interleaved. The whole saving is the flat-sky gate, which used to be
+  reached only after a candidate's entire double loop had run: a direction of
+  blank sky, which on a real seam is most of the ring, paid for the whole table
+  to be told there was nothing in it. A narrow re-acquisition search was built
+  on top of that and **measured out** - 0.631 against 0.632 ms on a sky seam
+  and 0.714 against 0.700 on a seam full of near ground, inside the run-to-run
+  spread on both - so it is not in the branch. The cadence the cost ruling
+  asked for has been in the pass since stage 2: `SLICES` reads half the ring
+  per frame.
+
 - 2026-08-01 **The seam has two axes and the campaign had only ever measured
   one** (issue #103, stage 5, docs/research/seam-two-axis.md). The owner
   rejected the horizon on `main` after stages 1 to 4 all merged on good

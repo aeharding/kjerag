@@ -1,6 +1,7 @@
 # The seam has two axes, and the campaign only ever measured one
 
-**Status:** diagnosis complete, stage 5 open against it. **Date:** 2026-08-01.
+**Status:** diagnosis complete; stages 5 and 6 open against it, sections 9 and
+10 written by stage 6. **Date:** 2026-08-01.
 **Scope:** why the owner still saw a step on the horizon after issue #103
 stages 1 to 4 all merged on good numbers, and what the two instruments built
 for the diagnosis measure.
@@ -229,6 +230,99 @@ Two rules follow, and stage 5 is held to both:
    A degree of disparity is not an artifact; a row of horizon is.
 2. **Acceptance covers both axes, and says which is which.** A single-axis
    number cannot distinguish "fixed" from "invisible to this metric".
+
+---
+
+## 9. The two instruments disagreed, and it was three faults (stage 6)
+
+Stage 5 shipped with the band's along-seam channel reading **+0.06 to +0.20
+deg** on the azimuths carrying the owner's step where `--bin seam
+mode=residual` read **-0.41 to -0.46** on the same directions of the same
+file, sd 0.006 over six frames — while on the opposite side of the ring the
+two agreed to **0.01 deg**. Opposite signs on one arc, agreement on the other.
+Any account of it had to explain both.
+
+Three faults, and each is needed for one half of the symptom.
+
+**(a) A sign that appeared once.** `Ring::perp` was built `centre x epi`,
+which is `seam::ring`'s `along` axis pointing the other way. The pass drew
+correctly for it — it measures and applies through the same axis, so the two
+signs cancel — but every number it printed was the negative of the probe's on
+the same direction. Built `epi x centre` now, in the Rust twin, in the shader
+and in the phase A study, with a no-GPU test pinning the two instruments to
+each other.
+
+**(b) A reset that reached half the ring.** `reset` was a property of a
+**frame** and the state it throws away is per **direction**. A frame reads
+every `SLICES`-th direction, so a seek reset only the slice it landed on; the
+other half kept what it held before the seek and crept toward the new content
+at `TAU_FAR`. Measured on the owner's July file: on the reset frame half the
+circle read 0.231 deg and the other half read nothing, and after 120 frames
+the unreset half was still at **0.56** of what the same content read on the
+other. The half is the parity of the cell index and nothing about the footage.
+Fixed by sweeping the whole ring on the frame that resets it, and by letting a
+direction with no evidence take its first reading whole on whatever frame it
+arrives on, which is stage 2's own argument applied where the state lives.
+
+**(c) Two calibrations, read as one.** `--bin band` had no way to be given a
+stored fit, so it ran under the file's own fit while `--bin seam` ran under
+the owner's pooled one. That difference is **0.04 deg** on the far side of the
+ring and **0.32 deg** on the step-carrying arc.
+
+Put together: on the step arc (a) dominates, so the two read the same size
+with opposite signs; on the far side the truth is small, and (c) happens to
+carry the sign-flipped band value onto the probe's — which is the "agreement".
+(b) supplies the +0.06 end of the band's range, which is a direction that had
+decayed rather than read.
+
+After (a) and (b), against the probe on the same file, same frames and same
+calibration, the band's along-seam readings come back at **0.99 of the
+reference on both parities**, where the unreset half read 0.34. The
+step-carrying arc reads -0.494 to -0.517 against the probe's -0.462 to -0.493.
+`--bin band` takes `seam=` now, so (c) cannot be made again.
+
+## 10. The step instrument extrapolates the terrain (stage 6)
+
+`--bin step` was written on one sentence: a great circle projects to a
+straight line in a rectilinear view, so a horizon is straight and a step in it
+is the seam's and not the terrain's. **What it traces on real footage is a
+treeline or a ridge a few kilometres off, and that is not a great circle.**
+
+The same frame, the owner's reference view, band held off, as the fit window
+moves away from the seam:
+
+| `guard` | step |
+|---|---|
+| 1.2 | 10.4 view px |
+| 1.6 | 20.9 |
+| 2.0 | 30.5 |
+| 2.5 (the campaign's) | 32.8 |
+| 3.5 | 37.8 |
+
+The trace itself says why: one side's own slope reads **+5.32 px/deg** over the
+two degrees outside the crossover and **+2.03** over `guard=2.5`'s window, and
+the fit's rms is 1.51 px in the second against 0.97 in the first. A line
+fitted four degrees out is describing the hill.
+
+**What survives this is every difference between two builds**, because the
+along-seam correction rotates one hemisphere and moves that side's whole trace
+by a constant: **23.2 view px in all three windows**, measured. So the
+campaign's before-and-after deltas stand and its absolute numbers carry the
+terrain as well as the seam.
+
+A roll sweep with the band held off finds where the picture wants the
+correction, and it depends on the window in exactly the same way: the local
+step zeroes at roll +0.35 deg past pooled fitted from 1.2 deg out, +0.47 from
+1.2 to 5.2, and +0.65 over 2.5 to 6.5. The correlation reads 0.476, which is
+the middle one — the patch is 3.7 deg across and averages over about that
+reach. **There is no single rotation that registers the two hemispheres at
+every distance from the seam**, and 0.028 deg per degree of that spread is
+measurable in the probe as well (`off=` -4 to +1 walks the residual from
+-0.571 to -0.431).
+
+`--bin step` prints both windows now, `step:` at the campaign's and `close:`
+over the two degrees just outside this frame's own crossover, with each fit's
+rms beside it.
 
 ---
 
