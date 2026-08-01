@@ -557,6 +557,49 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **Kjerag has its own channel: a signed Flatpak repository at
+  `kjerag.harding.dev`** (issue #137, owner). The same version tag that
+  attaches two bundles to a GitHub Release now also builds, signs and
+  publishes an OSTree repository on GitHub Pages, so installing is one click
+  on `dev.harding.Kjerag.flatpakref` and every release after it arrives
+  through `flatpak update`. A bundle is a copy of a build; a remote is a
+  subscription, and only one of those keeps a machine current.
+
+  **This reverses 2026-07-31's "Flathub and nothing else"**, and not because
+  the costs that ruling named were wrong. Issue #71 priced self-hosting
+  correctly and the price is unchanged: no discovery, and key management and
+  update delivery ours permanently. Flathub's contribution policy of
+  2026-05-29 rules out this project's development process, so the route those
+  costs bought is closed. The one thing issue #71 got wrong was the worst of
+  it: it expected a remote with no AppStream data to be invisible in every
+  software centre, and `flatpak build-update-repo` composes that data from the
+  metainfo the app already ships. The listing exists; what it lacks is the
+  screenshots (docs/DISTRIBUTION.md 5).
+
+  **Nothing in it is ours.** Three published actions, the shape valent uses:
+  `crazy-max/ghaction-import-gpg` for the key, `andyholmes/flatter` to build
+  per arch and export an incrementally signed repository, and
+  `JamesIves/github-pages-deploy-action` to push it to the Pages branch. The
+  one step of shell writes the two descriptor files, and writes them rather
+  than committing them because they carry the public half of the signing key:
+  a committed copy is a file that names the wrong key the day the key rotates.
+
+  **The branch is `stable`, in the repository and in the bundles alike.** It
+  is the name a Flathub stable branch would have, so if that policy ever
+  changes, moving is `flatpak install flathub dev.harding.Kjerag` and deleting
+  our remote, with no reinstall and nothing lost. It also closes a smaller gap
+  that was already there: a bundle install and a remote install are now the
+  same app on the same branch, so `flatpak update` reaches a machine that
+  started from a bundle.
+
+  **The accepted cost is deltas.** flatter caches the repository in a GitHub
+  Actions cache, and those are scoped to the ref that wrote them, so the two
+  arch jobs of one tag share theirs and the next tag starts empty. Each
+  release therefore publishes a repository holding that release alone: updates
+  resolve and install correctly, and they download the app whole rather than a
+  delta against the version already there. The app is 8 MB, which is why that
+  is a note and not a problem.
+
 - 2026-08-01 **A transient import error costs a frame, and every failure the
   pilot meets goes through the alert** (issue #124, owner-reported at flatpak
   verification). One failed frame import set a flag on the pipeline for good:
