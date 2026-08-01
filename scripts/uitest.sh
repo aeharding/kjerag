@@ -557,6 +557,23 @@ patch_rgb() {
 		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
 }
 
+# The same, over the 64 px mark the welcome view draws above its text. The
+# box is where that icon lands at 1280x720, which is the size of this
+# harness's only output: rows 312 to 371, centred across the window.
+mark_rgb() {
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=64:64:(iw-64)/2:312,scale=1:1" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+# How far apart the mark's channels have to be to be called a colour drawing
+# rather than a symbolic icon. A symbolic icon is filled with exactly one
+# grey, so its patch has a spread of zero whatever the theme. Measured over
+# that box: 94 153 138 dark and 130 189 174 light for the app icon this
+# draws now, against 156 156 156 and 77 77 77 for the
+# `video-x-generic-symbolic` it replaced (issue #93).
+MARK_SPREAD=20
+
 # Whether a patch is the flat neutral grey the pass paints where the frame
 # has no sphere in it, rather than a piece of picture: dark, and the three
 # channels within a code or two of each other. Measured on this harness, the
@@ -569,6 +586,36 @@ is_room() {
 	hi=$(printf '%s\n' "${rgb[@]}" | sort -n | tail -1)
 	lo=$(printf '%s\n' "${rgb[@]}" | sort -n | head -1)
 	[ "$hi" -le "$ROOM_DARK" ] && [ $((hi - lo)) -le "$ROOM_SPREAD" ]
+}
+
+# The mark above "No video open" is the app icon, which the binary carries as
+# bytes (`crates/app/src/app.rs`, `APP_ICON`) because the icon theme has
+# nothing under this app's ID yet (issue #75). Colour in that patch is what
+# separates the drawing from the symbolic icon it replaced, and from an SVG
+# that failed to load, which draws nothing at all.
+#
+# It says nothing about the window background, which the same issue changed:
+# under cage there is no compositor blur, so the theme's opaque background is
+# painted either way and the two builds' captures are identical outside this
+# box (measured: 3596 differing pixels, all of them inside it).
+draws_the_app_icon() {
+	local rgb hi lo
+	rgb=$(mark_rgb "$(grab welcome-mark)")
+	local channels=($rgb)
+	if [ "${#channels[@]}" != 3 ]; then
+		fail "the welcome view draws the app icon" \
+			"no patch could be read from $session/welcome-mark.ppm"
+		return
+	fi
+	hi=$(printf '%s\n' "${channels[@]}" | sort -n | tail -1)
+	lo=$(printf '%s\n' "${channels[@]}" | sort -n | head -1)
+	if [ $((hi - lo)) -ge "$MARK_SPREAD" ]; then
+		pass "the welcome view draws the app icon (mark $rgb)"
+	else
+		fail "the welcome view draws the app icon" \
+			"the mark reads $rgb, which is one grey: a symbolic icon, or nothing" \
+			"$session/welcome-mark.ppm"
+	fi
 }
 
 # `s` writes a still into the session's screenshots folder, which is inside
@@ -757,6 +804,7 @@ welcome() {
 		return
 	fi
 
+	draws_the_app_icon
 	flips_the_horizon
 	survives_fullscreen
 	exits_clean
