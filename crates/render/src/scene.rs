@@ -990,6 +990,8 @@ struct Band {
     read: wgpu::BindGroup,
     /// Set by an instrument to stop measuring (`ScenePipeline::hold_band`).
     held: bool,
+    /// Which round of the circle the next frame reads.
+    slice: u32,
     /// Where the last measured frame sat in the film, so the next one knows
     /// how much media time the state has aged by, and whether what happened
     /// in between was play or a seek.
@@ -1423,6 +1425,7 @@ impl Band {
             group,
             read,
             held: false,
+            slice: 0,
             at: None,
         }
     }
@@ -1439,16 +1442,18 @@ impl Band {
     fn aged(&mut self, now: Duration) -> Option<band::Watch> {
         let before = self.at.replace(now);
         let seconds = before.map(|then| now.as_secs_f32() - then.as_secs_f32());
+        let slice = self.slice;
+        self.slice = (slice + 1) % band::ROUNDS;
         match seconds {
             Some(0.0) => None,
             Some(seconds) if (0.0..band::Watch::GAP_S).contains(&seconds) => {
-                Some(band::Watch::new(seconds, false))
+                Some(band::Watch::new(seconds, false, slice))
             }
             // The first frame of a file, and every landing after a seek. The
             // step it is given is one frame's worth, so a direction with
             // content in it starts moving immediately rather than waiting a
             // frame for a gap to exist.
-            _ => Some(band::Watch::new(1.0 / 30.0, true)),
+            _ => Some(band::Watch::new(1.0 / 30.0, true, slice)),
         }
     }
 

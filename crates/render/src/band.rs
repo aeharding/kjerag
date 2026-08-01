@@ -79,9 +79,16 @@ pub const AZIMUTHS: usize = 128;
 /// degrees, which is two correlation steps.
 const SPAN_DEG: f32 = 2.0;
 
-/// How finely the correlation is stepped, in degrees. Phase A's number, and
-/// the same one [`super::seam::Probe`] uses.
-const STEP_DEG: f32 = 0.08;
+/// How finely the correlation is stepped, in degrees.
+///
+/// Phase A and [`super::seam::Probe`] both read at 0.08. This is a little
+/// coarser because the grid is what the pass **fetches**, and the fetch is the
+/// whole cost: measured on the shipped pass, the correlation itself is free
+/// and filling the two grids is not. A step buys resolution quadratically and
+/// costs it quadratically, and what actually resolves the answer is the
+/// parabola between whole steps and the seconds of averaging over it, neither
+/// of which the step bounds.
+const STEP_DEG: f32 = 0.10;
 
 /// The most disparity the search reports, in degrees, and the least.
 ///
@@ -91,7 +98,14 @@ const STEP_DEG: f32 = 0.08;
 /// exactly: after the pooled per-camera fit the across-seam residual on
 /// flights is 0.57 to 0.84 degrees, and the window has to hold the far-field
 /// part of that or the horizon cannot be reached.
-const NEAR_DEG: f32 = 3.5;
+///
+/// The near side is set by what the bend can **carry**, not by what a lens can
+/// see: [`FOLD`] clamps the applied disparity to 1.8 degrees, so a search that
+/// reached 6 would spend its whole cost distinguishing one clamped reading
+/// from another. It is set above the clamp rather than at it so that content
+/// nearer still peaks inside the window and is refused for being pinned rather
+/// than reported at the limit.
+const NEAR_DEG: f32 = 2.6;
 const FAR_DEG: f32 = -1.2;
 
 /// How far off the epipolar axis the search looks, in degrees.
@@ -104,14 +118,14 @@ const FAR_DEG: f32 = -1.2;
 /// correlations and buys the control that says the reading is depth, plus
 /// tolerance for whatever the calibration left on that axis (0.12 to 0.36
 /// degrees, which is why the range is a little wider than the residual).
-const PERP_DEG: f32 = 0.48;
+const PERP_DEG: f32 = 0.30;
 
 /// How many off-epipolar offsets are tried, either side of zero.
 ///
 /// Coarse on purpose: the epipolar peak barely moves with a small
 /// misregistration on the near-orthogonal axis, so this axis needs enough
 /// steps to find the correlation and not enough to resolve it.
-const PERP_STEPS: usize = 2;
+const PERP_STEPS: usize = 1;
 
 /// The correlation a reading has to reach to move the state.
 ///
@@ -179,6 +193,22 @@ const FOLD: f32 = 0.9;
 /// in it scores its share of the candidate shifts.
 const THREADS: usize = 64;
 
+/// How many frames it takes to read the whole circle.
+///
+/// Every frame measures every SLICES-th direction, starting one further round
+/// each time, so a direction is read every SLICES frames and the ring is
+/// covered continuously rather than in bursts. **Nothing about a reading
+/// changes**; only how often each one is taken, and that is the one axis the
+/// temporal regularizer was built to trade on: the filter is paced in seconds
+/// of media time, so a direction read at 15 Hz and one read at 30 settle in
+/// the same wall time and only the near field notices.
+///
+/// What it buys is the cost. The pass's whole expense is fetching the two
+/// grids, and this halves how many are fetched per frame: measured at 2560x1440
+/// under live decode, 3.0 ms per redraw reading the whole ring every frame
+/// against 0.9 reading half of it.
+const SLICES: u32 = 2;
+
 /// One direction's state, as the compute pass writes it and the fragment
 /// shader reads it.
 ///
@@ -230,7 +260,9 @@ pub struct Watch {
     /// 1 to throw the state away and start from this frame, which is what a
     /// seek, a new file and a first frame all want.
     pub reset: f32,
-    _pad: [f32; 2],
+    /// Which of the [`SLICES`] rounds of the circle this frame reads.
+    pub slice: f32,
+    _pad: f32,
 }
 
 impl Watch {
@@ -239,11 +271,15 @@ impl Watch {
     /// A gap that is not a play forward is a `reset`: the state is a running
     /// average over what the seam has been showing, and after a seek it is an
     /// average over somewhere else.
-    pub fn new(seconds: f32, reset: bool) -> Self {
+    pub fn new(seconds: f32, reset: bool, slice: u32) -> Self {
         Self {
-            seconds,
+            // What a direction of this slice has actually aged by: it was last
+            // read SLICES frames ago, not one. The filter is paced in seconds,
+            // so telling it the truth is the whole of what slicing costs.
+            seconds: seconds * SLICES as f32,
             reset: f32::from(u8::from(reset)),
-            _pad: [0.0; 2],
+            slice: slice as f32,
+            _pad: 0.0,
         }
     }
 
@@ -402,6 +438,7 @@ pub(crate) fn wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\n\
          const THREADS = {THREADS}u;\n\
+         const SLICES = {SLICES}u;\n\
          const HALF = {half}i;\n\
          const STEP = {step:?};\n\
          const EPI_FAR = {far}i;\n\
@@ -471,7 +508,11 @@ pub(crate) const WATCH_BINDING: u32 = 1;
 pub(crate) const BYTES: u64 = (AZIMUTHS * std::mem::size_of::<Cell>()) as u64;
 
 /// How many workgroups one frame's measurement dispatches: one per direction.
-pub(crate) const GROUPS: u32 = AZIMUTHS as u32;
+pub(crate) const GROUPS: u32 = AZIMUTHS as u32 / SLICES;
+
+/// How many frames it takes to read the whole circle, for the caller that has
+/// to count them.
+pub(crate) const ROUNDS: u32 = SLICES;
 
 /// Declared by both shaders, with the access each needs.
 const CELL: &str = r#"
@@ -580,7 +621,8 @@ fn luma_at(index: u32, uv: vec2<f32>) -> f32 {
 struct Watch {
   seconds: f32,
   reset: f32,
-  pad0: f32,
+  // Which of the SLICES rounds of the circle this frame reads.
+  slice: f32,
   pad1: f32,
 };
 
@@ -625,7 +667,8 @@ fn tap(index: u32, aim: mat3x3<f32>, ray: vec3<f32>) -> f32 {
 
 @compute @workgroup_size(THREADS)
 fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
-  let cell = group.x;
+  // Every SLICES-th direction, one further round each frame.
+  let cell = group.x * SLICES + u32(watch.slice);
   let at = ring_of(f32(cell) / f32(AZIMUTHS) * TAU);
   let aim0 = body_to_lens(0u);
   let aim1 = body_to_lens(1u);
