@@ -475,6 +475,7 @@ with_media() {
 	fi
 
 	idle_controls_hold_the_view
+	opens_onto_the_backdrop
 	exits_clean
 }
 
@@ -1158,6 +1159,225 @@ held_the_view() {
 		"the view reset on $name: the patch reads $patch, which is picture rather \
 than the room around the ball" "$file"
 	return 1
+}
+
+# ------------------------------------- the pane before the first frame
+#
+# A pane with no frame in it yet draws the backdrop, which is the same one the
+# room around the ball floats on (issue #100) - libcosmic's own pane in a
+# window, black in fullscreen - and never a picture of the pass's own. What it
+# drew until this check existed was an animated test pattern left over from
+# the first bring-up of the shader (owner-reported, 2026-08-01).
+#
+# The command line cannot show it. `kjerag file.insv` opens the file while the
+# window is still being mapped, so the decode thread has the whole mapping to
+# work in and the first frame is already there when the first pixel is drawn:
+# measured 2026-08-01 over 80 captures from launch, none of them caught a pane
+# with no frame. A window that is already up draws its pane the instant the
+# file is loaded, frame or no frame, and that is the pilot's own path.
+#
+# Ctrl+V is the only way into it from a keyboard: Ctrl+O opens a portal file
+# dialog and cage has no portal behind it. The pasted line names the file with
+# its directories, which is what makes a paste an open rather than a seek, and
+# it names a time near the end of the file, which is what makes the gap wide
+# enough to photograph: the first frame after a paste at 90% comes off a
+# keyframe walk deep in the file rather than off the head of the stream.
+# Measured on the main build of 2026-08-01: one capture caught the gap at
+# time=0, twenty caught it at time=1500 of a 1799.8 s file.
+
+# How many captures are taken once the app says it has loaded the file, and
+# how many times the whole open is repeated when a round catches nothing of
+# the gap. grim answers in about 17 ms here, so a burst covers 0.4 s; the gap
+# has measured 0.33 s on a cold window and 0.05 s on a warm one, and a round
+# whose every capture landed after the first frame has seen nothing rather
+# than seen something good.
+OPEN_BURST=24
+OPEN_ROUNDS=3
+
+# What separates the test pattern from a picture and from the backdrop.
+#
+# The pattern is a sine of the distance from the middle of the view, put into
+# blue whole, into green by the vertical place and into red by the horizontal
+# one, so two patches at mirrored places read the same green and the same blue
+# to the byte and different reds. Measured on the main build of 2026-08-01:
+# 41 97 210 on the left against 169 97 210 on the right. A frame of video is
+# not mirror symmetric (120 190 242 against 181 213 224, same run) and the
+# backdrop is flat, which is symmetric in all three channels rather than two.
+PATTERN_RED=20
+PATTERN_MATCH=1
+
+# The band of the window that is pane and nothing else: under the header bar,
+# well above the welcome view's icon, and further still above any toast.
+#
+# `flags=area` and not the default, which is what `patch_rgb` above leaves
+# alone: bicubic overshoots on a downscale this steep, and measured on a flat
+# 27 27 27 capture of this window it answers 30 26 30, a spread of 4 where the
+# picture has none. The area scaler is the mean itself, which is what both
+# readings below are asking for.
+pane_rgb() {
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=iw:ih*0.25:0:$HEADER_BAND,scale=1:1:flags=area" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+# mirror_rgb <file> <left|right>: one of two patches at places the middle of
+# the window reflects onto each other.
+mirror_rgb() {
+	local at=0.15
+	[ "$2" = left ] || at=0.75
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=iw*0.10:ih*0.10:iw*$at:ih*0.45,scale=1:1:flags=area" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+is_test_pattern() {
+	local left=($1) right=($2) dr dg db
+	[ "${#left[@]}" = 3 ] && [ "${#right[@]}" = 3 ] || return 1
+	dr=$((left[0] - right[0]))
+	dg=$((left[1] - right[1]))
+	db=$((left[2] - right[2]))
+	[ "${dr#-}" -ge "$PATTERN_RED" ] &&
+		[ "${dg#-}" -le "$PATTERN_MATCH" ] &&
+		[ "${db#-}" -le "$PATTERN_MATCH" ]
+}
+
+# The pane holds nothing but pane: the window with its file closed, and the
+# window with one open whose first frame has not arrived.
+pane_is_backdrop() {
+	is_room "$(pane_rgb "$1")"
+}
+
+pane_is_clear() {
+	pane_is_backdrop "$(grab "$1")"
+}
+
+opens_onto_the_backdrop() {
+	local check="an open with no frame yet draws the backdrop"
+	if [ "$clipboard" = no ]; then
+		skip "$check (no wl-copy)"
+		return
+	fi
+
+	local seconds deep round=1
+	seconds=$(sed -n 's/^media:.*, \([0-9.]*\) s$/\1/p' "$log" | head -1)
+	deep=$(awk -v s="${seconds:-0}" 'BEGIN { printf "%.3f", s * 0.9 }')
+
+	while [ "$round" -le "$OPEN_ROUNDS" ]; do
+		open_once "$check" "$deep" || return
+		case $verdict in
+		pattern)
+			fail "$check" \
+				"the pane drew the test pattern: its mirrored halves read \
+$(mirror_rgb "$caught" left) and $(mirror_rgb "$caught" right), which no picture is" \
+				"$caught"
+			return
+			;;
+		backdrop)
+			pass "$check ($held captures of backdrop, then the frame)"
+			return
+			;;
+		esac
+		round=$((round + 1))
+	done
+	fail "$check" \
+		"$OPEN_ROUNDS opens went by with every capture already a frame, so nothing \
+was seen of the gap and this proves nothing" "$caught"
+}
+
+# Set by open_once, read by the check around it: what the burst caught, the
+# capture that says so, and how much backdrop was in it.
+verdict=
+caught=
+held=0
+
+# open_once <check> <time>: close the file, open it again from the window that
+# is still up, and classify the burst of captures that follows. Answers
+# through `verdict`; a non-zero return is a failure it has already filed.
+open_once() {
+	local check=$1 deep=$2 taken shot
+	verdict=missed
+	caught=
+	held=0
+
+	# The default view first: the band this check reads is the room itself
+	# while the view is at the ball, whatever is playing behind it.
+	key -M ctrl -k 0 -m ctrl
+	if ! press_until pane_is_clear closed -M ctrl -k w -m ctrl; then
+		alive || lost "$check"
+		fail "$check" \
+			"ctrl+w left the pane reading $(pane_rgb "$session/closed.ppm"), which is \
+still a picture" "$session/closed.ppm"
+		return 1
+	fi
+
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-copy "$media time=$deep yaw=0.00 pitch=0.00 fov=90.00 lock=1" 2>>"$log"
+
+	# No settle after the key, and the burst starts on the app's own line
+	# rather than on a sleep: all of what this check is about happens in the
+	# fraction of a second after `goto:` is printed, which is the moment the
+	# file has been loaded and the pane is about to be drawn for the first
+	# time.
+	local gotos try=0 waited
+	gotos=$(grep -c '^goto:' "$log")
+	while [ "$try" -lt "$PRESSES" ]; do
+		env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+			wtype -M ctrl -k v -m ctrl 2>>"$log"
+		waited=0
+		while [ "$(grep -c '^goto:' "$log")" -le "$gotos" ] &&
+			[ "$waited" -lt $((READY * 100)) ]; do
+			alive || lost "$check"
+			sleep 0.01
+			waited=$((waited + 1))
+		done
+		[ "$(grep -c '^goto:' "$log")" -gt "$gotos" ] && break
+		try=$((try + 1))
+	done
+	if [ "$(grep -c '^goto:' "$log")" -le "$gotos" ]; then
+		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
+		return 1
+	fi
+
+	for taken in $(seq 1 "$OPEN_BURST"); do
+		alive || lost "$check"
+		grab "$(printf 'open-%02d' "$taken")" >/dev/null
+	done
+
+	for taken in $(seq 1 "$OPEN_BURST"); do
+		shot=$(printf '%s/open-%02d.ppm' "$session" "$taken")
+		[ -s "$shot" ] || continue
+		# The control row is what says the file is open, because the window
+		# the paste came from had none: its bottom band is pane and this one
+		# is a row of buttons.
+		band_changed "$session/closed.ppm" "$shot" bottom "$CONTROL_BAND" || continue
+		if pane_is_backdrop "$shot"; then
+			held=$((held + 1))
+			verdict=backdrop
+			caught=$shot
+			continue
+		fi
+		if is_test_pattern "$(mirror_rgb "$shot" left)" "$(mirror_rgb "$shot" right)"; then
+			verdict=pattern
+			caught=$shot
+		elif [ -z "$caught" ]; then
+			# A frame, and nothing before it: the burst started after the gap
+			# had closed, and this capture is what says so.
+			caught=$shot
+		fi
+		# Either way the gap is over: the frame has landed, or the pattern
+		# this check exists for is on screen and there is nothing to add to
+		# it.
+		break
+	done
+
+	# One capture of the verdict is kept and the rest of the burst goes: two
+	# dozen captures a round of a window full of somebody's flight is a lot of
+	# personal video to leave lying about for no reading.
+	if [ -n "$caught" ]; then
+		cp "$caught" "$session/open-$verdict.ppm"
+		caught=$session/open-$verdict.ppm
+	fi
+	rm -f "$session"/open-[0-9][0-9].ppm
 }
 
 exits_clean() {

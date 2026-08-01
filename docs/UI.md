@@ -123,6 +123,16 @@ A still is neither: the capture pass clears black and the transparent room
 flattens onto that, so a JPEG of a ball view has a black room and no alpha in
 it anywhere (JPEG has no channel for one).
 
+**A pane with no frame in it is all room**, and gets the same two treatments.
+Between opening a file and its first decoded frame there is nothing to point a
+ray at, so every ray misses, the whole pane is written transparent, and what
+the pilot sees is the backdrop: the window's own pane, or black in fullscreen.
+An open is then a pane that is already there and a picture that arrives on it.
+What was drawn there until 2026-08-01 was an animated test pattern from the
+shader's first bring-up, which is what the pilot met on every open from a
+window that was already up (`scripts/uitest.sh`, "an open with no frame yet
+draws the backdrop").
+
 Everywhere but the room the shader still writes alpha 1, so the picture is
 opaque to the window's edges. The chrome over the video is
 unchanged and already first-party: the control row is
