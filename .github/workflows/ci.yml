@@ -55,6 +55,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/cargo-sources.sh --check
 
+  # The name the project had before issue #75 is gone and stays gone, in file
+  # contents and in paths (owner). Needs no toolchain: it is a grep over what
+  # git tracks, and the pattern is written so the script does not match
+  # itself.
+  name-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/name-check.sh
+
   # The point of the workspace (issue #19): the trailer layer builds and
   # tests on a box with no libav headers. This job installs nothing, so it
   # fails the day something drags ffmpeg into kjerag-meta's graph.

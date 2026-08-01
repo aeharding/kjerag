@@ -538,13 +538,19 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
-- 2026-08-01 **Kyerag is Kjerag** (issue #75), in one mechanical sweep: five
-  crates, the binary, `App::APP_ID`, the four `resources/` and `flatpak/`
-  file names, the cosmic-config identifiers, the report prefixes, the harness
-  and every doc. The old name is gone rather than aliased (owner): no
-  compatibility spelling is read anywhere, and `KJERAG_TEST_MEDIA`,
-  `KJERAG_BIN`, `KJERAG_TEST_INSV` and `KJERAG_FFMPEG7` are the only names
-  the scripts answer to.
+- 2026-08-01 **The project is Kjerag** (issue #75), in one mechanical sweep:
+  five crates, the binary, `App::APP_ID`, the four `resources/` and
+  `flatpak/` file names, the cosmic-config identifiers, the report prefixes,
+  the harness and every doc. The previous spelling is gone rather than
+  aliased (owner: "doesn't exist in any files or filenames, folders,
+  anything"), so no compatibility name is read anywhere and
+  `KJERAG_TEST_MEDIA`, `KJERAG_BIN`, `KJERAG_TEST_INSV` and `KJERAG_FFMPEG7`
+  are the only names the scripts answer to. `scripts/name-check.sh` is the
+  lock, and CI runs it: a tracked path or file carrying the old name fails
+  the build. The transcripts in docs/DISTRIBUTION.md had their identifiers
+  rewritten with the rest, and that document's preamble says so, because a
+  transcript nobody re-ran is evidence for what it measured rather than for
+  what it prints.
 
   **cosmic-config moves with the ID and nothing migrates.** The stores live
   under `~/.config/cosmic/<id>/` and `~/.local/state/cosmic/<id>/` and

@@ -9,13 +9,13 @@ development box (AMD Radeon 760M, Phoenix, `radeonsi`, kernel
 7.0.11-76070011-generic, Pop!\_OS 24.04, `flatpak` 1.16.6). Nothing here is
 quoted from documentation where a command could answer instead.
 
-**Every run below predates the rename** (issue #75), and the transcripts are
-left as they came out, so the ID in them is the old `app.kyerag.Kyerag` and
-the binary is `kyerag`. Substituting the new spelling would make an
-unrepeated run read as a measured one. Everything outside a fenced block is
-the tree as it stands: the ID is `dev.harding.Kjerag` and the binary is
-`kjerag`. Where a name is the point rather than the setting, §2.4 and §3.6
-say which run has and has not been repeated since.
+**Every run below predates the rename** (issue #75), and the application ID
+and binary name in the transcripts have been rewritten to the current ones,
+which is the whole of what was edited in them. Nothing else in a transcript
+was touched and nothing was re-run to produce one, so where a name is the
+point rather than the setting, §2.4 and §3.6 say which run has and has not
+been repeated since. The ID is `dev.harding.Kjerag` and the binary is
+`kjerag`, in the tree and in every line below.
 
 The prototypes are in the tree: `resources/` (what gets installed onto a
 desktop, which is the desktop entry, the metainfo, the MIME package and the
@@ -177,14 +177,14 @@ the binary on `PATH`:
 
 ```
 $ gio mime video/x-insta360-insv
-Default application for “video/x-insta360-insv”: app.kyerag.Kyerag.desktop
+Default application for “video/x-insta360-insv”: dev.harding.Kjerag.desktop
 Registered applications:
-	app.kyerag.Kyerag.desktop
+	dev.harding.Kjerag.desktop
 	fr.handbrake.ghb.desktop
 	com.system76.CosmicPlayer.desktop
 	mpv.desktop
 Recommended applications:
-	app.kyerag.Kyerag.desktop
+	dev.harding.Kjerag.desktop
 ```
 
 Kjerag is the default and the only *recommended* handler, and the three
@@ -275,7 +275,7 @@ into `Exec` is a hard flatpak export failure.
 ### 2.3 `Categories=COSMIC;` fails validation, and stays
 
 ```
-$ desktop-file-validate resources/app.kyerag.Kyerag.desktop
+$ desktop-file-validate resources/dev.harding.Kjerag.desktop
 error: value "COSMIC;AudioVideo;Player;Video;" for key "Categories" …
 contains an unregistered value "COSMIC"; values extending the format should
 start with "X-"
@@ -301,17 +301,18 @@ listing sizes, because the tree is generated and a list goes stale.
 Every basename is `dev.harding.Kjerag`, the application ID issue #66 settled,
 and since issue #75 the desktop entry's `Icon=` key, the binary's `APP_ID`
 and these file names are one string. **The gap this section used to describe
-is closed**: while the entry named an ID nothing else carried, the Flatpak
-build said
+is closed.** While the entry named an ID the icons did not carry, the Flatpak
+build said this every time, with the ID of the day where the current one now
+stands:
 
 ```
-WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
+WARNING: Icon referenced in desktop file but not exported: dev.harding.Kjerag
 ```
 
-every time (flatpak exports an icon only when its basename starts with the
-app ID) and a launcher showed a generic placeholder. The export has not been
-re-run since the rename; what is known is that the two names it compares are
-now the same string.
+flatpak exports an icon only when its basename starts with the app ID, so a
+launcher showed a generic placeholder. The export has not been re-run since
+the rename; what is known is that the two names it compares are now the same
+string.
 
 The About page and the welcome view read
 `hicolor/scalable/apps/dev.harding.Kjerag.svg` as bytes rather than asking
@@ -334,9 +335,9 @@ in an isolated `XDG_DATA_HOME` with only the two prototype files in it:
 
 ```
 $ grep insta360 …/applications/mimeinfo.cache
-video/x-insta360-insv=app.kyerag.Kyerag.desktop;
+video/x-insta360-insv=dev.harding.Kjerag.desktop;
 $ xdg-mime query default video/x-insta360-insv
-app.kyerag.Kyerag.desktop
+dev.harding.Kjerag.desktop
 ```
 
 The wrinkle: **cosmic-files does not read `mimeinfo.cache` at all.** It
@@ -652,7 +653,8 @@ registers another, and cosmic-config writes to a third. The icons were named
 
 That rename was also the last thing between the manifest and a linter with
 nothing to say about the ID. What the linter said before it, run against the
-manifest as it then stood:
+manifest as it then stood, whose ID was built on a project-named `.app`
+domain:
 
 ```json
 "errors": [
@@ -661,17 +663,17 @@ manifest as it then stood:
   "appid-url-not-reachable"
 ],
 "info": [
-  "appid-url-not-reachable: Tried https://kyerag.app | … Failed to resolve
-   'kyerag.app'"
+  "appid-url-not-reachable: Tried https://<project>.app | … Failed to
+   resolve '<project>.app'"
 ]
 ```
 
-**`kyerag.app` did not exist**, which is what made the ID a decision rather
-than a detail. That linter run predates the rename and the old name is left
-in it as measured. Measured: `kyerag.app` had no DNS record; `harding.dev`
-resolves and answers 200; `github.com/aeharding` exists. The three candidates
-were `app.kyerag.Kyerag` (buy `kyerag.app` and serve real HTTPS off it, since
-`.app` is HSTS-preloaded and a parking page will not do),
+**That domain did not exist**, which is what made the ID a decision rather
+than a detail: a reverse-DNS ID asserts a domain and Flathub checks it.
+Measured at the time: the project-named `.app` domain had no DNS record;
+`harding.dev` resolves and answers 200; `github.com/aeharding` exists. The
+three candidates were that one (buy the domain and serve real HTTPS off it,
+since `.app` is HSTS-preloaded and a parking page will not do),
 `io.github.aeharding.Kjerag` (verified by the GitHub account, the convention
 for a project with no domain), and the one that won, which needs nothing. The
 linter has not been re-run since; the ID it now reads is `dev.harding.Kjerag`
@@ -734,8 +736,8 @@ The other two linter errors are smaller, and both survived the rename:
   `xdg-config/cosmic` is what produced this, every run:
 
   ```
-  kyerag: saved state not saved: Read-only file system (os error 30)
-          at path "/home/aeharding/.local/state/cosmic/app.kyerag.Kyerag/v1/…"
+  kjerag: saved state not saved: Read-only file system (os error 30)
+          at path "/home/aeharding/.local/state/cosmic/dev.harding.Kjerag/v1/…"
   ```
 
   so the recent-files list and the window state were silently discarded.
@@ -770,7 +772,7 @@ Files reach the app two ways and both are portal-shaped:
 
    ```
    Exec=/usr/bin/flatpak run --branch=master --arch=x86_64 \
-        --command=kyerag --file-forwarding app.kyerag.Kyerag @@ %f @@
+        --command=kjerag --file-forwarding dev.harding.Kjerag @@ %f @@
    ```
 
    The `@@ … @@` markers are flatpak's file-forwarding: the launcher hands
@@ -812,11 +814,11 @@ scratch tree.** Release build in 2m44s inside the sandbox, a 7.6 MB
 single-file bundle, installed and checked:
 
 ```
-$ flatpak run app.kyerag.Kyerag --version
-kyerag 0.1.0
+$ flatpak run dev.harding.Kjerag --version
+kjerag 0.1.0
 $ xdg-mime query default video/x-insta360-insv
-app.kyerag.Kyerag.desktop
-$ flatpak run --command=sh app.kyerag.Kyerag -c 'ls /dev/dri'
+dev.harding.Kjerag.desktop
+$ flatpak run --command=sh dev.harding.Kjerag -c 'ls /dev/dri'
 by-path  card1  renderD128
 ```
 
@@ -834,7 +836,7 @@ into.
 ```sh
 flatpak run org.flatpak.Builder --user --force-clean \
     --state-dir=scratch/flatpak-builder \
-    --repo=scratch/fp/repo scratch/fp/build flatpak/app.kyerag.Kyerag.yml
+    --repo=scratch/fp/repo scratch/fp/build flatpak/dev.harding.Kjerag.yml
 ```
 
 and it failed, which is the useful part:
@@ -843,7 +845,7 @@ and it failed, which is the useful part:
 error: failed to select a version for the requirement `ffmpeg-next = "^7.1"`
        (locked to 7.1.0)
 candidate versions found which didn't match: 6.1.1
-location searched: directory source `/run/build/kyerag/cargo/vendor`
+location searched: directory source `/run/build/kjerag/cargo/vendor`
 ```
 
 **`flatpak/cargo-sources.json` on `main` was generated from a lock file that
@@ -857,10 +859,10 @@ With that fixed the build runs through:
 
 ```
 Finished `release` profile [optimized] target(s) in 3m 21s
-Exporting share/applications/app.kyerag.Kyerag.desktop
-Exporting share/mime/packages/app.kyerag.Kyerag.xml
-Exporting share/metainfo/app.kyerag.Kyerag.metainfo.xml
-WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
+Exporting share/applications/dev.harding.Kjerag.desktop
+Exporting share/mime/packages/dev.harding.Kjerag.xml
+Exporting share/metainfo/dev.harding.Kjerag.metainfo.xml
+WARNING: Icon referenced in desktop file but not exported: dev.harding.Kjerag
 ```
 
 No network, no patch, no tarball. The eleven icon files are in the app

@@ -105,10 +105,17 @@ binary got is `readelf -d <binary> | grep NEEDED`: ffmpeg 7.1 is
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+scripts/name-check.sh
 ```
 
 The `--workspace` and `--all` are load-bearing: without them cargo only
 looks at `default-members`, which is the app crate alone.
+
+The last one is the rename lock (issue #75). The project had another name
+until 2026-08-01 and the owner's terms for the sweep were that it exist
+nowhere in the tree, in a file or in a path; the script is a grep over what
+git tracks and CI runs it as its own job. Git history and the archived
+issues and pull requests keep their copies, and nothing is rewritten there.
 
 ## UI verification
 
