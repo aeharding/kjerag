@@ -36,7 +36,6 @@ jobs:
             --result-root=app \
             --data-dir=app/files/share/app-info/xmls \
             --icons-dir=app/files/share/app-info/icons/flatpak \
-            --media-dir=app/files/share/app-info/media \
             app 2>&1 | tail -60
 
       - run: |
@@ -48,5 +47,4 @@ jobs:
             --result-root=app \
             --data-dir=app/files/share/app-info/xmls \
             --icons-dir=app/files/share/app-info/icons/flatpak \
-            --media-dir=app/files/share/app-info/media \
             app 2>&1 | tail -60
