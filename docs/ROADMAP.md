@@ -474,6 +474,16 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-07-31 (late) Seam architecture revised by three owner rulings: the
+  app targets ANY 360 footage (near-field moves in general, so per-frame
+  band alignment is the MAIN path and the per-clip table is a prior);
+  the horizon bar is pixel-perfect (calibration brings residual inside
+  the band search's capture range, per-frame alignment snaps it to zero,
+  far field included - which is how Insta360's own horizon is perfect);
+  and correction is calibrate-by-watching (seam readings harvested from
+  playback's own decoded frames, slerped in below perception, pooled
+  per camera, cached per file, no user surface at all).
+
 - 2026-07-31 **ffmpeg pin moved 6.1 -> 7.1** (owner: "Bump to 7"), which
   supersedes the 2026-07-30 entry further down. Issue #65: the Flatpak
   could not be built from the tree at all while the pin said 6.1, because
