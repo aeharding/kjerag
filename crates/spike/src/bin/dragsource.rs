@@ -266,8 +266,12 @@ impl Args {
                 Some(("linger", secs)) => {
                     linger = Duration::from_secs(secs.parse().map_err(|_| format!("{arg}?"))?);
                 }
-                Some(_) => return Err(format!("{arg}?")),
-                None => files.push(PathBuf::from(arg)),
+                // Anything else is a path, `=` and all. A file manager's
+                // network mount is a directory called
+                // `smb-share:server=host,share=name`, so a path holding an
+                // equals sign is not a typo: refusing one here is how this
+                // instrument first failed to drag the owner's own library.
+                _ => files.push(PathBuf::from(arg)),
             }
         }
         if files.is_empty() {

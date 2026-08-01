@@ -621,6 +621,23 @@ live, no keyframe UI ever.
   `/run/user/1000/doc/<id>/<name>`, its mate is not in that directory, and
   the capture still plays one lens. Issue #123 stands for that path alone.
 
+  And the grant was still not enough, which the owner found by testing rather
+  than by reading: his footage library is on a NAS, mounted by the file
+  manager, so the paths his drags carry are
+  `/run/user/1000/gvfs/smb-share:server=...,share=.../...`, which a sandbox
+  cannot see either. `--filesystem=xdg-run/gvfs:ro` is the standard grant and
+  the read-only half is measured: the mount lists inside the sandbox and a
+  file on it reads. Measured through a drop, on his own share: the file
+  opens, and because the mate sits beside it there too, a two-file capture on
+  the NAS plays `2 of 2 calibrated`, `2 lens streams from 2 files` over SMB.
+  The instrument had to learn the shape as well: a mount's directory is
+  called `smb-share:server=host,share=name`, and an argument parser that
+  treats `=` as an option refuses to drag it.
+
+  What is left outside every grant refuses once per drop rather than once per
+  file, which is what a multiple selection sends: the app takes the first file
+  and says one thing about it (measured: two files in, one refusal out).
+
 - 2026-08-01 **A pane with no frame draws the backdrop, not a picture of its
   own** (owner-reported). The pass carried an animated test pattern from its
   first bring-up, a sine of the distance from the middle of the view on a wall
