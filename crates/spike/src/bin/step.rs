@@ -30,9 +30,22 @@
 //! fitted to the trace on each side of the seam with the crossover and a
 //! guard left out, and the two lines are extrapolated to the seam. Their
 //! difference there is the **step**: how far the picture moves the horizon
-//! across the handover, in view pixels and in degrees. A great circle
-//! projects to a straight line in a rectilinear view, so a horizon really is
-//! straight and a step in it is the seam's and not the terrain's.
+//! across the handover, in view pixels and in degrees.
+//!
+//! **Two windows, and they do not agree** (issue #103, stage 6). This was
+//! written on the argument that a great circle projects to a straight line, so
+//! a horizon is straight and a step in it is the seam's. What the trace
+//! follows on real footage is a treeline or a ridge a few kilometres off,
+//! which is not a great circle, and extrapolating a straight line to the seam
+//! from four degrees out turns that curvature into step: the owner's own
+//! reference frame with the band held off reads 10.4, 20.9, 30.5, 32.8 and
+//! 37.8 view px at `guard` 1.2, 1.6, 2.0, 2.5 and 3.5. So `step:` is the
+//! campaign's own window, kept so its earlier numbers stay readable, and
+//! `close:` is the same measurement over the two degrees just outside the
+//! crossover, where the fits' own rms says a line describes the points. A
+//! DIFFERENCE between two builds is trustworthy in either window, because the
+//! along-seam correction rotates one hemisphere and moves that side's whole
+//! trace by a constant (23.2 px in all three windows, measured).
 //!
 //! `trace=1` writes the trace and both fits as a table, and every run writes
 //! an overlay with the seam, the crossover edges, the fitted lines and the
@@ -54,6 +67,21 @@ use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
 /// is local to the seam: the terrain a horizon runs along is straight over a
 /// few degrees and the view is 20 across.
 const FIT_DEG: f64 = 4.0;
+
+/// How far the close-in fit reaches, in degrees (issue #103, stage 6).
+///
+/// Two, because the line has to describe its own points and a ridge does not
+/// stay straight for longer than that: on the owner's reference frame the fit
+/// rms is 0.97 and 0.51 px over this window against 2.07 and 0.84 over
+/// [`FIT_DEG`] from `guard=2.5`.
+const CLOSE_DEG: f64 = 2.0;
+
+/// How far past the crossover's own edge the close-in fit starts.
+///
+/// Small, and it can be: it is measured against the crossover this frame drew
+/// rather than against the widest one stage 4 may open, so what it has to
+/// clear is the taper and not a worst case.
+const CLOSE_MARGIN_DEG: f64 = 0.2;
 
 /// How far either side of the seam is left out of both fits, in degrees.
 ///
@@ -219,12 +247,43 @@ struct Trace {
     /// One entry per column that had a horizon in it: the column, the
     /// sub-pixel row, and how far past the seam that pixel is.
     points: Vec<(f64, f64, f64)>,
-    /// The two fits, as slope and intercept in `row = a * past + b`, where
-    /// `past` is degrees past the seam. Fitted against the seam angle rather
-    /// than against the column so that the extrapolation to the seam is a
-    /// read of `b` and the two sides are directly comparable.
-    fits: [Option<(f64, f64)>; 2],
-    kept: [usize; 2],
+    /// The two fits over [`FIT_DEG`] starting at [`Options::guard`], which is
+    /// the window every acceptance number in this campaign has been quoted at.
+    fits: [Option<Fitted>; 2],
+    /// The same two over [`CLOSE_DEG`], starting just outside this frame's own
+    /// crossover (issue #103, stage 6).
+    ///
+    /// **The wide window's premise is that a horizon is straight, and on real
+    /// footage it is not.** What the trace follows is a treeline or a ridge at
+    /// a few kilometres, which is not a great circle: on the owner's own
+    /// reference frame one side reads +5.32 px/deg of slope over the two
+    /// degrees outside the crossover and +2.03 over `guard=2.5`'s window, at
+    /// twice the fit rms. Extrapolating a straight line from four degrees out
+    /// turns that curvature into step, and the same frame with the band held
+    /// off reads 10.4, 20.9, 30.5, 32.8 and 37.8 view px at `guard` 1.2, 1.6,
+    /// 2.0, 2.5 and 3.5.
+    ///
+    /// The DIFFERENCE between two builds is window-independent, because the
+    /// along-seam correction is a rotation of one hemisphere and moves that
+    /// side's whole trace by a constant: 23.2 px in all three windows,
+    /// measured. So the campaign's before-and-after deltas stand and its
+    /// absolute numbers carry the terrain as well as the seam. This column is
+    /// the absolute one: the shortest window a line still describes.
+    close: [Option<Fitted>; 2],
+}
+
+/// One side's straight line through the trace, and how well it describes it.
+struct Fitted {
+    /// Slope and intercept in `row = a * past + b`, where `past` is degrees
+    /// past the seam. Fitted against the seam angle rather than against the
+    /// column so that the extrapolation to the seam is a read of `b` and the
+    /// two sides are directly comparable.
+    line: (f64, f64),
+    kept: usize,
+    /// How far the kept points sit from that line, in pixels. A step read off
+    /// two lines that do not describe their own points is a step read off the
+    /// terrain.
+    rms: f64,
 }
 
 impl Trace {
@@ -268,12 +327,14 @@ impl Trace {
         let mut trace = Self {
             points,
             fits: [None, None],
-            kept: [0, 0],
+            close: [None, None],
         };
+        // Just outside the crossover this frame actually drew, which is what
+        // stage 4 may have opened rather than what it opens at zero disparity.
+        let from = field.half_deg + CLOSE_MARGIN_DEG;
         for side in 0..2 {
-            let (fit, kept) = trace.fit(side, options);
-            trace.fits[side] = fit;
-            trace.kept[side] = kept;
+            trace.fits[side] = trace.fit(side, options.guard, FIT_DEG);
+            trace.close[side] = trace.fit(side, from, CLOSE_DEG);
         }
         trace
     }
@@ -282,10 +343,10 @@ impl Trace {
     /// and positive. A straight line, refitted with the points furthest from
     /// it dropped, because a treeline holds one tall tree and a horizon does
     /// not bend.
-    fn fit(&self, side: usize, options: &Options) -> (Option<(f64, f64)>, usize) {
+    fn fit(&self, side: usize, from: f64, reach: f64) -> Option<Fitted> {
         let inside = |past: f64| {
             let far = past.abs();
-            far >= options.guard && far <= options.guard + FIT_DEG && (past < 0.0) == (side == 0)
+            far >= from && far <= from + reach && (past < 0.0) == (side == 0)
         };
         let mut kept: Vec<(f64, f64)> = self
             .points
@@ -294,9 +355,7 @@ impl Trace {
             .map(|(_, row, past)| (*past, *row))
             .collect();
         for _ in 0..REFITS {
-            let Some(line) = line(&kept) else {
-                return (None, 0);
-            };
+            let line = line(&kept)?;
             let spread = rms(&kept, line);
             let before = kept.len();
             kept.retain(|(past, row)| (row - (line.0 * past + line.1)).abs() <= OUTLIER * spread);
@@ -304,7 +363,12 @@ impl Trace {
                 break;
             }
         }
-        (line(&kept), kept.len())
+        let line = line(&kept)?;
+        Some(Fitted {
+            line,
+            kept: kept.len(),
+            rms: rms(&kept, line),
+        })
     }
 
     /// Where the traced horizon crosses the seam, and how steeply it runs
@@ -414,26 +478,59 @@ fn report(
         2.0 * field.half_deg * px_per_deg,
         px_per_deg,
     );
-    let (Some(near), Some(far)) = (trace.fits[0], trace.fits[1]) else {
+    let ([Some(near), Some(far)], close) = (&trace.fits, &trace.close) else {
         println!("step:   no horizon fitted on both sides of the seam");
         return;
     };
-    let step = far.1 - near.1;
+    let step = far.line.1 - near.line.1;
     println!(
-        "fits:   near side slope {:+.3} px/deg over {} columns, far side {:+.3} over {}",
-        near.0, trace.kept[0], far.0, trace.kept[1],
+        "fits:   near side slope {:+.3} px/deg over {} columns at rms {:.2}, \
+         far side {:+.3} over {} at {:.2}",
+        near.line.0, near.kept, near.rms, far.line.0, far.kept, far.rms,
     );
     println!(
         "step:   {:+.2} view px at the seam, which is {:+.4} deg. \
          Slopes differ by {:+.3} px/deg.",
         step,
         step / px_per_deg,
-        far.0 - near.0,
+        far.line.0 - near.line.0,
     );
+    close_in(close, px_per_deg);
     if let Some(rows) = attribute(mapped, field, trace, step) {
         applied_at(mapped, trace, cells, along, field, rows);
     }
     band_says(cells, along, px_per_deg);
+}
+
+/// The same step off the two degrees just outside the crossover, where a
+/// straight line still describes the trace (issue #103, stage 6).
+///
+/// Printed beside the wide one rather than instead of it: the wide window is
+/// what every earlier acceptance number in this campaign was quoted at, and a
+/// column that quietly changed meaning would make those numbers unreadable.
+/// Where the two disagree, the rms columns say which line is describing its own
+/// points and which is describing the hill.
+fn close_in(close: &[Option<Fitted>; 2], px_per_deg: f64) {
+    let [Some(near), Some(far)] = close else {
+        println!("close:  no horizon fitted on both sides just outside the crossover");
+        return;
+    };
+    let step = far.line.1 - near.line.1;
+    println!(
+        "close:  {:+.2} view px, {:+.4} deg, off the {:.1} deg starting {:.2} past the \
+         crossover edge\n\
+         \x20       (near {} columns at rms {:.2}, far {} at {:.2}; a ridge is not a great \
+         circle, so the\n\
+         \x20       wide window above extrapolates its curvature into step)",
+        step,
+        step / px_per_deg,
+        CLOSE_DEG,
+        CLOSE_MARGIN_DEG,
+        near.kept,
+        near.rms,
+        far.kept,
+        far.rms,
+    );
 }
 
 /// Which of the seam's two axes the step is on.
@@ -657,19 +754,24 @@ fn overlay(picture: &Picture, field: &Field, trace: &Trace) -> Picture {
     for (x, row, _) in &trace.points {
         paint(*x as usize, *row as usize, [0, 255, 255]);
     }
+    // Both windows' fits, so the overlay shows what the two numbers in the
+    // report were read off: magenta is the wide one, cyan-green the close-in.
     for x in 0..w {
-        for (side, fit) in trace.fits.iter().enumerate() {
-            let Some((a, b)) = fit else { continue };
-            let mut column = None;
-            for y in 0..h {
-                let past = field.at(x, y);
-                if past.is_finite() && (past < 0.0) == (side == 0) {
-                    column = Some(past);
-                    break;
+        for (fits, colour) in [(&trace.fits, [255, 0, 255]), (&trace.close, [0, 255, 128])] {
+            for (side, fit) in fits.iter().enumerate() {
+                let Some(fit) = fit else { continue };
+                let mut column = None;
+                for y in 0..h {
+                    let past = field.at(x, y);
+                    if past.is_finite() && (past < 0.0) == (side == 0) {
+                        column = Some(past);
+                        break;
+                    }
                 }
+                let Some(past) = column else { continue };
+                let (a, b) = fit.line;
+                paint(x, (a * past + b).round().max(0.0) as usize, colour);
             }
-            let Some(past) = column else { continue };
-            paint(x, (a * past + b).round().max(0.0) as usize, [255, 0, 255]);
         }
     }
     Picture {

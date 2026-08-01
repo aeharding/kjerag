@@ -835,6 +835,14 @@ fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
 /// go faster than the work in it, so the fastest of many is the least
 /// contended; a median far above it says the box was busy and not that the pass
 /// is slow.
+///
+/// **The first frame is priced on its own.** The shipped search is two
+/// searches: a direction that has not got the along-seam axis looks over the
+/// whole window, and one that has looks two steps either side of what it holds
+/// (`NARROW_STEPS` in the render crate's `band`). The first frame after a seek
+/// is every direction in the first state and every frame after it is nearly all
+/// of them in the second, so one average over a run would price neither of the
+/// two things the player actually does.
 fn cost(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
@@ -874,31 +882,47 @@ fn cost(options: &Options) -> Fallible<()> {
         options.fov,
     );
     println!(
-        "{:<16} {:>10} {:>10} {:>10}",
-        "dispatches", "min ms", "median", "worst"
+        "{:<16} {:>10} {:>10} {:>10} {:>10}",
+        "dispatches", "seek ms", "then min", "median", "worst"
     );
-    let mut floor = 0.0;
+    let mut floor = (0.0, 0.0);
     for (repeats, each) in &taken {
-        let mut sorted = each.clone();
+        let (seek, steady) = split(each);
+        let mut sorted = steady.to_vec();
         sorted.sort_by(f64::total_cmp);
         let min = sorted.first().copied().unwrap_or(0.0);
         println!(
-            "{repeats:<16} {min:>10.3} {:>10.3} {:>10.3}",
+            "{repeats:<16} {seek:>10.3} {min:>10.3} {:>10.3} {:>10.3}",
             sorted[sorted.len() / 2],
             sorted.last().copied().unwrap_or(0.0),
         );
         match *repeats {
-            1 => floor = min,
-            _ => println!(
-                "\nthe band's measurement costs {:.3} ms per redraw, from the slope over \n\
-                 {REPEATS} extra dispatches, which is {:.1} percent of the 16.6 ms a 60 fps \n\
-                 frame has.",
-                (min - floor) / f64::from(REPEATS),
-                100.0 * (min - floor) / f64::from(REPEATS) / 16.6,
-            ),
+            1 => floor = (seek, min),
+            _ => {
+                let each = |now: f64, was: f64| (now - was) / f64::from(REPEATS);
+                println!(
+                    "\nthe band's measurement costs {:.3} ms on the frame a seek lands on, where \n\
+                     every direction searches the whole along-seam window, and {:.3} ms on every \n\
+                     frame after it, where the ones that have the axis look two steps either \n\
+                     side. That is {:.1} and {:.1} percent of the 16.6 ms a 60 fps frame has. \n\
+                     Both are slopes over {REPEATS} extra dispatches.",
+                    each(seek, floor.0),
+                    each(min, floor.1),
+                    100.0 * each(seek, floor.0) / 16.6,
+                    100.0 * each(min, floor.1) / 16.6,
+                );
+            }
         }
     }
     Ok(())
+}
+
+/// The frame a seek landed on, and every frame after it.
+fn split(each: &[f64]) -> (f64, &[f64]) {
+    match each.split_first() {
+        Some((seek, rest)) if !rest.is_empty() => (*seek, rest),
+        _ => (each.first().copied().unwrap_or(0.0), each),
+    }
 }
 
 /// How many extra dispatches the slope is taken over.
