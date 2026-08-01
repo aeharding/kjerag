@@ -304,8 +304,8 @@ fn crossover(reads: &[Read]) {
              the zenith, because the two lens axes are horizontal, so it is reached by PITCH \n\
              and not by yaw (measured 2026-08-01 with mode=trace, which is what to check it \n\
              with again).\n\n\
-             \x20          {:>7} {:>8} {:>7} {:>10} {:>9} {:>9}   {}",
-            "frame", "at", "phi", "applied", "band", "cut px", "view (lock=0)",
+             \x20          {:>7} {:>8} {:>7} {:>10} {:>9} {:>9}   view (lock=0)",
+            "frame", "at", "phi", "applied", "band", "cut px",
         );
         for (frame, index, applied) in widest_first.iter().take(8) {
             let phi = *index as f64 / AZIMUTHS as f64 * 360.0;
