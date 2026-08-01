@@ -22,10 +22,17 @@
 
   <description>
     <p>
-      Kjerag plays Insta360 .insv files directly: no stitching step, no proxy
-      files, no export round trip. Drag to reframe, scroll to zoom, take
-      screenshots.
+      Kjerag plays Insta360 .insv files directly: open the file straight off
+      the camera and press play. Zero configuration.
     </p>
+    <ul>
+      <li>No stitching step, no proxy files, no export round trip</li>
+      <li>Drag to reframe, scroll to zoom, with gyro horizon lock</li>
+      <li>The lens seam is calibrated, aligned and blended automatically</li>
+      <li>Screenshots of the current view</li>
+      <li>Copy a view reference and jump back to that exact framing</li>
+      <li>Hardware decode end to end, even over a network share</li>
+    </ul>
     <p>
       The dual fisheye footage is decoded on the GPU and reprojected through
       the calibrated lens model that every .insv carries, so the horizon is

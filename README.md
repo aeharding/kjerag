@@ -10,14 +10,28 @@
   <img src="resources/screenshots/planet.png" width="720" alt="Kjerag playing a flight zoomed all the way out to a little planet">
 </p>
 
-Kjerag plays Insta360 `.insv` files directly: no stitching step, no proxy
-files, no export round-trip. Drag to reframe, scroll to zoom, take
-screenshots. The dual-fisheye footage is hardware-decoded and reprojected
-on the GPU using the calibrated lens model embedded in every `.insv` file.
+Kjerag plays Insta360 `.insv` files directly: open the file straight off
+the camera and press play. Zero configuration.
 
-**Status: pre-alpha.** See [docs/ROADMAP.md](docs/ROADMAP.md) for where
-things stand and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it
-works.
+## Features
+
+- No stitching step, no proxy files, no export round trip
+- Drag to reframe, scroll to zoom, with gyro horizon lock
+- The lens seam is calibrated, aligned and blended automatically
+- Screenshots of the current view
+- Copy a view reference and jump back to that exact moment and framing
+- Hardware decode end to end; a 30 minute flight file opens instantly,
+  even over a network share
+
+## Status
+
+Alpha. Watching, reframing and screenshots work and see daily use; the
+first tagged release and a Flathub listing are in progress. Verified with
+Insta360 X4 Air and ONE X2 footage, with X3, X4 and X5 samples in the
+test corpus. DJI and GoPro 360 formats are not supported.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for where things stand and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
 
 ## Why
 
