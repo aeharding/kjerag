@@ -482,6 +482,136 @@ impl Along {
     }
 }
 
+/// What the two lenses' colour difference does **round** the seam, per channel,
+/// after the one number [`Tone`] takes out of it (issue #103, stage 7).
+///
+/// **Because one number is measurably not enough.** At the owner's own
+/// reference view a per-channel gain takes the hue step in the drawn picture
+/// from 9.29 codes to 7.06, and one code is the floor of the medium. Round the
+/// ring on flat sky, a per-channel constant leaves 0.9 to 6.2 codes rms on his
+/// six captures and 1 to 41 on the corpus, against a frame-to-frame noise floor
+/// of 0.2 to 1.3: what is left is not noise, it is a shape, and it is the same
+/// shape stage 5 fits for the geometry - a constant, one cycle of the azimuth
+/// and two ([`Along`]). Fitting it takes the ring's residual down by a further
+/// third to a half on every capture measured.
+///
+/// **It is applied near the seam and nowhere else, and that is what makes it
+/// safe.** Stage 3 refused a gain that varied round the ring, and the reason it
+/// gave still stands: a hemisphere can carry one number, so a ring of numbers
+/// applied to a hemisphere is a brightness that changes as the view pans. A
+/// FIELD over body directions is not that - it does not move when the view
+/// does - but it does have to end somewhere, and where it ends is measured
+/// rather than chosen: the two lenses stop having a common picture at
+/// [`super::projection::Reframe::overlap`], and past that "how these two differ
+/// here" stops being a statement anything can check.
+///
+/// The alternative was to carry it over the whole hemisphere the way stage 5
+/// carries the along-seam rotation, which would be gentler and is what lens
+/// shading would justify. **The measurement refuses it**: shading is a property
+/// of the glass and would read the same on every scene of one file, and this
+/// field moves by 3 to 27 codes at one azimuth between five places in the same
+/// capture. What varies with the scene is glare, and glare has no business
+/// being painted over half a sphere.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tint {
+    /// Per channel, in R, G, B order, four coefficients in natural logs: the
+    /// cosine and sine of one cycle of the azimuth, then of two.
+    ///
+    /// **No constant**, because [`Tone`] is the constant and it is estimated
+    /// better: least squares in codes rather than in logs, which is the
+    /// difference measured across nine captures in stage 3.
+    pub terms: [f32; 12],
+    /// How many directions' worth of colour evidence is behind the fit, 0 up to
+    /// [`AZIMUTHS`]. Read by instruments; the fit is already shrunk by its own
+    /// ridge and is not taxed twice.
+    pub evidence: f32,
+    /// A storage buffer's struct is laid out by its own alignment rules and
+    /// `repr(C)` does not do it for us.
+    _pad: [f32; 3],
+}
+
+impl Tint {
+    /// The field at one azimuth, per channel, in natural logs, from that
+    /// azimuth's own cosine and sine - which a fragment already has, because a
+    /// direction flattened into the seam plane **is** `(cos, sin)`. No trig
+    /// reaches the fragment shader.
+    ///
+    /// WGSL twin: `tint_at`.
+    pub fn at(&self, cos: f32, sin: f32) -> [f32; 3] {
+        let basis = [cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+        std::array::from_fn(|channel| {
+            (0..4)
+                .map(|term| self.terms[4 * channel + term] * basis[term])
+                .sum()
+        })
+    }
+
+    /// The whole ring's colour readings as one field per channel: the same
+    /// five-term weighted least squares [`Along::fit`] runs, with the constant
+    /// thrown away because [`Tone`] already carries it.
+    ///
+    /// **Rust twin of the `pool_tint` entry point**, and a twin rather than a
+    /// description: the pass solves this on the GPU where no test can reach it.
+    ///
+    /// Weighted by the same `hue_conf / KEEP` and the same brightness squared
+    /// the constant is weighted by, per channel, so a channel the seam is dark
+    /// in does not lean on a channel it is bright in. Far field only, at the
+    /// band's own knee, for stage 3's reason.
+    pub fn fit(cells: &[Cell]) -> Self {
+        let mut terms = [0.0f32; 12];
+        let mut evidence = 0.0;
+        for channel in 0..3 {
+            let mut normal = [[0.0f32; 5]; 5];
+            let mut right = [0.0f32; 5];
+            evidence = 0.0;
+            for (index, cell) in cells.iter().enumerate() {
+                if near_field(cell) {
+                    continue;
+                }
+                let believed = (cell.hue_conf / KEEP).clamp(0.0, 1.0);
+                let [low, high] = cell.decoded();
+                if believed <= 0.0 || low[channel] <= 0.0 || high[channel] <= 0.0 {
+                    continue;
+                }
+                let trust = believed * low[channel] * low[channel];
+                let read = (high[channel] / low[channel]).ln();
+                let (sin, cos) =
+                    (index as f32 / cells.len() as f32 * std::f32::consts::TAU).sin_cos();
+                let basis = [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+                for row in 0..5 {
+                    for (column, term) in basis.iter().enumerate() {
+                        normal[row][column] += trust * basis[row] * term;
+                    }
+                    right[row] += trust * basis[row] * read;
+                }
+                evidence += believed;
+            }
+            for (term, row) in normal.iter_mut().enumerate() {
+                row[term] += RIDGE;
+            }
+            let fitted = solve(normal, right);
+            for term in 0..4 {
+                terms[4 * channel + term] = fitted[term + 1].clamp(-LIMIT_LN, LIMIT_LN);
+            }
+        }
+        Self {
+            terms,
+            evidence,
+            _pad: [0.0; 3],
+        }
+    }
+
+    /// The thirteen floats a readback finds in the buffer, as a `Tint`.
+    pub fn read(terms: [f32; 12], evidence: f32) -> Self {
+        Self {
+            terms,
+            evidence,
+            _pad: [0.0; 3],
+        }
+    }
+}
+
 /// How much evidence a coefficient is shrunk against, in directions.
 ///
 /// One direction's worth, which is a quantity and not a taste: it says a fit is
@@ -619,9 +749,9 @@ pub struct Cell {
     /// Its own and not [`Self::confidence`], because the two answer different
     /// questions and one of them has an answer where the other has none. A
     /// direction of flat sky cannot be correlated - the band refuses it at
-    /// `CONTRAST`, and on a real seam that is a fifth to two thirds of the ring
-    /// - but its photometry needs no correlation to be trustworthy: what a
-    /// window displaced by `e` degrees costs is `e` times the content's own
+    /// `CONTRAST`, and on a real seam that is a fifth to two thirds of the
+    /// ring - but its photometry needs no correlation to be trustworthy: what
+    /// a window displaced by `e` degrees costs is `e` times the content's own
     /// gradient across it, so the flattest content is the cheapest of all to
     /// read. Measured rather than argued: at the 0.2 degree residual the pass
     /// leaves, one lens against its own displaced picture reads 0.33 to 0.76
@@ -1036,12 +1166,39 @@ pub fn ease(seconds: f32, tau: f32) -> f32 {
 /// one-lens file, a file's first frame, and a seam with nothing far-field on
 /// it. The caller keeps what it had; the exposure of two lenses does not
 /// change because we stopped being able to see it.
+/// Whether this direction is looking at something inside the near knee, and is
+/// therefore no place to read a photometry (issue #103, stage 3).
+///
+/// **Measured on the disparity the pass is actually drawing with**, which is
+/// the reading times the strength its own evidence has earned (issue #103,
+/// stage 7). A disparity is kept when a direction stops correlating and only
+/// the evidence behind it is given up, which is this file's rule everywhere -
+/// so a direction that once read a boot at 3 m and is now flat sky still
+/// carries the boot's number, and a cut that read the number alone kept that
+/// direction out of the colour for the rest of the file. That is the same
+/// defect stage 2 was sent back for, an expired reading applied at full
+/// strength, and it is the same fix.
+///
+/// No new constant: the strength is `super::projection::Reframe::channel`'s
+/// own, so a direction fades out of the near field exactly as its bend fades
+/// out of the picture. It changes nothing about stage 3's gain, because a
+/// direction with no confidence weighed exactly zero there anyway; what it
+/// lets in is the flat content stage 7 added, whose confidence is zero
+/// because a flat patch cannot be correlated and whose colour is the best on
+/// the ring.
+///
+/// WGSL twin: `near_field`.
+fn near_field(cell: &Cell) -> bool {
+    let strength = (cell.confidence / KEEP).clamp(0.0, 1.0);
+    cell.disparity.abs() * strength >= NEAR_KNEE_DEG.to_radians()
+}
+
 pub fn pooled_gain(cells: &[Cell]) -> Option<([f32; 3], f32)> {
     let mut weight = [0.0f32; 3];
     let mut total = [0.0f32; 3];
     let mut count = 0.0;
     for cell in cells {
-        if cell.disparity.abs() >= NEAR_KNEE_DEG.to_radians() {
+        if near_field(cell) {
             continue;
         }
         let believed = (cell.hue_conf / KEEP).clamp(0.0, 1.0);
@@ -1210,11 +1367,42 @@ const HUE_TAPS: usize = 7;
 pub(crate) fn lookup_wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst KEEP = {KEEP:?};\n\
-         const WIDEST = {widest:?};\nconst TAU = {tau:?};\nconst LIMIT_LN = {LIMIT_LN:?};\n\
+         const WIDEST = {widest:?};\nconst WIDEST_SIN = {widest_sin:?};\n\
+         const TAU = {tau:?};\nconst LIMIT_LN = {LIMIT_LN:?};\n\
          {CELL}{RING}{LOOKUP}",
         widest = WIDEST_DEG.to_radians(),
+        widest_sin = WIDEST_DEG.to_radians().sin(),
         tau = std::f32::consts::TAU,
     )
+}
+
+/// How much of the ring's colour field reaches a direction whose sine out of
+/// the seam plane is `off_seam`, on a camera whose lenses share `half_overlap`
+/// radians either side of it (issue #103, stage 7).
+///
+/// Whole across every handover the band can ever open, so the step the field
+/// removes is removed exactly and the picture the two lenses mix carries one
+/// number; then a smoothstep out to where the two lenses stop sharing a
+/// picture. Neither end is a taste: the first is [`WIDEST_DEG`], the widest
+/// crossover the search can ask for, and the second is the angle past which
+/// "how these two lenses differ here" is not a statement anything could check.
+///
+/// A `smoothstep` and not a line, so the fade has no corner at either end. A
+/// gradient that stops abruptly is a Mach band, and a Mach band is the artifact
+/// this stage exists to remove rather than to move.
+///
+/// Exactly zero on a camera whose lenses do not overlap past the widest
+/// crossover, which includes every file with one lens stream.
+///
+/// WGSL twin: `tint_fade`.
+pub fn fade(off_seam: f32, half_overlap_rad: f32) -> f32 {
+    let outer = half_overlap_rad.sin();
+    let inner = WIDEST_DEG.to_radians().sin();
+    if outer <= inner {
+        return 0.0;
+    }
+    let t = ((off_seam.abs() - inner) / (outer - inner)).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
 }
 
 /// The state buffer's binding, on a group of its own.
@@ -1240,8 +1428,11 @@ pub(crate) const BYTES: u64 = (CELLS_AT + AZIMUTHS * std::mem::size_of::<Cell>()
 /// Where the along-seam field starts in that buffer.
 pub(crate) const ALONG_AT: usize = std::mem::size_of::<Tone>();
 
+/// Where the colour field starts in that buffer.
+pub(crate) const TINT_AT: usize = ALONG_AT + std::mem::size_of::<Along>();
+
 /// Where the cells start in that buffer, for the readback that unpacks it.
-pub(crate) const CELLS_AT: usize = ALONG_AT + std::mem::size_of::<Along>();
+pub(crate) const CELLS_AT: usize = TINT_AT + std::mem::size_of::<Tint>();
 
 /// A sample at or above this is a clipped highlight and not a brightness.
 ///
@@ -1297,11 +1488,37 @@ struct Along {
   pad1: f32,
 };
 
+struct Tint {
+  terms: array<f32, 12>,
+  evidence: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
 struct State {
   tone: Tone,
   along: Along,
+  tint: Tint,
   cells: array<Cell, AZIMUTHS>,
 };
+
+// The colour field at one azimuth, per channel, in natural logs. A direction
+// flattened into the seam plane IS (cos, sin), so no trig reaches the fragment
+// shader. Written out rather than looped for `along_at`'s reason. Rust twin:
+// `Tint::at`.
+fn tint_at(field: Tint, cos: f32, sin: f32) -> vec3<f32> {
+  let basis = vec4<f32>(cos, sin, cos * cos - sin * sin, 2.0 * cos * sin);
+  var out: vec3<f32>;
+  for (var channel = 0u; channel < 3u; channel += 1u) {
+    let at = 4u * channel;
+    out[channel] = field.terms[at] * basis.x
+      + field.terms[at + 1u] * basis.y
+      + field.terms[at + 2u] * basis.z
+      + field.terms[at + 3u] * basis.w;
+  }
+  return out;
+}
 
 // The along-seam correction at one azimuth, from that azimuth's own cosine and
 // sine. A direction flattened into the seam plane IS (cos, sin), so no trig
@@ -1383,6 +1600,49 @@ fn tone_split() -> mat2x3<f32> {
   return mat2x3<f32>(exp(half), exp(-half));
 }
 
+// The same split with what the ring says at THIS direction added to it, faded
+// out by how far the direction is from the seam (issue #103, stage 7). Rust
+// twin: `Reframe::colour_split`.
+//
+// `band.azimuth` is the ray flattened into the seam plane and `band.off_seam`
+// is the sine of its angle out of that plane, both computed by `band_bend` for
+// the geometry and reused here rather than recomputed.
+//
+// Exactly one on every channel of both sides when nothing has been measured,
+// which is the byte-identity `tone_split` already promises: a zero field times
+// any fade is zero, and `tone_half` of zero takes the equality above.
+fn colour_split(at: Band) -> mat2x3<f32> {
+  let half = tone_half()
+    + 0.5 * tint_fade(at.off_seam) * tint_at(band.tint, at.azimuth.x, at.azimuth.y);
+  if all(half == vec3<f32>(0.0)) {
+    return mat2x3<f32>(vec3<f32>(1.0), vec3<f32>(1.0));
+  }
+  return mat2x3<f32>(exp(half), exp(-half));
+}
+
+// How much of the ring's own colour field reaches a direction this far out of
+// the seam plane, given as the sine of that angle.
+//
+// Whole across every handover the band can ever open, so the correction is one
+// number over the width the two lenses actually mix at and the step it removes
+// is removed exactly. Then out to where the two lenses stop sharing a picture,
+// which the file's own calibration says and this pass is already told
+// (`Reframe::overlap`). Neither end is a taste: the first is `WIDEST`, the
+// widest crossover the search can ask for, and the second is the angle past
+// which "how these two lenses differ here" is not a statement anything could
+// check.
+//
+// `smoothstep` and not a line, so the fade has no corner at either end: a
+// gradient that stops abruptly is a Mach band, which is the artifact this whole
+// stage is about. Rust twin: `fade`.
+fn tint_fade(off_seam: f32) -> f32 {
+  let outer = sin(reframe.half_overlap);
+  if outer <= WIDEST_SIN {
+    return 0.0;
+  }
+  return 1.0 - smoothstep(WIDEST_SIN, outer, abs(off_seam));
+}
+
 // The band with nothing behind it: no bend, and the crossover at the width it
 // has always been. This is what a file with one lens stream takes, what a
 // direction that has never correlated takes, and what a ray straight down a
@@ -1392,6 +1652,10 @@ fn band_rest() -> Band {
   out.offset = vec3<f32>(0.0);
   out.along = vec3<f32>(0.0);
   out.crossover = CROSSOVER;
+  // Straight down a lens's own axis there is no azimuth, so there is no ring
+  // reading either, and the fade would answer zero there anyway.
+  out.azimuth = vec2<f32>(1.0, 0.0);
+  out.off_seam = 1.0;
   return out;
 }
 
@@ -1446,6 +1710,11 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // and the determinant stays exactly 1: a shear perpendicular to its own
   // gradient cannot fold, however wide it opens. Rust twin: `Reframe::bent`.
   var out: Band;
+  // The seam geometry this fragment has already worked out, carried rather
+  // than recomputed: the azimuth is what the colour field is read at and the
+  // sine out of the seam plane is what fades it (issue #103, stage 7).
+  out.azimuth = flat / reach;
+  out.off_seam = body.z / length(body);
   out.crossover = band_width(applied);
   let limit = FOLD * out.crossover;
   let carried = clamp(applied, -limit, limit);
@@ -2052,6 +2321,13 @@ fn read_photometry(held: ptr<function, Cell>) -> bool {
   return true;
 }
 
+// Whether the disparity this direction is DRAWN with is inside the near knee:
+// the reading times the strength its evidence has earned, so an expired
+// near-field reading is not one. Rust twin: `near_field`.
+fn near_field(cell: Cell) -> bool {
+  return abs(cell.disparity) * clamp(cell.confidence / KEEP, 0.0, 1.0) >= NEAR_KNEE;
+}
+
 // The pooled exposure, over the whole ring and over media time. Rust twin:
 // `pooled_gain`.
 //
@@ -2075,7 +2351,7 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
     // knee takes the step a fitted gain leaves from 15.7 codes to 3.6 on the
     // worst of them (`kjerag-spike --bin expose`, the near and far rows of
     // the `models` table).
-    if abs(cell.disparity) >= NEAR_KNEE {
+    if near_field(cell) {
       continue;
     }
     // Least squares in codes, per channel: each direction weighs its own
@@ -2182,6 +2458,68 @@ fn pool_along() {
   out.terms = solve5(&normal, &right);
   out.evidence = evidence;
   band.along = out;
+}
+
+// The colour field round the ring, per channel (issue #103, stage 7). Rust
+// twin: `Tint::fit`.
+//
+// One lane, for `pool_along`'s reason: this is three 5x5 systems accumulated
+// over 128 cells, once per frame, against a correlation that reads two grids
+// per direction over half of them. The constant each fit finds is thrown away,
+// because `pool` above estimates that better - least squares in codes rather
+// than in logs, which is the difference stage 3 measured across nine captures.
+//
+// NO TIME CONSTANT OF ITS OWN. What it is fitted to is already the per-
+// direction state, whose colour is written on the frame it is read on and
+// whose confidence is smoothed at TAU_FAR, so the field inherits that. A reset
+// empties the cells and the fit then answers zero by arithmetic, which is the
+// picture stage 3 drew.
+@compute @workgroup_size(1)
+fn pool_tint() {
+  var terms = array<f32, 12>();
+  var evidence = 0.0;
+  for (var channel = 0u; channel < 3u; channel += 1u) {
+    var normal = array<f32, 25>();
+    var right = array<f32, 5>();
+    evidence = 0.0;
+    for (var index = 0u; index < AZIMUTHS; index += 1u) {
+      let cell = band.cells[index];
+      // Far field only, at the band's own knee, for stage 3's reason.
+      if near_field(cell) {
+        continue;
+      }
+      let believed = clamp(cell.hue_conf / KEEP, 0.0, 1.0);
+      let low = decoded(cell.lit, cell.chroma[0], cell.chroma[1]);
+      let high = decoded(cell.lit * exp(cell.tone), cell.chroma[2], cell.chroma[3]);
+      if believed <= 0.0 || low[channel] <= 0.0 || high[channel] <= 0.0 {
+        continue;
+      }
+      let trust = believed * low[channel] * low[channel];
+      let read = log(high[channel] / low[channel]);
+      let phi = f32(index) / f32(AZIMUTHS) * TAU;
+      let cosine = cos(phi);
+      let sine = sin(phi);
+      let basis = array<f32, 5>(1.0, cosine, sine, cosine * cosine - sine * sine, 2.0 * cosine * sine);
+      for (var row = 0u; row < 5u; row += 1u) {
+        for (var column = 0u; column < 5u; column += 1u) {
+          normal[row * 5u + column] += trust * basis[row] * basis[column];
+        }
+        right[row] += trust * basis[row] * read;
+      }
+      evidence += believed;
+    }
+    for (var term = 0u; term < 5u; term += 1u) {
+      normal[term * 5u + term] += RIDGE;
+    }
+    let fitted = solve5(&normal, &right);
+    for (var term = 0u; term < 4u; term += 1u) {
+      terms[4u * channel + term] = clamp(fitted[term + 1u], -LIMIT_LN, LIMIT_LN);
+    }
+  }
+  var out: Tint;
+  out.terms = terms;
+  out.evidence = evidence;
+  band.tint = out;
 }
 
 // Gaussian elimination with no pivoting on a 5x5. Safe without pivoting
@@ -2756,11 +3094,11 @@ mod tests {
                 .map(|index| lit_cell(0.02, 0.2 + 0.003 * index as f32, gain))
                 .collect();
             let (read, evidence) = pooled_gain(&ring).expect("a ring that correlated");
-            for channel in 0..3 {
+            for (channel, held) in read.iter().enumerate() {
                 assert!(
-                    (read[channel] - gain.ln()).abs() < 1e-5,
+                    (held - gain.ln()).abs() < 1e-5,
                     "a ring at gain {gain} read channel {channel} back at {}",
-                    read[channel].exp(),
+                    held.exp(),
                 );
             }
             assert!((evidence - 1.0).abs() < 1e-5, "evidence {evidence}");
@@ -2820,6 +3158,107 @@ mod tests {
             })
             .collect();
         assert!(pooled_gain(&unread).is_none());
+    }
+
+    #[test]
+    fn a_ring_whose_colour_turns_once_round_it_is_fitted_and_the_constant_is_left_alone() {
+        // The field, as the positive control every column in this file is
+        // required to carry: a known shape put into the ring has to come back
+        // as itself, and the constant has to stay with `Tone` rather than
+        // being counted twice.
+        let put = |channel: usize, amplitude: f32| {
+            let ring: Vec<Cell> = (0..AZIMUTHS)
+                .map(|index| {
+                    let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+                    let mut gain = [1.03f32; 3];
+                    gain[channel] = 1.03 * (amplitude * phi.cos()).exp();
+                    hue_cell(0.6, gain)
+                })
+                .collect();
+            (Tint::fit(&ring), pooled_gain(&ring).expect("a ring").0)
+        };
+        for amplitude in [0.01f32, 0.04] {
+            let (field, gain) = put(2, amplitude);
+            // The one-cycle cosine of the channel it was put in, and nothing
+            // in the other two: 128 directions is a ridge of 1 against a
+            // weight of about 46, so the fit gives up about two percent of
+            // itself to the shrinkage and no more.
+            let read = field.terms[8];
+            assert!(
+                (read / amplitude - 1.0).abs() < 0.05,
+                "{amplitude} came back as {read}",
+            );
+            for term in [0, 4] {
+                assert!(field.terms[term].abs() < 0.002, "{:?}", field.terms);
+            }
+            // And the constant is where it was: the field carries no part of
+            // it, so the two corrections cannot double-count.
+            assert!(
+                (gain[1] - 1.03f32.ln()).abs() < 0.01,
+                "the constant moved to {}",
+                gain[1],
+            );
+            // A field is zero at the azimuth its cosine crosses zero and
+            // whole a quarter turn away, which is what says the phase is
+            // right and not merely the size.
+            let quarter = std::f32::consts::FRAC_PI_2;
+            assert!(field.at(quarter.cos(), quarter.sin())[2].abs() < 0.002);
+            assert!((field.at(1.0, 0.0)[2] - read).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_ring_with_no_colour_evidence_fits_exactly_nothing() {
+        // The ridge is what makes this an equality rather than a division,
+        // and the equality is what keeps a file's first frames and every
+        // one-lens file byte-identical.
+        let bare = vec![Cell::default(); AZIMUTHS];
+        assert_eq!(Tint::fit(&bare), Tint::default());
+        assert_eq!(Tint::default().at(1.0, 0.0), [0.0; 3]);
+        assert_eq!(Tint::default().at(0.3, 0.7), [0.0; 3]);
+    }
+
+    #[test]
+    fn the_colour_field_is_whole_across_the_handover_and_gone_by_the_overlap() {
+        // What the fade has to do, in the three places it has to do it. The
+        // fixture's two lenses overlap by 14.4 degrees, 7.2 a side.
+        let half = 7.22f32.to_radians();
+        let sine = |degrees: f32| degrees.to_radians().sin();
+        // Whole across every crossover the band can open, so the step it
+        // removes is removed exactly and the mixed picture carries one number.
+        for degrees in [0.0, 1.0, WIDEST_DEG] {
+            assert_eq!(fade(sine(degrees), half), 1.0, "at {degrees} degrees");
+            assert_eq!(fade(-sine(degrees), half), 1.0, "at -{degrees} degrees");
+        }
+        // Gone by the overlap, and gone past it: a hemisphere away from the
+        // seam is byte-identical whatever the ring read.
+        for degrees in [7.22, 20.0, 89.0] {
+            assert_eq!(fade(sine(degrees), half), 0.0, "at {degrees} degrees");
+        }
+        // And monotone in between, with no corner at either end: the second
+        // difference never changes sign inside a half, which is what a
+        // smoothstep buys over a line and what keeps a Mach band out.
+        let mut held = 1.0;
+        let mut steepest: f32 = 0.0;
+        for step in 0..=400 {
+            let degrees = WIDEST_DEG + (7.22 - WIDEST_DEG) * step as f32 / 400.0;
+            let now = fade(sine(degrees), half);
+            assert!(now <= held + 1e-6, "the fade rose at {degrees}");
+            steepest = steepest.max((held - now) / ((7.22 - WIDEST_DEG) / 400.0));
+            held = now;
+        }
+        // The steepest the fade can be, per degree, which is what a
+        // correction of a given size costs the picture in gradient: 1.5 over
+        // the width, which is a smoothstep's own peak slope.
+        assert!(
+            (steepest - 1.5 / (7.22 - WIDEST_DEG)).abs() < 0.02,
+            "the fade peaks at {steepest} per degree",
+        );
+        // A camera whose lenses do not overlap past the widest crossover
+        // takes no field at all, and a file with one lens stream is that
+        // camera: `Reframe::overlap` answers `None` and the block carries 0.
+        assert_eq!(fade(0.0, 0.0), 0.0);
+        assert_eq!(fade(0.0, WIDEST_DEG.to_radians()), 0.0);
     }
 
     #[test]
@@ -2918,8 +3357,8 @@ mod tests {
         // arithmetic that has to hold at every size.
         for gain in [0.90f32, 0.98, 1.0, 1.05, 1.15] {
             let split = Tone::read([gain.ln().clamp(-LIMIT_LN, LIMIT_LN); 3], 1.0).split();
-            for channel in 0..3 {
-                let lens0 = 100.0 * split[0][channel];
+            for (channel, low) in split[0].iter().enumerate() {
+                let lens0 = 100.0 * low;
                 let lens1 = 100.0 * gain.clamp(-LIMIT_LN.exp(), LIMIT_LN.exp()) * split[1][channel];
                 assert!(
                     (lens0 - lens1).abs() < 1e-3,
@@ -2927,7 +3366,7 @@ mod tests {
                 );
                 // Symmetric: the two multipliers are reciprocals, so the
                 // picture's own mean brightness is left where it was.
-                assert!((split[0][channel] * split[1][channel] - 1.0).abs() < 1e-6);
+                assert!((low * split[1][channel] - 1.0).abs() < 1e-6);
             }
         }
     }

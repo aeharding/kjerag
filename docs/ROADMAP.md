@@ -951,6 +951,50 @@ live, no keyframe UI ever.
   was shown able to fail before it was believed: against the stale file it
   names all four crates, ffmpeg-next 7.1.0 among them.
 
+- 2026-08-01 **The seam hands over a colour, and one number could never have
+  reached it** (issue #103, stage 7,
+  docs/research/insv-format.md 6.11). The owner's verdict on the merged
+  geometry work: *"the worst part now is the change in colour at the seam,
+  especially on the sky or when the sun is in one of the lenses."* Stage 3
+  corrects one gain for all three channels, so the SPREAD between the channels
+  survives it exactly however well it is fitted, and that spread is 3.4 to 5.6
+  codes on the owner's own six captures and 1.5 to 31 across four camera
+  models - over the one code an 8-bit picture can carry on every one. On a
+  corpus X4 it is **10.29 codes with the sun in one lens and 0.47 with the sun
+  in neither**, which is the owner's own sentence measured in somebody else's
+  footage. So `Tone` carries three gains in the same sixteen bytes.
+
+  Two findings changed the design. **The pass had never read the content the
+  complaint is about**: the band refuses a patch under its contrast gate, so
+  20 to 64 percent of a real seam - the sky - carried no reading at all, and
+  the gain was measured on the ground and applied to the sky. A flat patch has
+  no geometry and the best colour on the ring, because what a displaced window
+  costs a photometry is the content's own gradient across it: measured at 0.33
+  to 0.76 codes rms at the residual the pass leaves, against differences of 2
+  to 33. And **the difference is not one number round the ring**: a
+  per-channel constant leaves 1.0 to 6.2 codes rms on the owner's captures
+  against a frame-noise floor of 0.4 to 3.2, and the same five-term basis
+  stage 5 fits the geometry through takes another third to a half off it. The
+  null says that shape is not a window that moved: 0.15 to 0.25 codes of
+  one-cycle amplitude against the measurement's 1.4 to 4.1.
+
+  The cycles are applied as a FIELD near the seam, whole across every
+  crossover the band can open and faded out by `Reframe::overlap` - the one
+  angle in the problem that is a property of the cameras. Carrying it over the
+  whole hemisphere the way stage 5 carries its rotation was measured and
+  refused: lens shading would read the same on every scene of one file and
+  this moves by 3 to 27 codes between five places in one capture, so it is
+  glare, and glare has no business being painted over half a sphere. The
+  glare OFFSET stage 3 priced is answered by measurement rather than by a
+  build: on the content that can tell a gain from an offset the two are
+  indistinguishable and the pair together buys under a tenth of a code, so no
+  black level is moved.
+
+  Eight narrow views round the seam at the owner's own reference instant:
+  hue step 8.48 codes mean before, 5.22 after, seven of eight improved. It is
+  not under one code and does not claim to be; what is left is the part of the
+  ring that is not a constant, one cycle or two.
+
 - 2026-08-01 **The band's cost was the fetch, not the solve** (issue #103,
   stage 2). The obvious optimisation was to score each candidate shift on a
   quarter of the patch's samples, which is what `seam::best_shift` does. It

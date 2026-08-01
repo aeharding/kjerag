@@ -901,7 +901,7 @@ fn field(options: &Options) -> Fallible<()> {
     for class in [Class::All, Class::Flat, Class::Textured, Class::Sun] {
         models(truth, class);
     }
-    controls(&fields, options);
+    controls(&fields);
     Ok(())
 }
 
@@ -1132,7 +1132,7 @@ fn models(field: &Field, class: Class) {
 }
 
 /// Every control, beside the number each one has to produce.
-fn controls(fields: &[Field], options: &Options) {
+fn controls(fields: &[Field]) {
     println!(
         "\ncontrols. every trial runs the SAME code on the SAME frames: only the sampling \n\
          directions, one multiplier and one addend change. a per-channel reading is a \n\
@@ -1259,9 +1259,6 @@ fn controls(fields: &[Field], options: &Options) {
         confound * 0.2,
         truth.abs() / (confound * 0.2).max(f64::MIN_POSITIVE),
     );
-    if options.verbose {
-        return;
-    }
 }
 
 /// What each azimuth read, so a pooled number can be checked against the things
@@ -1307,7 +1304,13 @@ fn profile(options: &Options) -> Fallible<()> {
     std::fs::create_dir_all(&out)?;
     let size = Size::new(options.size, options.size);
 
-    let draw = |held: bool| -> Fallible<(Picture, Reframe)> {
+    let draw = |held: bool| -> Fallible<(
+        Picture,
+        Reframe,
+        kjerag_render::Tone,
+        kjerag_render::Tint,
+        f32,
+    )> {
         let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
         pipeline.hold_tone(held);
         let mut scene = Scene::still(
@@ -1336,10 +1339,23 @@ fn profile(options: &Options) -> Fallible<()> {
         let mapped = scene
             .mapped(options.camera(), 1.0)
             .ok_or("no frame to map")?;
-        Ok((shot.ok_or("no frame decoded at that instant")?, mapped))
+        let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
+        let (_, tint, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        // How much of the ring answered about COLOUR, which is not how much
+        // answered about geometry: the two are separate channels since stage 7
+        // and most of a sky seam is only ever the first.
+        let colours =
+            cells.iter().filter(|cell| cell.hue_conf > 0.0).count() as f32 / cells.len() as f32;
+        Ok((
+            shot.ok_or("no frame decoded at that instant")?,
+            mapped,
+            tone,
+            tint,
+            colours,
+        ))
     };
-    let (before, mapped) = draw(true)?;
-    let (after, _) = draw(false)?;
+    let (before, mapped, _, _, _) = draw(true)?;
+    let (after, _, tone, tint, colours) = draw(false)?;
 
     let stem = format!("{}-{}", options.stem(), options.tag);
     before.save(&gpu, &out.join(format!("{stem}-1-held.png")))?;
@@ -1347,15 +1363,43 @@ fn profile(options: &Options) -> Fallible<()> {
     after
         .amplified(&before)
         .save(&gpu, &out.join(format!("{stem}-3-what-moved.png")))?;
+    let split = tone.split();
     println!(
         "\nwrote three pictures into {} at yaw {:.2}, pitch {:.2}, fov {:.2}, {} frames in.\n\
-         {}",
+         {}\ngain:   R {:+.5} G {:+.5} B {:+.5} ln, evidence {:.3}, {:.0} percent of the ring \n\
+         \thad a colour to read. lens 0 is multiplied by {:.5} {:.5} {:.5} and lens 1 by \n\
+         \t{:.5} {:.5} {:.5}.",
         out.display(),
         options.yaw,
         options.pitch,
         options.fov,
         options.count.max(1),
         after.against(&before).report(),
+        tone.log_gain[0],
+        tone.log_gain[1],
+        tone.log_gain[2],
+        tone.evidence,
+        100.0 * colours,
+        split[0][0],
+        split[0][1],
+        split[0][2],
+        split[1][0],
+        split[1][1],
+        split[1][2],
+    );
+    println!(
+        "field:  what the ring says ROUND the seam, on top of that, as the amplitude of each \n\
+         \tcycle in codes at a mid grey of 128, evidence {:.1} directions:\n\
+         \t  R one cycle {:.2}, two cycles {:.2}\n\
+         \t  G one cycle {:.2}, two cycles {:.2}\n\
+         \t  B one cycle {:.2}, two cycles {:.2}",
+        tint.evidence,
+        128.0 * f64::from(tint.terms[0]).hypot(f64::from(tint.terms[1])),
+        128.0 * f64::from(tint.terms[2]).hypot(f64::from(tint.terms[3])),
+        128.0 * f64::from(tint.terms[4]).hypot(f64::from(tint.terms[5])),
+        128.0 * f64::from(tint.terms[6]).hypot(f64::from(tint.terms[7])),
+        128.0 * f64::from(tint.terms[8]).hypot(f64::from(tint.terms[9])),
+        128.0 * f64::from(tint.terms[10]).hypot(f64::from(tint.terms[11])),
     );
     for (name, picture) in [("the band held off", &before), ("as it draws", &after)] {
         println!("\n=== {name} ===");
@@ -1544,17 +1588,17 @@ fn studio(options: &Options) -> Fallible<()> {
     );
     let mut column = vec![[0.0f64; 3]; width];
     for row in low..high {
-        for x in 0..width {
+        for (x, held) in column.iter_mut().enumerate() {
             let at = (row * width + x) * 3;
-            for channel in 0..3 {
-                column[x][channel] += f64::from(bytes[at + channel]);
+            for (channel, sum) in held.iter_mut().enumerate() {
+                *sum += f64::from(bytes[at + channel]);
             }
         }
     }
     let rows = (high - low) as f64;
     for held in &mut column {
-        for channel in 0..3 {
-            held[channel] /= rows;
+        for sum in held.iter_mut() {
+            *sum /= rows;
         }
     }
     seam_transition(&column, options);

@@ -2813,3 +2813,221 @@ hemisphere interiors are **not**: they move by at most one code of 255, mean
 0.23 to 0.90 depending on the view. That is the price of the correction and
 not a defect of it - two hemispheres cannot be made to agree without changing
 at least one of them.
+
+### 6.11 The seam hands over a colour, and it is a shape (issue #103, stage 7)
+
+**Confidence: HIGH for the method, the controls and the per-channel step; HIGH
+for the ring's shape being real; MED for what any one correction leaves.**
+Measured 2026-08-01 with `kjerag-spike --bin colour` on six of the owner's
+captures, a second shooter's indoor and outdoor pair, and an X5, an X4 and an
+X3 from three more shooters.
+
+The owner's verdict on the merged geometry work named what was left: *"the
+worst part now is the change in colour at the seam, especially on the sky or
+when the sun is in one of the lenses."* Both halves of that sentence are
+measured below, and the second one is measured on somebody else's camera.
+
+#### What stage 3 could not reach, by construction
+
+6.10 corrects one gain, applied to all three channels of both lenses. **A
+single multiplier common to R, G and B cannot change what the two lenses
+disagree about in hue, however well it is fitted**, so the spread between the
+three channels' steps is exactly what survives it. That spread, at the seam, on
+flat content:
+
+| capture | R | G | B | spread |
+| --- | ---: | ---: | ---: | ---: |
+| owner A | +1.01 | +1.07 | -2.43 | **3.50** |
+| owner A, elsewhere | +2.03 | +1.20 | -3.55 | **5.58** |
+| owner B | +1.25 | +1.93 | -1.74 | **3.67** |
+| owner C | +0.07 | +0.76 | -2.95 | **3.71** |
+| owner D | -1.97 | +0.27 | -3.64 | **3.91** |
+| owner E | -3.48 | -4.94 | -8.41 | **4.93** |
+| second shooter, indoors | +2.87 | -0.31 | +1.29 | 3.18 |
+| corpus X5 | -1.84 | -3.38 | -1.98 | 1.54 |
+| corpus X3 | +2.30 | -5.83 | -9.16 | 11.46 |
+| corpus X4 | +17.28 | +22.80 | +32.85 | 15.58 |
+
+Codes of 255, lens 1 minus lens 0. **Every capture is over the one code an
+8-bit picture can carry**, and the owner's own six run 3.4 to 5.6.
+
+**The sun, isolated.** On the corpus X4 the same measurement over a whole
+capture, split by whether one lens had the sun in it and the other did not:
+
+| | R | G | B | spread |
+| --- | ---: | ---: | ---: | ---: |
+| the sun in one lens | +6.08 | +10.39 | +16.37 | **10.29** |
+| the sun in neither | +7.23 | +7.67 | +7.70 | **0.47** |
+
+Twenty-two times, on one camera, in one capture, on a shooter who is not the
+owner. The brightness step barely moves; the hue step is the whole of it.
+
+#### The method, and the two things that are new
+
+Every reading is taken after the two lenses are lined up on the same content,
+which is 6.10's method and the reason it can be trusted; the estimator that
+finds the alignment is normalized cross-correlation, which is invariant under
+`b -> g*b + o`, so alignment and colour are orthogonal by construction.
+
+**One: flat content, which the pass had never read.** The band refuses a patch
+with under six codes of standard deviation in it, because flat sky correlates
+with anything. On the nine captures measured that is **20 to 64 percent of the
+ring** - and it is where the owner sees the defect. What a photometry needs
+from an alignment is proportional to the content's own gradient across the
+window, so the patch that is hardest to align is the easiest to read a colour
+on. That is not taken on trust:
+
+| the same lens against its own picture, displaced | R | G | B |
+| --- | ---: | ---: | ---: |
+| +0.20 deg, every direction, rms round the ring | 1.80 | 1.44 | 1.25 |
+| +0.20 deg, **flat directions only** | **0.76** | **0.51** | **0.33** |
+| +0.50 deg, every direction | 4.51 | 3.64 | 3.11 |
+
+Codes. The pass leaves 0.02 degrees far field on the epipolar axis and 0.05 to
+0.20 along the seam after stage 5, so on flat content a misregistration is
+worth under a code against colour differences of 2 to 33.
+
+**Two: per channel, in the space the pass multiplies.** Samples are decoded
+through the fragment shader's own BT.709 matrix, in the video's own gamma-coded
+space, because that is what the correction multiplies and what an eye reads. A
+mean commutes with a matrix, so a patch's three channel means are that matrix
+applied to its luma mean and its two chroma means, exactly.
+
+#### The controls
+
+| trial | R | G | B | has to be |
+| --- | ---: | ---: | ---: | --- |
+| the measurement | -1.88 | -1.23 | -4.20 | - |
+| the same patches, not lined up first | -2.10 | -1.48 | -4.49 | - |
+| lens 0 against its own picture, same directions | 0.000 | 0.000 | 0.000 | 0 0 0 |
+| lens 0 against its own picture, at the found shift | -0.19 | -0.04 | +0.05 | 0 0 0 |
+| a gain of 1.02 injected into B | -1.88 | -1.23 | -2.39 | B only |
+| an offset of +4 codes injected into R | +2.12 | -1.23 | -4.20 | R only |
+
+Codes, one capture, four frames. The injections come back in the channel they
+were put in and in no other; the second null is what says a displaced window is
+not what is being called a colour.
+
+#### Is it a gain or is it glare
+
+An exposure or white-balance difference is a **gain**; veiling glare, a black
+level and the toe of a tone curve are an **offset**. They are told apart only
+by a fit spanning brightnesses. On the content that can tell them apart - flat
+patches from 20 to 190 codes, on the owner's own sun-in-one-lens reference:
+
+| model | R | G | B |
+| --- | ---: | ---: | ---: |
+| nothing at all | 2.97 | 1.83 | 3.15 |
+| a gain | 2.81 | 1.38 | 2.13 |
+| an offset | 2.75 | 1.38 | 2.06 |
+| both together | 2.51 | 1.38 | 1.99 |
+
+Codes left. **A gain and an offset are not distinguishable here**, and the pair
+together buys under a tenth of a code over either alone. So **no black level is
+moved**: stage 3's priced glare-offset follow-up is answered by measurement
+rather than by a build, and the correction stays multiplicative, which cannot
+make a picture negative and cannot lift a black.
+
+#### It is not one number round the ring, and the shape is the same one
+
+Per azimuth, on flat content, what a correction of each shape leaves round the
+ring, in codes rms, beside what the same azimuth reads on consecutive frames -
+which is the instrument's own noise, and the number any fit has to beat:
+
+| capture | channel | nothing | a constant | + one cycle | + two cycles | noise |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| owner A | B | 3.13 | 2.03 | 1.76 | **1.37** | 0.45 |
+| owner A, elsewhere | B | 3.82 | 1.22 | 1.03 | **1.01** | 0.67 |
+| owner B | B | 3.83 | 3.39 | 1.50 | **1.17** | 0.66 |
+| owner C | B | 3.64 | 1.77 | 1.49 | **1.16** | 0.38 |
+| owner D | B | 5.99 | 2.18 | 2.00 | **1.89** | 0.80 |
+| owner E | B | 10.10 | 6.18 | 4.88 | **4.32** | 3.16 |
+| corpus X5 | B | 2.25 | 1.07 | 0.95 | **0.78** | 0.95 |
+| corpus X3 | B | 10.02 | 3.89 | 2.32 | **2.22** | 0.31 |
+| corpus X4 | B | 53.03 | 40.73 | 24.63 | **18.27** | 1.07 |
+
+The basis is the one `band::Along` already fits the along-seam geometry
+through, and each term has a name there: a constant, one cycle of the azimuth,
+two cycles. **The cycles are worth a third to a half again on every capture**,
+and they are above the noise on every capture.
+
+**And they are not a window that moved.** The same fit, run on the null - one
+lens against its own picture displaced by the residual the pass leaves, where
+the true field is zero at every azimuth:
+
+| | one-cycle amplitude | two-cycle |
+| --- | ---: | ---: |
+| the measurement, flat content, R / G / B | 4.05 / 3.58 / 1.44 | 1.91 / 0.07 / 3.08 |
+| the null at +0.20 deg, flat content | 0.15 / 0.16 / 0.25 | 0.14 / 0.02 / 0.02 |
+
+Codes. Six to twenty-seven times.
+
+#### What ships, and where each half of it is applied
+
+**The constant, per channel, over the whole hemisphere.** 6.10's estimator
+unchanged - least squares in codes, far field only, symmetric split, smoothed
+at `TAU_FAR_S`, one runaway guard - run three times instead of once. A constant
+is one difference between two cameras, a hemisphere can carry one number, and a
+number applied to a hemisphere has no gradient anywhere.
+
+**The cycles, as a field near the seam, fading out at the overlap.** 6.10
+refused a gain that varied round the ring and the reason still stands: a ring
+of numbers applied to a hemisphere is a brightness that changes as the view
+pans. A **field over body directions** is not that - it does not move when the
+view does - but it has to end somewhere, and where it ends is measured rather
+than chosen. It is whole across every crossover the band can open, so the step
+it removes is removed exactly, and it fades to nothing by
+`Reframe::overlap`, which is where the two lenses stop having a common picture
+and therefore where "how these two differ here" stops being a checkable
+statement. The fade is a smoothstep, so it has no corner at either end; a
+gradient that stops abruptly is a Mach band, which is the artifact this is about.
+
+**Carrying it over the whole hemisphere was measured and refused.** That would
+be gentler, and lens shading would justify it: shading is a property of the
+glass and would read the same on every scene of one file. **This field does
+not.** At one azimuth, between five places in the same capture, it moves by 3
+to 27 codes. What varies with the scene is glare, and glare has no business
+being painted over half a sphere.
+
+**One defect found on the way.** 6.10's far-field cut read `Cell::disparity`
+and nothing else. A disparity is kept when a direction stops correlating and
+only the evidence behind it is given up - so a direction that once read a boot
+at 3 m and is now flat sky still carried the boot's number, and the cut kept it
+out of the colour for the rest of the file. That is the same defect stage 2 was
+sent back for. The cut now asks the disparity the pass is **drawing** with,
+which is the reading times the strength its own evidence has earned; it adds no
+constant, and it changes nothing about 6.10's gain, where a direction with no
+confidence weighed exactly zero anyway. On the owner's reference it takes the
+colour pool from 37 directions to 70.
+
+#### What it moves, in the picture
+
+At eight narrow views centred on the seam round the whole ring, at the instant
+of the owner's own reference, 1024 px at fov 40, in codes of 255. The statistic
+is the hue step: each side's own trend fitted where one lens draws alone and
+extrapolated to the seam, then the spread between the three channels', which is
+what a brightness correction cannot touch. **The two builds see the same
+scene**, so the difference between them is the correction and nothing else.
+
+| view | before | as it draws |
+| --- | ---: | ---: |
+| 1 | 4.32 | 3.64 |
+| 2 | 14.76 | **7.55** |
+| 3 | 19.53 | **10.33** |
+| 4 | 16.42 | **10.36** |
+| 5 | 5.20 | 3.41 |
+| 6 | 2.68 | 2.29 |
+| 7 | 0.98 | **0.17** |
+| 8 | 3.98 | 4.04 |
+| mean | 8.48 | **5.22** |
+
+Seven of eight improve and one is unchanged within the statistic's own noise.
+At the owner's own wide reference view, where the seam runs round the whole
+frame and the statistic is therefore a ring average that a field cannot reach,
+9.29 to 4.73.
+
+**It is not under one code and it does not claim to be.** What is left is the
+part of the ring that is not a constant, one cycle or two - which the table
+above prices at 1.0 to 4.3 codes rms on the owner's captures against a noise
+floor of 0.4 to 3.2, and at 18 codes on one corpus camera with the sun in a
+lens.

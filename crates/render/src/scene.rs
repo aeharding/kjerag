@@ -1092,6 +1092,10 @@ struct Band {
     /// The second dispatch of the same pass: what the ring just read, pooled
     /// into one exposure for the picture (issue #103, stage 3).
     pool: wgpu::ComputePipeline,
+    /// What the ring's colour does ROUND the seam, fitted over the same cells
+    /// and dispatched beside the pooling that takes its constant out
+    /// (issue #103, stage 7).
+    pool_tint: wgpu::ComputePipeline,
     /// The along-seam field fitted over the whole ring, dispatched beside the
     /// exposure pooling and over the same cells (issue #103, stage 5).
     pool_along: wgpu::ComputePipeline,
@@ -1265,6 +1269,8 @@ impl ScenePipeline {
             // no barrier has to be asked for.
             if !self.band.tone_held {
                 pass.set_pipeline(&self.band.pool);
+                pass.dispatch_workgroups(1, 1, 1);
+                pass.set_pipeline(&self.band.pool_tint);
                 pass.dispatch_workgroups(1, 1, 1);
             }
             pass.set_pipeline(&self.band.pool_along);
@@ -1507,9 +1513,9 @@ impl ScenePipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Along, Vec<band::Cell>)> {
-        let (_, along, cells) = self.band.read(device, queue)?;
-        Ok((along, cells))
+    ) -> Fallible<(band::Along, band::Tint, Vec<band::Cell>)> {
+        let (_, along, tint, cells) = self.band.read(device, queue)?;
+        Ok((along, tint, cells))
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1604,6 +1610,7 @@ impl Band {
         };
         let pipeline = compute("measure");
         let pool = compute("pool");
+        let pool_tint = compute("pool_tint");
         let pool_along = compute("pool_along");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
@@ -1644,6 +1651,7 @@ impl Band {
         Self {
             pipeline,
             pool,
+            pool_tint,
             pool_along,
             state,
             watch,
@@ -1692,7 +1700,7 @@ impl Band {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
+    ) -> Fallible<(band::Tone, band::Along, band::Tint, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1717,6 +1725,10 @@ impl Band {
             std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
             float(band::ALONG_AT + 20),
         );
+        let tint = band::Tint::read(
+            std::array::from_fn(|term| float(band::TINT_AT + 4 * term)),
+            float(band::TINT_AT + 48),
+        );
         let cells = (0..band::AZIMUTHS)
             .map(|index| {
                 let at = band::CELLS_AT + index * std::mem::size_of::<band::Cell>();
@@ -1735,7 +1747,7 @@ impl Band {
             .collect();
         drop(mapped);
         readback.unmap();
-        Ok((tone, along, cells))
+        Ok((tone, along, tint, cells))
     }
 }
 
@@ -1937,7 +1949,7 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 // `textureSample` computes its own level from derivatives and needs uniform
 // control flow to do it, and every one of these textures has a single level
 // anyway.
-fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
+fn picture(mix: Blend, ratio: vec2<f32>, tone: mat2x3<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
   // What the two lenses' colours have to be brought together by, per channel,
@@ -1947,7 +1959,6 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   // always used and a picture with no reading behind it is the picture stage 2
   // drew. It multiplies the RGB the two planes decode to rather than the luma
   // alone, which is what lets three numbers reach a hue at all.
-  let tone = tone_split();
   if mix.weights[0] > 0.0 {
     rgb += (mix.weights[0] * tone[0]) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
     total += mix.weights[0];
@@ -1993,8 +2004,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   // of the zoom (issue #47) is a fragment no lens has, and `picture` already
   // paints that. Nothing is sampled for it and no model is run.
   var mix: Blend;
+  // The constant alone until a ray has an azimuth to read the field at, which
+  // is the room around the ball and the two lens poles: `band_rest` answers
+  // for both and the fade answers zero there anyway.
+  var tone = tone_split();
   if look.w > 0.0 {
-    mix = blend(look.xyz, band_bend(look.xyz));
+    let at = band_bend(look.xyz);
+    mix = blend(look.xyz, at);
+    tone = colour_split(at);
   }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
@@ -2004,7 +2021,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[0].pixel),
     texel_ratio(mix.landings[1].pixel),
   );
-  let lens = picture(mix, ratio);
+  let lens = picture(mix, ratio, tone);
   return vec4<f32>(
     select(lens.rgb, linearize(lens.rgb), reframe.linearize > 0.5),
     lens.a,

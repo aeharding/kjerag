@@ -325,11 +325,20 @@ pub struct Reframe {
     /// are two grids and reach 1:1 an octave of zoom apart. [`Sampling`] is
     /// the names they come in.
     sharpen: [f32; 2],
+    /// Half the angle over which both lenses have the picture, in radians:
+    /// [`Self::overlap`]'s answer, halved, or zero for a file with one lens
+    /// stream (issue #103, stage 7).
+    ///
+    /// The one angle in the whole problem that is a property of the cameras
+    /// rather than a taste, which is why the colour field fades out at it
+    /// ([`super::band::Tint`]) and why it is read off the file's own
+    /// calibration rather than quoted at 14 degrees from the format study.
+    half_overlap: f32,
     /// A uniform block's size rounds up to its own alignment, which the
     /// matrices in [`LensBlock`] make 16 bytes. WGSL does that itself;
     /// `repr(C)` does not, and the two sizes have to agree or
     /// `min_binding_size` rejects the pipeline.
-    _pad: [f32; 4],
+    _pad: [f32; 3],
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -513,8 +522,21 @@ impl Reframe {
                 .rolling
                 .map_or([0.0; 2], |rolling| rolling.axis.map(|c| c as f32)),
             sharpen: sampling.limits(),
-            _pad: [0.0; 4],
+            half_overlap: 0.0,
+            _pad: [0.0; 3],
         }
+        .with_overlap()
+    }
+
+    /// The overlap the block's own lenses describe, written into it.
+    ///
+    /// After the block is built and not inside it, because
+    /// [`Self::overlap`] reads the very [`LensBlock`]s the constructor is
+    /// filling: it is the file's own answer and not a second copy of the
+    /// calibration.
+    fn with_overlap(mut self) -> Self {
+        self.half_overlap = 0.5 * self.overlap().unwrap_or(0.0);
+        self
     }
 
     /// No frame to draw: one lens with no picture in it, so the map still runs
@@ -543,7 +565,8 @@ impl Reframe {
             row_axis: [0.0; 2],
             // Every ray misses every lens, so no plane is ever sampled.
             sharpen: Sampling::default().limits(),
-            _pad: [0.0; 4],
+            half_overlap: 0.0,
+            _pad: [0.0; 3],
         }
     }
 
@@ -1637,12 +1660,14 @@ struct Reframe {
   // `Reframe::sharpen`.
   sharpen_luma: f32,
   sharpen_chroma: f32,
+  // Half the angle both lenses have the picture over, in radians, which is
+  // where the colour field fades out. Rust twin: `Reframe::half_overlap`.
+  half_overlap: f32,
   // WGSL rounds this block's size up to its own 16-byte alignment. Rust twin:
   // `Reframe::_pad`, which is what makes the two sizes agree.
   pad0: f32,
   pad1: f32,
   pad2: f32,
-  pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -1675,6 +1700,12 @@ struct Band {
   // the calibration is. Rust twin: `Bend::along`.
   along: vec3<f32>,
   crossover: f32,
+  // This ray's own place on the seam, worked out once for the geometry and
+  // read again by the colour (issue #103, stage 7): the azimuth as the cosine
+  // and sine a ring fit is evaluated at, and the sine of how far the ray is out
+  // of the seam plane, which is what fades the colour field.
+  azimuth: vec2<f32>,
+  off_seam: f32,
 };
 
 // x right, y down, z forward, matching the lens frame the model projects in.
