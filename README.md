@@ -22,6 +22,23 @@ the camera and press play. Zero configuration.
 - Copyable view references
 - Zero-copy hardware decode
 
+## Install
+
+[**Install Kjerag**](https://kjerag.harding.dev/dev.harding.Kjerag.flatpakref)
+in COSMIC Store, GNOME Software or Discover. One click, and updates arrive
+with everything else.
+
+Or two lines in a terminal:
+
+```sh
+flatpak remote-add --if-not-exists kjerag https://kjerag.harding.dev/kjerag.flatpakrepo
+flatpak install kjerag dev.harding.Kjerag
+```
+
+Every build is GPG signed. Single-file bundles, for a machine that should not
+carry a remote, are attached to each
+[release](https://github.com/aeharding/kjerag/releases).
+
 ## Status
 
 Beta.

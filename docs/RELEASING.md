@@ -28,14 +28,29 @@ gates on the tagged commit, builds the Flatpak with Flatpak's own GitHub
 action on an x86_64 and an aarch64 runner, and publishes a Release carrying
 `kjerag-0.2.0-x86_64.flatpak`, `kjerag-0.2.0-aarch64.flatpak` and a `.sha256`
 for each, with notes GitHub generates from what merged since the last tag.
-About ten minutes; the two builds run side by side. Then check what shipped,
-which is not the same question as whether it builds:
+About ten minutes; the two builds run side by side.
+
+**The same tag publishes the channel** (issue #137, docs/DISTRIBUTION.md 4.3).
+A second pair of builds is GPG signed and exported into the OSTree repository
+at `https://kjerag.harding.dev/`, which is where an installed Kjerag gets this
+version from and where a new one is installed from with a click. That half
+builds one arch at a time, because both write into one repository, so a tag is
+nearer twenty-five minutes end to end than ten. It needs the `GPG_PRIVATE_KEY`
+and `GPG_PASSPHRASE` repository secrets; without them that job fails and the
+Release is published anyway, which is the right way round.
+
+Then check what shipped, which is not the same question as whether it builds:
 
 ```sh
 gh release download 0.2.0
 flatpak install --user ./kjerag-0.2.0-x86_64.flatpak
 KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh ~/Videos/<file>.insv
 ```
+
+The same check answers for the channel, with the first two lines replaced by
+`flatpak update dev.harding.Kjerag`. Both install branch `stable` and there is
+only ever one of them on a machine, so whichever route the build arrived by,
+`flatpak run dev.harding.Kjerag` is the same app.
 
 That last line is the release check. The dry run above proved a **binary**
 opens a window on this box; this proves the **bundle** plays real footage
@@ -55,8 +70,11 @@ If the tag run fails, take the tag back, fix, and tag again:
 gh release delete 0.2.0 --yes --cleanup-tag
 ```
 
-Two things this does not do. It writes no prose: the changelog entry carries a
+That takes the Release and the tag back. It does not take the repository back,
+because the deploy already happened: fix, tag the next patch version, and the
+next deploy replaces it.
+
+One thing this does not do. It writes no prose: the changelog entry carries a
 version and a date, and if a release deserves words in a software centre, add
 a `<description>` to its entry in `resources/dev.harding.Kjerag.metainfo.xml`
-and push it like any other commit. And it does not submit to Flathub, which is
-owner-led and owner-coordinated (docs/DISTRIBUTION.md 4.1).
+and push it like any other commit.

@@ -35,10 +35,10 @@ Flatpak had never done before: no scratch patch, no 950 MB tarball, no
 network. Getting there turned up one defect on `main` and §3.8 is the record
 of it.
 
-**The channel is Flathub, and nothing else** (owner, 2026-07-31). Self-hosting
-a repository was considered and declined (§4.2). Flathub is reached under the
-one scoped exception in AGENTS.md, which is owner-coordinated and owner-led;
-§4.1 says what that permits and what it does not.
+**The channel is Kjerag's own signed repository**, `https://kjerag.harding.dev/`
+(owner, 2026-08-01; issue #137), published by the same version tag that builds
+the bundles. §4 is the decision and the machinery under it. It reverses the
+ruling of 2026-07-31, which was Flathub and nothing else.
 
 ---
 
@@ -1030,58 +1030,191 @@ command line with `--filesystem` gives `2 lens streams from 2 files`.
 
 ## 4. Publishing
 
-### 4.1 Flathub is the channel, under one scoped exception
+### 4.1 The channel is Kjerag's own signed repository
 
-**Flathub, and nothing else** (owner, 2026-07-31). AGENTS.md's standing rule
-is that all work stays inside the owner's repositories and that no agent
-opens, files or comments on anything outside them. A Flathub submission is a
-pull request against `flathub/flathub`, and the app afterwards lives in a
-repository under the `flathub` organisation, so it needed an exception and it
-got exactly one:
+**`https://kjerag.harding.dev/`, published by the version tag** (owner,
+2026-08-01; issue #137). A flatpak remote is a static OSTree repository over
+HTTP: `flatpak-builder --repo=<dir>` writes one, a GPG key signs it, GitHub
+Pages serves it, and a `.flatpakref` beside it makes an install one click.
 
-> ONE scoped exception (owner-granted 2026-07-31): Flathub publishing for
-> this app, done together with the owner and with him told before every
-> outward action; everything is prepared and previewed in this repo first.
+**This reverses 2026-07-31**, which was Flathub and nothing else, and it is
+not a change of mind about the price. Issue #71 costed self-hosting correctly
+and every line of that costing still holds: nobody browses a one-app remote,
+so there is no discovery in it, and update delivery and key management are
+ours permanently. What changed is §4.2, the availability of the thing those
+costs were being paid to avoid.
 
-Read it as narrow, because it is. It covers Flathub publishing for this app
-and nothing else, no agent takes an outward step the owner has not been told
-about first, and everything an outsider would see is built and reviewed here
-before it leaves. The rest of AGENTS.md's rule is untouched: no issues, no
-pull requests, no bug reports anywhere else, ever.
+**One cost issue #71 named is not one.** It recorded that a repository with no
+AppStream data leaves the app installable from the remote and invisible in
+COSMIC Store, GNOME Software and Discover. `flatpak build-update-repo`
+composes that data itself, from the metainfo the app already installs, and
+writes `appstream2/<arch>` into the repository; the tool flatter runs on every
+build is that command. Measured on the dry run, §4.3.
 
-The shape of a submission: the PR carries the manifest and the app ID; the
-ID's domain has to be one the owner controls (§3.6, which is why
-`harding.dev` won); the metainfo has to carry at least one screenshot; the
-build has to pass `flatpak-builder-lint`. Review is by humans and the
-permission set is the part they read hardest, which is the argument for §3.7
-being as small as it is.
+### 4.2 Flathub is not the channel
 
-What is left before a submission is worth previewing, and none of it is a
-Flathub problem: screenshots, which only the owner can take and agree to
-publish, and the X11 question, where "fix it" means someone runs the app
-under Xwayland first. Issue #75's rename was the third and it has landed, so
-the ID in the tree is the ID that was settled. §5 is the list.
+Flathub's contribution policy of 2026-05-29 rules out this project's
+development process, so that route is not open here.
 
-### 4.2 A self-hosted repo was the alternative, and it is declined
+What the tree keeps from the plan that was: the shape of a submission, because
+it is also the shape of a good app anywhere. The app ID's domain is one the
+owner controls and it answers (§3.6), the permission set is small and every
+line of it is argued (§3.7, docs/PERMISSIONS.md), and the metainfo is the file
+every software centre reads hardest, ours included now. The two
+`flatpak-builder-lint` complaints §3.6 records are still open questions rather
+than settled answers, and §5 still lists them.
 
-**Declined** (owner, 2026-07-31; issue #71, closed). It was the obvious
-fallback while Flathub looked unreachable: a flatpak remote is a static
-OSTree repository over HTTP, `flatpak-builder --repo=<dir>` already writes
-one, GitHub Pages serves a directory of static files, and none of it needs
-anyone's permission. The full shape, with the GPG signing, the pruning, the
-1 GB Pages cap against the `.Debug` ref, and the finding that decides whether
-it works at all (no AppStream data means the app is installable from the
-remote and invisible in COSMIC Store, GNOME Software and Discover), is
-written down on issue #71.
+The way back, if the policy ever changes, is one origin. A Flathub build of
+this manifest would be the same app on the same `stable` branch, so switching
+is `flatpak install flathub dev.harding.Kjerag` and deleting our remote, with
+no reinstall and no lost settings. **That is why the branch is `stable` and
+not `master`.**
 
-It lost on what it costs rather than on what it does: it gives up discovery,
-nobody browses a one-app remote, and it puts update delivery and key
-management on us permanently. One channel, and it is Flathub.
+### 4.3 How a tag publishes it
 
-**The single-file bundle stays**, because it is not a distribution channel:
-`flatpak build-bundle` produces one `.flatpak` that installs with no remote
-at all, which is how the owner gets a build to click a `.insv` against
-before anything is published.
+`.github/workflows/release.yml`, the `pages` job, next to the `bundle` job
+that issue #106 built. Three published actions and one step of shell; the
+model is andyholmes/valent's `cd.yml`, which does the same job for a GNOME app
+and proves the aarch64 half.
+
+1. **`crazy-max/ghaction-import-gpg`** imports the signing key from the
+   `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` repository secrets. No key, no
+   repository: the job fails rather than publishing something a client would
+   have to be told to trust anyway.
+2. **`andyholmes/flatter`** runs `flatpak-builder --repo` against the same
+   committed manifest, signs the result, runs `flatpak build-update-repo`
+   (which is what writes the AppStream refs and signs the summary), and caches
+   the repository so the next build adds to it rather than replacing it. It
+   runs in flatter's own `rust:25.08` image, which carries the freedesktop
+   Platform, Sdk and rust-stable for **both** arches already; `llvm21` is the
+   one thing the manifest names that the image lacks, and
+   `--install-deps-from=flathub` fetches it.
+3. **`JamesIves/github-pages-deploy-action`** pushes the repository directory
+   to the Pages branch as a single commit, at the root of the site, so the
+   remote URL is the bare domain.
+
+**The two arches share one repository, so they run one at a time**
+(`max-parallel: 1`). The second job restores the first's cache and adds to it,
+which is what makes one deploy carry both. Running them together would have
+each deploy a repository holding only its own arch, and the loser's would win.
+
+**Three files ride along**, copied out of `flatpak/pages/` and written beside
+the OSTree objects:
+
+- `CNAME`, which is what makes the custom domain stick, and which flatter also
+  reads out of the working directory to write the `Url` into the
+  `index.flatpakrepo` it generates.
+- `.nojekyll`, which is load-bearing rather than cargo cult: a branch-source
+  Pages site is a Jekyll build by default, Jekyll drops paths beginning with
+  an underscore, and OSTree names static deltas in a base64 alphabet that
+  contains one.
+- `index.html`, because the root of the domain is otherwise a 404 and the
+  domain is the thing people are given.
+
+**And two are generated**, because they carry the public half of the signing
+key and a committed copy would go stale the day it rotates:
+`kjerag.flatpakrepo` (`Title`, `Url`, `GPGKey`) adds the remote, and
+`dev.harding.Kjerag.flatpakref` (the same plus `Name`, `Branch=stable`,
+`SuggestRemoteName=kjerag`, `RuntimeRepo=flathub`, `IsRuntime=false`) installs
+the app and adds the remote in one click. `RuntimeRepo` is what lets that work
+on a machine that has never had Flathub configured: the app is ours, the
+runtime under it is not.
+
+Three things to know before touching this.
+
+- **The repository does not survive from tag to tag.** flatter's cache is a
+  GitHub Actions cache, and Actions caches are scoped to the ref that wrote
+  them: the two jobs of one tag share theirs, and the next tag starts from
+  nothing. So each release publishes a repository holding that release alone.
+  Updates work exactly as they should, because a client resolves the ref to
+  whatever commit the summary now names; what is given up is static deltas, so
+  an update downloads the app whole. The app is 8 MB.
+- **GitHub Pages is a soft-limit host**: 1 GB per site, 100 GB of bandwidth a
+  month, and it says out loud that a heavily subscribed Flatpak repository may
+  be throttled. One release of one 8 MB app on two arches is nowhere near it;
+  the day it is, the answer is a real object store, and only the `Url` fields
+  above change.
+- **`flatpak build-update-repo` runs inside flatter's cache save**, so
+  disabling the cache (`cache-key: ''`) would leave the repository with no
+  updated summary and no AppStream refs, which reads as a remote that has
+  nothing in it. Do not disable the cache.
+
+**Measured**, on the `0.1.1-pipelinetest1` dry run of 2026-08-01 (workflow run
+30720758898), signed with a throwaway key generated for it:
+
+```
+Dependency Extension: org.freedesktop.Sdk.Extension.llvm21 25.08
+Installing org.freedesktop.Sdk.Extension.llvm21/x86_64/25.08 from flathub
+    Finished `release` profile [optimized] target(s) in 6m 21s
+Running appstreamcli compose
+Exporting dev.harding.Kjerag to repo
+flatpak build-update-repo --gpg-sign=… /__w/kjerag/kjerag/repo
+Updating appstream branch
+```
+
+Sixteen minutes for the x86_64 job, no `WARNING:` line of any kind, and eight
+refs in the deployed repository afterwards: `app` and `.Debug` for each arch,
+`appstream` and `appstream2` for each arch. **15 MB for one arch, 30 MB for
+both**, which is the number to hold against the 1 GB cap. GitHub built the
+Pages site from the branch in 22 s and its certificate for the domain came
+back approved.
+
+Then, from this box, against `https://kjerag.harding.dev/` and nothing local:
+
+```
+$ flatpak remote-add --user --from kjerag …/kjerag.flatpakrepo
+$ flatpak remote-ls --user kjerag
+app/dev.harding.Kjerag/x86_64/stable   x86_64   stable   13.1 MB
+$ flatpak search Kjerag
+Kjerag  Play Insta360 360 video  dev.harding.Kjerag  0.1.1  stable  kjerag
+$ flatpak install --user kjerag dev.harding.Kjerag && flatpak run …//stable --version
+kjerag 0.1.1
+```
+
+The remote is GPG verified, which is not a claim: it was added with no
+`--no-gpg-verify` and the summary signature is what `remote-ls` checks before
+it answers. `flatpak search` finding it is §4.1's AppStream point, arriving
+from the remote's own `appstream2` ref. And the one-click file does the whole
+of it in one command, remote included:
+
+```
+$ flatpak install --user --from …/dev.harding.Kjerag.flatpakref
+$ flatpak remotes | grep kjerag
+kjerag   user   https://kjerag.harding.dev/
+```
+
+One thing to expect: **GitHub Pages answered one pull with HTTP 503** and the
+same command succeeded on retry a minute later. It is a static host with a
+free tier, not a CDN anyone is paying for.
+
+**And the update crosses the rebuild**, which is the one claim the bullet about
+deltas above puts at risk: a repository built from an empty cache shares no
+history with the one a client already has. Second dry run,
+`0.1.1-pipelinetest2`, against a client installed from the first:
+
+```
+deployed x86_64 ref: 7d8c4c824c63202e215ea3642bfed94b16fdb54277340b7748ff467ea29b0d6d
+installed before:    edc488803015a25cd8e3fec366e4ca0fee4712d788fc84a6c68c3babfe67f095
+$ flatpak update dev.harding.Kjerag
+Updates complete.
+installed after:     7d8c4c824c63202e215ea3642bfed94b16fdb54277340b7748ff467ea29b0d6d
+```
+
+An OSTree client resolves the ref to whatever the summary now names and pulls
+it; ancestry is not a condition. The same client asked between the two tags,
+after the aarch64 half of the first run had deployed over the x86_64 half, said
+`Nothing to do`, which is the other half of the check: the second arch's deploy
+does not churn the first arch's ref.
+
+Both dry runs ran under a scratch `FLATPAK_USER_DIR`, so nothing in them
+touched the installation this desktop uses.
+
+### 4.4 The single-file bundle stays
+
+Because it is not a distribution channel and never was: `flatpak build-bundle`
+produces one `.flatpak` that installs with no remote at all, which is how the
+owner gets a build to click a `.insv` against, and how anyone with a machine
+that should not carry a third-party remote gets one.
 
 Since issue #106 that bundle is what a version tag produces: the release
 workflow builds this manifest with Flatpak's own GitHub action, once per arch
@@ -1093,36 +1226,41 @@ what lets it install on a machine that has never had Flathub configured: the
 bundle carries the app, and that URL is where the runtime under it comes
 from.
 
+**Both routes install branch `stable`** since issue #137, which is the whole
+point of naming it in the manifest rather than on a command line: a machine
+that took a bundle and later adds the remote has one Kjerag on it, and
+`flatpak update` reaches it.
+
 ---
 
 ## 5. What is settled, and what is left
 
-Settled on 2026-07-31, all of it by the owner:
+Settled by the owner, on 2026-07-31 except where dated otherwise:
 
 | question | answer |
 | -------- | ------ |
 | the icon | shipped, `resources/icons/` (issue #67, §2.4) |
 | the app ID | `dev.harding.Kjerag`, in the tree since issue #75 (§3.6) |
 | the ffmpeg pin | 7.1, and the dev box takes ffmpeg 7 from a PPA (§3.4) |
-| the channel | Flathub only, under AGENTS.md's scoped exception (§4.1) |
-| a self-hosted repo | declined (issue #71, §4.2) |
+| the channel | our own signed repository at `kjerag.harding.dev`, 2026-08-01 (issue #137, §4.1) |
+| the branch | `stable`, in the repository and the bundles alike (§4.2) |
+| Flathub | not open to this project (§4.2) |
 | the licence | `AGPL-3.0-only`, which is what the metainfo already says |
 
-Left, and each one is the owner's rather than a task anybody can pick up:
+Left. The first is the owner's; the other two are work nobody has done:
 
-1. **Screenshots.** Flathub will not accept a submission without at least
-   one, and ours has to be a real window over real footage, which is the
-   owner's to take and to agree to publish. The metainfo carries the
-   commented-out `<screenshots>` block waiting for URLs.
-2. **The X11 question.** Flathub's linter wants `--socket=fallback-x11` and
-   `--share=ipc`; the manifest omits both because the frame path is Wayland
-   dmabuf and has never been run under Xwayland (§3.6). Either it is argued
-   in review or somebody runs the app under Xwayland first, and the second
-   one is work, not a decision.
+1. **Screenshots.** The remote carries AppStream data, so COSMIC Store,
+   GNOME Software and Discover list the app, and a listing with no picture is
+   the one thing about that listing which still looks unfinished. Ours has to
+   be a real window over real footage, which is the owner's to take and to
+   agree to publish. The metainfo carries the commented-out `<screenshots>`
+   block waiting for URLs.
+2. **The X11 question.** `flatpak-builder-lint` wants `--socket=fallback-x11`
+   and `--share=ipc`; the manifest omits both because the frame path is
+   Wayland dmabuf and has never been run under Xwayland (§3.6). Nobody
+   reviews us now, so nothing forces the question, but the answer is still
+   unknown and the way to know it is to run the app under Xwayland.
 3. **`xdg-config/cosmic:ro`.** The linter wants read-only; cosmic-config
    writes the app's own settings under that path and the two COSMIC apps
    installed on this box both take it read-write. Whether `:ro` costs
    persisted settings is untested (§3.6).
-4. **When to preview a submission.** Issue #75's rename was the last thing
-   that changes what a submission would contain and it has landed, so what
-   is left is screenshots, preview with the owner, then the one outward step.
