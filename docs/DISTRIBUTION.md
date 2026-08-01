@@ -1133,6 +1133,54 @@ Three things to know before touching this.
   updated summary and no AppStream refs, which reads as a remote that has
   nothing in it. Do not disable the cache.
 
+**Measured**, on the `0.1.1-pipelinetest1` dry run of 2026-08-01 (workflow run
+30720758898), signed with a throwaway key generated for it:
+
+```
+Dependency Extension: org.freedesktop.Sdk.Extension.llvm21 25.08
+Installing org.freedesktop.Sdk.Extension.llvm21/x86_64/25.08 from flathub
+    Finished `release` profile [optimized] target(s) in 6m 21s
+Running appstreamcli compose
+Exporting dev.harding.Kjerag to repo
+flatpak build-update-repo --gpg-sign=… /__w/kjerag/kjerag/repo
+Updating appstream branch
+```
+
+Sixteen minutes for the x86_64 job, no `WARNING:` line of any kind, and eight
+refs in the deployed repository afterwards: `app` and `.Debug` for each arch,
+`appstream` and `appstream2` for each arch. **15 MB for one arch, 30 MB for
+both**, which is the number to hold against the 1 GB cap. GitHub built the
+Pages site from the branch in 22 s and its certificate for the domain came
+back approved.
+
+Then, from this box, against `https://kjerag.harding.dev/` and nothing local:
+
+```
+$ flatpak remote-add --user --from kjerag …/kjerag.flatpakrepo
+$ flatpak remote-ls --user kjerag
+app/dev.harding.Kjerag/x86_64/stable   x86_64   stable   13.1 MB
+$ flatpak search Kjerag
+Kjerag  Play Insta360 360 video  dev.harding.Kjerag  0.1.1  stable  kjerag
+$ flatpak install --user kjerag dev.harding.Kjerag && flatpak run …//stable --version
+kjerag 0.1.1
+```
+
+The remote is GPG verified, which is not a claim: it was added with no
+`--no-gpg-verify` and the summary signature is what `remote-ls` checks before
+it answers. `flatpak search` finding it is §4.1's AppStream point, arriving
+from the remote's own `appstream2` ref. And the one-click file does the whole
+of it in one command, remote included:
+
+```
+$ flatpak install --user --from …/dev.harding.Kjerag.flatpakref
+$ flatpak remotes | grep kjerag
+kjerag   user   https://kjerag.harding.dev/
+```
+
+One thing to expect: **GitHub Pages answered one pull with HTTP 503** and the
+same command succeeded on retry a minute later. It is a static host with a
+free tier, not a CDN anyone is paying for.
+
 ### 4.4 The single-file bundle stays
 
 Because it is not a distribution channel and never was: `flatpak build-bundle`
