@@ -245,9 +245,14 @@ type whose `AllowedMimeTypes::allowed()` is `["text/uri-list"]`, modelled
 on cosmic-files' `ClipboardPaste` (`src/clipboard.rs:108-160`); the widget
 is `src/widget/dnd_destination.rs:16-27` in libcosmic and the wiring
 example is cosmic-files `src/app.rs:6491-6496`. First file wins, others are
-ignored. Also handle `FILE_TRANSFER_MIME`
-(`src/widget/dnd_destination.rs:33`) if it comes for free; it is how the
-portal hands over files from sandboxed sources.
+ignored. `FILE_TRANSFER_MIME` (`src/widget/dnd_destination.rs:33`) is the
+other half, and it did not come for free as this line once hoped: it is how
+a drop reaches a sandboxed app, and what arrives under it is a key rather
+than a payload, so it is `on_file_transfer` and a call to the document
+portal rather than another mime type in `allowed()`. It goes ahead of
+`text/uri-list` in the offer, which is what GTK does with the same choice.
+Issue #118 is what it cost to leave out: a shipped Flatpak that took no
+drops at all.
 
 **The command line.** `kjerag <file.insv>` already works. Keep it a path,
 not a URL: cosmic-player parses freestanding arguments as URLs

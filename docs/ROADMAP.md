@@ -557,6 +557,40 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The shipped Flatpak took no drops, and nothing could have
+  caught it** (issue #118). A drop into a sandbox arrives as
+  `application/vnd.portal.filetransfer`, which is a key the target exchanges
+  with the document portal for paths it can open, and the app read only
+  `text/uri-list`, whose paths belong to the source's filesystem and do not
+  exist inside the sandbox. `dnd.rs` predicted exactly this in its own header
+  and it shipped anyway, because there was no drop check anywhere: `wtype`
+  presses keys and cannot drag. So the instrument came first
+  (`kjerag-spike --bin dragsource`): a second Wayland client that performs a
+  real drag with a virtual pointer and offers either shape. It found three
+  things about the harness before it could find anything about the app, each
+  of them something a desktop session has and a headless one does not.
+  libcosmic creates the `wl_data_device` a drag is delivered over only while
+  the seat has a **keyboard** (smithay-clipboard `src/state.rs:323-333`), and
+  with none in the session neither this app nor cosmic-files ever asked for
+  one. It reads the drop through the seat its last input event came from and
+  gives up with "no events received on any seat" when there has been none, so
+  a window nobody has clicked accepts a drop and then reads nothing from it.
+  And wlroots drops on a button release only if the destination has already
+  accepted, which is a round trip through another process, so a drag
+  performed at machine speed is cancelled before the target has looked at it.
+  With those three answered, the measurements: the dev build opens a
+  `uri-list` drop and refuses a portal one; the released 0.1.1 bundle refuses
+  the portal one, which is the owner's report, and reads a `uri-list` one and
+  then cannot open the path it names ("No such file or directory" for a file
+  that plainly exists). The fix is libcosmic's own two calls,
+  `on_file_transfer` and `command::file_transfer_receive`, and no new
+  permission in the manifest: the portal exchange is what a sandbox is for,
+  and needs no `--filesystem` at all. What it cannot fix is a source that
+  never registers the files. cosmic-files 1.5.0 offers `text/uri-list` and
+  nothing else, so a drag out of the COSMIC file manager hands any sandboxed
+  app a path it cannot open; that half of the exchange is the source's and
+  not ours.
+
 - 2026-08-01 **A version tag is the release, and nothing about it is ours**
   (issue #106). `cargo release patch --execute` on main bumps the version,
   stamps a dated entry into the metainfo changelog, tags the plain version

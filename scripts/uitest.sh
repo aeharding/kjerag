@@ -1280,7 +1280,8 @@ dropped_files() {
 }
 
 a_drop_opens_the_file() {
-	local offer=$1 check="a drop offered as $offer opens the file"
+	local offer=$1
+	local check="a drop offered as $offer opens the file"
 	local report=$session/drag-$offer.log
 	local before waited=0 pid
 
