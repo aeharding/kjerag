@@ -1,10 +1,24 @@
-//! The file's sound: one AAC stream, off the same demuxer as the pictures.
+//! The file's sound: one AAC stream, on a demuxer of its own.
 //!
-//! There is no second reader and no second thread. An `.insv` writes the sound
-//! interleaved with the two lens streams in one MP4, so its packets arrive at
-//! the demuxer that is already running and this is the lane that takes them
-//! ([`Reader::pump`](super::Reader)). Decoding it anywhere else would mean a
-//! second file handle seeking against the first.
+//! **Why its own** (issue #97). The sound used to come off the pictures'
+//! demuxer, because an `.insv` writes all three streams into one MP4 and one
+//! file handle is simpler than two. The owner's April capture says that
+//! cannot hold: it has one place, 4.885 s in, where the camera left 67 MB of
+//! picture between two audio samples, and libavformat reads a file whose
+//! streams are interleaved like that by letting one of them fall up to a
+//! second behind (`mov_find_next_sample` reads in file order until the
+//! timestamps differ by more than `AV_TIME_BASE`, and only then seeks). The
+//! sound for those three and a half seconds therefore arrived after its
+//! moment had passed, was dropped by the splice, and the owner heard silence
+//! from 4.9 s to 8.2 s. No ring depth can fix that: the samples had not been
+//! read yet, and the pictures cannot be read further ahead than the decoder's
+//! surface pool allows.
+//!
+//! A demuxer of its own has no other stream to fall behind. It carries the
+//! same file, with the pictures discarded, so libavformat seeks straight to
+//! each audio chunk: 190 kbps of a 180 Mbps file, measured at 40x realtime
+//! for the whole 30 minute capture. The cost is one more open of the
+//! container (measured at 0.2 s on the 36 GB file) and one more file handle.
 //!
 //! What leaves the decoder is planar `fltp` at the file's own rate; what the
 //! device wants is interleaved at the device's rate and channel count. So
@@ -14,30 +28,38 @@
 //! card's.
 
 use std::ffi::c_int;
+use std::path::Path;
 use std::time::Duration;
 
 use ffmpeg_next as ff;
 
 use super::audio::{Pipe, compensation};
-use super::{Fallible, media_time};
+use super::{Fallible, media_time, read_only};
 
 /// Output frames the drift correction is spread over: one second. Long enough
 /// that the ratio is a rounding error, short enough that it is re-aimed before
 /// the file has moved far.
 const DISTANCE: u32 = 1;
 
+/// How much room the ring must have before another packet is read. One AAC
+/// packet is 21 ms of sound and a decoder can hand over more than one at a
+/// time, so the margin is a few of them: read past it and [`Pipe::write`]
+/// would drop what it had just read.
+const HEADROOM: Duration = Duration::from_millis(100);
+
 type Resampler = ff::software::resampling::Context;
 
-/// One audio stream, decoded and resampled into the device's own format.
+/// One audio stream, on its own demuxer, decoded and resampled into the
+/// device's own format.
 pub struct Track {
-    /// Which of the reader's files this stream is in. A capture written as
-    /// one file per lens has an audio stream in **both** of them, and they
-    /// are two recordings of the same moment rather than two halves of one,
-    /// so the packets of the other file's stream have to be told apart from
-    /// these and skipped. Without it they arrive at the same stream index
-    /// and are fed to the ring twice.
-    pub source: usize,
-    pub stream: usize,
+    /// The same file the pictures are read from, opened again with every
+    /// other stream discarded. Two file handles rather than one, which is
+    /// what the interleave costs (issue #97).
+    input: ff::format::context::Input,
+    stream: usize,
+    /// The file has been read to its end. Cleared by a seek, which is the
+    /// only way back into it.
+    drained: bool,
     decoder: ff::decoder::Audio,
     /// Built from the first decoded frame rather than at open: a decoder does
     /// not know its own sample format until it has decoded something, and
@@ -56,19 +78,14 @@ pub struct Track {
 }
 
 impl Track {
-    /// Opens the first audio stream of `input`, if it has one, to be resampled
-    /// into `rate` and `channels`.
+    /// Opens `path` again for its first audio stream, if it has one, to be
+    /// resampled into `rate` and `channels`.
     ///
     /// `Ok(None)` is a file with no sound in it, which the older cameras'
     /// per-lens files are. Those play their pictures exactly as before, and
     /// silently rather than by refusing to open.
-    pub fn open(
-        input: &ff::format::context::Input,
-        source: usize,
-        pipe: Pipe,
-        rate: u32,
-        channels: usize,
-    ) -> Fallible<Option<Self>> {
+    pub fn open(path: &Path, pipe: Pipe, rate: u32, channels: usize) -> Fallible<Option<Self>> {
+        let mut input = ff::format::input(&path)?;
         let Some(stream) = input
             .streams()
             .find(|s| s.parameters().medium() == ff::media::Type::Audio)
@@ -77,10 +94,12 @@ impl Track {
         };
         let (index, time_base, start) = (stream.index(), stream.time_base(), stream.start_time());
         let context = ff::codec::context::Context::from_parameters(stream.parameters())?;
+        read_only(&mut input, &[index]);
 
         Ok(Some(Self {
-            source,
+            input,
             stream: index,
+            drained: false,
             decoder: context.decoder().audio()?,
             resampler: None,
             format: ff::format::Sample::F32(ff::format::sample::Type::Planar),
@@ -107,15 +126,55 @@ impl Track {
         ff::ChannelLayout::default(self.channels as i32)
     }
 
+    /// Read sound until the ring is nearly full, and no further.
+    ///
+    /// The ring is the pacing: the reader calls this once per turn of its own
+    /// loop ([`Reader::read_until`](super::Reader::read_until)), which is at
+    /// least once per pair of pictures, and it returns at once with nothing
+    /// read when there is no room. Sound the ring cannot take yet is sound
+    /// that would be dropped, and it is still in the file next time.
+    pub fn pump(&mut self) -> Fallible<()> {
+        while !self.drained && self.pipe.room() > HEADROOM {
+            let mut packet = ff::Packet::empty();
+            match packet.read(&mut self.input) {
+                // Every other stream is discarded, so this is the sound's own
+                // packet; the guard is for a container that puts something
+                // else through anyway.
+                Ok(()) if packet.stream() == self.stream => self.take(&packet)?,
+                Ok(()) => {}
+                Err(ff::Error::Eof) => {
+                    self.drained = true;
+                    self.end()?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Put the sound where a seek has put the pictures, and throw away
+    /// everything decoded before it.
+    ///
+    /// `to` is media time in microseconds, the same number
+    /// [`Reader::seek`](super::Reader::seek) gives its own demuxers, so both
+    /// land on the same instant. AAC frames are all keyframes, so this lands
+    /// within one packet of it.
+    pub fn seek(&mut self, to: i64) -> Fallible<()> {
+        self.flush();
+        self.input.seek(to, ..to)?;
+        self.drained = false;
+        Ok(())
+    }
+
     /// One packet in, and everything it completes out to the device.
-    pub fn take(&mut self, packet: &ff::Packet) -> Fallible<()> {
+    fn take(&mut self, packet: &ff::Packet) -> Fallible<()> {
         self.decoder.send_packet(packet)?;
         self.drain()
     }
 
     /// The end of the file: whatever the decoder is still holding, which is
     /// the last few tens of milliseconds of the track.
-    pub fn end(&mut self) -> Fallible<()> {
+    fn end(&mut self) -> Fallible<()> {
         self.decoder.send_eof()?;
         self.drain()
     }
@@ -123,7 +182,7 @@ impl Track {
     /// Throw away what is decoded but not yet heard. Paired with the video
     /// decoders' flush in [`Reader::seek`](super::Reader::seek), so the sound
     /// and the pictures start again from the same instant.
-    pub fn flush(&mut self) {
+    fn flush(&mut self) {
         self.decoder.flush();
         // The resampler holds a few samples of its own. They are from before
         // the seek too, and prepending them to what lands after it would put

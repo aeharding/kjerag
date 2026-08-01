@@ -116,6 +116,23 @@ so neither runs away with the memory. The lens 0 file is a frame longer than
 its partner in every pair measured, and that frame is dropped: it has no
 partner, and half a sphere is not a picture.
 
+**The sound has a demuxer of its own** (issue #97): the same file, opened
+again with the pictures discarded. The reason is measured, not stylistic.
+Two of the four large captures on this box have one place where the camera
+left tens of megabytes of picture between two audio samples, both of them
+about four and a half seconds in, and libavformat reads a file interleaved
+like that by letting one stream fall up to a second behind
+(`mov_find_next_sample` keeps to file order until the timestamps differ by
+more than `AV_TIME_BASE`). Sound a second late is sound the splice drops, so
+the owner heard three seconds of silence. Nothing on the picture side can
+fix it: no ring can hold sound that has not been read, and the pictures
+cannot be read a second ahead of themselves when a decoder's surface pool is
+20 frames deep. On its own demuxer the sound reads 190 kbps of a 180 Mbps
+file, seeking straight to each audio chunk (40x realtime over the whole 30
+minute capture, measured), and the pictures no longer cross the file for
+packets nobody takes from them. It costs one more file handle and one more
+open of the container, 0.2 s on the 36 GB capture.
+
 `Player` runs that reader on its own thread behind a two-deep channel and
 answers one question per redraw: which frame belongs on screen at this
 `Instant`. Nothing counts ticks. 29.97 fps divides evenly into no refresh
