@@ -524,9 +524,16 @@ be seen from.
   makes a per-frame reading steadier than the per-clip table phase A
   recommended rather than noisier: flicker 0.008 to 0.023 degrees rms against
   phase A's 0.22 to 0.54 for a naive per-frame table. It costs 0.3 ms a redraw
-  at 2560x1440, and the disparity is clamped to nine tenths of the crossover,
-  which is the first time the shear that bounds the band's width has been
-  computable at runtime rather than quoted. Issue #79 opened
+  at 2560x1440. **Stage 4 then made the crossover itself an answer to that
+  same measurement**: the clamp and the width are one inequality,
+  `|disparity| <= 0.9 * width`, and stage 2 held the width at 2 degrees and
+  solved it for the disparity, which threw alignment away on everything
+  nearer than 1.06 m. Solving the same line for the width opens the band to
+  exactly what the reading needs and returns the floor bit for bit
+  everywhere else, so the far field is the picture it was. It recovers up to
+  11.5 view pixels of doubled edge, on 0.02 to 0.19 percent of
+  direction-frames of the owner's own flights and 0.2 to 2.3 percent of the
+  handheld and selfie-stick corpus, for 0.06 ms a redraw. Issue #79 opened
   a second camera: the ONE X2 writes one lens per file, and the player now
   pairs the two at open and holds an X2's horizon with that camera's own IMU
   convention.
@@ -661,6 +668,23 @@ live, no keyframe UI ever.
   are resolution the parabola and the seconds of averaging give back; the
   third is free because the filter is paced in seconds of media time, so a
   direction read at 15 Hz and one read at 30 settle in the same wall time.
+
+- 2026-08-01 **The near end of the seam correction is now the search window,
+  not the fold** (issue #103, stage 4). The crossover width and the shear
+  clamp turned out to be one inequality read two ways, so the band now opens
+  to carry what was measured instead of the measurement being cut to fit the
+  band. What that exposes is where the remaining bound sits: the clamp is
+  inert for every disparity the pass can report, and what stops the
+  correction at 0.73 m is `NEAR_DEG`, the search window. Measured by widening
+  it to 4.0 degrees on a branch-local build: the direction-frames the band
+  opens for go from 175 to **513** on the X3 sample (2.28 to 6.68 percent),
+  the worst doubled edge recovered goes from 11.3 to **31.9 view px** on
+  content at 0.42 m, and the pass costs **+0.20 ms** rather than +0.06. Not
+  taken here, because it changes the measurement rather than the crossover
+  and it halves the margin the widest band has inside the lenses' overlap
+  (1.04 degrees a side on the X4 Air, against 3.22 today). It is priced and
+  it is one constant: the ceiling follows `NEAR_DEG` on its own, so there is
+  no second number to keep in step.
 
 - 2026-08-01 **The pinned seam benchmark named the wrong file** (issue #103).
   #87 and #103 both give `VID_20260501_183417_00_001.insv` as the source of
