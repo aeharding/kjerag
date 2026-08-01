@@ -557,6 +557,38 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **A transient import error costs a frame, and every failure the
+  pilot meets goes through the alert** (issue #124, owner-reported at flatpak
+  verification). One failed frame import set a flag on the pipeline for good:
+  the picture was gone until the app was restarted, the sound played on over
+  it, and the whole of what was said was one `eprintln!` on a terminal a
+  launcher-started Flatpak sends nowhere. Measured on main's own binary under
+  the headless harness, with `dup(2)` made to answer EMFILE on the app's main
+  thread for 0.3 s: the picture froze for good, the clock ran on at 30.00 fps,
+  and the null sink still carried the sound at 15745 of 32767. The flag is
+  gone. A failed import costs that frame and the next redraw tries again; a
+  run of failures that lasts two seconds stops the file, sound and all, and
+  says so. The bound is time and not a frame count, because what the pilot is
+  looking at is a picture that has been frozen for so long, and how many
+  redraws went by inside that is a property of his display. Two seconds is the
+  shell's own "long enough that a person has noticed", the same one the
+  controls hide on. The run lives in the open capture's `Stalled` rather than
+  on the pipeline, which iced keeps for the life of the window and which is
+  why the old flag outlived every file.
+
+  **The second half is the structure**, and it is the owner's ruling: error
+  surfacing consistent by code design rather than by discipline. The alert's
+  line is now private to `crates/app/src/fail.rs` and the only way to put one
+  there is `Alert::raise(Failure)`, which prints the terminal echo with it, so
+  a bare `eprintln!` at a failure site is strictly less than calling the
+  funnel rather than an alternative to it. The engine has no way to report at
+  all: a pass that gives up leaves a `Stall`, `Scene::pump` hands it out as a
+  `Next::Stopped` arm every caller must match, and the shader widget will only
+  give that arm to a message type implementing `From<Stall>`, so the shell
+  cannot compile the video widget without a way to receive one. Adding the arm
+  broke `kjerag-spike --bin playback`, which is the mechanism working: an
+  instrument whose picture died was reporting a clean run.
+
 - 2026-08-01 **A pane with no frame draws the backdrop, not a picture of its
   own** (owner-reported). The pass carried an animated test pattern from its
   first bring-up, a sine of the distance from the middle of the view on a wall
