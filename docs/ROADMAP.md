@@ -394,6 +394,20 @@ and the key zooms there now, which is what the wheel has always done. With
 nothing held it still zooms about the middle, which is where a keyboard with
 no hand on the picture is pointing.
 
+**And nor does the wheel out in the room around the ball** (issue #92, owner
+reported, the last of the same family). Zoomed out to the ball, a drag that
+starts on the picture and wanders out into the grey keeps turning the view,
+which is what issue #78 bought: the wide drag reads the hand's travel and not
+what is under the cursor. Scrolling out there killed it stone dead. Every
+zoom re-takes the drag's hold at the cursor, the room has no direction under
+it to take hold of, and the whole drag was being dropped rather than the
+hold: the button was still down, the pointer moved 200 px, and the camera
+came back bit for bit identical in the widget-level reproduction. The hold is
+kept now where there is nothing to replace it with. Nothing reads it stale:
+the room only exists past 220 degrees of view and the pinned drag stops at
+110, so the wide drag, which does not use it, is the only regime the room can
+be seen from.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
