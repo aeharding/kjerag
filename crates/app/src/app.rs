@@ -1007,7 +1007,7 @@ impl App {
             return;
         }
         self.controls.shown = false;
-        self.controls.volume = false;
+        self.hide_volume();
         self.core.window.show_headerbar = false;
         self.hide_cursor(true);
     }
