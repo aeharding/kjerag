@@ -1588,8 +1588,8 @@ fn binned(
             continue;
         }
         let slot = &mut held[(bin as isize + bins as isize) as usize];
-        for channel in 0..3 {
-            slot.0[channel] += planes[channel][index];
+        for (channel, plane) in planes.iter().enumerate() {
+            slot.0[channel] += plane[index];
         }
         slot.1 += 1.0;
     }
@@ -1619,12 +1619,7 @@ fn binned(
 /// view of ploughed soil that is larger than the artifact; the same pair
 /// measured across the seam is the handover plus that texture, and the decoy
 /// circle is what says how much of it is which.
-fn eye_at(
-    planes: &[Vec<f64>; 3],
-    distance: &[Option<f64>],
-    size: Size,
-    reach: f64,
-) -> Option<Eye> {
+fn eye_at(planes: &[Vec<f64>; 3], distance: &[Option<f64>], size: Size, reach: f64) -> Option<Eye> {
     let rate = degrees_per_pixel(distance, size)?;
     let bins = binned(planes, distance, rate, reach);
     if bins.len() < 8 {
@@ -1714,12 +1709,7 @@ fn flat(distance: &[Option<f64>], rate: f64, level: f64, ratio: f64, pixels: f64
         let t = ((at / rate / pixels) + 0.5).clamp(0.0, 1.0);
         level * (1.0 + (ratio - 1.0) * t)
     };
-    std::array::from_fn(|_| {
-        distance
-            .iter()
-            .map(|at| at.map_or(0.0, ramp))
-            .collect()
-    })
+    std::array::from_fn(|_| distance.iter().map(|at| at.map_or(0.0, ramp)).collect())
 }
 
 /// What one view is worth to an eye, with its nulls and its plants under it.

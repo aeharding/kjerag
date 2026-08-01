@@ -1761,7 +1761,11 @@ impl Band {
         let float = |at: usize| {
             f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
         };
-        let tone = band::Tone::read(std::array::from_fn(|channel| float(4 * channel)), float(12));
+        let tone = band::Tone::read(
+            std::array::from_fn(|channel| float(4 * channel)),
+            std::array::from_fn(|channel| float(16 + 4 * channel)),
+            float(12),
+        );
         let along = band::Along::read(
             std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
             float(band::ALONG_AT + 20),
@@ -1783,6 +1787,7 @@ impl Band {
                     lit: float(at + 24),
                     chroma: std::array::from_fn(|channel| float(at + 28 + 4 * channel)),
                     hue_conf: float(at + 44),
+                    open: float(at + 48),
                 }
             })
             .collect();
@@ -1990,22 +1995,29 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 // `textureSample` computes its own level from derivatives and needs uniform
 // control flow to do it, and every one of these textures has a single level
 // anyway.
-fn picture(mix: Blend, ratio: vec2<f32>, tone: mat2x3<f32>) -> vec4<f32> {
+fn picture(mix: Blend, ratio: vec2<f32>, tone: mat2x3<f32>, lift: mat2x3<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
   // What the two lenses' colours have to be brought together by, per channel,
-  // split between them (issue #103, stages 3 and 7). One storage read for the
-  // whole draw, and exactly 1.0 on every channel of both sides until something
-  // has been measured, so the weights below are the weights this pass has
-  // always used and a picture with no reading behind it is the picture stage 2
-  // drew. It multiplies the RGB the two planes decode to rather than the luma
-  // alone, which is what lets three numbers reach a hue at all.
+  // split between them: a gain each (stages 3 and 7) and an offset each
+  // (stage 8). Exactly 1.0 and exactly 0.0 on every channel of both sides
+  // until something has been measured, so a picture with no reading behind it
+  // is the picture stage 2 drew. Both multiply and add to the RGB the two
+  // planes decode to rather than to the luma alone, which is what lets three
+  // numbers reach a hue at all.
+  //
+  // A gain cannot lift a black and an offset cannot scale a highlight, and the
+  // seam holds both: the difference between two lenses is 6.5 codes on 17-code
+  // soil and the same 6.5 codes is a different phenomenon on 190-code sky
+  // (issue #103, stage 8, docs/research/seam-blending.md).
   if mix.weights[0] > 0.0 {
-    rgb += (mix.weights[0] * tone[0]) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
+    rgb += mix.weights[0]
+      * (tone[0] * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x) + lift[0]);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += (mix.weights[1] * tone[1]) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    rgb += mix.weights[1]
+      * (tone[1] * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y) + lift[1]);
     total += mix.weights[1];
   }
   // The room around the ball, written rather than painted: transparent black,
@@ -2032,6 +2044,40 @@ fn nv12(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f3
   );
 }
 
+// A pixel's own dither, in codes of 1, triangular and spatially decorrelated
+// (issue #103, stage 8).
+//
+// What is left after a difference is spread over sixty pixels is a ramp of a
+// fraction of a code per pixel, and an 8-bit picture cannot draw that: it draws
+// a staircase, whose treads are wide flat bands with hard edges between them.
+// That is the same artifact by another route, and the answer to it is the one
+// the recording industry settled on - put a little noise in before the
+// quantizer and the bands become grain.
+//
+// TRIANGULAR, from two independent samples, because uniform dither leaves the
+// quantization noise correlated with the signal and the banding faintly
+// visible; the sum of two uniforms does not. Both are the interleaved gradient
+// hash, which is the cheapest thing that looks like blue noise: its energy sits
+// at high spatial frequency, where an eye has the least of its own sensitivity,
+// where a flat random dither would put a third of its energy in the low
+// frequencies the banding is in.
+//
+// It is a function of the PIXEL and not of time, so it does not shimmer between
+// frames, and it is applied only across the blend region, so nothing outside
+// the handover is touched at all.
+fn ign(at: vec2<f32>) -> f32 {
+  return fract(52.9829189 * fract(0.06711056 * at.x + 0.00583715 * at.y));
+}
+
+fn dither(at: vec2<f32>, amount: f32) -> vec3<f32> {
+  if amount <= 0.0 {
+    return vec3<f32>(0.0);
+  }
+  // One code of 255 peak to peak, which is the size of the step being hidden.
+  let tri = ign(at) - ign(at + vec2<f32>(97.0, 71.0));
+  return vec3<f32>(amount * tri / 255.0);
+}
+
 fn linearize(c: vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92;
   let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
@@ -2049,10 +2095,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   // is the room around the ball and the two lens poles: `band_rest` answers
   // for both and the fade answers zero there anyway.
   var tone = tone_split();
+  var lift = mat2x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0));
+  var spread = 0.0;
+  // HOW MANY RADIANS OF THE SEAM'S OWN AXIS ONE PIXEL OF THIS VIEW COVERS
+  // (issue #103, stage 8), which is what makes the handover's width a number
+  // of pixels rather than a number of degrees. It is the delivered view's own
+  // answer and not a uniform anything has to be told: the sine of the angle out
+  // of the seam plane, differentiated across the quad. Taken HERE, above every
+  // branch, because a derivative needs every lane of the quad to be running.
+  let body = reframe.view_to_body * look.xyz;
+  let off_seam = body.z / max(length(body), 1e-9);
+  let rate = length(vec2<f32>(dpdx(off_seam), dpdy(off_seam)));
   if look.w > 0.0 {
-    let at = band_bend(look.xyz);
+    let at = band_bend(look.xyz, rate);
     mix = blend(look.xyz, at);
     tone = colour_split(at);
+    lift = tone_lift(at);
+    // Dithered where the two lenses are mixed and nowhere else: the ramp this
+    // hides is the one the handover draws.
+    spread = tint_fade(at);
   }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
@@ -2062,9 +2123,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[0].pixel),
     texel_ratio(mix.landings[1].pixel),
   );
-  let lens = picture(mix, ratio, tone);
+  let lens = picture(mix, ratio, tone, lift);
+  let grain = dither(in.pos.xy, spread * lens.a);
   return vec4<f32>(
-    select(lens.rgb, linearize(lens.rgb), reframe.linearize > 0.5),
+    select(lens.rgb + grain, linearize(lens.rgb + grain), reframe.linearize > 0.5),
     lens.a,
   );
 }

@@ -609,7 +609,7 @@ impl Reframe {
     ///
     /// WGSL twin: `blend`.
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
-        self.blend_bent(view_ray, super::band::Reading::default())
+        self.blend_bent(view_ray, super::band::Reading::default(), 0.0)
     }
 
     /// The same with the band's own correction in it (issue #103): each lens's
@@ -636,7 +636,12 @@ impl Reframe {
     /// disparity is small, so the far field is the picture it always was.
     ///
     /// WGSL twin: `blend`, whose `band` argument is `band_bend`'s answer.
-    pub fn blend_bent(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Blend {
+    pub fn blend_bent(
+        &self,
+        view_ray: [f32; 3],
+        reading: super::band::Reading,
+        rate: f32,
+    ) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
         let reach = norm3(view_ray);
@@ -645,7 +650,7 @@ impl Reframe {
         // is what keeps this pass costing what it cost before the crossover
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
-        let band = self.crossover_at(reading.epi);
+        let band = self.crossover_at(reading.epi, reading.open, rate);
         let front = self.handover(axis, reach, band);
         let bend = self.bent(view_ray, reading, band);
         for lens in 0..MAX_LENSES {
@@ -718,18 +723,29 @@ impl Reframe {
         }
     }
 
-    /// How wide the crossover opens at a ray whose measured disparity is
-    /// `disparity`, in radians (issue #103, stage 4).
+    /// How wide the handover is at one ray, in radians (issue #103, stages 4
+    /// and 8).
     ///
-    /// [`CROSSOVER_DEG`] wherever that already carries the reading without
-    /// folding, which is every direction under 1.8 degrees of disparity, so
-    /// the far field's handover is the one it has always had. Wider exactly
-    /// where the reading would otherwise be clamped, and only by as much as
-    /// the reading needs.
+    /// [`CROSSOVER_DEG`] is the floor and half the lenses' shared angle is the
+    /// ceiling; between them sit what the reading needs so as not to fold, what
+    /// an eye wants in pixels of this view, and what the content there will
+    /// bear. [`super::band::width`] is where all four meet, and it is where
+    /// they are argued.
+    ///
+    /// `rate` is how many radians of the seam's own axis one pixel of the
+    /// delivered view covers. Zero asks for the floor, which is what every
+    /// caller with no view to speak of wants and what
+    /// [`Self::blend`] passes.
     ///
     /// WGSL twin: `band_width`.
-    pub fn crossover_at(&self, disparity: f32) -> f32 {
-        super::band::width(disparity, CROSSOVER_DEG.to_radians())
+    pub fn crossover_at(&self, disparity: f32, open: f32, rate: f32) -> f32 {
+        super::band::width(
+            disparity,
+            open,
+            CROSSOVER_DEG.to_radians(),
+            rate,
+            self.half_overlap,
+        )
     }
 
     /// A view-space ray in the camera body's own frame, which is where the
@@ -782,6 +798,10 @@ impl Reframe {
         let (a, b) = (cell(0), cell(1));
         super::band::Reading {
             epi: Self::channel(a.disparity, a.confidence, b.disparity, b.confidence, mix),
+            // Straight between the two cells and not weighted by evidence: the
+            // openness is already a smoothed state and it means what it says at
+            // a direction that never correlated, which is most of a sky seam.
+            open: a.open + (b.open - a.open) * mix,
             // One fitted field over the whole circle rather than a cell
             // lookup: see `Along`. This azimuth's cosine and sine are the ray
             // flattened into the seam plane.
@@ -819,8 +839,12 @@ impl Reframe {
     /// bites only where the band has run out of room to open.
     ///
     /// WGSL twin: `band_bend`.
-    pub fn bend(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Bend {
-        self.bent(view_ray, reading, self.crossover_at(reading.epi))
+    pub fn bend(&self, view_ray: [f32; 3], reading: super::band::Reading, rate: f32) -> Bend {
+        self.bent(
+            view_ray,
+            reading,
+            self.crossover_at(reading.epi, reading.open, rate),
+        )
     }
 
     /// The same with the width already in hand, which is how [`Self::blend_bent`]
@@ -1324,7 +1348,31 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 ///
 /// WGSL twin: `crossover`.
 fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-    (0.5 + apart / (2.0 * reach * band)).clamp(0.0, 1.0)
+    handover((0.5 + apart / (2.0 * reach * band)).clamp(0.0, 1.0))
+}
+
+/// The shape of the handover itself: how much of the picture the front lens
+/// has, `t` of the way across the band (issue #103, stage 8).
+///
+/// `t^3 (6t^2 - 15t + 10)`, which is 0 at 0 and 1 at 1 with **both** its first
+/// and its second derivative zero at each end. A straight line has neither, and
+/// what a corner in a brightness gradient produces is a **Mach band**: a line
+/// the eye's own lateral inhibition draws where the picture has only a change
+/// of slope. That is what is left at a seam after the photometry is corrected
+/// and the difference is spread out, and no photometry reaches it, because it
+/// is not in the numbers.
+///
+/// It costs the width. The steepest part of this is [`super::band::SLOPE`]
+/// times a straight line's, so a bend carried across it shears that much
+/// harder, and [`super::band::width`] solves the same inequality stage 4 solved
+/// with that factor in it. Nothing else about stage 4 changed.
+///
+/// Exactly 0 and exactly 1 at the ends, by arithmetic and not by a tolerance,
+/// which is what keeps a lens outside the band multiplied by an exact one.
+///
+/// WGSL twin: `handover_profile`.
+fn handover(t: f32) -> f32 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
 impl LensBlock {
@@ -1840,7 +1888,13 @@ fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
 // a band this ray's own reading decided the width of (`band_width`). Rust
 // twin: `crossover`.
 fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-  return clamp(0.5 + apart / (2.0 * reach * band), 0.0, 1.0);
+  return handover_profile(clamp(0.5 + apart / (2.0 * reach * band), 0.0, 1.0));
+}
+
+// The shape of the handover: zero slope AND zero curvature at both ends, so
+// there is no corner for an eye to draw a Mach band at. Rust twin: `handover`.
+fn handover_profile(t: f32) -> f32 {
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
 // The forward map, with the readout taken out of it. Rust twin:
@@ -2060,7 +2114,11 @@ pub(crate) mod tests {
     /// about the crossover's width is about: the along-seam axis does not
     /// open it (`Reframe::bent`).
     fn reading(epi: f32) -> crate::band::Reading {
-        crate::band::Reading { epi, along: 0.0 }
+        crate::band::Reading {
+            epi,
+            along: 0.0,
+            open: 0.0,
+        }
     }
 
     /// The lens carrying most of an output pixel, and where it lands, which
@@ -2335,16 +2393,28 @@ pub(crate) mod tests {
 
         for phi in 0..36 {
             let blend = reframe.blend(direction(90.0, phi as f32 * 10.0));
-            near(blend.weights[0], 0.5, 0.08);
-            near(blend.weights[1], 0.5, 0.08);
+            // The tolerance is the profile's, not the geometry's: stage 8's
+            // handover is SLOPE times steeper in the middle than the straight
+            // line this was written against, so the same 0.3 degrees of axis
+            // misalignment turns into that much more weight. What the test is
+            // about has not moved - the picture is still centred on the two
+            // lenses - and it is still under a fifth either way.
+            near(blend.weights[0], 0.5, 0.16);
+            near(blend.weights[1], 0.5, 0.16);
         }
     }
 
     /// Continuity, which is the property the eye actually reads: swept
     /// through the whole band a hundred steps to the degree, no lens's weight
-    /// ever moves more than a hundredth in one step. The hard pick this
-    /// replaces moved 1.0 in one step, at the seam, which is the line issue
-    /// #7 was filed about.
+    /// ever moves more than [`super::band::SLOPE`] hundredths in one step,
+    /// which is the steepest this profile gets over a band of two degrees. The
+    /// hard pick this replaces moved 1.0 in one step, at the seam, which is
+    /// the line issue #7 was filed about.
+    ///
+    /// The bound is the profile's slope and not a tolerance: a straight line
+    /// over the same band moves 1/200 a step and the fifth-order profile moves
+    /// 15/8 of that where it is steepest. What it buys for that is both ends,
+    /// where a straight line's slope stops dead and this one arrives at zero.
     ///
     /// The sweep runs well past both edges of the overlap, so it also covers
     /// the two places a weight arrives at 0: the band edge is where a blend
@@ -2367,7 +2437,12 @@ pub(crate) mod tests {
                 held = weights;
             }
 
-            assert!(worst < 0.01, "a weight jumped by {worst} at phi {phi}");
+            // The profile's own steepest step over a two-degree band, plus the
+            // thousandth the coverage depth adds on top of it at the rim,
+            // which is `claim`'s and not the handover's (measured 2026-08-01:
+            // 0.01014 against the profile's own 0.00938).
+            let bound = crate::band::SLOPE / 200.0 + 0.001;
+            assert!(worst < bound, "a weight jumped by {worst} at phi {phi}");
         }
     }
 
@@ -2413,13 +2488,13 @@ pub(crate) mod tests {
         let reframe = fixture(Camera::default());
         for disparity_deg in [0.0f32, 1.8, 2.2, 2.6] {
             let disparity = disparity_deg.to_radians();
-            let wanted = reframe.crossover_at(disparity).to_degrees();
+            let wanted = reframe.crossover_at(disparity, 0.0, 0.0).to_degrees();
             for phi in [0.0, 90.0, 180.0, 270.0] {
                 let mixed: Vec<f32> = (0..3000)
                     .map(|step| 70.0 + step as f32 * 0.01)
                     .filter(|theta| {
                         let weights = reframe
-                            .blend_bent(direction(*theta, phi), reading(disparity))
+                            .blend_bent(direction(*theta, phi), reading(disparity), 0.0)
                             .weights;
                         weights.iter().all(|weight| *weight > 0.0)
                     })
@@ -2428,7 +2503,11 @@ pub(crate) mod tests {
                     *mixed.first().expect("nothing is mixed at all"),
                     *mixed.last().expect("nothing is mixed at all"),
                 );
-                near(last - first, wanted, 0.02);
+                // Two hundredths of a degree of slack rather than one: this
+                // profile meets both its ends with zero slope, so the last
+                // hundredth of the band either side carries a weight under
+                // what an f32 keeps and the span reads that much narrow.
+                near(last - first, wanted, 0.04);
                 near(0.5 * (first + last), 90.0, 0.2);
             }
         }
@@ -2451,9 +2530,12 @@ pub(crate) mod tests {
             .expect("the fixture has two lenses")
             .to_degrees();
         let widest = crate::band::WIDEST_DEG;
-        let reach = 0.5 * widest + widest * 0.9;
+        let reach = 0.5 * widest + widest * 0.9 / crate::band::SLOPE;
         // Measured on the fixture 2026-08-01: 14.44 degrees of overlap, 7.22
-        // a side, against a reach of 4.04.
+        // a side, against a reach of 5.31. The band is wider since stage 8 and
+        // the bend it carries at that width is the same 2.6 degrees, because
+        // the two moved by the same factor: what the profile costs in width it
+        // gives back in what the width can carry.
         assert!(
             reach < 0.5 * overlap,
             "the widest band reaches {reach:.2} deg off the seam into an overlap of \
@@ -2901,7 +2983,7 @@ pub(crate) mod tests {
             norm3(ray),
             // No band and no reading, so the width is the floor, which is the
             // width this test was written against.
-            reframe.crossover_at(0.0),
+            reframe.crossover_at(0.0, 0.0, 0.0),
         );
         let mut weights: [f32; MAX_LENSES] =
             std::array::from_fn(|lens| match lens < reframe.lens_count as usize {
