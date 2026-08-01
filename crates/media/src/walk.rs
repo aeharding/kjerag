@@ -19,7 +19,7 @@
 //! shape rather than the camera's.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ffmpeg_next as ff;
@@ -138,6 +138,13 @@ pub struct Walk {
 }
 
 impl Walk {
+    /// A walk over the capture one path names, looking beside it for the
+    /// other lens if this file carries only one.
+    ///
+    /// Beside is where a bare path's mate is, and a bare path is what a
+    /// command line and every instrument hands over. It is not where a picked
+    /// file's mate is: for a capture somebody has already composed, use
+    /// [`Walk::over`].
     pub fn open(path: &Path, from: f64, size: Size) -> Fallible<Self> {
         ff::init()?;
         let hw = HwDevice::vaapi()?;
@@ -161,7 +168,47 @@ impl Walk {
                 }
             }
         }
+        Self::walking(inputs, lanes, from, size, hw)
+    }
 
+    /// A walk over a capture that is already composed: every file of it, in
+    /// lens order, as [`Reader::paths`](crate::Reader::paths) hands them over.
+    ///
+    /// Taken as given, with nothing looked up, because looking again can only
+    /// find less. A capture whose two halves were picked in a sandbox's file
+    /// chooser arrives as two documents in two directories that hold one file
+    /// each, so its second lens exists in the picked set and nowhere on the
+    /// filesystem beside the first (issue #123). One path is a capture nobody
+    /// has composed, and takes [`Walk::open`]'s lookup.
+    pub fn over(files: &[PathBuf], from: f64, size: Size) -> Fallible<Self> {
+        if let [only] = files {
+            return Self::open(only, from, size);
+        }
+        ff::init()?;
+        let hw = HwDevice::vaapi()?;
+        let mut inputs = Vec::new();
+        let mut lanes = Vec::new();
+        for path in files {
+            let input = ff::format::input(path)?;
+            for stream in video_streams(&input) {
+                lanes.push((inputs.len(), stream));
+            }
+            inputs.push(input);
+        }
+        Self::walking(inputs, lanes, from, size, hw)
+    }
+
+    /// One decoder per lane, every demuxer seeked to the same instant, and
+    /// the timing the whole capture is read on: what the two constructors
+    /// above share once they have settled which files and streams the capture
+    /// is.
+    fn walking(
+        mut inputs: Vec<ff::format::context::Input>,
+        lanes: Vec<(usize, usize)>,
+        from: f64,
+        size: Size,
+        hw: HwDevice,
+    ) -> Fallible<Self> {
         let (file, index) = *lanes.first().ok_or("this file carries no video stream")?;
         let stream = inputs[file].stream(index).ok_or("no video stream")?;
         let time_base = stream.time_base();

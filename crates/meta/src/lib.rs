@@ -17,6 +17,10 @@
 //! `docs/research/insv-format.md`.
 
 mod calibration;
+/// Public where the rest of these are private, because its one function only
+/// reads right qualified: `capture::resolve(path)`, rather than a bare
+/// `resolve` at the root of a crate about trailers.
+pub mod capture;
 mod exposure;
 mod format;
 mod gyro;

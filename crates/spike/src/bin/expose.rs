@@ -611,8 +611,12 @@ fn calibrated(options: &Options) -> Fallible<(CalibrationSet, Vec<Lens>, Size)> 
         println!("seam:   factory calibration, uncorrected");
         return Ok((calibration, lenses, frame));
     }
-    let Some(fitted) = seam::fit_file(&options.input, &lenses, frame, &seam::Plan::default())
-    else {
+    let Some(fitted) = seam::fit_reported(
+        std::slice::from_ref(&options.input),
+        &lenses,
+        frame,
+        &seam::Plan::default(),
+    ) else {
         return Ok((calibration, lenses, frame));
     };
     println!("seam:   {}", fitted.describe(0.0));

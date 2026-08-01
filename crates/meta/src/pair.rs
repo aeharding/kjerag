@@ -38,9 +38,17 @@ const MARKER_FROM_END: usize = 2;
 /// one file: nothing is named `_10_` next to them, so the lookup is one
 /// `Path::exists` that fails.
 pub fn sibling(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?.to_str()?;
-    let beside = path.with_file_name(sibling_name(name)?);
+    let beside = sibling_path(path)?;
     beside.is_file().then_some(beside)
+}
+
+/// Where the rule says the other lens would be, whether or not anything is
+/// there. [`sibling`] is this and the existence check together, which is what
+/// a reader wants; [`super::capture`] wants the name on its own, because a
+/// name with nothing under it is the question it exists to answer.
+pub(crate) fn sibling_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(sibling_name(name)?))
 }
 
 /// Which lens of the pair this file holds, from its marker alone: 0 for

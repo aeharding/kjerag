@@ -57,6 +57,20 @@ pub const VIDEO_STOPPED_BODY: &str =
 pub const OPEN_TITLE: &str = "Open video";
 pub const INSV_FILTER: &str = "Insta360 video";
 
+/// Half a capture, in the two positions the app can be in about it
+/// (issue #123). Both play the half that was opened: a pilot who asked for a
+/// file gets the file, and what these add is the reason the sphere has a
+/// blank side.
+///
+/// The first is said only where the app can see the folder the capture came
+/// from and the other file is not in it. The second is said where it cannot:
+/// a file picked in a sandbox's chooser arrives in a directory holding it
+/// alone, so nothing there is evidence of anything, and the honest thing is
+/// to name the two ways that do work rather than to claim a file is missing.
+pub const CAPTURE_HALF: &str =
+    "Playing one lens. The second file of this capture is not in the folder.";
+pub const CAPTURE_PICK_BOTH: &str = "This capture is two files. Choose both in the dialog, or drag them in from your file manager, to see the whole sphere.";
+
 /// Menu roots.
 pub const FILE: &str = "File";
 pub const PLAYBACK: &str = "Playback";
