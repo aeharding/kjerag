@@ -86,6 +86,7 @@
   </screenshots>
 
   <releases>
+    <release version="0.1.1" type="development" date="2026-08-01"/>
     <release version="0.1.0" type="development" date="2026-07-31">
       <description>
         <p>Beta. Playback, reframing and stills work.</p>

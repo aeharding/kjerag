@@ -2835,7 +2835,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kjerag"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "jpeg-encoder",
@@ -2850,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "kjerag-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "ffmpeg-next",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "kjerag-meta"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "prost",
  "serde",
@@ -2868,7 +2868,7 @@ dependencies = [
 
 [[package]]
 name = "kjerag-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ash",
  "ffmpeg-next",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "kjerag-spike"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ffmpeg-next",
  "kjerag-media",

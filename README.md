@@ -37,6 +37,10 @@ Have a camera that is unverified or missing?
 [Open an issue](https://github.com/aeharding/kjerag/issues) with a short
 raw clip straight off the camera.
 
+Releases carry an x86_64 and an aarch64 build. The aarch64 one is compiled
+and unit tested in CI and has never been run on aarch64 hardware; reports
+are welcome in the same place.
+
 See [docs/ROADMAP.md](docs/ROADMAP.md) for where things stand and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
 
