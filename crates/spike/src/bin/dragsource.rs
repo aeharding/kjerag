@@ -209,11 +209,12 @@ there would be a drop on ourselves"
     }
 
     // Letting go before the target has answered is a cancelled drag whatever
-    // the target would have said: wlroots drops on a release only if the
-    // destination has already accepted a mime type and an action
-    // (`types/data_device/wlr_drag.c`), and the answer is a round trip
-    // through another process. A drag by hand takes half a second and never
-    // meets this; a drag by machine met it on the first run.
+    // the target would have said. wlroots drops on a release only when the
+    // offer has already been accepted and an action agreed, and destroys the
+    // source otherwise (0.16.2, `types/data_device/wlr_drag.c`,
+    // `drag_handle_pointer_button`), and that answer is a round trip through
+    // another process. A drag by hand takes half a second and never meets
+    // this; a drag by machine met it on the first run.
     let _ = pump(&mut queue, &mut state, REPLY, |s| !s.accepted.is_empty());
     pointer.button(state.stamp(), BTN_LEFT, ButtonState::Released);
     pointer.frame();
