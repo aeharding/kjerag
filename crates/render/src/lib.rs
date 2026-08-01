@@ -18,7 +18,7 @@ mod widget;
 
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
-pub use kyerag_media::{Accuracy, Cue, Fallible, Size, Stats};
+pub use kyerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
 pub use kyerag_meta::{Quat, Readout, Sweep};
 pub use projection::{Blend, Held, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe, Rolling};
 pub use sampling::Sampling;

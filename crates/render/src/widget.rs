@@ -205,6 +205,7 @@ fn aspect(bounds: Rectangle) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::fov_ceiling;
     use crate::{Camera, Nudge};
 
     const BOUNDS: Rectangle = Rectangle {
@@ -264,6 +265,30 @@ mod tests {
                 .send(Event::Mouse(mouse::Event::CursorMoved {
                     position: Point::new(x, y),
                 }))
+        }
+
+        fn scroll(&mut self, lines: f32) -> &mut Self {
+            self.send(Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: lines },
+            }))
+        }
+
+        /// Zoomed out to the far end, which is a ball with room around it,
+        /// with the pointer parked in the middle and nothing held.
+        fn scroll_to_the_ball(&mut self) -> &mut Self {
+            self.cursor_at(500.0, 250.0);
+            for _ in 0..40 {
+                self.scroll(-1.0);
+            }
+            assert_eq!(self.camera().fov, fov_ceiling(aspect(BOUNDS)));
+            self
+        }
+
+        /// What the view is looking at through a point of the window, in
+        /// window pixels. `None` is the room around the ball.
+        fn looking_at(&self, x: f32, y: f32) -> Option<[f32; 3]> {
+            self.camera()
+                .look(uv(Point::new(x, y), BOUNDS), aspect(BOUNDS))
         }
 
         /// Where the view points, read where `draw` reads it.
@@ -433,6 +458,77 @@ mod tests {
 
         widget.send(redraw());
         assert_eq!(widget.camera(), zoomed);
+    }
+
+    /// Issue #83, through the events iced delivers: a drag is held, the zoom
+    /// key goes in, and the picture stays where the zoom left it until the
+    /// hand asks for something else. The nudge used to re-take the drag's
+    /// hold at the middle of the frame while the cursor was elsewhere, so the
+    /// next move -- this one, which goes nowhere at all -- hauled the picture
+    /// across.
+    #[test]
+    fn a_nudge_mid_drag_keeps_the_grab() {
+        let mut widget = Widget::new();
+        widget.press(200.0, 400.0).move_to(700.0, 150.0);
+
+        widget.scene.nudge(Nudge::ZoomOut);
+        widget.send(Event::Window(
+            window::Event::RedrawRequested(Instant::now()),
+        ));
+        let zoomed = widget.camera();
+        assert!(zoomed.fov > Camera::default().fov, "the key did not zoom");
+
+        widget.move_to(700.0, 150.0);
+        let moved = widget.camera();
+        assert!(
+            (moved.yaw - zoomed.yaw).abs() < 1e-4 && (moved.pitch - zoomed.pitch).abs() < 1e-4,
+            "the cursor stayed put and the view went from {zoomed:?} to {moved:?}",
+        );
+    }
+
+    /// Issue #92, the owner's steps in the events iced delivers: zoom all the
+    /// way out to the ball, press on the picture, drag out into the room
+    /// around it, scroll there, and keep dragging. The pan has to survive the
+    /// scroll.
+    ///
+    /// It did not. The wheel re-takes the drag's hold at the cursor, the room
+    /// has no direction under it to take hold of, and the drag was dropped
+    /// altogether: the zoom worked and every move after it moved nothing.
+    #[test]
+    fn a_wheel_zoom_over_the_room_keeps_the_drag() {
+        let mut widget = Widget::new();
+        widget.scroll_to_the_ball();
+        let ball = widget.camera();
+
+        // Where the ball is, and where the room around it is: the picture
+        // fills 40% of this window's width, so the middle is picture and a
+        // point a seventh of the way across is not.
+        let room = (150.0, 120.0);
+        assert!(widget.looking_at(500.0, 250.0).is_some(), "no ball");
+        assert!(
+            widget.looking_at(room.0, room.1).is_none(),
+            "the room around the ball is still picture",
+        );
+
+        widget.press(500.0, 250.0).move_to(room.0, room.1);
+        let dragged = widget.camera();
+        assert_ne!(dragged, ball, "the drag into the room moved nothing");
+
+        widget.scroll(1.0);
+        let zoomed = widget.camera();
+        assert!(zoomed.fov < dragged.fov, "the scroll did not zoom");
+        assert!(
+            widget.scene.viewpoint().is_dragging(),
+            "the scroll let go of the drag",
+        );
+
+        widget.move_to(room.0 + 200.0, room.1);
+        assert_ne!(
+            widget.camera(),
+            zoomed,
+            "the pan died at the scroll: the button is still down and the \
+             cursor moved 200 px",
+        );
     }
 
     /// The zoom is the widget's only other input, and it is not a grab: it

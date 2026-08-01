@@ -422,6 +422,31 @@ view at a fixed 164 degrees per window width, which is the rate the pinned
 drag itself is going at in the last view before the handover, so the two meet
 at the threshold with nothing to feel. Under 110 nothing changed at all.
 
+**And the zoom key no longer lets go of the drag** (issue #83, pre-existing
+and surfaced by the three above). `Ctrl+=` and `Ctrl+-` took a held drag's
+hold again at the middle of the frame while the hand was somewhere else, so
+the next move of the pointer hauled the picture over to whatever the middle
+had been pointing at: 33 degrees of yaw for a cursor that did not move, in
+the widget-level check that reproduced it. A held drag already knows where
+the cursor is, because that is what the wide regime measures its travel from,
+and the key zooms there now, which is what the wheel has always done. With
+nothing held it still zooms about the middle, which is where a keyboard with
+no hand on the picture is pointing.
+
+**And nor does the wheel out in the room around the ball** (issue #92, owner
+reported, the last of the same family). Zoomed out to the ball, a drag that
+starts on the picture and wanders out into the grey keeps turning the view,
+which is what issue #78 bought: the wide drag reads the hand's travel and not
+what is under the cursor. Scrolling out there killed it stone dead. Every
+zoom re-takes the drag's hold at the cursor, the room has no direction under
+it to take hold of, and the whole drag was being dropped rather than the
+hold: the button was still down, the pointer moved 200 px, and the camera
+came back bit for bit identical in the widget-level reproduction. The hold is
+kept now where there is nothing to replace it with. Nothing reads it stale:
+the room only exists past 220 degrees of view and the pinned drag stops at
+110, so the wide drag, which does not use it, is the only regime the room can
+be seen from.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
@@ -491,6 +516,43 @@ no commitment: export that follows the view the pilot actually flies
 live, no keyframe UI ever.
 
 ## Decisions log
+
+- 2026-07-31 (late) Seam architecture revised by three owner rulings: the
+  app targets ANY 360 footage (near-field moves in general, so per-frame
+  band alignment is the MAIN path and the per-clip table is a prior);
+  the horizon bar is pixel-perfect (calibration brings residual inside
+  the band search's capture range, per-frame alignment snaps it to zero,
+  far field included - which is how Insta360's own horizon is perfect);
+  and correction is calibrate-by-watching (seam readings harvested from
+  playback's own decoded frames, slerped in below perception, pooled
+  per camera, cached per file, no user surface at all).
+
+- 2026-07-31 **ffmpeg pin moved 6.1 -> 7.1** (owner: "Bump to 7"), which
+  supersedes the 2026-07-30 entry further down. Issue #65: the Flatpak
+  could not be built from the tree at all while the pin said 6.1, because
+  every freedesktop runtime ships ffmpeg 7 and the 25.08 one is forced by
+  libcosmic's rustc floor. The port is one file. ffmpeg 7 replaced the
+  bitmask channel layout with `AVChannelLayout`, which holds raw pointers
+  and so is not `Send`, and a `Track` rides its `Reader` onto the decode
+  thread; it now derives the layout from the channel count it already
+  keeps rather than storing one. The bill goes to the dev box: Ubuntu
+  24.04 has no ffmpeg 7 and will not get one, so ffmpeg comes from a PPA
+  (AGENTS.md, and the same one in CI) or, without sudo, from
+  `scripts/ffmpeg7-local.sh`.
+
+- 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
+  recorded in docs/icon.md). A round teal world with a green coast and a warm
+  rim, and a small figure entering it from the upper left, drawn by
+  `scripts/icon-diver.py` from a joint skeleton rather than traced. The
+  figure's size and how far its feet clear the rim are set together, because
+  the rim crossing is what decides both: round 7 grew it 18 percent inward,
+  holding the feet at the same 27.1 units past the rim.
+  `resources/icons/hicolor/` is the theme tree: a scalable SVG, PNGs from 256
+  down to 16, and a drawing of its own for 32, 24 and 16, because both COSMIC
+  and the Pop theme redraw those sizes instead of exporting. The files are
+  named for the application ID `dev.harding.Kjerag`, the one issue #66
+  settled and issue #75 will put in the code; until that rename lands the
+  binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
 
 - 2026-07-31 Seam bar raised (owner): "I want the best seam support out
   there." The prod gate is not good-enough but best-shipping, Insta360's
@@ -944,7 +1006,8 @@ live, no keyframe UI ever.
 - 2026-07-30 Primary target is AMD/Intel Mesa (VA-API). NVIDIA would need
   an NVDEC backend variant; out of scope until someone needs it.
 - 2026-07-30 ffmpeg-next/ffmpeg-sys-next pinned to 6.1, matching the system
-  ffmpeg. The 8.x APIs in the research notes are not present.
+  ffmpeg. The 8.x APIs in the research notes are not present. **Superseded
+  2026-07-31**: 7.1, see the top of this log.
 - 2026-07-30 Zero-copy import is not a hand-rolled ash routine: wgpu 30's
   `Device::texture_from_dmabuf_fd` (wgpu-hal Vulkan) imports the VA-API
   planes as they come, 0.12 ms/frame for both. On libcosmic's wgpu 28 the
@@ -987,11 +1050,23 @@ live, no keyframe UI ever.
   wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
   and two wgpu-types in one graph is two incompatible `TextureFormat`s.
   `wgpu` is the only crate in that workspace anything outside it depends on.
-- 2026-07-31 The app turns libcosmic's content container off
-  (`core.window.content_container = false`). It insets the view by
-  `border_padding` on the right and, because `nav_bar.active` defaults to
-  true even with no nav model, by nothing on the left. Video wants both
-  edges (issue #22).
+- 2026-07-31 ~~The app turns libcosmic's content container off
+  (`core.window.content_container = false`)~~ (issue #22, superseded by
+  issue #93 the same day). It insets the view by `border_padding` on the
+  right and, because `nav_bar.active` defaults to true even with no nav
+  model, by nothing on the left. Video wants both edges, and turning the
+  container off is one of the two ways to get them.
+- 2026-07-31 The border padding is zeroed instead, and the content container
+  stays (`core.window.border_padding = Some(0)`, cosmic-player
+  `src/main.rs:895`, issue #93). `main_content_padding` is `[0, 0, 0, 0]`
+  either way (`app/mod.rs:632-639`), so the video still has both edges. What
+  the container is worth is the window background: libcosmic paints
+  `background(theme.transparent).base` only on the container branch
+  (`app/mod.rs:856-874`), and that colour is what makes a COSMIC window a
+  darkened pane over the compositor's blur. Without it the welcome view was
+  blur and nothing else, which is what the owner saw. cosmic-files paints no
+  background of its own either; it just leaves the container on
+  (`src/app.rs:2352-2367`, off in desktop mode only).
 - 2026-07-31 One crate per layer, in a workspace (issue #19): `kyerag-meta`,
   `kyerag-media`, `kyerag-render`, `kyerag` (the app) and `kyerag-spike`.
   The layer diagram is now a build constraint, and `kyerag-meta` builds and

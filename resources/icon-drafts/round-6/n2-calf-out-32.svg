@@ -1,0 +1,27 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="n2-ocean" x1="16" y1="16" x2="248" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <linearGradient id="n2-fig" x1="0" y1="-38" x2="30" y2="36" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EE9048"/>
+      <stop offset="1" stop-color="#B8371A"/>
+    </linearGradient>
+    <clipPath id="n2-globe"><circle cx="130" cy="130" r="117"/></clipPath>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="#FFE0B0"/>
+  <circle cx="130" cy="130" r="117" fill="url(#n2-ocean)"/>
+  <g clip-path="url(#n2-globe)">
+    <g transform="translate(130 130) scale(2.8537) translate(-130 -140)">
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
+    </g>
+  </g>
+  <g transform="translate(58.7 58.7) rotate(-45) scale(1.0)" fill="url(#n2-fig)">
+    <path d="M13.5 18.4L8.6 0.1L-13.0 2.4L-14.0 21.3Z"/>
+    <path d="M8.2 -1.0L-5.3 -35.5L-13.0 -34.0L-13.0 3.0Z"/>
+    <circle cx="0" cy="22" r="14"/>
+    <circle cx="-2" cy="3" r="11"/>
+  </g>
+</svg>

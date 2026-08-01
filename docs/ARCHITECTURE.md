@@ -194,7 +194,13 @@ grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
   on the right and, because `nav_bar.active` defaults to true even with no
   nav model, by nothing on the left (`app/mod.rs`, `main_content_padding`).
   Measured at scale 1.25: 1 physical px of border left, 10 right. The app
-  sets `core.window.content_container = false` (issue #22).
+  sets `core.window.border_padding = Some(0)` and keeps the container
+  (issue #93): the same `[0, 0, 0, 0]` around the video, and the window
+  background comes with it. That background is painted only on the
+  container branch (`app/mod.rs:856-874`,
+  `background(theme.transparent).base`), so an app that turns the container
+  off to reach the window edges is transparent behind its own content, and
+  under the desktop's blur that reads as blur with no window over it.
 - `iced_renderer` silently drops shader primitives when the tiny-skia
   fallback is chosen (`fallback.rs`: a `log::warn!` and nothing drawn), so
   a blank widget can mean "wrong renderer", not "wrong shader". libcosmic's

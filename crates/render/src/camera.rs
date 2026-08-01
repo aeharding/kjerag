@@ -39,11 +39,12 @@ const FOV_MIN: f32 = 20.0 * PI / 180.0;
 const ZOOM_PER_STEP: f32 = 0.12;
 
 /// Scroll steps one press of the zoom key is worth. A wheel notch is a small
-/// adjustment under a cursor that is already pointing at something; a key
-/// press has no cursor and wants to cross the range in a handful of presses.
+/// adjustment on a hand that is already on the picture; a key press is a
+/// standing instruction and wants to cross the range in a handful of presses.
 const STEPS_PER_KEY: f32 = 3.0;
 
-/// The middle of the output, which is where a keyboard is pointing.
+/// The middle of the output, which is where a keyboard with no hand on the
+/// picture is pointing.
 const MIDDLE: [f32; 2] = [0.5, 0.5];
 
 /// How much bearing a grabbed direction has to have before a drag turns the
@@ -316,7 +317,10 @@ impl Viewpoint {
     /// A press on the room around the ball takes hold of nothing, because
     /// there is nothing there to take hold of.
     pub fn grab(&mut self, uv: [f32; 2], aspect: f32) {
-        self.drag = self.hold(uv, aspect);
+        self.drag = self
+            .camera
+            .look(uv, aspect)
+            .map(|anchor| Drag { anchor, at: uv });
     }
 
     pub fn release(&mut self) {
@@ -349,19 +353,35 @@ impl Viewpoint {
     /// A held drag takes hold again at the new field of view. The direction
     /// under the cursor moved when the view widened, and a drag still solving
     /// for the old one would jump the picture on its next move.
+    ///
+    /// **A cursor in the room around the ball keeps the hold it has** (issue
+    /// #92). There is no direction there to take hold of, and a drag is a
+    /// button the hand is still holding down: letting go of it because the
+    /// wheel turned over the room killed the pan outright, and the only way
+    /// back was to release and press again. Nothing reads the kept direction
+    /// while it is stale, because the room and the pinned drag cannot be seen
+    /// at the same width: the room needs a view wider than `2 * FOV_FLAT`
+    /// (past there the sphere closes into a disc with an edge, `Screen`),
+    /// the pinned drag stops at `FOV_FLAT`, and the zoom re-takes the hold at
+    /// the width it just arrived at. The wide drag between them reads the
+    /// cursor's travel and not what is under it, which is why the pan worked
+    /// in the room until the wheel touched it.
     pub fn zoom(&mut self, steps: f32, uv: [f32; 2], aspect: f32) {
         self.camera.zoom(steps, aspect);
-        if self.drag.is_some() {
-            self.drag = self.hold(uv, aspect);
-        }
+        let Some(held) = self.drag else {
+            return;
+        };
+        self.drag = Some(Drag {
+            anchor: self.camera.look(uv, aspect).unwrap_or(held.anchor),
+            at: uv,
+        });
     }
 
-    /// Apply a [`Nudge`], which zooms about the middle of the view because
-    /// that is where a keyboard is pointing.
+    /// Apply a [`Nudge`], which zooms where the keyboard is pointing.
     pub fn nudge(&mut self, nudge: Nudge, aspect: f32) {
         match nudge {
-            Nudge::ZoomIn => self.zoom(STEPS_PER_KEY, MIDDLE, aspect),
-            Nudge::ZoomOut => self.zoom(-STEPS_PER_KEY, MIDDLE, aspect),
+            Nudge::ZoomIn => self.zoom(STEPS_PER_KEY, self.pointing(), aspect),
+            Nudge::ZoomOut => self.zoom(-STEPS_PER_KEY, self.pointing(), aspect),
             // The drag keeps its hold: the direction it grabbed is not where
             // the reset leaves the view, and re-anchoring here would haul the
             // picture straight back on the next move.
@@ -372,11 +392,17 @@ impl Viewpoint {
         }
     }
 
-    fn hold(&self, uv: [f32; 2], aspect: f32) -> Option<Drag> {
-        Some(Drag {
-            anchor: self.camera.look(uv, aspect)?,
-            at: uv,
-        })
+    /// Where a view change with no event of its own is aimed: at the cursor a
+    /// held drag last saw, and otherwise at the middle of the frame.
+    ///
+    /// A key has no cursor of its own, but a hand on the picture has one, and
+    /// that is where the zoom has to take its hold again (issue #83). Taking
+    /// it at the middle while the drag is holding somewhere else hands the
+    /// drag a direction the hand never grabbed, and the next move hauls the
+    /// picture over to it. With nothing held there is no such place, and the
+    /// middle is what a keyboard is pointing at.
+    fn pointing(&self) -> [f32; 2] {
+        self.drag.map_or(MIDDLE, |drag| drag.at)
     }
 }
 
@@ -1135,21 +1161,30 @@ mod tests {
         assert_eq!(viewpoint.camera(), Camera::default());
     }
 
-    /// A scroll in the middle of a drag re-reads what the cursor is over, so
+    /// A zoom in the middle of a drag re-reads what the cursor is over, so
     /// the move after it is still a move from here. Without that the next
     /// move solves for a direction the cursor stopped being over the moment
     /// the view widened, and the picture jumps.
-    #[test]
-    fn zooming_mid_drag_keeps_the_grab() {
-        let held = [0.6, 0.4];
-        let mut viewpoint = Viewpoint::default();
-        viewpoint.grab([0.8, 0.2], 1.6);
-        viewpoint.drag_to(held, 1.6);
+    ///
+    /// The drag is taken to [`HELD`] and left there, the zoom goes in, and
+    /// the move after it asks for nothing: anything the view does then, it
+    /// did on its own.
+    #[track_caller]
+    fn zoom_mid_drag_holds(start: Camera, zoom: impl FnOnce(&mut Viewpoint, f32)) {
+        let aspect = 1.6;
 
-        viewpoint.zoom(3.0, held, 1.6);
+        let mut viewpoint = parked(start);
+        viewpoint.grab([0.8, 0.2], aspect);
+        assert!(viewpoint.drag_to(HELD, aspect), "the drag moved nothing");
+
+        zoom(&mut viewpoint, aspect);
         let zoomed = viewpoint.camera();
-        viewpoint.drag_to(held, 1.6);
+        assert_ne!(
+            zoomed.fov, start.fov,
+            "the zoom left the view as wide as it was"
+        );
 
+        viewpoint.drag_to(HELD, aspect);
         let moved = viewpoint.camera();
         assert!(
             (moved.yaw - zoomed.yaw).abs() < 1e-4 && (moved.pitch - zoomed.pitch).abs() < 1e-4,
@@ -1157,5 +1192,161 @@ mod tests {
             degrees(zoomed),
             degrees(moved),
         );
+    }
+
+    /// Where the drag in [`zoom_mid_drag_holds`] is holding when the zoom
+    /// arrives, which is nowhere near the middle of the frame: the wheel is
+    /// handed it and the key has to know it already.
+    const HELD: [f32; 2] = [0.6, 0.4];
+
+    /// A view narrow enough that its drag stays pinned to the cursor, and one
+    /// wide enough that its drag reads the hand's travel instead: the two
+    /// regimes issue #78 left, which zoom alike and drag differently.
+    const PINNED: Camera = Camera {
+        yaw: 0.0,
+        pitch: 0.0,
+        fov: FOV_FLAT * 0.8,
+    };
+    const WIDE: Camera = Camera {
+        yaw: 0.0,
+        pitch: 0.0,
+        fov: FOV_FLAT * 1.5,
+    };
+
+    #[test]
+    fn scrolling_mid_drag_keeps_the_grab() {
+        zoom_mid_drag_holds(PINNED, |viewpoint, aspect| {
+            viewpoint.zoom(3.0, HELD, aspect)
+        });
+        zoom_mid_drag_holds(WIDE, |viewpoint, aspect| viewpoint.zoom(3.0, HELD, aspect));
+    }
+
+    /// Issue #83: the same invariant for the key, which used to take its hold
+    /// again at the middle of the frame however far from there the cursor
+    /// was. The pinned drag then solved for a direction the hand never
+    /// grabbed and the wide one measured its travel from a place the hand
+    /// never was, so both regimes jumped on the next move and both are here.
+    #[test]
+    fn keyboard_zooming_mid_drag_keeps_the_grab() {
+        for nudge in [Nudge::ZoomIn, Nudge::ZoomOut] {
+            zoom_mid_drag_holds(PINNED, |viewpoint, aspect| viewpoint.nudge(nudge, aspect));
+            zoom_mid_drag_holds(WIDE, |viewpoint, aspect| viewpoint.nudge(nudge, aspect));
+        }
+    }
+
+    /// A point of the ball view that is room rather than picture, and the one
+    /// the drag starts from, which is picture at every width.
+    const ROOM: [f32; 2] = [0.12, 0.2];
+
+    /// Issue #92: a zoom while the cursor is out in the room does not let go
+    /// of the drag. There is no direction out there to take hold of, and the
+    /// wide drag was never holding one.
+    ///
+    /// The drag is grabbed on the ball and hauled out into the room, which is
+    /// the owner's own gesture and works; the zoom lands there.
+    #[track_caller]
+    fn zoom_over_the_room_holds(zoom: impl FnOnce(&mut Viewpoint, f32)) {
+        let aspect = 16.0 / 9.0;
+        let mut viewpoint = at_the_ball(aspect);
+        assert!(
+            viewpoint.camera().look(ROOM, aspect).is_none(),
+            "the test point is picture, not room",
+        );
+
+        viewpoint.grab(MIDDLE, aspect);
+        assert!(viewpoint.drag_to(ROOM, aspect), "the drag stalled");
+
+        zoom(&mut viewpoint, aspect);
+        assert!(viewpoint.is_dragging(), "the zoom let go of the drag");
+
+        let zoomed = viewpoint.camera();
+        assert!(
+            viewpoint.drag_to([ROOM[0] + 0.2, ROOM[1]], aspect),
+            "the pan died at the zoom",
+        );
+        assert_ne!(viewpoint.camera().yaw, zoomed.yaw);
+    }
+
+    #[test]
+    fn zooming_over_the_room_keeps_the_drag() {
+        // Both ways the wheel goes, because the far end is a clamp rather than
+        // a state and a scroll that changes nothing at all still re-takes the
+        // hold. And both keys, which aim where the drag is holding (issue
+        // #83), so a hand out in the room aims them into the room.
+        for steps in [1.0, -1.0] {
+            zoom_over_the_room_holds(|viewpoint, aspect| viewpoint.zoom(steps, ROOM, aspect));
+        }
+        for nudge in [Nudge::ZoomIn, Nudge::ZoomOut] {
+            zoom_over_the_room_holds(|viewpoint, aspect| viewpoint.nudge(nudge, aspect));
+        }
+    }
+
+    /// The same drag on the way back in (issue #92): the hand holds the button
+    /// and scrolls the whole zoom range in from the ball, cursor parked out in
+    /// the room, so the picture comes out to meet it partway.
+    ///
+    /// Two things at every notch. The drag is alive, which is what the room
+    /// used to end. And it has not jumped: a move to where the cursor already
+    /// is asks for nothing, so anything the view does then it did on its own.
+    /// That covers both crossings the scroll makes -- the room's edge, where
+    /// the hold starts answering again, and [`FOV_FLAT`], where the drag goes
+    /// back to being pinned to the cursor -- and the second is why the kept
+    /// direction is never read stale: the room is gone a whole `FOV_FLAT`
+    /// before the pinned drag starts.
+    #[test]
+    fn scrolling_in_from_the_room_keeps_the_drag_and_does_not_jump() {
+        let aspect = 16.0 / 9.0;
+        let mut viewpoint = at_the_ball(aspect);
+        viewpoint.grab(MIDDLE, aspect);
+        assert!(viewpoint.drag_to(ROOM, aspect));
+
+        let mut over_the_room = 0;
+        let mut pinned = 0;
+        while viewpoint.camera().fov > FOV_MIN {
+            viewpoint.zoom(1.0, ROOM, aspect);
+            let camera = viewpoint.camera();
+            assert!(viewpoint.is_dragging(), "the zoom let go at {}", camera.fov);
+
+            match camera.look(ROOM, aspect) {
+                None => over_the_room += 1,
+                Some(_) if camera.fov <= FOV_FLAT => pinned += 1,
+                Some(_) => {}
+            }
+
+            viewpoint.drag_to(ROOM, aspect);
+            let moved = viewpoint.camera();
+            assert!(
+                (moved.yaw - camera.yaw).abs() < 1e-4 && (moved.pitch - camera.pitch).abs() < 1e-4,
+                "the cursor did not move but the view went from {:?} to {:?} at \
+                 fov {:.0}",
+                degrees(camera),
+                degrees(moved),
+                camera.fov.to_degrees(),
+            );
+        }
+
+        assert!(over_the_room > 0, "the scroll never started in the room");
+        assert!(pinned > 0, "the scroll never reached the pinned drag");
+    }
+
+    /// With no drag held the key is the only thing pointing, and it points at
+    /// the middle: the zoom changes how wide the view is, moves it nowhere,
+    /// and takes hold of nothing.
+    #[test]
+    fn a_keyboard_zoom_with_nothing_held_only_changes_the_width() {
+        let start = Camera {
+            yaw: 0.7,
+            pitch: -0.3,
+            fov: 1.2,
+        };
+        for nudge in [Nudge::ZoomIn, Nudge::ZoomOut] {
+            let mut viewpoint = parked(start);
+            viewpoint.nudge(nudge, 1.6);
+            let zoomed = viewpoint.camera();
+
+            assert_ne!(zoomed.fov, start.fov, "the key did not zoom");
+            assert_eq!((zoomed.yaw, zoomed.pitch), (start.yaw, start.pitch));
+            assert!(!viewpoint.is_dragging());
+        }
     }
 }

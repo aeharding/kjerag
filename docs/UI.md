@@ -51,15 +51,69 @@ implementing agent to settle alone.
 
 One window, no tabs, one file at a time.
 
-- `core.window.content_container = false`, already set and already
-  explained in `crates/app/src/app.rs`: video wants both window edges.
-  cosmic-player reaches the same place from the other direction, with
-  `core.window.border_padding = Some(0)` (`src/main.rs:895`).
+- `core.window.border_padding = Some(0)`, which is cosmic-player's own line
+  (`src/main.rs:895`): video wants both window edges, and this is the way to
+  them that keeps libcosmic's content container. The container was turned
+  off instead until issue #93, and the difference is the window background;
+  see "The background" below.
 - Size limits stay as they are (360 x 240). cosmic-player uses 360 x 180
   (`src/main.rs:156`).
 - `Settings::default().theme(config.app_theme.theme())` at startup, so the
   window opens in the configured theme rather than flashing the default
   one (cosmic-player `src/main.rs:154-155`).
+
+### The background
+
+**A COSMIC window is a darkened pane over the compositor's blur, and the app
+paints the pane.** Issue #93, from the owner looking at the welcome view
+with blur on: "just a blur without darkening the bg. Should be like the
+finder, and the body should have that OS-wide darkened area."
+
+The composition, read at the revisions above:
+
+1. The surface is created transparent (libcosmic `src/app/settings.rs:100`,
+   plumbed at `src/app/mod.rs:89`) and cleared transparent
+   (`src/app/cosmic.rs:549-563`; the opaque clear is only for a maximized
+   window under a theme with `frosted_maximized_apps` off). Overriding
+   `Application::style()` with an opaque colour would defeat blur, so that
+   is not the lever.
+2. Blur itself is not asked for by the app. libcosmic requests it per
+   surface over `ext-background-effect-v1` whenever the theme is frosted and
+   `Core::auto_blur` allows it (`src/app/cosmic.rs:911-929`,
+   `src/core.rs:544-553`, `573-600`), and Kyerag takes the default. So the
+   blur the owner saw was already ours.
+3. What darkens it is one widget: the container libcosmic wraps the header
+   bar and the content in, whose background is
+   `theme.cosmic().background(theme.transparent).base`
+   (`src/app/mod.rs:856-874`). `theme.transparent` is set from the same
+   frosted-and-blurred test (`src/app/cosmic.rs:899-904`), and it picks the
+   pre-derived translucent copy of the background container
+   (`cosmic-theme/src/model/theme.rs:213-219`), whose alpha runs 0.90 down
+   to 0.60 with the blur strength (`theme.rs:1098-1104`, `1809-1828`). That
+   alpha is the darkened area.
+4. **That background is painted only when `content_container` is true**
+   (`src/app/mod.rs:858-866`, the `else` arm is `None`), which is why an app
+   that turns the container off to reach the window edges gets bare blur.
+
+cosmic-files does nothing at all here: no `fn style`, no background
+container in the main window, `content_container` left on and turned off
+only for the desktop-icon layer (`src/app.rs:2352-2367`). Its darkened
+window is entirely libcosmic's doing. So matching it is a matter of keeping
+the container, which is what `border_padding = Some(0)` above is for.
+
+**The video needs nothing further.** cosmic-player paints `Color::BLACK`
+behind its video widget and `Color::TRANSPARENT` when there is no video, so
+that libcosmic's translucent background shows through in the second case
+(`src/main.rs:1711-1714`, applied at `2092-2101`). It needs the black
+because a GStreamer video widget does not necessarily fill its bounds; our
+shader writes alpha 1 to every pixel of its own (`crates/render`'s
+fragment shader returns `vec4(rgb, 1.0)`), so there is nothing to see
+through and no second background to paint. The chrome over the video is
+unchanged and already first-party: the control row is
+`theme::Container::WindowBackground` (cosmic-player `src/main.rs:2056`,
+`2081`), which resolves to the same `background(transparent).base`
+(`src/theme/style/iced.rs:506-524`) and so goes translucent with the rest of
+the window when blur is on.
 
 ### Header bar
 
@@ -116,11 +170,29 @@ Centered column, in this order (cosmic-player `src/main.rs:1676-1695`):
 4. flexible space
 
 cosmic-player uses `folder-symbolic` and "No video or audio file open" /
-"Open file". Kyerag uses `video-x-generic-symbolic` (present in
-libcosmic's bundled icons under `freedesktop/scalable/mimetypes/`), "No
-video open", and "Open video". The elementary HIG's welcome-screen page,
-which the System76 HIG defers to, describes exactly this shape: explain the
-situation, then offer the action that fixes it.
+"Open file". Kyerag uses the app icon, "No video open", and "Open video".
+The elementary HIG's welcome-screen page, which the System76 HIG defers to,
+describes exactly this shape: explain the situation, then offer the action
+that fixes it.
+
+**The mark is the app icon, at 64 px** (issue #93). The size is the
+first-party empty state's: cosmic-files' empty folder is
+`widget::icon::from_name("folder-symbolic").size(64).icon()` over a
+`text::body` line, centred, `spacing(space_xxs)`
+(`src/tab.rs:5627-5655`), and cosmic-player's welcome column is the same
+shape at the same size. What is *drawn* there deviates: both of those draw a
+symbolic icon for the thing that is missing, and this draws the app's own
+icon, because the owner asked for the icon in this view (issue #93) and
+because a player with one job has nothing to say with a generic video glyph
+that the window is not already saying. The size is not the owner's call yet:
+libcosmic draws this same icon at 128 px on the About page
+(`src/widget/about.rs:132-141`), and 64 was taken because it is what the two
+first-party empty states use and because this column also has to fit a
+360 x 240 window.
+
+The icon is loaded from the committed drawing
+(`resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg`, through
+`icon::from_svg_bytes`) rather than asked for by name. See "About" below.
 
 **Failure to open lands here too.** The welcome view returns with a second
 line of body text under the first, saying what went wrong in plain words
@@ -762,7 +834,7 @@ Message::ToggleContextPage(ContextPage::About))` (cosmic-edit
 ```rust
 About::default()
     .name("Kyerag")
-    .icon(icon::from_name(Self::APP_ID))
+    .icon(icon::from_svg_bytes(APP_ICON))
     .version(env!("CARGO_PKG_VERSION"))
     .author("Alexander Harding")
     .comments("360 video player for the COSMIC desktop")
@@ -783,9 +855,19 @@ About::default()
   turns them into `mailto:` links (`src/widget/about.rs:45-50`), and this
   repo does not publish personal addresses. Name in `.author()`, contact
   through the repository link.
-- `.icon(icon::from_name(APP_ID))` resolves nothing until an app icon is
-  installed. Icon and desktop-file packaging are out of scope for issue
-  #16; see the build order.
+- **The icon is the drawing, not a name** (issue #93).
+  `About::icon` takes an `icon::Handle`
+  (`src/widget/about.rs:13`, setter generated by `derive_setters` with
+  `into`), and the widget draws it at a fixed 128 px with
+  `ContentFit::Contain` (`src/widget/about.rs:132-141`), so
+  `icon::from_svg_bytes` (`src/widget/icon/handle.rs:95-100`) goes in where
+  cosmic-edit puts `icon::from_name`. A name is the thing to use once it
+  resolves, and it does not yet: the icons are installed as
+  `dev.harding.Kjerag` (`resources/icons/`) and the binary's `APP_ID` is
+  still `app.kyerag.Kyerag` until issue #75 renames it. Even after #75, a
+  name only resolves for a build whose icons are installed into an icon
+  theme, which a `cargo run` from the source tree is not, so the bytes are
+  not purely a bridge. Same handle in the welcome view, above.
 
 ## Copy
 
@@ -829,6 +911,9 @@ reviewer can find them in one place:
     `widget::toaster`. Owner's call, and the reason is the window: the
     bottom of a file manager is empty space and the bottom of this one is
     the transport. See "The capture toast".
+11. **The welcome view's mark is the app icon**, where cosmic-player and
+    cosmic-files both draw a symbolic icon of the missing thing. Owner's
+    call (issue #93). The shape and the size are still theirs.
 
 Two things cosmic-player does that we should copy later, neither of them
 part of issue #16:
@@ -855,11 +940,13 @@ part of issue #16:
 4. `Ctrl+0` as "default view" resets yaw, pitch and field of view together.
    The zoom trio it borrows from resets only zoom, because that is all
    those apps have. Splitting them later would need a second key.
-5. An app icon and a MIME type. `.insv` has no registered MIME type
-   anywhere; playing one from Files needs a shared-mime-info definition
-   plus a desktop file, and thumbnails would need a `.thumbnailer` like
-   cosmic-player's (`res/com.system76.CosmicPlayer.thumbnailer`). Out of
-   scope here, wants its own issue.
+5. Half answered. The app icon exists (issue #76, `resources/icons/`) and
+   the About page and the welcome view draw it (issue #93). The MIME type is
+   still open: `.insv` has no registered MIME type anywhere, so playing one
+   from Files needs a shared-mime-info definition plus a desktop file, and
+   thumbnails would need a `.thumbnailer` like cosmic-player's
+   (`res/com.system76.CosmicPlayer.thumbnailer`). The desktop entry and the
+   MIME package prototypes live on the `docs/distribution` branch.
 
 ## Build order
 
