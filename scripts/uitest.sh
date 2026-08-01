@@ -12,8 +12,9 @@
 # `cage` runs one client on a wlroots headless backend, which is a whole
 # Wayland session with no monitor and no connection to the desktop the
 # developer is looking at. `wtype` presses keys into it over the virtual
-# keyboard protocol and `grim` copies the output out. The app is the release
-# binary, unchanged: nothing here is a test hook.
+# keyboard protocol, `target/release/pointer` moves and clicks over the
+# virtual pointer one, and `grim` copies the output out. The app is the
+# release binary, unchanged: nothing here is a test hook.
 #
 # One check is louder than that and says so where it stands: `stalls` needs a
 # frame import to fail, so it preloads twenty lines of C that make `dup(2)`
@@ -35,6 +36,8 @@
 # public. The session's XDG directories are redirected there too, so pressing
 # `h` writes a config the developer's desktop never sees and pressing `s`
 # writes a still into scratch/ rather than into their screenshots folder.
+# The one thing the session shares with the desktop is the sound server, and
+# what it plays there goes into a null sink: see the preflight.
 #
 # Needs `cage wtype grim ffmpeg`, and `wl-paste` for the clipboard check,
 # which skips without it.
@@ -78,6 +81,9 @@ SETTLE=1
 # of failing on the first miss. A key whose effect never arrives fails the
 # check, which is what a broken binding would look like too.
 PRESSES=3
+# Where the session's sound goes: the same null sink scripts/quiet.sh loads,
+# by the same name, so a box that has run either has one of them.
+QUIET_SINK=kjerag_quiet
 
 failures=0
 checks=0
@@ -173,6 +179,16 @@ if [ -n "${KJERAG_FLATPAK:-}" ]; then
 	# ~/.config/cosmic is then not bound into the sandbox at all, so the app
 	# cannot write it even though it still holds the grant that says it may.
 	launch+=("--env=XDG_SCREENSHOTS_DIR=$session/shots" "--filesystem=$session")
+	# Where the sound would go, since a sandbox inherits nothing from `boot`'s
+	# environment. This mode has none to route today: the bundle holds
+	# `--socket=pulseaudio`, flatpak binds that socket out of the caller's
+	# runtime directory, and the session's own has only the PipeWire one in
+	# it, so the app says "playing silently" and the checks that need sound
+	# skip (measured 2026-08-01, with the desktop's sink muted for the length
+	# of it: silent with these two and silent without them). They are here so
+	# that the day this session carries a pulse socket, it is routed the way
+	# every other run is rather than out of the speakers.
+	launch+=("--env=PULSE_SINK=$QUIET_SINK" "--env=PIPEWIRE_NODE=$QUIET_SINK")
 	[ -z "$media" ] || launch+=("--filesystem=$media:ro")
 	launch+=("$app")
 elif [ -n "${KJERAG_BIN:-}" ]; then
@@ -197,6 +213,37 @@ if [ -n "$media" ]; then
 	printf 'building %s\n' "$dragsource"
 	(cd "$root" && cargo build --release -p kjerag-spike --bin dragsource) ||
 		die "the drag source did not build"
+fi
+
+# The pointer is harness machinery rather than the thing under test, so it is
+# built from this tree whatever KJERAG_BIN says.
+poker=$root/target/release/pointer
+(cd "$root" && cargo build --release -p kjerag-spike --bin pointer) ||
+	die "the pointer did not build"
+[ -x "$poker" ] || die "no pointer at $poker"
+
+# Sound. The app opens an output device when the file has an audio track, and
+# under a session with no PipeWire socket in its runtime directory that open
+# fails, the app says "playing silently", and everything about the sound is
+# drawn disabled - the speaker button included, which is the way into the
+# volume popup. So the session is given the desktop's own socket, and the
+# stream is sent to a null sink, which is the same routing scripts/quiet.sh
+# does and for the same reason: the owner's speakers are not a test fixture
+# (AGENTS.md, sound etiquette). Measured 2026-08-01: the app's stream lands on
+# kjerag_quiet, with PIPEWIRE_NODE as the thing that puts it there, because
+# what plays what cpal writes is pipewire-alsa.
+#
+# It is the one hole in the session's isolation and it is only ever a hole
+# outward: nothing is read from the desktop, one stream is written to a sink
+# that goes nowhere.
+sound=yes
+if command -v pactl >/dev/null && [ -S "/run/user/$(id -u)/pipewire-0" ]; then
+	pactl list short sinks | grep -q "[[:space:]]$QUIET_SINK[[:space:]]" ||
+		pactl load-module module-null-sink "sink_name=$QUIET_SINK" \
+			"sink_properties=device.description=$QUIET_SINK" >/dev/null
+else
+	sound=no
+	printf 'no pipewire socket or no pactl: the session plays silently\n'
 fi
 
 [ -z "$media" ] || [ -f "$media" ] || die "no file at $media"
@@ -232,6 +279,8 @@ boot() {
 	log=$session/$label.log
 	runtime=$(mktemp -d "${TMPDIR:-/tmp}/kjerag-uitest.XXXXXXXX")
 	chmod 700 "$runtime"
+	# The sound out, and only the sound out: see the preflight above.
+	[ "$sound" = no ] || ln -s "/run/user/$(id -u)/pipewire-0" "$runtime/pipewire-0"
 
 	env \
 		HOME="$HOME_DIR" \
@@ -241,6 +290,8 @@ boot() {
 		XDG_DATA_HOME="$session/data" \
 		XDG_CACHE_HOME="$session/cache" \
 		XDG_SCREENSHOTS_DIR="$session/shots" \
+		PULSE_SINK="$QUIET_SINK" \
+		PIPEWIRE_NODE="$QUIET_SINK" \
 		WLR_BACKENDS=headless \
 		WLR_LIBINPUT_NO_DEVICES=1 \
 		cage -- "${wrap[@]}" "${launch[@]}" ${file:+"$file"} >"$log" 2>&1 &
@@ -307,6 +358,16 @@ grab() {
 	local out=$session/$1.ppm
 	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" grim -t ppm "$out" 2>>"$log"
 	printf '%s' "$out"
+}
+
+# poke <x> <y> [click]: put the pointer there, and press the left button if
+# asked. `crates/spike/src/bin/pointer.rs` says why this is a binary of ours
+# and not `wlrctl pointer`. The output is the one cage gives a headless
+# session, which is 1280x720 and is what every measured coordinate here is in.
+poke() {
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$poker" 1280 720 "$1" "$2" "${3:-}" 2>>"$log"
+	sleep "$SETTLE"
 }
 
 # ------------------------------------------------------------ assertions
@@ -532,6 +593,9 @@ with_media() {
 	survives_fullscreen
 	fullscreen_holds_the_view
 	the_room_belongs_to_the_window
+	# While the window is still paused, which is what makes two captures of it
+	# differ by the popup and nothing else.
+	volume_popup_closes_on_a_click "$paused"
 
 	# Space again, and this time the app's own report line is the evidence.
 	# A file that never paused is still playing, so its report lines would
@@ -928,6 +992,74 @@ $(patch_rgb "$session/room-pane-again.ppm") rather than the pane's $room_pane" \
 		return
 	fi
 	pass "$check (pane $room_pane, fullscreen $(patch_rgb "$session/room-black.ppm"))"
+}
+
+# ------------------------------------------- the volume popup, and the pointer
+#
+# Issue #126, owner-reported: the volume popup stayed up until the speaker
+# button was pressed again. cosmic-player takes a press anywhere in the video
+# as the way out of an open dropdown (`src/main.rs:1771-1773`, `1507-1513`)
+# and the owner ruled that we follow it, so this is that press.
+#
+# The window is paused, so two captures of it are the same bytes and
+# everything that differs between them is what the pointer did. The band is
+# the bottom of the window: measured 2026-08-01 against the main build, the
+# popup is 240 px wide by 50 rows tall and sits at rows 622 to 671, which is
+# directly above the 48-row control row, and the two captures differ in
+# 11,960 pixels all of them inside it.
+#
+# Both halves are needed and the first is what makes the second worth
+# anything: a run where the speaker button drew nothing has not shown a popup
+# being dismissed, it has shown a window with no popup in it.
+VOLUME_BUTTON=1252
+CONTROL_ROW=696
+# A point in the video clear of both the popup and the control row, which is
+# where the pointer sits for the captures either side of the popup as well as
+# for the click that has to close it.
+VIDEO_X=320
+VIDEO_Y=360
+# Control row plus popup plus room above it.
+POPUP_BAND=144
+
+volume_popup_closes_on_a_click() {
+	local check="a click in the video closes the volume popup"
+	if [ "${1:-no}" = no ]; then
+		skip "$check (nothing paused)"
+		return
+	fi
+	if said 'playing silently'; then
+		skip "$check (no sound device here, so the speaker button is disabled)"
+		return
+	fi
+	# A toast still on screen is a second thing that can change between two
+	# captures, and it is in the band nothing else is.
+	sleep "$TOAST_GONE"
+
+	local parked popup gone try=0
+	poke "$VIDEO_X" "$VIDEO_Y"
+	parked=$(grab volume-parked)
+	while [ "$try" -lt "$PRESSES" ]; do
+		poke "$VOLUME_BUTTON" "$CONTROL_ROW" click
+		alive || lost "$check"
+		popup=$(grab volume-up)
+		band_changed "$parked" "$popup" bottom "$POPUP_BAND" && break
+		try=$((try + 1))
+	done
+	if ! band_changed "$parked" "$popup" bottom "$POPUP_BAND"; then
+		fail "$check" "the speaker button drew no popup after $PRESSES clicks" \
+			"$parked" "$popup" "log: $log"
+		return
+	fi
+
+	poke "$VIDEO_X" "$VIDEO_Y" click
+	alive || lost "$check"
+	gone=$(grab volume-gone)
+	if band_changed "$parked" "$gone" bottom "$POPUP_BAND"; then
+		fail "$check" "the popup is still up after a click in the video" \
+			"$parked" "$gone"
+		return
+	fi
+	pass "$check"
 }
 
 # The arguments half of a view line, which is `reframe`'s own syntax: the same

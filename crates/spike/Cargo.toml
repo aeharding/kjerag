@@ -24,11 +24,13 @@ ffmpeg-next = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }
 wgpu = { workspace = true }
-# `dragsource` alone (issue #118): a drop can only be tested by a second
-# Wayland client performing the drag, because wtype presses keys and nothing
-# in the harness can drag. Every crate here is already in Cargo.lock through
-# libcosmic, so the instrument adds edges to the graph and no crate to the
-# Flatpak's source list.
+# The two instruments and nothing else in the tree: the app reaches Wayland
+# through libcosmic and never speaks it directly. `dragsource` (issue #118)
+# performs a real drag, because a drop can only be tested by a second Wayland
+# client; `src/bin/pointer.rs` (issue #126) moves and clicks, because wtype
+# presses keys and nothing else in the harness can press anything. Every crate
+# here is already in Cargo.lock through libcosmic, so the instruments add
+# edges to the graph and no crate to the Flatpak's source list.
 #
 # `ashpd` is the portal client, for the half of a drop a sandboxed app can
 # read: the file is registered with the document portal and the drag carries
@@ -50,5 +52,6 @@ wayland-protocols = { workspace = true, features = ["client"] }
 wayland-protocols-misc = { workspace = true, features = ["client"] }
 # The pointer, for the same reason: the button the drag is started from comes
 # from the virtual pointer protocol, which is the one cage offers
-# (`wlr_virtual_pointer_manager_v1_create`).
+# (`wlr_virtual_pointer_manager_v1_create`). It is also all `pointer` binds,
+# beside wayland-client.
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
