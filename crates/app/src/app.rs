@@ -71,6 +71,17 @@ use crate::{menu, shot, strings};
 const JUMP_BACKWARD_ICON: &[u8] = include_bytes!("../res/icons/jump-backward-10-symbolic.svg");
 const JUMP_FORWARD_ICON: &[u8] = include_bytes!("../res/icons/jump-forward-10-symbolic.svg");
 
+/// The app icon, for the About page and the welcome view. The drawing itself,
+/// rather than the `icon::from_name(Self::APP_ID)` cosmic-edit passes to the
+/// same setter (`src/main.rs:1454-1468`): a name resolves through the icon
+/// theme, and these icons are installed as `dev.harding.Kjerag` while the
+/// binary still calls itself `app.kyerag.Kyerag`, so the lookup finds nothing.
+///
+/// TODO(#75): revisit at the rename, remembering that a name still resolves
+/// to nothing for a build run out of the source tree.
+const APP_ICON: &[u8] =
+    include_bytes!("../../../resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg");
+
 /// How long the pointer has to sit still before the controls, the header bar
 /// and the cursor go away (cosmic-player `src/main.rs:45`).
 const CONTROLS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -296,13 +307,19 @@ impl cosmic::Application for App {
     /// toggle to the header only when there is a model to toggle
     /// (`src/app/mod.rs:786`), and we have no playlist.
     fn init(mut core: Core, flags: Flags) -> (Self, Task<Self::Message>) {
-        // libcosmic's content container insets the app's view by
-        // `border_padding` on the right and, because `nav_bar.active`
-        // defaults to true even for an app with no nav model, by nothing on
-        // the left (`app/mod.rs`, `main_content_padding`). Measured at scale
-        // 1.25: 1 physical px of window border on the left against 10 on the
-        // right. Video wants both edges, so the container comes off.
-        core.window.content_container = false;
+        // Video wants both window edges, and this is cosmic-player's way of
+        // getting them (`src/main.rs:895`): zero the border padding and keep
+        // libcosmic's content container. `main_content_padding` is then
+        // `[0, 0, 0, 0]` (`app/mod.rs:632-639`), which is the same view as
+        // turning the container off, with the window background that turning
+        // it off takes away: libcosmic paints
+        // `background(theme.transparent).base` only on the container branch
+        // (`app/mod.rs:856-874`), and that colour is the whole of what makes
+        // a COSMIC window a darkened pane over the compositor's blur rather
+        // than bare blur. cosmic-files leaves the container on for the same
+        // reason and never paints a background of its own
+        // (`src/app.rs:2352-2367`, container off in desktop mode only).
+        core.window.border_padding = Some(0);
 
         let mut app = App {
             core,
@@ -894,11 +911,18 @@ impl App {
 
     /// Nothing open: an icon, a line saying so, and the button that fixes it
     /// (cosmic-player `src/main.rs:1676-1695`).
+    ///
+    /// The mark is the app icon at the size a first-party empty state draws
+    /// one: cosmic-files' empty folder is `.size(64)` over a `text::body`,
+    /// and ours is twice that at the owner's direction (2026-07-31)
+    /// line (`src/tab.rs:5627-5655`), and cosmic-player's welcome view is the
+    /// same shape. It used to be `video-x-generic-symbolic`, which said
+    /// "video" where the window can already say which video player this is.
     fn welcome(&self) -> Element<'_, Message> {
         let mut said = widget::column::with_capacity(3)
             .align_x(Alignment::Center)
             .spacing(8)
-            .push(widget::icon::from_name("video-x-generic-symbolic").size(64))
+            .push(icon::from_svg_bytes(APP_ICON).icon().size(128))
             .push(widget::text::body(strings::NOTHING_OPEN));
         if self.failed {
             said = said.push(widget::text::body(strings::OPEN_FAILED));
@@ -1205,10 +1229,14 @@ fn chooser() -> Task<Message> {
 /// No `developers([...])`: that setter turns name and email pairs into
 /// `mailto:` links, and this repository does not publish personal addresses.
 /// The name is in `author` and contact goes through the repository link.
+///
+/// The widget takes an `icon::Handle` and draws it at 128 px
+/// (libcosmic `src/widget/about.rs:132-141`), so the drawing goes in
+/// directly. See [`APP_ICON`] for why it is not asked for by name.
 fn about() -> About {
     About::default()
         .name(strings::APP_NAME)
-        .icon(icon::from_name(App::APP_ID))
+        .icon(icon::from_svg_bytes(APP_ICON))
         .version(env!("CARGO_PKG_VERSION"))
         .author(strings::AUTHOR)
         .comments(strings::COMMENTS)

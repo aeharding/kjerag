@@ -982,11 +982,23 @@ live, no keyframe UI ever.
   wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
   and two wgpu-types in one graph is two incompatible `TextureFormat`s.
   `wgpu` is the only crate in that workspace anything outside it depends on.
-- 2026-07-31 The app turns libcosmic's content container off
-  (`core.window.content_container = false`). It insets the view by
-  `border_padding` on the right and, because `nav_bar.active` defaults to
-  true even with no nav model, by nothing on the left. Video wants both
-  edges (issue #22).
+- 2026-07-31 ~~The app turns libcosmic's content container off
+  (`core.window.content_container = false`)~~ (issue #22, superseded by
+  issue #93 the same day). It insets the view by `border_padding` on the
+  right and, because `nav_bar.active` defaults to true even with no nav
+  model, by nothing on the left. Video wants both edges, and turning the
+  container off is one of the two ways to get them.
+- 2026-07-31 The border padding is zeroed instead, and the content container
+  stays (`core.window.border_padding = Some(0)`, cosmic-player
+  `src/main.rs:895`, issue #93). `main_content_padding` is `[0, 0, 0, 0]`
+  either way (`app/mod.rs:632-639`), so the video still has both edges. What
+  the container is worth is the window background: libcosmic paints
+  `background(theme.transparent).base` only on the container branch
+  (`app/mod.rs:856-874`), and that colour is what makes a COSMIC window a
+  darkened pane over the compositor's blur. Without it the welcome view was
+  blur and nothing else, which is what the owner saw. cosmic-files paints no
+  background of its own either; it just leaves the container on
+  (`src/app.rs:2352-2367`, off in desktop mode only).
 - 2026-07-31 One crate per layer, in a workspace (issue #19): `kyerag-meta`,
   `kyerag-media`, `kyerag-render`, `kyerag` (the app) and `kyerag-spike`.
   The layer diagram is now a build constraint, and `kyerag-meta` builds and

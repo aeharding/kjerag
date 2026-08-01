@@ -1,6 +1,10 @@
-# Kyerag
+<p align="center">
+  <img src="resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg" width="128" height="128" alt="">
+</p>
 
-Native 360° video player for the COSMIC desktop, written in Rust.
+<h1 align="center">Kyerag</h1>
+
+<p align="center">Native 360° video player for the COSMIC desktop, written in Rust.</p>
 
 Kyerag plays Insta360 `.insv` files directly: no stitching step, no proxy
 files, no export round-trip. Drag to reframe, scroll to zoom, take
