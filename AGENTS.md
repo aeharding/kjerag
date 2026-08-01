@@ -142,6 +142,16 @@ CI does not run it and cannot: decode is VA-API against
 device every file is refused with `av_hwdevice_ctx_create: Input/output
 error` (measured), so a GPU-less runner would be checking nothing.
 
+## Sound etiquette
+
+Any instrument or app run that emits audio (sync, playback, the app
+itself outside the harness) goes through `scripts/quiet.sh`, which routes
+the stream to a null sink: the owner's speakers are not a test fixture.
+Timing and underrun accounting are unaffected (verified; the #49 pop
+analysis already measured through a null sink). The one exception: a
+measurement whose purpose is real-device latency uses the real sink with
+the STREAM volume zeroed, never audible playback, and says so.
+
 ## Hard rules
 
 - Branch + PR for all work after the bootstrap commits. Never force-push.
