@@ -1,0 +1,972 @@
+# Distribution: opening a `.insv`, and shipping a Flatpak
+
+Two questions, one document, because they share every file: what has to
+exist for a double click on a `.insv` to start Kyerag, and what has to exist
+for someone who does not build Rust to have Kyerag at all.
+
+Everything called **measured** below was run on 2026-07-31 on the
+development box (AMD Radeon 760M, Phoenix, `radeonsi`, kernel
+7.0.11-76070011-generic, Pop!\_OS 24.04, `flatpak` 1.16.6). Nothing here is
+quoted from documentation where a command could answer instead.
+
+The prototypes are in the tree: `resources/` (what gets installed onto a
+desktop, which is the desktop entry, the metainfo, the MIME package and the
+icon theme tree), `flatpak/app.kyerag.Kyerag.yml` (the manifest) and
+`justfile` (the install recipe). `crates/app/res/` is a different thing and
+stays where it is: the two jump-button icons are `include_bytes!`d into the
+binary.
+
+**Status.** The Flatpak builds, installs, and registers the type. A double
+click resolves to Kyerag, verified end to end (§3.8). The blocker this
+document was written around is gone: the workspace pins ffmpeg 7.1 and the
+runtime ships 7.1.3 (§3.4). The app has an icon (§2.4) and the crate sources
+are committed rather than tarred (§3.5).
+
+**And it builds from this tree with nothing applied to it**, which the
+Flatpak had never done before: no scratch patch, no 950 MB tarball, no
+network. Getting there turned up one defect on `main` and §3.8 is the record
+of it.
+
+**The channel is Flathub, and nothing else** (owner, 2026-07-31). Self-hosting
+a repository was considered and declined (§4.2). Flathub is reached under the
+one scoped exception in AGENTS.md, which is owner-coordinated and owner-led;
+§4.1 says what that permits and what it does not.
+
+---
+
+## 1. The MIME type for `.insv`
+
+### 1.1 Nothing claims it, and something already claims its sibling
+
+Measured, with shared-mime-info as installed:
+
+```
+$ xdg-mime query filetype ~/Videos/VID_…_00_004.insv
+application/octet-stream
+$ grep -i 'lrv\|insv' /usr/share/mime/globs2
+50:video/mp4:*.lrv
+```
+
+So `.insv` is unknown to every application on a stock desktop, and `.lrv`
+is already spoken for. Both facts drive decisions below.
+
+### 1.2 The name: `video/x-insta360-insv`
+
+Nothing is registered: the IANA media-types registry has no `insv` and no
+`insta360`, and neither does shared-mime-info. There is no prior art to
+collide with either: no other project appears to have minted a name for
+this format.
+
+The shared-mime-info **specification says nothing** about naming an
+unregistered format; the only guidance upstream gives is in its
+CONTRIBUTING.md, "Mime-types used should be IANA registered mime-types when
+possible" and "When old mime-types become registered, the new definition
+should include an alias for the old mime-type". RFC 6838 §3.4 discourages
+the unregistered tree, and RFC 6648 discourages `X-` prefixes generally;
+§3.2's vendor tree wants a registration by the vendor. Against that,
+freedesktop's practice is unambiguous: **530** `x-` subtypes against **154**
+`vnd.` ones in the installed database, and upstream was still minting new
+`x-` names in July 2026 (`image/x-portable-arbitrarymap`,
+`image/x-aseprite`, `application/x-hwpx`). Where a registration does appear,
+upstream migrates and keeps the old name as an `<alias>`. `video/vnd.avi`
+carries `video/x-msvideo`, `video/vnd.rn-realvideo` carries
+`video/x-real-video`. That is the road out if Insta360 ever registers one.
+
+So an `x-` name it is, and the remaining question is whether to qualify it
+by vendor. freedesktop does both: `video/x-flv` and `video/x-matroska` do
+not, `video/x-ms-wmv` and `video/x-sgi-movie` do. The tie is broken by the
+closest analogue there is, a dozen file formats belonging to one camera
+maker each and registered nowhere:
+
+```
+image/x-canon-cr2   image/x-canon-cr3   image/x-nikon-nef
+image/x-sony-arw    image/x-fuji-raf    image/x-olympus-orf
+image/x-panasonic-rw2  image/x-pentax-pef  image/x-minolta-mrw
+```
+
+`<media>/x-<vendor>-<extension>`, one per camera vendor, for a dozen raw
+formats none of which is IANA registered. The video tree uses the same shape
+where it needs to (`video/x-ms-wmv`, `video/x-sgi-movie`).
+
+`video/x-insta360-insv` is that pattern applied to us, and the three
+alternatives lose on specific grounds:
+
+- **`application/x-insta360-insv`** is wrong about what the file is. It is
+  video, it holds two HEVC streams and an AAC track, and the top level
+  exists to say so.
+- **`video/vnd.insta360.insv`** spends Insta360's namespace. The vendor tree
+  is for names a vendor registers or at least acknowledges; Insta360 has
+  done neither, and inventing inside someone else's tree is a claim we are
+  not entitled to make. (freedesktop does carry unregistered `vnd.` names,
+  so this is a judgement call, not a rule violation.)
+- **`video/x-insv`** is the genuinely close call, and would not be wrong:
+  plenty of freedesktop `x-` names carry no vendor. It loses on the
+  camera-format precedent above, which is the most similar set of entries in
+  the database and is unanimous the other way, and on the fact that four
+  letters with no vendor in them are a worse thing to squat than four
+  letters with one.
+
+### 1.3 There is no magic rule, and there cannot be a good one
+
+The bytes that identify an `.insv` beyond doubt are the last thirty-two:
+
+```
+$ tail -c 32 ~/Videos/VID_…_00_004.insv
+8db42d694ccc418790edff439fe026bf
+```
+
+which is `crates/meta/src/trailer.rs:48`'s `MAGIC`, and it sits at EOF-32
+because the trailer is appended after `moov`/`mdat`
+(docs/research/insv-format.md §2). shared-mime-info's `<match offset=…>` is
+"the byte offset(s) in the file to check… a single number or a range in the
+form `start:end`": a non-negative start and an optional *forward* range.
+There is no end-relative offset and no way to express one.
+
+Worth knowing before someone tries: `update-mime-database` **accepts**
+`offset="-32"` without a word, writes it into the compiled `magic` file, and
+nothing ever matches it. Worse, on this box a rule with a negative offset
+makes `gio info -a standard::content-type` segfault, reproducibly, on any
+binary file, for as long as the rule is installed anywhere. Forward ranges
+do not save it either: GLib sniffs about 16 KB and stops. The good magic
+rule is unreachable, and the near miss is a trap.
+
+What is reachable is the `ftyp` brand at offset 4, and it is generic:
+
+```
+$ head -c 32 ~/Videos/VID_…_00_004.insv | xxd
+00000000: 0000 001c 6674 7970 6176 6331 2014 0200  ....ftypavc1 ...
+00000010: 6176 6331 6973 6f6d 0000 0000 0000 0001  avc1isom........
+```
+
+`ftypavc1`, compatible brands `avc1isom`. An X4's `.insv` announces itself
+as a plain MP4 and nothing else. shared-mime-info's own `video/mp4` magic
+lists brands one by one, six in the version installed here and eleven
+upstream, and `avc1` is in neither list. That is precisely why an `.insv`
+reads as `application/octet-stream` today. The whole database has exactly
+one `avc*` rule, `ftypavci`, for AVC-Intra imagery.
+
+Adding `ftypavc1` would claim files that are not ours. MP4RA registers
+`avc1` as a generic ISO brand ("Advanced Video Coding extensions"), the same
+status as `isom`; any H.264 MP4 may carry it. A rule on it takes other
+vendors' files.
+
+So: **glob only**, at the default weight of 50, and no `<magic>` element at
+all. Measured with the prototype installed:
+
+```
+$ xdg-mime query filetype sample.insv
+video/x-insta360-insv
+```
+
+The cost is honest and small: a `.insv` renamed to something else is not
+recognised. The camera names them, and nothing renames them afterwards.
+
+### 1.4 `sub-class-of video/mp4` is kept, and it earns its place
+
+An `.insv` really is a valid ISO-BMFF file, so the declaration is true. It
+is also load-bearing. Measured, with the type and the entry installed and
+the binary on `PATH`:
+
+```
+$ gio mime video/x-insta360-insv
+Default application for “video/x-insta360-insv”: app.kyerag.Kyerag.desktop
+Registered applications:
+	app.kyerag.Kyerag.desktop
+	fr.handbrake.ghb.desktop
+	com.system76.CosmicPlayer.desktop
+	mpv.desktop
+Recommended applications:
+	app.kyerag.Kyerag.desktop
+```
+
+Kyerag is the default and the only *recommended* handler, and the three
+generic players are still offered under Open With, inherited through the
+subclass. Drop the subclass and they disappear: a pilot who wants to check
+a file in mpv would have nothing to click. cosmic-files reaches them the
+same way, through `mime_icon::parent_mime_types()`.
+
+One trap comes with choosing a `video/…` name, and it is worth knowing
+before a bug report arrives. cosmic-settings' default-applications page
+handles its **Video** row by collecting every MIME type whose name starts
+with `video` and setting the chosen application as the default for all of
+them. A pilot who picks a video player in Settings silently takes `.insv`
+away from Kyerag, and nothing tells them. That is COSMIC's behaviour, not
+something this end can fix, and the answer is to know it rather than to pick
+a dishonest top-level type to dodge it.
+
+### 1.5 `.lrv` is left alone, deliberately
+
+`.lrv` is already `video/mp4` in shared-mime-info at weight 50 (measured,
+§1.1), and it has been since 2014: commit `acbec109`, "Add glob for
+low-resolution videos from GoPro". So the extension names two vendors' proxy
+formats, and the name alone cannot tell them apart. Handing every GoPro
+proxy to a player that only understands Insta360 dual fisheye is a worse
+failure than not offering to open the file.
+
+Claiming it also does not work reliably, which settles it. Installing a
+competing `*.lrv` glob and typing the same file two ways on one machine:
+
+| our glob weight | `gio` | `mimetype` (File::MimeInfo) |
+| --------------- | ----- | --------------------------- |
+| 50 (a tie)      | ours  | `video/mp4`                 |
+| 60 (higher)     | ours  | `video/mp4`                 |
+
+Two shared-mime-info consumers, one database, different answers, even when
+our weight is strictly higher. The recommended lookup order has no
+tie-breaker both implement the same way. An `<alias>` would be worse still:
+that asserts the two names mean the same thing, which would make every GoPro
+proxy an Insta360 video by definition.
+
+This also matches the code: "The camera's LRV proxy may not exist"
+(AGENTS.md); proxies are generated, never assumed. Nothing in the app needs
+`.lrv` to be a type.
+
+---
+
+## 2. The desktop entry, and installing without root
+
+### 2.1 The entry
+
+`resources/app.kyerag.Kyerag.desktop`. Named for the app ID rather than the
+binary because `flatpak build-export` only exports files under
+`share/applications`, `share/mime/packages` and `share/metainfo` whose names
+start with the app ID, and because cosmic-files, cosmic-player and
+cosmic-edit all do the same (`res/com.system76.Cosmic*.desktop`).
+
+`resources/` and not `res/`, which is where these three files started, because
+the icon tree landed at `resources/icons/` (issue #67) following the official
+`cosmic-app-template`, and two resource roots in one tree is a thing to trip
+over rather than a distinction anybody wants. cosmic-player uses `res/`; the
+template it is a template of uses `resources/`; one root matters more than
+which of the two it is.
+
+### 2.2 `Exec=kyerag %f`, not `%U`
+
+The Desktop Entry Specification's field codes: `%f` is a single local file
+path, `%F` a list of them, `%u` a single URL, `%U` a list. A launcher given
+`%f` and several selected files spawns the program once per file.
+
+`crates/app/src/args.rs` takes exactly one positional argument, treats it as
+a `PathBuf`, and refuses two ("only one file can be opened at a time"). It
+does not parse URLs, and says why: cosmic-player parses its arguments as
+URLs because GStreamer streams from the network, and we decode local files
+only. `%f` is the field code that matches that grammar, and it is also the
+one the spec describes for our exact case: a program that "cannot handle
+multiple file arguments", with remote files copied local first so the
+program never sees a URL.
+
+Both launchers that matter would in fact survive `%u`: cosmic-files
+substitutes a plain local path for every field code
+(`src/mime_app.rs`, `exec_to_command`), and GLib expands `%u` to a local
+path too when the file is local. But `%u` is specified as "either a file:
+URL or a file path", so taking it would mean handling both forms for no
+gain. Two further reasons to leave `Exec` exactly as it is: `%f` is what
+makes flatpak's file forwarding kick in (§3.7), and a `@@` written by hand
+into `Exec` is a hard flatpak export failure.
+
+### 2.3 `Categories=COSMIC;` fails validation, and stays
+
+```
+$ desktop-file-validate resources/app.kyerag.Kyerag.desktop
+error: value "COSMIC;AudioVideo;Player;Video;" for key "Categories" …
+contains an unregistered value "COSMIC"; values extending the format should
+start with "X-"
+```
+
+The same command against cosmic-files' and cosmic-player's own entries
+produces the identical error (measured). System76 ships files that fail this
+check, on purpose, because `COSMIC` is how a COSMIC app marks itself.
+AGENTS.md says to do what a first-party COSMIC app would do, so we keep it
+and write the finding down instead of quietly diverging. Flathub's linter
+did not object to it (§3.6).
+
+### 2.4 The icon exists, under a name the binary does not have yet
+
+The icon landed with issue #67: `resources/icons/hicolor/`, an icon theme
+tree laid out the way the Icon Theme Specification wants one, so an installer
+copies rather than converts. A scalable SVG, PNGs from 256 down to 16, and a
+drawing of its own for 32, 24 and 16. `resources/icons/README.md` says what
+each file is and `docs/icon.md` says how it got there. Both the `justfile`
+install recipe and the Flatpak manifest copy the tree whole rather than
+listing sizes, because the tree is generated and a list goes stale.
+
+Every basename is `dev.harding.Kjerag`, the application ID issue #66 settled.
+**The desktop entry still says `Icon=app.kyerag.Kyerag`**, because the binary
+still calls itself that and issue #75's rename sweep is what changes all of
+them in one move (§3.6). So until that sweep lands, the two names do not
+meet, and two things follow that a reader should not have to discover:
+
+```
+WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
+```
+
+the Flatpak build still says that (flatpak exports an icon only when its
+basename starts with the app ID), and a launcher still shows a generic
+placeholder. The About page and the welcome view are unaffected: they read
+`hicolor/scalable/apps/dev.harding.Kjerag.svg` as bytes rather than asking
+the icon theme for a name (`crates/app/src/app.rs`, `APP_ICON`), which is
+what issue #93 did about exactly this gap.
+
+Nothing about the sizes is left to decide. The Icon Theme Specification's
+stated minimum is 48×48, Flathub's floor is "preferably a SVG icon or at
+least a 256x256 PNG", Flatpak requires the basename to equal the app ID, and
+the tree satisfies all three.
+
+### 2.5 How a desktop actually finds Kyerag
+
+Standard XDG, with one COSMIC wrinkle. The MIME database maps `*.insv` to
+our type, `mimeinfo.cache` maps our type to our desktop file, and
+`mimeapps.list` records a user's explicit choice if they make one. Measured
+in an isolated `XDG_DATA_HOME` with only the two prototype files in it:
+
+```
+$ grep insta360 …/applications/mimeinfo.cache
+video/x-insta360-insv=app.kyerag.Kyerag.desktop;
+$ xdg-mime query default video/x-insta360-insv
+app.kyerag.Kyerag.desktop
+```
+
+The wrinkle: **cosmic-files does not read `mimeinfo.cache` at all.** It
+enumerates desktop entries itself and reads each one's `MimeType=` key
+(`src/mime_app.rs`, `MimeAppCache::reload`), watching the directories for
+changes. It does honour `mimeapps.list`, including the
+`cosmic-mimeapps.list` variant, for defaults and added/removed
+associations. So `update-desktop-database` is not what makes Kyerag appear
+in COSMIC's own file manager, but it is still required, because every
+GLib/GTK application on the machine does read that cache.
+
+A second COSMIC-specific gap, for the `prefix=$HOME/.local` case:
+cosmic-settings enumerates MIME types from `XDG_DATA_DIRS` only, not
+`XDG_DATA_HOME`, so a type installed into `~/.local/share/mime` is invisible
+to its default-application page. cosmic-files itself is unaffected: its
+MIME database loads the user data directory first.
+
+One more trap, measured and worth the line: **GIO hides a desktop entry
+whose `Exec` program is not on `PATH`.** With `Exec=kyerag` and no `kyerag`
+installed, `gio mime` listed cosmic-player and mpv and not Kyerag; changing
+`Exec` to a program that exists made Kyerag both the default and the only
+recommended application, with nothing else altered. That is the failure mode
+of a `prefix=$HOME/.local` install on a session whose `PATH` lacks
+`~/.local/bin`: not an error message, just an app that is silently not
+offered.
+
+### 2.6 The install recipe
+
+`justfile`, modelled on cosmic-player's (rev `23d5944`), which is the shape
+a first-party COSMIC app uses.
+
+```sh
+just build-release
+sudo just install                       # /usr/local
+just prefix=$HOME/.local install        # no root; see the PATH trap above
+```
+
+What lands: the binary, three files (desktop entry, metainfo, MIME package),
+and the icon theme tree copied whole out of `resources/icons/`. Then two
+caches are refreshed, in this order and not the other:
+
+```sh
+update-mime-database  $prefix/share/mime
+update-desktop-database $prefix/share/applications
+```
+
+`update-mime-database` is what compiles `resources/app.kyerag.Kyerag.xml`
+into the `globs2`/`subclasses` tables, so it is what makes `*.insv` mean
+anything at all. `update-desktop-database` then records which application
+handles the type it now knows about. Run them the other way round and the
+second one writes a cache entry for a type the first has not created yet.
+
+There is no `vendor` recipe any more, and §3.5 is why: the Flatpak build's
+crate sources are committed, so nothing here has a step that needs the
+network.
+
+---
+
+## 3. Flatpak
+
+### 3.1 Runtime: `org.freedesktop.Platform` 25.08, and the choice is forced
+
+libcosmic needs rustc 1.93. The Rust SDK extension's version is pinned to
+the runtime branch, and measured on Flathub:
+
+| branch | `org.freedesktop.Sdk.Extension.rust-stable` |
+| ------ | ------------------------------------------- |
+| 23.08  | 1.81.0                                      |
+| 24.08  | 1.89.0                                      |
+| 25.08  | **1.97.1**                                  |
+
+24.08 is short by four minors, so 25.08 it is; there is no version to
+choose. The freedesktop SDK has no `clang`, which `ffmpeg-sys-next`'s
+bindgen needs, so `org.freedesktop.Sdk.Extension.llvm21` (clang 21.1.8)
+comes along and sets `LIBCLANG_PATH`.
+
+### 3.2 VA-API: it works, and here is the proof
+
+This was the make-or-break. The pipeline is VA-API decode into a dmabuf that
+wgpu imports with no copy, so the sandbox has to contain a working
+`radeonsi` VA driver and `/dev/dri`. Both do.
+
+The VA driver is not in the runtime. It arrives with
+`org.freedesktop.Platform.GL.default`, the Mesa extension that flatpak
+installs and mounts automatically for whatever GPU is present
+(`download-if = active-gl-driver` in the runtime's metadata), and whose
+`merge-dirs` list includes `lib/dri`. Measured, inside the runtime, with
+nothing but `--device=dri`:
+
+```
+$ flatpak run --command=sh --device=dri org.freedesktop.Platform//25.08 \
+    -c 'ls /usr/lib/x86_64-linux-gnu/GL/default/lib/dri | grep drv_video'
+nouveau_drv_video.so
+r600_drv_video.so
+radeonsi_drv_video.so
+virtio_gpu_drv_video.so
+```
+
+and libva finds it without being told where to look:
+
+```
+libva: VA-API version 1.22.0
+libva: Trying to open /usr/lib/x86_64-linux-gnu/dri/radeonsi_drv_video.so
+libva: Trying to open …/GL/lib/dri/radeonsi_drv_video.so
+libva: Found init function __vaDriverInit_1_22
+libva: va_openDriver() returns 0
+Initialised VAAPI connection: version 1.22
+VAAPI driver: Mesa Gallium driver 26.1.4 for AMD Radeon 760M Graphics
+              (radeonsi, phoenix, ACO, DRM 3.64, 7.0.11-76070011-generic)
+```
+
+That is device creation. Real decode of real footage, same sandbox:
+
+```
+$ flatpak run --command=ffmpeg --device=dri --filesystem=home:ro \
+    org.freedesktop.Platform//25.08 -hwaccel vaapi \
+    -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi \
+    -i ~/Videos/VID_…_00_004.insv -frames:v 30 -f null -
+Stream mapping:
+  Stream #0:0 -> #0:0 (hevc (native) -> wrapped_avframe (native))
+  … Video: wrapped_avframe, vaapi(pc, bt709, progressive), 3840x3840 …
+frame=   30 … speed=2.67x
+```
+
+3840×3840 HEVC, hardware surfaces out, 2.67× realtime, inside the sandbox.
+**`--device=dri` is the whole permission.** No `ffmpeg-full`, no
+`LIBVA_DRIVERS_PATH`, no `--device=all`.
+
+The second half of the pipeline is wgpu's Vulkan import of that dmabuf,
+which has to work against the *extension's* Mesa (26.1.4) rather than the
+host's, and needs the `VK_EXT_image_drm_format_modifier` enable that the
+`[patch.crates-io]` fork exists for. Kyerag reports on that itself. Running
+the installed Flatpak on real footage inside a headless `cage` session (the
+same trick `scripts/uitest.sh` uses):
+
+```
+lens:   Insta360 X4 Air v1.2.7_build1, sampling 2 of 2 calibrated
+media:  2 lens streams, 3840x3840, 29.970 fps, 53940 frames, 1799.8 s
+device: dmabuf import: all extensions enabled
+play:  14.82 s, 30.00 fps presented in 30.2 redraws/s, 0 dropped, 0 starved,
+       worst 6.0 ms late, sound -4.3 ms, 0 underruns, 0 dropped
+```
+
+Full rate, nothing dropped, nothing starved, for as long as it was left
+running, and the frame `grim` took out of that session is the reframed view
+with a level horizon. The whole pipeline runs inside the sandbox: hardware
+decode, zero-copy import, projection pass, and the sound.
+
+### 3.3 HEVC comes from an extension, and it is already there
+
+The base runtime's ffmpeg is built `--disable-decoder='h264,hevc,vc1,vvc'`
+(read out of `ffmpeg -version` inside the sandbox), and forcing the base
+library over the extension with `LD_PRELOAD` leaves `ffmpeg -decoders` with
+no `hevc` at all. **The base runtime cannot decode our footage.**
+
+The decoders arrive from `org.freedesktop.Platform.codecs-extra`, which is
+what 25.08 calls what 24.08 called `org.freedesktop.Platform.ffmpeg-full`
+(the rename is a documented breaking change in the freedesktop-sdk 25.08.0
+release notes). It ships a complete `libavcodec.so.61.19.101`, same soname
+and same version, built `--enable-decoders`, which shadows the runtime's
+through `add-ld-path = lib`. The part that matters for the manifest: the
+runtime's own metadata declares it with **no `no-autodownload`**, so it is
+installed and mounted as a related ref along with the runtime and **the app
+manifest declares nothing**. On 24.08 it was the other way round: an app had
+to name `ffmpeg-full` in `add-extensions` itself.
+
+The catch worth writing down: "installed by default" is not "installed".
+`flatpak install --no-related`, or a user pruning extensions, removes the
+only `hevc` decoder in the sandbox, and `hevc_vaapi` hangs off it. The
+failure is `avcodec_find_decoder` returning null on a file the app just
+opened.
+
+**The app now says so, at open** (issue #69, shipped). `open_decoder` asks
+`avcodec_find_decoder` for the stream's own codec one line before
+ffmpeg-next asks for the same one, and refuses the file with a typed
+`MissingDecoder` carrying the codec name; the shell turns that into
+
+> Kyerag has no HEVC decoder here, so that file cannot be played. In a
+> Flatpak, the decoder comes from the codecs-extra runtime extension.
+
+instead of "That file could not be opened.", and the terminal line reads
+`kyerag: <path> not shown: no hevc decoder in this libavcodec`.
+
+At open rather than at startup, which is what this section originally asked
+for and is not what shipped. A startup probe needs a surface to say it on,
+says it on a box that never opens a file it cannot play, and can only ever
+ask about HEVC. Asking at open costs one lookup on a path that already
+exists, asks about the codec the file actually carries, and replaces a line
+that is wrong at the moment the pilot is reading it. It is not
+Flatpak-specific either: a stripped system ffmpeg produces the same null.
+
+### 3.4 The ffmpeg pin was the blocker, and it is 7.1 now
+
+**Settled** (owner: "bump to 7"; issue #65, closed). The workspace pins
+`ffmpeg-next = "7.1"`, the 25.08 runtime ships **ffmpeg 7.1.3**, and the
+Flatpak's cargo build no longer has anything to argue with. The rest of this
+section is the measurement that produced the decision, kept because it is
+also the record of what ffmpeg 7 costs the development box.
+
+The pin used to read `6.1.1`, because Pop!\_OS 24.04 ships ffmpeg 6.1 and the
+crate major must match the headers it binds (AGENTS.md). 24.08 ships 7.0.3.
+There is no freedesktop branch with ffmpeg 6.
+
+Measured, building `-p kyerag-media` inside `org.freedesktop.Sdk//25.08`:
+
+```
+error: could not compile `ffmpeg-next` (lib) due to 30 previous errors
+```
+
+thirty errors inside the crate itself: non-exhaustive matches over
+`AVPacketSideDataType` and `AVFrameSideDataType` variants that ffmpeg 7
+added, plus missing fields. This is not something a flag works around.
+
+Bumping to `ffmpeg-next = "7.1"` makes the crate compile and leaves
+**two errors, both ours, both the same cause**: ffmpeg 7 replaced the old
+bitmask channel layout with `AVChannelLayout`, which holds raw pointers and
+so is not `Send`; `Track` stores one (`crates/media/src/track.rs:40`), which
+makes `Reader` not `Send`, which breaks the decode thread's `spawn`
+(`crates/media/src/player.rs:176`).
+
+The fix is three hunks in one file: drop the stored field, compute it from
+the channel count on demand (`ChannelLayout::default(i32)` still exists in
+7.1), and hoist one call out of a `&mut self.resampler` borrow. That is what
+landed.
+
+The alternative it was weighed against was building ffmpeg 6.1 as a manifest
+module: no source change ever, and the Flatpak stops caring what the runtime
+ships, which would also survive the 26.08 runtime moving to ffmpeg 8. It lost
+on the price, a large extra module with our own `--enable-vaapi
+--enable-decoder=hevc` build to maintain and a Flathub reviewer asking why we
+bundle what the runtime already has.
+
+**The bill went to the development box**, which is the part of this decision
+that is still live. Ubuntu 24.04 ships ffmpeg 6.1 and will not get a 7, so
+the dev box takes its ffmpeg 7.1 from a PPA, and CI takes it from the same
+one. Without root, `scripts/ffmpeg7-local.sh` unpacks the same .debs under
+`~/.local`. AGENTS.md carries both, including the trap that decides whether
+a build is right: 6.1 and 7.1 export the same symbol names, so a link
+against the wrong one is silent and `readelf -d <binary> | grep NEEDED` is
+what settles it (`libavcodec.so.61` is 7.1, `.so.60` is 6.1).
+
+### 3.5 Sourcing cargo offline: a committed `cargo-sources.json`
+
+flatpak-builder builds with no network, so every dependency has to be a
+declared source. The workspace makes that harder than usual: eleven git
+dependencies (libcosmic and the pop-os forks it drags along) plus a
+`[patch.crates-io]` entry pointing at our own wgpu fork.
+
+**`flatpak/cargo-sources.json` is what ships** (issue #72, closed). It is
+generated from `Cargo.lock` by `flatpak-cargo-generator.py` through
+`scripts/cargo-sources.sh`, and it is committed: 1404 sources, 500 KB, one
+per crate. The manifest lists it beside the `dir` source and builds
+`--offline --locked`, so the Flatpak build has no step that touches the
+network at all.
+
+It needs no `[patch]` support to cover the fork, because cargo has already
+resolved the patch into an ordinary git source in the lock file
+(`Cargo.lock:5713`, and seven more crates including `naga`). The stanza it
+writes, read out of the committed file:
+
+```toml
+[source."https://github.com/aeharding/wgpu"]
+git = "https://github.com/aeharding/wgpu"
+replace-with = "vendored-sources"
+rev = "fb66f36c5cf1135c11523767652ea7a809b3e598"
+```
+
+**A `rev`, not a branch, and that closed the one real fragility.** This
+section used to end by pointing at it: the patch entry named a branch and
+every offline recipe pinned whatever commit that branch resolved to, so a
+force-push on the fork would break every recorded build. Issue #68 pinned the
+rev in the root manifest, `Cargo.lock` did not re-resolve (the hash after the
+`#` was already this commit), and the generated file inherits it.
+
+Two traps come with this route and both are load-bearing:
+
+- **The config lands at `$CARGO_HOME/config`**, so `CARGO_HOME` must be
+  exactly `/run/build/<module-name>/cargo`. Anywhere else the file is
+  written and never read and the build dies with "you are in the offline
+  mode". The manifest's module is named `kyerag` and its `CARGO_HOME` says
+  `/run/build/kyerag/cargo`; renaming one without the other breaks the
+  build.
+- **A change to `Cargo.lock` is a change to `cargo-sources.json`**, in the
+  same commit (AGENTS.md, `scripts/cargo-sources.sh`). A stale one is not a
+  build that fetches what it is missing; it is a build that fails.
+
+The route not taken was `cargo vendor`, which is what built the first
+Flatpak. It works, and measured on this tree it emitted a source replacement
+per git remote including the patch, with the forked `wgpu-hal` rather than
+crates.io's: the `VK_EXT_image_drm_format_modifier` hunk was present in
+`vendor/wgpu-hal/src/vulkan/adapter.rs`. It lost on size. 668 crates, 988 MB,
+~950 MB tarred, which cannot live in the repository, so any published build
+would have to fetch the tarball as a release asset by URL and sha256. The
+generated JSON is also what every COSMIC app on Flathub ships
+(`dev.edfloreshz.Tasks`, `dev.edfloreshz.CosmicTweaks`,
+`io.github.pixeldoted.cosmic-ext-color-picker`) and what Flathub's own
+requirements ask for.
+
+### 3.6 The app ID is `dev.harding.Kjerag`, and the code does not say so yet
+
+**Settled** (owner, issue #66): `dev.harding.Kjerag`. `harding.dev` resolves
+and answers 200, which is what a reverse-DNS app ID has to assert and what
+Flathub checks, so the ID is verifiable today by a `.well-known` file or a
+DNS TXT record and costs nothing to hold.
+
+**Nothing in this branch carries it yet, on purpose.** The manifest, the
+desktop entry, the metainfo and the MIME package are still
+`app.kyerag.Kyerag`, because the app ID is a rename with one seam and issue
+#75 owns it: the crate names, the binary, `App::APP_ID`, the cosmic-config
+identifiers, these four file names and the docs all move together, in one
+mechanical PR, after the open drafts land. Renaming half of them here would
+put the tree in a state where the entry names one ID, the binary registers
+another, and cosmic-config writes to a third. The icons are the one thing
+already named `dev.harding.Kjerag` (§2.4), and §2.4 says what that costs
+until #75.
+
+That rename is also the last thing between the manifest and a linter with
+nothing to say about the ID. What the linter says today, run against the
+manifest as it stands:
+
+```json
+"errors": [
+  "finish-args-unnecessary-xdg-config-cosmic-rw-access",
+  "finish-args-only-wayland",
+  "appid-url-not-reachable"
+],
+"info": [
+  "appid-url-not-reachable: Tried https://kyerag.app | … Failed to resolve
+   'kyerag.app'"
+]
+```
+
+**`kyerag.app` does not exist**, which is what made the ID a decision rather
+than a detail. Measured: `kyerag.app` has no DNS record; `harding.dev`
+resolves and answers 200; `github.com/aeharding` exists. The three candidates
+were `app.kyerag.Kyerag` (buy `kyerag.app` and serve real HTTPS off it, since
+`.app` is HSTS-preloaded and a parking page will not do),
+`io.github.aeharding.Kjerag` (verified by the GitHub account, the convention
+for a project with no domain), and the one that won, which needs nothing.
+
+Why it was worth settling before publishing rather than after. The app ID is
+the cosmic-config path (`~/.config/cosmic/<id>/` and
+`~/.local/state/cosmic/<id>/`, so every stored setting), the icon name, the
+desktop-entry and MIME-package file names, the metainfo `<id>`, the D-Bus
+name and the Wayland `app_id`. cosmic-config has no name-migration path, only
+version fallback, and Flatpak's end-of-life rebase does not touch host paths,
+so a rename orphans stored settings silently even when the rebase is done
+right. The project is pre-release, which is exactly why #75 can do it as a
+mechanical sweep with no migration.
+
+The other two linter errors are smaller, and both survive the rename:
+
+- `finish-args-only-wayland`: Flathub wants `--socket=fallback-x11` and
+  `--share=ipc` alongside Wayland. The manifest deliberately omits them,
+  because the frame path is Wayland dmabuf and has never been run under
+  Xwayland; claiming X11 support would be a guess. If Flathub is the target
+  this has to be either fixed or argued, and "fixed" means someone runs the
+  app under Xwayland first.
+- `finish-args-unnecessary-xdg-config-cosmic-rw-access`: the linter wants
+  `xdg-config/cosmic:ro`. But cosmic-config writes the app's own settings
+  under that path, and the two COSMIC apps installed on this box take it
+  read-write (`io.github.TopiCsarno.YapCap`: `~/.config/cosmic`;
+  `io.github.cosmic_utils.minimon-applet`: `xdg-config/cosmic`). Whether
+  `:ro` costs us persisted settings is untested.
+
+### 3.7 Permissions, and why there is no `--filesystem=home`
+
+```yaml
+--socket=wayland
+--device=dri
+--socket=pulseaudio
+--filesystem=xdg-config/cosmic
+--filesystem=~/.local/state/cosmic
+--talk-name=com.system76.CosmicSettingsDaemon
+--talk-name=com.system76.CosmicSettingsDaemon.Config.*
+--filesystem=xdg-pictures
+```
+
+- **`--device=dri`** is §3.2. It is the GPU for both decode and render.
+- **`--socket=pulseaudio`** is the sound, and it is enough on its own: the
+  flag bind-mounts the PulseAudio socket *and* `/dev/snd`, and the runtime
+  ships `/etc/alsa/conf.d/99-pulseaudio-default.conf`, which makes ALSA's
+  `default` device the pulse plugin. cpal opens `default` and lands there.
+  (The runtime's `ALSA_CONFIG_PATH=/usr/share/alsa/alsa-flatpak.conf` is
+  often credited with this and does not do it: its only difference from the
+  stock `alsa.conf` is pointing `~/.asoundrc` at a writable path.) PipeWire
+  is covered because `pipewire-pulse` provides the socket; there is no
+  `--socket=pipewire` and flatpak rejects it. Measured: 0 underruns over a
+  25 s playback in the sandbox.
+- **The two cosmic paths + the talk-names.** cosmic-config deliberately
+  escapes the sandbox: under `FLATPAK_ID` it resolves the **host's** config
+  and state directories, not the app's private ones. Granting only
+  `xdg-config/cosmic` is what produced this, every run:
+
+  ```
+  kyerag: saved state not saved: Read-only file system (os error 30)
+          at path "/home/aeharding/.local/state/cosmic/app.kyerag.Kyerag/v1/…"
+  ```
+
+  so the recent-files list and the window state were silently discarded.
+  `--filesystem=~/.local/state/cosmic` fixes it (verified writable after).
+  There is no `xdg-state` token in flatpak, hence the literal path.
+- **`xdg-pictures`** is where a saved still goes.
+  `crates/app/src/shot.rs` resolves `XDG_SCREENSHOTS_DIR` or the pictures
+  directory. Without this the still lands in the sandbox's private home and
+  the pilot never finds it.
+- **No general filesystem access at all**, and it is not needed. Measured
+  inside the installed app: `ls ~` shows exactly one entry, `Pictures`.
+- **Nothing for icons.** The UI asks the icon theme for
+  `camera-photo-symbolic`, `view-fullscreen-symbolic` and friends, and
+  `/usr/share/icons` in the sandbox holds an empty `hicolor` before our own
+  tree is installed into it. They resolve anyway: flatpak puts the host's
+  icon themes on `XDG_DATA_DIRS` as `/run/host/share`, and all four names the
+  app uses were found there, `video-x-generic-symbolic` from the host's own
+  `Cosmic` theme. A host with no COSMIC icons installed is the untested case;
+  `com.system76.Cosmic.BaseApp`, which the COSMIC apps on Flathub build
+  against, exists to cover it. Whether to take that base is the one manifest
+  question issue #72 left open and this branch is still leaving open: on this
+  box nothing needs it, and "untested elsewhere" is not a reason to add a
+  dependency, only a reason to know where to look when a report arrives.
+
+Files reach the app two ways and both are portal-shaped:
+
+1. **The file chooser** is already the XDG portal, so the chosen file
+   arrives through the document portal and needs no permission.
+2. **A double click in a file manager** works because `flatpak
+   build-export` rewrites the exported entry. Measured, straight out of
+   `~/.local/share/flatpak/exports/share/applications/`:
+
+   ```
+   Exec=/usr/bin/flatpak run --branch=master --arch=x86_64 \
+        --command=kyerag --file-forwarding app.kyerag.Kyerag @@ %f @@
+   ```
+
+   The `@@ … @@` markers are flatpak's file-forwarding: the launcher hands
+   flatpak a host path, flatpak exports it through the document portal and
+   substitutes the sandbox path before the program sees it. Our `%f`
+   survives inside the markers. **A double click needs no filesystem
+   permission**, and this is the reason the `%f`/`%U` choice in §2.2 had to
+   be right.
+
+Drag and drop is the one that does not work, and the reason is not ours to
+fix. The app reads `text/uri-list` only (`crates/app/src/dnd.rs`), which is
+a host `file://` path: readable outside a sandbox, `ENOENT` inside one.
+`application/vnd.portal.filetransfer` is the mime that carries files across
+a sandbox boundary, and `dnd.rs` says in its own header that it skips it
+deliberately because "nothing about this app is sandboxed yet", a sentence
+that expires the day the Flatpak ships.
+
+Except that adding it would buy nothing today. The FileTransfer portal needs
+**both** sides: the source starts the transfer and offers the mime, the
+target retrieves by key. **cosmic-files does not offer it**: as a drag
+source it advertises exactly `text/plain`, `text/plain;charset=utf-8`,
+`UTF8_STRING`, `text/uri-list` and `x-special/gnome-copied-files`
+(`src/clipboard.rs`). GTK4 apps like Nautilus do offer it, so handling it
+would make drops from *those* work. libcosmic supports it opt-in
+(`on_file_transfer`), so the change is small when it is worth making.
+
+Until then a drag from cosmic-files into the Flatpak fails. The narrowest
+permission that would paper over it is `--filesystem=xdg-videos:ro`, which
+Clapper takes and the Flathub linter allows. Not taken here: it is a
+permanent grant bought to work around one launcher's missing feature, and
+double click and the file chooser both already work.
+
+### 3.8 What the build actually produced
+
+Two builds, and the difference between them is the point.
+
+**The first one, with `vendor.tar` and §3.4's ffmpeg port applied in a
+scratch tree.** Release build in 2m44s inside the sandbox, a 7.6 MB
+single-file bundle, installed and checked:
+
+```
+$ flatpak run app.kyerag.Kyerag --version
+kyerag 0.1.0
+$ xdg-mime query default video/x-insta360-insv
+app.kyerag.Kyerag.desktop
+$ flatpak run --command=sh app.kyerag.Kyerag -c 'ls /dev/dri'
+by-path  card1  renderD128
+```
+
+and then run on real footage under a headless compositor, which is where
+§3.2's `dmabuf import: all extensions enabled` and its 30 fps came from.
+
+Two defects that run found, both fixed in the manifest and neither visible
+without running it: saved state was silently discarded (§3.7), and the first
+version of the manifest had no `~/.local/state/cosmic` grant to discard it
+into.
+
+**The second one is this tree, unpatched**, after the ffmpeg pin and
+`cargo-sources.json` landed on `main`:
+
+```sh
+flatpak run org.flatpak.Builder --user --force-clean \
+    --state-dir=scratch/flatpak-builder \
+    --repo=scratch/fp/repo scratch/fp/build flatpak/app.kyerag.Kyerag.yml
+```
+
+and it failed, which is the useful part:
+
+```
+error: failed to select a version for the requirement `ffmpeg-next = "^7.1"`
+       (locked to 7.1.0)
+candidate versions found which didn't match: 6.1.1
+location searched: directory source `/run/build/kyerag/cargo/vendor`
+```
+
+**`flatpak/cargo-sources.json` on `main` was generated from a lock file that
+still said ffmpeg 6.1**, because issue #90 regenerated it on a branch cut
+before issue #95 bumped the pin and the two merged clean. Nothing reads that
+file except a Flatpak build, so nothing had noticed. It is regenerated here,
+and `scripts/cargo-sources.sh --check` now compares the lock file's packages
+against the sources with no network and no generator, in CI and by hand.
+
+With that fixed the build runs through:
+
+```
+Finished `release` profile [optimized] target(s) in 3m 21s
+Exporting share/applications/app.kyerag.Kyerag.desktop
+Exporting share/mime/packages/app.kyerag.Kyerag.xml
+Exporting share/metainfo/app.kyerag.Kyerag.metainfo.xml
+WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
+```
+
+No network, no patch, no tarball. The eleven icon files are in the app
+(`files/share/icons/hicolor/*/apps/dev.harding.Kjerag.*`), and the warning is
+§2.4's: the entry names `app.kyerag.Kyerag` and flatpak exports only what
+starts with the app ID, until issue #75 makes the two the same name. The
+binary links the runtime's ffmpeg and says which one, which is the check
+AGENTS.md asks for: `readelf -d` reports `libavcodec.so.61`, so ffmpeg 7.1.
+
+Three things about that second build to be exact about.
+
+- **It was not installed and not run.** §3.2's playback numbers stand on the
+  first build and have not been re-measured against this one.
+- **`--state-dir` is not decoration.** flatpak-builder's cache defaults to
+  `.flatpak-builder` in the working directory, which for this manifest is the
+  repository root, and the `dir` source copies the whole repository into the
+  build. So the default puts 1.7 GB of build cache next to the source and
+  then copies it into the next build of itself. `scratch/` is skipped and
+  gitignored, which is why the cache belongs there.
+- **Cargo warns about the file name it is given.**
+  `/run/build/kyerag/cargo/config is deprecated in favor of config.toml`.
+  That name is the generator's, cargo still reads it, and the day it stops is
+  the day this breaks; it is a thing to watch rather than a thing to patch
+  around here.
+
+The MIME package rides along: the first build's flatpak exported it to
+`~/.local/share/flatpak/exports/share/mime/packages/app.kyerag.Kyerag.xml`,
+so installing the Flatpak teaches the whole desktop what a `.insv` is. No
+separate step.
+
+Tooling used to get here, all `--user`, no root and no system packages:
+`org.flatpak.Builder`, `org.freedesktop.Sdk.Extension.rust-stable//25.08`,
+`org.freedesktop.Sdk.Extension.llvm21//25.08`.
+
+---
+
+## 4. Publishing
+
+### 4.1 Flathub is the channel, under one scoped exception
+
+**Flathub, and nothing else** (owner, 2026-07-31). AGENTS.md's standing rule
+is that all work stays inside the owner's repositories and that no agent
+opens, files or comments on anything outside them. A Flathub submission is a
+pull request against `flathub/flathub`, and the app afterwards lives in a
+repository under the `flathub` organisation, so it needed an exception and it
+got exactly one:
+
+> ONE scoped exception (owner-granted 2026-07-31): Flathub publishing for
+> this app, done together with the owner and with him told before every
+> outward action; everything is prepared and previewed in this repo first.
+
+Read it as narrow, because it is. It covers Flathub publishing for this app
+and nothing else, no agent takes an outward step the owner has not been told
+about first, and everything an outsider would see is built and reviewed here
+before it leaves. The rest of AGENTS.md's rule is untouched: no issues, no
+pull requests, no bug reports anywhere else, ever.
+
+The shape of a submission: the PR carries the manifest and the app ID; the
+ID's domain has to be one the owner controls (§3.6, which is why
+`harding.dev` won); the metainfo has to carry at least one screenshot; the
+build has to pass `flatpak-builder-lint`. Review is by humans and the
+permission set is the part they read hardest, which is the argument for §3.7
+being as small as it is.
+
+What is left before a submission is worth previewing, and none of it is a
+Flathub problem: issue #75's rename, so the ID in the tree is the ID that was
+settled; screenshots, which only the owner can take and agree to publish; and
+the X11 question, where "fix it" means someone runs the app under Xwayland
+first. §5 is the list.
+
+### 4.2 A self-hosted repo was the alternative, and it is declined
+
+**Declined** (owner, 2026-07-31; issue #71, closed). It was the obvious
+fallback while Flathub looked unreachable: a flatpak remote is a static
+OSTree repository over HTTP, `flatpak-builder --repo=<dir>` already writes
+one, GitHub Pages serves a directory of static files, and none of it needs
+anyone's permission. The full shape, with the GPG signing, the pruning, the
+1 GB Pages cap against the `.Debug` ref, and the finding that decides whether
+it works at all (no AppStream data means the app is installable from the
+remote and invisible in COSMIC Store, GNOME Software and Discover), is
+written down on issue #71.
+
+It lost on what it costs rather than on what it does: it gives up discovery,
+nobody browses a one-app remote, and it puts update delivery and key
+management on us permanently. One channel, and it is Flathub.
+
+**The single-file bundle stays**, because it is not a distribution channel:
+`flatpak build-bundle` produces one `.flatpak` that installs with no remote
+at all, which is how the owner gets a build to click a `.insv` against
+before anything is published.
+
+---
+
+## 5. What is settled, and what is left
+
+Settled on 2026-07-31, all of it by the owner:
+
+| question | answer |
+| -------- | ------ |
+| the icon | shipped, `resources/icons/` (issue #67, §2.4) |
+| the app ID | `dev.harding.Kjerag`; issue #75 puts it in the tree (§3.6) |
+| the ffmpeg pin | 7.1, and the dev box takes ffmpeg 7 from a PPA (§3.4) |
+| the channel | Flathub only, under AGENTS.md's scoped exception (§4.1) |
+| a self-hosted repo | declined (issue #71, §4.2) |
+| the licence | `AGPL-3.0-only`, which is what the metainfo already says |
+
+Left, and each one is the owner's rather than a task anybody can pick up:
+
+1. **Screenshots.** Flathub will not accept a submission without at least
+   one, and ours has to be a real window over real footage, which is the
+   owner's to take and to agree to publish. The metainfo carries the
+   commented-out `<screenshots>` block waiting for URLs.
+2. **The X11 question.** Flathub's linter wants `--socket=fallback-x11` and
+   `--share=ipc`; the manifest omits both because the frame path is Wayland
+   dmabuf and has never been run under Xwayland (§3.6). Either it is argued
+   in review or somebody runs the app under Xwayland first, and the second
+   one is work, not a decision.
+3. **`xdg-config/cosmic:ro`.** The linter wants read-only; cosmic-config
+   writes the app's own settings under that path and the two COSMIC apps
+   installed on this box both take it read-write. Whether `:ro` costs
+   persisted settings is untested (§3.6).
+4. **When to preview a submission.** Issue #75's rename is the last thing
+   that changes what a submission would contain, so the natural order is
+   rename, screenshots, preview with the owner, then the one outward step.

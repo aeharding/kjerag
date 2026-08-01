@@ -751,14 +751,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/bindgen/bindgen-0.64.0.crate",
-        "sha256": "c4243e6031260db77ede97ad86c27e501d646a27ab57b59a574f725d98ab1fb4",
-        "dest": "cargo/vendor/bindgen-0.64.0"
+        "url": "https://static.crates.io/crates/bindgen/bindgen-0.70.1.crate",
+        "sha256": "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f",
+        "dest": "cargo/vendor/bindgen-0.70.1"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"c4243e6031260db77ede97ad86c27e501d646a27ab57b59a574f725d98ab1fb4\", \"files\": {}}",
-        "dest": "cargo/vendor/bindgen-0.64.0",
+        "contents": "{\"package\": \"f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f\", \"files\": {}}",
+        "dest": "cargo/vendor/bindgen-0.70.1",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -2186,27 +2186,27 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/ffmpeg-next/ffmpeg-next-6.1.1.crate",
-        "sha256": "4e72c72e8dcf638fb0fb03f033a954691662b5dabeaa3f85a6607d101569fccd",
-        "dest": "cargo/vendor/ffmpeg-next-6.1.1"
+        "url": "https://static.crates.io/crates/ffmpeg-next/ffmpeg-next-7.1.0.crate",
+        "sha256": "da02698288e0275e442a47fc12ca26d50daf0d48b15398ba5906f20ac2e2a9f9",
+        "dest": "cargo/vendor/ffmpeg-next-7.1.0"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"4e72c72e8dcf638fb0fb03f033a954691662b5dabeaa3f85a6607d101569fccd\", \"files\": {}}",
-        "dest": "cargo/vendor/ffmpeg-next-6.1.1",
+        "contents": "{\"package\": \"da02698288e0275e442a47fc12ca26d50daf0d48b15398ba5906f20ac2e2a9f9\", \"files\": {}}",
+        "dest": "cargo/vendor/ffmpeg-next-7.1.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/ffmpeg-sys-next/ffmpeg-sys-next-6.1.0.crate",
-        "sha256": "c2529ad916d08c3562c754c21bc9b17a26c7882c0f5706cc2cd69472175f1620",
-        "dest": "cargo/vendor/ffmpeg-sys-next-6.1.0"
+        "url": "https://static.crates.io/crates/ffmpeg-sys-next/ffmpeg-sys-next-7.1.3.crate",
+        "sha256": "f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad",
+        "dest": "cargo/vendor/ffmpeg-sys-next-7.1.3"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"c2529ad916d08c3562c754c21bc9b17a26c7882c0f5706cc2cd69472175f1620\", \"files\": {}}",
-        "dest": "cargo/vendor/ffmpeg-sys-next-6.1.0",
+        "contents": "{\"package\": \"f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad\", \"files\": {}}",
+        "dest": "cargo/vendor/ffmpeg-sys-next-7.1.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -3512,6 +3512,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/itertools/itertools-0.13.0.crate",
+        "sha256": "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186",
+        "dest": "cargo/vendor/itertools-0.13.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186\", \"files\": {}}",
+        "dest": "cargo/vendor/itertools-0.13.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/itertools/itertools-0.14.0.crate",
         "sha256": "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285",
         "dest": "cargo/vendor/itertools-0.14.0"
@@ -3819,32 +3832,6 @@
         "type": "inline",
         "contents": "{\"package\": \"c62026ae44756f8a599ba21140f350303d4f08dcdcc71b5ad9c9bb8128c13c62\", \"files\": {}}",
         "dest": "cargo/vendor/kurbo-0.11.3",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/lazy_static/lazy_static-1.5.0.crate",
-        "sha256": "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe",
-        "dest": "cargo/vendor/lazy_static-1.5.0"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe\", \"files\": {}}",
-        "dest": "cargo/vendor/lazy_static-1.5.0",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/lazycell/lazycell-1.3.0.crate",
-        "sha256": "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55",
-        "dest": "cargo/vendor/lazycell-1.3.0"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55\", \"files\": {}}",
-        "dest": "cargo/vendor/lazycell-1.3.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -4965,19 +4952,6 @@
         "type": "inline",
         "contents": "{\"package\": \"57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a\", \"files\": {}}",
         "dest": "cargo/vendor/paste-1.0.15",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/peeking_take_while/peeking_take_while-0.1.2.crate",
-        "sha256": "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099",
-        "dest": "cargo/vendor/peeking_take_while-0.1.2"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099\", \"files\": {}}",
-        "dest": "cargo/vendor/peeking_take_while-0.1.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -6444,19 +6418,6 @@
         "type": "inline",
         "contents": "{\"package\": \"6c2499c2d826531388872b2268718aed907a39bd785ab0dcfe57fab26283f92e\", \"files\": {}}",
         "dest": "cargo/vendor/swash-0.2.10",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/syn/syn-1.0.109.crate",
-        "sha256": "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237",
-        "dest": "cargo/vendor/syn-1.0.109"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237\", \"files\": {}}",
-        "dest": "cargo/vendor/syn-1.0.109",
         "dest-filename": ".cargo-checksum.json"
     },
     {

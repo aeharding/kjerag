@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Kyerag
+GenericName=360 Video Player
+Comment=Play Insta360 dual fisheye video
+Exec=kyerag %f
+Icon=app.kyerag.Kyerag
+Terminal=false
+StartupNotify=true
+Categories=COSMIC;AudioVideo;Player;Video;
+Keywords=360;Insta360;Fisheye;Reframe;Video;Player;
+MimeType=video/x-insta360-insv;

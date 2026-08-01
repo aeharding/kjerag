@@ -41,6 +41,16 @@ scripts/cargo-sources.sh
 A stale one is not a build that fetches what it is missing; it is a build that
 fails.
 
+That rule is per commit and the failure is per merge, which is not the same
+thing: on 2026-07-31 one branch bumped the ffmpeg pin and another regenerated
+the sources, both merged clean because they touch different files, and `main`
+then carried a lock file wanting ffmpeg-next 7.1 and a source list offering
+6.1.1. So CI checks it, and so can you, with no network and no generator:
+
+```sh
+scripts/cargo-sources.sh --check
+```
+
 **Two checkouts must not share a `CARGO_TARGET_DIR`.** Pointing a worktree's
 build at the main checkout's `target/` to reuse its dependency cache works
 until the moment something is built from the other tree: the uplifted

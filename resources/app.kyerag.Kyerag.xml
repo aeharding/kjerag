@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The MIME type for Insta360 .insv, which nothing registers anywhere.
+  Why this name, why no magic rule, and why .lrv is left alone:
+  docs/DISTRIBUTION.md section 1.
+
+  Installed to $prefix/share/mime/packages/app.kyerag.Kyerag.xml. The file
+  name has to start with the app ID or flatpak build-export will not export
+  it.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="video/x-insta360-insv">
+    <comment>Insta360 dual fisheye video</comment>
+    <!--
+      An .insv is a valid ISO-BMFF file, so every video/mp4 handler can at
+      least open it. Saying so keeps thumbnailers and generic players in the
+      Open With list instead of hiding the file from them.
+    -->
+    <sub-class-of type="video/mp4"/>
+    <generic-icon name="video-x-generic"/>
+    <!--
+      Extension only, no <magic>. The bytes that identify an .insv are the
+      last 32 of the file, and shared-mime-info offsets are measured from
+      the start; the ftyp brand at offset 4 is the generic "avc1" that
+      ordinary mp4s carry, so matching it would claim them too.
+    -->
+    <glob pattern="*.insv"/>
+  </mime-type>
+</mime-info>

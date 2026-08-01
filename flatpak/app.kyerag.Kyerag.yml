@@ -1,0 +1,106 @@
+# Flatpak manifest. Reasoning and measurements are in docs/DISTRIBUTION.md;
+# this file only says what.
+#
+# Build it. No step touches the network: every crate is a declared source in
+# cargo-sources.json, generated from Cargo.lock by scripts/cargo-sources.sh
+# and committed (issue #72).
+#
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#       --state-dir=scratch/flatpak-builder \
+#       scratch/flatpak-build flatpak/app.kyerag.Kyerag.yml
+#
+# --state-dir is not decoration. The builder's cache defaults to
+# .flatpak-builder in the working directory, which for this manifest is the
+# repository root, and the `dir` source below copies the whole repository into
+# the build: the default leaves 1.7 GB of cache beside the source and then
+# copies it into the next build of itself. scratch/ is skipped and gitignored.
+app-id: app.kyerag.Kyerag
+runtime: org.freedesktop.Platform
+# 25.08, not 24.08: libcosmic needs rustc 1.93 and the rust-stable extension
+# is 1.89.0 on 24.08, 1.97.1 on 25.08 (measured). Its ffmpeg is 7.1.3, which
+# is the major the workspace pins (issue #65).
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # ffmpeg-sys-next runs bindgen, which needs libclang. The SDK has none.
+  - org.freedesktop.Sdk.Extension.llvm21
+command: kyerag
+
+finish-args:
+  # A COSMIC app. No X11 socket: the frame path is Wayland dmabuf and has
+  # never been run under Xwayland, so claiming it would be a guess.
+  - --socket=wayland
+  # The GPU, which is both halves of the pipeline: VA-API decode through
+  # /dev/dri/renderD128 and the Vulkan device wgpu imports the dmabuf onto.
+  - --device=dri
+  # cpal links ALSA, and the runtime's /etc/alsa/conf.d/99-pulseaudio-default.conf
+  # makes ALSA's `default` device the pulse plugin, which this socket carries.
+  # Measured playing real footage in the sandbox: 0 underruns.
+  - --socket=pulseaudio
+  # cosmic-config deliberately escapes the sandbox and reads and writes the
+  # HOST's ~/.config/cosmic and ~/.local/state/cosmic, so both have to be
+  # granted by name. Without the second one every run logs "saved state not
+  # saved: Read-only file system" (measured) and nothing is remembered.
+  - --filesystem=xdg-config/cosmic
+  - --filesystem=~/.local/state/cosmic
+  - --talk-name=com.system76.CosmicSettingsDaemon
+  - --talk-name=com.system76.CosmicSettingsDaemon.Config.*
+  # Where a saved still goes (crates/app/src/shot.rs). Without this the file
+  # lands inside the sandbox's private home and the pilot never finds it.
+  - --filesystem=xdg-pictures
+  # No other filesystem access on purpose: files arrive through the file
+  # chooser portal, or as a document-portal path that flatpak's
+  # --file-forwarding hands us when a file manager opens one.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm21/lib
+  env:
+    LIBCLANG_PATH: /usr/lib/sdk/llvm21/lib
+    # /run/build/<module-name>/cargo, and the module below has to keep that
+    # name. cargo reads $CARGO_HOME/config, cargo-sources.json writes one
+    # into exactly that directory, and anywhere else the file is written and
+    # never read and the build dies with "you are in the offline mode".
+    CARGO_HOME: /run/build/kyerag/cargo
+    CARGO_NET_OFFLINE: 'true'
+
+modules:
+  - name: kyerag
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --offline --locked
+      - install -Dm0755 target/release/kyerag /app/bin/kyerag
+      - install -Dm0644 resources/app.kyerag.Kyerag.desktop
+        /app/share/applications/app.kyerag.Kyerag.desktop
+      - install -Dm0644 resources/app.kyerag.Kyerag.metainfo.xml
+        /app/share/metainfo/app.kyerag.Kyerag.metainfo.xml
+      - install -Dm0644 resources/app.kyerag.Kyerag.xml
+        /app/share/mime/packages/app.kyerag.Kyerag.xml
+      # The icon theme tree, copied whole rather than listed size by size: it
+      # is generated (resources/icons/README.md), so a list written here goes
+      # stale the first time a size moves.
+      #
+      # flatpak exports an icon to the host only when its basename starts
+      # with the app ID. These are named dev.harding.Kjerag, the ID issue #66
+      # settled and issue #75 puts in the code, so until that rename lands
+      # the build still says "Icon referenced in desktop file but not
+      # exported" and a host launcher shows a placeholder. Inside the sandbox
+      # the files are there either way.
+      - install -d /app/share/icons
+      - cp -r resources/icons/hicolor /app/share/icons/
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .worktrees
+          - scratch
+          - target
+      # One source per crate of Cargo.lock, which is what makes the build
+      # offline. Regenerate it in any change that moves the lock file
+      # (scripts/cargo-sources.sh, AGENTS.md). It covers the eleven git
+      # dependencies and the [patch.crates-io] wgpu fork as well as
+      # crates.io, because cargo has already resolved the patch into an
+      # ordinary git source in the lock file.
+      - cargo-sources.json
