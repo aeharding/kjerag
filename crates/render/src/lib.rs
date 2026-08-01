@@ -1,6 +1,10 @@
 //! wgpu: frame import and the shader pass. No demuxing and no decoding; it
 //! takes frames from `kjerag-media` and hands the pass to iced (src/widget.rs).
 
+/// The per-frame seam band: what the two lenses still disagree about after
+/// the calibration, measured on the GPU and bent out (issue #103). Public for
+/// `kjerag-spike --bin band`, which reads the state back and reports it.
+pub mod band;
 mod camera;
 mod capture;
 pub mod dmabuf;
@@ -17,6 +21,7 @@ mod scene;
 pub mod seam;
 mod widget;
 
+pub use band::{AZIMUTHS, Cell, Ring};
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;

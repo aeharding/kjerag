@@ -6,7 +6,7 @@
 //! of a sampling kernel and `ball` (issue #47) asks them of a projection, so
 //! they live here rather than in either.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use kjerag_media::Fallible;
 use kjerag_render::{Camera, Sampling, Scene, ScenePipeline, Size};
@@ -57,6 +57,35 @@ impl Picture {
         let target = Offscreen::new(&gpu.device, self.size, FORMAT);
         target.write_png(&self.rgba, &out)?;
         Ok(out)
+    }
+
+    /// The same, into a path of the caller's own choosing.
+    pub fn save(&self, gpu: &Gpu, path: &Path) -> Fallible<()> {
+        Offscreen::new(&gpu.device, self.size, FORMAT).write_png(&self.rgba, path)
+    }
+
+    /// What moved between two pictures, drawn: the difference at 8x about mid
+    /// grey, so a change of one code is visible and a change of none is
+    /// unambiguously flat.
+    ///
+    /// The first picture to look at in a proof package, and the one with an
+    /// acceptance sentence attached to it: it has to be flat grey everywhere
+    /// except where the change was supposed to be.
+    pub fn amplified(&self, other: &Self) -> Self {
+        Self {
+            rgba: self
+                .rgba
+                .chunks_exact(4)
+                .zip(other.rgba.chunks_exact(4))
+                .flat_map(|(a, b)| {
+                    let lift = |c: usize| {
+                        (128 + 8 * (i32::from(a[c]) - i32::from(b[c]))).clamp(0, 255) as u8
+                    };
+                    [lift(0), lift(1), lift(2), 255]
+                })
+                .collect(),
+            size: self.size,
+        }
     }
 
     /// How much detail the picture holds: the mean absolute Laplacian of its

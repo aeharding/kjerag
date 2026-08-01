@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use kjerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
 use kjerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack, Quat, Readout};
 
+use super::band;
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
@@ -942,6 +943,9 @@ pub struct ScenePipeline {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
+    /// The seam band, measured on the frame the draw is about to sample and
+    /// dispatched from `prepare` (issue #103).
+    band: Band,
     /// One black pixel, bound wherever a lens has no stream: before a file is
     /// open, and in the second slot of a file that carries one lens.
     blank: Planes,
@@ -967,18 +971,56 @@ struct Live {
     _planes: Vec<Planes>,
 }
 
+/// The compute half of the seam: the pipeline that measures the overlap band,
+/// the state it accumulates into, and where in the film the state is.
+///
+/// It is dispatched from [`ScenePipeline::prepare`] and never from `draw`,
+/// which is handed a render pass it cannot leave. The submit order is what
+/// makes that correct and it is the same rule the capture already relies on:
+/// a submit from `prepare` lands before iced's own submit of the pass that
+/// reads its result.
+struct Band {
+    pipeline: wgpu::ComputePipeline,
+    /// One [`band::Cell`] per direction, read by the draw and written here.
+    state: wgpu::Buffer,
+    watch: wgpu::Buffer,
+    /// The same buffer twice: writable for the dispatch, read-only for the
+    /// draw. Two groups over one buffer, and never both in one pass.
+    group: wgpu::BindGroup,
+    read: wgpu::BindGroup,
+    /// Set by an instrument to stop measuring (`ScenePipeline::hold_band`).
+    held: bool,
+    /// Where the last measured frame sat in the film, so the next one knows
+    /// how much media time the state has aged by, and whether what happened
+    /// in between was play or a seek.
+    at: Option<Duration>,
+}
+
 impl ScenePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
+            // In dependency order, so nothing is used before it is declared:
+            // the map and its uniform block, then the band's lookup into it,
+            // then the sampling, then this file's own entry points.
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{}\n{SHADER}", projection::wgsl(), sampling::wgsl()).into(),
+                format!(
+                    "{}\n{}\n{}\n{SHADER}",
+                    projection::wgsl(),
+                    band::lookup_wgsl(),
+                    sampling::wgsl(),
+                )
+                .into(),
             ),
         });
         let layout = bind_group_layout(device);
+        // Two groups: the pictures and the map, then the band's state. iced's
+        // device is asked for a limit of exactly two (`iced_wgpu`), so this is
+        // all of them, and there is nowhere for a third to go.
+        let reading = read_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene"),
-            bind_group_layouts: &[&layout],
+            bind_group_layouts: &[&layout, &reading],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1027,6 +1069,7 @@ impl ScenePipeline {
             mapped_at_creation: false,
         });
         let blank = blank_planes(device);
+        let band = Band::new(device, &layout);
         let bind_group = bind(device, &layout, &uniforms, [&blank; MAX_LENSES], &sampler);
 
         Self {
@@ -1034,6 +1077,7 @@ impl ScenePipeline {
             layout,
             sampler,
             uniforms,
+            band,
             blank,
             bind_group,
             live: VecDeque::new(),
@@ -1041,6 +1085,43 @@ impl ScenePipeline {
             format,
             reported: false,
         }
+    }
+
+    /// The band, measured on the pair the bind group points at, before the
+    /// draw that will read what it wrote.
+    ///
+    /// One dispatch, one submit, no readback: the state lives on the GPU for
+    /// its whole life, so nothing here waits on a fence and nothing stalls the
+    /// pipeline. The reason it is here and not in `draw` is that `draw` is
+    /// handed a render pass and cannot open a compute one; the reason that is
+    /// **correct** is the same rule the capture already relies on, written at
+    /// the uniform write above: a submit from `prepare` lands before iced's
+    /// own submit of the pass that reads its result.
+    fn measure(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: Option<&View>) {
+        // A file with one lens stream has no seam, and a redraw with no new
+        // frame has nothing new to read. The state stays where it is, which
+        // for a one-lens file is the zero it was created in.
+        let Some(view) =
+            view.filter(|view| !self.band.held && view.lenses.len() > 1 && self.is_bound(view))
+        else {
+            return;
+        };
+        let Some(watch) = self.band.aged(view.frames.timestamp) else {
+            return;
+        };
+        queue.write_buffer(&self.band.watch, 0, watch.bytes());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("band"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.band.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(1, &self.band.group, &[]);
+            pass.dispatch_workgroups(band::GROUPS, 1, 1);
+        }
+        queue.submit([encoder.finish()]);
     }
 
     /// iced picks an sRGB surface when it gamma-corrects, and the GPU then
@@ -1081,6 +1162,10 @@ impl ScenePipeline {
             _ => Reframe::gradient(primitive.elapsed, aspect, self.linearize()),
         };
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());
+        // After the uniform write, because the band reads the same block: the
+        // calibration it measures against has to be the one the draw will use,
+        // or the two disagree by whatever the correction walked this redraw.
+        self.measure(device, queue, primitive.view.as_ref());
 
         // After the uniform write, and only after it: the write lands at the
         // next submit on this queue, and the capture's own submit is that
@@ -1191,6 +1276,7 @@ impl ScenePipeline {
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.band.read, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -1198,6 +1284,32 @@ impl ScenePipeline {
         self.live
             .front()
             .is_some_and(|live| Arc::ptr_eq(&live.frames, &view.frames))
+    }
+
+    /// Stop measuring the band, which leaves its state where it is and, on a
+    /// pipeline that has never measured, leaves it at the zero that bends
+    /// nothing: exactly the picture stage 1 drew.
+    ///
+    /// **Nothing in the player calls this** and no key reaches it (AGENTS.md,
+    /// zero-config playback). It exists so `kjerag-spike --bin band` can draw
+    /// the same frame both ways through the same pipeline, which is the only
+    /// way a before and after differ by the band and by nothing else.
+    pub fn hold_band(&mut self, held: bool) {
+        self.band.held = held;
+    }
+
+    /// The band as it stands, for an instrument. `None` where the device
+    /// cannot map a buffer back, which is not a case the player has.
+    ///
+    /// Nothing in the player calls this: the state's whole life is on the GPU
+    /// and a readback would be a stall. It exists so `kjerag-spike --bin band`
+    /// can print what the pass is drawing with.
+    pub fn band_state(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Fallible<Vec<band::Cell>> {
+        self.band.read(device, queue)
     }
 
     /// Imports a newly delivered pair and points the bind group at it. A
@@ -1239,6 +1351,142 @@ impl ScenePipeline {
             .iter()
             .map(|frame| dmabuf::import(device, frame.descriptor(), view.frames.size))
             .collect()
+    }
+}
+
+impl Band {
+    fn new(device: &wgpu::Device, scene: &wgpu::BindGroupLayout) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("band"),
+            // The same map the draw runs, so the band correlates directions
+            // through the calibration the picture is drawn with rather than
+            // through a second copy of it.
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", projection::wgsl(), band::wgsl()).into(),
+            ),
+        });
+        let layout = band_layout(device);
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("band"),
+            bind_group_layouts: &[scene, &layout],
+            immediate_size: 0,
+        });
+        let reading = read_layout(device);
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("band"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("measure"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let state = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("band"),
+            size: band::BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            // Zeroed, and zero is the state that bends nothing: a file's first
+            // frame is drawn exactly as stage 1 drew it.
+            mapped_at_creation: false,
+        });
+        let watch = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("band"),
+            size: std::mem::size_of::<band::Watch>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("band"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: band::STATE_BINDING,
+                    resource: state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: band::WATCH_BINDING,
+                    resource: watch.as_entire_binding(),
+                },
+            ],
+        });
+        let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("band read"),
+            layout: &reading,
+            entries: &[wgpu::BindGroupEntry {
+                binding: band::STATE_BINDING,
+                resource: state.as_entire_binding(),
+            }],
+        });
+        Self {
+            pipeline,
+            state,
+            watch,
+            group,
+            read,
+            held: false,
+            at: None,
+        }
+    }
+
+    /// How much media time the state has aged by, or `None` for a frame it has
+    /// already read.
+    ///
+    /// Media time and not wall clock, so a paused window does not age the
+    /// state, a slow box does not smooth harder than a fast one, and the same
+    /// second of film settles the same way at 24 fps and at 60. A gap that is
+    /// not a play forward is a reset: what the state holds is an average over
+    /// what the seam has been showing, and after a seek that is somewhere
+    /// else.
+    fn aged(&mut self, now: Duration) -> Option<band::Watch> {
+        let before = self.at.replace(now);
+        let seconds = before.map(|then| now.as_secs_f32() - then.as_secs_f32());
+        match seconds {
+            Some(0.0) => None,
+            Some(seconds) if (0.0..band::Watch::GAP_S).contains(&seconds) => {
+                Some(band::Watch::new(seconds, false))
+            }
+            // The first frame of a file, and every landing after a seek. The
+            // step it is given is one frame's worth, so a direction with
+            // content in it starts moving immediately rather than waiting a
+            // frame for a gap to exist.
+            _ => Some(band::Watch::new(1.0 / 30.0, true)),
+        }
+    }
+
+    /// The state copied back to the CPU. For instruments only: see
+    /// [`ScenePipeline::band_state`].
+    fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Vec<band::Cell>> {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("band"),
+            size: band::BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.state, 0, &readback, 0, band::BYTES);
+        let submission = queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })?;
+        let cells = slice
+            .get_mapped_range()
+            .chunks_exact(std::mem::size_of::<band::Cell>())
+            .map(|bytes| {
+                let read = |at: usize| {
+                    f32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+                };
+                band::Cell {
+                    disparity: read(0),
+                    confidence: read(4),
+                    reach_m: read(8),
+                    off_epi: read(12),
+                }
+            })
+            .collect();
+        readback.unmap();
+        Ok(cells)
     }
 }
 
@@ -1284,9 +1532,14 @@ fn bind(
 }
 
 fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    // The uniform block and the pictures are read by both passes: the draw
+    // samples them and the band correlates them (issue #103). The state buffer
+    // at the end is the draw's alone here, read-only; the compute pass reaches
+    // the same buffer through a group of its own, where it is writable.
+    let both = wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE);
     let texture = |binding| wgpu::BindGroupLayoutEntry {
         binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
+        visibility: both,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,
@@ -1296,7 +1549,7 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     };
     let mut entries = vec![wgpu::BindGroupLayoutEntry {
         binding: 0,
-        visibility: wgpu::ShaderStages::FRAGMENT,
+        visibility: both,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
@@ -1310,13 +1563,61 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     entries.extend((1..SAMPLER_BINDING).map(texture));
     entries.push(wgpu::BindGroupLayoutEntry {
         binding: SAMPLER_BINDING,
-        visibility: wgpu::ShaderStages::FRAGMENT,
+        visibility: both,
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         count: None,
     });
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("scene"),
         entries: &entries,
+    })
+}
+
+/// The state buffer alone, as the draw sees it: read-only, on a group of its
+/// own (see [`band::STATE_BINDING`]).
+fn read_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("band read"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: band::STATE_BINDING,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(band::BYTES),
+            },
+            count: None,
+        }],
+    })
+}
+
+/// What the band writes and what it is told about this frame. A group of its
+/// own so the same buffer can be read-only on the draw's side.
+fn band_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("band"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: band::STATE_BINDING,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(band::BYTES),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: band::WATCH_BINDING,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(std::mem::size_of::<band::Watch>() as u64),
+                },
+                count: None,
+            },
+        ],
     })
 }
 
@@ -1442,7 +1743,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   // paints that. Nothing is sampled for it and no model is run.
   var mix: Blend;
   if look.w > 0.0 {
-    mix = blend(look.xyz);
+    mix = blend(look.xyz, band_bend(look.xyz));
   }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
