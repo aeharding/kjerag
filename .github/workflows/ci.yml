@@ -9,8 +9,8 @@ on:
 
 jobs:
   # The gates that compile run on both arches, natively: ubuntu-24.04-arm is a
-  # real aarch64 runner rather than emulation, and it is free for public
-  # repositories the same way the x86 one is.
+  # real aarch64 runner rather than emulation, and says so itself (`uname -m`,
+  # `dpkg --print-architecture`).
   #
   # One provisioning path covers both, because the PPA below carries arm64.
   # Measured on the arm runner 2026-08-01: candidate libavcodec-dev

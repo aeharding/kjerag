@@ -585,7 +585,9 @@ live, no keyframe UI ever.
   one. The two bundle jobs run side by side and the arm one finished first,
   7m22 against 9m10, so the second bundle costs no wall time of its own; the
   tag run as a whole went from 11m31 to 14m43, and that difference is one cold
-  arm cargo cache in the gates. What this is not, and the README and
+  arm cargo cache in the gates. Warm, the two legs land together: on the second
+  push to the branch the arm gate took 1m33 and the x86 one 1m52. What this is
+  not, and the README and
   docs/RELEASING.md say so where a person reads them, is a verified build: a
   runner has no GPU, decode is VA-API against `/dev/dri/renderD128`, and most
   arm devices decode through V4L2, which this app does not use. The aarch64
