@@ -1365,11 +1365,7 @@ impl ScenePipeline {
     /// The pooled exposure the pass is drawing with, for an instrument
     /// (issue #103, stage 3). Same readback, same caveat: a stall, and no
     /// shipped path takes it.
-    pub fn band_tone(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Fallible<band::Tone> {
+    pub fn band_tone(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<band::Tone> {
         Ok(self.band.read(device, queue)?.0)
     }
 
@@ -1524,7 +1520,11 @@ impl Band {
 
     /// The state copied back to the CPU. For instruments only: see
     /// [`ScenePipeline::band_state`].
-    fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<(band::Tone, Vec<band::Cell>)> {
+    fn read(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Fallible<(band::Tone, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1554,6 +1554,7 @@ impl Band {
                     reach_m: float(at + 8),
                     off_epi: float(at + 12),
                     tone: float(at + 16),
+                    lit: float(at + 20),
                 }
             })
             .collect();

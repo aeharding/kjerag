@@ -661,16 +661,21 @@ fn sweep(options: &Options, trials: &[Trial]) -> Fallible<Vec<Field>> {
     let duration = walk.duration().as_secs_f64();
     for place in 0..options.places.max(1) {
         if place > 0 {
-            let at = options.from + (duration - options.from) * place as f64
-                / options.places.max(1) as f64;
+            let at = options.from
+                + (duration - options.from) * place as f64 / options.places.max(1) as f64;
             walk.jump(at)?;
         }
         for _ in 0..options.count {
             let Some(pair) = walk.next_pair()? else {
                 break;
             };
-            let found =
-                seam::read_ring(&reframe, &pair.lenses, &ring, &options.probe(), &mut refused);
+            let found = seam::read_ring(
+                &reframe,
+                &pair.lenses,
+                &ring,
+                &options.probe(),
+                &mut refused,
+            );
             for (trial, field) in trials.iter().zip(&mut fields) {
                 harvest(&reframe, &pair, &ring, &found, *trial, options, field);
             }
@@ -836,9 +841,20 @@ fn models(field: &Field) {
          \tdarkest patches are made of, and is where an alignment is hardest, so a term that \n\
          \tlives only in the near-field rows is a boot and not a camera."
     );
+    // The shipped pass's own knee, imported rather than copied: 0.19 degrees
+    // is 10 m at this baseline, it is what the band already switches time
+    // constants at, and a cut here means this table is scoring the directions
+    // the pass actually pools.
+    let knee = f64::from(kjerag_render::band::NEAR_KNEE_DEG);
     for (name, cut) in [
-        ("far field, under 0.5 deg", (0.0, 0.5)),
-        ("near field, over 0.5 deg", (0.5, f64::INFINITY)),
+        (
+            format!("far field, under {knee:.2} deg - what the pass pools"),
+            (0.0, knee),
+        ),
+        (
+            format!("near field, over {knee:.2} deg"),
+            (knee, f64::INFINITY),
+        ),
     ] {
         let points = field.points(cut);
         let all = Model::all(&points);
@@ -983,7 +999,10 @@ fn sensitivity(fields: &[Field], probes: &[f64], truth: Reading) {
         "\n  {:<44} {:>10} {:>10}",
         "how much an alignment error costs", "mean ln", "totals ln"
     );
-    println!("  {:<44} {by_mean:>10.4} {by_totals:>10.4}", "per degree of misalignment");
+    println!(
+        "  {:<44} {by_mean:>10.4} {by_totals:>10.4}",
+        "per degree of misalignment"
+    );
     // The far-field flicker the band leaves, which is the alignment error the
     // shipped pass actually has: 0.02 deg rms (6.9's own table, worst column).
     let residual = 0.02;
@@ -1220,7 +1239,9 @@ fn profile(reframe: &Reframe, picture: &Picture, size: Size) {
             "  {step:>10} {:>10} {:>9} {:>12} {:>9}",
             here.0.map_or_else(|| "-".to_owned(), |v| format!("{v:.2}")),
             here.1,
-            there.0.map_or_else(|| "-".to_owned(), |v| format!("{v:.2}")),
+            there
+                .0
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}")),
             there.1,
         );
     }
