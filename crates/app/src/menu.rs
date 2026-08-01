@@ -56,6 +56,10 @@ pub fn menu_bar<'a>(
                         // is nothing to take a still of without a file.
                         enabled(has_file, strings::SAVE_FRAME, Action::SaveFrame),
                         enabled(has_file, strings::COPY_FRAME, Action::CopyFrame),
+                        // Under the two picture items rather than in `View`,
+                        // which holds the things that move the view rather
+                        // than the things that take something away from it.
+                        enabled(has_file, strings::COPY_VIEW, Action::CopyView),
                         Item::Divider,
                         Item::Button(strings::QUIT.to_owned(), None, Action::Quit),
                     ],

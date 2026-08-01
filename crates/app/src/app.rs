@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
+use kyerag_render::{Accuracy, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -171,6 +171,9 @@ pub enum Message {
     /// A toast's close button, or its own five seconds running out: both
     /// arrive here (cosmic-files `src/app.rs:3008-3010`).
     CloseToast(u64),
+    /// Put the view on the clipboard as one line of text: `i`, or
+    /// `File > Copy view`.
+    CopyView,
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -480,6 +483,10 @@ impl cosmic::Application for App {
             }
             Message::Captured(to, still) => return self.captured(to, still),
             Message::CloseToast(id) => self.toasts.close(id),
+            Message::CopyView => {
+                self.show_controls(now);
+                return self.copy_view();
+            }
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -813,12 +820,31 @@ impl App {
             return Task::none();
         };
         let video = open.path.clone();
+        // Read as the capture is armed, and printed against the frame the
+        // redraw after this one actually caught: a still taken with a drag in
+        // flight can be one redraw of turning ahead of the line.
+        let camera = open.scene.viewpoint().camera();
+        let horizon = open.scene.horizon();
         let (finished, waiting) = oneshot::channel();
         open.scene.capture(Request {
             width: shot::WIDTH,
             then: Box::new(move |taken| {
                 let done = taken
-                    .and_then(|still| shot::finish(&still, &video, to))
+                    .and_then(|still| {
+                        // A JPEG carries the video and the timecode in its
+                        // name and no direction anywhere, so where the still
+                        // was looking is only ever recoverable from here.
+                        // Printed before the answer is sent, which is what
+                        // puts it above the `shot:` line the shell writes
+                        // when it arrives.
+                        let framing = Framing {
+                            at: still.time,
+                            camera,
+                            horizon,
+                        };
+                        println!("view:   {}", framing.printed(&video));
+                        shot::finish(&still, &video, to)
+                    })
                     .map_err(|e| e.to_string());
                 let _ = finished.send(done);
             }),
@@ -856,6 +882,35 @@ impl App {
                 self.toast(strings::capture_failed(to, &e))
             }
         }
+    }
+
+    /// The view as one line of `reframe`'s own arguments, on the clipboard
+    /// and on the terminal.
+    ///
+    /// What a report about a 360 video is missing is the direction it was
+    /// pointing, and this is the whole of the fix: which video, which frame,
+    /// and the three angles, in a line that can be pasted into an issue and
+    /// run as a command. The clipboard copy carries the file's name and the
+    /// terminal one carries its path ([`Framing`]).
+    ///
+    /// The frame is the one on screen rather than the clock's position: a
+    /// paused scrub shows the keyframe it landed on, and what is asked for
+    /// here is the picture the pilot is looking at.
+    fn copy_view(&mut self) -> Task<Message> {
+        let Some(open) = &self.open else {
+            return Task::none();
+        };
+        let framing = Framing {
+            at: open.scene.frame().map_or(open.position, |(_, time)| time),
+            camera: open.scene.viewpoint().camera(),
+            horizon: open.scene.horizon(),
+        };
+        println!("view:   {}", framing.printed(&open.path));
+        let line = framing.copied(&open.path);
+        Task::batch([
+            self.toast(strings::VIEW_COPIED.to_owned()),
+            clipboard::write(line),
+        ])
     }
 
     /// One toast, and the task that takes it away again five seconds later.

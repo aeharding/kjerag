@@ -45,6 +45,9 @@ pub const CLEAR_RECENT: &str = "Clear recent list";
 pub const CLOSE_VIDEO: &str = "Close video";
 pub const SAVE_FRAME: &str = "Save frame";
 pub const COPY_FRAME: &str = "Copy frame";
+/// Beside `Copy frame`, and named the same way: the frame is the picture and
+/// the view is where it was taken from.
+pub const COPY_VIEW: &str = "Copy view";
 pub const QUIT: &str = "Quit";
 
 /// `Playback`.
@@ -70,6 +73,11 @@ pub const SETTINGS_TITLE: &str = "Settings";
 /// What a capture says when it lands (issue #15). The noun is the menu's
 /// own: the pilot pressed `Copy frame`, so the toast says frame.
 pub const FRAME_COPIED: &str = "Frame copied to the clipboard";
+
+/// And the same sentence for the line of text, whose noun is `Copy view`.
+/// It names the destination for the reason the frame's does: a copy that
+/// does not say where it went is a copy nobody trusts enough to paste.
+pub const VIEW_COPIED: &str = "View copied to the clipboard";
 
 /// The Settings page.
 pub const APPEARANCE: &str = "Appearance";
@@ -209,6 +217,7 @@ mod tests {
             CLOSE_VIDEO,
             SAVE_FRAME,
             COPY_FRAME,
+            COPY_VIEW,
             QUIT,
             PLAY_PAUSE,
             BACK_10,
@@ -227,6 +236,7 @@ mod tests {
             THEME_DARK,
             THEME_LIGHT,
             FRAME_COPIED,
+            VIEW_COPIED,
         ];
         for line in copy {
             assert!(!line.contains('\u{2014}'), "em dash in {line:?}");
