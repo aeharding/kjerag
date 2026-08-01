@@ -156,6 +156,10 @@ pub enum Message {
     ConfigState(ConfigState),
     /// A drag and drop landed. `None` is a payload that could not be read.
     Dropped(Option<Dropped>),
+    /// A drop that arrived as a document portal transfer key, which is the
+    /// only shape of drop a sandboxed app can open (issue #118, `dnd.rs`).
+    /// The paths it stands for come back as a [`Message::Dropped`].
+    DroppedTransfer(String),
     FileClearRecents,
     FileClose,
     FileLoad(PathBuf),
@@ -505,6 +509,20 @@ impl cosmic::Application for App {
                 };
                 return self.update(Message::FileLoad(path));
             }
+            Message::DroppedTransfer(key) => {
+                // The key is the drop; the files are the portal's to hand
+                // over, which is a call to another process rather than bytes
+                // that came with the drag (`dnd.rs`).
+                return cosmic::command::file_transfer_receive(key).map(|answer| {
+                    action::app(Message::Dropped(match answer {
+                        Ok(paths) => Some(Dropped::transferred(paths)),
+                        Err(e) => {
+                            eprintln!("kjerag: that drop's files stayed with the portal: {e}");
+                            None
+                        }
+                    }))
+                });
+            }
             Message::FileClearRecents => {
                 self.stored.state.recent_files.clear();
                 self.stored.write_state();
@@ -802,6 +820,14 @@ impl cosmic::Application for App {
         dnd_destination_for_data(content, |dropped: Option<Dropped>, _action| {
             Message::Dropped(dropped)
         })
+        // The other shape a drop comes in, and the only one that survives a
+        // sandbox (issue #118). This is what adds the mime type to the
+        // offer as well as handling it, and it goes ahead of `text/uri-list`
+        // in what the window will accept, which is the order GTK uses for
+        // the same choice: a source that offers both is a source that
+        // registered the files with the portal, and the portal's answer is
+        // openable from either side of a sandbox where a bare path is not.
+        .on_file_transfer(Message::DroppedTransfer)
         .into()
     }
 
@@ -1575,6 +1601,14 @@ fn shift(from: Duration, seconds: f64) -> Duration {
 }
 
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
+///
+/// The line it prints is the answer to a question the app cannot ask any
+/// other way (issue #123): what the chooser hands back inside a sandbox. A
+/// path under `/run/user/<uid>/doc/` is the document portal's translation of
+/// the file, and its directory holds that file alone, which is why a capture
+/// written as two files plays one lens when it is picked there. The portal's
+/// own `Documents.Info` is refused to sandboxed callers ("Not allowed in
+/// sandbox", measured), so the terminal is where this can be seen at all.
 fn chooser() -> Task<Message> {
     Task::perform(
         async {
@@ -1583,7 +1617,10 @@ fn chooser() -> Task<Message> {
                 .filter(FileFilter::new(strings::INSV_FILTER).glob("*.insv"));
             match dialog.open_file().await {
                 Ok(response) => match response.url().to_file_path() {
-                    Ok(path) => action::app(Message::FileLoad(path)),
+                    Ok(path) => {
+                        println!("chose:  {}", response.url());
+                        action::app(Message::FileLoad(path))
+                    }
                     Err(()) => {
                         eprintln!("kjerag: {} is not a local file", response.url());
                         action::none()

@@ -5,11 +5,20 @@
 //! mime types it can read, handed to `dnd_destination_for_data`, which does
 //! the offer dance and calls [`TryFrom`] on the bytes.
 //!
-//! `application/vnd.portal.filetransfer`, which is how the portal hands over
-//! files from a sandboxed source, is deliberately not handled: it is not a
-//! payload but a key that has to be exchanged for paths over D-Bus, and
-//! nothing about this app is sandboxed yet. docs/UI.md hoped it would come
-//! for free; it does not.
+//! A drop into a sandbox carries `application/vnd.portal.filetransfer`
+//! instead, which is not a payload but a key: the source registered the files
+//! with the document portal and the key is exchanged for paths the sandbox
+//! can open. A path off the source's own filesystem means nothing inside one,
+//! so this is the only shape a drop can arrive in that a Flatpak build can
+//! use, and until issue #118 it was the shape this app refused. cosmic-files
+//! has no arm for it either; libcosmic does, and both ends of the exchange
+//! are its (`src/widget/dnd_destination.rs:242-250` names the mime type,
+//! `src/command.rs:66-72` reads the key back), so the app's part is naming
+//! the message and turning the answer into paths.
+//!
+//! The key travels with the drop; the paths come back over D-Bus, which is a
+//! task rather than a call, so this half is two messages in `app.rs` where
+//! the `text/uri-list` half is one.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -22,6 +31,15 @@ const URI_LIST: &str = "text/uri-list";
 /// The local files a drop carried, in the order the source listed them.
 #[derive(Clone, Debug)]
 pub struct Dropped(pub Vec<PathBuf>);
+
+impl Dropped {
+    /// What the document portal answered a transfer key with: paths rather
+    /// than URLs, and inside a sandbox the portal's own rather than the ones
+    /// the source dragged, which is the whole point of the exchange.
+    pub fn transferred(paths: Vec<String>) -> Self {
+        paths.into_iter().map(PathBuf::from).collect()
+    }
+}
 
 impl AllowedMimeTypes for Dropped {
     fn allowed() -> Cow<'static, [String]> {
@@ -92,5 +110,23 @@ mod tests {
     #[test]
     fn an_unexpected_mime_type_is_refused() {
         assert!(Dropped::try_from((b"whatever".to_vec(), "text/plain".to_owned())).is_err());
+    }
+
+    /// The portal answers a transfer key with paths, not URLs, and in a
+    /// sandbox they are its own: `/run/user/1000/doc/<id>/<name>` is the file
+    /// the source dragged, seen from inside (issue #118).
+    #[test]
+    fn a_portal_transfer_becomes_paths() {
+        let answer = vec![
+            "/run/user/1000/doc/2c1c4d1e/a b.insv".to_owned(),
+            "/home/pilot/c.insv".to_owned(),
+        ];
+        assert_eq!(
+            Dropped::transferred(answer).0,
+            [
+                PathBuf::from("/run/user/1000/doc/2c1c4d1e/a b.insv"),
+                PathBuf::from("/home/pilot/c.insv")
+            ]
+        );
     }
 }

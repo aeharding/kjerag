@@ -42,6 +42,11 @@ wgpu = "28.0"
 # The dmabuf import is hand-rolled against raw Vulkan on wgpu 28, so the
 # ash major must be the one wgpu-hal 28 links.
 ash = "0.38"
+# The XDG portals, for the `dragsource` instrument's half of a sandboxed
+# drop (issue #118). The version is libcosmic's own: it is what
+# `cosmic::command::file_transfer_receive` reads the other end of the
+# exchange with, and two ashpd majors in one graph would be two portals.
+ashpd = "0.12"
 # Resolves the XDG user directories, which is where a still goes. Already in
 # the tree through libcosmic, and the crate the COSMIC screenshot portal
 # itself asks for the folder we write into.
@@ -70,6 +75,14 @@ tokio = { version = "1", default-features = false, features = ["time"] }
 # The portal file chooser answers in URLs, and a drop's `text/uri-list` is
 # URLs too. Everything past the edge of the shell is a `PathBuf` (docs/UI.md).
 url = "2"
+# The instrument's own Wayland client (issue #118). The app never binds a
+# protocol itself, libcosmic does; these are `dragsource`'s, which has to
+# speak wl_data_device and the wlr virtual pointer directly. The versions are
+# the ones winit already resolved, so nothing new enters the lock file.
+wayland-client = "0.31"
+wayland-protocols = "0.32"
+wayland-protocols-misc = "0.3"
+wayland-protocols-wlr = "0.3"
 
 [workspace.dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic"
