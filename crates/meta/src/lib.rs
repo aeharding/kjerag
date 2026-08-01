@@ -18,6 +18,7 @@
 
 mod calibration;
 mod exposure;
+mod format;
 mod gyro;
 mod orientation;
 mod pair;
@@ -29,6 +30,7 @@ pub use calibration::{
     Sweep,
 };
 pub use exposure::{ExposureSample, ExposureTrack};
+pub use format::{Foreign, Format};
 pub use gyro::{GyroSample, GyroTrack};
 pub use orientation::{Filter, OrientationSample, OrientationTrack, Seed, axis_map, body_from_imu};
 pub use pair::{lens_index, sibling};
