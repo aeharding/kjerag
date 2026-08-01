@@ -557,6 +557,30 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **Another camera's 360 format is refused by name, and nothing
+  in the app grades the camera it does take** (issue #107, alongside #88).
+  Two halves of the same honesty. The refusal: a GoPro `.360` and a DJI
+  `.osv` are ordinary MP4s, so before this they opened, failed the trailer
+  read, and got the line a corrupt file gets. `kjerag_meta::Format::sniff`
+  now names the maker off the container before the decoder is asked for
+  anything, in this order: the Insta360 trailer magic, GoPro's own `udta`
+  boxes (`FIRM` `GPMF` `CAME` `MUID`), DJI's `djmd`/`dbgi` tracks, and
+  Google's spherical metadata for a stitched MP4. Only where the bytes say
+  nothing is the name asked, so a `.360` off a firmware that writes the
+  container differently is still named, and no `.insv` can be refused for
+  what it is called. The search walks the box tree instead of the bytes,
+  because a raw grep for `st3d` over the sample corpus hits two genuine
+  Insta360 captures inside their compressed video, and refusing a pilot's
+  own footage is the one failure this must not have. Verified on 18 real
+  files from seven cameras; the spherical arm alone has hand-built fixtures
+  only, because no such file exists here and ffmpeg 7.1 cannot write one.
+  The other half is what was **not** built: an `.insv` from a camera outside
+  the verified set opens and plays with nothing said about it. The support
+  tiers are the README's and the listing's, where somebody deciding whether
+  to install reads them; in the app a tier is a label the pilot cannot act
+  on, it would fire on files that play perfectly, and it would go stale the
+  day #88 verifies a model. What the app says about a camera stays what it
+  already said: the `lens:` line naming model and firmware on the terminal.
 - 2026-08-01 **A version tag is the release, and nothing about it is ours**
   (issue #106). `cargo release patch --execute` on main bumps the version,
   stamps a dated entry into the metainfo changelog, tags the plain version

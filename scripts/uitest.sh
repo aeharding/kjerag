@@ -1288,6 +1288,90 @@ dud() {
 	exits_clean
 }
 
+# ------------------------------------- the checks, with another camera's file
+#
+# A GoPro capture opens: it is an ordinary MP4 with video in it, so the
+# refusal cannot come from a decode that failed. It comes from what the
+# container holds (`crates/meta/src/format.rs`, issue #107), which is why the
+# fixtures here are 71 bytes and no pictures: the app names the file before
+# anything is asked to decode it, and a real frame would not change a word of
+# what it says. Whether those bytes are what a GoPro really writes is that
+# module's question, and it answers it against the local sample corpus.
+#
+# Two fixtures, because there are two ways a file gets named: the first
+# carries GoPro's own `udta` boxes under a name that says nothing, and the
+# second is named `.osv` and holds nothing at all.
+
+foreign() {
+	printf '\n-- foreign format checks (synthetic)\n'
+	local gopro=$session/no-name-on-it.mp4 dji=$session/named-only.osv
+	printf '\x00\x00\x00\x14ftypmp41\x00\x00\x00\x00mp41' >"$gopro"
+	printf '\x00\x00\x00\x33moov\x00\x00\x00\x2budta' >>"$gopro"
+	printf '\x00\x00\x00\x17FIRMH19.03.02.00.75\x00\x00\x00\x0cGPMF\x00\x00\x00\x00' >>"$gopro"
+	: >"$dji"
+
+	# What the plain welcome view looks like, to compare the refusal against.
+	# The app draws the refusal as a second line under "No video open", and no
+	# capture can read it; two captures that differ is the whole of what this
+	# harness can say about a line of text, and it says it against a session
+	# of its own so the two are the same window at the same size.
+	boot welcome-plain
+	if ! await_paint welcome-plain; then
+		alive || lost "the refusal says what the file is"
+		fail "the refusal says what the file is" "the welcome view is black" "log: $log"
+		teardown
+		return
+	fi
+	# A capture taken the moment the output stopped being black can be a
+	# window that is still filling in, so both sides of the comparison are
+	# taken a beat after paint instead.
+	sleep "$SETTLE"
+	local plain
+	plain=$(grab welcome-settled)
+	quit >/dev/null 2>&1 || teardown
+
+	boot gopro "$gopro"
+	if await 'not shown: a GoPro capture' "$READY"; then
+		pass "a GoPro file is refused by name"
+	else
+		fail "a GoPro file is refused by name" \
+			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
+	fi
+
+	if await_paint gopro; then
+		pass "the refusal leaves a window up"
+	else
+		alive || lost "the refusal leaves a window up"
+		fail "the refusal leaves a window up" \
+			"capture is black: $session/gopro.ppm" "log: $log"
+		teardown
+		return
+	fi
+
+	sleep "$SETTLE"
+	local refused
+	refused=$(grab gopro-settled)
+	if same_picture "$plain" "$refused"; then
+		fail "the refusal says what the file is" \
+			"the welcome view is what it is with nothing open" \
+			"$plain" "$refused"
+	else
+		pass "the refusal says what the file is"
+	fi
+	quit >/dev/null 2>&1 || teardown
+
+	# The other half of the rule: the bytes said nothing, so the name is
+	# what is left, and an `.osv` is DJI's.
+	boot dji "$dji"
+	if await 'not shown: a DJI capture' "$READY"; then
+		pass "an .osv with nothing in it is still named"
+	else
+		fail "an .osv with nothing in it is still named" \
+			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
+	fi
+	exits_clean
+}
+
 # ------------------------------------------------------------------- run
 
 if [ -n "$media" ]; then
@@ -1297,6 +1381,7 @@ else
 	welcome
 fi
 dud
+foreign
 
 printf '\n%s checks, %s failed\n' "$checks" "$failures"
 printf 'captures and logs: %s\n' "$session"
