@@ -273,6 +273,27 @@ pub struct Reframe {
     /// has: a uniform block cannot change size between draws. The ones past
     /// `lens_count` are [`LensBlock::EMPTY`].
     lenses: [LensBlock; MAX_LENSES],
+    /// A `mat3x3<f32>` as WGSL lays one out. Takes a view-space ray to the
+    /// camera **body**'s own frame, which is where the seam circle and the
+    /// baseline are fixed (issue #103): the two lenses are glued to the body,
+    /// so a direction on the seam is the same direction whatever the view is
+    /// pointed at and however the horizon lock is turning under it.
+    ///
+    /// It is the middle two steps of [`view_to_lens`] with the mounting left
+    /// off, so the composition is the pass's own and not a second convention.
+    /// [`super::band`] is the only thing that reads it, on both sides: the
+    /// compute pass turns it round to get from the body to each lens, and the
+    /// fragment shader uses it to ask a ray which azimuth of the seam it is
+    /// near.
+    view_to_body: [[f32; 4]; 3],
+    /// Where lens 1 sits relative to lens 0, in the body's frame, in metres:
+    /// 33 mm of z on this camera family. What makes the overlap band a stereo
+    /// pair, and zero for a file with one lens stream, which switches the
+    /// band off rather than dividing by it.
+    baseline: [f32; 3],
+    /// A `vec3` in a uniform block is padded to sixteen bytes. WGSL does that
+    /// itself; `repr(C)` does not.
+    _baseline_pad: f32,
     /// How a point of the frame becomes a ray (issue #47). Sixteen bytes at a
     /// sixteen-byte offset, which is what a uniform block asks of a struct
     /// inside it.
@@ -455,6 +476,9 @@ impl Reframe {
                 Some(lens) => LensBlock::new(lens, index, frame, camera, held),
                 None => LensBlock::EMPTY,
             }),
+            view_to_body: body_from_view(camera, held).columns(),
+            baseline: super::band::baseline(lenses),
+            _baseline_pad: 0.0,
             screen: Screen::new(camera, aspect),
             frame_width: frame.width as f32,
             frame_height: frame.height as f32,
@@ -475,6 +499,11 @@ impl Reframe {
     pub fn gradient(elapsed: f32, aspect: f32, linearize: bool) -> Self {
         Self {
             lenses: [LensBlock::EMPTY; MAX_LENSES],
+            view_to_body: Mat3::IDENTITY.columns(),
+            // No file, so no camera and no baseline: every ray misses every
+            // lens and the band is never asked anything.
+            baseline: [0.0; 3],
+            _baseline_pad: 0.0,
             screen: Screen::new(Camera::default(), aspect),
             frame_width: 1.0,
             frame_height: 1.0,
@@ -529,6 +558,27 @@ impl Reframe {
     ///
     /// WGSL twin: `blend`.
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
+        self.blend_bent(view_ray, 0.0)
+    }
+
+    /// The same with the band's own correction in it (issue #103): each lens's
+    /// ray bent along the epipolar axis by the **other** lens's weight times
+    /// `disparity`, which is in radians and is what the two lenses disagree by
+    /// at this ray's azimuth.
+    ///
+    /// The two bends then differ by exactly the disparity wherever the weights
+    /// sum to 1, so the two lenses show the same content across the whole
+    /// band; and each lens's own bend is zero wherever its weight is 1, so
+    /// nothing outside the band moves and there is no edge to feather. Neither
+    /// property is arranged: both fall out of the weights this function was
+    /// already computing.
+    ///
+    /// The crossover is taken from the **unbent** ray, on purpose. The bend is
+    /// what the handover asked for, so a handover that then followed the bend
+    /// would be its own input.
+    ///
+    /// WGSL twin: `blend`, whose `bend` argument is `band_bend`'s answer.
+    pub fn blend_bent(&self, view_ray: [f32; 3], disparity: f32) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
         let reach = norm3(view_ray);
@@ -538,16 +588,24 @@ impl Reframe {
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
         let front = self.handover(axis, reach);
+        let bend = self.bend(view_ray, disparity);
         for lens in 0..MAX_LENSES {
             if !self.covers(lens, axis[lens], reach) {
                 continue;
             }
-            landings[lens] = self.project(lens, view_ray);
+            let share = match lens {
+                0 => front,
+                _ => 1.0 - front,
+            };
+            // This lens's share of the bend is the OTHER lens's weight, with
+            // the sign that puts the two of them one whole disparity apart.
+            let carry = match lens {
+                0 => share - 1.0,
+                _ => 1.0 - share,
+            };
+            let bent = std::array::from_fn(|c| view_ray[c] + carry * bend[c]);
+            landings[lens] = self.project(lens, bent);
             if lens < self.lens_count as usize {
-                let share = match lens {
-                    0 => front,
-                    _ => 1.0 - front,
-                };
                 weights[lens] = claim(landings[lens], share);
             }
         }
@@ -592,6 +650,87 @@ impl Reframe {
             true => crossover(axis[0] - axis[1], reach),
             false => 1.0,
         }
+    }
+
+    /// A view-space ray in the camera body's own frame, which is where the
+    /// seam circle and the baseline stand still (issue #103).
+    ///
+    /// WGSL twin: `reframe.view_to_body * ray`.
+    pub fn body_ray(&self, view_ray: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|row| {
+            (0..3)
+                .map(|c| self.view_to_body[c][row] * view_ray[c])
+                .sum()
+        })
+    }
+
+    /// Which azimuth of the seam circle a ray is over, in radians from the
+    /// body's +x, and the geometry of the band there.
+    ///
+    /// `None` straight down a lens's own axis, where there is no seam to be
+    /// near and no azimuth to name.
+    pub fn seam_at(&self, view_ray: [f32; 3]) -> Option<super::band::Ring> {
+        let body = self.body_ray(view_ray);
+        let reach = body[0].hypot(body[1]);
+        (reach > 0.0)
+            .then(|| super::band::Ring::at([body[0] / reach, body[1] / reach, 0.0], self.baseline))
+    }
+
+    /// What the band holds at a ray's azimuth, in radians, interpolated
+    /// between the two cells it lands between.
+    ///
+    /// The field is a circle, so the lookup wraps: a step between neighbouring
+    /// cells would be a step in the picture.
+    ///
+    /// WGSL twin: the `band[..]` lookup inside `band_bend`.
+    pub fn disparity_at(&self, view_ray: [f32; 3], cells: &[super::band::Cell]) -> f32 {
+        if cells.is_empty() {
+            return 0.0;
+        }
+        let body = self.body_ray(view_ray);
+        let turn = body[1].atan2(body[0]) / std::f32::consts::TAU * cells.len() as f32;
+        let low = turn.floor();
+        let mix = turn - low;
+        let cell =
+            |step: usize| cells[(low.rem_euclid(cells.len() as f32) as usize + step) % cells.len()];
+        let (a, b) = (cell(0), cell(1));
+        // Weighted by the evidence behind each cell. A direction that has
+        // stopped correlating stops contributing, and with none at all the
+        // answer is zero, which is the picture before the band existed.
+        let (wa, wb) = (a.confidence * (1.0 - mix), b.confidence * mix);
+        let total = wa + wb;
+        if total <= 0.0 {
+            return 0.0;
+        }
+        let strength = ((a.confidence + (b.confidence - a.confidence) * mix) / super::band::KEEP)
+            .clamp(0.0, 1.0);
+        (wa * a.disparity + wb * b.disparity) / total * strength
+    }
+
+    /// The offset one lens's ray takes for a whole disparity, in view space,
+    /// scaled by the ray's own length so that adding it turns the ray by
+    /// `disparity` radians.
+    ///
+    /// Clamped to what the crossover can carry without folding
+    /// (`super::band::carried`), which is the guard the record has wanted
+    /// since the band narrowed: the bend's own gradient across the band **is**
+    /// the shear, and past 1 the mapping prints the picture back over itself.
+    ///
+    /// WGSL twin: `band_bend`.
+    pub fn bend(&self, view_ray: [f32; 3], disparity: f32) -> [f32; 3] {
+        let Some(at) = self.seam_at(view_ray) else {
+            return [0.0; 3];
+        };
+        let carried = super::band::carried(disparity, CROSSOVER_DEG.to_radians());
+        let scale = carried * norm3(view_ray);
+        // Back out of the body's frame. `view_to_body` is a rotation, so its
+        // transpose is its inverse.
+        std::array::from_fn(|row| {
+            scale
+                * (0..3)
+                    .map(|c| self.view_to_body[row][c] * at.epi[c])
+                    .sum::<f32>()
+        })
     }
 
     /// How far a ray is off one lens's axis, as an unnormalized cosine: one
@@ -1117,9 +1256,18 @@ pub(crate) fn world_ray(camera: Camera, ray: [f32; 3]) -> [f32; 3] {
 /// and with lock on that frame is the world: the anchor stays on the world
 /// and the picture turns under it.
 fn view_to_lens(pose: &Pose, index: usize, camera: Camera, held: Held) -> Mat3 {
-    lens_from_body(pose, index)
-        .mul(Mat3::from(held.body_from_world.matrix().rows()))
-        .mul(camera_rotation(camera))
+    lens_from_body(pose, index).mul(body_from_view(camera, held))
+}
+
+/// The same composition with the lens's own mounting left off: a view-space
+/// ray in the camera **body**'s frame (issue #103).
+///
+/// The seam circle and the baseline are fixed to the body, so this is the
+/// frame the band is measured and looked up in. Taken from [`view_to_lens`]
+/// rather than written out beside it, so the two cannot drift: whatever the
+/// pass thinks the view is pointing at, the band thinks the same.
+fn body_from_view(camera: Camera, held: Held) -> Mat3 {
+    Mat3::from(held.body_from_world.matrix().rows()).mul(camera_rotation(camera))
 }
 
 /// Yaw about the world vertical, then pitch about the view's own horizontal.
@@ -1305,6 +1453,18 @@ struct Screen {
 
 struct Reframe {
   lenses: array<LensBlock, MAX_LENSES>,
+  // A view-space ray in the camera body's own frame, which is where the seam
+  // circle and the baseline stand still. Rust twin: `Reframe::view_to_body`.
+  view_to_body: mat3x3<f32>,
+  // Where lens 1 sits relative to lens 0, in metres, in the body's frame.
+  // Zero for a file with one lens stream, which is a band that measures
+  // nothing and bends nothing. Rust twin: `Reframe::baseline`.
+  baseline_x: f32,
+  baseline_y: f32,
+  baseline_z: f32,
+  // A `vec3` in a uniform block is padded to sixteen bytes. Rust twin:
+  // `Reframe::_baseline_pad`.
+  baseline_pad: f32,
   screen: Screen,
   frame_width: f32,
   frame_height: f32,
@@ -1364,7 +1524,14 @@ fn view_ray(uv: vec2<f32>) -> vec4<f32> {
   return vec4<f32>(plane * out, cos(theta), 1.0);
 }
 
-// Every lens's claim on the ray, normalized. Rust twin: `Reframe::blend`.
+// Every lens's claim on the ray, normalized. Rust twin: `Reframe::blend_bent`.
+//
+// `bend` is what the band says the two lenses disagree by at this direction,
+// as an offset to add to the ray (`band_bend`). It is zero on a file with one
+// lens stream and on every direction the band has not measured, and then this
+// pass is what it was before issue #103. It is taken from the UNBENT ray, like
+// the crossover below: a bend that moved its own lookup would be its own
+// input.
 //
 // The loop runs MAX_LENSES times whatever the file holds, and the lens count
 // zeroes the claim of a slot that has no stream rather than shortening the
@@ -1372,7 +1539,7 @@ fn view_ray(uv: vec2<f32>) -> vec4<f32> {
 // puts it in scratch memory and costs more than the blend does; the numbers
 // are on the Rust twin. The array writes stay unconditional for the same
 // reason; what `within` skips is the model, not the bookkeeping.
-fn blend(ray: vec3<f32>) -> Blend {
+fn blend(ray: vec3<f32>, bend: vec3<f32>) -> Blend {
   var out: Blend;
   var total = 0.0;
   let reach = length(ray);
@@ -1390,8 +1557,12 @@ fn blend(ray: vec3<f32>) -> Blend {
     var landing: Landing;
     var claimed = 0.0;
     if within(lens, select(axis1, axis0, index == 0u), reach) {
-      landing = project(lens, ray);
       let share = select(1.0 - front, front, index == 0u);
+      // This lens's share of the bend is the OTHER lens's weight, with the
+      // sign that puts the two of them one whole disparity apart. Rust twin:
+      // `Reframe::blend_bent`.
+      let carry = select(1.0 - share, share - 1.0, index == 0u);
+      landing = project(lens, ray + carry * bend);
       claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
     }
     out.landings[index] = landing;
@@ -3224,7 +3395,9 @@ pub(crate) mod tests {
     fn the_uniform_block_is_the_size_wgsl_lays_it_out() {
         assert_eq!(std::mem::size_of::<LensBlock>(), 112);
         assert_eq!(std::mem::size_of::<Screen>(), 16);
-        assert_eq!(std::mem::size_of::<Reframe>(), 288);
+        // 288 before the band's two fields, which add a padded mat3x3 and a
+        // padded vec3 (issue #103).
+        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16);
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {

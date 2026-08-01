@@ -2473,3 +2473,161 @@ Vendor documentation:
 
 - https://onlinemanual.insta360.com/x4/en-us/camera/basicuse/stitching
   (the 1 m minimum subject distance)
+
+### 6.9 The band is read on every frame, and the reading is a distance (issue #103, stage 2)
+
+**Confidence: HIGH for the cost and the flicker, MED for the residual.**
+Measured 2026-08-01 on the shipped pass, on six captures from two cameras.
+Instrument: `kjerag-spike --bin band`, which reads the state back out of the
+very buffer `ScenePipeline` dispatches into while it draws.
+
+6.8 corrects what belongs to the camera and leaves 0.12 to 0.36 degrees along
+the seam and 0.57 to 0.84 across it on flights. The second of those is not
+calibration: the baseline is 33 mm, so 3 m of subject distance is 0.64 degrees
+of real displacement (6.1) and no rotation of a lens moves content that is at
+two distances at once. So it is measured, per direction and per frame.
+
+**Where the cost is, and it is not where it looks.** The pass is one compute
+workgroup per direction: fill two grids from the two lenses' luma, correlate
+them along the epipolar axis, filter, write four floats. The obvious
+optimisation is to score each candidate shift on a fraction of the patch's
+samples, which is exactly what `seam::best_shift` does and for exactly the
+stated reason. Measured, it makes the pass **slower**: 9.1 ms per redraw at
+2560x1440 under live decode against 8.4, because the refine it needs afterwards
+is serial. The correlation is not the cost. **The fetch is**: 3733 taps of a
+tiled 3840x3840 decoder surface per direction per frame, on an iGPU that has
+VA-API decoding into that same memory. Three changes to what is fetched, and
+nothing to how it is scored:
+
+| | taps per direction | ms per redraw, added |
+| --- | ---: | ---: |
+| 0.08 deg step, search to 3.5 deg, whole ring each frame | 3733 | 3.2 |
+| 0.10 deg step, search to 2.6 deg, half the ring each frame | 958 | **0.3** |
+
+The step is resolution the parabola between whole steps gives back, and the
+seconds of averaging over it give back again. The search stops where the fold
+clamp does, because past 1.8 degrees every reading is clamped to the same
+number and the window was being spent telling one clamped reading from
+another. Half the ring is free: the filter is paced in **seconds of media
+time**, so a direction read at 15 Hz and one read at 30 settle in the same wall
+time, and only the near field notices.
+
+Interleaved runs of the same binary, `noband` against `band`, 20 s at
+2560x1440 under live decode: 5.09, 5.25, 5.31 ms per redraw against 5.43,
+5.56, 5.61. Dropped frames are 2 either way on this file and this box.
+
+**Why per-frame beats the per-clip table it was supposed to lose to.** Phase A
+measured a naive per-frame table flickering 0.22 to 0.54 degrees rms frame to
+frame against a static residual of 0.2 to 0.4 that it was meant to remove, and
+called that a bad trade. It is, and the answer is not to pool: it is that far
+field and near field want opposite time constants. A direction reading under
+0.19 degrees is looking at something past 10 m, which does not move, and can be
+smoothed for two seconds for free; a direction reading degrees is looking at
+the wing and has to track. The constant is read off the **smoothed state** and
+not off this frame's reading, so a noisy far-field reading cannot unlock the
+smoothing that is keeping the horizon still.
+
+Measured at 360 directions round the circle, where the bend is APPLIED rather
+than where it was read:
+
+| capture | flicker, deg rms | view px | far field only, deg rms | view px at fov 24.1 |
+| --- | ---: | ---: | ---: | ---: |
+| static 07-31 12:07 | 0.0077 | 0.13 | 0.0010 | 0.08 |
+| flight 04-10 | 0.0140 | 0.23 | 0.0095 | 0.75 |
+| flight 05-01 | 0.0199 | 0.33 | 0.0136 | 1.09 |
+| flight 05-26 | 0.0182 | 0.31 | 0.0106 | 0.85 |
+| flight 07-14 | 0.0225 | 0.38 | 0.0176 | 1.40 |
+| flight 07-25 | 0.0161 | 0.27 | 0.0218 | 1.74 |
+
+Ten to thirty times smaller than the naive per-frame table. The far-field
+column is the one the pixel-perfect horizon claim rests on: those directions
+are looking at things that do not move, so what is left over is the
+measurement's own repeatability and nothing else.
+
+**The control, and it is not optional.** A known step is put into the state
+each frame, alternating sign, and a step of `s` has to come back at `2s` in
+quadrature with what the file already had: 0.05 deg reads 0.1015 against 0.1020
+expected, and 0.20 reads 0.4000 against 0.4005. A flicker column is a negative
+result and means nothing until it is shown able to read a positive one.
+
+**The shear guard exists now.** 6.8 bounds the crossover's width from below by
+shear, the disparity divided by the band, and says that above 1 the crossover
+folds rather than blends. The bend has the same bound and for the same reason:
+its own gradient across the band **is** the shear, so past 1 the mapping prints
+the picture back over itself. The applied disparity is clamped to nine tenths
+of the crossover. This is the first time that number has been computable at
+runtime rather than quoted; what it clamps is content nearer than about 1.9 m,
+which is nearer than the camera maker's own manual asks a subject to be, and
+widening the band where it bites is stage 4's.
+
+**What did not change.** A file with one lens stream has a front weight of
+exactly 1 everywhere, so the bend each lens takes -- the OTHER lens's weight
+times the disparity -- is exactly zero everywhere. Rendered against a build of
+`main` in its own target directory, a ONE X2 one-lens file is byte-identical at
+yaw 0, 45, 90, 180 and 270; a two-stream flight file is byte-identical at yaw 0
+and 180 and differs at yaw 90; and the 12:07 static capture is byte-identical
+even across its seam, which is its own result -- it is the capture whose
+calibration already lands, and the band finds nothing there to correct.
+
+**A reading expires when its evidence does** (owner-reported, 2026-08-01).
+The first version of this held a refused direction's last reading for a fixed
+1.5 s. On the owner's own footage two directions were then applying **4.54 and
+4.61 view px** of warp to a treeline at hundreds of metres, from a reading of
+his boot at **3.2 m** taken 1.3 and 2.1 seconds earlier. The decay identified
+the path exactly: five consecutive frames falling by 0.95739, 0.95734,
+0.95737, 0.95738 and 0.95740 against an `ease(2 frames, 1.5 s)` hold ratio of
+0.957447, so those directions were refusing on **every** frame. A patch that
+holds both a boot at 3 m and a field at 300 m has no single shift that
+correlates; it refuses, and the refusal was holding an expired near-field
+number for 45 frames while the seam swept the scene at **197 deg/s** and the
+content in that direction changed completely in under one.
+
+It is an occlusion defect and not an aircraft one: a selfie stick, a hand on
+the mount, a helmet or a passer-by produces the same thing. What was wrong is
+that the refusal branch decayed the **measurement**. The measurement was true
+when it was taken and may be true still; what is absent is anything confirming
+it. So refusal now erodes the **evidence** alone, and the pass applies a
+reading in proportion to how well it is being confirmed. Three variants,
+measured rather than reasoned about:
+
+| refusal branch | the two reported directions | 05-01 far-field residual | 04-10 |
+| --- | ---: | ---: | ---: |
+| hold the value 1.5 s | 4.54, 4.61 view px | 1.09 | 0.75 |
+| decay the value at the learn rate | 0.64, 0.36 | 2.88 | 3.16 |
+| decay the value at the near rate | - | 2.52 | 2.74 |
+| **decay the evidence, keep the value** | **0.01, 0.00** | **1.09** | **0.56** |
+
+The two that decay the value are worse in the far field for a reason worth
+recording: a far direction refuses intermittently, and destroying its
+measurement each time means learning the answer again, so the correction
+blinks. **No constant was added and one was removed.** The fade rate is the
+direction's own learn rate, so a near reading expires as fast as it was
+learned, out of the same geometric knee at 0.19 degrees; the trust threshold
+is `KEEP`, the bar a single reading must already clear before it may move the
+state at all.
+
+**The same numbers on other cameras and other shooters**, from the local-only
+sample corpus, handheld and selfie-stick rather than airborne, so that none of
+this is fitted to one aircraft:
+
+| camera | directions read | flicker, deg rms | far-field residual, view px at fov 24.1 |
+| --- | ---: | ---: | ---: |
+| Insta360 X5 | 127 of 128 | 0.0149 | 0.44 |
+| Insta360 X4 (non-Air) | 95 of 128 | 0.0263 | 2.16 |
+| Insta360 X3 | 76 of 128 | 0.0193 | 0.69 |
+| Insta360 ONE X2 | one lens stream: no seam, no band | | |
+
+The owner's own six clips read 0.0088 to 0.0198 degrees of flicker and 0.08 to
+1.73 view px of residual over the same run length, so the corpus sits inside
+his range on every column.
+
+**The benchmark this section does not reach.** 6.8's band-over-surroundings
+share cannot score the 0:09 wing dip against the camera maker's export: the
+projection fit correlates 0.7262 there against the 0.977 to 0.9996 a locked fit
+gives, and at the one instant nearby where it does lock both shares come out
+above 1, which is the statistic saying it does not apply. Scored against our
+own picture instead, each its own control, the band takes 05-01's wing crossing
+the seam from **0.930 to 0.954**. Also recorded because it was wrong in the
+record: TEST.mp4 is the first 20.22 s of `VID_20260501_183417_00_003.insv`, not
+of `_00_001`, settled by cross-correlating the two files' own audio (r = 1.000
+at offset 0.0 s against 0.64 and 0.67 on the other parts).

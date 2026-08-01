@@ -578,6 +578,20 @@ fn strategies(options: &Options) -> Fallible<()> {
 
 // ------------------------------------------------------------ pictures
 
+/// What to say when `plan=` names nothing. The names are the ladder's own and
+/// they carry spaces, so the message has to show how to type one.
+fn named(asked: &str) -> String {
+    format!(
+        "no plan called \"{asked}\". the ladder is {}, and an underscore stands for the space: \
+         plan=per-frame_dense",
+        Plan::ladder(&[0.0])
+            .iter()
+            .map(|plan| plan.name)
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
 fn render(options: &Options) -> Fallible<()> {
     let (calibration, pairs) = open(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
@@ -590,7 +604,7 @@ fn render(options: &Options) -> Fallible<()> {
     let plan = Plan::ladder(&options.psis)
         .into_iter()
         .find(|plan| plan.name == options.plan)
-        .ok_or("no plan by that name")?;
+        .ok_or_else(|| named(&options.plan))?;
     let warp = plan.build(&measured, 0, options.keep);
 
     let look = options.look();
@@ -657,7 +671,7 @@ fn parity(options: &Options) -> Fallible<()> {
     let plan = Plan::ladder(&options.psis)
         .into_iter()
         .find(|plan| plan.name == options.plan)
-        .ok_or("no plan by that name")?;
+        .ok_or_else(|| named(&options.plan))?;
     let warp = plan.build(&measured, 0, options.keep);
 
     let look = options.look();
@@ -851,7 +865,12 @@ impl Options {
                         .collect::<Result<Vec<f64>, _>>()?;
                 }
                 "fix" => options.fix = turns(value)?,
-                "plan" => options.plan = value.replace('-', " "),
+                // Every plan name carries a hyphen of its own ("per-frame
+                // mesh"), so a hyphen cannot be the word separator: replacing
+                // them all left nothing that could match, and `plan=` selected
+                // no plan at any value. `mode=render` and `mode=parity` then
+                // ran the compiled-in default whatever they were asked for.
+                "plan" => options.plan = value.replace('_', " "),
                 "yaw" => options.yaw = value.parse()?,
                 "pitch" => options.pitch = value.parse()?,
                 "roll" => options.roll = value.parse()?,

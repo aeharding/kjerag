@@ -77,6 +77,10 @@ fn main() -> Fallible<()> {
     // `luma` is the half of the upgrade the delivered frame's own grid asks
     // for.
     let sample: String = parse(&args, 8, "sharp".to_owned())?;
+    // Issue #103's cost: `noband` holds the per-frame seam measurement off, so
+    // the compute pass's own share of a redraw is the difference between two
+    // runs of this binary rather than between two builds of it.
+    let band: String = parse(&args, 9, "band".to_owned())?;
 
     for lookahead in [0, 2, 4] {
         println!("{}", drain(&input, lookahead)?);
@@ -92,18 +96,21 @@ fn main() -> Fallible<()> {
         Duration::from_secs(seconds),
         hz,
         shots,
-        camera,
-        &readout,
-        match sample.as_str() {
-            "bilinear" => Sampling::Bilinear,
-            "luma" => Sampling::Luma,
-            _ => Sampling::Sharp,
+        Drawn {
+            camera,
+            readout: &readout,
+            sampling: match sample.as_str() {
+                "bilinear" => Sampling::Bilinear,
+                "luma" => Sampling::Luma,
+                _ => Sampling::Sharp,
+            },
+            band: band != "noband",
         },
     )
 }
 
 const USAGE: &str = "usage: playback <file.insv> [seconds] [hz] [shots] [yaw] \
-     [file|off|right|left|down|up] [fov] [bilinear|luma|sharp]";
+     [file|off|right|left|down|up] [fov] [bilinear|luma|sharp] [band|noband]";
 
 /// What the readout argument does to the file's own (issue #9): a direction
 /// forces that one, `off` is a readout of no length at all, which is the pass
@@ -183,15 +190,24 @@ fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
 /// (`iced`'s `RedrawRequest::At`, from `kjerag_render`'s widget), so this
 /// does too. `hz` is the display's refresh rate, and caps how often a redraw
 /// can happen when the scene asks for one as soon as possible.
-fn play(
-    input: &Path,
-    run: Duration,
-    hz: u32,
-    shots: u32,
+/// What one run is asked to draw, as against how long for: the arguments that
+/// describe the picture rather than the measurement.
+struct Drawn<'a> {
     camera: Camera,
-    readout: &str,
+    readout: &'a str,
     sampling: Sampling,
-) -> Fallible<()> {
+    /// Whether the per-frame seam band measures (issue #103). Off is the pass
+    /// as it was before it, which is what its cost is measured against.
+    band: bool,
+}
+
+fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> Fallible<()> {
+    let Drawn {
+        camera,
+        readout,
+        sampling,
+        band,
+    } = drawn;
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
     println!("device: {}", dmabuf::device_report(&gpu.device));
@@ -209,6 +225,7 @@ fn play(
     scene.set_sampling(sampling);
     println!("sample: {sampling:?}");
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    pipeline.hold_band(!band);
     let refresh = Duration::from_secs_f64(1.0 / f64::from(hz));
     println!(
         "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{} at yaw {:.0}, \

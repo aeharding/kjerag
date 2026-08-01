@@ -980,6 +980,10 @@ struct Options {
     also: Option<PathBuf>,
     /// The camera maker's own export of the same capture, for `mode=parity`.
     against: Option<PathBuf>,
+    /// What the shipped per-frame band settled on, written out by
+    /// `kjerag-spike --bin band save=` (issue #103). Empty is the picture
+    /// before stage 2, and `mode=parity` draws both.
+    band: Vec<kjerag_render::Cell>,
     from: f64,
     count: usize,
     patches: usize,
@@ -1023,6 +1027,7 @@ impl Options {
             input,
             also: None,
             against: None,
+            band: Vec::new(),
             from: 0.0,
             count: 6,
             patches: 72,
@@ -1059,6 +1064,10 @@ impl Options {
                 }
                 "also" => options.also = Some(PathBuf::from(value)),
                 "against" => options.against = Some(PathBuf::from(value)),
+                "band" => {
+                    options.band = kjerag_render::Cell::read(&std::fs::read_to_string(value)?)
+                        .ok_or("that is not a band state written by --bin band")?;
+                }
                 "yaw" => options.yaw = value.parse()?,
                 "pitch" => options.pitch = value.parse()?,
                 "fov" => options.fov = value.parse()?,
@@ -1271,7 +1280,27 @@ enum Weighting {
 impl Weighting {
     /// The two lenses' shares of one ray, and where each of them reads it.
     fn at(self, reframe: &Reframe, ray: [f64; 3]) -> ([f64; 2], [Landing; 2]) {
-        let shipped = reframe.blend(ray.map(|c| c as f32));
+        self.bent(reframe, ray, &[])
+    }
+
+    /// The same with the per-frame band's own correction in it (issue #103).
+    ///
+    /// `cells` is the state the shipped compute pass settled on, written out
+    /// by `kjerag-spike --bin band save=`. Empty is the picture before stage 2,
+    /// which is what a before-and-after needs one of.
+    ///
+    /// It has to come in as a table rather than being measured here because
+    /// the camera maker's own export is in a projection family the app's pass
+    /// does not draw, so the comparison is a CPU render through
+    /// `Reframe::blend_bent` and never goes near a window.
+    fn bent(
+        self,
+        reframe: &Reframe,
+        ray: [f64; 3],
+        cells: &[kjerag_render::Cell],
+    ) -> ([f64; 2], [Landing; 2]) {
+        let ray32 = ray.map(|c| c as f32);
+        let shipped = reframe.blend_bent(ray32, reframe.disparity_at(ray32, cells));
         let landings = shipped.landings;
         let covered = |lens: usize| landings[lens].inside;
         let weights = match self {
@@ -1723,7 +1752,7 @@ fn parity(options: &Options) -> Fallible<()> {
                         fov,
                         compression: 1.0,
                     };
-                    let score = agree(&looked(&lenses, frame, look, &ours, coarse), &small);
+                    let score = agree(&looked(&lenses, frame, look, &ours, coarse, &[]), &small);
                     if score > best.0 {
                         best = (score, look);
                     }
@@ -1735,7 +1764,8 @@ fn parity(options: &Options) -> Fallible<()> {
     // wanted in.
     let fine = export.shape.scaled(200);
     let small = export.resampled(fine);
-    let scored = |look: Look, pair: &Pair| agree(&looked(&lenses, frame, look, pair, fine), &small);
+    let scored =
+        |look: Look, pair: &Pair| agree(&looked(&lenses, frame, look, pair, fine, &[]), &small);
     let mut step = 8.0;
     let mut score = scored(best.1, &ours);
     while step > 0.005 {
@@ -1772,21 +1802,33 @@ fn parity(options: &Options) -> Fallible<()> {
     // their tone curve and our lack of one cancel. The fit is then wanted only
     // to say which pixels are the band, and a degree of slack in a band 14
     // degrees wide is slack it can afford.
-    let ours = looked(&lenses, frame, look, &ours, export.shape);
+    // The view is fitted on the picture the band does NOT touch, and then both
+    // of our pictures are drawn at it: the band moves a strip a couple of
+    // degrees wide, and a fit free to follow it would score the strip it
+    // chose.
+    let stage1 = looked(&lenses, frame, look, &ours, export.shape, &[]);
+    let banded_picture = looked(&lenses, frame, look, &ours, export.shape, &options.band);
     let seam = seam_map(&lenses, frame, look, export.shape);
     println!(
-        "\n{:<12} {:>14} {:>14} {:>12}",
-        "picture", "in the band", "either side", "share"
+        "\n{:<14} {:>13} {:>13} {:>9} {:>9} {:>9}",
+        "picture", "in the band", "either side", "share", "band px", "side px"
     );
-    for (name, luma) in [("ours", &ours), ("Insta360", &export.luma)] {
+    let ours_rows: [(&str, &Vec<f64>); 3] = [
+        ("ours, stage 1", &stage1),
+        ("ours, band", &banded_picture),
+        ("Insta360", &export.luma),
+    ];
+    for (name, luma) in ours_rows {
         let inside = banded(luma, &seam, export.shape, (0.0, 5.0));
         let outside = banded(luma, &seam, export.shape, (9.0, 25.0));
         println!(
-            "{name:<12} {inside:>14.1} {outside:>14.1} {:>12.3}",
+            "{name:<14} {inside:>13.1} {outside:>13.1} {:>9.3} {:>9} {:>9}",
             match outside > 0.0 {
                 true => inside / outside,
                 false => 0.0,
             },
+            counted(luma, &seam, export.shape, (0.0, 5.0)),
+            counted(luma, &seam, export.shape, (9.0, 25.0)),
         );
     }
     println!(
@@ -1802,6 +1844,33 @@ fn parity(options: &Options) -> Fallible<()> {
 
 /// Mean squared gradient over the pixels whose distance from the seam falls in
 /// `band`.
+/// How many pixels the statistic above was taken over.
+///
+/// Printed beside every ratio, and the reason is a failure already in the
+/// record: a band that lands on nothing at all reads 0.000, which looks like a
+/// picture with no sharpness rather than a mask with no pixels.
+fn counted(luma: &[f64], seam: &[f64], shape: Shape, band: (f64, f64)) -> usize {
+    let (width, height) = (shape.width as usize, shape.height as usize);
+    let mut count = 0;
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let index = y * width + x;
+            let past = seam[index].abs();
+            if past < band.0 || past > band.1 {
+                continue;
+            }
+            if [index - 1, index, index + 1]
+                .iter()
+                .any(|at| luma[*at] <= 0.0)
+            {
+                continue;
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
 fn banded(luma: &[f64], seam: &[f64], shape: Shape, band: (f64, f64)) -> f64 {
     let (width, height) = (shape.width as usize, shape.height as usize);
     let mut total = 0.0;
@@ -1953,7 +2022,14 @@ fn ray_of(uv: [f64; 2], half_fov: f64, compression: f64, aspect: f64) -> [f64; 3
 
 /// Our own pass, rendered into a candidate projection under a candidate
 /// rotation, which is what a fitted export has to be compared against.
-fn looked(lenses: &[Lens], frame: Size, view: Look, pair: &Pair, shape: Shape) -> Vec<f64> {
+fn looked(
+    lenses: &[Lens],
+    frame: Size,
+    view: Look,
+    pair: &Pair,
+    shape: Shape,
+    cells: &[kjerag_render::Cell],
+) -> Vec<f64> {
     let reframe = Reframe::new(
         lenses,
         frame,
@@ -1974,7 +2050,7 @@ fn looked(lenses: &[Lens], frame: Size, view: Look, pair: &Pair, shape: Shape) -
                 view.compression,
                 shape.aspect(),
             );
-            let (weights, landings) = Weighting::Shipped.at(&reframe, ray);
+            let (weights, landings) = Weighting::Shipped.bent(&reframe, ray, cells);
             let mut luma = 0.0;
             let mut total = 0.0;
             for lens in 0..2 {
