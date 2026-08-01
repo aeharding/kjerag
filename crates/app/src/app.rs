@@ -1619,6 +1619,14 @@ fn sandboxed() -> bool {
 }
 
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
+///
+/// The line it prints is the answer to a question the app cannot ask any
+/// other way (issue #123): what the chooser hands back inside a sandbox. A
+/// path under `/run/user/<uid>/doc/` is the document portal's translation of
+/// the file, and its directory holds that file alone, which is why a capture
+/// written as two files plays one lens when it is picked there. The portal's
+/// own `Documents.Info` is refused to sandboxed callers ("Not allowed in
+/// sandbox", measured), so the terminal is where this can be seen at all.
 fn chooser() -> Task<Message> {
     Task::perform(
         async {
@@ -1627,7 +1635,10 @@ fn chooser() -> Task<Message> {
                 .filter(FileFilter::new(strings::INSV_FILTER).glob("*.insv"));
             match dialog.open_file().await {
                 Ok(response) => match response.url().to_file_path() {
-                    Ok(path) => action::app(Message::FileLoad(path)),
+                    Ok(path) => {
+                        println!("chose:  {}", response.url());
+                        action::app(Message::FileLoad(path))
+                    }
                     Err(()) => {
                         eprintln!("kjerag: {} is not a local file", response.url());
                         action::none()
