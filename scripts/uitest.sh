@@ -1288,6 +1288,114 @@ dud() {
 	exits_clean
 }
 
+# ------------------------------------- the checks, with another camera's file
+#
+# A GoPro capture opens: it is an ordinary MP4 with video in it, so the
+# refusal cannot come from a decode that failed. It comes from what the
+# container holds (`crates/meta/src/format.rs`, issue #107), which is why the
+# fixtures here are 71 bytes and no pictures: the app names the file before
+# anything is asked to decode it, and a real frame would not change a word of
+# what it says. Whether those bytes are what a GoPro really writes is that
+# module's question, and it answers it against the local sample corpus.
+#
+# Two fixtures, because there are two ways a file gets named: the first
+# carries GoPro's own `udta` boxes under a name that says nothing, and the
+# second is named `.osv` and holds nothing at all.
+#
+# What the app does with them is an alert: the stock dialog libcosmic draws
+# over the middle of the window in a modal popover. No capture can read the
+# words in it, so what is checked is that something is drawn over the view,
+# and that Escape takes it away and leaves the window byte for byte what it
+# was. A modal layer that only half goes away fails the second half, which is
+# what the pair is here to catch.
+
+# Set by the check below and read by its predicate: the window before any of
+# this, which is what dismissing the alert has to come back to.
+prior=
+
+alert_gone() {
+	local shot
+	shot=$(grab "$1")
+	same_picture "$prior" "$shot"
+}
+
+foreign() {
+	printf '\n-- foreign format checks (synthetic)\n'
+	local gopro=$session/no-name-on-it.mp4 dji=$session/named-only.osv
+	printf '\x00\x00\x00\x14ftypmp41\x00\x00\x00\x00mp41' >"$gopro"
+	printf '\x00\x00\x00\x33moov\x00\x00\x00\x2budta' >>"$gopro"
+	printf '\x00\x00\x00\x17FIRMH19.03.02.00.75\x00\x00\x00\x0cGPMF\x00\x00\x00\x00' >>"$gopro"
+	: >"$dji"
+
+	# The window with nothing open and nothing said, taken in a session of its
+	# own so that both sides of the comparison are the same window at the same
+	# size with the same state directory behind them.
+	boot welcome-plain
+	if ! await_paint welcome-plain; then
+		alive || lost "the refusal puts an alert over the window"
+		fail "the refusal puts an alert over the window" \
+			"the welcome view is black" "log: $log"
+		teardown
+		return
+	fi
+	# A capture taken the moment the output stopped being black can be a
+	# window that is still filling in, so every capture compared here is taken
+	# a beat after paint instead.
+	sleep "$SETTLE"
+	prior=$(grab welcome-settled)
+	quit >/dev/null 2>&1 || teardown
+
+	boot gopro "$gopro"
+	if await 'not shown: a GoPro capture' "$READY"; then
+		pass "a GoPro file is refused by name"
+	else
+		fail "a GoPro file is refused by name" \
+			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
+	fi
+
+	if await_paint gopro; then
+		pass "the refusal leaves a window up"
+	else
+		alive || lost "the refusal leaves a window up"
+		fail "the refusal leaves a window up" \
+			"capture is black: $session/gopro.ppm" "log: $log"
+		teardown
+		return
+	fi
+
+	sleep "$SETTLE"
+	local alerted
+	alerted=$(grab gopro-alert)
+	if same_picture "$prior" "$alerted"; then
+		fail "the refusal puts an alert over the window" \
+			"the window is what it is with nothing open and nothing said" \
+			"$prior" "$alerted"
+	else
+		pass "the refusal puts an alert over the window"
+	fi
+
+	if press_until alert_gone gopro-dismissed -k Escape; then
+		pass "escape takes the alert away and leaves the window as it was"
+	else
+		alive || lost "escape takes the alert away and leaves the window as it was"
+		fail "escape takes the alert away and leaves the window as it was" \
+			"the window did not come back to what it was" \
+			"$prior" "$session/gopro-dismissed.ppm"
+	fi
+	quit >/dev/null 2>&1 || teardown
+
+	# The other half of the rule: the bytes said nothing, so the name is what
+	# is left, and an `.osv` is DJI's.
+	boot dji "$dji"
+	if await 'not shown: a DJI capture' "$READY"; then
+		pass "an .osv with nothing in it is still named"
+	else
+		fail "an .osv with nothing in it is still named" \
+			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
+	fi
+	exits_clean
+}
+
 # ------------------------------------------------------------------- run
 
 if [ -n "$media" ]; then
@@ -1297,6 +1405,7 @@ else
 	welcome
 fi
 dud
+foreign
 
 printf '\n%s checks, %s failed\n' "$checks" "$failures"
 printf 'captures and logs: %s\n' "$session"

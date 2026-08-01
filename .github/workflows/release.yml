@@ -1,6 +1,7 @@
 name: release
 # A version tag is the whole trigger, and what comes out is one file a person
-# can install (issue #106): `flatpak install --user ./kjerag-….flatpak`.
+# can install, one per arch (issue #106):
+# `flatpak install --user ./kjerag-….flatpak`.
 #
 # Both halves are stock. The build is Flatpak's own action, running in the
 # image Flathub builds with; the release is softprops/action-gh-release with
@@ -29,16 +30,33 @@ jobs:
   gates:
     uses: ./.github/workflows/ci.yml
 
+  # One bundle per arch, each built on a runner of that arch: no emulation and
+  # no cross build. The aarch64 half is compiled and unit tested and nothing
+  # else, because a runner has no GPU (README, docs/RELEASING.md).
   bundle:
     needs: gates
-    runs-on: ubuntu-latest
+    strategy:
+      # One arch failing is not a reason to throw away the other's bundle.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     # The image Flathub's own builds run in, on the runtime branch our
     # manifest names. It carries flatpak-builder and the two tools its last
     # steps need, `eu-strip` and gdk-pixbuf's SVG loader, which a bare runner
-    # does not have and this job used to install by hand.
+    # does not have and this job used to install by hand. The tag is
+    # multi-arch: measured 2026-08-01 on ubuntu-24.04-arm, it starts and
+    # reports `aarch64`, and the runtime and both SDK extensions the manifest
+    # names exist on Flathub for aarch64.
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
+    env:
+      BUNDLE: kjerag-${{ github.ref_name }}-${{ matrix.arch }}.flatpak
     steps:
       - uses: actions/checkout@v4
       # Runs flatpak-builder against the committed manifest and
@@ -49,16 +67,24 @@ jobs:
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: flatpak/dev.harding.Kjerag.yml
-          bundle: kjerag-${{ github.ref_name }}-x86_64.flatpak
+          bundle: ${{ env.BUNDLE }}
+          # Not the host's arch: the action's own default is the string
+          # `x86_64` (its action.yml), so the arm runner has to be told, or
+          # flatpak-builder is asked for an x86_64 build on an arm machine.
+          arch: ${{ matrix.arch }}
           # The Release is where the bundle goes; a second copy as a workflow
           # artifact would expire in 90 days and confuse which is which.
           upload-artifact: false
-      - run: sha256sum kjerag-*.flatpak > kjerag-${{ github.ref_name }}-x86_64.flatpak.sha256
+      - run: sha256sum "$BUNDLE" > "$BUNDLE.sha256"
+      # Both arches publish into the one Release for the tag. Whichever runs
+      # second finds it already created and adds its two files; the action
+      # expects that ("presume a race with competing matrix runs",
+      # src/github.ts).
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            kjerag-${{ github.ref_name }}-x86_64.flatpak
-            kjerag-${{ github.ref_name }}-x86_64.flatpak.sha256
+            ${{ env.BUNDLE }}
+            ${{ env.BUNDLE }}.sha256
           generate_release_notes: true
           # A label after the version (0.1.0-rc1) is a prerelease, and GitHub
           # is told rather than left to guess.

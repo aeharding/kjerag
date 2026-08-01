@@ -32,7 +32,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kjerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
-use kjerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack, Quat, Readout};
+use kjerag_meta::{
+    CalibrationSet, ExposureTrack, Filter, Format, Lens, OrientationTrack, Quat, Readout,
+};
 
 use super::band;
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
@@ -280,6 +282,7 @@ impl Scene {
     /// Opens a file and starts playing it. Returns as soon as the container
     /// is parsed; the first frames arrive on the decode thread.
     pub fn open(path: &Path) -> Fallible<Self> {
+        ours(path)?;
         let mut player = Player::open(path)?;
         let calibrated = calibrated(path, player.size(), player.lenses())?;
         println!(
@@ -324,6 +327,7 @@ impl Scene {
     /// always giving frame 0 because #8's Studio-diff harness needs to name
     /// the frame it is checking.
     pub fn still(path: &Path, at: Cue) -> Fallible<Self> {
+        ours(path)?;
         let mut reader = Reader::open(path)?;
         let calibrated = calibrated(path, reader.size(), reader.lenses())?;
         let frame = reader.size();
@@ -864,6 +868,25 @@ type Harvested = Arc<Mutex<Option<Harvest>>>;
 /// capture is 1.8 million IMU samples and costs about a fifth of a second to
 /// read and integrate, against 70 ms to open the container. Doing it per
 /// frame would be 30 times a second for a track that does not change.
+/// Another camera's 360 format is refused here, before the decoder is asked
+/// for anything (issue #107).
+///
+/// The file it means opens perfectly well: a GoPro `.360` is a valid MP4 with
+/// two HEVC tracks in it, so nothing downstream fails until the trailer read
+/// finds no trailer, and "file has no Insta360 trailer" is what a corrupt
+/// file says too. The shell turns this error into a line that names the
+/// format instead.
+///
+/// A file nothing recognizes is not refused: the second file of an X2-class
+/// pair carries no trailer and no maker's mark, and it is a file Kjerag plays
+/// (`kjerag_meta::sibling`).
+fn ours(path: &Path) -> Fallible<()> {
+    match Format::sniff(path) {
+        Format::Foreign(foreign) => Err(Box::new(foreign)),
+        Format::Insta360 | Format::Unknown => Ok(()),
+    }
+}
+
 fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
     let calibration = CalibrationSet::from_capture(path)?;
     // The calibration's pixel numbers are already in delivered-frame

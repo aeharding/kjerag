@@ -25,15 +25,20 @@ and pushes both. Configuration is `release.toml`.
 
 The tag is what builds the app. `.github/workflows/release.yml` runs the CI
 gates on the tagged commit, builds the Flatpak with Flatpak's own GitHub
-action, and publishes a Release carrying `kjerag-0.2.0-x86_64.flatpak` and its
-`.sha256`, with notes GitHub generates from what merged since the last tag.
-About ten minutes. Then check what shipped:
+action on an x86_64 and an aarch64 runner, and publishes a Release carrying
+`kjerag-0.2.0-x86_64.flatpak`, `kjerag-0.2.0-aarch64.flatpak` and a `.sha256`
+for each, with notes GitHub generates from what merged since the last tag.
+About ten minutes; the two builds run side by side. Then check what shipped:
 
 ```sh
 gh release download 0.2.0
 flatpak install --user ./kjerag-0.2.0-x86_64.flatpak
 flatpak run dev.harding.Kjerag
 ```
+
+Only the x86_64 half is ever checked that way. The aarch64 bundle is compiled
+and unit tested by CI and run by nobody: no GPU on a runner, and no aarch64
+machine on this end (README).
 
 If the tag run fails, take the tag back, fix, and tag again:
 

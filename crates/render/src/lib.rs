@@ -28,7 +28,7 @@ pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;
 pub use kjerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
-pub use kjerag_meta::{Quat, Readout, Sweep};
+pub use kjerag_meta::{Foreign, Quat, Readout, Sweep};
 pub use projection::{Bend, Blend, Held, Landing, MAX_LENSES, Reframe, Rolling};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
