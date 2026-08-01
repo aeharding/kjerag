@@ -611,11 +611,27 @@ live, no keyframe UI ever.
   - and the GTK backend never reads such an option anyway. It only writes one,
     from a checkbox the pilot ticks by hand.
 
-  So the write bit cannot be given up per request, and the choice is the
-  owner's: keep `:ro` and ask the pilot for what the sandbox cannot see, or
-  trade the read-only half of the two footage grants for a chooser that
-  answers with real paths and pairs silently. Nothing is in the app or the
-  manifest yet either way.
+  So the write bit cannot be given up per request, and the owner's ruling is
+  that it is not given up at all: **the grants stay read only and the manifest
+  does not change**. The chooser keeps handing over a document, and what the
+  app does about it is ask for what it cannot see. It takes more than one file
+  now, the picked set is paired by name rather than by directory, a drop
+  carries its set the same way, and a capture that arrived half says which of
+  the two proper ways to open it the pilot has left: pick both files, or drag
+  them in. Half is still played, because a pilot who asked for a file gets the
+  file.
+
+  Two facts are needed before any of that is said, and either alone is a lie.
+  The capture is read as ONE lens, and the naming rule names a mate: an
+  X4-class file names one too and carries both lenses in its container, so a
+  name rule on its own would call every X4 capture half of one (measured: it
+  stays silent). A readable folder with no mate in it earns the toast; a
+  document directory earns the guidance instead, because it lists one file
+  whatever is on the pilot's card.
+
+  The longer answer is issue #134, the owner's own: a folder-first shell in
+  the cosmic-player idiom, where the app is given the directory and never has
+  to ask. Not v1.
 
 - 2026-08-01 **The shipped Flatpak took no drops, and nothing could have
   caught it** (issue #118). A drop into a sandbox arrives as
