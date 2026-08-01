@@ -152,29 +152,6 @@ pub const PERP_DEG: f32 = 0.90;
 /// on the other axis and it is what a horizon at fov 20 needs here.
 const PERP_STEPS: usize = 9;
 
-/// How many along-seam offsets are tried once a direction has ACQUIRED the
-/// axis, either side of what it already holds (issue #103, stage 6).
-///
-/// **This is the shipping form of the search, and it is the whole of stage
-/// 5's standing cost.** That stage widened the along-seam range from three
-/// offsets to nineteen and paid +2.6 ms per redraw for it, every frame,
-/// forever - out of the campaign's class and outside the owner's 16.6 ms
-/// budget at 60 fps. What it was buying is an ACQUISITION: the along-seam
-/// value is the camera, it is fixed for the life of the file, and a search
-/// that has already found it does not have to find it again. So it is
-/// searched wide until it is found and narrowly around what it holds after
-/// that, which is two steps either side - twenty times the reading's own
-/// frame-to-frame spread (0.0020 deg rms, stage 5's flicker column), so a
-/// reading that has settled cannot leave the window on its own.
-///
-/// What decides which a direction runs is [`KEEP`] and not a new number: a
-/// direction whose smoothed along-seam correlation has fallen under the gate a
-/// single reading has to pass is a direction that has stopped tracking, and it
-/// goes back to searching wide until it tracks again. A direction that has
-/// never read is that case with nothing in it, so acquisition and recovery are
-/// the same line.
-const NARROW_STEPS: usize = 2;
-
 /// The correlation a reading has to reach to move the state.
 ///
 /// Below [`super::seam::Probe`]'s 0.80, and deliberately: that gate protects
@@ -1084,7 +1061,6 @@ pub(crate) fn wgsl() -> String {
          const PERP_STEP = {perp}i;\n\
          const PERP_STEPS = {perp_steps}i;\n\
          const PERP_SHIFTS = {perp_shifts}u;\n\
-         const NARROW_STEPS = {narrow}i;\n\
          const KEEP = {keep:?};\n\
          const CONTRAST = {contrast:?};\n\
          const NEAR_KNEE = {knee:?};\n\
@@ -1099,7 +1075,6 @@ pub(crate) fn wgsl() -> String {
         tau = std::f32::consts::TAU,
         step = STEP_DEG.to_radians(),
         perp_steps = PERP_STEPS,
-        narrow = NARROW_STEPS,
         keep = KEEP,
         contrast = CONTRAST / 255.0,
         knee = NEAR_KNEE_DEG.to_radians(),
@@ -1439,12 +1414,6 @@ var<workgroup> scores: array<f32, EPI_SHIFTS * PERP_SHIFTS>;
 // Which candidate won, so every lane can read the same answer without
 // scoring the table twice.
 var<workgroup> winner: u32;
-// What this direction's along-seam search is this frame: how many offsets
-// either side of `bias` it tries, and where `bias` sits on the whole-window
-// grid. One workgroup is one direction, so these are uniform where they are
-// read and the loops below have uniform bounds. Rust twin: `NARROW_STEPS`.
-var<workgroup> reach: i32;
-var<workgroup> bias: i32;
 // Whether the front patch has enough picture in it to correlate at all. Read
 // ONCE per direction rather than inside every candidate: flat sky correlates
 // with anything, and on a real seam most of the ring is sky, so this is the
@@ -1516,7 +1485,6 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   }
   if lane == 0u {
     textured = has_picture();
-    plan(cell);
   }
   workgroupBarrier();
   if !textured {
@@ -1528,34 +1496,29 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     return;
   }
 
-  // The back lens's grid, over the columns THIS frame's search can reach and
-  // no others: a direction that has acquired the along-seam axis reads a fifth
-  // of the columns a direction still looking for it does.
-  let shifts = u32(2 * reach + 1);
-  let first = (bias - reach + PERP_STEPS) * PERP_STEP;
-  let columns = u32(2 * reach * PERP_STEP + 2 * HALF + 1);
-  for (var i = lane; i < columns * BACK_ACROSS; i += THREADS) {
-    let column = i32(i % columns) + first;
-    let a = f32(column - HALF - PERP_STEPS * PERP_STEP) * STEP;
-    let b = f32(i32(i / columns) - HALF + EPI_FAR) * STEP;
-    back[u32(column) + (i / columns) * BACK_ALONG] = tap(1u, aim1, at.centre + a * at.perp + b * at.epi);
+  // The back lens's grid: the patch widened by everywhere the search may
+  // slide it.
+  for (var i = lane; i < BACK_ALONG * BACK_ACROSS; i += THREADS) {
+    let a = f32(i32(i % BACK_ALONG) - HALF - PERP_STEPS * PERP_STEP) * STEP;
+    let b = f32(i32(i / BACK_ALONG) - HALF + EPI_FAR) * STEP;
+    back[i] = tap(1u, aim1, at.centre + a * at.perp + b * at.epi);
   }
   workgroupBarrier();
 
-  for (var i = lane; i < EPI_SHIFTS * shifts; i += THREADS) {
-    scores[i] = correlate(i, shifts, first);
+  for (var i = lane; i < EPI_SHIFTS * PERP_SHIFTS; i += THREADS) {
+    scores[i] = correlate(i);
   }
   workgroupBarrier();
 
   if lane == 0u {
-    winner = peak(EPI_SHIFTS * shifts);
+    winner = peak();
   }
   workgroupBarrier();
 
   // The two lenses' brightness on the SAME content, which is what the shift
   // above just established and what no earlier exposure measurement in this
   // project had. Cooperative, so it costs a seventh of a sample per lane.
-  photometry(lane, winner, shifts, first);
+  photometry(lane, winner);
   workgroupBarrier();
 
   if lane == 0u {
@@ -1563,11 +1526,11 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   }
 }
 
-// The best-scoring candidate shift, over the `live` this frame's search filled.
-fn peak(live: u32) -> u32 {
+// The best-scoring candidate shift.
+fn peak() -> u32 {
   var best = -2.0;
   var found = 0u;
-  for (var i = 0u; i < live; i += 1u) {
+  for (var i = 0u; i < EPI_SHIFTS * PERP_SHIFTS; i += 1u) {
     if scores[i] > best {
       best = scores[i];
       found = i;
@@ -1578,9 +1541,9 @@ fn peak(live: u32) -> u32 {
 
 // Each lane's share of the two patches' brightness at the winning shift,
 // clipped samples left out in pairs.
-fn photometry(lane: u32, found: u32, shifts: u32, first: i32) {
-  let epi = found / shifts;
-  let perp = u32(first) + (found % shifts) * u32(PERP_STEP);
+fn photometry(lane: u32, found: u32) {
+  let epi = found / PERP_SHIFTS;
+  let perp = (found % PERP_SHIFTS) * u32(PERP_STEP);
   let width = u32(2 * HALF + 1);
   var sum0 = 0.0;
   var sum1 = 0.0;
@@ -1610,9 +1573,9 @@ fn photometry(lane: u32, found: u32, shifts: u32, first: i32) {
 // shift `i`, or -2 where either patch is short of picture. -2 rather than -1
 // so that "no answer" loses to any answer, including a perfectly
 // anti-correlated one.
-fn correlate(i: u32, shifts: u32, first: i32) -> f32 {
-  let epi = i / shifts;
-  let perp = u32(first) + (i % shifts) * u32(PERP_STEP);
+fn correlate(i: u32) -> f32 {
+  let epi = i / PERP_SHIFTS;
+  let perp = (i % PERP_SHIFTS) * u32(PERP_STEP);
   var sum_a = 0.0;
   var sum_b = 0.0;
   var sum_aa = 0.0;
@@ -1671,29 +1634,6 @@ fn has_picture() -> bool {
   return spread > 0.0 && sqrt(spread / count) >= CONTRAST;
 }
 
-// How wide this direction searches the along-seam axis this frame, and where
-// that window is centred, in steps of PERP_STEP (issue #103, stage 6).
-//
-// KEEP and not a new number: a direction whose smoothed along-seam correlation
-// is under the gate a single reading has to pass has not got the axis, and it
-// searches the whole window until it has. One that is over the gate is
-// tracking a quantity that cannot move - the camera - so it looks two steps
-// either side of what it holds. Rust twin: `NARROW_STEPS`.
-fn plan(cell: u32) {
-  let held = band.cells[cell];
-  if watch.reset != 0.0 || held.off_conf < KEEP {
-    reach = PERP_STEPS;
-    bias = 0;
-    return;
-  }
-  reach = NARROW_STEPS;
-  // Clamped so the window stays inside the grid the back patch was allocated
-  // for, which is what makes the narrow search a subset of the wide one rather
-  // than a second geometry.
-  let want = i32(round(held.off_epi / (f32(PERP_STEP) * STEP)));
-  bias = clamp(want, -PERP_STEPS + NARROW_STEPS, PERP_STEPS - NARROW_STEPS);
-}
-
 // A direction with nothing in the picture to read. What it keeps is the
 // measurement and what it gives up is the evidence, which is the rule
 // everywhere else in this file: the reading was true when it was taken and may
@@ -1720,13 +1660,8 @@ fn settle(cell: u32, at: Ring) {
 
   let found = winner;
   let best = scores[found];
-  let shifts = u32(2 * reach + 1);
-  let epi = i32(found / shifts);
-  // Where in THIS frame's window the peak sits, and what offset that is on the
-  // whole-window grid. A narrow window is a subset of the wide one, so the
-  // second number means the same thing whichever ran (`plan`).
-  let index = i32(found % shifts);
-  let perp = bias - reach + index;
+  let epi = i32(found / PERP_SHIFTS);
+  let perp = i32(found % PERP_SHIFTS) - PERP_STEPS;
   // A peak against the edge of the search is not a peak, it is the search
   // running out, and a reading pinned at the limit would report the limit.
   // Each axis runs out for its own reason and is refused on its own, which is
@@ -1741,12 +1676,7 @@ fn settle(cell: u32, at: Ring) {
   // a match at the edge of the depth window has not established what content
   // is being compared, and an along-seam offset read off content that is not
   // the same content is not a reading of anything.
-  // Against the edge of the window THIS frame searched, which for a tracking
-  // direction is two steps from what it holds: a reading that has moved
-  // further than that in one visit is not a camera that moved, so it is
-  // refused, the evidence decays, and `plan` puts the direction back on the
-  // wide search once it falls under the gate.
-  let along_pinned = epi_pinned || index == 0 || index == 2 * reach;
+  let along_pinned = epi_pinned || perp == -PERP_STEPS || perp == PERP_STEPS;
 
   // What decays where a channel is refused is the EVIDENCE and not the
   // measurement: the reading was true when it was taken and may be true still,
@@ -1786,7 +1716,7 @@ fn settle(cell: u32, at: Ring) {
   } else {
     // Between whole steps, because a third of a step is exactly the size this
     // is trying to resolve. Rust twin: `super::seam::best_shift`'s `peak`.
-    let read = f32(epi + EPI_FAR) + parabola(scores[found - shifts], best, scores[found + shifts]);
+    let read = f32(epi + EPI_FAR) + parabola(scores[found - PERP_SHIFTS], best, scores[found + PERP_SHIFTS]);
     // The time constant is read off what this direction has been showing, not
     // off what it showed this frame: a noisy far-field reading must not unlock
     // the smoothing that is keeping the horizon still. Rust twin:
