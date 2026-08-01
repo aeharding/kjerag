@@ -514,8 +514,19 @@ be seen from.
   seam; phase 1 measured that and attributed it to a relative lens tilt, and
   phase 2 calibrates it per camera off a capture the pilot points at and hands
   the picture over in a 2 degree crossover instead of the whole 14 degree
-  overlap. What is left at the seam on flight footage is parallax, which is
-  depth rather than geometry and is the next thing to look at. Issue #79 opened
+  overlap. What was left at the seam on flight footage is parallax, which is
+  depth rather than geometry, and **stage 2 of issue #103 now measures it on
+  every frame the pass draws**: a compute pass over the two imported textures
+  reads the overlap band as the stereo pair it is, along the axis the file's
+  own 33 mm baseline names, and each lens's ray is bent by the other lens's
+  blend weight times what the two disagree by. Far field and near field take
+  opposite time constants, 2 seconds against a tenth of one, which is what
+  makes a per-frame reading steadier than the per-clip table phase A
+  recommended rather than noisier: flicker 0.008 to 0.023 degrees rms against
+  phase A's 0.22 to 0.54 for a naive per-frame table. It costs 0.3 ms a redraw
+  at 2560x1440, and the disparity is clamped to nine tenths of the crossover,
+  which is the first time the shear that bounds the band's width has been
+  computable at runtime rather than quoted. Issue #79 opened
   a second camera: the ONE X2 writes one lens per file, and the player now
   pairs the two at open and holds an X2's horizon with that camera's own IMU
   convention.
@@ -636,6 +647,31 @@ live, no keyframe UI ever.
   package sets with no network and no generator, in CI and by hand. The check
   was shown able to fail before it was believed: against the stale file it
   names all four crates, ffmpeg-next 7.1.0 among them.
+
+- 2026-08-01 **The band's cost was the fetch, not the solve** (issue #103,
+  stage 2). The obvious optimisation was to score each candidate shift on a
+  quarter of the patch's samples, which is what `seam::best_shift` does. It
+  made the pass **slower**: 9.1 ms a redraw against 8.4. What the pass spends
+  its time on is filling the two correlation grids, 3733 taps of a tiled
+  3840x3840 decoder surface per direction per frame on an iGPU that is
+  decoding at the same time. Shrinking the grids instead - a 0.10 degree step
+  against 0.08, a search that stops at 2.6 degrees rather than 4.0 because the
+  fold clamp cannot carry more than 1.8, and half the ring read per frame -
+  took the whole per-frame measurement from +3.2 ms to **+0.3**. The first two
+  are resolution the parabola and the seconds of averaging give back; the
+  third is free because the filter is paced in seconds of media time, so a
+  direction read at 15 Hz and one read at 30 settle in the same wall time.
+
+- 2026-08-01 **The pinned seam benchmark named the wrong file** (issue #103).
+  #87 and #103 both give `VID_20260501_183417_00_001.insv` as the source of
+  `~/Videos/TEST.mp4`, the camera maker's export the 0:09 wing dip is scored
+  against. It is part **003**: cross-correlating the two files' own audio as
+  10 Hz energy envelopes over every offset gives r = 1.000 at offset 0.0 s on
+  003 against 0.64 and 0.67 on the other two parts. The export's `comment` tag
+  is the CAPTURE's start time, which is part 001's name, and it is not the
+  clip's offset. Scored against the wrong part the projection fit never locks
+  and the share reads anywhere from 0.497 to 0.932 across half a second, which
+  is how a number that is not a measurement got into the record as one.
 
 - 2026-07-31 **The sound reads on a demuxer of its own** (issue #97, owner
   defect). One file handle for all three streams was the simpler design and
