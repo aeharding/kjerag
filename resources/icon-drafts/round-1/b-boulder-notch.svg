@@ -1,0 +1,34 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="b-sky" x1="128" y1="8" x2="128" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4E58A8"/>
+      <stop offset="0.52" stop-color="#F2743C"/>
+      <stop offset="1" stop-color="#FFCB5C"/>
+    </linearGradient>
+    <linearGradient id="b-left" x1="20" y1="100" x2="110" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6B5C52"/>
+      <stop offset="1" stop-color="#3C332C"/>
+    </linearGradient>
+    <linearGradient id="b-right" x1="240" y1="116" x2="150" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#54473F"/>
+      <stop offset="1" stop-color="#2C2522"/>
+    </linearGradient>
+    <linearGradient id="b-boulder" x1="102" y1="112" x2="160" y2="182" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D6C7B6"/>
+      <stop offset="1" stop-color="#8E7A66"/>
+    </linearGradient>
+    <clipPath id="b-disc"><circle cx="128" cy="128" r="120"/></clipPath>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#b-sky)"/>
+  <g clip-path="url(#b-disc)">
+    <circle cx="196" cy="62" r="14" fill="#FFF0BC"/>
+    <circle cx="128" cy="144" r="40" fill="url(#b-boulder)"/>
+    <circle cx="116" cy="132" r="15" fill="#FBF3E7" fill-opacity="0.45"/>
+    <path d="M-20 268L-20 124C20 112 55 102 84 100L128 178L128 268Z" fill="url(#b-left)"/>
+    <path d="M276 268L276 140C245 128 210 118 174 116L128 178L128 268Z" fill="url(#b-right)"/>
+    <path d="M-20 124C20 112 55 102 84 100L88.6 108C58 110 22 121 -20 133Z" fill="#A08B78"/>
+    <path d="M276 140C245 128 210 118 174 116L168.8 124C208 126 243 136 276 149Z" fill="#87745F"/>
+    <path d="M84 100L128 178L117.5 183.9L73.5 105.9Z" fill="#8B7765"/>
+    <path d="M174 116L128 178L137.6 185.2L183.6 123.2Z" fill="#6E5D50"/>
+  </g>
+</svg>

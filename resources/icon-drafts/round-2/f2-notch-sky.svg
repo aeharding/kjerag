@@ -1,0 +1,42 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="f2-sky" x1="128" y1="134" x2="128" y2="186" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFC46A"/>
+      <stop offset="1" stop-color="#FF7A42"/>
+    </linearGradient>
+    <linearGradient id="f2-lbody" x1="26" y1="134" x2="100" y2="212" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D4835C"/>
+      <stop offset="1" stop-color="#2E2036"/>
+    </linearGradient>
+    <linearGradient id="f2-rbody" x1="230" y1="134" x2="160" y2="212" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BE7250"/>
+      <stop offset="1" stop-color="#261A2E"/>
+    </linearGradient>
+    <linearGradient id="f2-ocean" x1="98" y1="88" x2="164" y2="158" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <clipPath id="f2-left"><path d="M26 134H80L128 186V212H50Z"/></clipPath>
+    <clipPath id="f2-right"><path d="M128 186L176 134H230L212 212H128Z"/></clipPath>
+    <clipPath id="f2-globe"><circle cx="130" cy="120" r="39"/></clipPath>
+  </defs>
+  <path d="M80 134L128 186L176 134Z" fill="url(#f2-sky)"/>
+  <circle cx="128" cy="118" r="42" fill="#FFE0B0"/>
+  <circle cx="130" cy="120" r="39" fill="url(#f2-ocean)"/>
+  <g clip-path="url(#f2-globe)">
+    <g transform="translate(130 120) scale(0.9512) translate(-130 -146)">
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
+    </g>
+  </g>
+  <g clip-path="url(#f2-left)">
+    <path d="M26 134H80L128 186V212H50Z" fill="url(#f2-lbody)"/>
+    <rect x="16" y="134" width="112" height="7" fill="#FFAE73"/>
+    <path d="M80 134L128 186L119.9 193.5L71.9 141.5Z" fill="#6E4048"/>
+  </g>
+  <g clip-path="url(#f2-right)">
+    <path d="M128 186L176 134H230L212 212H128Z" fill="url(#f2-rbody)"/>
+    <rect x="128" y="134" width="112" height="7" fill="#E89A62"/>
+    <path d="M176 134L128 186L136.1 193.5L184.1 141.5Z" fill="#5E3742"/>
+  </g>
+</svg>

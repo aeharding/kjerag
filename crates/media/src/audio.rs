@@ -64,6 +64,12 @@ pub struct Audio {
     /// was opened. A maximum cannot be subtracted, so unlike the counts this
     /// one is not windowed.
     pub worst: i64,
+    /// Sound waiting in the ring when the device last looked at it, in
+    /// microseconds. A level rather than a count, and the one number that
+    /// tells a hole in the sound caused by decode falling behind from a hole
+    /// caused by sound arriving too late to play: the first empties the ring,
+    /// the second fills it with sound whose moment has passed (issue #97).
+    pub queued: i64,
 }
 
 impl Audio {
@@ -74,6 +80,7 @@ impl Audio {
             dropped: self.dropped.saturating_sub(earlier.dropped),
             offset: self.offset,
             worst: self.worst,
+            queued: self.queued,
         }
     }
 
@@ -186,6 +193,22 @@ impl Pipe {
 
     pub fn health(&self) -> Audio {
         self.locked().health
+    }
+
+    /// How much more sound the ring would take. This is the pacing for the
+    /// sound's own demuxer ([`super::track::Track::pump`]): it reads until
+    /// the ring is nearly full and stops, so nothing it reads is ever
+    /// dropped for want of room.
+    ///
+    /// Zero while a seek's flush is still on its way through the device
+    /// callback. Everything written then is thrown away, so reading it would
+    /// be reading the file for nothing.
+    pub fn room(&self) -> Duration {
+        let buffer = self.locked();
+        match buffer.stale {
+            true => Duration::ZERO,
+            false => buffer.seconds(buffer.room()),
+        }
     }
 
     /// How the sound stood against the picture when it was last measured, in
@@ -358,7 +381,12 @@ impl Buffer {
     /// One device callback's worth of sound.
     fn fill(&mut self, out: &mut [f32], due: Option<Duration>) {
         out.fill(0.0);
-        let mut target = self.target(due.is_some());
+        self.health.queued = self.seconds(self.frames).as_micros() as i64;
+        // What the pilot asked to hear, kept from before the splice logic
+        // lowers it: a hole is a hole whether or not the ring was also too
+        // far out to play, and `target` is zero in both cases.
+        let asked = self.target(due.is_some());
+        let mut target = asked;
         let mut waiting = false;
         if let Some(due) = due.filter(|_| target > 0.0) {
             match self.measure(due) {
@@ -401,9 +429,16 @@ impl Buffer {
             written += 1;
         }
         // A callback the ring could not fill while the picture was moving is a
-        // hole in the sound. Running out while fading down is not: the rest of
-        // that callback is silence either way.
-        if target > 0.0 && written < wanted {
+        // hole in the sound, and an empty ring is one however far out its head
+        // was: a ring that has run dry behind a splice never reaches the ramp
+        // above, so it used to leave `target` at zero and count nothing. That
+        // is why the 3.3 s hole of issue #97 measured as 2.4 s, and why its
+        // first 0.9 s were invisible to the report altogether.
+        //
+        // Fading down over sound the ring still holds is not a hole: that is
+        // the join before a splice, and the rest of the callback is silence
+        // by design.
+        if asked > 0.0 && written < wanted && self.frames == 0 {
             self.health.underruns += 1;
         }
     }
@@ -458,6 +493,19 @@ mod tests {
 
         buffer.fill(&mut frames(2400, 0.0), Some(at(4800)));
         assert_eq!(buffer.head_time(), at(7200));
+    }
+
+    /// The depth the device saw, which is what tells a ring that ran dry from
+    /// one holding sound whose moment has passed (issue #97: the second).
+    #[test]
+    fn the_depth_the_device_saw_is_reported() {
+        let mut buffer = buffer();
+        buffer.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
+        assert_eq!(buffer.health.queued, 0);
+
+        buffer.write(&frames(4800, 0.5), at(4800));
+        buffer.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
+        assert_eq!(buffer.health.queued, 100_000);
     }
 
     /// Sound whose moment has passed is dropped, not played late: a scrub
@@ -598,6 +646,24 @@ mod tests {
         buffer.write(&frames(4800, 0.5), at(4800));
         buffer.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
         assert_eq!(buffer.health.underruns, 1);
+    }
+
+    /// The hole of issue #97: a ring that ran dry while its head was a long
+    /// way behind the picture. The splice lowers the gain over sound that is
+    /// not there, so the ramp is never reached, and every callback of those
+    /// three seconds used to count nothing at all.
+    #[test]
+    fn a_dry_ring_behind_the_picture_is_counted_every_callback() {
+        let mut buffer = buffer();
+        buffer.write(&frames(4800, 0.5), at(4800));
+        buffer.fill(&mut frames(4800, 0.0), Some(Duration::ZERO));
+        assert_eq!((buffer.frames, buffer.health.underruns), (0, 0));
+
+        // A second of picture later, with nothing having arrived since.
+        for beat in 1..=3 {
+            buffer.fill(&mut frames(480, 0.0), Some(at(48_000)));
+            assert_eq!(buffer.health.underruns, beat);
+        }
     }
 
     /// Mute is silence, not a stopped clock: the sound keeps running under it,

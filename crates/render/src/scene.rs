@@ -37,7 +37,7 @@ use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack,
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
-use super::{Camera, Extent, Fallible, Nudge, Planes, Size, dmabuf};
+use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
 const SAMPLER_BINDING: u32 = 1 + 2 * MAX_LENSES as u32;
@@ -107,8 +107,26 @@ pub struct Scene {
     /// (docs/UI.md, "The cursor"). One bit of shell state, and the only one
     /// this crate carries.
     cursor_hidden: bool,
-    /// A [`Nudge`] the `View` menu left for the widget, which is where iced
-    /// keeps the camera. Read once, by the next redraw.
+    /// Where the view points, and any drag that has hold of it.
+    ///
+    /// Here rather than in the shader widget's own `State`, which is where
+    /// iced would keep it and where issue #77 found it. Widget state lives in
+    /// the widget tree, and the tree is rebuilt from the shell's `view`
+    /// whenever the window changes shape. The header bar coming and going is
+    /// one of those changes -- libcosmic pushes it into the same column as
+    /// the content (`src/app/mod.rs:775`), so hiding it moves the content up
+    /// a place -- and it goes on entering fullscreen, on leaving it, and two
+    /// seconds after the pointer stops while a file plays. Measured
+    /// 2026-07-31 through the headless harness: with the bar pinned up every
+    /// one of those transitions held the view, and with it free each one put
+    /// the camera back to [`Camera::default`].
+    ///
+    /// The [`Scene`] is the shell's own, and the shell's own state outlives
+    /// its view. A [`Cell`] for the same reason the clock is one:
+    /// `shader::Program` hands out `&self` and nothing else.
+    viewpoint: Cell<Viewpoint>,
+    /// A [`Nudge`] the `View` menu left for the widget. Read once, by the
+    /// next redraw, which is where the output's shape is known.
     nudge: Cell<Option<Nudge>>,
     /// `View > Lock horizon`. Read on every redraw rather than taken, because
     /// it is a state and not an event.
@@ -224,6 +242,7 @@ impl Scene {
             started: Instant::now(),
             shutter: Shutter::default(),
             cursor_hidden: false,
+            viewpoint: Cell::new(Viewpoint::default()),
             nudge: Cell::new(None),
             horizon: Cell::new(Horizon::default()),
             clock: Cell::new(FrameClock::default()),
@@ -239,12 +258,19 @@ impl Scene {
         let mut player = Player::open(path)?;
         let (lenses, held) = calibrated(path, player.size(), player.lenses())?;
         println!(
-            "media:  {}, {}x{}, {:.3} fps, {} frames, {:.1} s",
-            // The older cameras write one lens per file, so this is 1 as
-            // often as it is 2.
+            "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
                 1 => "1 lens stream".to_owned(),
                 n => format!("{n} lens streams"),
+            },
+            // Two files is a capture the camera wrote one lens per file and
+            // the player paired at open (issue #79). Printed because it is
+            // the one thing about an open file the pilot cannot otherwise
+            // see: half a sphere and a whole one look the same until the
+            // view is turned round.
+            match player.files() {
+                1 => String::new(),
+                n => format!(" from {n} files"),
             },
             player.size().width,
             player.size().height,
@@ -449,6 +475,21 @@ impl Scene {
         self.cursor_hidden
     }
 
+    /// Where the view points, and whether a drag has hold of it.
+    pub fn viewpoint(&self) -> Viewpoint {
+        self.viewpoint.get()
+    }
+
+    /// Move the view, and hand back whatever the move answered. The widget's
+    /// mouse handling is the only caller: everything else asks through a
+    /// [`Nudge`].
+    pub(crate) fn steer<T>(&self, steer: impl FnOnce(&mut Viewpoint) -> T) -> T {
+        let mut viewpoint = self.viewpoint.get();
+        let answer = steer(&mut viewpoint);
+        self.viewpoint.set(viewpoint);
+        answer
+    }
+
     /// Leave a view change for the widget to apply on its next redraw.
     pub fn nudge(&self, nudge: Nudge) {
         self.nudge.set(Some(nudge));
@@ -605,22 +646,29 @@ impl Show {
     }
 }
 
-/// Everything the trailer contributes to one open file: the calibration for
-/// the lenses the shader samples, checked against the streams they will be
-/// sampled from, and where the camera body went while it recorded.
+/// Everything the trailer contributes to one open capture: the calibration
+/// for the lenses the shader samples, checked against the streams they will
+/// be sampled from, and where the camera body went while it recorded.
 ///
 /// One lens entry per decoded stream, and in the same order: the trailer
-/// writes its lens blocks in the order the container carries the streams. A
-/// camera that writes one lens per file (the ONE X2 and older) calibrates two
-/// lenses in a file that decodes one, and then this is lens 0 alone and the
-/// picture is one hemisphere.
+/// writes its lens blocks in the order the container carries the streams,
+/// and a paired per-lens capture opens lens 0's file first, so the two
+/// orders are the same one (`kyerag_meta::lens_index`).
+///
+/// **The calibration belongs to the capture, not to the file** (issue #79).
+/// A camera that writes one lens per file writes one trailer for the pair
+/// and keeps it with lens 0, so opening the second file reads the first
+/// file's trailer. Before that, opening it failed outright with "file has no
+/// Insta360 trailer". A per-lens file whose sibling is not on the card still
+/// calibrates two lenses and decodes one, and then this is lens 0 alone and
+/// the picture is one hemisphere, exactly as it was.
 ///
 /// The orientation is integrated here, once, at open: a 30-minute X4 Air
 /// capture is 1.8 million IMU samples and costs about a fifth of a second to
 /// read and integrate, against 70 ms to open the container. Doing it per
 /// frame would be 30 times a second for a track that does not change.
 fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<(Arc<[Lens]>, Arc<Motion>)> {
-    let calibration = CalibrationSet::from_insv(path)?;
+    let calibration = CalibrationSet::from_capture(path)?;
     // The calibration's pixel numbers are already in delivered-frame
     // coordinates, so they describe this texture only if the stream is the
     // size the trailer says it is. A mismatch reprojects at the wrong scale,
@@ -1177,7 +1225,14 @@ fn linearize(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  let mix = blend(view_ray(in.uv));
+  let look = view_ray(in.uv);
+  // Zero, which is every weight zero: the room around the ball at the far end
+  // of the zoom (issue #47) is a fragment no lens has, and `picture` already
+  // paints that. Nothing is sampled for it and no model is run.
+  var mix: Blend;
+  if look.w > 0.0 {
+    mix = blend(look.xyz);
+  }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
   // the neighbouring lanes landed on is exactly what this asks about, so the

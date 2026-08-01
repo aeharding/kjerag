@@ -13,6 +13,8 @@
 
 use std::path::Path;
 
+use crate::shot::Destination;
+
 pub const APP_NAME: &str = "Kyerag";
 pub const COMMENTS: &str = "360 video player for the COSMIC desktop";
 pub const LICENSE: &str = "AGPL-3.0-only";
@@ -43,6 +45,15 @@ pub const CLEAR_RECENT: &str = "Clear recent list";
 pub const CLOSE_VIDEO: &str = "Close video";
 pub const SAVE_FRAME: &str = "Save frame";
 pub const COPY_FRAME: &str = "Copy frame";
+/// The owner's own wording, verbatim: `Copy view` said nothing to anyone who
+/// had not already been told what it did. Its counterpart mirrors it word for
+/// word, because the two are one idea and half a name would hide that.
+///
+/// The vocabulary the rest of these follow: the **reference** is the text and
+/// the **view** is the place it names. A reference is copied; a view is gone
+/// to.
+pub const COPY_VIEW: &str = "Copy current view reference";
+pub const GO_TO_VIEW: &str = "Go to copied view reference";
 pub const QUIT: &str = "Quit";
 
 /// `Playback`.
@@ -65,6 +76,19 @@ pub const FULLSCREEN: &str = "Fullscreen";
 pub const SETTINGS: &str = "Settings...";
 pub const SETTINGS_TITLE: &str = "Settings";
 
+/// What a capture says when it lands (issue #15). The noun is the menu's
+/// own: the pilot pressed `Copy frame`, so the toast says frame.
+pub const FRAME_COPIED: &str = "Frame copied to the clipboard";
+
+/// And the same sentence for the line of text, with the menu item's own noun
+/// in it. It names the destination for the reason the frame's does: a copy
+/// that does not say where it went is a copy nobody trusts enough to paste.
+pub const VIEW_COPIED: &str = "View reference copied to the clipboard";
+
+/// What a paste that landed says. This one is about the place rather than the
+/// text, which is why it is the shorter noun: nobody goes to a reference.
+pub const WENT_TO_VIEW: &str = "Went to the copied view";
+
 /// The Settings page.
 pub const APPEARANCE: &str = "Appearance";
 pub const THEME: &str = "Theme";
@@ -77,6 +101,30 @@ pub fn about_item() -> String {
     format!("About {APP_NAME}...")
 }
 
+/// Why the last open did not work, as the welcome view's second line.
+///
+/// `missing` is the codec this ffmpeg has no decoder for, which is a different
+/// failure from a file that will not open and has a different answer
+/// (issue #69): nothing is wrong with the file, and one install fixes every
+/// file of that kind at once. Inside a Flatpak it is the way this happens, and
+/// the extension is named because that name is the whole of the pilot's fix
+/// (docs/DISTRIBUTION.md 3.3). The sentence stays true off Flatpak, where a
+/// stripped ffmpeg has the same shape.
+///
+/// The codec is ffmpeg's own short name, upper-cased: `HEVC`, `H264`. Not a
+/// table of prettier spellings, because the reason to print it is that it can
+/// be searched for and repeated in a bug report.
+pub fn open_failed(missing: Option<&str>) -> String {
+    let Some(codec) = missing else {
+        return OPEN_FAILED.to_owned();
+    };
+    format!(
+        "Kyerag has no {} decoder here, so that file cannot be played. \
+         In a Flatpak, the decoder comes from the codecs-extra runtime extension.",
+        codec.to_uppercase()
+    )
+}
+
 /// `{file name} - Kyerag`, and plain `Kyerag` with nothing open.
 ///
 /// cosmic-files writes its equivalent with an em dash
@@ -86,6 +134,43 @@ pub fn window_title(open: Option<&Path>) -> String {
         Some(name) => format!("{} - {APP_NAME}", name.display()),
         None => APP_NAME.to_owned(),
     }
+}
+
+/// Where a still went, named the way cosmic-files names a destination in its
+/// own toasts: the folder's own name in quotes, and no path around it
+/// (`i18n/en/cosmic_files.ftl:231-234` `copied = ... to "{$to}"`, built from
+/// `file_name(to)` in `src/operation/mod.rs:563-568` and `309-312`). The
+/// whole path is on the terminal, where it does not have to be read at a
+/// glance.
+///
+/// The folder is whatever the capture resolved to, which is usually
+/// `Screenshots` but is `XDG_SCREENSHOTS_DIR`'s last part when that is set.
+pub fn frame_saved(path: &Path) -> String {
+    match path.parent().and_then(Path::file_name) {
+        Some(folder) => format!("Frame saved to \"{}\"", folder.display()),
+        None => "Frame saved".to_owned(),
+    }
+}
+
+/// A capture that did not happen, with the reason it did not. Which half
+/// failed matters to the pilot: nothing was written, or nothing can be
+/// pasted.
+pub fn capture_failed(to: Destination, reason: &str) -> String {
+    match to {
+        Destination::Save => format!("Frame not saved: {reason}"),
+        Destination::Copy => format!("Frame not copied: {reason}"),
+    }
+}
+
+/// A pasted reference that names a video this window is not showing, and
+/// carries no directories to find it in. There is nowhere to go, so all this
+/// does is say which video it belongs to, which is the one thing the pilot
+/// cannot see for himself.
+///
+/// The file is quoted and not pathed, which is how `frame_saved` above names
+/// a destination and how cosmic-files names one.
+pub fn view_is_from(file: &Path) -> String {
+    format!("That view reference is from \"{}\"", file.display())
 }
 
 /// A recent file as the menu shows it: under the home directory, `~` stands
@@ -153,6 +238,8 @@ mod tests {
             CLOSE_VIDEO,
             SAVE_FRAME,
             COPY_FRAME,
+            COPY_VIEW,
+            GO_TO_VIEW,
             QUIT,
             PLAY_PAUSE,
             BACK_10,
@@ -170,11 +257,71 @@ mod tests {
             THEME_SYSTEM,
             THEME_DARK,
             THEME_LIGHT,
+            FRAME_COPIED,
+            VIEW_COPIED,
+            WENT_TO_VIEW,
         ];
         for line in copy {
             assert!(!line.contains('\u{2014}'), "em dash in {line:?}");
         }
         assert!(!about_item().contains('\u{2014}'));
+        assert!(!frame_saved(Path::new("/tmp/Screenshots/a.png")).contains('\u{2014}'));
+        assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
+        assert!(!view_is_from(Path::new("a.insv")).contains('\u{2014}'));
+        assert!(!open_failed(Some("hevc")).contains('\u{2014}'));
+    }
+
+    /// A missing decoder is not a broken file, and the line has to say which
+    /// codec is missing and where it comes from, or the pilot is left with a
+    /// player that refuses a file for no stated reason (issue #69).
+    ///
+    /// This is the whole of the wording, checked with no ffmpeg in sight: the
+    /// probe that decides which branch runs is one `avcodec_find_decoder` call
+    /// in `kyerag-media`, and a box whose ffmpeg has HEVC cannot exercise the
+    /// other branch of it honestly.
+    #[test]
+    fn a_missing_decoder_names_the_codec_and_the_extension() {
+        let line = open_failed(Some("hevc"));
+        assert!(line.contains("HEVC"), "{line}");
+        assert!(line.contains("codecs-extra"), "{line}");
+        assert_eq!(open_failed(None), OPEN_FAILED);
+    }
+
+    /// The toast answers one question, which is where to look for the still.
+    /// The folder is named and the path is not: the pilot reads this over the
+    /// video, in the two seconds before the control row hides.
+    #[test]
+    fn the_saved_toast_names_the_folder_and_no_path() {
+        let toast = frame_saved(Path::new(
+            "/home/pilot/Pictures/Screenshots/f_00-00-01.000.png",
+        ));
+        assert_eq!(toast, "Frame saved to \"Screenshots\"");
+        assert!(!toast.contains('/'));
+    }
+
+    /// `XDG_SCREENSHOTS_DIR` can point anywhere, and the toast has to say
+    /// where the still actually went rather than where it usually goes.
+    #[test]
+    fn the_saved_toast_follows_the_folder_that_was_used() {
+        assert_eq!(
+            frame_saved(Path::new("/mnt/flights/stills/f_00-00-01.000.png")),
+            "Frame saved to \"stills\""
+        );
+        assert_eq!(frame_saved(Path::new("f.png")), "Frame saved");
+    }
+
+    /// A failure says which half failed: nothing was written, or nothing can
+    /// be pasted.
+    #[test]
+    fn a_failed_capture_says_which_one_it_was() {
+        assert_eq!(
+            capture_failed(Destination::Save, "Permission denied (os error 13)"),
+            "Frame not saved: Permission denied (os error 13)"
+        );
+        assert_eq!(
+            capture_failed(Destination::Copy, "out of memory"),
+            "Frame not copied: out of memory"
+        );
     }
 
     #[test]

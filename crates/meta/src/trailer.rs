@@ -164,9 +164,35 @@ impl CalibrationSet {
     ///
     /// Only the trailer at the end of the file is read, so a 37 GB
     /// capture costs the same as a small one.
+    ///
+    /// This is the **literal** file. A ONE X2's `_10_` file carries no
+    /// trailer at all and answers [`Error::NoTrailer`] here;
+    /// [`Self::from_capture`] is what the player opens files with.
     pub fn from_insv(path: impl AsRef<Path>) -> Result<Self, Error> {
         let mut file = std::fs::File::open(path)?;
         Self::from_trailer(&read_trailer(&mut file)?)
+    }
+
+    /// The calibration for the **capture** this file belongs to, which is
+    /// not always the calibration in this file.
+    ///
+    /// The cameras that write one lens per file write one trailer for the
+    /// pair, and it lives with lens 0: measured 2026-07-31 on all three ONE
+    /// X2 captures on this box, where every `VID_..._00_....insv` ends in
+    /// the Insta360 magic and no `VID_..._10_....insv` has a footer at all.
+    /// So opening the second file of a pair has to reach across to the
+    /// first, or there is no calibration, no IMU and no frame clock; issue
+    /// #79 asks for either file of a pair to open the whole sphere.
+    ///
+    /// The reach is only made when this file has no trailer of its own, so
+    /// a file that carries one is read exactly as [`Self::from_insv`] reads
+    /// it, down to the bytes, and no X4-class capture takes this path.
+    pub fn from_capture(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
+        match (Self::from_insv(path), super::pair::sibling(path)) {
+            (Err(Error::NoTrailer), Some(beside)) => Self::from_insv(beside),
+            (read, _) => read,
+        }
     }
 }
 
@@ -436,6 +462,100 @@ mod tests {
 
         let error = trailer_of(file).unwrap_err();
         assert!(matches!(error, Error::NoTrailer), "{error:?}");
+    }
+
+    /// A capture written one lens per file, as a ONE X2 writes it: a `_00_`
+    /// file with the whole trailer in it and a `_10_` file with no trailer
+    /// at all. Both are synthetic; the shape is the measured one.
+    fn per_lens_capture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kyerag-pair-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut metadata = fixture::metadata();
+        metadata.camera_type = "Insta360 ONE X2".into();
+        std::fs::write(
+            dir.join("VID_20000101_100000_00_001.insv"),
+            Capture::of(&metadata).insv(),
+        )
+        .unwrap();
+        // The second file really is a plain mp4 as far as the trailer reader
+        // is concerned: no records, no footer, no magic.
+        std::fs::write(
+            dir.join("VID_20000101_100000_10_001.insv"),
+            b"not really an mp4 either",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// **Issue #79.** Opening the second file of a per-lens pair used to fail
+    /// outright, because the calibration is not in it. It belongs to the
+    /// capture rather than to the file, so the read reaches across.
+    #[test]
+    fn the_second_file_of_a_pair_reads_the_first_file_s_trailer() {
+        let dir = per_lens_capture("second");
+        let lens0 = dir.join("VID_20000101_100000_00_001.insv");
+        let lens1 = dir.join("VID_20000101_100000_10_001.insv");
+
+        // What the file itself says, which is nothing.
+        assert!(
+            matches!(CalibrationSet::from_insv(&lens1), Err(Error::NoTrailer)),
+            "the second file of a pair carries no trailer"
+        );
+
+        // What the capture says, from either end of it.
+        let from0 = CalibrationSet::from_capture(&lens0).unwrap();
+        let from1 = CalibrationSet::from_capture(&lens1).unwrap();
+        assert_eq!(from0.camera_model, "Insta360 ONE X2");
+        assert_eq!(from1.camera_model, from0.camera_model);
+        assert_eq!(from1.lenses.len(), 2);
+        assert_eq!(
+            from1.lenses[1].pose.roll_deg, from0.lenses[1].pose.roll_deg,
+            "either file of a pair calibrates the same two lenses"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// And the reach is only ever made by a file that has no trailer of its
+    /// own, so nothing that used to be read from one file is read from two.
+    #[test]
+    fn a_file_with_a_trailer_never_reads_its_sibling_s() {
+        let dir = per_lens_capture("first");
+        let lens0 = dir.join("VID_20000101_100000_00_001.insv");
+
+        // Put a decoy in the sibling's place. If `from_capture` reached for
+        // it, the camera model below would be the decoy's.
+        let mut decoy = fixture::metadata();
+        decoy.camera_type = "decoy".into();
+        std::fs::write(
+            dir.join("VID_20000101_100000_10_001.insv"),
+            Capture::of(&decoy).insv(),
+        )
+        .unwrap();
+
+        let read = CalibrationSet::from_capture(&lens0).unwrap();
+        assert_eq!(read.camera_model, "Insta360 ONE X2");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A per-lens file whose partner is not on the card is what it always
+    /// was: no trailer, no calibration, and the same error as before. The
+    /// pilot copied one file off the camera, and half a capture cannot be
+    /// invented.
+    #[test]
+    fn a_pair_with_no_sibling_on_disk_fails_the_way_it_did() {
+        let dir = per_lens_capture("alone");
+        let lens1 = dir.join("VID_20000101_100000_10_001.insv");
+        std::fs::remove_file(dir.join("VID_20000101_100000_00_001.insv")).unwrap();
+
+        assert!(matches!(
+            CalibrationSet::from_capture(&lens1),
+            Err(Error::NoTrailer)
+        ));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

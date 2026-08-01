@@ -1,0 +1,37 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="f4-lbody" x1="24" y1="76" x2="110" y2="216" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D4835C"/>
+      <stop offset="1" stop-color="#2E2036"/>
+    </linearGradient>
+    <linearGradient id="f4-rbody" x1="232" y1="152" x2="170" y2="216" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BE7250"/>
+      <stop offset="1" stop-color="#261A2E"/>
+    </linearGradient>
+    <linearGradient id="f4-ocean" x1="96" y1="76" x2="190" y2="182" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <clipPath id="f4-left"><path d="M36 76H92L128 176V216H40C31.1634 216 24 208.8366 24 200Z"/></clipPath>
+    <clipPath id="f4-right"><path d="M128 176L172 152H224L232 200C232 208.8366 224.8366 216 216 216H128Z"/></clipPath>
+    <clipPath id="f4-globe"><circle cx="142" cy="124.5" r="52.5"/></clipPath>
+  </defs>
+  <circle cx="140" cy="122" r="56" fill="#FFE0B0"/>
+  <circle cx="142" cy="124.5" r="52.5" fill="url(#f4-ocean)"/>
+  <g clip-path="url(#f4-globe)">
+    <g transform="translate(142 124.5) scale(1.2805) translate(-130 -146)">
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
+    </g>
+  </g>
+  <g clip-path="url(#f4-left)">
+    <path d="M36 76H92L128 176V216H40C31.1634 216 24 208.8366 24 200Z" fill="url(#f4-lbody)"/>
+    <rect x="16" y="76" width="100" height="7" fill="#FFAE73"/>
+    <path d="M92 76L128 176L115.8 180.4L79.8 80.4Z" fill="#6E4048"/>
+  </g>
+  <g clip-path="url(#f4-right)">
+    <path d="M128 176L172 152H224L232 200C232 208.8366 224.8366 216 216 216H128Z" fill="url(#f4-rbody)"/>
+    <rect x="124" y="152" width="124" height="7" fill="#E89A62"/>
+    <path d="M172 152L128 176L134.2 187.4L178.2 163.4Z" fill="#5E3742"/>
+  </g>
+</svg>

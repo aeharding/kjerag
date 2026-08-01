@@ -4,6 +4,7 @@
 mod camera;
 mod capture;
 pub mod dmabuf;
+mod framing;
 mod projection;
 /// How a magnified picture is sampled, and where the upgrade engages
 /// (issue #11). Public for the instrument that measures it, like
@@ -14,7 +15,8 @@ mod widget;
 
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
-pub use kyerag_media::{Accuracy, Cue, Fallible, Size, Stats};
+pub use framing::Framing;
+pub use kyerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
 pub use kyerag_meta::{Quat, Readout, Sweep};
 pub use projection::{Blend, Held, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe, Rolling};
 pub use sampling::Sampling;

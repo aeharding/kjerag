@@ -31,13 +31,38 @@ stillness while playing and never while paused. The scrubber scrubs (issue
 #5): dragging it seeks to keyframes, 21 ms each wherever in the 37.9 GB file
 they land, and letting go seeks to the exact frame. **The view can be
 photographed** (issue #15): `s`, the camera button and `File > Save frame`
-write a 3840 px wide PNG of the reframed view, at the window's aspect and
+write a 3840 px wide JPEG of the reframed view, at the window's aspect and
 not its size, into the desktop's screenshots folder; `Ctrl+C` puts the same
 picture on the clipboard as `image/png`. The capture is the window's own
 pipeline and bind group drawn a second time into a texture of the surface's
 format, so the numbers in the file are the numbers on the screen, and
 everything after the submit runs on a worker thread: 13 captures over 20 s
-of playback, zero dropped and zero starved in every report.
+of playback, zero dropped and zero starved in every report. **A capture says
+so**, in a toast built the way cosmic-files builds its own: `Frame saved to
+"Screenshots"`, `Frame copied to the clipboard`, or the reason it did not
+happen (docs/UI.md, "The capture toast"). 11 captures over 30 s of playback
+with the toasts in: zero dropped and zero starved in all six reports. **And
+the view can be quoted**: `i` copies one line naming the video, the frame
+and the framing, written as `reframe`'s own arguments, so a report about a
+360 video carries the direction it was pointing rather than leaving everyone
+to guess it. Every capture prints the same line, because a still's name
+carries the video and the moment and nothing carries the direction. The copy
+carries the file's name alone and the terminal line carries the path.
+
+**And the line is a place, not a label.** `Ctrl+V` goes there: the frame it
+names, the direction it was pointing, the horizon it was held with, as a jump
+and not an animation. A reference carrying a path opens the video it names
+first; one naming a video that is not open says which video it is from; a
+clipboard holding anything else does nothing at all, because `Ctrl+V` over a
+video means nothing in any other player either. The command line takes one
+too, so the terminal line is a complete launch command:
+`kyerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1`.
+All three read it with the one parser in `crates/render/src/framing.rs`, which
+is also where it is written; reframe's real parser reads the same line in a
+test, so no two of them can drift. Measured under the harness: copy a view,
+seek ten seconds away, zoom out a notch, paste, and the copied line comes back
+to the millisecond and the hundredth of a degree with the picture byte for
+byte what it was.
 
 **M1 is done.** The seam blend (issue #7) is the first M2 quality item and
 it has landed: where the two lenses overlap the pass mixes them by
@@ -194,6 +219,66 @@ measurement: 29.97 fps presented, 0 dropped, 0 starved, the same decode rate
 as before, and the sound goes with it, because a preempted read stops
 without reading another packet and the seek behind it flushes the ring.
 
+**The zoom goes all the way out to the blue ball** (issue #47, owner ask). The
+scroll used to stop at 110 degrees, because that is where a flat window stops
+being one. It now keeps going: past that threshold the output projection bends
+out of perspective through **stereographic**, which is the **tiny planet**
+Insta360 names and the owner calls the blue ball, and on until the whole
+sphere is a ball with room around it. One
+family does the whole range, `r = tan(shrink * theta) / shrink`, with `shrink`
+running 1 to about 0.18, so nothing is switched over and there is nowhere to
+pop. The far end is where the ball fills 0.8 of the window's **shorter** side,
+which is 605 degrees of field of view on a 16:9 window and 406 on a square
+one, and past 360 the frame is simply wider than the sphere: that extra is the
+room the ball sits in, painted the same grey the pass has always painted where
+no lens has the ray. Ctrl+0 comes back in one press.
+
+Measured on real footage at 2560x1440 (`kyerag-spike --bin ball`): one scroll
+from 20 degrees to the ball, a notch at a time, rendered, and the largest
+single step is 64.3 codes at fov 402, with the largest growth of a step over
+the step before it 1.32x at fov 173 - against 1.15x inside the flat range this
+change did not touch, and nothing standing out at the threshold or at
+stereographic. Cost, interleaved across the range and three runs agreeing
+within 0.01 ms a cell, 0.71 ms/redraw at the default view against 0.81 at the
+ball, on a 33 ms frame; the flat range costs what it cost, `--bin zoom` off
+this branch against the same binary built off main, alternated on one box,
+within 0.04 ms a cell in both directions. Playback at the ball, with three
+3840 px captures taken during it: 29.97 fps presented, **0 dropped, 0
+starved**, and a still of the ball is byte for byte the ball. The drag took no new mathematics: it was
+already written against the projection's own rays rather than against a
+tangent, so it inverts whichever map the view is in, and grabbing the ball and
+turning it works because of that rather than despite it.
+
+What is **not** fixed is aliasing. Out wide the map minifies rather than
+magnifies (7.6 delivered texels to the output pixel at the middle of the
+ball), so issue #11's kernel correctly switches off and the pass is plain
+bilinear on a single mip level: against the same view supersampled 4x4 the
+ball is 4.1 codes out over the pixels that have picture and 107 at worst,
+against 1.1 and 11 at the default view. High-contrast edges will shimmer in a
+moving ball. A prefilter is the fix and it is deliberately not built yet: the
+imported dmabuf textures have one level and no room to generate another in
+place, so it means a downsample pass per frame per lens, for a view the player
+is in for a few seconds at a time. Numbers first, then the owner decides.
+**A fast drag no longer freezes the picture** (issue #55). What #46 measured
+and could not fix inside itself: `Player::pump` showed a frame only while its
+own seek was still the newest, so a hand faster than a landing starved the
+display instead of slowing it, and at 60 slider positions a second not one
+picture reached the screen for the length of the drag. The pump now takes a
+frame from any seek newer than the position on screen, so the pilot sees the
+landings their finger has passed over rather than nothing, and picture
+updates rise with the hand instead of falling off a cliff: 10.0, 15.0, 19.5,
+29.0, 38.5, 45.5 and 43.0 a second at 10 to 90 positions/s, against 10.0,
+15.0, 12.5, 10.5, 5.0, 0.0 and 0.0. The two questions the old rule answered
+with one flag are now separate: which frames may take the screen, and which
+seek is still owed one. The second is what keeps a paused window redrawing,
+and it ends on the newest seek's own frame, so the release still lands the
+exact frame under the handle (49 of 49 drags, both arms). At 60 positions/s
+the picture now changes every 22.0 ms, which is about what one keyframe
+decode costs on this camera (21.1 ms at the reader): the drag runs at the
+decoder's rate, which is also the answer to #46's open question about a
+100 ms drag cycle. There was no 100 ms cycle. Three landings in four were
+being thrown away.
+
 M2 is done. #44 and #45 closed against it (the seed fix, owner-verified),
 and #48 has now reopened the seam.
 
@@ -285,6 +370,65 @@ sample-to-sample step at each join puts every one of the six below the 97th
 percentile of ordinary playback, against 12 of 15 synthetic hard cuts spliced
 into the same recording that land at the 99th or above: the fades hold.
 
+**Looking around got three fixes at once** (issues #77, #63, #78, all owner
+reported). **Fullscreen no longer resets the view.** The camera was living in
+the shader widget's iced `State`, and iced rebuilds widget state whenever the
+widget tree changes shape: libcosmic pushes the header bar into the same
+column as the content, so hiding the bar moves the content up a place and
+everything under it is built fresh. Fullscreen hides the bar, which is the
+whole of the connection - and so does the two-second idle timeout, so the view
+was being reset under a pilot who was only watching, too. The `Viewpoint`
+lives on the `Scene` now, which is the shell's own and outlives its view. The
+harness gained the checks that measured it: entering and leaving fullscreen by
+both keys, and the controls hiding on their own.
+
+**The pan goes over the top** (issue #63). The pitch had a wall at 89 degrees;
+it is gone, and past a quarter turn the view is looking back over itself with
+the world upside down, on round to a whole turn and round again. It is a pitch
+and not a roll, so the horizon stays a level line either way up, and a
+vertical drag never swings the yaw. Nothing was added to get there:
+`rot_y(yaw) * rot_x(pitch)` was always the rotation and a pitch past 90 is a
+perfectly good one. What the anchor solve needed is to count to the nearest
+tilt **the short way round**. Checked through the pass on real footage and not
+only in arithmetic: rendered at yaw 180 pitch 180, the pass draws exactly the
+yaw 0 pitch 0 picture turned upside down, every pixel of it within one code of
+255.
+
+**And the wide end of the zoom drags calmly** (issue #78). Pinning the grabbed
+direction to the cursor is what makes the flat range feel like a hand on the
+picture and what makes the ball twitchy: the pinned rate at the middle of the
+ball view is 900 degrees of world per width of window, against 164 at the
+widest flat view, so a drag across the window out there turned the world two
+and a half times. Past 110 degrees the pin comes off and the drag turns the
+view at a fixed 164 degrees per window width, which is the rate the pinned
+drag itself is going at in the last view before the handover, so the two meet
+at the threshold with nothing to feel. Under 110 nothing changed at all.
+
+**And the zoom key no longer lets go of the drag** (issue #83, pre-existing
+and surfaced by the three above). `Ctrl+=` and `Ctrl+-` took a held drag's
+hold again at the middle of the frame while the hand was somewhere else, so
+the next move of the pointer hauled the picture over to whatever the middle
+had been pointing at: 33 degrees of yaw for a cursor that did not move, in
+the widget-level check that reproduced it. A held drag already knows where
+the cursor is, because that is what the wide regime measures its travel from,
+and the key zooms there now, which is what the wheel has always done. With
+nothing held it still zooms about the middle, which is where a keyboard with
+no hand on the picture is pointing.
+
+**And nor does the wheel out in the room around the ball** (issue #92, owner
+reported, the last of the same family). Zoomed out to the ball, a drag that
+starts on the picture and wanders out into the grey keeps turning the view,
+which is what issue #78 bought: the wide drag reads the hand's travel and not
+what is under the cursor. Scrolling out there killed it stone dead. Every
+zoom re-takes the drag's hold at the cursor, the room has no direction under
+it to take hold of, and the whole drag was being dropped rather than the
+hold: the button was still down, the pointer moved 200 px, and the camera
+came back bit for bit identical in the widget-level reproduction. The hold is
+kept now where there is nothing to replace it with. Nothing reads it stale:
+the room only exists past 220 degrees of view and the pinned drag stops at
+110, so the wide drag, which does not use it, is the only regime the room can
+be seen from.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
@@ -298,9 +442,9 @@ into the same recording that land at the 99th or above: the fades hold.
   Full 360-degree look-around lands here too (issue #27): both lenses
   sampled, and the seam they left is blended by #7 in M2. The app shell
   around all of it is issue #16, seeking is issue #5, and screenshots are
-  issue #15. What is left of the MVP's UI is the two Settings rows for the
-  capture folder and resolution, and the toast that says where a still
-  went; both wait on docs/UI.md's open question about the wording.
+  issue #15, whose toast has since landed in cosmic-files' idiom
+  (docs/UI.md, "The capture toast"). What is left of the MVP's UI is the two
+  Settings rows for the capture folder and resolution.
 - **M2 Quality** — seam blend (issue #7, done: weight field in, exposure
   correction measured and rejected), gyro horizon lock (issue #8, done:
   complementary filter, `View > Lock horizon`, and a harness that measures
@@ -311,19 +455,278 @@ into the same recording that land at the 99th or above: the fades hold.
   gating (issue #10, done: the pass skips the lens a ray cannot reach, and
   the decode gate under the same test is measured and cut), scrub
   responsiveness (issue #46, done: a newer drag position takes the decode
-  thread off the lookahead refill, 59 ms to 26 ms per scrub), high-quality
+  thread off the lookahead refill, 59 ms to 26 ms per scrub; and issue #55,
+  done: a drag faster than a landing shows the landings it has passed over
+  instead of freezing, 0 to 46 picture updates a second), high-quality
   zoom sampling (issue #11, done: a Catmull-Rom kernel on the luma plane
   wherever the map's own Jacobian says an output pixel has landed inside a
-  texel, and the chroma half of it measured and cut). **M2 is complete**,
-  except that issue #48 reopened the seam: the two lenses are misaligned by up
-  to 2.7 degrees across it, phase 1 has measured that, attributed it to a
-  relative lens tilt and fitted the correction, and phase 2 will apply it.
+  texel, and the chroma half of it measured and cut), and the zoom out to the
+  tiny planet and the whole ball (issue #47: one projection family from
+  perspective through stereographic to a finite disc, capped where the
+  ball clears the window's shorter side; the tiny-planet framing sits
+  mid-scroll on the way there, and the owner chose to keep the extended
+  range after trying a hard stop at the planet).
+  Three of the quality issues under it are the interaction ones the owner
+  found while flying the finished zoom: the view surviving fullscreen
+  (issue #77), the pan carrying on through the poles (issue #63), and the
+  wide end of the zoom dragging calmly (issue #78).
+  **M2 is complete**, except that issue #48 reopened the seam: the two lenses
+  are misaligned by up to 2.7 degrees across it, phase 1 has measured that,
+  attributed it to a relative lens tilt and fitted the correction, and phase 2
+  will apply it. Issue #79 opened a second camera: the ONE X2 writes one lens
+  per file, and the player now pairs the two at open and holds an X2's horizon
+  with that camera's own IMU convention.
 - **M3 Export & sound** — clip export (reframed VCN encode, and lossless
   time-range remux), audio playback (issue #13, done: AAC off the same
   demuxer, cpal out, slaved to the video clock, volume and mute in the control
   row).
 
+## Scope doctrine (owner, 2026-07-31)
+
+Kjerag is a VIEWER: view, reframe, screenshot, and at most a simple clip
+export (mark in and out, export the current view or a lossless cut). It
+must be an awesome viewer before any of that export work starts, so
+quality owns the roadmap until the owner says the bar is met. Keyframed
+reframing and timeline editing are OUT OF SCOPE, not deferred: that is an
+editor, a different product (Kdenlive's bigsh0t filters already cover
+keyframed 360 export on Linux). The one editor-adjacent idea parked with
+no commitment: export that follows the view the pilot actually flies
+live, no keyframe UI ever.
+
 ## Decisions log
+
+- 2026-07-31 **The sound reads on a demuxer of its own** (issue #97, owner
+  defect). One file handle for all three streams was the simpler design and
+  the owner's April capture disproved it: the camera left 67 MB of picture
+  between the audio sample ending at 4.907 s and the next one, and
+  libavformat lets a stream fall a whole second behind before it seeks out
+  of file order, so the sound for that region arrived after its moment had
+  passed and the splice dropped it. Measured on main: silent from 4.87 s to
+  8.21 s. A second capture on this box has the same gap at 4.480 s and a
+  third has one at 1445.8 s, so it is a camera behaviour rather than one bad
+  file. The alternatives are all worse: a deeper ring cannot hold sound that
+  has not been read, reading the pictures a second ahead needs 60 more
+  surfaces than a decoder pool holds, and buffering the packets instead
+  means carrying 25 MB of undecoded picture at all times. A demuxer of its
+  own with the pictures discarded reads the sound at its own 190 kbps and is
+  immune to any interleave, for one file handle and 0.2 s of open. **And the
+  underrun count was lying**: a ring that ran dry while its head was behind
+  the picture took the splice's fade-down path and counted nothing, which is
+  why the hole measured 2.4 s when it was 3.3 s, and why issue #95 read 227
+  underruns as a burst at startup when they were this hole in the middle.
+- 2026-07-31 (late) Seam architecture revised by three owner rulings: the
+  app targets ANY 360 footage (near-field moves in general, so per-frame
+  band alignment is the MAIN path and the per-clip table is a prior);
+  the horizon bar is pixel-perfect (calibration brings residual inside
+  the band search's capture range, per-frame alignment snaps it to zero,
+  far field included - which is how Insta360's own horizon is perfect);
+  and correction is calibrate-by-watching (seam readings harvested from
+  playback's own decoded frames, slerped in below perception, pooled
+  per camera, cached per file, no user surface at all).
+
+- 2026-07-31 **ffmpeg pin moved 6.1 -> 7.1** (owner: "Bump to 7"), which
+  supersedes the 2026-07-30 entry further down. Issue #65: the Flatpak
+  could not be built from the tree at all while the pin said 6.1, because
+  every freedesktop runtime ships ffmpeg 7 and the 25.08 one is forced by
+  libcosmic's rustc floor. The port is one file. ffmpeg 7 replaced the
+  bitmask channel layout with `AVChannelLayout`, which holds raw pointers
+  and so is not `Send`, and a `Track` rides its `Reader` onto the decode
+  thread; it now derives the layout from the channel count it already
+  keeps rather than storing one. The bill goes to the dev box: Ubuntu
+  24.04 has no ffmpeg 7 and will not get one, so ffmpeg comes from a PPA
+  (AGENTS.md, and the same one in CI) or, without sudo, from
+  `scripts/ffmpeg7-local.sh`.
+
+- 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
+  recorded in docs/icon.md). A round teal world with a green coast and a warm
+  rim, and a small figure entering it from the upper left, drawn by
+  `scripts/icon-diver.py` from a joint skeleton rather than traced. The
+  figure's size and how far its feet clear the rim are set together, because
+  the rim crossing is what decides both: round 7 grew it 18 percent inward,
+  holding the feet at the same 27.1 units past the rim.
+  `resources/icons/hicolor/` is the theme tree: a scalable SVG, PNGs from 256
+  down to 16, and a drawing of its own for 32, 24 and 16, because both COSMIC
+  and the Pop theme redraw those sizes instead of exporting. The files are
+  named for the application ID `dev.harding.Kjerag`, the one issue #66
+  settled and issue #75 will put in the code; until that rename lands the
+  binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
+
+- 2026-07-31 Seam bar raised (owner): "I want the best seam support out
+  there." The prod gate is not good-enough but best-shipping, Insta360's
+  stitcher included. Two tracks: the per-camera geometric foundation
+  (static-capture 5-knob fit, #87 rework) ships first; depth-aware seam
+  alignment (the overlap band is a 33 mm stereo pair, disparity gives
+  metric depth - what dynamic stitching fundamentally is) is #80 phase A,
+  research-first with owner-validated design before implementation.
+
+- 2026-07-31 **The camera is the shell's state, not the widget tree's**
+  (issue #77). iced keeps a widget's state in the widget tree and rebuilds
+  it whenever the tree changes shape under it, which the header bar coming
+  and going does on every fullscreen toggle and every idle timeout. Anything
+  a pilot expects to survive the window changing shape therefore cannot live
+  in an iced `State`, however natural a home it looks. Keeping it there and
+  pinning the tree instead was the alternative and it is a trap: it makes
+  every future layout change a chance to lose the view, silently, and the
+  shell has to be free to change its layout.
+- 2026-07-31 **The pitch runs all the way round, and the wall is gone**
+  (issue #63, owner ask). The alternative reading of "keep looking up past
+  the zenith" is to fold the crossing into pitch and yaw together - pitch
+  turns back down and the yaw swings half a turn - which keeps the pitch
+  inside a quarter turn and keeps the picture upright. It was rejected
+  because it is not what was asked for: the owner asked to keep going
+  **until he sees upside down**, and a fold never shows an upside down
+  world. It also puts a discontinuity in the yaw exactly where the hand is
+  moving. Letting the pitch continue is both the thing asked for and the one
+  with no jump in it.
+- 2026-07-31 **Past the flat range the drag is a rate, not a pin**
+  (issue #78, owner ask). One threshold, `FOV_FLAT`, shared with the
+  projection's own bend, and one constant: the rate the pinned drag is
+  already turning at when it gets there. The alternative was to keep the pin
+  and damp it - a speed limit on the solve - which reads well and breaks
+  issue #63, because the same limit would have to bite hardest exactly where
+  a pole crossing legitimately turns the view fastest. Two drags with one
+  clean threshold beats one drag with a rule that has to know about poles.
+- 2026-07-31 **A capture reports itself at the top of the window, in a toast
+  drawn out of libcosmic's own pieces** (issue #15, docs/UI.md's open
+  question 2). cosmic-files is the only first-party app that uses toasts at
+  all, so its lines are the whole precedent and the wording, the 5 s, the
+  five-line stack, the tooltip container and its spacings, and the refusal
+  to carry an action unless it undoes something destructive are all its own
+  (`src/app.rs:1344-1358`, `toaster/mod.rs:33-63`, `79-85`, `162-181`). The
+  **placement is the owner's**, and it is a deviation from cosmic-files with
+  a reason: it puts its toasts at the bottom because the bottom of a file
+  manager is empty, and the bottom of this window is the transport. Shipped
+  over the scrubber first, and the owner found it.
+  `widget::toaster` cannot be moved: its overlay is laid out against the
+  bounds iced hands every overlay, which are the window's
+  (`toaster/widget.rs:199-215` against `user_interface.rs:228`), so it sits
+  15 px above the bottom of the window whatever it is mounted over. Mounting
+  it over a band at the top of the window was built and captured, and the
+  toast did not move. So the stack is a `Stack` layer over the picture,
+  which also gets the control row's overlay back
+  (`overlay::from_children` rather than `Toaster`'s replace-the-content's,
+  `toaster/widget.rs:137-162`). Two things that were measured rather than
+  assumed: the layer is mounted even when empty, because a tree that grows a
+  layer cost the toast five redraws before it reached the screen; and the
+  five seconds is a sleep on the async runtime as libcosmic's own is, not a
+  poll, because a 250 ms poll cost 3 to 6 redraws a second and dropped
+  frames in 2 of 18 report windows against 0 of 18 without it.
+  `scripts/uitest.sh` now asserts the placement instead of a reader having to
+  notice it: transient chrome must leave the header band and the control-row
+  band byte for byte identical, which the shipped-first placement fails.
+
+- 2026-07-31 **A capture is not always one file, and the ONE X2's IMU is
+  not mounted like an X4's** (issue #79, owner-reported). Three symptoms on
+  the owner's X2 footage were two defects and one thing that was never
+  broken. Half a sphere was the camera writing one lens per file: the two
+  are paired at open, matched on frame index, and either file of a pair now
+  opens the whole capture. The horizon being "way wrong" was the IMU axis
+  convention, which fell through to the X4's `xZY` and is 121 degrees out on
+  this camera; measured against pixels it is `Zxy`. "Upside down" was the
+  same defect seen through a horizon lock that is on by default, and the
+  delivered-frame datum it appeared to accuse turned out to be right: the
+  unlocked picture is upright on a plumb reference, and the seam's own
+  arithmetic agrees to 0.16 degrees.
+
+  Two method notes worth keeping. The 24-way sweep **cannot** finish this
+  job on a camera whose two best candidates are a half turn apart when the
+  footage has no true horizon in it - a mountain ridge is not level - and
+  what finished it was aiming the view along the accelerometer on a still
+  frame and looking at whether the sky was there. And a wrong picture datum
+  and a wrong axis convention are not separately observable in a locked
+  view, because each cancels the other; only the unlocked picture pins the
+  datum.
+
+- 2026-07-31 **A saved still is a JPEG; the clipboard is still a PNG**
+  (issue #15). Twelve encodings of five real 3840x2160 captures, plus
+  libwebp and libjxl for reference, scored against those same pixels with
+  ffmpeg's `psnr` and `ssim` filters. Nothing lossless got near the size a
+  file that gets shared wants: PNG's own levels bottom out at 3.2 to 8.7 MB
+  and take 3 to 7 s to do it, oxipng reaches 2.9 to 7.6 MB in 5 to 7 s, and
+  lossless WebP, the best of them per second, 3.0 to 7.9 MB. Of the lossy
+  ones only JPEG has a maintained pure Rust encoder: lossy WebP and JPEG XL
+  are C libraries, and the one pure Rust JXL encoder does lossless only.
+  Skipping them costs nothing measurable. At quality 93 with no chroma
+  subsampling a still is 0.7 to 1.8 MB, a seventh of the PNG or less, and
+  scores higher on SSIM than libwebp at quality 95 and libjxl at distance 1
+  on all five captures, at 1.3 to 2.5 times their file size. The encode is
+  65 to 74 ms against the PNG's 33 to 45 ms, on the worker thread that has
+  already waited for the GPU and reads back 33 MB before it starts.
+- 2026-07-31 **The UI harness builds the binary it drives, every run**
+  (`scripts/uitest.sh`). It used to build only when `target/release/kyerag`
+  was missing, so a binary left over from before a `git revert` is what it
+  drove: the ball check failed twice on a tree whose source passes it four
+  runs out of four, and the capture it filed was the reverted design rather
+  than the restored one. A harness that reports on code it did not run is
+  worse than no harness, and cargo costs nothing when the binary is already
+  fresh. `KYERAG_BIN` stays the way to point it at a binary on purpose,
+  which is how the stale one was identified.
+- 2026-07-31 **The zoom out to the ball is one projection family, not a second
+  projection** (issue #47). Perspective and tiny planet are two ends of
+  `r = tan(shrink * theta) / shrink`: `shrink` 1 is rectilinear exactly,
+  1/2 is stereographic exactly, and below that the sphere closes into a finite
+  disc. Blending two separately-written maps was the obvious alternative and
+  is worse in the way that matters, because the thing being asked for is that
+  there be no seam in the scroll: a family has no crossover to hide. The
+  schedule is `shrink = 110 degrees / fov`, which holds `shrink * fov / 2`
+  constant past the threshold - the frame keeps the half angle of the widest
+  flat view and the world shrinks into it - and that is not a taste: it is
+  what makes zooming out zoom out at every point of the frame, where a
+  smoothed schedule that overshoots hands back a scroll that reverses in the
+  middle (`the_picture_only_ever_shrinks`).
+- 2026-07-31 **The field of view is allowed past 360 degrees** (issue #47),
+  rather than capping there or switching to a second control. At 360 the
+  frame's edges are half a turn out and the sphere is exactly as wide as the
+  frame; the owner asked for the ball to sit in frame **with room around it**,
+  and room means the frame reaching further than the sphere does. Anything
+  else needs a second zoom parameter with a different meaning at the far end,
+  which is a worse thing to explain and a worse thing to test.
+- 2026-07-31 **Which frames may take the screen and which seek is still owed
+  one are two questions** (issue #55). `Player::pump` answered both with one
+  epoch comparison: a frame was shown only while its own seek was the newest,
+  and showing anything cleared `is_seeking`. That is what froze a fast drag,
+  and the obvious repair breaks the other half, because `is_seeking` is what
+  keeps a paused window redrawing and an intermediate picture would end the
+  wait before the release's frame arrived. `Epochs` now carries `asked`,
+  `shown` and a `Wait`, and the two questions are separate methods:
+  `accepts` decides what may take the screen, and only the newest seek's own
+  frame ends the wait. Three states rather than a flag, because the wait is
+  not one thing: a **seek** wants a position newer than the one on screen
+  (the reader is still handing over frames of the position being left, and
+  they are a picture of nowhere the pilot asked to be, which the exact scrub
+  measured at 79 ms of wrong picture), a **step** wants the very next frame
+  of the position on screen and sends no seek at all, and **playback** wants
+  whatever the clock is due. The landing is applied where the frame arrives
+  rather than where the seek was asked for, so several outstanding seeks each
+  get their own picture at their own time; `Presenter::advance` takes the
+  seek's own frame however many pictures have already gone up, which is what
+  makes the release's exact frame the last picture of a drag rather than a
+  picture that never comes.
+
+- 2026-07-31 **A picture from a seek the pilot has dragged past is better
+  than a frozen one** (issue #55). Frames arrive in the order they were asked
+  for, so a landing tagged after the picture on screen is a picture of
+  somewhere the pilot has been since, and putting it up can only move the
+  picture forwards. Sweeping the fixture end to end, 2 s a rate, interleaved
+  arms, medians of 7 runs:
+
+  | positions/s | 10   | 15   | 20   | 30   | 45   | 60   | 90   |
+  | ----------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | before      | 10.0 | 15.0 | 12.5 | 10.5 |  5.0 |  0.0 |  0.0 |
+  | after       | 10.0 | 15.0 | 19.5 | 29.0 | 38.5 | 45.5 | 43.0 |
+
+  Below 20 positions/s the decoder keeps up and both arms show one picture a
+  position. Above it the old rule falls away to nothing while the new one
+  climbs to the decoder's own rate and stays there: 45.5 pictures a second is
+  22.0 ms each against a 21.1 ms keyframe decode at the reader. That also
+  answers what #46 could not, which was what made a drag cycle cost 100 ms
+  where a scrub through the same player cost 26. Nothing did: three landings
+  in four were being decoded and thrown away. The release lands the exact
+  frame in 49 of 49 drags on each arm, a median of 239 ms after letting go
+  before and 281 ms after, which is not a difference the measurement supports
+  (permutation p = 0.23): the per-drag spread is 24 to 446 ms on both arms
+  and it is set by where in the GOP the release falls, since an exact seek
+  decodes forward from the keyframe before it.
 
 - 2026-07-31 **The orientation filter starts only from a reading it would
   believe completely** (issue #45). The rule that covers every other sample
@@ -489,12 +892,15 @@ into the same recording that land at the 99th or above: the fades hold.
   after. The interruptible read helps here too, but the ceiling is not the
   refill and this change does not move it: at 60 positions/s neither arm
   puts a single picture on the screen, and that is what a fast drag on the
-  scrubber does today. Whatever costs the difference between a 26 ms scrub
-  and a 100 ms drag cycle has not been found yet, and an all-or-nothing
-  epoch rule is what turns it into a frozen picture rather than a slow one.
-  It is not the page cache: a sweep confined to one warm 36 s window of the
-  file measures the same 10.0, 11.5, 10.5, 5.5 and 0.0 against the full
-  file's 10.0, 12.0, 10.0, 5.5 and 0.0, interleaved on a quiet box.
+  scrubber did until issue #55, whose entry above is where that ends.
+  Whatever costs the difference between a 26 ms scrub and a 100 ms drag
+  cycle was not found here, and an all-or-nothing epoch rule is what turns
+  it into a frozen picture rather than a slow one. It is not the page cache:
+  a sweep confined to one warm 36 s window of the file measures the same
+  10.0, 11.5, 10.5, 5.5 and 0.0 against the full file's 10.0, 12.0, 10.0,
+  5.5 and 0.0, interleaved on a quiet box. (#55's answer to the 100 ms: the
+  cycle cost one keyframe decode all along, and the epoch rule discarded
+  three landings in four.)
 - 2026-07-31 The pass **skips the lens a ray cannot reach** (issue #10). Each
   lens's picture is one cap around its own axis; the cap is solved out of the
   calibration by finding where the model's own landing leaves the image
@@ -597,7 +1003,8 @@ into the same recording that land at the 99th or above: the fades hold.
 - 2026-07-30 Primary target is AMD/Intel Mesa (VA-API). NVIDIA would need
   an NVDEC backend variant; out of scope until someone needs it.
 - 2026-07-30 ffmpeg-next/ffmpeg-sys-next pinned to 6.1, matching the system
-  ffmpeg. The 8.x APIs in the research notes are not present.
+  ffmpeg. The 8.x APIs in the research notes are not present. **Superseded
+  2026-07-31**: 7.1, see the top of this log.
 - 2026-07-30 Zero-copy import is not a hand-rolled ash routine: wgpu 30's
   `Device::texture_from_dmabuf_fd` (wgpu-hal Vulkan) imports the VA-API
   planes as they come, 0.12 ms/frame for both. On libcosmic's wgpu 28 the
@@ -640,11 +1047,23 @@ into the same recording that land at the 99th or above: the fades hold.
   wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
   and two wgpu-types in one graph is two incompatible `TextureFormat`s.
   `wgpu` is the only crate in that workspace anything outside it depends on.
-- 2026-07-31 The app turns libcosmic's content container off
-  (`core.window.content_container = false`). It insets the view by
-  `border_padding` on the right and, because `nav_bar.active` defaults to
-  true even with no nav model, by nothing on the left. Video wants both
-  edges (issue #22).
+- 2026-07-31 ~~The app turns libcosmic's content container off
+  (`core.window.content_container = false`)~~ (issue #22, superseded by
+  issue #93 the same day). It insets the view by `border_padding` on the
+  right and, because `nav_bar.active` defaults to true even with no nav
+  model, by nothing on the left. Video wants both edges, and turning the
+  container off is one of the two ways to get them.
+- 2026-07-31 The border padding is zeroed instead, and the content container
+  stays (`core.window.border_padding = Some(0)`, cosmic-player
+  `src/main.rs:895`, issue #93). `main_content_padding` is `[0, 0, 0, 0]`
+  either way (`app/mod.rs:632-639`), so the video still has both edges. What
+  the container is worth is the window background: libcosmic paints
+  `background(theme.transparent).base` only on the container branch
+  (`app/mod.rs:856-874`), and that colour is what makes a COSMIC window a
+  darkened pane over the compositor's blur. Without it the welcome view was
+  blur and nothing else, which is what the owner saw. cosmic-files paints no
+  background of its own either; it just leaves the container on
+  (`src/app.rs:2352-2367`, off in desktop mode only).
 - 2026-07-31 One crate per layer, in a workspace (issue #19): `kyerag-meta`,
   `kyerag-media`, `kyerag-render`, `kyerag` (the app) and `kyerag-spike`.
   The layer diagram is now a build constraint, and `kyerag-meta` builds and
@@ -1145,14 +1564,17 @@ The same instrument measures a drag, which asks for a position per pointer
 move rather than waiting for each picture, sweeping the file end to end for
 2 s per rate:
 
-| positions/s     | 10   | 20   | 30   | 45  | 60  |
-| --------------- | ---: | ---: | ---: | --: | --: |
-| picture updates | 10.0 | 12.0 | 10.0 | 5.5 | 0.0 |
+| positions/s     | 10   | 15   | 20   | 30   | 45   | 60   | 90   |
+| --------------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| picture updates | 10.0 | 15.0 | 19.5 | 29.0 | 38.5 | 45.5 | 43.0 |
 
-A picture reaches the screen only while its own seek is still the newest, so
-past about 30 positions a second the landings arrive stale and the picture
-stops moving until the hand does. The release lands on the exact frame every
-time regardless.
+A picture reaches the screen while its own seek is newer than the position on
+screen (issue #55), so a hand faster than a landing sees the landings it has
+passed over: the rate rises with the hand to the decoder's own ceiling of
+about 45 a second, which is one keyframe decode each. Under the rule that
+shipped before #55 the same sweep read 10.0, 15.0, 12.5, 10.5, 5.0, 0.0 and
+0.0, the last two being a frozen picture for the length of the drag. The
+release lands on the exact frame every time either way.
 
 ## Ideas parked (complexity needs an observed failure first)
 

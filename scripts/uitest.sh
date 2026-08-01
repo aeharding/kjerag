@@ -25,6 +25,9 @@
 # `h` writes a config the developer's desktop never sees and pressing `s`
 # writes a still into scratch/ rather than into their screenshots folder.
 #
+# Needs `cage wtype grim ffmpeg`, and `wl-paste` for the clipboard check,
+# which skips without it.
+#
 # Local only, and never in CI: see "UI verification" in AGENTS.md.
 #
 # Exit: 0 all checks passed, 1 a check failed, 2 the harness could not run,
@@ -96,8 +99,25 @@ for tool in cage wtype grim ffmpeg; do
 	command -v "$tool" >/dev/null || die "$tool is not installed (AGENTS.md, UI verification)"
 done
 
-bin=${KYERAG_BIN:-$root/target/release/kyerag}
-if [ ! -x "$bin" ]; then
+# One check reads the session's clipboard and nothing else wants this, so a
+# box without it loses that half of that check rather than the whole run.
+clipboard=yes
+command -v wl-paste >/dev/null || clipboard=no
+
+# The build is part of the run, not a fallback for a missing binary. Cargo
+# is a no-op on a fresh one, and the version that only built when the file
+# was absent drove whatever happened to be there instead: on 2026-07-31 a
+# binary built before a `git revert` failed the ball check for an hour while
+# the source it was meant to be checking passed on every run.
+#
+# KYERAG_BIN is the way to point the harness at a binary on purpose, which is
+# how that was measured, so it is taken as given and never rebuilt.
+if [ -n "${KYERAG_BIN:-}" ]; then
+	bin=$KYERAG_BIN
+	[ -x "$bin" ] || die "no binary at $bin (KYERAG_BIN)"
+	printf 'binary %s (KYERAG_BIN: not rebuilt)\n' "$bin"
+else
+	bin=$root/target/release/kyerag
 	printf 'building %s\n' "$bin"
 	(cd "$root" && cargo build --release) || die "the app did not build"
 	[ -x "$bin" ] || die "no binary at $bin"
@@ -218,6 +238,68 @@ nonblack() {
 	total=$(stat -c%s "$file")
 	nonzero=$(tr -d '\0' <"$file" | wc -c)
 	[ $((nonzero * 100 / total)) -ge "$NONBLACK_PERCENT" ]
+}
+
+# The two bands of the window that transient chrome must never be drawn over,
+# because both hold things that get pressed: the header bar with the menus at
+# the top, and the control row with the scrubber at the bottom.
+#
+# Measured under cage at 1280x720: the header bar is the top 48 rows and the
+# control row the bottom 48. The bands are those plus clearance, so a message
+# that merely creeps up against the scrubber fails this as well.
+HEADER_BAND=64
+CONTROL_BAND=96
+
+# band <file> <top|bottom> <rows>: those rows of the capture, as raw bytes.
+# grim writes a P6 header of three lines and then the pixels, three bytes to
+# a pixel, so a band is a slice at a computed offset.
+band() {
+	local file=$1 edge=$2 rows=$3 magic width height depth header start
+	{
+		read -r magic
+		read -r width height
+		read -r depth
+	} <"$file"
+	header=$((${#magic} + ${#width} + ${#height} + ${#depth} + 4))
+	case $edge in
+	top) start=$header ;;
+	*) start=$((header + (height - rows) * width * 3)) ;;
+	esac
+	tail -c "+$((start + 1))" "$file" | head -c $((rows * width * 3))
+}
+
+# band_changed <before> <after> <top|bottom> <rows>: something was drawn into
+# that band between the two captures.
+band_changed() {
+	! cmp -s <(band "$1" "$3" "$4") <(band "$2" "$3" "$4")
+}
+
+# picture <file>: everything between the header bar and the control row, which
+# is the view and none of the chrome around it. Same P6 arithmetic as `band`
+# above, from the other direction.
+#
+# The chrome has to come off for a check that compares two captures of one
+# view. Measured on this harness: two captures of the same frame at the same
+# camera differ in 14 pixels of the scrubber's thumb, because the thumb is
+# drawn at the clock's position and a copied line carries the frame's own
+# time, which is up to one frame behind it. The picture is byte for byte
+# identical.
+picture() {
+	local file=$1 magic width height depth header rows
+	{
+		read -r magic
+		read -r width height
+		read -r depth
+	} <"$file"
+	header=$((${#magic} + ${#width} + ${#height} + ${#depth} + 4))
+	rows=$((height - HEADER_BAND - CONTROL_BAND))
+	tail -c "+$((header + HEADER_BAND * width * 3 + 1))" "$file" |
+		head -c $((rows * width * 3))
+}
+
+# same_picture <a> <b>: the two captures show the same view.
+same_picture() {
+	cmp -s <(picture "$1") <(picture "$2")
 }
 
 # said <pattern>: the app printed it. Its own instruments say things no
@@ -344,9 +426,25 @@ with_media() {
 			"$session/paused-a.ppm" "$session/paused-b.ppm"
 	fi
 
+	# Before saves_a_still, because it wants a window with no toast on it and
+	# nothing has pressed `s` yet. A paused window keeps its control row for
+	# good, which is what lets the two captures differ by the toast alone.
+	if [ "$paused" = no ]; then
+		skip "a toast is drawn clear of the controls (nothing paused)"
+	else
+		toast_clears_the_controls
+	fi
+
+	zooms_out_to_the_ball
 	saves_a_still
+	# Both before `i`, which prints view lines of its own: while the only
+	# thing that has printed one is a capture, the two counts can be compared.
+	a_still_says_where_it_was_looking
+	copies_the_view
+	returns_to_the_copied_view
 	flips_the_horizon
 	survives_fullscreen
+	fullscreen_holds_the_view
 
 	# Space again, and this time the app's own report line is the evidence.
 	# A file that never paused is still playing, so its report lines would
@@ -363,6 +461,7 @@ with_media() {
 			"log: $log"
 	fi
 
+	idle_controls_hold_the_view
 	exits_clean
 }
 
@@ -385,15 +484,199 @@ more_report_lines() {
 	return 1
 }
 
+# A message that says a capture landed must not be drawn over anything the
+# pilot presses. The window is paused, so its picture and its control row are
+# the same bytes in both captures and everything that differs between them is
+# the toast: the header band and the control band have to come through
+# untouched, and something has to have changed somewhere, or the check has
+# proved nothing.
+#
+# PR #74 is why this exists. The stock toaster's overlay is nailed 15 px above
+# the bottom of the window whatever it is mounted over (libcosmic
+# `src/widget/toaster/widget.rs:199-215`), which put every capture message
+# straight across the scrubber, and nothing mechanical noticed.
+toast_clears_the_controls() {
+	local check="a toast is drawn clear of the controls"
+	local before=$session/toast-before.ppm after=$session/toast-up.ppm
+	local shots try=0
+
+	grab toast-before >/dev/null
+	shots=$(grep -c '^shot:' "$log")
+	while [ "$try" -lt "$PRESSES" ]; do
+		key -k s
+		alive || lost "$check"
+		[ "$(grep -c '^shot:' "$log")" -gt "$shots" ] && break
+		try=$((try + 1))
+	done
+	if [ "$(grep -c '^shot:' "$log")" -le "$shots" ]; then
+		fail "$check" "no capture landed after $PRESSES presses of s" "log: $log"
+		return
+	fi
+	grab toast-up >/dev/null
+
+	if cmp -s "$before" "$after"; then
+		fail "$check" "the two captures are identical" \
+			"nothing was on screen to check, so this proves nothing" \
+			"$before" "$after"
+		return
+	fi
+
+	local over=
+	band_changed "$before" "$after" top "$HEADER_BAND" && over="the header bar"
+	band_changed "$before" "$after" bottom "$CONTROL_BAND" &&
+		over="${over:+$over and }the control row"
+	if [ -z "$over" ]; then
+		pass "$check"
+	else
+		fail "$check" "the toast is drawn over $over" "$before" "$after"
+	fi
+}
+
+# Ctrl+- keeps zooming out past the flat range now, until the whole sphere
+# is a ball with room around it (issue #47). The room is the one thing in
+# the window whose colour the app decides rather than the footage:
+# OUTSIDE_GRAY, flat and neutral, where a frame of video at the same place
+# is neither. So the check reads one patch a fourteenth of the way in from
+# the left, level with the middle, which is outside the ball at the far end
+# of the zoom and inside the picture at the default view.
+#
+# Presses one at a time and looks after each, because the zoom is a clamp
+# rather than a state: pressing past the end is free, and a dropped key
+# costs a press rather than the check.
+# Measured on this harness's 1280x672 widget: the room reaches the patch on
+# the fifth press (90, 129, 185, 265, 380, 544 degrees, and the patch is off
+# the ball past about 403). wtype drops about one key in twenty, so the rest
+# is headroom, and the loop breaks on success so headroom costs nothing.
+BALL_PRESSES=20
+ROOM_SPREAD=4
+# The room is the app's own flat OUTSIDE_GRAY and reads 25 25 25 here, so this
+# is five codes of headroom and not thirty five. It was 60, and 60 is wide
+# enough to let real footage through: measured 2026-07-31, a hillside in
+# shadow read 35 35 36 a fifth of the way out of the zoom, `reach_the_ball`
+# took it for the room and stopped there, and every check downstream then
+# compared two pictures that were never at the ball. Two of them failed
+# saying the view had reset when the captures show it holding.
+ROOM_DARK=30
+
+# reach_the_ball <name>: press ctrl+- until the patch reads the room, and
+# say whether it got there. The capture it went by is left under <name>.
+reach_the_ball() {
+	local try=0
+	while [ "$try" -lt "$BALL_PRESSES" ]; do
+		key -M ctrl -k minus -m ctrl
+		alive || return 1
+		is_room "$(patch_rgb "$(grab "$1")")" && return 0
+		try=$((try + 1))
+	done
+	return 1
+}
+
+zooms_out_to_the_ball() {
+	local before after
+	before=$(patch_rgb "$(grab zoom-before)")
+	reach_the_ball zoom-ball
+	alive || lost "ctrl+- zooms out to the ball"
+	after=$(patch_rgb "$session/zoom-ball.ppm")
+	if ! is_room "$after"; then
+		fail "ctrl+- zooms out to the ball" \
+			"after $BALL_PRESSES presses the patch reads $after, which is not the room \
+around the ball" "$session/zoom-ball.ppm"
+		return
+	fi
+	pass "ctrl+- zooms out to the ball (patch $after, was $before)"
+
+	key -M ctrl -k 0 -m ctrl
+	after=$(patch_rgb "$(grab zoom-reset)")
+	if is_room "$after"; then
+		fail "ctrl+0 comes back from the ball" \
+			"the patch still reads $after, which is the room around the ball" \
+			"$session/zoom-reset.ppm"
+	else
+		pass "ctrl+0 comes back from the ball (patch $after)"
+	fi
+}
+
+# The mean colour of a small patch of a capture, as three decimal codes.
+# `scale=1:1` is the averaging, and rawvideo is what makes `od` the whole
+# reader.
+patch_rgb() {
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=iw*0.05:ih*0.05:iw*0.07:ih*0.47,scale=1:1" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+# The same, over the 64 px mark the welcome view draws above its text. The
+# box is where that icon lands at 1280x720, which is the size of this
+# harness's only output: rows 312 to 371, centred across the window.
+mark_rgb() {
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=64:64:(iw-64)/2:312,scale=1:1" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+# How far apart the mark's channels have to be to be called a colour drawing
+# rather than a symbolic icon. A symbolic icon is filled with exactly one
+# grey, so its patch has a spread of zero whatever the theme. Measured over
+# that box: 94 153 138 dark and 130 189 174 light for the app icon this
+# draws now, against 156 156 156 and 77 77 77 for the
+# `video-x-generic-symbolic` it replaced (issue #93).
+MARK_SPREAD=20
+
+# Whether a patch is the flat neutral grey the pass paints where the frame
+# has no sphere in it, rather than a piece of picture: dark, and the three
+# channels within a code or two of each other. Measured on this harness, the
+# room reads 25 25 25, which is OUTSIDE_GRAY through the surface's own sRGB
+# round trip, and the same patch of the default view read 185 224 241 on the
+# owner's footage, which is sky.
+is_room() {
+	local rgb=($1) hi lo
+	[ "${#rgb[@]}" = 3 ] || return 1
+	hi=$(printf '%s\n' "${rgb[@]}" | sort -n | tail -1)
+	lo=$(printf '%s\n' "${rgb[@]}" | sort -n | head -1)
+	[ "$hi" -le "$ROOM_DARK" ] && [ $((hi - lo)) -le "$ROOM_SPREAD" ]
+}
+
+# The mark above "No video open" is the app icon, which the binary carries as
+# bytes (`crates/app/src/app.rs`, `APP_ICON`) because the icon theme has
+# nothing under this app's ID yet (issue #75). Colour in that patch is what
+# separates the drawing from the symbolic icon it replaced, and from an SVG
+# that failed to load, which draws nothing at all.
+#
+# It says nothing about the window background, which the same issue changed:
+# under cage there is no compositor blur, so the theme's opaque background is
+# painted either way and the two builds' captures are identical outside this
+# box (measured: 3596 differing pixels, all of them inside it).
+draws_the_app_icon() {
+	local rgb hi lo
+	rgb=$(mark_rgb "$(grab welcome-mark)")
+	local channels=($rgb)
+	if [ "${#channels[@]}" != 3 ]; then
+		fail "the welcome view draws the app icon" \
+			"no patch could be read from $session/welcome-mark.ppm"
+		return
+	fi
+	hi=$(printf '%s\n' "${channels[@]}" | sort -n | tail -1)
+	lo=$(printf '%s\n' "${channels[@]}" | sort -n | head -1)
+	if [ $((hi - lo)) -ge "$MARK_SPREAD" ]; then
+		pass "the welcome view draws the app icon (mark $rgb)"
+	else
+		fail "the welcome view draws the app icon" \
+			"the mark reads $rgb, which is one grey: a symbolic icon, or nothing" \
+			"$session/welcome-mark.ppm"
+	fi
+}
+
 # `s` writes a still into the session's screenshots folder, which is inside
-# scratch/ and not the developer's own.
+# scratch/ and not the developer's own. The name it looks for is the one the
+# app writes: a JPEG since issue #15, and ffmpeg reads what it finds, so a
+# file that is not the format its name claims fails the decode below.
 saves_a_still() {
 	local still shrunk=$session/still.ppm
 	local try=0
 	while [ "$try" -lt "$PRESSES" ]; do
 		key -k s
 		alive || lost "s saves a still"
-		still=$(find "$session/shots" -name '*.png' | head -1)
+		still=$(find "$session/shots" -name '*.jpg' | head -1)
 		[ -n "$still" ] && break
 		try=$((try + 1))
 	done
@@ -405,8 +688,177 @@ saves_a_still() {
 	if nonblack "$shrunk"; then
 		pass "s saves a still"
 	else
-		fail "s saves a still" "the PNG is black: $still"
+		fail "s saves a still" "the still is black: $still"
 	fi
+}
+
+# The arguments half of a view line, which is `reframe`'s own syntax: the same
+# keys in the same order, and each number printed to the places
+# `crates/render/src/framing.rs` prints it to. The round trip through
+# reframe's parser is a unit test; what this adds is that the line reaching a
+# terminal is that line and not a debug print near it.
+VIEW_ARGS='time=[0-9]+\.[0-9]{3} yaw=-?[0-9]+\.[0-9]{2} pitch=-?[0-9]+\.[0-9]{2}'
+VIEW_ARGS="$VIEW_ARGS fov=-?[0-9]+\.[0-9]{2} lock=[01]"
+
+# view <n> -> the nth-from-last view line, with its label taken off.
+view_line() {
+	grep '^view:' "$log" | tail -"${1:-1}" | head -1 | sed 's/^view:[[:space:]]*//'
+}
+
+# A still carries the video and the timecode in its file name and no direction
+# anywhere, so a capture the pilot sends back months later is only placeable if
+# the terminal said where it was looking. Every capture prints one line, which
+# while nothing has pressed `i` yet means the two counts are equal.
+a_still_says_where_it_was_looking() {
+	local check="every still prints where it was looking"
+	local shots views
+	shots=$(grep -c '^shot:' "$log")
+	views=$(grep -c '^view:' "$log")
+	if [ "$shots" = 0 ]; then
+		skip "$check (nothing was captured)"
+	elif [ "$views" = "$shots" ]; then
+		pass "$check ($views for $shots)"
+	else
+		fail "$check" "$views view lines for $shots captures" "log: $log"
+	fi
+}
+
+# Set by copies_the_view before its presses, read by the predicate below.
+view_lines=0
+
+more_view_lines() {
+	[ "$(grep -c '^view:' "$log")" -gt "$view_lines" ]
+}
+
+# `i` copies the view: one line naming the video, the frame and the framing,
+# which is what turns "it looks wrong here" into coordinates anyone can
+# render.
+#
+# Two instruments, because they answer different halves. The terminal line
+# says the app built the line and carries the whole path, and the clipboard
+# says the compositor is holding it, which is the half a pilot actually
+# pastes from. Comparing the two also pins the one rule that separates them:
+# the copy names the file and never the directories above it, because a
+# pilot's report lands in a public issue.
+#
+# wl-paste rather than a hook: it reads the real selection off the real
+# session. cage advertises no wlr-data-control, so this is the ordinary
+# focus path, which needs the seat to have a keyboard; the keys pressed
+# before this point are what put one there.
+copies_the_view() {
+	local check="i copies the view"
+	local printed args pasted
+	view_lines=$(grep -c '^view:' "$log")
+
+	if ! press_until more_view_lines view -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after $PRESSES presses of i" "log: $log"
+		return
+	fi
+
+	printed=$(view_line)
+	args=${printed#"$media "}
+	if [ "$args" = "$printed" ]; then
+		fail "$check" "the printed line does not start with $media" "$printed"
+		return
+	fi
+	if ! printf '%s' "$args" | grep -qE "^$VIEW_ARGS\$"; then
+		fail "$check" "these are not reframe's arguments" "$args"
+		return
+	fi
+
+	if [ "$clipboard" = no ]; then
+		pass "$check (terminal only: $args)"
+		skip "the view reaches the clipboard (no wl-paste)"
+		return
+	fi
+	pasted=$(env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-paste --no-newline 2>>"$log")
+	alive || lost "$check"
+	if [ "$pasted" = "$(basename "$media") $args" ]; then
+		pass "$check ($pasted)"
+	else
+		fail "$check" "the clipboard holds: $pasted" \
+			"expected: $(basename "$media") $args"
+	fi
+}
+
+# How long a toast is up, plus a beat. Two captures of the same view are only
+# the same bytes once the lines saying so have gone.
+TOAST_GONE=6
+
+# Set by returns_to_the_copied_view before its presses, read by the predicate.
+goto_lines=0
+
+more_goto_lines() {
+	[ "$(grep -c '^goto:' "$log")" -gt "$goto_lines" ]
+}
+
+# The whole loop, which is the feature: copy a view, wander off, paste, and be
+# back exactly where the copy was taken.
+#
+# The window is paused here, so the picture is a function of the frame and the
+# camera alone and two captures of one view are the same bytes. Two
+# instruments, and the first is the stronger: the app's own copied line is
+# exact to the millisecond and the hundredth of a degree, where a capture only
+# says the pixels came out the same. Both, because a line that matches while
+# the picture does not would mean the view is not what the line says it is.
+#
+# The wander is a ten second seek and a notch of zoom out: one moves the frame
+# and the other moves the camera, which are the two halves a paste has to put
+# back. A dropped key costs the check nothing, because the capture taken
+# afterwards has to differ from the first or the check says so itself.
+returns_to_the_copied_view() {
+	local check="ctrl+v goes back to the copied view"
+	local copied returned
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines goto -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after $PRESSES presses of i" "log: $log"
+		return
+	fi
+	copied=$(view_line)
+	sleep "$TOAST_GONE"
+	grab goto-there >/dev/null
+
+	key -k Right
+	key -M ctrl -k minus -m ctrl
+	alive || lost "$check"
+	grab goto-away >/dev/null
+	if same_picture "$session/goto-there.ppm" "$session/goto-away.ppm"; then
+		fail "$check" "the seek and the zoom moved nothing, so this proves nothing" \
+			"$session/goto-there.ppm" "$session/goto-away.ppm"
+		return
+	fi
+
+	goto_lines=$(grep -c '^goto:' "$log")
+	if ! press_until more_goto_lines goto -M ctrl -k v -m ctrl; then
+		alive || lost "$check"
+		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
+		return
+	fi
+	sleep "$TOAST_GONE"
+	grab goto-back >/dev/null
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines goto -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after the paste" "log: $log"
+		return
+	fi
+	returned=$(view_line)
+
+	if [ "$returned" != "$copied" ]; then
+		fail "$check" "copied:   $copied" "came back: $returned"
+		return
+	fi
+	if ! same_picture "$session/goto-there.ppm" "$session/goto-back.ppm"; then
+		fail "$check" "the line came back but the picture did not" \
+			"$session/goto-there.ppm" "$session/goto-back.ppm"
+		return
+	fi
+	pass "$check (${copied#"$media "})"
 }
 
 # `h` flips the horizon lock, which is on by default, so the session's config
@@ -442,6 +894,104 @@ survives_fullscreen() {
 	else
 		fail "f survives fullscreen" "alive: $(alive && echo yes || echo no)" "$shot"
 	fi
+	# Back to windowed, so the checks after this one start where they expect.
+	key -k Escape
+}
+
+# Issue #77: the view survives fullscreen, both ways, every time.
+#
+# Entering fullscreen hides the header bar, which changes the shape of the
+# window's widget tree, so the camera must not live anywhere that is rebuilt
+# with it.
+#
+# The zoom is what stands in for the pan here, because the zoom is the whole
+# of what a keyboard can move: yaw, pitch and field of view are one
+# `Viewpoint` in one place, and a transition that keeps one keeps all three.
+# The instrument is the room around the ball (`is_room`), which is the app's
+# own flat grey rather than footage, so it reads the same however the window
+# is shaped underneath and whether the picture is paused or playing.
+#
+# The two ways in a keyboard has, and the two ways out. The other three ways
+# in - the View menu, the button in the control row, a double click on the
+# video - send this same message and need a pointer the harness has not got.
+# A dropped key leaves the view where it already was, so it can only cost a
+# real failure, never invent one.
+fullscreen_holds_the_view() {
+	if ! reach_the_ball fullscreen-ball; then
+		alive || lost "fullscreen holds the view"
+		fail "fullscreen holds the view" \
+			"the view never reached the ball" "$session/fullscreen-ball.ppm"
+		return
+	fi
+
+	held_the_view f -k f &&
+		held_the_view escape -k Escape &&
+		held_the_view alt-enter -M alt -k Return -m alt &&
+		held_the_view f-again -k f &&
+		pass "fullscreen holds the view (f, escape, alt+enter, f)"
+
+	# However that went, leave the window windowed: the check after this one
+	# is about the header bar, which fullscreen keeps hidden whatever else
+	# happens.
+	key -k Escape
+}
+
+# Issue #77 again, on the path with no fullscreen in it: the header bar also
+# goes away on its own, two seconds after the last pointer input, while
+# playing (`CONTROLS_TIMEOUT`). It is the header bar coming and going that
+# reshapes the window, so this is the same defect met the way a pilot meets
+# it most often - watching a video, hands off - and it is what says the cause
+# is the header bar rather than anything about fullscreen.
+#
+# `h` is pressed first because it is a message that shows the controls, so
+# the bar is known to be up before the wait. It leaves the horizon lock back
+# on, which nothing after this reads.
+CONTROLS_HIDE=4
+
+idle_controls_hold_the_view() {
+	if ! reach_the_ball idle-ball; then
+		alive || lost "the view survives the controls hiding"
+		fail "the view survives the controls hiding" \
+			"the view never reached the ball" "$session/idle-ball.ppm"
+		return
+	fi
+
+	# The bar is up from here and nothing is pressed after it, so the two
+	# seconds run out inside the wait below and the hide is inside the
+	# check rather than before it.
+	key -k h
+	local shown hidden
+	shown=$(patch_rgb "$(grab idle-shown)")
+	sleep "$CONTROLS_HIDE"
+	alive || lost "the view survives the controls hiding"
+	hidden=$(patch_rgb "$(grab idle-hidden)")
+
+	if ! is_room "$shown"; then
+		fail "the view survives the controls hiding" \
+			"showing the controls moved the view: the patch reads $shown, which is \
+picture rather than the room around the ball" "$session/idle-shown.ppm"
+	elif is_room "$hidden"; then
+		pass "the view survives the controls hiding"
+	else
+		fail "the view survives the controls hiding" \
+			"after $CONTROLS_HIDE s with no input the patch reads $hidden, which is \
+picture rather than the room around the ball" "$session/idle-hidden.ppm"
+	fi
+}
+
+# held_the_view <name> <key...>: press it, and the view is still at the ball.
+held_the_view() {
+	local name=$1 patch file
+	shift
+	key "$@"
+	alive || lost "fullscreen holds the view"
+	file=$(grab "fullscreen-$name")
+	patch=$(patch_rgb "$file")
+	is_room "$patch" && return 0
+	fail "fullscreen holds the view" \
+		"the view reset on $name: the patch reads $patch, which is picture rather \
+than the room around the ball" "$file"
+	return 1
 }
 
 exits_clean() {
@@ -471,6 +1021,7 @@ welcome() {
 		return
 	fi
 
+	draws_the_app_icon
 	flips_the_horizon
 	survives_fullscreen
 	exits_clean

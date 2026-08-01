@@ -16,7 +16,9 @@ crates/render   kyerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
                                offscreen render for screenshots
 crates/media    kyerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
-                               frames by index or timestamp. No UI.
+                               frames by index or timestamp. One demuxer per
+                               file of the capture, which is two on the
+                               cameras that write one lens per file. No UI.
 crates/meta     kyerag-meta    .insv trailer, read directly: per-lens Mei
                                calibration, gyro track, per-frame exposure.
                                No UI, no ffmpeg, no wgpu.
@@ -26,10 +28,17 @@ crates/spike    kyerag-spike   the headless instruments, kept out of the
                                a PNG, no compositor needed)
 ```
 
-`app` -> `render` -> `media`, `render` -> `meta` for the calibration the
-shader runs on, and `meta` depends on nothing but `prost`. That last one is
-the point of the split: `cargo test -p kyerag-meta` passes on a box with no
-libav headers, and a CI job that installs nothing proves it on every push.
+`app` -> `render` -> `media` -> `meta`, `render` -> `meta` as well for the
+calibration the shader runs on, and `meta` depends on nothing but `prost`.
+That last one is the point of the split: `cargo test -p kyerag-meta` passes
+on a box with no libav headers, and a CI job that installs nothing proves it
+on every push.
+
+`media -> meta` is one function wide and it is issue #79's: a capture is not
+always one file, and which file holds the other lens is a fact about `.insv`
+naming, which `meta` owns. `media` owns what a container is and does the
+verifying half with it (`Shape::pairs_with`), because the second file of a
+per-lens pair carries no trailer to check against.
 
 `media` and `meta` know nothing about the shell. `render` names libcosmic
 for exactly one file, `crates/render/src/widget.rs`: those three
@@ -95,10 +104,35 @@ map call alone, with nothing reading the pixels through it.)
 
 ## Playback (issue #4)
 
-One demuxer feeds both decoders and hands out `Frames`: every video stream
-at the same PTS, mapped and ready to import. A lens is never delivered
-without its partner, so the two streams cannot drift apart; if a head ever
-lacked a partner the reader drops it rather than pairing two instants.
+One demuxer per file feeds every decoder and hands out `Frames`: every lens
+at the same instant, mapped and ready to import. A lens is never delivered
+without its partner, so the two cannot drift apart; if a head ever lacked a
+partner the reader drops it rather than pairing two instants.
+
+Two demuxers is the ONE X2 case (issue #79), where a capture is two files of
+one lens each. They share a frame grid exactly, so the lanes are matched on
+frame **index** - the one number that means the same thing in two timelines
+with their own `start_time` - and the reader pumps whichever file is behind
+so neither runs away with the memory. The lens 0 file is a frame longer than
+its partner in every pair measured, and that frame is dropped: it has no
+partner, and half a sphere is not a picture.
+
+**The sound has a demuxer of its own** (issue #97): the same file, opened
+again with the pictures discarded. The reason is measured, not stylistic.
+Two of the four large captures on this box have one place where the camera
+left tens of megabytes of picture between two audio samples, both of them
+about four and a half seconds in, and libavformat reads a file interleaved
+like that by letting one stream fall up to a second behind
+(`mov_find_next_sample` keeps to file order until the timestamps differ by
+more than `AV_TIME_BASE`). Sound a second late is sound the splice drops, so
+the owner heard three seconds of silence. Nothing on the picture side can
+fix it: no ring can hold sound that has not been read, and the pictures
+cannot be read a second ahead of themselves when a decoder's surface pool is
+20 frames deep. On its own demuxer the sound reads 190 kbps of a 180 Mbps
+file, seeking straight to each audio chunk (40x realtime over the whole 30
+minute capture, measured), and the pictures no longer cross the file for
+packets nobody takes from them. It costs one more file handle and one more
+open of the container, 0.2 s on the 36 GB capture.
 
 `Player` runs that reader on its own thread behind a two-deep channel and
 answers one question per redraw: which frame belongs on screen at this
@@ -178,7 +212,13 @@ grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
   on the right and, because `nav_bar.active` defaults to true even with no
   nav model, by nothing on the left (`app/mod.rs`, `main_content_padding`).
   Measured at scale 1.25: 1 physical px of border left, 10 right. The app
-  sets `core.window.content_container = false` (issue #22).
+  sets `core.window.border_padding = Some(0)` and keeps the container
+  (issue #93): the same `[0, 0, 0, 0]` around the video, and the window
+  background comes with it. That background is painted only on the
+  container branch (`app/mod.rs:856-874`,
+  `background(theme.transparent).base`), so an app that turns the container
+  off to reach the window edges is transparent behind its own content, and
+  under the desktop's blur that reads as blur with no window over it.
 - `iced_renderer` silently drops shader primitives when the tiny-skia
   fallback is chosen (`fallback.rs`: a `log::warn!` and nothing drawn), so
   a blank widget can mean "wrong renderer", not "wrong shader". libcosmic's
@@ -265,6 +305,101 @@ definitions have drifted apart.
 
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
+
+## The output projection: flat, then bent, then a ball (issue #47)
+
+The map above answers "which pixel is this ray"; something else has to say
+which ray a point of the **output** is, and until issue #47 that was one line
+of rectilinear projection with a hard 110-degree cap on it. Past there a flat
+window stops being one: it stretches the corner by `1 / cos` of the angle out
+to it, 3.1x at the corners of a 110-degree 16:9 view, and runs away to
+infinity at 180. So the frame bends instead, and keeps bending until the whole
+sphere is a ball with room around it.
+
+One family does all of it (`projection::Screen`). A plane radius `r` from the
+middle of the frame is the direction `theta` off the view axis with
+
+```
+r = tan(shrink * theta) / shrink
+```
+
+`shrink` of 1 is `tan(theta)`, the flat window, arithmetic for arithmetic what
+it always was. 1/2 is `2 tan(theta / 2)`, which **is** stereographic: the
+**tiny planet**, what Insta360 calls it and what the owner means by the blue
+ball, arrived at rather than special-cased. Below that the
+sphere closes into a disc of finite radius and the frame reaches past it.
+`shrink` is `110 degrees / fov`, held at 1 until the view is wider than that,
+so past the threshold `shrink * fov / 2` is constant: **the frame keeps the
+half angle of the widest flat view and the world is shrunk into it**, which is
+what keeps zooming out zooming out. `the_picture_only_ever_shrinks` is that
+claim over the whole range and every point of the frame, and it is the one a
+different-looking schedule fails: the widening and the bend pull opposite ways
+and an unbalanced pair hands back a scroll that reverses in the middle.
+
+The field of view keeps meaning what it meant, past a full turn included: 360
+degrees is the frame's own edges half a turn out, so the sphere is exactly as
+wide as the frame, and wider still is the frame reaching past the sphere. That
+is where the room around the ball comes from, and it is why the far end
+(`fov_ceiling`) depends on the **window shape**: the ball is round and fills
+0.8 of the frame's shorter side there, which is 406 degrees on a square window
+and 605 on a 16:9 one. Outside the ball there is no ray at all, and the pass
+paints the same `OUTSIDE_GRAY` it has always painted where no lens has one.
+
+The drag needed no new mathematics, which is the finding rather than luck:
+`Camera::look` and `Camera::aim` were already written against `view_ray`
+rather than against a `tan`, so they invert whatever map the view is in. Two
+things did change. A press on the room around the ball takes hold of nothing,
+because there is nothing there (`look` answers `Option`), and a cursor exactly
+a quarter turn out along the frame's own horizontal axis has a ray no pitch
+can move, which is zero over zero in the height solve and would have left a
+NaN camera that never comes back.
+
+Measured on the X4 Air at 2560x1440 (`kyerag-spike --bin ball`):
+
+- **No pop.** One scroll from 20 degrees to the ball, a notch at a time,
+  rendered: the largest single step is 64.3 codes at fov 402, and the largest
+  a step grows against the step before it is 1.32x at fov 173. Inside the flat
+  range, which this change did not touch, that same number is 1.15x. Nothing
+  stands out at the threshold or at stereographic; at a quarter of a notch the
+  largest growth anywhere is 1.12x. The geometric statement is in `cargo test`
+  (`the_bend_starts_without_a_step`): halving the scroll across the threshold
+  halves the angle the picture moves, four halvings running, and a jump would
+  not shrink at all.
+- **It costs a tenth of a millisecond at the far end and nothing at all in
+  the range that already existed.** Interleaved across the range, three runs
+  back to back agreeing within 0.01 ms a cell: 0.71 ms/redraw at the default
+  view, 0.63 at the threshold, 0.67 at 150 degrees, 0.71 at stereographic,
+  0.83 at 320 and **0.81 at the ball**, against a 33 ms frame. The trig is not
+  what the far end costs, and the table says so itself: 320 degrees runs the
+  same bent map over a frame that is all picture and costs the same 0.83. (All
+  six rows move together with the box's clock state -- an earlier session sat
+  near 2.2 ms a cell with the same shape -- so this table is read across its
+  own rows rather than against another day's.) The flat range is unchanged,
+  measured the way it was first measured: `--bin zoom`'s cost table off this
+  branch against the same binary built off main, alternated on one box, agrees
+  cell for cell within 0.04 ms in both directions (fov 90: 0.56 / 0.73 / 0.98
+  main against 0.58 / 0.71 / 1.00). It runs the two multiplies it always ran,
+  and the `length`, the `atan` and the `sin_cos` the bend needs are all behind
+  the one uniform test that says the frame is not flat.
+- **Playback holds at the ball.** 20 s of real footage at the far end of the
+  zoom, 2560x1440, with three 3840 px captures taken during it: 600 redraws,
+  29.97 fps presented, **0 dropped and 0 starved**, 2.65 ms per redraw in the
+  pass under live decode. The captures are the ball: a 3840 px still through
+  `Scene::capture` at the ball is byte for byte the same picture as the same
+  view drawn straight into a 3840 px target, which is issue #15's own check
+  run at a field of view it was never written for.
+- **Minification, not magnification.** Out wide an output pixel covers 7.6
+  delivered texels at the middle of the ball and 5.3 at its rim, so issue
+  #11's Catmull-Rom kernel reads 0.00 engagement everywhere past 110 degrees
+  and the pass is plain bilinear, which is what it should be. What that costs
+  is aliasing rather than softness: against the same view supersampled 4x4 and
+  box averaged, the ball is 4.1 codes out over the pixels that have picture
+  and 107 at worst, against 1.1 codes and 11 at the default view. A moving
+  picture will shimmer on high-contrast edges out there. The fix is a
+  prefilter, not a sharper kernel, and it is not built: the imported dmabuf
+  textures have one mip level and no room to generate more in place, so it
+  would be a downsample pass per frame per lens for a view the player is in
+  for a few seconds at a time. Issue #47's comment thread has the numbers.
 
 ## Sampling a magnified picture (issue #11)
 

@@ -1,0 +1,37 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="f1-lbody" x1="28" y1="132" x2="100" y2="212" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D4835C"/>
+      <stop offset="1" stop-color="#2E2036"/>
+    </linearGradient>
+    <linearGradient id="f1-rbody" x1="230" y1="146" x2="160" y2="212" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BE7250"/>
+      <stop offset="1" stop-color="#261A2E"/>
+    </linearGradient>
+    <linearGradient id="f1-ocean" x1="94" y1="86" x2="176" y2="176" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CD0E2"/>
+      <stop offset="1" stop-color="#1B7B9C"/>
+    </linearGradient>
+    <clipPath id="f1-left"><path d="M28 132H80L128 172V212H52Z"/></clipPath>
+    <clipPath id="f1-right"><path d="M128 172L180 146H230L210 212H128Z"/></clipPath>
+    <clipPath id="f1-globe"><circle cx="130" cy="126.5" r="47"/></clipPath>
+  </defs>
+  <circle cx="128" cy="124" r="50" fill="#FFE0B0"/>
+  <circle cx="130" cy="126.5" r="47" fill="url(#f1-ocean)"/>
+  <g clip-path="url(#f1-globe)">
+    <g transform="translate(130 126.5) scale(1.1463) translate(-130 -146)">
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 190L89 190Z" fill="#73C48F"/>
+      <path d="M89 154C99 142 110 150 123 145C136 140 146 128 159 133C167 136 168 147 168 147L168 156C168 156 166 144 158 142C147 139 136 149 123 154C110 159 99 151 89 164Z" fill="#A6E0B4"/>
+    </g>
+  </g>
+  <g clip-path="url(#f1-left)">
+    <path d="M28 132H80L128 172V212H52Z" fill="url(#f1-lbody)"/>
+    <rect x="16" y="132" width="112" height="7" fill="#FFAE73"/>
+    <path d="M80 132L128 172L121 180.4L73 140.4Z" fill="#6E4048"/>
+  </g>
+  <g clip-path="url(#f1-right)">
+    <path d="M128 172L180 146H230L210 212H128Z" fill="url(#f1-rbody)"/>
+    <rect x="128" y="146" width="112" height="7" fill="#E89A62"/>
+    <path d="M180 146L128 172L132.9 181.8L184.9 155.8Z" fill="#5E3742"/>
+  </g>
+</svg>

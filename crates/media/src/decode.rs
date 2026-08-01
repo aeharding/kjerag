@@ -2,6 +2,7 @@
 //! to software, and the two ways a decoded frame leaves the GPU.
 
 use std::ffi::{CStr, c_int};
+use std::fmt;
 
 use ff::ffi::{
     AV_HWFRAME_MAP_DIRECT, AV_HWFRAME_MAP_READ, AVBufferRef, AVCodecContext, AVDRMFrameDescriptor,
@@ -64,12 +65,51 @@ unsafe extern "C" fn pick_vaapi(
     }
 }
 
+/// A stream whose codec this libavcodec has no decoder for at all (issue #69).
+///
+/// Its own type, because the shell says a different thing for it: this is not
+/// a file that is broken, it is a build of ffmpeg that cannot play any file of
+/// this kind, and the pilot is the one who can fix that. Inside a Flatpak it
+/// is the whole of the failure mode, because the runtime's own ffmpeg is built
+/// `--disable-decoder='h264,hevc,vc1,vvc'` and every decoder we need arrives
+/// with the `codecs-extra` runtime extension (measured 2026-07-31).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MissingDecoder {
+    /// ffmpeg's own short name for the codec: `hevc`, `h264`.
+    pub codec: &'static str,
+}
+
+impl fmt::Display for MissingDecoder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no {} decoder in this libavcodec", self.codec)
+    }
+}
+
+impl std::error::Error for MissingDecoder {}
+
 pub fn open_decoder(
     ictx: &ff::format::context::Input,
     stream: usize,
     hw: &HwDevice,
 ) -> Fallible<ff::decoder::Video> {
     let params = ictx.stream(stream).ok_or("no such stream")?.parameters();
+    // The decoder this asks after is the one the lines below open: the default
+    // decoder for the stream's own codec, which VA-API rides on as a hwaccel
+    // through `pick_vaapi`. `hevc_vaapi` is not a second lookup and would not
+    // be found without this one anyway.
+    //
+    // ffmpeg-next makes the identical lookup one line later and turns a null
+    // into `Error::DecoderNotFound`, whose text is "Decoder not found" and
+    // says nothing about which codec or why. That generic line is what
+    // issue #69 is about; this one is asked a step early so the answer can
+    // carry the codec and a type the shell can read.
+    let codec = params.id();
+    if ff::decoder::find(codec).is_none() {
+        return Err(MissingDecoder {
+            codec: codec.name(),
+        }
+        .into());
+    }
     let mut ctx = ff::codec::context::Context::from_parameters(params)?;
     unsafe {
         let raw = ctx.as_mut_ptr();
@@ -196,5 +236,34 @@ impl SwFrame {
 impl Drop for SwFrame {
     fn drop(&mut self) {
         unsafe { av_frame_free(&mut self.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The probe has to be able to answer both ways to be worth asking. This
+    /// box's ffmpeg has an `hevc` decoder, and no build of ffmpeg has one for
+    /// the null codec id, so a lookup that always said "present" fails the
+    /// second line and a lookup that always said "missing" fails the first.
+    ///
+    /// What this cannot do is stand in for a real ffmpeg with the decoder
+    /// taken out. That was reproduced against the running app with an
+    /// `LD_PRELOAD` shim over `avcodec_find_decoder`; the note is in the PR.
+    #[test]
+    fn the_probe_answers_present_and_absent() {
+        assert!(ff::decoder::find(ff::codec::Id::HEVC).is_some());
+        assert!(ff::decoder::find(ff::codec::Id::None).is_none());
+    }
+
+    /// The terminal line names the codec, because "Decoder not found" is what
+    /// it replaces (issue #69).
+    #[test]
+    fn the_error_names_the_codec_it_could_not_find() {
+        let missing = MissingDecoder {
+            codec: ff::codec::Id::HEVC.name(),
+        };
+        assert_eq!(missing.to_string(), "no hevc decoder in this libavcodec");
     }
 }

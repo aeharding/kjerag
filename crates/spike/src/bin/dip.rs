@@ -167,7 +167,12 @@ fn main() -> Fallible<()> {
                     gated += 1;
                     continue;
                 }
-                let look = |uv: [f64; 2]| camera.look(uv.map(|c| c as f32), aspect).map(f64::from);
+                let look = |uv: [f64; 2]| {
+                    camera
+                        .look(uv.map(|c| c as f32), aspect)
+                        .expect("the dip runs are measured in flat views")
+                        .map(f64::from)
+                };
                 let normal = unit(cross(look(line.through[0]), look(line.through[1])));
                 let up = match dot(normal, UP) > 0.0 {
                     true => normal,

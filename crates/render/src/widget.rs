@@ -5,7 +5,7 @@
 //! rather than in `kyerag`: that, and nothing else, is why the render layer
 //! names libcosmic. Nothing above this file decides anything about the pass
 //! or the view direction; the shell only builds a `shader::Shader` around a
-//! [`Scene`], and iced keeps the [`Viewpoint`] in its widget tree.
+//! [`Scene`], which is where the [`Viewpoint`] lives.
 
 use std::time::Instant;
 
@@ -19,44 +19,44 @@ use super::{Next, Scene, ScenePipeline, ScenePrimitive, Viewpoint};
 const PIXELS_PER_LINE: f32 = 40.0;
 
 impl<Message> shader::Program<Message> for Scene {
-    type State = Viewpoint;
+    /// Nothing at all. The camera lived here until issue #77: iced keeps
+    /// widget state in the widget tree, and the tree is rebuilt from the
+    /// shell's `view` whenever the window changes shape, which takes the
+    /// state with it. It is the [`Scene`]'s now.
+    type State = ();
     type Primitive = ScenePrimitive;
 
     fn update(
         &self,
-        viewpoint: &mut Viewpoint,
+        _state: &mut (),
         event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
         match event {
-            Event::Mouse(event) => mouse_update(viewpoint, event, bounds, cursor),
+            Event::Mouse(event) => mouse_update(self, event, bounds, cursor),
             Event::Window(window::Event::RedrawRequested(now)) => {
                 // The `View` menu's zoom items have no cursor and no event of
                 // their own, so the shell leaves them on the scene and this is
-                // where they reach the camera iced owns.
+                // where they reach the camera: a redraw is the first place the
+                // shape of the output is known.
                 if let Some(nudge) = self.take_nudge() {
-                    viewpoint.nudge(nudge, aspect(bounds));
+                    self.steer(|viewpoint| viewpoint.nudge(nudge, aspect(bounds)));
                 }
                 tick(self, *now)
             }
             // Alt-tabbing away mid-drag takes the release with it, and a grab
             // nothing can end is a camera glued to the cursor.
             Event::Window(window::Event::Unfocused) => {
-                viewpoint.release();
+                self.steer(Viewpoint::release);
                 None
             }
             _ => None,
         }
     }
 
-    fn draw(
-        &self,
-        viewpoint: &Viewpoint,
-        _cursor: mouse::Cursor,
-        _bounds: Rectangle,
-    ) -> ScenePrimitive {
-        self.primitive(viewpoint.camera())
+    fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> ScenePrimitive {
+        self.primitive(self.viewpoint().camera())
     }
 
     /// `Hidden` is how a pointer disappears in iced: the winit conversion maps
@@ -65,12 +65,12 @@ impl<Message> shader::Program<Message> for Scene {
     /// pointer comes back the moment it is over the controls.
     fn mouse_interaction(
         &self,
-        viewpoint: &Viewpoint,
+        _state: &(),
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         match (
-            viewpoint.is_dragging(),
+            self.viewpoint().is_dragging(),
             self.is_cursor_hidden(),
             cursor.is_over(bounds),
         ) {
@@ -117,7 +117,7 @@ impl shader::Pipeline for ScenePipeline {
 /// The pan is a grab: it starts on a press over the widget, it lasts exactly
 /// as long as the button is held, and every way it can end ends it.
 fn mouse_update<Message>(
-    viewpoint: &mut Viewpoint,
+    scene: &Scene,
     event: &mouse::Event,
     bounds: Rectangle,
     cursor: mouse::Cursor,
@@ -132,7 +132,7 @@ fn mouse_update<Message>(
         // starts move nothing, because neither is dragged anywhere.
         mouse::Event::ButtonPressed(mouse::Button::Left) => {
             let at = cursor.position_over(bounds)?;
-            viewpoint.grab(uv(at, bounds), aspect(bounds));
+            scene.steer(|viewpoint| viewpoint.grab(uv(at, bounds), aspect(bounds)));
             Some(Action::request_redraw())
         }
         // Deliberately not gated on the cursor being over the widget: a pan
@@ -140,20 +140,20 @@ fn mouse_update<Message>(
         // the drag that decides whether this moves anything, not the cursor.
         // The `uv` of a cursor outside the widget is outside 0 to 1, which is
         // a direction outside the view, which is exactly what the drag means.
-        mouse::Event::CursorMoved { position } => viewpoint
-            .drag_to(uv(*position, bounds), aspect(bounds))
+        mouse::Event::CursorMoved { position } => scene
+            .steer(|viewpoint| viewpoint.drag_to(uv(*position, bounds), aspect(bounds)))
             .then(Action::request_redraw),
         // The release ends the grab wherever it lands, including off the
         // widget. `CursorLeft` is the case where it cannot land here at all:
         // the pointer left the window still held, so the release will be some
         // other window's.
         mouse::Event::ButtonReleased(mouse::Button::Left) | mouse::Event::CursorLeft => {
-            viewpoint.release();
+            scene.steer(Viewpoint::release);
             None
         }
         mouse::Event::WheelScrolled { delta } => {
             let at = cursor.position_over(bounds)?;
-            viewpoint.zoom(steps(*delta), uv(at, bounds), aspect(bounds));
+            scene.steer(|viewpoint| viewpoint.zoom(steps(*delta), uv(at, bounds), aspect(bounds)));
             Some(Action::request_redraw().and_capture())
         }
         _ => None,
@@ -205,6 +205,7 @@ fn aspect(bounds: Rectangle) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::fov_ceiling;
     use crate::{Camera, Nudge};
 
     const BOUNDS: Rectangle = Rectangle {
@@ -216,7 +217,11 @@ mod tests {
 
     struct Widget {
         scene: Scene,
-        viewpoint: Viewpoint,
+        /// Whatever iced keeps for this widget, which since issue #77 is
+        /// nothing. Kept here all the same, and thrown away in one test
+        /// below, because a state iced can rebuild under the app is the whole
+        /// of what that issue was.
+        state: (),
         cursor: mouse::Cursor,
     }
 
@@ -224,7 +229,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 scene: Scene::blank(),
-                viewpoint: Viewpoint::default(),
+                state: (),
                 cursor: mouse::Cursor::Available(Point::ORIGIN),
             }
         }
@@ -236,13 +241,8 @@ mod tests {
         }
 
         fn send(&mut self, event: Event) -> &mut Self {
-            let _: Option<Action<()>> = shader::Program::update(
-                &self.scene,
-                &mut self.viewpoint,
-                &event,
-                BOUNDS,
-                self.cursor,
-            );
+            let _: Option<Action<()>> =
+                shader::Program::update(&self.scene, &mut self.state, &event, BOUNDS, self.cursor);
             self
         }
 
@@ -267,17 +267,45 @@ mod tests {
                 }))
         }
 
+        fn scroll(&mut self, lines: f32) -> &mut Self {
+            self.send(Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: lines },
+            }))
+        }
+
+        /// Zoomed out to the far end, which is a ball with room around it,
+        /// with the pointer parked in the middle and nothing held.
+        fn scroll_to_the_ball(&mut self) -> &mut Self {
+            self.cursor_at(500.0, 250.0);
+            for _ in 0..40 {
+                self.scroll(-1.0);
+            }
+            assert_eq!(self.camera().fov, fov_ceiling(aspect(BOUNDS)));
+            self
+        }
+
+        /// What the view is looking at through a point of the window, in
+        /// window pixels. `None` is the room around the ball.
+        fn looking_at(&self, x: f32, y: f32) -> Option<[f32; 3]> {
+            self.camera()
+                .look(uv(Point::new(x, y), BOUNDS), aspect(BOUNDS))
+        }
+
+        /// Where the view points, read where `draw` reads it.
         fn camera(&self) -> Camera {
-            self.viewpoint.camera()
+            self.scene.viewpoint().camera()
+        }
+
+        /// What iced does when the widget tree changes shape under a widget:
+        /// the old state is dropped and a new one is built from scratch
+        /// (`iced_core::widget::Tree::diff`).
+        fn rebuild_state(&mut self) -> &mut Self {
+            self.state = <Scene as shader::Program<()>>::State::default();
+            self
         }
 
         fn interaction(&self) -> mouse::Interaction {
-            shader::Program::<()>::mouse_interaction(
-                &self.scene,
-                &self.viewpoint,
-                BOUNDS,
-                self.cursor,
-            )
+            shader::Program::<()>::mouse_interaction(&self.scene, &self.state, BOUNDS, self.cursor)
         }
     }
 
@@ -295,6 +323,34 @@ mod tests {
         let mut widget = Widget::new();
         widget.press(100.0, 100.0).move_to(400.0, 100.0);
         assert_ne!(widget.camera(), Camera::default());
+    }
+
+    /// Issue #77, at the level it happens: the pilot pans, the window changes
+    /// shape, and iced rebuilds this widget's state under him.
+    ///
+    /// Entering fullscreen is one of the changes that does it, because the
+    /// header bar goes with it and libcosmic pushes the header into the same
+    /// column as the content, so the content moves up a place and everything
+    /// under it is built fresh. Leaving fullscreen is another, and so is the
+    /// header bar hiding two seconds after the pointer stops. The camera has
+    /// to be somewhere none of that reaches.
+    #[test]
+    fn a_rebuilt_widget_state_holds_the_view() {
+        let mut widget = Widget::new();
+        widget
+            .press(100.0, 100.0)
+            .move_to(400.0, 180.0)
+            .release(400.0, 180.0);
+        let panned = widget.camera();
+        assert_ne!(panned, Camera::default(), "the pan moved nothing");
+
+        widget.rebuild_state();
+        assert_eq!(widget.camera(), panned);
+
+        // And the drag still works from where it left off, rather than from
+        // some camera the rebuild reset.
+        widget.press(400.0, 180.0).move_to(500.0, 180.0);
+        assert_ne!(widget.camera(), panned);
     }
 
     #[test]
@@ -402,6 +458,77 @@ mod tests {
 
         widget.send(redraw());
         assert_eq!(widget.camera(), zoomed);
+    }
+
+    /// Issue #83, through the events iced delivers: a drag is held, the zoom
+    /// key goes in, and the picture stays where the zoom left it until the
+    /// hand asks for something else. The nudge used to re-take the drag's
+    /// hold at the middle of the frame while the cursor was elsewhere, so the
+    /// next move -- this one, which goes nowhere at all -- hauled the picture
+    /// across.
+    #[test]
+    fn a_nudge_mid_drag_keeps_the_grab() {
+        let mut widget = Widget::new();
+        widget.press(200.0, 400.0).move_to(700.0, 150.0);
+
+        widget.scene.nudge(Nudge::ZoomOut);
+        widget.send(Event::Window(
+            window::Event::RedrawRequested(Instant::now()),
+        ));
+        let zoomed = widget.camera();
+        assert!(zoomed.fov > Camera::default().fov, "the key did not zoom");
+
+        widget.move_to(700.0, 150.0);
+        let moved = widget.camera();
+        assert!(
+            (moved.yaw - zoomed.yaw).abs() < 1e-4 && (moved.pitch - zoomed.pitch).abs() < 1e-4,
+            "the cursor stayed put and the view went from {zoomed:?} to {moved:?}",
+        );
+    }
+
+    /// Issue #92, the owner's steps in the events iced delivers: zoom all the
+    /// way out to the ball, press on the picture, drag out into the room
+    /// around it, scroll there, and keep dragging. The pan has to survive the
+    /// scroll.
+    ///
+    /// It did not. The wheel re-takes the drag's hold at the cursor, the room
+    /// has no direction under it to take hold of, and the drag was dropped
+    /// altogether: the zoom worked and every move after it moved nothing.
+    #[test]
+    fn a_wheel_zoom_over_the_room_keeps_the_drag() {
+        let mut widget = Widget::new();
+        widget.scroll_to_the_ball();
+        let ball = widget.camera();
+
+        // Where the ball is, and where the room around it is: the picture
+        // fills 40% of this window's width, so the middle is picture and a
+        // point a seventh of the way across is not.
+        let room = (150.0, 120.0);
+        assert!(widget.looking_at(500.0, 250.0).is_some(), "no ball");
+        assert!(
+            widget.looking_at(room.0, room.1).is_none(),
+            "the room around the ball is still picture",
+        );
+
+        widget.press(500.0, 250.0).move_to(room.0, room.1);
+        let dragged = widget.camera();
+        assert_ne!(dragged, ball, "the drag into the room moved nothing");
+
+        widget.scroll(1.0);
+        let zoomed = widget.camera();
+        assert!(zoomed.fov < dragged.fov, "the scroll did not zoom");
+        assert!(
+            widget.scene.viewpoint().is_dragging(),
+            "the scroll let go of the drag",
+        );
+
+        widget.move_to(room.0 + 200.0, room.1);
+        assert_ne!(
+            widget.camera(),
+            zoomed,
+            "the pan died at the scroll: the button is still down and the \
+             cursor moved 200 px",
+        );
     }
 
     /// The zoom is the widget's only other input, and it is not a grab: it

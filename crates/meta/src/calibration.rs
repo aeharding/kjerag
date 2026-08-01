@@ -504,15 +504,65 @@ impl GyroConfig {
 /// from=<seconds> sweep=1`, and docs/research/insv-format.md 8.5 has the
 /// tables.
 ///
-/// The default is the same string: the X-series mounting is the only one
-/// measured, and a guess with evidence behind it beats one without. It is
-/// **not** verified for a ONE X2, whose sensor roll is near 180 where an X4's
-/// is near 90 (issue #18's caution). Run the sweep above before believing a
-/// locked horizon on one.
+/// **The ONE X2 is `Zxy`, and it is not a near miss of the X4's** (issue
+/// #79, measured 2026-07-31 on three X2 captures). Held by the X4's `xZY`,
+/// an X2's accelerometer points **121 degrees** from where the picture says
+/// up is, which is the owner's "horizon is way wrong" and most of his
+/// "upside down" as well: the app locks the horizon by default, so a wrong
+/// vertical arrives as a picture turned over.
+///
+/// The 24-way sweep narrows an X2 to two candidates and stops there. `zYX`
+/// and `Zxy` are a half turn apart about `(1, -1, 0)`, and on this camera's
+/// resting attitudes that half turn moves the accelerometer's up by only
+/// 13 degrees, so each wins some stretches: 8.99 against 19.66 at one, 5.86
+/// against 25.92 the other way at another. What separates them is that this
+/// footage has no true horizon in it - it is a mountain launch, and the
+/// sky-to-ground line the finder locks onto is a ridge, which is not level.
+///
+/// So the last step is not a horizon at all. **Aim the view along what the
+/// accelerometer calls up, on a frame where the camera is not moving, and
+/// look at what is there.** At rest the accelerometer is gravity and
+/// nothing else, so the right convention points at the sky by physics.
+/// Three instants across two captures, each with the camera under 5 deg/s
+/// and inside 0.015 g of 1 g, and at each of them the two candidates point
+/// a half turn apart:
+///
+/// | capture, instant | `zYX` points at | `Zxy` points at |
+/// | --- | --- | --- |
+/// | 184419, 1.0 s | bare dirt | sky, and a helmet from below |
+/// | 184419, 5.0 s | dirt, and a pair of boots | sky, a helmet and the lines |
+/// | 191318, 1.0 s | dirt, and a pair of boots | sky, and a helmet from below |
+///
+/// A pair of boots seen from above is the nadir. The renders are
+/// `kyerag-spike --bin reframe -- <file.insv> time=5 yaw=15.1 pitch=39.4`
+/// and its half turn; they are frames of somebody's flying day, so they
+/// stay on the box.
+///
+/// telemetry-parser's no-`offset_v3` table names `xZy` for this model, and
+/// that is **not** this answer and could not have been: in Kyerag's frame
+/// `xZy` has determinant -1, so it is a reflection rather than a mounting,
+/// and the sweep does not even enumerate it. It is carried in
+/// `kyerag-spike --bin horizon` as a standing wrong answer instead, where
+/// it puts the line 22 degrees from where `Zxy` puts it. That is 8.4's
+/// point with a number on it: a string is only half of a convention, and
+/// the other half is the frame it lands in.
+///
+/// Held by `Zxy`, an X2's locked horizon holds to **0.11 degrees of
+/// standard deviation and 0.33 peak to peak** over the frames a horizon is
+/// findable in; held by `xZY` the finder reads **0 of 120 frames**, which
+/// is what a horizon 121 degrees off level looks like from a camera aimed
+/// at where it ought to be.
+///
+/// The default stays the X4's. It is now known to be wrong on one camera
+/// family rather than merely unverified, so a model that is not in this
+/// table gets a horizon nobody has checked; there is no better guess to
+/// make, and the check is one run of the sweep plus the zenith render
+/// above.
 fn imu_orientation(camera_model: &str) -> &'static str {
     match camera_model {
         m if m.starts_with("Insta360 X4") => "xZY",
         m if m.starts_with("Insta360 X5") => "xZY",
+        m if m.starts_with("Insta360 ONE X2") => "Zxy",
         _ => "xZY",
     }
 }
@@ -627,6 +677,8 @@ impl LensBlock {
 mod tests {
     use super::*;
     use crate::fixture;
+    use crate::orientation::axis_map;
+    use crate::rotation::dot;
 
     fn calibration() -> CalibrationSet {
         CalibrationSet::from_metadata(&fixture::metadata()).unwrap()
@@ -791,6 +843,35 @@ mod tests {
         assert_eq!(calibration().gyro.imu_orientation, "xZY");
         assert_eq!(imu_orientation("Insta360 X4"), "xZY");
         assert_eq!(imu_orientation("Insta360 X5"), "xZY");
+    }
+
+    /// **Issue #79.** The ONE X2's IMU is not mounted the way an X4's is, and
+    /// the difference is not small: held by the X4's string, an X2's
+    /// accelerometer points 121 degrees from the picture's own up.
+    ///
+    /// The two strings have to be genuinely different rotations, or the
+    /// entry above is decoration. The arithmetic for that is here, where a
+    /// change to either string breaks it, rather than in a comment.
+    #[test]
+    fn the_one_x2_gets_its_own_measured_imu_orientation() {
+        assert_eq!(imu_orientation("Insta360 ONE X2"), "Zxy");
+        assert_ne!(
+            imu_orientation("Insta360 ONE X2"),
+            imu_orientation("Insta360 X4 Air")
+        );
+
+        // Both are rotations, as an IMU's three right-handed axes must be.
+        for axes in ["Zxy", "xZY"] {
+            assert!((axis_map(axes).determinant() - 1.0).abs() < 1e-12, "{axes}");
+        }
+        // And they are a long way apart: a resting reading sent through one
+        // and then back through the other lands 121 degrees from where it
+        // started, which is the size of the defect the owner reported.
+        let resting = [0.0, -1.0, 0.0];
+        let x2 = axis_map("Zxy").mul_vec(resting);
+        let x4 = axis_map("xZY").mul_vec(resting);
+        let apart = dot(x2, x4).clamp(-1.0, 1.0).acos().to_degrees();
+        assert!(apart > 89.0, "the two conventions are only {apart} apart");
     }
 
     /// The whole chain from the file to the sensor's axes, checked at the

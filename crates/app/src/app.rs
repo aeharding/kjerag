@@ -48,7 +48,7 @@ use cosmic::iced::keyboard::key::{Key, Physical};
 use cosmic::iced::keyboard::{Event as KeyEvent, Modifiers};
 use cosmic::iced::mouse::Event as MouseEvent;
 use cosmic::iced::runtime::clipboard;
-use cosmic::iced::widget::shader;
+use cosmic::iced::widget::{Stack, shader};
 use cosmic::iced::window::{self, Mode};
 use cosmic::iced::{Alignment, Length, Limits, Subscription, time};
 use cosmic::widget::about::About;
@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Horizon, Nudge, Request, Scene, Stats};
+use kyerag_render::{Accuracy, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -70,6 +70,17 @@ use crate::{menu, shot, strings};
 /// GPL-3.0, attributed in the files themselves).
 const JUMP_BACKWARD_ICON: &[u8] = include_bytes!("../res/icons/jump-backward-10-symbolic.svg");
 const JUMP_FORWARD_ICON: &[u8] = include_bytes!("../res/icons/jump-forward-10-symbolic.svg");
+
+/// The app icon, for the About page and the welcome view. The drawing itself,
+/// rather than the `icon::from_name(Self::APP_ID)` cosmic-edit passes to the
+/// same setter (`src/main.rs:1454-1468`): a name resolves through the icon
+/// theme, and these icons are installed as `dev.harding.Kjerag` while the
+/// binary still calls itself `app.kyerag.Kyerag`, so the lookup finds nothing.
+///
+/// TODO(#75): revisit at the rename, remembering that a name still resolves
+/// to nothing for a build run out of the source tree.
+const APP_ICON: &[u8] =
+    include_bytes!("../../../resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg");
 
 /// How long the pointer has to sit still before the controls, the header bar
 /// and the cursor go away (cosmic-player `src/main.rs:45`).
@@ -90,24 +101,32 @@ const CONTROLS_POLL: Duration = Duration::from_millis(250);
 /// way to see dropped frames without a profiler.
 const REPORT_EVERY: Duration = Duration::from_secs(5);
 
+/// How long a toast stays up, and how many are kept: libcosmic's own numbers
+/// (`src/widget/toaster/mod.rs:79-85`, `162-181`), which cosmic-files takes
+/// unchanged.
+const TOAST_FOR: Duration = Duration::from_secs(5);
+const TOASTS: usize = 5;
+
 /// Width of the volume popup (cosmic-player `src/main.rs:1924`).
 const VOLUME_POPUP: f32 = 240.0;
 
 /// Runs the shell.
-pub fn run(input: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(input: Option<PathBuf>, at: Option<Framing>) -> Result<(), Box<dyn std::error::Error>> {
     let stored = Stored::load(App::APP_ID);
     let settings = Settings::default()
         .size_limits(Limits::NONE.min_width(360.0).min_height(240.0))
         // The window opens in the configured theme rather than flashing the
         // default one first (cosmic-player `src/main.rs:154-155`).
         .theme(stored.config.app_theme.theme());
-    cosmic::app::run::<App>(settings, Flags { stored, input })?;
+    cosmic::app::run::<App>(settings, Flags { stored, input, at })?;
     Ok(())
 }
 
 pub struct Flags {
     stored: Stored,
     input: Option<PathBuf>,
+    /// Where to land, when the command line named a view as well as a file.
+    at: Option<Framing>,
 }
 
 #[derive(Clone, Debug)]
@@ -147,8 +166,23 @@ pub enum Message {
     /// Take a still of the view as it stands: `s`, `Ctrl+C`, the camera
     /// button, or either File menu item (issue #15).
     Capture(Destination),
-    /// One came back, some milliseconds later, off the render thread.
-    Captured(Result<Done, String>),
+    /// One came back, some milliseconds later, off the render thread. It
+    /// carries what was asked for as well as what happened, because a failure
+    /// has to say which of the two it was.
+    Captured(Destination, Result<Done, String>),
+    /// A toast's close button, or its own five seconds running out: both
+    /// arrive here (cosmic-files `src/app.rs:3008-3010`).
+    CloseToast(u64),
+    /// Put the view on the clipboard as one line of text: `i`, or
+    /// `File > Copy current view reference`.
+    CopyView,
+    /// Go where a copied line says: `Ctrl+V`, or
+    /// `File > Go to copied view reference`. The clipboard is read by a task,
+    /// so the text arrives in the message below.
+    PasteView,
+    /// What the clipboard turned out to hold. `None` is an empty clipboard,
+    /// and most of what is not `None` is not a view either.
+    PastedView(Option<String>),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -179,15 +213,18 @@ pub struct App {
     core: Core,
     /// The file on screen, if there is one.
     open: Option<Open>,
-    /// Set when the last attempt to open a file did not work, which puts a
-    /// second line under the welcome view's first.
-    failed: bool,
+    /// The line under the welcome view's first, set when the last attempt to
+    /// open a file did not work. It holds the line rather than a flag because
+    /// which line it is depends on why the open failed (issue #69).
+    failed: Option<String>,
     stored: Stored,
     key_binds: HashMap<KeyBind, Action>,
     about: About,
     context_page: ContextPage,
     /// The theme names the settings dropdown shows, in its own order.
     themes: Vec<String>,
+    /// What a capture says when it lands.
+    toasts: Toasts,
     controls: Controls,
     /// Set while the scrubber is being dragged, to whether the file was
     /// playing when the drag started. cosmic-player pauses for the drag and
@@ -212,6 +249,97 @@ struct Open {
     /// instant to ask with, so this is refreshed by whichever message caused
     /// the rebuild.
     position: Duration,
+}
+
+/// The lines a capture leaves on screen, newest last.
+///
+/// libcosmic's `toaster::Toasts` is the model and the numbers are its own
+/// ([`TOASTS`], [`TOAST_FOR`]). It is not that type because that type is only
+/// readable by the widget that draws it, and that widget nails its stack to
+/// the bottom of the window, which is where the control row lives
+/// (docs/UI.md, "The capture toast").
+#[derive(Default)]
+struct Toasts {
+    lines: Vec<Toast>,
+    /// Never reused, so the line a dismissal names is the line it was pushed
+    /// with: the five second task of a line already dropped for being the
+    /// sixth closes nothing.
+    next: u64,
+}
+
+struct Toast {
+    id: u64,
+    message: String,
+}
+
+impl Toasts {
+    fn push(&mut self, message: String) -> u64 {
+        let id = self.next;
+        self.lines.push(Toast { id, message });
+        self.next += 1;
+        if self.lines.len() > TOASTS {
+            self.lines.remove(0);
+        }
+        id
+    }
+
+    fn close(&mut self, id: u64) {
+        self.lines.retain(|toast| toast.id != id);
+    }
+}
+
+/// What a pasted line asks the window to do, given what is already on screen.
+///
+/// A paste is the one input that arrives with no idea what it is. Deciding
+/// here rather than inside the shell is what lets all four answers be read in
+/// one place, and tested with no window and no file.
+#[derive(Clone, Debug, PartialEq)]
+enum Goto {
+    /// Nothing this app can read. No toast, no line, nothing at all:
+    /// `Ctrl+V` over a video means nothing in any other player either, and a
+    /// player that argues with every paste is a player nobody pastes into.
+    Nothing,
+    /// The file already on screen: seek and turn, and that is the whole of
+    /// it.
+    Here(Framing),
+    /// A view of some other file, named with the directories to find it in.
+    /// That is the terminal line, which is the one a pilot has in a report.
+    Open(PathBuf, Framing),
+    /// A view of some other file, named by that file alone. There is nothing
+    /// to open and nowhere to go; all the window can do is say which video
+    /// the line belongs to.
+    Elsewhere(PathBuf),
+}
+
+impl Goto {
+    fn read(text: Option<&str>, open: Option<&Path>) -> Self {
+        let Some((file, framing)) = text.and_then(Framing::read_line) else {
+            return Self::Nothing;
+        };
+        if names(open, &file) {
+            return Self::Here(framing);
+        }
+        match file.parent().is_some_and(|up| !up.as_os_str().is_empty()) {
+            true => Self::Open(file, framing),
+            false => Self::Elsewhere(file),
+        }
+    }
+}
+
+/// Whether a line naming `file` is naming the file on screen.
+///
+/// A copied line carries the name alone and a printed one carries the path,
+/// so both have to answer yes for the file being watched: the name is what a
+/// copy has, and the whole path is what tells two videos of the same name in
+/// two folders apart.
+fn names(open: Option<&Path>, file: &Path) -> bool {
+    let Some(open) = open else {
+        return false;
+    };
+    match file.parent().is_some_and(|up| !up.as_os_str().is_empty()) {
+        true => open == file,
+        false => open.file_name() == Some(file.as_os_str()),
+    }
 }
 
 /// The overlay's visibility, and when the pointer last asked for it.
@@ -246,18 +374,24 @@ impl cosmic::Application for App {
     /// toggle to the header only when there is a model to toggle
     /// (`src/app/mod.rs:786`), and we have no playlist.
     fn init(mut core: Core, flags: Flags) -> (Self, Task<Self::Message>) {
-        // libcosmic's content container insets the app's view by
-        // `border_padding` on the right and, because `nav_bar.active`
-        // defaults to true even for an app with no nav model, by nothing on
-        // the left (`app/mod.rs`, `main_content_padding`). Measured at scale
-        // 1.25: 1 physical px of window border on the left against 10 on the
-        // right. Video wants both edges, so the container comes off.
-        core.window.content_container = false;
+        // Video wants both window edges, and this is cosmic-player's way of
+        // getting them (`src/main.rs:895`): zero the border padding and keep
+        // libcosmic's content container. `main_content_padding` is then
+        // `[0, 0, 0, 0]` (`app/mod.rs:632-639`), which is the same view as
+        // turning the container off, with the window background that turning
+        // it off takes away: libcosmic paints
+        // `background(theme.transparent).base` only on the container branch
+        // (`app/mod.rs:856-874`), and that colour is the whole of what makes
+        // a COSMIC window a darkened pane over the compositor's blur rather
+        // than bare blur. cosmic-files leaves the container on for the same
+        // reason and never paints a background of its own
+        // (`src/app.rs:2352-2367`, container off in desktop mode only).
+        core.window.border_padding = Some(0);
 
         let mut app = App {
             core,
             open: None,
-            failed: false,
+            failed: None,
             stored: flags.stored,
             key_binds: key_binds(),
             about: about(),
@@ -267,6 +401,7 @@ impl cosmic::Application for App {
                 strings::THEME_DARK.to_owned(),
                 strings::THEME_LIGHT.to_owned(),
             ],
+            toasts: Toasts::default(),
             controls: Controls {
                 shown: true,
                 since: Instant::now(),
@@ -282,6 +417,12 @@ impl cosmic::Application for App {
             Some(path) => app.update(Message::FileLoad(path)),
             None => app.retitle(),
         };
+        // A view named on the command line lands with no toast. Nothing was
+        // pasted and nobody needs telling what they just typed; the window
+        // opening at that view is the whole of the answer.
+        if let Some(at) = flags.at {
+            app.place(at);
+        }
         (app, task)
     }
 
@@ -331,7 +472,7 @@ impl cosmic::Application for App {
                 // First file wins, others are ignored.
                 let Some(path) = dropped.and_then(|files| files.0.into_iter().next()) else {
                     eprintln!("kyerag: that drop carried no local file");
-                    self.failed = true;
+                    self.failed = Some(strings::open_failed(None));
                     return Task::none();
                 };
                 return self.update(Message::FileLoad(path));
@@ -342,7 +483,7 @@ impl cosmic::Application for App {
             }
             Message::FileClose => {
                 self.open = None;
-                self.failed = false;
+                self.failed = None;
                 self.show_controls(now);
                 return self.retitle();
             }
@@ -409,7 +550,19 @@ impl cosmic::Application for App {
                 self.show_controls(now);
                 return self.capture(to);
             }
-            Message::Captured(still) => return report_still(still),
+            Message::Captured(to, still) => return self.captured(to, still),
+            Message::CloseToast(id) => self.toasts.close(id),
+            Message::CopyView => {
+                self.show_controls(now);
+                return self.copy_view();
+            }
+            Message::PasteView => {
+                self.show_controls(now);
+                // The clipboard is somebody else's process on Wayland, so
+                // reading it is a task and not a call.
+                return clipboard::read().map(|text| action::app(Message::PastedView(text)));
+            }
+            Message::PastedView(text) => return self.go_to_view(text.as_deref()),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -530,10 +683,26 @@ impl cosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let content = match &self.open {
+        let shown = match &self.open {
             Some(open) => self.playing(open),
             None => self.welcome(),
         };
+        // A layer over the picture rather than a row beside it, so the toast
+        // hangs under the header and the picture keeps the whole window.
+        // `Stack` only takes the cursor away from the layer beneath where the
+        // layer above reports an interaction for it
+        // (`iced/widget/src/stack.rs`, `update`), so the drag that looks
+        // around still starts anywhere except on a toast's close button, and
+        // `overlay::from_children` keeps the control row's overlay working
+        // under it.
+        //
+        // The layer is mounted whether or not there is a toast in it, so the
+        // shape of the tree around the picture never changes. Building the
+        // stack only when a toast arrives was measured under the harness and
+        // is not a free rearrangement: the toast reached the screen on the
+        // first capture after it landed with a fixed tree, and on the sixth,
+        // two seconds later, with a tree that grew a layer.
+        let content = Stack::with_children(vec![shown, self.toast_stack()]);
         // cosmic-player implements no drag and drop, so this follows
         // cosmic-files (`src/app.rs:6491-6496`). The destination is the whole
         // window rather than only the video: a file dropped on "No video
@@ -611,7 +780,7 @@ impl App {
     fn load(&mut self, path: &Path) {
         match Scene::open(path) {
             Ok(scene) => {
-                self.failed = false;
+                self.failed = None;
                 self.open = Some(Open {
                     path: path.to_path_buf(),
                     duration: scene.duration(),
@@ -625,7 +794,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("kyerag: {} not shown: {e}", path.display());
-                self.failed = true;
+                self.failed = Some(strings::open_failed(missing_decoder(&*e)));
                 self.open = None;
             }
         }
@@ -719,7 +888,7 @@ impl App {
     ///
     /// Nothing here touches the picture. The render pass takes the request on
     /// its next redraw, a worker thread reads the pixels back and either
-    /// writes the PNG or encodes it for the clipboard, and this task is woken
+    /// writes a JPEG or encodes a PNG for the paste, and this task is woken
     /// when that is done. The clipboard is the one step that has to come back
     /// to the shell, because on Wayland it is the window that offers the data.
     fn capture(&self, to: Destination) -> Task<Message> {
@@ -727,21 +896,187 @@ impl App {
             return Task::none();
         };
         let video = open.path.clone();
+        // Read as the capture is armed, and printed against the frame the
+        // redraw after this one actually caught: a still taken with a drag in
+        // flight can be one redraw of turning ahead of the line.
+        let camera = open.scene.viewpoint().camera();
+        let horizon = open.scene.horizon();
         let (finished, waiting) = oneshot::channel();
         open.scene.capture(Request {
             width: shot::WIDTH,
             then: Box::new(move |taken| {
                 let done = taken
-                    .and_then(|still| shot::finish(&still, &video, to))
+                    .and_then(|still| {
+                        // A JPEG carries the video and the timecode in its
+                        // name and no direction anywhere, so where the still
+                        // was looking is only ever recoverable from here.
+                        // Printed before the answer is sent, which is what
+                        // puts it above the `shot:` line the shell writes
+                        // when it arrives.
+                        let framing = Framing {
+                            at: still.time,
+                            camera,
+                            horizon,
+                        };
+                        println!("view:   {}", framing.printed(&video));
+                        shot::finish(&still, &video, to)
+                    })
                     .map_err(|e| e.to_string());
                 let _ = finished.send(done);
             }),
         });
-        Task::perform(waiting, |done| {
-            action::app(Message::Captured(done.unwrap_or_else(|_| {
-                Err("the capture was replaced before a redraw took it".to_owned())
-            })))
+        Task::perform(waiting, move |done| {
+            action::app(Message::Captured(
+                to,
+                done.unwrap_or_else(|_| {
+                    Err("the capture was replaced before a redraw took it".to_owned())
+                }),
+            ))
         })
+    }
+
+    /// Says where the still went, and puts it on the clipboard when that is
+    /// what was asked for.
+    ///
+    /// The terminal line stays: it is what the headless harness reads, and it
+    /// carries the whole path, which the toast deliberately does not.
+    fn captured(&mut self, to: Destination, still: Result<Done, String>) -> Task<Message> {
+        match still {
+            Ok(Done::Saved(path)) => {
+                println!("shot:   {}", path.display());
+                self.toast(strings::frame_saved(&path))
+            }
+            Ok(Done::Copied(png)) => {
+                println!("shot:   copied");
+                Task::batch([
+                    self.toast(strings::FRAME_COPIED.to_owned()),
+                    clipboard::write_data(png),
+                ])
+            }
+            Err(e) => {
+                eprintln!("kyerag: no still: {e}");
+                self.toast(strings::capture_failed(to, &e))
+            }
+        }
+    }
+
+    /// The view as one line of `reframe`'s own arguments, on the clipboard
+    /// and on the terminal.
+    ///
+    /// What a report about a 360 video is missing is the direction it was
+    /// pointing, and this is the whole of the fix: which video, which frame,
+    /// and the three angles, in a line that can be pasted into an issue and
+    /// run as a command. The clipboard copy carries the file's name and the
+    /// terminal one carries its path ([`Framing`]).
+    ///
+    /// The frame is the one on screen rather than the clock's position: a
+    /// paused scrub shows the keyframe it landed on, and what is asked for
+    /// here is the picture the pilot is looking at.
+    fn copy_view(&mut self) -> Task<Message> {
+        let Some(open) = &self.open else {
+            return Task::none();
+        };
+        let framing = Framing {
+            at: open.scene.frame().map_or(open.position, |(_, time)| time),
+            camera: open.scene.viewpoint().camera(),
+            horizon: open.scene.horizon(),
+        };
+        println!("view:   {}", framing.printed(&open.path));
+        let line = framing.copied(&open.path);
+        Task::batch([
+            self.toast(strings::VIEW_COPIED.to_owned()),
+            clipboard::write(line),
+        ])
+    }
+
+    /// Go where a copied line says: the frame it names, the direction it was
+    /// pointing, and the horizon it was held with.
+    ///
+    /// This is the other half of [`Self::copy_view`], and the pair is what
+    /// makes the line a place rather than a label. The four things a paste
+    /// can be are [`Goto`]'s four answers, decided there so they can be read
+    /// and tested without a window.
+    fn go_to_view(&mut self, text: Option<&str>) -> Task<Message> {
+        let open = self.open.as_ref().map(|open| open.path.as_path());
+        match Goto::read(text, open) {
+            Goto::Nothing => Task::none(),
+            Goto::Elsewhere(file) => self.toast(strings::view_is_from(&file)),
+            Goto::Here(framing) => {
+                self.place(framing);
+                self.toast(strings::WENT_TO_VIEW.to_owned())
+            }
+            Goto::Open(file, framing) => {
+                self.load(&file);
+                let titled = self.retitle();
+                if self.open.is_none() {
+                    return titled;
+                }
+                self.place(framing);
+                Task::batch([titled, self.toast(strings::WENT_TO_VIEW.to_owned())])
+            }
+        }
+    }
+
+    /// Put the window at a framing: seek to the frame, point the view, hold
+    /// the horizon the way it was held.
+    ///
+    /// A jump and not an animation. The seek is the exact one rather than the
+    /// keyframe a scrub settles for, because the line names one frame; the
+    /// camera lands on the next redraw, which is the only place the far end
+    /// of the zoom can be clamped to this window's shape ([`Nudge::Point`]).
+    ///
+    /// The lock is written to the config, which is what pressing `h` does:
+    /// there is one horizon setting and a view that was copied held is not
+    /// the same view unheld.
+    fn place(&mut self, framing: Framing) {
+        let locked = matches!(framing.horizon, Horizon::Locked);
+        if self.stored.config.horizon_lock != locked {
+            self.stored.config.horizon_lock = locked;
+            self.stored.write_config();
+        }
+        self.hold_horizon();
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        println!("goto:   {}", framing.printed(&open.path));
+        open.position = framing.at.min(open.duration);
+        open.scene.seek(open.position, Accuracy::Exact);
+        open.scene.nudge(Nudge::Point(framing.camera));
+    }
+
+    /// One toast, and the task that takes it away again five seconds later.
+    /// That is libcosmic's own dismissal, moved out of `Toasts::push` with
+    /// nothing else changed: a sleep on the async runtime rather than a timer
+    /// the shell has to keep, so a toast that is up costs no redraws
+    /// (`src/widget/toaster/mod.rs:183-196`).
+    fn toast(&mut self, message: String) -> Task<Message> {
+        let id = self.toasts.push(message);
+        cosmic::task::future(async move {
+            tokio::time::sleep(TOAST_FOR).await;
+            Message::CloseToast(id)
+        })
+        .map(cosmic::Action::App)
+    }
+
+    /// The toasts, under the header and centered, newest first: cosmic-files'
+    /// stack order (libcosmic `src/widget/toaster/mod.rs:56-63`, which reads
+    /// its queue back to front) against the top edge instead of the bottom
+    /// one.
+    fn toast_stack(&self) -> Element<'_, Message> {
+        let spacing = theme::active().cosmic().spacing;
+        let lines = self.toasts.lines.iter().rev().fold(
+            widget::column::with_capacity(self.toasts.lines.len()).spacing(spacing.space_xxxs),
+            |column, toast| column.push(toast_line(toast, spacing)),
+        );
+        widget::column::with_children(vec![lines.into(), widget::space::vertical().into()])
+            .align_x(Alignment::Center)
+            // Clear of the menu bar rather than tucked under it: the header
+            // is the one part of the window a pointer goes to while a capture
+            // is landing.
+            .padding([spacing.space_m, spacing.space_none])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn report(&mut self, now: Instant) {
@@ -763,14 +1098,21 @@ impl App {
 
     /// Nothing open: an icon, a line saying so, and the button that fixes it
     /// (cosmic-player `src/main.rs:1676-1695`).
+    ///
+    /// The mark is the app icon at the size a first-party empty state draws
+    /// one: cosmic-files' empty folder is `.size(64)` over a `text::body`,
+    /// and ours is twice that at the owner's direction (2026-07-31)
+    /// line (`src/tab.rs:5627-5655`), and cosmic-player's welcome view is the
+    /// same shape. It used to be `video-x-generic-symbolic`, which said
+    /// "video" where the window can already say which video player this is.
     fn welcome(&self) -> Element<'_, Message> {
         let mut said = widget::column::with_capacity(3)
             .align_x(Alignment::Center)
             .spacing(8)
-            .push(widget::icon::from_name("video-x-generic-symbolic").size(64))
+            .push(icon::from_svg_bytes(APP_ICON).icon().size(128))
             .push(widget::text::body(strings::NOTHING_OPEN));
-        if self.failed {
-            said = said.push(widget::text::body(strings::OPEN_FAILED));
+        if let Some(line) = &self.failed {
+            said = said.push(widget::text::body(line.as_str()));
         }
         widget::column::with_capacity(4)
             .align_x(Alignment::Center)
@@ -899,28 +1241,29 @@ impl App {
     }
 }
 
-/// Says where the still went, and puts it on the clipboard when that is what
-/// was asked for.
-///
-/// A line on the terminal is all the feedback there is today. docs/UI.md asks
-/// for a toast here and leaves its wording, and whether it carries an action,
-/// as an open question for the owner (its "Open questions", 2): not this
-/// PR's to settle.
-fn report_still(still: Result<Done, String>) -> Task<Message> {
-    match still {
-        Ok(Done::Saved(path)) => {
-            println!("shot:   {}", path.display());
-            Task::none()
-        }
-        Ok(Done::Copied(png)) => {
-            println!("shot:   copied");
-            clipboard::write_data(png)
-        }
-        Err(e) => {
-            eprintln!("kyerag: no still: {e}");
-            Task::none()
-        }
-    }
+/// One toast, built out of the same pieces libcosmic's own toaster builds one
+/// out of (`src/widget/toaster/mod.rs:33-54`): the line, a close button, and
+/// a tooltip-class container around both, with its paddings and spacings.
+/// libcosmic's version has a second, optional action button in there; ours
+/// never carries an action (docs/UI.md), so it is one button.
+fn toast_line(toast: &Toast, spacing: cosmic_theme::Spacing) -> Element<'_, Message> {
+    let inside = widget::row::with_capacity(2)
+        .align_y(Alignment::Center)
+        .spacing(spacing.space_s)
+        .push(widget::text(&toast.message))
+        .push(
+            widget::button::icon(icon::from_name("window-close-symbolic"))
+                .on_press(Message::CloseToast(toast.id)),
+        );
+    widget::container(inside)
+        .padding([
+            spacing.space_xxs,
+            spacing.space_s,
+            spacing.space_xxs,
+            spacing.space_m,
+        ])
+        .class(theme::Container::Tooltip)
+        .into()
 }
 
 /// One row of the overlay: cosmic-player's padding and background
@@ -1044,6 +1387,21 @@ fn shift(from: Duration, seconds: f64) -> Duration {
     }
 }
 
+/// The codec a failed open could find no decoder for, and `None` for every
+/// other failure (issue #69).
+///
+/// The engine hands the shell one boxed error from the whole open, and the box
+/// arrives with whatever was put in it: `kyerag-media` refuses a stream whose
+/// codec has no decoder with a [`MissingDecoder`], and nothing between here
+/// and there re-wraps it. So this is a downcast rather than a string match.
+///
+/// The `'static` on the trait object is what makes the downcast legal: without
+/// it the reference's own lifetime becomes the object's, and `downcast_ref` is
+/// only implemented for `dyn Error + Send + Sync + 'static`.
+fn missing_decoder(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Option<&'static str> {
+    Some(e.downcast_ref::<MissingDecoder>()?.codec)
+}
+
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
 fn chooser() -> Task<Message> {
     Task::perform(
@@ -1073,10 +1431,14 @@ fn chooser() -> Task<Message> {
 /// No `developers([...])`: that setter turns name and email pairs into
 /// `mailto:` links, and this repository does not publish personal addresses.
 /// The name is in `author` and contact goes through the repository link.
+///
+/// The widget takes an `icon::Handle` and draws it at 128 px
+/// (libcosmic `src/widget/about.rs:132-141`), so the drawing goes in
+/// directly. See [`APP_ICON`] for why it is not asked for by name.
 fn about() -> About {
     About::default()
         .name(strings::APP_NAME)
-        .icon(icon::from_name(App::APP_ID))
+        .icon(icon::from_svg_bytes(APP_ICON))
         .version(env!("CARGO_PKG_VERSION"))
         .author(strings::AUTHOR)
         .comments(strings::COMMENTS)
@@ -1085,4 +1447,168 @@ fn about() -> About {
             (strings::REPOSITORY, strings::REPOSITORY_URL),
             (strings::SUPPORT, strings::SUPPORT_URL),
         ])
+}
+
+/// What the shell decides on its own: which line a failed open leaves on the
+/// welcome view, what a paste turns out to be asking for, and the three rules
+/// of the toast queue, which is ours now rather than libcosmic's and so is
+/// tested rather than taken on trust.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A line of the open file's own, as the clipboard would hold it: the
+    /// name alone, which is all a copy ever carries.
+    const COPIED: &str = "VID_0001.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+    /// And as the terminal prints it, with the path in front.
+    const PRINTED: &str =
+        "/home/pilot/Videos/VID_0001.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+
+    fn watching() -> PathBuf {
+        PathBuf::from("/home/pilot/Videos/VID_0001.insv")
+    }
+
+    fn read(text: &str, open: Option<&Path>) -> Goto {
+        Goto::read(Some(text), open)
+    }
+
+    /// (a) The file on screen, named either way. A copy carries the name and
+    /// a printed line carries the path, and both are this video.
+    #[test]
+    fn a_reference_to_the_open_file_goes_there() {
+        let open = watching();
+        assert!(matches!(read(COPIED, Some(&open)), Goto::Here(_)));
+        assert!(matches!(read(PRINTED, Some(&open)), Goto::Here(_)));
+
+        let Goto::Here(framing) = read(COPIED, Some(&open)) else {
+            panic!("not here");
+        };
+        assert!((framing.at.as_secs_f64() - 754.321).abs() < 0.000_5);
+        assert!((framing.camera.yaw.to_degrees() + 37.42).abs() < 0.005);
+        assert_eq!(framing.horizon, Horizon::Locked);
+    }
+
+    /// (c) A name that is not the open file's, with nothing to find it by.
+    /// Nowhere to go, so the window says which video it belongs to and stays
+    /// where it is.
+    #[test]
+    fn a_reference_to_another_video_says_which_one() {
+        let open = watching();
+        let elsewhere = COPIED.replace("VID_0001", "VID_0002");
+        assert_eq!(
+            read(&elsewhere, Some(&open)),
+            Goto::Elsewhere(PathBuf::from("VID_0002.insv"))
+        );
+        // And with nothing open at all, which is the same answer: a name is
+        // not enough to open anything.
+        assert_eq!(
+            read(COPIED, None),
+            Goto::Elsewhere(PathBuf::from("VID_0001.insv"))
+        );
+    }
+
+    /// (b) A whole path that is not the file on screen: open it, then go.
+    /// That is the terminal line, which is the one a pilot has in a report.
+    #[test]
+    fn a_reference_carrying_a_path_opens_that_video() {
+        let other = PathBuf::from("/home/pilot/Videos/VID_0002.insv");
+        let printed = PRINTED.replace("VID_0001", "VID_0002");
+        assert!(matches!(read(&printed, Some(&watching())), Goto::Open(file, _) if file == other));
+        assert!(matches!(read(&printed, None), Goto::Open(file, _) if file == other));
+    }
+
+    /// Two videos of the same name in two folders are two videos, and only a
+    /// line carrying the path can tell them apart.
+    #[test]
+    fn the_same_name_in_another_folder_is_another_video() {
+        let printed = PRINTED.replace("/Videos/", "/Videos/2026/");
+        assert!(matches!(
+            read(&printed, Some(&watching())),
+            Goto::Open(_, _)
+        ));
+    }
+
+    /// (d) Everything else a clipboard holds, which is nearly all of it.
+    /// Nothing happens and nothing is said: `Ctrl+V` over a video means
+    /// nothing in any other player either.
+    #[test]
+    fn anything_that_is_not_a_reference_does_nothing() {
+        let open = watching();
+        for text in [
+            None,
+            Some(""),
+            Some("https://example.com"),
+            Some("VID.insv"),
+        ] {
+            assert_eq!(Goto::read(text, Some(&open)), Goto::Nothing, "{text:?}");
+        }
+    }
+
+    /// The shell has to tell a build with no decoder apart from a file it
+    /// cannot read, because they get different lines and only one of them is
+    /// the pilot's to fix (issue #69). This is that test with the probe stood
+    /// in for: the error is built by hand, the way `kyerag-media` builds it on
+    /// a box whose ffmpeg has no HEVC in it.
+    #[test]
+    fn a_missing_decoder_is_told_apart_from_a_file_that_will_not_open() {
+        let missing: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(MissingDecoder { codec: "hevc" });
+        assert_eq!(missing_decoder(&*missing), Some("hevc"));
+        assert!(strings::open_failed(missing_decoder(&*missing)).contains("HEVC"));
+
+        let broken: Box<dyn std::error::Error + Send + Sync> = "file has no video stream".into();
+        assert_eq!(missing_decoder(&*broken), None);
+        assert_eq!(
+            strings::open_failed(missing_decoder(&*broken)),
+            strings::OPEN_FAILED
+        );
+    }
+
+    fn lines(toasts: &Toasts) -> Vec<&str> {
+        toasts
+            .lines
+            .iter()
+            .map(|toast| toast.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn five_are_kept_and_the_oldest_goes_first() {
+        let mut toasts = Toasts::default();
+        for i in 0..7 {
+            toasts.push(i.to_string());
+        }
+        assert_eq!(lines(&toasts), ["2", "3", "4", "5", "6"]);
+    }
+
+    /// Ids are never reused, so the close button on a line that is still up
+    /// cannot take away a later one that landed in its place.
+    #[test]
+    fn closing_one_leaves_the_rest() {
+        let mut toasts = Toasts::default();
+        let first = toasts.push("first".to_owned());
+        toasts.push("second".to_owned());
+        toasts.close(first);
+        assert_eq!(lines(&toasts), ["second"]);
+        toasts.close(first);
+        assert_eq!(lines(&toasts), ["second"]);
+    }
+
+    /// A line dropped for being the sixth still has five seconds of its own
+    /// left to run, and what it names by then may be a line the pilot has
+    /// only just been shown.
+    #[test]
+    fn a_dropped_line_dismisses_nothing_later() {
+        let mut toasts = Toasts::default();
+        let mut dropped = 0;
+        for i in 0..6 {
+            let id = toasts.push(i.to_string());
+            if i == 0 {
+                dropped = id;
+            }
+        }
+        assert_eq!(lines(&toasts), ["1", "2", "3", "4", "5"]);
+        toasts.close(dropped);
+        assert_eq!(lines(&toasts), ["1", "2", "3", "4", "5"]);
+    }
 }

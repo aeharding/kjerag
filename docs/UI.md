@@ -51,15 +51,69 @@ implementing agent to settle alone.
 
 One window, no tabs, one file at a time.
 
-- `core.window.content_container = false`, already set and already
-  explained in `crates/app/src/app.rs`: video wants both window edges.
-  cosmic-player reaches the same place from the other direction, with
-  `core.window.border_padding = Some(0)` (`src/main.rs:895`).
+- `core.window.border_padding = Some(0)`, which is cosmic-player's own line
+  (`src/main.rs:895`): video wants both window edges, and this is the way to
+  them that keeps libcosmic's content container. The container was turned
+  off instead until issue #93, and the difference is the window background;
+  see "The background" below.
 - Size limits stay as they are (360 x 240). cosmic-player uses 360 x 180
   (`src/main.rs:156`).
 - `Settings::default().theme(config.app_theme.theme())` at startup, so the
   window opens in the configured theme rather than flashing the default
   one (cosmic-player `src/main.rs:154-155`).
+
+### The background
+
+**A COSMIC window is a darkened pane over the compositor's blur, and the app
+paints the pane.** Issue #93, from the owner looking at the welcome view
+with blur on: "just a blur without darkening the bg. Should be like the
+finder, and the body should have that OS-wide darkened area."
+
+The composition, read at the revisions above:
+
+1. The surface is created transparent (libcosmic `src/app/settings.rs:100`,
+   plumbed at `src/app/mod.rs:89`) and cleared transparent
+   (`src/app/cosmic.rs:549-563`; the opaque clear is only for a maximized
+   window under a theme with `frosted_maximized_apps` off). Overriding
+   `Application::style()` with an opaque colour would defeat blur, so that
+   is not the lever.
+2. Blur itself is not asked for by the app. libcosmic requests it per
+   surface over `ext-background-effect-v1` whenever the theme is frosted and
+   `Core::auto_blur` allows it (`src/app/cosmic.rs:911-929`,
+   `src/core.rs:544-553`, `573-600`), and Kyerag takes the default. So the
+   blur the owner saw was already ours.
+3. What darkens it is one widget: the container libcosmic wraps the header
+   bar and the content in, whose background is
+   `theme.cosmic().background(theme.transparent).base`
+   (`src/app/mod.rs:856-874`). `theme.transparent` is set from the same
+   frosted-and-blurred test (`src/app/cosmic.rs:899-904`), and it picks the
+   pre-derived translucent copy of the background container
+   (`cosmic-theme/src/model/theme.rs:213-219`), whose alpha runs 0.90 down
+   to 0.60 with the blur strength (`theme.rs:1098-1104`, `1809-1828`). That
+   alpha is the darkened area.
+4. **That background is painted only when `content_container` is true**
+   (`src/app/mod.rs:858-866`, the `else` arm is `None`), which is why an app
+   that turns the container off to reach the window edges gets bare blur.
+
+cosmic-files does nothing at all here: no `fn style`, no background
+container in the main window, `content_container` left on and turned off
+only for the desktop-icon layer (`src/app.rs:2352-2367`). Its darkened
+window is entirely libcosmic's doing. So matching it is a matter of keeping
+the container, which is what `border_padding = Some(0)` above is for.
+
+**The video needs nothing further.** cosmic-player paints `Color::BLACK`
+behind its video widget and `Color::TRANSPARENT` when there is no video, so
+that libcosmic's translucent background shows through in the second case
+(`src/main.rs:1711-1714`, applied at `2092-2101`). It needs the black
+because a GStreamer video widget does not necessarily fill its bounds; our
+shader writes alpha 1 to every pixel of its own (`crates/render`'s
+fragment shader returns `vec4(rgb, 1.0)`), so there is nothing to see
+through and no second background to paint. The chrome over the video is
+unchanged and already first-party: the control row is
+`theme::Container::WindowBackground` (cosmic-player `src/main.rs:2056`,
+`2081`), which resolves to the same `background(transparent).base`
+(`src/theme/style/iced.rs:506-524`) and so goes translucent with the rest of
+the window when blur is on.
 
 ### Header bar
 
@@ -116,11 +170,29 @@ Centered column, in this order (cosmic-player `src/main.rs:1676-1695`):
 4. flexible space
 
 cosmic-player uses `folder-symbolic` and "No video or audio file open" /
-"Open file". Kyerag uses `video-x-generic-symbolic` (present in
-libcosmic's bundled icons under `freedesktop/scalable/mimetypes/`), "No
-video open", and "Open video". The elementary HIG's welcome-screen page,
-which the System76 HIG defers to, describes exactly this shape: explain the
-situation, then offer the action that fixes it.
+"Open file". Kyerag uses the app icon, "No video open", and "Open video".
+The elementary HIG's welcome-screen page, which the System76 HIG defers to,
+describes exactly this shape: explain the situation, then offer the action
+that fixes it.
+
+**The mark is the app icon, at 64 px** (issue #93). The size is the
+first-party empty state's: cosmic-files' empty folder is
+`widget::icon::from_name("folder-symbolic").size(64).icon()` over a
+`text::body` line, centred, `spacing(space_xxs)`
+(`src/tab.rs:5627-5655`), and cosmic-player's welcome column is the same
+shape at the same size. What is *drawn* there deviates: both of those draw a
+symbolic icon for the thing that is missing, and this draws the app's own
+icon, because the owner asked for the icon in this view (issue #93) and
+because a player with one job has nothing to say with a generic video glyph
+that the window is not already saying. The size is not the owner's call yet:
+libcosmic draws this same icon at 128 px on the About page
+(`src/widget/about.rs:132-141`), and 64 was taken because it is what the two
+first-party empty states use and because this column also has to fit a
+360 x 240 window.
+
+The icon is loaded from the committed drawing
+(`resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg`, through
+`icon::from_svg_bytes`) rather than asked for by name. See "About" below.
 
 **Failure to open lands here too.** The welcome view returns with a second
 line of body text under the first, saying what went wrong in plain words
@@ -345,8 +417,8 @@ video, exactly as in a window.
 ## The keyboard
 
 The map is cosmic-player's, extended with the standard app keys the other
-two first-party apps agree on. Three bare letters are invented, because no
-COSMIC app does what they do: `s`, `h` and `m`.
+two first-party apps agree on. Four bare letters are invented, because no
+COSMIC app does what they do: `s`, `h`, `m` and `i`.
 
 | key             | action                    | precedent                                            |
 | --------------- | ------------------------- | ---------------------------------------------------- |
@@ -369,6 +441,8 @@ COSMIC app does what they do: `s`, `h` and `m`.
 | `Ctrl+C`        | copy frame                | cosmic-files `src/key_bind.rs:73`                    |
 | `h`             | lock the horizon          | none; see below                                      |
 | `m`             | mute                      | none; mpv's key, see below                           |
+| `i`             | copy view reference       | none; mpv's key, see below                           |
+| `Ctrl+V`        | go to copied view         | the desktop's paste key, see below                   |
 
 Notes:
 
@@ -384,6 +458,19 @@ Notes:
   the same way, and cosmic-edit's source notes why those three characters
   in particular: they are not special to terminals, so they are free
   (`src/key_bind.rs:41`).
+- **The zoom range runs from 20 degrees to the whole sphere** (issue #47).
+  Scrolling out does not stop at a wide flat view any more: past 110 degrees
+  the picture bends, through the tiny planet at 220, and ends with the whole
+  sphere as a ball sitting in the middle of the window with room around it.
+  The far end is where the ball fills 0.8 of the window's shorter side, so it
+  is further out on a wide window than on a square one; the room around the
+  ball is the same grey the player paints anywhere it has no picture. It is
+  one continuous scroll out and back, the ball can be grabbed and turned like
+  any other view, and Ctrl+0 comes back to the default in one press. Nothing
+  about the ordinary range changed. Dragging the view down on the way out is
+  what puts the nadir in the middle, which is the tiny planet as Insta360
+  frames it; dragging it up gives the same picture inside out, with the sky in
+  the middle and the ground wrapped round the rim.
 - **`s` for save frame** has no first-party precedent, because no COSMIC
   app captures its own view. Bare unmodified letters are idiomatic in this
   app class though: cosmic-player binds `f` and `a` with no modifier. The
@@ -395,6 +482,69 @@ Notes:
   speaker button's own message, so it is remembered the same way the button
   is, and a file with no sound in it ignores it exactly as the disabled
   button does.
+- **`i` copies the view**, which is mpv's information key and lands here for
+  the same reason `m` did: no COSMIC app has the action, and mpv is the
+  player this app's users already have. What it copies is one line naming
+  the video, the frame and the framing, in `reframe`'s own argument syntax:
+
+  ```text
+  VID_20260410_185407_00_004.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1
+  ```
+
+  It is a sentence and a command at once. Pasted into an issue it says
+  exactly which picture is being talked about; pasted after
+  `cargo run --release -p kyerag-spike --bin reframe -- <path>` it renders
+  that picture again on any box. The same line goes to the terminal with the
+  whole path in front of it, and **the copy carries the file's name alone**:
+  a pilot's report lands in a public issue, and the directories above a video
+  are nobody's business.
+
+  Every capture prints the line too, because a still cannot carry it: the
+  JPEG's name says which video and which moment (issue #15) and nothing
+  anywhere says which direction, so a picture sent back months later would
+  otherwise be unplaceable.
+- **`Ctrl+V` goes there**, which is the half that makes the line a place
+  rather than a label, and it is the owner's own expectation of it: "I
+  thought I can paste into kjerag to go to that exact spot". The desktop's
+  paste key doing what a paste does everywhere, which is to put in front of
+  you the thing that was copied. It is a jump and not an animation: the seek
+  is the exact one rather than the keyframe a scrub settles for, and the
+  camera is set outright.
+
+  Four things a paste can be, and only two of them move the window:
+
+  | the clipboard holds                        | the window                                |
+  | ------------------------------------------ | ----------------------------------------- |
+  | a reference to the open video               | seeks, turns, and holds the horizon as the reference says |
+  | a reference carrying a path, another video  | opens that video and goes there           |
+  | a reference naming another video, no path   | says which video it is from, and stays    |
+  | anything else at all                        | nothing, and says nothing                 |
+
+  The last row is the one worth stating. `Ctrl+V` over a video means nothing
+  in any other player, so a clipboard holding a URL or half a sentence is the
+  normal case and it has to cost nothing: a player that argues with every
+  paste is a player nobody pastes into. There is no error line and no toast.
+
+  The third row exists because a copied reference carries the name alone. It
+  is enough to say *which* video, and not enough to find it, so the window
+  says which one rather than guessing.
+- **The command line takes a view too**, read with the same code, which makes
+  the terminal line a complete launch command:
+
+  ```sh
+  kyerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1
+  ```
+
+  `--help` says so. A view named there lands with no toast, because nothing
+  was pasted and nobody needs telling what they just typed. **The transport
+  is left alone** by all three ways in: a launch plays, as opening a file
+  always does, and a paste keeps whatever the window was doing. Landing on a
+  frame is not the same as stopping on it.
+
+  One writer and one reader, in `crates/render/src/framing.rs`, because a
+  format written twice is a format that drifts. reframe keeps its own parser,
+  since its syntax is a superset of this one; what holds the two together is
+  a test in reframe that feeds it a line from the writer.
 - Implement this as libcosmic's `HashMap<KeyBind, Action>` plus a
   `Message::Key(modifiers, physical_key, key)` from a global subscription,
   matched with `KeyBind::matches` (cosmic-player `src/main.rs:1207-1213`,
@@ -488,6 +638,11 @@ hand group holds the actions that are about the view rather than the
 transport (subtitles, speed, fullscreen, volume: `src/main.rs:2013-2051`).
 A frame capture is exactly that kind of action.
 
+- **Format:** a JPEG at quality 93 with full size chroma, because a still is
+  a file to share and 12 MB is not (issue #15): 0.7 to 1.8 MB a still against
+  5.3 to 13.3 MB as a lossless PNG, 52 to 54 dB PSNR over five real captures,
+  and it opens on a stock desktop with nothing installed. The clipboard stays
+  PNG.
 - **Button:** `camera-photo-symbolic` in the control row, immediately left
   of fullscreen.
 - **Menu:** `File > Save frame`, showing the `s` accelerator. No ellipsis,
@@ -495,10 +650,135 @@ A frame capture is exactly that kind of action.
   which is what issue #15 asks for.
 - **Clipboard:** `File > Copy frame`, on `Ctrl+C` (cosmic-files
   `src/key_bind.rs:73`). Issue #15's paste-friendly copy.
-- **Feedback:** a toast saying where the file went. libcosmic has
-  `widget::toaster`, cosmic-files uses toasts for exactly this kind of "it
-  happened, here is the undo" report. **Open question:** toast copy and
-  whether it carries an action ("Show in Files").
+- **Feedback:** a toast. Decided below.
+
+### The capture toast
+
+Shipped, and the open question is closed. cosmic-files is the only
+first-party app with toasts at all: nothing in cosmic-player or cosmic-edit
+mentions `toaster`. So its use of them is the whole precedent, and this
+copies it rather than reasoning from the widget.
+
+**The placement is a deviation from cosmic-files, and it is the owner's
+call.** cosmic-files puts its toasts at the bottom of the window, and it can:
+the bottom of a file manager is empty space. The bottom of this window is the
+transport. The owner asked for the message at the top after seeing it land
+over the progress bar, and that is what ships: the toast hangs under the
+header bar, centred, one `space_m` below it, and the control row and the
+scrubber are never covered.
+
+**Which means the stock toaster widget cannot be used, and this is worth
+recording, because reading it wrong costs a build.** `widget::toaster` does
+not place its stack relative to whatever it is mounted over. Its overlay is
+laid out against the bounds iced hands every overlay, which are the whole
+window's (`ToasterOverlay::layout`, libcosmic
+`src/widget/toaster/widget.rs:199-215`, against `overlay.layout(renderer,
+self.bounds)` in `iced/runtime/src/user_interface.rs:228`), and it puts the
+stack 15 px above the bottom of those bounds with no anchor, offset or
+position argument. Mounting it over a fixed-height band at the top of the
+window was built and captured under the harness: the toast did not move, and
+sat across the scrubber exactly as before.
+
+**So the stack is drawn rather than delegated**, out of the same pieces
+libcosmic's own `toaster()` builds a toast from and with its own spacings:
+`container(row![text, button::icon("window-close-symbolic")])
+.padding([space_xxs, space_s, space_xxs, space_m])
+.class(theme::Container::Tooltip)`, one per line, newest first
+(`src/widget/toaster/mod.rs:33-63`). It is a `Stack` layer over the picture,
+top aligned and centred. Three things fall out of that choice and all three
+are load-bearing:
+
+- **The control row keeps working.** A `Toaster` with a toast up returns its
+  own overlay *instead of* its content's (`toaster/widget.rs:137-162`, whose
+  author left a `//TODO` beside it) and our control row *is* an overlay, the
+  popover's. `Stack` hands back `overlay::from_children` instead, so the row
+  is still there while a toast is up. That was the reason cosmic-files'
+  mount-over-an-empty-element trick was copied in the first place, and it is
+  no longer needed.
+- **The picture still takes a drag.** `Stack::update` only takes the cursor
+  away from the layer beneath where the layer above reports an interaction
+  for that position (`iced/widget/src/stack.rs`), and a container of text
+  reports none, so looking around still starts anywhere except on a toast's
+  own close button.
+- **The layer is mounted whether or not it holds a toast.** Building the
+  stack only when one arrives changes the shape of the tree around the
+  shader widget, and that is not free: measured under the harness, the toast
+  reached the screen on the first capture after it landed with a fixed tree
+  and on the sixth, two seconds later, with a tree that grew a layer.
+
+Measured on a 1280x720 headless session, dark and light: the toast occupies
+rows 72 to 119 of the window, the header bar is rows 0 to 47 and the control
+row is rows 672 to 719. Five stacked toasts reach row 327, still 297 rows
+clear of the control row. `scripts/uitest.sh` asserts it rather than trusting
+it: "a toast is drawn clear of the controls" captures the paused window with
+and without a toast up and requires the top 64 rows and the bottom 96 to be
+byte for byte identical between the two, and requires something to have
+changed somewhere so that the check cannot pass by showing nothing. Against
+the bottom placement this PR replaced, that check fails.
+
+**The copy**, in the app's own vocabulary. The menu says `Save frame` and
+`Copy frame`, so the toast says frame:
+
+| event                | toast                                       |
+| -------------------- | ------------------------------------------- |
+| `Save frame` worked  | `Frame saved to "Screenshots"`              |
+| `Copy frame` worked  | `Frame copied to the clipboard`             |
+| `Save frame` failed  | `Frame not saved: {reason}`                 |
+| `Copy frame` failed  | `Frame not copied: {reason}`                |
+| `Copy current view reference` | `View reference copied to the clipboard` |
+| `Go to copied view reference` landed | `Went to the copied view`        |
+| ... and it was another video | `That view reference is from "VID_0001.insv"` |
+
+The copy toast is the same sentence as `Copy frame` with the menu's own noun
+in it, and it names the destination for the reason the frame's does: a copy
+that does not say where it went is a copy nobody trusts enough to paste.
+Neither has a failure line, because there is nothing in either that can
+fail: the line is built out of numbers the window is already holding, and
+reading it back is arithmetic.
+
+**The two nouns are not the same noun, and that is deliberate.** The
+**reference** is the text and the **view** is the place it names, so a
+reference is copied and a view is gone to. Nobody goes to a reference. The
+third line names the video in quotes and never a path, exactly as the saved
+frame's does below, and it is the only thing the window can usefully say: a
+copied reference carries the file's name alone, which is enough to say which
+video and not enough to open it.
+
+The destination is the folder's own name in quotes and never a path, which
+is how cosmic-files names one in its toasts: `copied = Copied {$items} items
+from "{$from}" to "{$to}"` (`i18n/en/cosmic_files.ftl:231-234`) built from
+`file_name(to)`, the last component only (`src/operation/mod.rs:563-568`,
+`309-312`). The name follows whatever the capture resolved to, so a session
+with `XDG_SCREENSHOTS_DIR` set elsewhere says that folder's name instead
+(the headless harness reads `Frame saved to "shots"`). The whole path still
+goes to the terminal, where it does not have to be read at a glance.
+
+**Duration and stacking are stock**, and they are stock in the strong sense:
+the numbers and the mechanism are both libcosmic's, only the anchor moved.
+Five seconds is `Duration::Short` (`toaster/mod.rs:79-85`), which is what
+cosmic-files leaves every toast on (`src/app.rs:1344-1358`). Five lines are
+kept and the oldest is dropped past that (`toaster/mod.rs:162-181`); toasts
+stack rather than replace. A line is taken away by a five second sleep on the
+async runtime, which is exactly how `Toasts::push` does it
+(`toaster/mod.rs:183-196`), and not by a timer the shell keeps: a poll was
+written first and measured against the stock build, and it cost 3 to 6 extra
+redraws a second and dropped frames in 2 of 18 report windows, against 0 of
+18 with the sleep. Reading the queue back to front puts the newest line
+nearest the anchored edge, which is libcosmic's order (`toaster/mod.rs:56-63`)
+read against the top, so five quick captures stack downward from the header
+and no line already on screen moves when the next one lands.
+
+**No action button, for now.** libcosmic's toast carries one if it is asked
+to (`Toast::action`, `toaster/mod.rs:132-144`), and cosmic-files asks in
+exactly one place: `Undo` on the toast for a delete
+(`src/app.rs:1344-1352`). That is the shape of it there, a way back from
+something destructive. Nothing in cosmic-files, cosmic-player or cosmic-edit
+opens a location from a toast; cosmic-files' own "Open item location" is a
+context menu item (`i18n/en/cosmic_files.ftl:91`, `src/menu.rs:244`,
+`379`). So a "Show in Files" button has no first-party precedent to copy and
+does not ship. If the owner wants it later, the portal call is
+`org.freedesktop.FileManager1.ShowItems` and the toast already carries the
+path it would need.
 
 **Export (issue #12, M3)** goes in the `File` menu only, as
 `Export clip...` with the ellipsis, since it opens a dialog and then runs
@@ -519,19 +799,40 @@ video player is a normal size. `item_height(ItemHeight::Dynamic(40))`,
 `item_width(ItemWidth::Uniform(320))`.
 
 ```
-File                      Playback                 View
-  Open video...             Play / Pause             Zoom in
-  Open recent >             Back 10 seconds          Default view
-  Close video               Forward 10 seconds       Zoom out
-  ---                       ---                      ---
-  Save frame                Previous frame           Fullscreen
-  Copy frame                Next frame               ---
-  ---                                                Settings...
-  Quit                                               About Kyerag...
+File                              Playback              View
+  Open video...                     Play / Pause          Zoom in
+  Open recent >                     Back 10 seconds       Default view
+  Close video                       Forward 10 seconds    Zoom out
+  ---                               ---                   ---
+  Save frame                        Previous frame        Fullscreen
+  Copy frame                        Next frame            ---
+  Copy current view reference                             Settings...
+  Go to copied view reference                             About Kyerag...
+  ---
+  Quit
 ```
 
 - Ellipsis on items that open a dialog, none on items that act
   (cosmic-player `Open media...` vs `Close file`, `src/menu.rs:119-121`).
+- **The two view items are named the owner's way**, and the first is his
+  wording verbatim. `Copy view` was the first spelling and it said nothing to
+  anyone who had not already been told what it did; a menu item has to work
+  for someone reading it for the first time. The counterpart mirrors it word
+  for word, because the two are one idea and half a name would hide that.
+  They are long for menu items and that is the trade: this menu is opened by
+  someone looking for something, not scanned in a hurry.
+- They sit under the two picture items rather than in `View`, which holds the
+  things that move the view. These four are all about handing something over
+  or getting it back. They are there at all because the menu is where a
+  shortcut is advertised, and `i` and `Ctrl+V` are worth finding.
+- **`Go to copied view reference` is never drawn disabled**, which is the one
+  item in this menu that is not gated on a file being open. Two reasons, and
+  either would do: a reference carrying a whole path opens the video it names,
+  so it has something to do with nothing open; and what the clipboard holds
+  cannot be known while the menu is being built, because reading a clipboard
+  on Wayland is a task whose answer arrives later and this runs on every
+  redraw. Pressed with nothing useful on the clipboard it does nothing, which
+  is the same answer `Ctrl+V` gives.
 - `Settings...` then a divider then `About <app>...` at the end of `View`
   is the shared convention: cosmic-files `src/menu.rs:762-764`, cosmic-edit
   `src/menu.rs:346-350`.
@@ -600,7 +901,7 @@ Message::ToggleContextPage(ContextPage::About))` (cosmic-edit
 ```rust
 About::default()
     .name("Kyerag")
-    .icon(icon::from_name(Self::APP_ID))
+    .icon(icon::from_svg_bytes(APP_ICON))
     .version(env!("CARGO_PKG_VERSION"))
     .author("Alexander Harding")
     .comments("360 video player for the COSMIC desktop")
@@ -621,15 +922,37 @@ About::default()
   turns them into `mailto:` links (`src/widget/about.rs:45-50`), and this
   repo does not publish personal addresses. Name in `.author()`, contact
   through the repository link.
-- `.icon(icon::from_name(APP_ID))` resolves nothing until an app icon is
-  installed. Icon and desktop-file packaging are out of scope for issue
-  #16; see the build order.
+- **The icon is the drawing, not a name** (issue #93).
+  `About::icon` takes an `icon::Handle`
+  (`src/widget/about.rs:13`, setter generated by `derive_setters` with
+  `into`), and the widget draws it at a fixed 128 px with
+  `ContentFit::Contain` (`src/widget/about.rs:132-141`), so
+  `icon::from_svg_bytes` (`src/widget/icon/handle.rs:95-100`) goes in where
+  cosmic-edit puts `icon::from_name`. A name is the thing to use once it
+  resolves, and it does not yet: the icons are installed as
+  `dev.harding.Kjerag` (`resources/icons/`) and the binary's `APP_ID` is
+  still `app.kyerag.Kyerag` until issue #75 renames it. Even after #75, a
+  name only resolves for a build whose icons are installed into an icon
+  theme, which a `cargo run` from the source tree is not, so the bytes are
+  not purely a bridge. Same handle in the welcome view, above.
 
 ## Copy
 
 Plain words, no em dashes (AGENTS.md). Sentence case for labels, which is
 what the first-party apps use ("Open recent media", "Clear recent list").
 A space before a unit ("10 seconds", System76 HIG).
+
+**A label is read by someone who has not been told what it does.** That is
+the whole of why `Copy view` became `Copy current view reference`: the short
+one was clear to everybody who had already used it and to nobody else, which
+is the failure mode a menu is worst at surviving. Length is worth spending
+there. It is not worth spending in a toast, which is read in the two seconds
+before it goes.
+
+**One noun per thing.** The **reference** is the line of text and the
+**view** is the place it names, and the strings keep those apart: a reference
+is copied, a view is gone to. A vocabulary that wobbles between two words for
+one idea is what makes a small feature feel like two.
 
 No i18n in the first landing. All three first-party apps use
 `i18n-embed` + fluent with an `fl!` macro, and that is real machinery for a
@@ -662,6 +985,14 @@ reviewer can find them in one place:
    asked for them to persist, and they go in `Config` beside the theme.
 9. **The volume popup closes with the control row**, rather than holding the
    row open the way cosmic-player's dropdowns do. See "The volume slider".
+10. **The capture toast is at the top of the window**, where cosmic-files
+    puts its own at the bottom, and it is drawn rather than delegated to
+    `widget::toaster`. Owner's call, and the reason is the window: the
+    bottom of a file manager is empty space and the bottom of this one is
+    the transport. See "The capture toast".
+11. **The welcome view's mark is the app icon**, where cosmic-player and
+    cosmic-files both draw a symbolic icon of the missing thing. Owner's
+    call (issue #93). The shape and the size are still theirs.
 
 Two things cosmic-player does that we should copy later, neither of them
 part of issue #16:
@@ -680,17 +1011,21 @@ part of issue #16:
    control row. The mute key was answered on 2026-07-31, and `m` is bound.
    What is left of it is smaller: should the speaker button take a wheel of
    its own? Above, under "Conflict 2".
-2. Screenshot feedback: toast wording, and whether it offers an action.
+2. Answered: the capture toasts shipped, with the wording and the reasoning
+   under "The capture toast" above. They carry no action button, because no
+   first-party app opens a location from a toast.
 3. Whether the frame-capture button belongs in the control row at all, or
    whether the menu item plus `s` is enough. No precedent either way.
 4. `Ctrl+0` as "default view" resets yaw, pitch and field of view together.
    The zoom trio it borrows from resets only zoom, because that is all
    those apps have. Splitting them later would need a second key.
-5. An app icon and a MIME type. `.insv` has no registered MIME type
-   anywhere; playing one from Files needs a shared-mime-info definition
-   plus a desktop file, and thumbnails would need a `.thumbnailer` like
-   cosmic-player's (`res/com.system76.CosmicPlayer.thumbnailer`). Out of
-   scope here, wants its own issue.
+5. Half answered. The app icon exists (issue #76, `resources/icons/`) and
+   the About page and the welcome view draw it (issue #93). The MIME type is
+   still open: `.insv` has no registered MIME type anywhere, so playing one
+   from Files needs a shared-mime-info definition plus a desktop file, and
+   thumbnails would need a `.thumbnailer` like cosmic-player's
+   (`res/com.system76.CosmicPlayer.thumbnailer`). The desktop entry and the
+   MIME package prototypes live on the `docs/distribution` branch.
 
 ## Build order
 
