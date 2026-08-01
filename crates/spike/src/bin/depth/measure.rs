@@ -209,7 +209,15 @@ pub fn body_up(calibration: &CalibrationSet) -> Option<[f64; 3]> {
 /// One capture's calibration and the frames the field is read from.
 pub fn open(options: &Options, path: &Path) -> Fallible<(CalibrationSet, Vec<Pair>)> {
     let calibration = CalibrationSet::from_insv(path)?;
-    let mut walk = Walk::open(path, options.from, calibration.dimension)?;
+    let dim = calibration.dimension;
+    let mut walk = Walk::open(
+        path,
+        options.from,
+        kyerag_render::Size {
+            width: dim.width,
+            height: dim.height,
+        },
+    )?;
     if walk.streams() < 2 {
         return Err("this file carries one lens stream, so it has no seam".into());
     }
