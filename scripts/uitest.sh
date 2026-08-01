@@ -796,29 +796,30 @@ exits_clean() {
 	fi
 }
 
-# ------------------------------- the checks, with a calibration to remember
+# ------------------------------- the checks, with a pool to remember
 #
-# The seam correction is a per-camera setting now, not a per-file fit (issue
-# #48), and the whole point of that is that it is in the picture before the
-# first frame rather than two seconds into it. That is a claim about the app's
-# own path, so it is checked through the app: open the file once with an empty
-# config and read the camera out of the report line, write a calibration for
-# that camera into the session's own state directory, open it again, and
-# require the app to say it drew with it and never to say it was fitting.
+# The seam correction is pooled per camera, and nothing asks the pilot for it
+# (AGENTS.md, zero-config playback). The claim under test is that a camera the
+# pool knows is corrected before the first frame rather than two seconds into
+# it, so it is checked through the app: open the file once with an empty pool
+# and read the camera out of the report line, write a pool for that camera into
+# the session's own state directory, open it again, and require the app to say
+# it drew from the pool and never to say it was fitting.
 #
 # It is also the control for the failure it clears: with the first session's
-# empty config, the app says it is fitting off the file, which is the line the
+# empty pool, the app says it is fitting off the file, which is the line the
 # second session must not print.
 
-stored_calibration() {
-	local check="a stored calibration is in the first frame"
+pooled_calibration() {
+	local check="a pooled calibration is in the first frame"
 	printf '\n-- calibration checks (%s)\n' "$media"
 
-	# The session's directories persist between runs, so the calibration a
-	# previous run stored is still there and would make this session take the
-	# path it is here to rule out.
+	# The session's directories persist between runs, so a pool a previous run
+	# stored is still there and would make this session take the path it is
+	# here to rule out. The superseded single-entry key goes too: it is
+	# derived data and nothing reads it any more.
 	local state=$session/state/cosmic/app.kyerag.Kyerag/v1
-	rm -f "$state/seam_calibration"
+	rm -f "$state/seam_pool" "$state/seam_calibration"
 
 	boot fallback "$media"
 	if ! await '^seam:' "$READY"; then
@@ -828,8 +829,8 @@ stored_calibration() {
 	fi
 	local camera
 	camera=$(sed -n 's/^lens:.*camera \([0-9a-f]*\).*/\1/p' "$log" | head -1)
-	if ! grep -q 'no calibration stored for this camera' "$log"; then
-		fail "$check" "the empty config did not fall back to fitting" "log: $log"
+	if ! grep -q 'nothing pooled for this camera yet' "$log"; then
+		fail "$check" "the empty pool did not fall back to fitting" "log: $log"
 		teardown
 		return
 	fi
@@ -839,21 +840,21 @@ stored_calibration() {
 		return
 	fi
 
-	# The owner's own answer, which is what 6.8 fitted on his static capture.
-	# Any five numbers would do here: what is under test is that they reach
-	# the first frame, not what they are.
+	# The owner's own answer, which is what 6.8 fitted on his static capture,
+	# as a pool of one. Any five numbers would do here: what is under test is
+	# that they reach the first frame, not what they are.
 	mkdir -p "$state"
-	printf '{"%s":(roll_deg:0.789,yaw_deg:-2.450,pitch_deg:-0.668,cx_px:-2.55,cy_px:-13.84)}\n' \
-		"$camera" >"$state/seam_calibration"
+	printf '{"%s":(samples:[(roll_deg:0.789,yaw_deg:-2.450,pitch_deg:-0.668,cx_px:-2.55,cy_px:-13.84,patches:13,residual_deg:0.108)])}\n' \
+		"$camera" >"$state/seam_pool"
 
 	boot calibrated "$media"
-	if ! await "this camera's calibration" "$READY"; then
-		fail "$check" "the stored calibration was not read" \
+	if ! await 'pooled over 1 fits' "$READY"; then
+		fail "$check" "the pooled calibration was not read" \
 			"$(grep '^seam:' "$log" || echo 'no seam line')" "log: $log"
 		teardown
 		return
 	fi
-	if grep -q 'no calibration stored for this camera' "$log"; then
+	if grep -q 'nothing pooled for this camera yet' "$log"; then
 		fail "$check" "it fitted off the file anyway" "log: $log"
 		teardown
 		return
@@ -927,7 +928,7 @@ dud() {
 
 if [ -n "$media" ]; then
 	with_media
-	stored_calibration
+	pooled_calibration
 else
 	welcome
 fi

@@ -38,7 +38,6 @@ pub use cosmic::widget::menu::key_bind::{KeyBind, Modifier};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     About,
-    CalibrateSeam,
     CopyFrame,
     DefaultView,
     FileClearRecents,
@@ -66,7 +65,6 @@ impl MenuAction for Action {
     fn message(&self) -> Message {
         match self {
             Self::About => Message::ToggleContextPage(ContextPage::About),
-            Self::CalibrateSeam => Message::CalibrateSeam,
             Self::CopyFrame => Message::Capture(Destination::Copy),
             Self::DefaultView => Message::Look(Nudge::Reset),
             Self::FileClearRecents => Message::FileClearRecents,

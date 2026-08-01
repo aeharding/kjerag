@@ -660,12 +660,11 @@ the bottom placement this PR replaced, that check fails.
 | `Copy frame` worked  | `Frame copied to the clipboard`             |
 | `Save frame` failed  | `Frame not saved: {reason}`                 |
 | `Copy frame` failed  | `Frame not copied: {reason}`                |
-| `Calibrate seam` worked | `Seam calibrated for this camera`        |
-| `Calibrate seam` failed | `Seam not calibrated: {reason}`          |
 
-The calibration toast says **camera** rather than video, because that is the
-whole difference between the action and what the app does on its own: the
-answer is kept, and every later video off the same camera opens with it.
+There is **no calibration toast**, because there is no calibration action
+(owner ruling, 2026-07-31, in AGENTS.md as zero-config playback). The seam
+corrects itself from what the app sees while a file plays, and the only place
+that is said out loud is the terminal report line.
 
 The destination is the folder's own name in quotes and never a path, which
 is how cosmic-files names one in its toasts: `copied = Copied {$items} items
@@ -728,7 +727,7 @@ File                      Playback                 View
   Close video               Forward 10 seconds       Zoom out
   ---                       ---                      ---
   Save frame                Previous frame           [x] Lock horizon
-  Copy frame                Next frame               Calibrate seam from this video
+  Copy frame                Next frame
   ---                                                ---
   Quit                                               Fullscreen
                                                      ---
@@ -740,24 +739,18 @@ File                      Playback                 View
   (cosmic-player `Open media...` vs `Close file`, `src/menu.rs:119-121`).
 - `Lock horizon` is a checkbox rather than a pair of items, because it is a
   state (issue #8); cosmic-files spells `Show hidden files` the same way.
-- `Calibrate seam from this video` measures what this camera's two lenses
-  disagree by and keeps the answer for every later video off that camera
-  (issue #48). It sits beside the horizon lock because both are about how
-  the picture is put together rather than about the file it came out of, it
-  is disabled for a capture with no seam in it, and it says what it did in
-  a toast: the run takes a second or two on a worker thread and the window
-  keeps playing while it does. Nothing on screen says it is running, which is
-  the same call the capture toast makes: an action that is over in two seconds
-  and has a result line does not want a progress bar in a window whose job is
-  to keep drawing.
-
-  **A capture from a camera standing still is what it wants pointed at it**,
-  and the reason is measured rather than a preference
-  (docs/research/insv-format.md 6.8): a fit taken through a flight's seam
-  absorbs that flight's own parallax into the answer, and a still capture of
-  far content has none to absorb. The app says so where it matters rather
-  than in a dialog nobody reads: a camera with no calibration prints the
-  advice in its report line as it falls back to fitting off the open file.
+- **There is no seam item, and there must never be one.** A
+  `Calibrate seam from this video` action shipped on this branch and was
+  ruled out (owner, 2026-07-31): "The menu item for calibration is a
+  nonstarter. All videos must play seamlessly without anything weird like
+  'click a calibration button'." It was not only taste. The action fitted
+  whichever file was open, and a fit taken through a flight's seam absorbs
+  that flight's own parallax into the answer
+  (docs/research/insv-format.md 6.8); pressed twice on this box it stored the
+  May 1 flight's fit and then the April 10 flight's, said "Seam calibrated
+  for this camera" both times, and left the picture worse than the static
+  capture's answer with nothing on screen able to show it. A control that can
+  silently store a wrong answer and report success is worse than no control.
 - `Settings...` then a divider then `About <app>...` at the end of `View`
   is the shared convention: cosmic-files `src/menu.rs:762-764`, cosmic-edit
   `src/menu.rs:346-350`.
@@ -808,15 +801,18 @@ first-party app uses:
 
 - `Config` (`CONFIG_VERSION: u64 = 1`): things the pilot chose.
   `app_theme`, `screenshot_dir`, `screenshot_scale`.
-- `ConfigState`: things the app remembers. `recent_files`, and
-  `seam_calibration`, one entry per camera under a serial-free fingerprint
-  of that camera's own factory calibration (issue #48).
+- `ConfigState`: things the app remembers. `recent_files`, and `seam_pool`,
+  one pool per camera under a serial-free fingerprint of that camera's own
+  factory calibration (issue #48).
 
-`seam_calibration` is state and not config for the same reason
-`recent_files` is: it is something the app measured rather than something
-the pilot expressed, it has no row on the Settings page, and resetting the
-settings must not throw it away. It is not a cache either. Deleting it does
-not cost a recompute, it costs the pilot the capture he pointed the app at.
+`seam_pool` is state and not config for the same reason `recent_files` is: it
+is something the app measured rather than something the pilot expressed, and it
+has no row on the Settings page. It **is** a cache, which is what changed: no
+action fills it, so deleting it costs a few seconds of watching and nothing
+else. The superseded `seam_calibration` key is left on disk unread rather than
+migrated, because its entries were made by the removed action off whichever
+file was open and carry exactly the contamination the pool exists to average
+out.
 
 Both derive `CosmicConfigEntry` and both get a `cosmic_config` subscription
 so an external change applies live (cosmic-player `src/config.rs`,

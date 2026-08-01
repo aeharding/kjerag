@@ -517,6 +517,22 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The calibration menu action is deleted, and the store with it.**
+  Zero-config playback (AGENTS.md) leaves no room for it, and the reason is
+  stronger than the doctrine: the action fitted whichever file was open, so on
+  this box it stored the May 1 flight's fit and then the April 10 flight's,
+  reported "Seam calibrated for this camera" both times, and never once fitted
+  the static capture it existed for. A fit taken through a flight's seam
+  absorbs that flight's parallax (6.8), so both answers were wrong and nothing
+  on screen could show it. That is the whole explanation of the owner's "I have
+  never once seen a before and after that improved". The single-entry
+  `seam_calibration` is replaced by a per-camera `seam_pool` of quality-gated
+  fits, medianed, filled by watching; the old key is discarded rather than
+  migrated, because its contents are exactly the contamination the pool exists
+  to average out. The correction is no longer landed once either: a
+  `Correction` walks from what is drawn to what is asked for at 0.25 deg/s, so
+  a fit that lands mid-playback is never a jump.
+
 - 2026-07-31 (late) Seam architecture revised by three owner rulings: the
   app targets ANY 360 footage (near-field moves in general, so per-frame
   band alignment is the MAIN path and the per-clip table is a prior);

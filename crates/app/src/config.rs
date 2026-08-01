@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use cosmic::cosmic_config::cosmic_config_derive::CosmicConfigEntry;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::theme;
-use kyerag_render::SeamFit;
+use kyerag_render::{Harvest, SeamFit};
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_VERSION: u64 = 1;
@@ -83,42 +83,129 @@ impl Default for Config {
     }
 }
 
-/// One camera's seam calibration, as it is written to disk.
+/// How many fits one camera's pool keeps. Past this the worst is dropped,
+/// worst being the fewest azimuths, because the azimuth count is what caught
+/// both of 6.8's bad captures where the residual did not.
+const POOLED: usize = 16;
+
+/// The widest residual a fit may leave and still be pooled, in degrees.
 ///
-/// Its own type rather than `SeamFit` because that one belongs to the render
+/// Read off the applied-and-re-read table (6.8, and
+/// `scratch/seam2-investigation/11-applied-and-reread.txt`), which is the only
+/// place in the record a correction was measured on the pixels **after** it was
+/// applied rather than predicted: the five flights and the static capture come
+/// out between 0.15 and 0.87 degrees, and the deck capture, whose seam is
+/// 5 to 30 cm of decking and which the fit cannot help, stays at 1.65. One
+/// degree is the gap between those two populations.
+const POOL_RESIDUAL_DEG: f64 = 1.0;
+
+/// One fit the app made by watching, as it is written to disk.
+///
+/// Its own type rather than `Harvest` because that one belongs to the render
 /// layer, which has no serde and no business having one: a number the app
 /// stores is the app's own shape, and this is where the two are converted.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
-pub struct SeamCalibration {
+pub struct SeamSample {
     pub roll_deg: f64,
     pub yaw_deg: f64,
     pub pitch_deg: f64,
     pub cx_px: f64,
     pub cy_px: f64,
+    /// How many azimuths round the seam correlated, and what the fit left.
+    /// Kept beside the answer because the pool has to be able to tell a fit
+    /// off fifty far-field patches from one off seven near-field ones.
+    pub patches: usize,
+    pub residual_deg: f64,
 }
 
-impl From<SeamFit> for SeamCalibration {
-    fn from(fit: SeamFit) -> Self {
+impl From<Harvest> for SeamSample {
+    fn from(harvest: Harvest) -> Self {
         Self {
-            roll_deg: fit.roll_deg,
-            yaw_deg: fit.yaw_deg,
-            pitch_deg: fit.pitch_deg,
-            cx_px: fit.cx_px,
-            cy_px: fit.cy_px,
+            roll_deg: harvest.fit.roll_deg,
+            yaw_deg: harvest.fit.yaw_deg,
+            pitch_deg: harvest.fit.pitch_deg,
+            cx_px: harvest.fit.cx_px,
+            cy_px: harvest.fit.cy_px,
+            patches: harvest.patches,
+            residual_deg: harvest.residual_deg,
         }
     }
 }
 
-impl From<SeamCalibration> for SeamFit {
-    fn from(stored: SeamCalibration) -> Self {
-        Self {
-            roll_deg: stored.roll_deg,
-            yaw_deg: stored.yaw_deg,
-            pitch_deg: stored.pitch_deg,
-            cx_px: stored.cx_px,
-            cy_px: stored.cy_px,
+/// What this box has learned about one camera's seam, by watching.
+///
+/// A pool rather than one answer, and this is the whole of what changed
+/// (owner ruling, 2026-07-31, zero-config playback). The single-entry store
+/// this replaces was filled by a menu action, and the action stored a fit off
+/// **whichever file happened to be open**: on this box it stored the May 1
+/// flight's fit, then the April 10 flight's, and never the static capture it
+/// was meant for. A fit taken through a seam full of near content absorbs that
+/// flight's parallax and then applies it to the whole sphere (6.8), so both
+/// answers were wrong in a way nothing on screen could show.
+///
+/// The pool's premise is that the contamination is per file and the
+/// calibration is not: what a flight's own parallax adds points wherever that
+/// flight's near content happened to be, while the factory extrinsic error is
+/// the same every time, so across files the first should scatter and the
+/// second should not. **The premise is stated, not yet established**; the
+/// experiment that would settle it is in the PR.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct SeamPool {
+    pub samples: Vec<SeamSample>,
+}
+
+impl SeamPool {
+    /// The pooled answer: the median of each knob over the samples.
+    ///
+    /// A median rather than a mean, weighted or not, because the failure this
+    /// has to survive is one bad fit rather than noise on every fit. 04-10 is
+    /// that file in the record: its content is 2.6 m away and it asks for a
+    /// yaw 0.9 degrees from what the same camera asks for elsewhere. A mean
+    /// carries a sixteenth of that into the answer; a median carries none of
+    /// it until such files are half the pool.
+    pub fn answer(&self) -> Option<SeamFit> {
+        if self.samples.is_empty() {
+            return None;
         }
+        let median = |of: fn(&SeamSample) -> f64| {
+            let mut values: Vec<f64> = self.samples.iter().map(of).collect();
+            values.sort_by(f64::total_cmp);
+            let middle = values.len() / 2;
+            match values.len() % 2 {
+                0 => (values[middle - 1] + values[middle]) / 2.0,
+                _ => values[middle],
+            }
+        };
+        Some(SeamFit {
+            roll_deg: median(|s| s.roll_deg),
+            yaw_deg: median(|s| s.yaw_deg),
+            pitch_deg: median(|s| s.pitch_deg),
+            cx_px: median(|s| s.cx_px),
+            cy_px: median(|s| s.cy_px),
+        })
+    }
+
+    /// Take one fit if it is worth keeping. `false` for one that is not, which
+    /// is not an error: most captures have something near the seam.
+    fn keep(&mut self, sample: SeamSample) -> bool {
+        if !sample.residual_deg.is_finite() || sample.residual_deg > POOL_RESIDUAL_DEG {
+            return false;
+        }
+        self.samples.push(sample);
+        if self.samples.len() > POOLED {
+            let worst = self
+                .samples
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, sample)| sample.patches)
+                .map(|(index, _)| index);
+            if let Some(worst) = worst {
+                self.samples.remove(worst);
+            }
+        }
+        true
     }
 }
 
@@ -130,19 +217,24 @@ impl From<SeamCalibration> for SeamFit {
 #[serde(default)]
 pub struct ConfigState {
     pub recent_files: VecDeque<PathBuf>,
-    /// What each camera's seam was measured to be off by (issue #48), under
+    /// What each camera's seam has been measured to be off by, under
     /// [`CalibrationSet::camera_key`](kyerag_meta::CalibrationSet::camera_key)
     /// in hex.
     ///
     /// **State rather than config**, which is the same call cosmic-player
     /// makes for its recent files (docs/UI.md, "Persistence"): this is a
-    /// measurement the app made, not a preference the pilot expressed, it has
-    /// no row in the Settings page, and resetting the settings must not throw
-    /// away a calibration that took a capture and two seconds to make. It is
-    /// not a cache either, which is what changed on this branch: deleting it
-    /// does not cost a recompute, it costs the pilot the capture he pointed
-    /// the app at.
-    pub seam_calibration: BTreeMap<String, SeamCalibration>,
+    /// measurement the app made, not a preference the pilot expressed, and it
+    /// has no row in the Settings page.
+    ///
+    /// It is now a **cache**, which is what changed: nothing here costs the
+    /// pilot an action to remake, so deleting it costs a few seconds of
+    /// watching and nothing else. That is why the single-entry
+    /// `seam_calibration` this replaces is discarded rather than migrated. The
+    /// old entries were made by a menu action off whichever file was open, so
+    /// migrating them would carry exactly the contamination the pool exists to
+    /// average out; the old key is left on disk unread and the pool refills
+    /// itself from the next few files played.
+    pub seam_pool: BTreeMap<String, SeamPool>,
 }
 
 impl ConfigState {
@@ -155,16 +247,23 @@ impl ConfigState {
 
     /// What this box knows about this camera's seam, if anything.
     pub fn seam(&self, camera: u64) -> Option<SeamFit> {
-        self.seam_calibration
-            .get(&camera_name(camera))
-            .map(|stored| (*stored).into())
+        self.seam_pool.get(&camera_name(camera))?.answer()
     }
 
-    /// Remember one camera's seam, replacing whatever was there: a second
-    /// calibration is the pilot saying the first one was not good enough.
-    pub fn calibrate(&mut self, camera: u64, fit: SeamFit) {
-        self.seam_calibration
-            .insert(camera_name(camera), fit.into());
+    /// How many fits that answer rests on, for the report line.
+    pub fn seam_pooled(&self, camera: u64) -> usize {
+        self.seam_pool
+            .get(&camera_name(camera))
+            .map_or(0, |pool| pool.samples.len())
+    }
+
+    /// Fold one watched fit into this camera's pool. `false` where the fit was
+    /// not good enough to keep, which is ordinary and is not shown anywhere.
+    pub fn harvest(&mut self, camera: u64, harvest: Harvest) -> bool {
+        self.seam_pool
+            .entry(camera_name(camera))
+            .or_default()
+            .keep(harvest.into())
     }
 }
 
@@ -270,33 +369,83 @@ mod tests {
         assert_eq!(paths(&state)[0], "/24.insv");
     }
 
-    /// One entry per camera, and calibrating again replaces it: the pilot
-    /// pointing the action at a better capture has to be able to overrule the
-    /// answer he got from a worse one.
-    #[test]
-    fn a_camera_has_one_calibration_and_the_newest_wins() {
-        let mut state = ConfigState::default();
-        let first = SeamFit {
-            roll_deg: 0.702,
-            yaw_deg: -2.605,
-            pitch_deg: 0.176,
-            ..SeamFit::default()
-        };
-        let better = SeamFit {
-            roll_deg: 0.810,
-            yaw_deg: -2.352,
-            pitch_deg: -0.678,
-            cx_px: -4.18,
-            cy_px: -13.91,
-        };
-        state.calibrate(0x1234_5678_9abc_def0, first);
-        state.calibrate(0x1234_5678_9abc_def0, better);
-        state.calibrate(0x0fed_cba9_8765_4321, first);
+    fn harvest(yaw_deg: f64, patches: usize, residual_deg: f64) -> Harvest {
+        Harvest {
+            fit: SeamFit {
+                roll_deg: 0.8,
+                yaw_deg,
+                pitch_deg: -0.7,
+                cx_px: -2.5,
+                cy_px: -13.8,
+            },
+            patches,
+            residual_deg,
+        }
+    }
 
-        assert_eq!(state.seam(0x1234_5678_9abc_def0), Some(better));
-        assert_eq!(state.seam(0x0fed_cba9_8765_4321), Some(first));
+    /// The pool is per camera and it accumulates rather than replacing: no
+    /// action fills it, so there is no pilot to say which of two answers he
+    /// meant.
+    #[test]
+    fn each_camera_pools_its_own_fits() {
+        let mut state = ConfigState::default();
+        for yaw in [-2.35, -2.45] {
+            assert!(state.harvest(0x1234_5678_9abc_def0, harvest(yaw, 30, 0.6)));
+        }
+        assert!(state.harvest(0x0fed_cba9_8765_4321, harvest(-1.10, 30, 0.6)));
+
+        assert_eq!(state.seam_pooled(0x1234_5678_9abc_def0), 2);
+        assert_eq!(state.seam(0x0fed_cba9_8765_4321).unwrap().yaw_deg, -1.10);
         assert_eq!(state.seam(0), None);
-        assert_eq!(state.seam_calibration.len(), 2);
-        assert!(state.seam_calibration.contains_key("123456789abcdef0"));
+        assert_eq!(state.seam_pool.len(), 2);
+        assert!(state.seam_pool.contains_key("123456789abcdef0"));
+    }
+
+    /// The point of a median: one file whose seam is full of near content asks
+    /// for an answer of its own, and the pool must not follow it. 04-10 is
+    /// that file in the record, 0.9 degrees of yaw away from what the same
+    /// camera asks for on every other capture (6.8).
+    #[test]
+    fn one_contaminated_fit_does_not_move_the_pooled_answer() {
+        let mut state = ConfigState::default();
+        let camera = 0xd8a3_9338_9b7b_8639;
+        for yaw in [-2.45, -2.35, -2.44, -2.40] {
+            state.harvest(camera, harvest(yaw, 30, 0.6));
+        }
+        let clean = state.seam(camera).unwrap().yaw_deg;
+        state.harvest(camera, harvest(-1.69, 23, 0.9));
+        let polluted = state.seam(camera).unwrap().yaw_deg;
+        assert!(
+            (polluted - clean).abs() < 0.06,
+            "one bad fit moved the answer from {clean:.3} to {polluted:.3}"
+        );
+    }
+
+    /// A capture the fit cannot help is not pooled at all. The deck capture is
+    /// the one in the record: 5 to 30 cm of decking across the seam, which no
+    /// rotation reaches, and it comes out of the fit still 1.65 degrees wrong.
+    #[test]
+    fn a_fit_that_did_not_flatten_the_seam_is_not_kept() {
+        let mut state = ConfigState::default();
+        assert!(!state.harvest(1, harvest(-2.4, 5, 1.65)));
+        assert!(!state.harvest(1, harvest(-2.4, 5, f64::NAN)));
+        assert_eq!(state.seam(1), None);
+        assert_eq!(state.seam_pooled(1), 0);
+    }
+
+    /// The pool is bounded, and what it drops is the fit with the fewest
+    /// azimuths behind it rather than the oldest: a capture with content round
+    /// the whole circle is better evidence than a newer one without.
+    #[test]
+    fn the_pool_is_bounded_and_drops_its_thinnest_fit() {
+        let mut state = ConfigState::default();
+        for patches in 0..POOLED {
+            state.harvest(1, harvest(-2.4, 20 + patches, 0.5));
+        }
+        state.harvest(1, harvest(-2.4, 99, 0.5));
+        let pool = &state.seam_pool["0000000000000001"];
+        assert_eq!(pool.samples.len(), POOLED);
+        assert_eq!(pool.samples.iter().map(|s| s.patches).min(), Some(21));
+        assert!(pool.samples.iter().any(|s| s.patches == 99));
     }
 }

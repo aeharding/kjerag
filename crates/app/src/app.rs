@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Horizon, MissingDecoder, Nudge, Request, Scene, SeamFit, Stats};
+use kyerag_render::{Accuracy, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -171,13 +171,6 @@ pub enum Message {
     /// A toast's close button, or its own five seconds running out: both
     /// arrive here (cosmic-files `src/app.rs:3008-3010`).
     CloseToast(u64),
-    /// `View > Calibrate seam from this video`: measure this camera's seam off
-    /// the open file and keep the answer (issue #48).
-    CalibrateSeam,
-    /// It came back, a second or two later, off a worker thread. The camera
-    /// travels with it, because the answer is stored under the camera and the
-    /// pilot may have opened something else while it ran.
-    Calibrated(u64, Result<SeamFit, String>),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -417,6 +410,7 @@ impl cosmic::Application for App {
                 self.stored.write_state();
             }
             Message::FileClose => {
+                self.pool_seam();
                 self.open = None;
                 self.failed = None;
                 self.show_controls(now);
@@ -487,11 +481,6 @@ impl cosmic::Application for App {
             }
             Message::Captured(to, still) => return self.captured(to, still),
             Message::CloseToast(id) => self.toasts.close(id),
-            Message::CalibrateSeam => {
-                self.show_controls(now);
-                return self.calibrate();
-            }
-            Message::Calibrated(camera, fit) => return self.calibrated(camera, fit),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -589,7 +578,6 @@ impl cosmic::Application for App {
             &self.stored.state,
             &self.key_binds,
             self.open.is_some(),
-            self.has_seam(),
             self.stored.config.horizon_lock,
         )]
     }
@@ -708,6 +696,7 @@ impl App {
     /// pilot staring at an unchanged window; a player with exactly one job
     /// should say when it cannot do it.
     fn load(&mut self, path: &Path) {
+        self.pool_seam();
         match Scene::open(path) {
             Ok(scene) => {
                 self.failed = None;
@@ -744,18 +733,59 @@ impl App {
             });
     }
 
-    /// Hand this camera's seam calibration to the scene, before its first
-    /// frame is drawn (issue #48).
+    /// Hand this camera's pooled seam calibration to the scene, before its
+    /// first frame is drawn (issue #48).
     ///
-    /// A camera this box has never been asked to calibrate falls back to a fit
-    /// off this file's own frames, which is the weaker answer for the reason
-    /// 6.8 measures: a flight's own seam carries that flight's parallax, and a
-    /// fit taken through it absorbs some. That is the whole of the difference
-    /// between the two paths here.
+    /// A camera the pool knows nothing about falls back to a fit off this
+    /// file's own frames, which is the weaker answer for the reason 6.8
+    /// measures: a flight's own seam carries that flight's parallax, and a fit
+    /// taken through it absorbs some. That is the whole of the difference
+    /// between the two paths here, and it is why the fallback's answer is
+    /// pooled rather than believed.
+    ///
+    /// Nothing is asked of the pilot either way (AGENTS.md, zero-config
+    /// playback). The terminal line is the whole of what is said about it.
     fn hold_seam(&self, scene: &Scene) {
+        let pooled = scene
+            .camera_key()
+            .map_or(0, |c| self.stored.state.seam_pooled(c));
         match scene.camera_key().and_then(|c| self.stored.state.seam(c)) {
-            Some(fit) => scene.use_seam(fit),
+            Some(fit) => {
+                println!(
+                    "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, \
+                     cy {:+.2} px (pooled over {pooled} fits of this camera)",
+                    fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
+                );
+                scene.use_seam(fit);
+            }
             None => scene.fit_seam(),
+        }
+    }
+
+    /// Fold whatever the open file taught us about its camera's seam into that
+    /// camera's pool, on the way out.
+    ///
+    /// Called when a file is closed or replaced rather than when the fit
+    /// lands, because a fit that landed one second into a file the pilot then
+    /// scrubbed through is the same evidence as one that landed and was
+    /// watched: what makes it worth keeping is its own quality, which travels
+    /// with it, and waiting until the file is done costs nothing.
+    fn pool_seam(&mut self) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        let (Some(camera), Some(harvest)) = (open.scene.camera_key(), open.scene.seam_harvest())
+        else {
+            return;
+        };
+        if self.stored.state.harvest(camera, harvest) {
+            println!(
+                "seam:   kept that fit, {} azimuths leaving {:.3} deg; this camera's pool is {}",
+                harvest.patches,
+                harvest.residual_deg,
+                self.stored.state.seam_pooled(camera),
+            );
+            self.stored.write_state();
         }
     }
 
@@ -767,13 +797,6 @@ impl App {
         };
         open.scene.set_volume(self.stored.config.volume as f32);
         open.scene.set_muted(self.stored.config.muted);
-    }
-
-    /// Whether there is a seam to calibrate: `false` for no file and for a
-    /// capture that carries one lens stream (issue #79's camera, a file at a
-    /// time).
-    fn has_seam(&self) -> bool {
-        self.open.as_ref().is_some_and(|open| open.scene.has_seam())
     }
 
     /// Whether there is anything to mute: `false` for no file, for a file
@@ -892,72 +915,6 @@ impl App {
                 self.toast(strings::capture_failed(to, &e))
             }
         }
-    }
-
-    /// Measures this camera's seam off the open file and keeps the answer
-    /// (issue #48).
-    ///
-    /// The run reads real frames from three places in the file, so it is a
-    /// second or two and it happens on a thread of its own; the window keeps
-    /// playing while it does. A capture from a camera standing still is what
-    /// this wants pointed at it, and where the app says so is docs/UI.md's
-    /// line in the menu plus the report line a file with no calibration
-    /// prints.
-    ///
-    /// A thread and a channel rather than the async runtime's blocking pool,
-    /// which is what [`Self::capture`] does two functions up and for the same
-    /// reason: the work is a decoder, it belongs on a thread that is allowed
-    /// to sit in `read`, and this way the shell asks the runtime for nothing
-    /// but the wakeup.
-    fn calibrate(&self) -> Task<Message> {
-        let Some(open) = &self.open else {
-            return Task::none();
-        };
-        let (Some(camera), Some(job)) = (open.scene.camera_key(), open.scene.seam_job()) else {
-            return Task::none();
-        };
-        let path = open.path.clone();
-        let (finished, waiting) = oneshot::channel();
-        let spawned = std::thread::Builder::new()
-            .name("seam calibration".to_owned())
-            .spawn(move || {
-                let _ = finished.send(job.run(&path));
-            });
-        if let Err(e) = spawned {
-            return cosmic::task::message(cosmic::Action::App(Message::Calibrated(
-                camera,
-                Err(e.to_string()),
-            )));
-        }
-        Task::perform(waiting, move |done| {
-            action::app(Message::Calibrated(
-                camera,
-                done.unwrap_or_else(|_| Err("the calibration did not finish".to_owned())),
-            ))
-        })
-    }
-
-    /// Says what the calibration came to, keeps it, and puts it into the
-    /// picture that is already on screen if that picture came off the same
-    /// camera.
-    fn calibrated(&mut self, camera: u64, fit: Result<SeamFit, String>) -> Task<Message> {
-        let fit = match fit {
-            Ok(fit) => fit,
-            Err(e) => {
-                eprintln!("kyerag: the seam was not calibrated: {e}");
-                return self.toast(strings::calibration_failed(&e));
-            }
-        };
-        self.stored.state.calibrate(camera, fit);
-        self.stored.write_state();
-        if let Some(open) = &self.open {
-            // Not only the file it was measured on: any file from that camera
-            // that happens to be open is drawn with it from here.
-            if open.scene.camera_key() == Some(camera) {
-                open.scene.use_seam(fit);
-            }
-        }
-        self.toast(strings::SEAM_CALIBRATED.to_owned())
     }
 
     /// One toast, and the task that takes it away again five seconds later.

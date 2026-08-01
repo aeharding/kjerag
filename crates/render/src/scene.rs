@@ -28,7 +28,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
@@ -37,7 +37,7 @@ use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack,
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
-use super::seam::{self, Corrected, SeamFit};
+use super::seam::{self, Correction, Harvest, SeamFit};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -170,12 +170,18 @@ struct Show {
     /// ([`CalibrationSet::camera_key`]). The seam calibration is stored under
     /// it.
     camera: u64,
-    /// The same lenses with the seam correction in them (issue #48): this
-    /// camera's stored calibration, applied at open, or a fit off this file's
-    /// own frames where there is none. Empty until one of those lands, and
-    /// empty for good on a file that has no seam or nothing to fit one on,
-    /// which is the factory calibration and is what every earlier build drew.
-    corrected: Corrected,
+    /// The same lenses with the seam correction in them (issue #48): what the
+    /// pool knows about this camera, landed at open, or a fit off this file's
+    /// own frames where it knows nothing. The factory calibration until one of
+    /// those arrives, and for good on a file with no seam.
+    ///
+    /// Shared rather than owned because the fallback fit runs on a thread of
+    /// its own and hands its answer back through this.
+    corrected: Arc<Correction>,
+    /// What a fallback fit off this file came to, for the pool to keep if it
+    /// is good enough. The shell reads it when the file is closed or another
+    /// is opened; nothing in the render path touches it.
+    harvested: Harvested,
     /// Where the camera body was, over the whole file, and the camera's own
     /// timestamp for each frame. Both come out of the trailer at open
     /// (issue #8); both are empty for a file with no IMU record, and then
@@ -356,38 +362,56 @@ impl Scene {
             .is_some_and(|show| show.lenses.len() >= 2)
     }
 
-    /// Draw this file with the calibration this box has stored for its
-    /// camera. Applied here and now, so it is in the first frame.
+    /// Draw this file with what the pool knows about its camera. Applied here
+    /// and now, with no walk, so it is in the first frame.
     pub fn use_seam(&self, fit: SeamFit) {
         let Some(show) = &self.show else {
             return;
         };
-        seam::known(&show.corrected, &show.lenses, fit);
+        show.corrected.land(fit);
     }
 
-    /// No calibration stored for this camera: fit one from this file's own
+    /// The pool does not know this camera yet: fit one from this file's own
     /// frames instead, best effort (`kyerag_render::seam`).
     ///
     /// On its own thread for a file that is playing, because a fit is a
     /// second or two of decode and the picture is not waiting for it; on this
     /// one for a still, which has no later to correct itself in.
+    ///
+    /// A fit that lands while the file plays is **asked for** rather than
+    /// landed: the picture walks to it over the next few seconds, because by
+    /// then there is a picture to jump.
     pub fn fit_seam(&self) {
         let Some(show) = &self.show else {
             return;
         };
+        if show.lenses.len() < 2 {
+            return;
+        }
+        println!(
+            "seam:   nothing pooled for this camera yet, so it is fitted from this file, best \
+             effort, while it plays"
+        );
         let stepped = matches!(show.playing.borrow().source, Source::Stepped(_));
-        let fit = match stepped {
-            true => seam::correct_now,
-            false => seam::correct,
-        };
-        fit(&show.corrected, &show.path, &show.lenses, show.frame);
+        let (path, lenses, frame) = (show.path.clone(), show.lenses.clone(), show.frame);
+        let (corrected, kept) = (show.corrected.clone(), show.harvested.clone());
+        if stepped {
+            fit_into(&path, &lenses, frame, &corrected, &kept, true);
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("seam fit".to_owned())
+            .spawn(move || fit_into(&path, &lenses, frame, &corrected, &kept, false));
+        if let Err(e) = spawned {
+            eprintln!("kyerag: the seam fit did not start: {e}");
+        }
     }
 
-    /// What a calibration run needs from this file, for a caller that will run
-    /// it off the main thread (issue #48). `None` for a file with no seam.
-    pub fn seam_job(&self) -> Option<seam::Job> {
-        let show = self.show.as_ref()?;
-        seam::Job::new(&show.lenses, show.frame)
+    /// What this file's own frames came to, for the pool to keep if it is good
+    /// enough. `None` until a fallback fit has landed, and on a file whose
+    /// camera the pool already knew, which fits nothing.
+    pub fn seam_harvest(&self) -> Option<Harvest> {
+        *self.show.as_ref()?.harvested.lock().ok()?
     }
 
     /// Take the next frame of a stepped scene, on this thread. `false` at the
@@ -691,18 +715,19 @@ impl Show {
         Self {
             path: path.to_path_buf(),
             frame,
+            corrected: Arc::new(Correction::none(&calibrated.lenses)),
+            harvested: Harvested::default(),
             lenses: calibrated.lenses,
             camera: calibrated.camera,
-            corrected: Corrected::default(),
             held: calibrated.held,
             playing: RefCell::new(Playing { frames, source }),
         }
     }
 
-    /// What the pass runs on: this file's own fitted calibration once the fit
-    /// has landed, and the camera's own until then.
+    /// What the pass runs on this redraw: the correction as it stands, which
+    /// is one step further along its walk than it was on the last one.
     fn lenses(&self) -> Arc<[Lens]> {
-        self.corrected.get().unwrap_or(&self.lenses).clone()
+        self.corrected.lenses()
     }
 
     fn view(&self, held: Holding) -> Option<View> {
@@ -727,6 +752,51 @@ impl Show {
         })
     }
 }
+
+/// A fallback fit off one file's own frames, into the correction it will be
+/// drawn with and the slot the pool reads it out of.
+///
+/// `land` for a still, which has no later moment to correct itself in, and
+/// `ask` for a file that is playing, which does: by the time this returns
+/// there is a picture on screen, and a picture that jumps is worse than a
+/// picture that is briefly a degree out.
+fn fit_into(
+    path: &Path,
+    lenses: &Arc<[Lens]>,
+    frame: Size,
+    into: &Arc<Correction>,
+    kept: &Harvested,
+    now: bool,
+) -> Option<Harvest> {
+    let started = Instant::now();
+    let fitted = seam::fit_file(path, lenses, frame, &seam::Plan::default())?;
+    println!(
+        "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, cy {:+.2} px ({})",
+        fitted.fit.roll_deg,
+        fitted.fit.yaw_deg,
+        fitted.fit.pitch_deg,
+        fitted.fit.cx_px,
+        fitted.fit.cy_px,
+        fitted.describe(started.elapsed().as_secs_f64()),
+    );
+    match now {
+        true => into.land(fitted.fit),
+        false => into.ask(fitted.fit),
+    }
+    let harvest = Harvest {
+        fit: fitted.fit,
+        patches: fitted.patches,
+        residual_deg: fitted.after[0].hypot(fitted.after[1]),
+    };
+    if let Ok(mut slot) = kept.lock() {
+        *slot = Some(harvest);
+    }
+    Some(harvest)
+}
+
+/// Where a fallback fit leaves its answer for the shell to pool. Shared,
+/// because the fit that fills it runs on a thread of its own.
+type Harvested = Arc<Mutex<Option<Harvest>>>;
 
 /// Everything the trailer contributes to one open capture: the calibration
 /// for the lenses the shader samples, checked against the streams they will

@@ -61,9 +61,6 @@ pub const ZOOM_OUT: &str = "Zoom out";
 /// The horizon lock toggle (issue #8). "Lock horizon" is what Insta360's own
 /// app and Studio call it, so it is the words this pilot already has.
 pub const LOCK_HORIZON: &str = "Lock horizon";
-/// Measure this camera's seam off the open video and keep the answer
-/// (issue #48). No ellipsis: it opens nothing, it acts.
-pub const CALIBRATE_SEAM: &str = "Calibrate seam from this video";
 pub const FULLSCREEN: &str = "Fullscreen";
 /// The ellipsis is on the menu item, which opens something; the page it opens
 /// is titled without one.
@@ -73,12 +70,6 @@ pub const SETTINGS_TITLE: &str = "Settings";
 /// What a capture says when it lands (issue #15). The noun is the menu's
 /// own: the pilot pressed `Copy frame`, so the toast says frame.
 pub const FRAME_COPIED: &str = "Frame copied to the clipboard";
-
-/// What a calibration says when it lands (issue #48). It says camera rather
-/// than video, because that is the difference between this and what the app
-/// does on its own: the answer is kept and every later video off the same
-/// camera opens with it.
-pub const SEAM_CALIBRATED: &str = "Seam calibrated for this camera";
 
 /// The Settings page.
 pub const APPEARANCE: &str = "Appearance";
@@ -151,14 +142,6 @@ pub fn capture_failed(to: Destination, reason: &str) -> String {
         Destination::Save => format!("Frame not saved: {reason}"),
         Destination::Copy => format!("Frame not copied: {reason}"),
     }
-}
-
-/// A calibration that did not happen, with the reason it did not: too little
-/// content on the seam to match, a file with one lens in it, an answer too
-/// big to be a calibration. Every one of them is a property of the capture
-/// that was pointed at, so the reason is the whole message.
-pub fn calibration_failed(reason: &str) -> String {
-    format!("Seam not calibrated: {reason}")
 }
 
 /// A recent file as the menu shows it: under the home directory, `~` stands
@@ -244,8 +227,6 @@ mod tests {
             THEME_DARK,
             THEME_LIGHT,
             FRAME_COPIED,
-            CALIBRATE_SEAM,
-            SEAM_CALIBRATED,
         ];
         for line in copy {
             assert!(!line.contains('\u{2014}'), "em dash in {line:?}");
@@ -253,7 +234,6 @@ mod tests {
         assert!(!about_item().contains('\u{2014}'));
         assert!(!frame_saved(Path::new("/tmp/Screenshots/a.png")).contains('\u{2014}'));
         assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
-        assert!(!calibration_failed("no").contains('\u{2014}'));
         assert!(!open_failed(Some("hevc")).contains('\u{2014}'));
     }
 

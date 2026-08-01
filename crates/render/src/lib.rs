@@ -23,7 +23,7 @@ pub use kyerag_meta::{Quat, Readout, Sweep};
 pub use projection::{Blend, Held, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe, Rolling};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
-pub use seam::{Corrected, SeamFit};
+pub use seam::{Correction, Harvest, SeamFit};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on
 /// `Size` because `Size` belongs to `kyerag-media`, which has no wgpu.
