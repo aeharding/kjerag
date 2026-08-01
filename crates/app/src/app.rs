@@ -161,6 +161,9 @@ pub enum Message {
     /// only shape of drop a sandboxed app can open (issue #118, `dnd.rs`).
     /// The paths it stands for come back as a [`Message::Dropped`].
     DroppedTransfer(String),
+    /// The portal answered that key with an error rather than paths, in its
+    /// own words, which are the ones the alert then says.
+    DroppedTransferFailed(String),
     FileClearRecents,
     FileClose,
     FileLoad(PathBuf),
@@ -536,15 +539,13 @@ impl cosmic::Application for App {
                 // over, which is a call to another process rather than bytes
                 // that came with the drag (`dnd.rs`).
                 return cosmic::command::file_transfer_receive(key).map(|answer| {
-                    action::app(Message::Dropped(match answer {
-                        Ok(paths) => Some(Dropped::transferred(paths)),
-                        Err(e) => {
-                            eprintln!("kjerag: that drop's files stayed with the portal: {e}");
-                            None
-                        }
-                    }))
+                    action::app(match answer {
+                        Ok(paths) => Message::Dropped(Some(Dropped::transferred(paths))),
+                        Err(e) => Message::DroppedTransferFailed(e.to_string()),
+                    })
                 });
             }
+            Message::DroppedTransferFailed(why) => self.alert.raise(Failure::Portal(why)),
             Message::FileClearRecents => {
                 self.stored.state.recent_files.clear();
                 self.stored.write_state();

@@ -2219,7 +2219,14 @@ welcome() {
 # A file with video in it and no Insta360 trailer is what the app meets when
 # someone hands it an ordinary video, and it is the one playback-adjacent
 # path that needs no footage: ffmpeg writes the file in a second. What is
-# checked is that the refusal is a message and not a crash.
+# checked is that the refusal is a message and not a crash, and that the
+# message is the one the failure itself wrote.
+#
+# The second half is the owner's ruling of 2026-08-01 (AGENTS.md, "Errors are
+# the error"): the alert's body is the raw reason, not a line about a file
+# that would not open. The terminal half of that is read here directly, since
+# the trailer read fails with a sentence this script can name. The window
+# half is `refusals_differ` below, because no capture can read words.
 
 dud() {
 	printf '\n-- rejected file checks (synthetic)\n'
@@ -2229,15 +2236,19 @@ dud() {
 		-f lavfi -i "testsrc=size=320x320:rate=30:duration=1" \
 		-map 0:v -map 1:v -c:v libx265 -tag:v hvc1 -preset ultrafast \
 		"$file" 2>>"$session/ffmpeg.log"; then
-		skip "a file with no trailer is refused (no two-stream HEVC from ffmpeg here)"
+		skip "the refusal says what actually failed (no two-stream HEVC from ffmpeg here)"
+		# The comparison below is against this file's own alert, so it goes
+		# with it: an empty .insv alone has nothing to differ from.
+		skip "two failures put up two different alerts (no file to refuse)"
 		return
 	fi
 
 	boot dud "$file"
-	if await 'not shown' "$READY"; then
-		pass "a file with no trailer is refused"
+	local check="the refusal says what actually failed, in the error's own words"
+	if await 'not shown: file has no Insta360 trailer' "$READY"; then
+		pass "$check"
 	else
-		fail "a file with no trailer is refused" "nothing said so in $READY s" "log: $log"
+		fail "$check" "$(refused_with "$log")" "log: $log"
 	fi
 
 	if await_paint dud; then
@@ -2250,6 +2261,73 @@ dud() {
 		return
 	fi
 
+	# The window with this refusal's alert over it, kept for the comparison
+	# in `refusals_differ`. A beat after paint, like every capture that is
+	# compared with another one.
+	sleep "$SETTLE"
+	grab dud-alert >/dev/null
+	exits_clean
+
+	refusals_differ
+}
+
+# What the app said it would not show, with the path taken off the front.
+refused_with() {
+	sed -n 's/^kjerag: .* not shown: //p' "$1" | tail -1
+}
+
+# The alert's body is this failure's own message and not a line the app keeps
+# for failures in general (AGENTS.md, "Errors are the error").
+#
+# No capture can read the words in a dialog, so what is checked is that two
+# files that fail for two different reasons draw two different dialogs. The
+# reasons are read off the terminal and required to differ, because two files
+# that failed the same way would prove nothing; the pixels are then what says
+# the difference reached the window. Both halves are needed and the check is
+# worth what the pair is worth: on the commit before this one, both of these
+# files put up "That file could not be opened." and this fails.
+#
+# The second file is empty and named `.insv`, so it is refused by libavformat
+# rather than by the trailer read, in libavformat's own words.
+refusals_differ() {
+	local check="two failures put up two different alerts"
+	local empty=$session/nothing-in-it.insv
+	: >"$empty"
+
+	boot empty "$empty"
+	if ! await 'not shown' "$READY"; then
+		alive || lost "$check"
+		fail "$check" "an empty file was not refused in $READY s" "log: $log"
+		teardown
+		return
+	fi
+
+	local first second
+	first=$(refused_with "$session/dud.log")
+	second=$(refused_with "$log")
+	if [ "$first" = "$second" ]; then
+		fail "$check" "both files were refused with: $second" \
+			"log: $log"
+		exits_clean
+		return
+	fi
+
+	if ! await_paint empty; then
+		alive || lost "$check"
+		fail "$check" "capture is black: $session/empty.ppm" "log: $log"
+		teardown
+		return
+	fi
+	sleep "$SETTLE"
+	local alerted
+	alerted=$(grab empty-alert)
+	if same_picture "$session/dud-alert.ppm" "$alerted"; then
+		fail "$check" \
+			"the same dialog for \"$first\" and \"$second\"" \
+			"$session/dud-alert.ppm" "$alerted"
+	else
+		pass "$check ($second)"
+	fi
 	exits_clean
 }
 

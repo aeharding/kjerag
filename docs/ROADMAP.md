@@ -557,6 +557,51 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **Errors are the error** (owner ruling, on reading the funnel's
+  own output). He watched the terminal say "trailer says lens frames are
+  2880x2880 but the stream decodes 736x368" while the window said "That file
+  could not be opened.", and ruled the raw message is what the pilot gets,
+  everywhere, as a rule and not as a fix. So the alert's body is the
+  failure's own message and the generic line is deleted rather than demoted.
+  Nothing falls back to it, because there is no it: a failure nobody
+  anticipated says what it says. Three lines of the app's own sit over an
+  error and they are the whole list (`fail::refusal`): the format refusal
+  (#107), the missing decoder (#69), the sandbox reach line (#118). Each
+  names a fix the error does not know about, and each is one sentence away
+  from being a mask, which is why the list is written down rather than left
+  to judgement.
+
+  **The stopped-video alert went the same way** (coordinator's call on the
+  branch, applying the rule the branch had just written). Its body was "The
+  picture could not be drawn, so playback stopped. Open the file again.",
+  which knew less than the stall it stood over, so it did not qualify. The
+  body is the stall's own line with the action on the end of it now: "61
+  frames could not be imported over 2.0 s, last: Too many open files
+  (os error 24). Open the file again." Added rather than substituted, which
+  is the difference that makes a line of ours legitimate, and the only thing
+  that half of it carries is the one fact the render layer cannot have, that
+  this open is over. The terminal echo is unchanged, and so is everything
+  about when the alert appears and what closing it does.
+
+  **Two failures had no reason to show and now do.** A drop the document
+  portal refused printed its answer to the terminal and put the generic line
+  in the window; it carries the portal's own words now. A drop with nothing
+  openable in it has no error at all to show, because libcosmic keeps only
+  what converted (`dnd_destination.rs:119-120` calls `.ok()`, read at the
+  pinned revision), so it says that instead of blaming a file nobody named.
+  Nothing else in the shell was masking a reason; what the audit found
+  besides was the opposite defect, failures with no surface at all (the file
+  chooser's own errors, and issue #131's About links).
+
+  **The engine's error strings are UI copy now.** They were always written at
+  the failure site; what is new is that a person reads them, so the copy
+  rules bind them and the tests do too. `kjerag-meta` checks every `Error`
+  variant through a wildcard-free match, so a variant added later has to be
+  looked at. The harness proves the words reach the screen rather than only
+  the log: two files that fail for two different reasons must draw two
+  different dialogs, which is a check that fails on the commit before this
+  one.
+
 - 2026-08-01 **The chooser hands back a document because the grant is read
   only, not because it is a chooser** (issue #123, measured, no fix yet). A
   file picked in `File > Open video` arrives as `/run/user/<uid>/doc/<id>/

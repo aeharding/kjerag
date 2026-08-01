@@ -517,8 +517,14 @@ ffmpeg-next asks for the same one, and refuses the file with a typed
 > Kjerag has no HEVC decoder here, so that file cannot be played. In a
 > Flatpak, the decoder comes from the codecs-extra runtime extension.
 
-instead of "That file could not be opened.", and the terminal line reads
+and the terminal line reads
 `kjerag: <path> not shown: no hevc decoder in this libavcodec`.
+
+This is one of the three lines the shell is still allowed to write over an
+error (AGENTS.md, "Errors are the error"), and it is allowed for a reason
+that is this section: which package carries the decoder is a packaging fact,
+and `kjerag-media` has no way of knowing it. Its own message is true and
+leaves the pilot nowhere.
 
 At open rather than at startup, which is what this section originally asked
 for and is not what shipped. A startup probe needs a surface to say it on,
@@ -979,8 +985,8 @@ it behaves the same. Two details worth keeping:
   VA-API at all.
 - **HEVC needs no `codecs-extra` extension here.** The base runtime's
   libavcodec 61.19.101 carries the `hevc` decoder, which is what §3.3 found
-  and what `strings::open_failed` names as the thing to install if it ever is
-  not.
+  and what `strings::missing_decoder` names as the thing to install if it
+  ever is not.
 
 **A by-name grant is resolved against the caller's environment, which is what
 lets the harness test the shipped sandbox without writing to the desktop**
