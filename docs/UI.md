@@ -220,13 +220,36 @@ The icon is loaded from the committed drawing
 (`resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg`, through
 `icon::from_svg_bytes`) rather than asked for by name. See "About" below.
 
-**Failure to open lands here too.** The welcome view returns with a second
-line of body text under the first, saying what went wrong in plain words
-("That file could not be opened."), plus a `log::warn!` with the detail.
-cosmic-player only logs (`src/video.rs:63`), which
-leaves the pilot staring at an unchanged window; a player with exactly one
-job should say when it cannot do it. No dialog: the HIG's dialog section is
-about asking the user something, and there is nothing to ask.
+**Failure to open does not land here.** It used to: the welcome view returned
+with a second line of body text under the first. The owner's call
+(2026-08-01, issue #117) is that this was the wrong surface for it, and a
+failure is now the stock alert in the middle of the window, shaped the way
+cosmic-files shapes the one it puts up for an operation that failed
+(`src/app.rs:5665-5678`): a title, the reason as the body, `dialog-error` at
+64, and one button. It says why in plain words, and the terminal carries the
+detail. cosmic-player only logs (`src/video.rs:63`), which leaves the pilot
+staring at an unchanged window; a player with exactly one job should say when
+it cannot do it.
+
+**And it is the only surface a failure has** (issue #124). A video that
+stopped part way through puts up the same alert with a title of its own
+("Video stopped"), because it is the same thing from the pilot's side: no
+picture, and one action that fixes it. The alert's line is private to
+`crates/app/src/fail.rs` and nothing else in the app can put words there, so
+this is a property of the code rather than a rule to remember
+(docs/ARCHITECTURE.md). The one failure that is deliberately not an alert is a
+capture that could not be written: the picture is still there and the pilot is
+still watching it, so that is a toast.
+
+**One alert per open, and the alert means what it says** (owner ruling,
+2026-08-01). A video that stopped is stopped: closing the alert leaves the
+window as it stands, picture held, clock and sound stopped, controls there to
+be used, and nothing retrying behind it. The transport goes quiet with the file
+it belongs to, so a play press cannot start a clock over a picture that is not
+coming back. Opening the file is the way on, which is what the alert says. The
+first shape of this re-armed as soon as the alert was closed, and the owner met
+the same alert five times over while it told him each time to open the file
+again.
 
 ## Opening a file
 

@@ -16,6 +16,13 @@
 # virtual pointer one, and `grim` copies the output out. The app is the
 # release binary, unchanged: nothing here is a test hook.
 #
+# One check is louder than that and says so where it stands: `stalls` needs a
+# frame import to fail, so it preloads twenty lines of C that make `dup(2)`
+# answer EMFILE on the app's own main thread while a file exists. The binary
+# is still the unchanged release build and the failure it meets is a real
+# errno from a real syscall on the real import path; what is arranged is the
+# scarcity, not the handling of it (issue #124).
+#
 # What the checks are allowed to believe, strongest first:
 #
 #   1. the app's own stdout: a report line every 5 s while playing, and one
@@ -258,6 +265,10 @@ cage_pid=
 runtime=
 log=
 
+# Set by `stalls` for its own sessions and empty for every other one: what to
+# wrap the app in, which is the fault shim and the file that arms it.
+wrap=()
+
 # boot <label> [file]
 #
 # The runtime directory is the session's own, which is what keeps the socket
@@ -283,7 +294,7 @@ boot() {
 		PIPEWIRE_NODE="$QUIET_SINK" \
 		WLR_BACKENDS=headless \
 		WLR_LIBINPUT_NO_DEVICES=1 \
-		cage -- "${launch[@]}" ${file:+"$file"} >"$log" 2>&1 &
+		cage -- "${wrap[@]}" "${launch[@]}" ${file:+"$file"} >"$log" 2>&1 &
 	cage_pid=$!
 
 	local waited=0
@@ -1653,6 +1664,277 @@ pooled_calibration() {
 	exits_clean
 }
 
+# ---------------------------------------- the checks, with the import failing
+#
+# Issue #124. A frame import can fail for reasons that pass: the box runs out
+# of file descriptors, the driver runs out of device memory. Until this branch
+# the first one of those was the last frame the player ever drew, and the whole
+# of what was said about it was one line on a terminal a launcher-started
+# Flatpak sends nowhere: measured on main's own binary, one 0.3 s squeeze left
+# the picture frozen for good while the sound played on at 15745 of 32767 and
+# the clock ran on at 30.00 fps.
+#
+# So there are two claims and they pull in opposite directions, which is why
+# both are checked: a failure that passes must cost frames and nothing else,
+# and one that does not must stop the file, sound and all, and put the alert up.
+#
+# The instrument is a shim over `dup(2)`, which the import calls once per plane
+# (`crates/render/src/dmabuf.rs`) on the thread iced prepares the pass on. The
+# decode thread's own descriptors come out of `av_hwframe_map` and never
+# through `dup`, so failing it on the main thread alone leaves the decoder
+# delivering frames into an import that cannot take them, which is the shape of
+# the hiccup this is about. Nothing in the app is compiled differently and no
+# code path is stood in for; what the shim arranges is the scarcity.
+
+# How long the app is given to notice, which is the render layer's own bound
+# (`STUCK_FOR`, two seconds) and then some.
+STUCK_BY=8
+# How long the stop is watched after the alert is closed, with the import still
+# failing. Four times the bound: the shape the owner rejected raised its next
+# alert two seconds in, and did it five times over.
+FINAL_BY=8
+# How long a hiccup lasts. Well under the bound, and long enough to cover
+# several frames at 30 fps.
+HICCUP=0.4
+# The line the funnel prints when the picture is what stopped, which names the
+# file it stopped (`crates/app/src/fail.rs`). It is spelled with the file in it
+# because the sound has a `stopped:` line of its own: cpal reports an underrun
+# as "kjerag: sound stopped", a loaded box produces one at startup, and a
+# pattern of plain `stopped:` reads that as the picture dying. Measured: it
+# failed the hiccup check that way on 2026-08-01, on two underruns that landed
+# before the file's first report line.
+STOPPED='.insv stopped:'
+
+stalls() {
+	local check
+	printf '\n-- import failure checks (%s)\n' "$media"
+
+	if [ -n "${KJERAG_FLATPAK:-}" ]; then
+		skip "a stuck import stops the file and says so (no preload into a sandbox)"
+		return
+	fi
+	if ! command -v cc >/dev/null; then
+		skip "a stuck import stops the file and says so (no cc to build the shim)"
+		return
+	fi
+
+	local shim=$session/dupfail.so gate=$session/dup-fail
+	rm -f "$gate"
+	cat >"$session/dupfail.c" <<-'EOF'
+		#define _GNU_SOURCE
+		#include <dlfcn.h>
+		#include <errno.h>
+		#include <stdlib.h>
+		#include <sys/syscall.h>
+		#include <unistd.h>
+
+		static int (*real_dup)(int);
+
+		int dup(int fd) {
+		        if (!real_dup) {
+		                real_dup = dlsym(RTLD_NEXT, "dup");
+		        }
+		        const char *gate = getenv("KJERAG_DUP_FAIL");
+		        if (gate && syscall(SYS_gettid) == getpid() && access(gate, F_OK) == 0) {
+		                errno = EMFILE;
+		                return -1;
+		        }
+		        return real_dup(fd);
+		}
+	EOF
+	if ! cc -shared -fPIC -O2 -o "$shim" "$session/dupfail.c" -ldl 2>>"$session/cc.log"; then
+		skip "a stuck import stops the file and says so (the shim did not build)"
+		return
+	fi
+
+	wrap=(env "LD_PRELOAD=$shim" "KJERAG_DUP_FAIL=$gate")
+	boot stall "$media"
+	if ! await '^play:' "$READY"; then
+		fail "the file plays under the shim" "no report line in $READY s" "log: $log"
+		teardown
+		wrap=()
+		return
+	fi
+	pass "the file plays under the shim"
+
+	# (1) The hiccup. Failing imports for a fraction of the bound costs the
+	# frames it covers and must cost nothing else: no line, no alert, and a
+	# picture still moving on the other side of it.
+	check="a transient import failure costs frames and not the file"
+	: >"$gate"
+	sleep "$HICCUP"
+	rm -f "$gate"
+	sleep "$SETTLE"
+	if said "$STOPPED"; then
+		fail "$check" "$(grep -- "$STOPPED" "$log")" "log: $log"
+	elif moving_picture hiccup; then
+		pass "$check"
+	else
+		alive || lost "$check"
+		fail "$check" "the picture did not come back after a ${HICCUP}s squeeze" \
+			"$session/hiccup-a.ppm" "$session/hiccup-b.ppm"
+	fi
+
+	# (2) The one that does not pass. From here the file is stopped for good,
+	# so every check after this one is about a window that has already given up.
+	check="a stuck import stops the file and says so"
+	local reports
+	reports=$(grep -c '^play:' "$log")
+	: >"$gate"
+	if ! await "$STOPPED" "$STUCK_BY"; then
+		alive || lost "$check"
+		fail "$check" "nothing said the picture had gone, after $STUCK_BY s" "log: $log"
+		teardown
+		wrap=()
+		return
+	fi
+	pass "$check ($(grep -- "$STOPPED" "$log" | grep -o 'stopped:.*' | tail -1))"
+
+	# The report subscription runs only while playing, so a line that never
+	# arrives is the clock stopped, and the sound follows the clock: this is
+	# how the harness sees silence without a microphone.
+	check="a stopped file stops its sound too"
+	sleep "$REPORT"
+	if [ "$(grep -c '^play:' "$log")" -gt "$reports" ]; then
+		fail "$check" "the clock ran on for $REPORT s after the picture died" \
+			"$(grep '^play:' "$log" | tail -1)"
+	else
+		pass "$check (no report line in $REPORT s: the clock is stopped)"
+	fi
+
+	# And the pilot's own surface. No capture can read the words in an alert,
+	# so what is checked is the pair: something is drawn over a window whose
+	# picture is provably not moving any more, and Escape takes that something
+	# away again.
+	check="the stall puts an alert over the window"
+	if ! still_picture stalled; then
+		alive || lost "$check"
+		fail "$check" "the picture is still moving, so nothing below means anything" \
+			"$session/stalled-a.ppm" "$session/stalled-b.ppm"
+		teardown
+		wrap=()
+		return
+	fi
+	cp "$session/stalled-b.ppm" "$session/stalled-alert.ppm"
+	if press_until alert_dismissed stalled-dismissed -k Escape; then
+		pass "$check"
+	else
+		alive || lost "$check"
+		fail "$check" "the window did not settle to anything other than what it was \
+when Escape was pressed, so either nothing was drawn over it or nothing took \
+that away" \
+			"$session/stalled-alert.ppm" "$session/stalled-dismissed-b.ppm"
+	fi
+
+	# What the picture that stopped is, once the alert is out of the way: a
+	# picture. The pane holds the last frame the pass managed to present rather
+	# than falling to the backdrop, because a video that vanishes at the moment
+	# it stops reads as a second failure on top of the first. Owner, on the
+	# shape this replaced: "Why does the video disappear instead of just
+	# freezing on current frame though? Its jarring".
+	#
+	# `pane_is_backdrop` is issue #125's own reading, a mean of the band under
+	# the header, and what lets it tell the room from a picture is that this
+	# footage reads sky there: 185 224 241 against the room's 27 27 27. Taken
+	# with the alert dismissed, so nothing is drawn over what is being read,
+	# and the two captures behind it were already shown to be the same bytes,
+	# which is the frame being held rather than a video still running.
+	check="the stopped picture is the last frame, not the backdrop"
+	if pane_is_backdrop "$session/stalled-dismissed-b.ppm"; then
+		fail "$check" "the pane reads $(pane_rgb "$session/stalled-dismissed-b.ppm"), \
+which is the room and not a frame" "$session/stalled-dismissed-b.ppm"
+	else
+		pass "$check (the pane reads $(pane_rgb "$session/stalled-dismissed-b.ppm"))"
+	fi
+
+	# (3) The owner's ruling. The gate is still on, the alert has been closed,
+	# and from here this open is over: one alert for one open, whatever the
+	# pilot does next. Space is what he does next, because a stopped picture
+	# with a transport under it invites a press, and the shape this replaced
+	# answered one with two more seconds of retries and the same alert again.
+	check="the stop is final: one alert, and nothing restarts it"
+	local said_so
+	said_so=$(grep -c -- "$STOPPED" "$log")
+	reports=$(grep -c '^play:' "$log")
+	key -k space
+	key -k space
+	sleep "$FINAL_BY"
+	if [ "$(grep -c -- "$STOPPED" "$log")" -gt "$said_so" ]; then
+		fail "$check" "it said so again, $FINAL_BY s and two play presses later" \
+			"$(grep -- "$STOPPED" "$log" | grep -o 'stopped:.*' | tail -1)" "log: $log"
+	elif [ "$(grep -c '^play:' "$log")" -gt "$reports" ]; then
+		fail "$check" "a play press started the clock over a picture that had gone" \
+			"$(grep '^play:' "$log" | tail -1)" "log: $log"
+	else
+		pass "$check (one alert in $FINAL_BY s, and two play presses moved nothing)"
+	fi
+
+	# (4) And the way back, which is the one the alert names. The gate comes
+	# off and the pilot opens the file: a new capture, a new stall detector,
+	# and a picture again. Dropping it is how the harness opens a file into a
+	# window that is already up (`dropped_files`).
+	check="opening the file again plays it"
+	rm -f "$gate"
+	if reopened; then
+		pass "$check"
+	else
+		alive || lost "$check"
+		fail "$check" "the file was dropped on the window and it did not play" \
+			"report: $session/drag-reopen.log" "log: $log"
+	fi
+
+	exits_clean
+	wrap=()
+}
+
+# The file, dropped on a window that has given up on it, plays. True when the
+# app opens it (`media:`) and then reports on it (`play:`), which is the clock
+# running again, and the sound with it.
+reopened() {
+	local media_before play_before waited=0 pid
+	media_before=$(grep -c '^media:' "$log")
+	play_before=$(grep -c '^play:' "$log")
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$dragsource" "$media" "offer=uri-list" "linger=$DROP_OPEN" \
+		>"$session/drag-reopen.log" 2>&1 &
+	pid=$!
+	while [ "$waited" -le $((DROP_OPEN * 2)) ]; do
+		alive || break
+		[ "$(grep -c '^media:' "$log")" -gt "$media_before" ] &&
+			[ "$(grep -c '^play:' "$log")" -gt "$play_before" ] && break
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	[ "$(grep -c '^media:' "$log")" -gt "$media_before" ] &&
+		[ "$(grep -c '^play:' "$log")" -gt "$play_before" ]
+}
+
+# Whatever was drawn over the window is gone. Only means anything while the
+# picture underneath is known to be held, which `stalls` checks first.
+#
+# Two things have to be true and neither is enough on its own. The window has
+# settled, because a dialog part way through fading out is already not what it
+# was. And it has changed by more than a rounding error, because a window
+# changes a little on its own: measured on this branch, with the alert left up
+# the settled window differs from the alert capture by 2113 bytes of 2764816,
+# and with Escape taking it away it differs by 355691. One percent sits two
+# orders of magnitude clear of both.
+#
+# This is what "the window is not what it was" cost: written that way the check
+# passed a run in which the alert never went away at all, and the capture it
+# filed as its evidence still had the dialog in it.
+alert_dismissed() {
+	local a b changed
+	a=$(grab "$1-a")
+	sleep 0.7
+	b=$(grab "$1-b")
+	cmp -s "$a" "$b" || return 1
+	changed=$(cmp -l "$session/stalled-alert.ppm" "$b" | wc -l)
+	[ "$changed" -gt $(($(stat -c%s "$b") / 100)) ]
+}
+
 # ------------------------------------------------- the checks, with a drop
 #
 # A file dropped on the window opens it, which is the one way into the app no
@@ -1908,6 +2190,7 @@ if [ -n "$media" ]; then
 	with_media
 	pooled_calibration
 	dropped_files
+	stalls
 else
 	welcome
 fi

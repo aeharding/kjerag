@@ -57,12 +57,11 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kjerag_render::{
-    Accuracy, Foreign, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats,
-};
+use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, Stall, Stats};
 
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
+use crate::fail::{Alert, Failure};
 use crate::key_bind::{Action, JUMP, key_binds};
 use crate::shot::{Destination, Done};
 use crate::{menu, shot, strings};
@@ -178,6 +177,11 @@ pub enum Message {
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
+    /// The pass gave up on the file that was playing and stopped it
+    /// (issue #124). It arrives here because `kjerag_render`'s widget can only
+    /// hand a [`Stall`] to a message type that carries one, which is what
+    /// keeps a dead picture from being a line on a terminal nobody reads.
+    Stalled(Stall),
     /// Take a still of the view as it stands: `s`, `Ctrl+C`, the camera
     /// button, or either File menu item (issue #15).
     Capture(Destination),
@@ -224,6 +228,16 @@ pub enum Message {
     VideoAreaClick,
 }
 
+/// What makes [`Scene`]'s widget usable from this shell at all: its
+/// `shader::Program` will only hand its messages to a type that can carry a
+/// [`Stall`] (issue #124). Deleting this arm does not quietly drop the
+/// failure, it stops the video widget compiling.
+impl From<Stall> for Message {
+    fn from(stall: Stall) -> Self {
+        Self::Stalled(stall)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextPage {
     About,
@@ -234,10 +248,9 @@ pub struct App {
     core: Core,
     /// The file on screen, if there is one.
     open: Option<Open>,
-    /// What a file that would not open said, while the alert saying it is on
-    /// screen. It holds the line rather than a flag because which line it is
-    /// depends on why the open failed (issues #69 and #107).
-    alert: Option<String>,
+    /// What the window is saying about a failure, and the only way anything in
+    /// this app says one (`crate::fail`, issue #124).
+    alert: Alert,
     stored: Stored,
     key_binds: HashMap<KeyBind, Action>,
     about: About,
@@ -419,7 +432,7 @@ impl cosmic::Application for App {
         let mut app = App {
             core,
             open: None,
-            alert: None,
+            alert: Alert::default(),
             stored: flags.stored,
             key_binds: key_binds(),
             about: about(),
@@ -457,7 +470,7 @@ impl cosmic::Application for App {
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         let now = Instant::now();
         match message {
-            Message::AlertClose => self.alert = None,
+            Message::AlertClose => self.alert.close(),
             Message::AudioDropdown => {
                 self.controls.volume = !self.controls.volume;
                 self.show_controls(now);
@@ -500,8 +513,7 @@ impl cosmic::Application for App {
             Message::Dropped(dropped) => {
                 // First file wins, others are ignored.
                 let Some(path) = dropped.and_then(|files| files.0.into_iter().next()) else {
-                    eprintln!("kjerag: that drop carried no local file");
-                    self.alert = Some(strings::open_failed(None));
+                    self.alert.raise(Failure::Dropped);
                     return Task::none();
                 };
                 return self.update(Message::FileLoad(path));
@@ -657,6 +669,23 @@ impl cosmic::Application for App {
                 self.pool_seam();
                 std::process::exit(0)
             }
+            Message::Stalled(stall) => {
+                // The scene has already stopped the file, sound and all: what
+                // is left is saying so (issue #124). The controls come back
+                // with it, because the alert says to open the file again and
+                // the menu that does that lives in a header bar which hides
+                // itself while a file plays.
+                //
+                // Nothing open is the one case with nobody to tell about:
+                // the file was closed between the redraw that gave up and
+                // this message, so the picture the pilot is missing is one he
+                // put away himself.
+                let Some(open) = &self.open else {
+                    return Task::none();
+                };
+                self.alert.raise(Failure::Stopped(open.path.clone(), stall));
+                self.show_controls(now);
+            }
             Message::Report => {
                 self.report(now);
                 // The fit lands on a thread of its own with no message to
@@ -703,8 +732,8 @@ impl cosmic::Application for App {
     /// Escape to the app through this hook, which is why the key map does not
     /// bind it.
     fn on_escape(&mut self) -> Task<Self::Message> {
-        if self.alert.is_some() {
-            self.alert = None;
+        if self.alert.is_up() {
+            self.alert.close();
             return Task::none();
         }
         if self.core.window.show_context {
@@ -730,11 +759,11 @@ impl cosmic::Application for App {
     /// (`src/main.rs:1657-1671`). libcosmic centres whatever this returns
     /// over the view in a modal popover (`src/app/mod.rs:877-884`).
     fn dialog(&self) -> Option<Element<'_, Self::Message>> {
-        let said = self.alert.as_deref()?;
+        let (title, body) = self.alert.showing()?;
         Some(
             widget::dialog()
-                .title(strings::CANNOT_OPEN)
-                .body(said)
+                .title(title)
+                .body(body)
                 .icon(icon::from_name("dialog-error").size(64))
                 .primary_action(
                     widget::button::suggested(strings::CLOSE).on_press(Message::AlertClose),
@@ -886,7 +915,7 @@ impl App {
         self.pool_seam();
         match Scene::open(path) {
             Ok(scene) => {
-                self.alert = None;
+                self.alert.close();
                 self.hold_seam(&scene);
                 self.open = Some(Open {
                     path: path.to_path_buf(),
@@ -899,10 +928,7 @@ impl App {
                 self.hold_horizon();
                 self.hold_sound();
             }
-            Err(e) => {
-                eprintln!("kjerag: {} not shown: {e}", path.display());
-                self.alert = Some(refusal(&*e, path));
-            }
+            Err(e) => self.alert.raise(Failure::Open(path.to_path_buf(), e)),
         }
     }
 
@@ -1602,50 +1628,6 @@ fn shift(from: Duration, seconds: f64) -> Duration {
     }
 }
 
-/// The codec a failed open could find no decoder for, and `None` for every
-/// other failure (issue #69).
-///
-/// The engine hands the shell one boxed error from the whole open, and the box
-/// arrives with whatever was put in it: `kjerag-media` refuses a stream whose
-/// codec has no decoder with a [`MissingDecoder`], and nothing between here
-/// and there re-wraps it. So this is a downcast rather than a string match.
-///
-/// The `'static` on the trait object is what makes the downcast legal: without
-/// it the reference's own lifetime becomes the object's, and `downcast_ref` is
-/// only implemented for `dyn Error + Send + Sync + 'static`.
-fn missing_decoder(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Option<&'static str> {
-    Some(e.downcast_ref::<MissingDecoder>()?.codec)
-}
-
-/// What the alert says a failed open failed for. Four lines, in the order of
-/// how much they can tell the pilot: the file is another camera's format
-/// (issue #107), the sandbox was never shown it (issue #118), this build has
-/// no decoder for it (issue #69), or nothing more is known than that it did
-/// not open.
-///
-/// The path decides the second one rather than the error, and on purpose. A
-/// file the sandbox has no mount for fails somewhere inside libav, which
-/// answers "No such file or directory" for a file the pilot is looking at in
-/// their file manager; asking the filesystem whether the path is there at all
-/// is the same question with none of libav's spelling in it, and it keeps the
-/// sandbox out of the layers below the shell (docs/ARCHITECTURE.md).
-fn refusal(e: &(dyn std::error::Error + Send + Sync + 'static), path: &Path) -> String {
-    if let Some(foreign) = e.downcast_ref::<Foreign>() {
-        return strings::foreign(*foreign);
-    }
-    if sandboxed() && !path.exists() {
-        return strings::out_of_reach();
-    }
-    strings::open_failed(missing_decoder(e))
-}
-
-/// Whether this is running inside a Flatpak, which is a fact about the run and
-/// not about the platform: `/.flatpak-info` is the file flatpak mounts into
-/// every sandbox, and asking for it is how every toolkit asks this.
-fn sandboxed() -> bool {
-    Path::new("/.flatpak-info").exists()
-}
-
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
 ///
 /// The line it prints is the answer to a question the app cannot ask any
@@ -1704,10 +1686,10 @@ fn about() -> About {
         ])
 }
 
-/// What the shell decides on its own: which line a failed open puts in the
-/// alert, what a paste turns out to be asking for, and the three rules
-/// of the toast queue, which is ours now rather than libcosmic's and so is
-/// tested rather than taken on trust.
+/// What the shell decides on its own: what a paste turns out to be asking
+/// for, and the three rules of the toast queue, which is ours now rather than
+/// libcosmic's and so is tested rather than taken on trust. Which line a
+/// failure puts in the alert is `crate::fail`'s, and tested there.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1816,72 +1798,6 @@ mod tests {
         ] {
             assert_eq!(Goto::read(text, Some(&open)), Goto::Nothing, "{text:?}");
         }
-    }
-
-    /// The shell has to tell a build with no decoder apart from a file it
-    /// cannot read, because they get different lines and only one of them is
-    /// the pilot's to fix (issue #69). This is that test with the probe stood
-    /// in for: the error is built by hand, the way `kjerag-media` builds it on
-    /// a box whose ffmpeg has no HEVC in it.
-    #[test]
-    fn a_missing_decoder_is_told_apart_from_a_file_that_will_not_open() {
-        let missing: Box<dyn std::error::Error + Send + Sync> =
-            Box::new(MissingDecoder { codec: "hevc" });
-        assert_eq!(missing_decoder(&*missing), Some("hevc"));
-        assert!(strings::open_failed(missing_decoder(&*missing)).contains("HEVC"));
-
-        let broken: Box<dyn std::error::Error + Send + Sync> = "file has no video stream".into();
-        assert_eq!(missing_decoder(&*broken), None);
-        assert_eq!(
-            strings::open_failed(missing_decoder(&*broken)),
-            strings::OPEN_FAILED
-        );
-    }
-
-    /// And the lines a failed open can leave, told apart by the type in the
-    /// box rather than by anything in the message (issue #107). The foreign
-    /// one names the format; the others are what they were.
-    ///
-    /// The path is one that exists, so nothing here takes the sandbox arm:
-    /// that one is a fact about the run and the test below says what it is.
-    #[test]
-    fn another_cameras_format_gets_a_line_of_its_own() {
-        let here = Path::new(file!());
-        let gopro: Box<dyn std::error::Error + Send + Sync> = Box::new(Foreign::GoPro);
-        assert_eq!(refusal(&*gopro, here), strings::foreign(Foreign::GoPro));
-        assert!(
-            refusal(&*gopro, here).contains("GoPro"),
-            "{}",
-            refusal(&*gopro, here)
-        );
-
-        let missing: Box<dyn std::error::Error + Send + Sync> =
-            Box::new(MissingDecoder { codec: "hevc" });
-        assert!(refusal(&*missing, here).contains("HEVC"));
-
-        let broken: Box<dyn std::error::Error + Send + Sync> = "file has no video stream".into();
-        assert_eq!(refusal(&*broken, here), strings::OPEN_FAILED);
-    }
-
-    /// A path that is not there says so in the sandbox's words and nowhere
-    /// else (issue #118). Outside a Flatpak the same open is a file that was
-    /// deleted or renamed, and "Kjerag cannot reach that file from inside its
-    /// sandbox" would be a sentence about a sandbox that is not there.
-    ///
-    /// Both arms are exercised wherever this runs, because what decides is
-    /// `/.flatpak-info` and not the test: in CI and on a developer box the
-    /// first is what a run gets, and inside the Flatpak the second is, which
-    /// is the build the line was written for.
-    #[test]
-    fn a_path_the_sandbox_cannot_see_is_not_a_missing_file() {
-        let gone = Path::new("/nowhere/at/all/flight.insv");
-        let broken: Box<dyn std::error::Error + Send + Sync> = "No such file or directory".into();
-        let expected = match sandboxed() {
-            true => strings::out_of_reach(),
-            false => strings::OPEN_FAILED.to_owned(),
-        };
-        assert_eq!(refusal(&*broken, gone), expected);
-        assert!(strings::out_of_reach().contains(strings::OPEN_TITLE));
     }
 
     fn lines(toasts: &Toasts) -> Vec<&str> {

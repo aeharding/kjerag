@@ -12,13 +12,19 @@ use std::time::Instant;
 use cosmic::iced::widget::shader::{self, Action};
 use cosmic::iced::{Event, Point, Rectangle, mouse, window};
 
-use super::{Next, Scene, ScenePipeline, ScenePrimitive, Viewpoint};
+use super::{Next, Scene, ScenePipeline, ScenePrimitive, Stall, Viewpoint};
 
 /// Wheels report scroll in lines and touchpads report it in pixels, and iced
 /// passes both through as they came. A feel constant, not a measurement.
 const PIXELS_PER_LINE: f32 = 40.0;
 
-impl<Message> shader::Program<Message> for Scene {
+/// The bound is issue #124's funnel, at the one boundary this crate has with
+/// the application: a picture that died has to reach whoever can say so, and
+/// this widget is the only thing that can carry it there. Anything that puts
+/// a [`Scene`] on screen must therefore have a message type that can hold a
+/// [`Stall`], which is what makes ignoring one a decision somebody wrote down
+/// rather than a line nobody added.
+impl<Message: From<Stall>> shader::Program<Message> for Scene {
     /// Nothing at all. The camera lived here until issue #77: iced keeps
     /// widget state in the widget tree, and the tree is rebuilt from the
     /// shell's `view` whenever the window changes shape, which takes the
@@ -166,11 +172,16 @@ fn mouse_update<Message>(
 /// sleep until exactly that instant. Waking per frame rather than per refresh
 /// is what keeps 29.97 fps content off a 60 Hz grid; `kjerag::app` documents
 /// the pacing, and the measurement that rejected the alternative.
-fn tick<Message>(scene: &Scene, now: Instant) -> Option<Action<Message>> {
+fn tick<Message: From<Stall>>(scene: &Scene, now: Instant) -> Option<Action<Message>> {
     match scene.pump(now) {
         Next::At(due) => Some(Action::request_redraw_at(due)),
         Next::Refresh => Some(Action::request_redraw()),
         Next::Never => None,
+        // The file has already been stopped by the time this arrives; what is
+        // left is saying so, and only the shell can (issue #124). Published
+        // rather than polled for, because the shell's own timers run while
+        // the file is playing and this is the moment it stopped.
+        Next::Stopped(stall) => Some(Action::publish(Message::from(stall))),
     }
 }
 
@@ -208,6 +219,19 @@ mod tests {
     use crate::projection::fov_ceiling;
     use crate::{Camera, Nudge};
 
+    /// What these tests stand in for the shell's `Message` with. It carries a
+    /// [`Stall`] because every message type this widget is used with has to
+    /// (issue #124): a test that could opt out of the funnel would be
+    /// checking a widget the application cannot build.
+    #[derive(Debug)]
+    struct Msg(#[expect(dead_code, reason = "carried, never read: see the doc above")] Stall);
+
+    impl From<Stall> for Msg {
+        fn from(stall: Stall) -> Self {
+            Self(stall)
+        }
+    }
+
     const BOUNDS: Rectangle = Rectangle {
         x: 0.0,
         y: 0.0,
@@ -241,7 +265,7 @@ mod tests {
         }
 
         fn send(&mut self, event: Event) -> &mut Self {
-            let _: Option<Action<()>> =
+            let _: Option<Action<Msg>> =
                 shader::Program::update(&self.scene, &mut self.state, &event, BOUNDS, self.cursor);
             self
         }
@@ -300,12 +324,12 @@ mod tests {
         /// the old state is dropped and a new one is built from scratch
         /// (`iced_core::widget::Tree::diff`).
         fn rebuild_state(&mut self) -> &mut Self {
-            self.state = <Scene as shader::Program<()>>::State::default();
+            self.state = <Scene as shader::Program<Msg>>::State::default();
             self
         }
 
         fn interaction(&self) -> mouse::Interaction {
-            shader::Program::<()>::mouse_interaction(&self.scene, &self.state, BOUNDS, self.cursor)
+            shader::Program::<Msg>::mouse_interaction(&self.scene, &self.state, BOUNDS, self.cursor)
         }
     }
 

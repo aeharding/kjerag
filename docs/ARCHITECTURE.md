@@ -56,6 +56,42 @@ depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`
 that cannot live in a crate with no wgpu.
 
+## Failures the pilot is told about (issue #124)
+
+There is one way a failure reaches the pilot and it is the alert, and that is
+a property of the types rather than a rule anybody has to remember, which is
+what the owner asked for: "why is this not consistent by code design?"
+
+Three pieces hold it up.
+
+- **The line is private.** `crates/app/src/fail.rs` owns the alert's title and
+  body in a struct nothing outside that module can build, and the only way in
+  is `Alert::raise(Failure)`. A new failure site cannot write its own sentence
+  into the window; it adds a `Failure` variant, and the compiler then makes it
+  give that variant a title, a line for the pilot and a line for the terminal.
+- **The terminal echo comes with it.** `raise` prints as well as shows, so an
+  `eprintln!` at a failure site is not a shortcut past the funnel, it is
+  strictly less than calling it.
+- **The engine cannot report at all.** `render` has no way to say anything to
+  a person. A pass that has given up leaves a `Stall` in the open capture's
+  own slot, `Scene::pump` turns it into a `Next::Stopped` arm that every
+  caller has to match, and the shader widget will only hand that arm to a
+  message type implementing `From<Stall>`. The shell cannot compile the video
+  widget without a way to receive one.
+
+A stop is final for the capture it happened to, which is the owner's second
+ruling on the issue (2026-08-01). The `Stalled` that gave up says so for the
+rest of that capture's life: the pass stops importing into it, and `Scene`
+stops handing out its player, so nothing the pilot presses can run a clock over
+a picture that is not coming back. Opening the file builds another `Scene` with
+another `Stalled`, which is the whole of the recovery and the only thing the
+alert asks for. The shape before it re-armed on the next redraw and raised the
+same alert every two seconds.
+
+Deliberately not in the funnel: a capture that could not be written says so in
+a toast, because the picture is still there and the pilot is still watching it
+(docs/UI.md). The funnel is for the failures that leave him with no video.
+
 ## The frame path (zero-copy)
 
 ```

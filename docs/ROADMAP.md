@@ -557,6 +557,50 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **A transient import error costs a frame, and every failure the
+  pilot meets goes through the alert** (issue #124, owner-reported at flatpak
+  verification). One failed frame import set a flag on the pipeline for good:
+  the picture was gone until the app was restarted, the sound played on over
+  it, and the whole of what was said was one `eprintln!` on a terminal a
+  launcher-started Flatpak sends nowhere. Measured on main's own binary under
+  the headless harness, with `dup(2)` made to answer EMFILE on the app's main
+  thread for 0.3 s: the picture froze for good, the clock ran on at 30.00 fps,
+  and the null sink still carried the sound at 15745 of 32767. The flag is
+  gone. A failed import costs that frame and the next redraw tries again; a
+  run of failures that lasts two seconds stops the file, sound and all, and
+  says so. The bound is time and not a frame count, because what the pilot is
+  looking at is a picture that has been frozen for so long, and how many
+  redraws went by inside that is a property of his display. Two seconds is the
+  shell's own "long enough that a person has noticed", the same one the
+  controls hide on. The run lives in the open capture's `Stalled` rather than
+  on the pipeline, which iced keeps for the life of the window and which is
+  why the old flag outlived every file.
+
+  **The second half is the structure**, and it is the owner's ruling: error
+  surfacing consistent by code design rather than by discipline. The alert's
+  line is now private to `crates/app/src/fail.rs` and the only way to put one
+  there is `Alert::raise(Failure)`, which prints the terminal echo with it, so
+  a bare `eprintln!` at a failure site is strictly less than calling the
+  funnel rather than an alternative to it. The engine has no way to report at
+  all: a pass that gives up leaves a `Stall`, `Scene::pump` hands it out as a
+  `Next::Stopped` arm every caller must match, and the shader widget will only
+  give that arm to a message type implementing `From<Stall>`, so the shell
+  cannot compile the video widget without a way to receive one. Adding the arm
+  broke `kjerag-spike --bin playback`, which is the mechanism working: an
+  instrument whose picture died was reporting a clean run.
+
+  **A stop is final for that open** (owner ruling, on testing the branch with
+  the fault left on permanently). The first shape re-armed as soon as the alert
+  was closed and retried on its own, so a persistent fault meant an alert every
+  two seconds: five of them in one sitting, from an app whose alert says to open
+  the file again while quietly having another go behind it. Now the `Stalled`
+  that gave up stays given up for the life of that capture. The pass stops
+  importing into it and `Scene` hands out no player, so a play press cannot
+  start the clock over a picture that is not coming back either. Reopening the
+  file is a new `Scene`, a new `Stalled` and a fresh two seconds of patience,
+  and it is what the alert asks for. Under the bound nothing changed: a hiccup
+  still costs frames.
+
 - 2026-08-01 **The volume popup closes on a press in the video, the way
   cosmic-player's dropdowns do** (issue #126, owner-reported). It was a
   hand-toggled bool that only the speaker button flipped, so the only way out

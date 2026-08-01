@@ -43,6 +43,7 @@ use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Correction, Harvest, SeamFit};
+use super::stall::{Stall, Stalled};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -60,7 +61,7 @@ const RETAINED: usize = 3;
 /// When the widget should come back, which is the whole of frame pacing:
 /// the shell sleeps until the instant the next frame is due rather than
 /// polling, so 29.97 fps content costs 29.97 redraws a second.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Next {
     /// Whenever the compositor will take a frame: playback that is still
     /// waiting for its first decoded frame, and a seek that has not landed.
@@ -69,6 +70,12 @@ pub enum Next {
     At(Instant),
     /// Nothing changes by itself: paused, ended, or a still frame.
     Never,
+    /// The picture is gone and the file has been stopped, sound and all
+    /// (issue #124). Nothing changes by itself here either, and the
+    /// difference is that somebody has to be told: this arm is how a failure
+    /// in the pass reaches the shell's alert, and there is no other way out
+    /// of this crate for one.
+    Stopped(Stall),
 }
 
 /// Which clock a decoded frame's instant is read on, before the camera's
@@ -145,6 +152,12 @@ pub struct Scene {
     /// How the pass samples where the view magnifies the source (issue #11).
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
+    /// Where the pass leaves word that it cannot draw this file any more
+    /// (issue #124). It belongs to the open capture rather than to the
+    /// pipeline, which outlives every file it draws.
+    stalled: Stalled,
+    /// And what it last managed to draw of this file, for the same reason.
+    shown: Shown,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -274,6 +287,8 @@ impl Scene {
             forced: Cell::new(None),
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
+            stalled: Stalled::default(),
+            shown: Shown::default(),
         }
     }
 
@@ -489,13 +504,24 @@ impl Scene {
         let Source::Live(player) = source else {
             return Next::Never;
         };
+        // The pass has been unable to put a frame on screen for long enough
+        // that it has given up (issue #124). Pausing is what stops the sound
+        // as well as the clock, because the sound follows the clock
+        // (`kjerag_media`'s `Beat`), and a picture that died while the audio
+        // played on is the whole of what that issue was.
+        if let Some(stall) = self.stalled.take() {
+            player.pause(now);
+            return Next::Stopped(stall);
+        }
         match player.pump(now) {
             Ok(None) => {}
             Ok(Some(taken)) => *frames = Some(taken),
+            // The decode thread has stopped and will deliver nothing more, so
+            // the answer is the same one: stop cleanly, and say so. This
+            // printed a line and paused in silence until issue #124.
             Err(e) => {
-                eprintln!("kjerag: playback stopped: {e}");
                 player.pause(now);
-                return Next::Never;
+                return Next::Stopped(Stall::new(format_args!("playback stopped: {e}")));
             }
         }
         // The end of the file stops the clock rather than leaving it running
@@ -703,7 +729,17 @@ impl Scene {
         }
     }
 
+    /// The player, for the calls that drive it: play, pause, seek, step.
+    ///
+    /// A capture the pass has given up on has none to hand out (issue #124).
+    /// The sound follows the clock, so a play press that got through here
+    /// would be sound over a picture that is not coming back, which is the
+    /// symptom this whole issue is about. The transport goes quiet with the
+    /// file it belongs to, and opening a file is the way on.
     fn player_mut(&mut self) -> Option<&mut Player> {
+        if self.stalled.stopped() {
+            return None;
+        }
         match &mut self.show.as_mut()?.playing.get_mut().source {
             Source::Live(player) => Some(player),
             Source::Stepped(_) => None,
@@ -748,6 +784,8 @@ impl Scene {
             view: self.show.as_ref().and_then(|show| show.view(held)),
             sampling: self.sampling.get(),
             shutter: self.shutter.clone(),
+            stalled: self.stalled.clone(),
+            shown: self.shown.clone(),
         }
     }
 }
@@ -964,6 +1002,13 @@ pub struct ScenePrimitive {
     /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
     /// first, and one that never does is still armed for the next.
     shutter: Shutter,
+    /// A handle on the [`Scene`]'s stall slot, the same way and for the same
+    /// reason, in the other direction: the pass writes and the shell reads
+    /// (issue #124).
+    stalled: Stalled,
+    /// And on the slot the pass keeps the last frame it drew of this capture
+    /// in, which it both writes and reads.
+    shown: Shown,
 }
 
 /// A pair of decoded lenses and the calibration that reprojects them. Both
@@ -976,6 +1021,30 @@ struct View {
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
     held: Held,
+}
+
+/// The last view the pass actually presented of one capture, which is what the
+/// pane holds while a newer one cannot be imported (issue #124).
+///
+/// It belongs to the capture rather than to the pipeline, for the reason the
+/// whole issue is about: iced keeps one pipeline for the life of the window,
+/// so whatever it remembers about this file it remembers about the next one.
+/// Kept on the pipeline for one commit, this opened a new file onto the last
+/// frame of the file before it, until the first frame of the new one arrived.
+/// Issue #125's check is what caught it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Shown(Arc<Mutex<Option<View>>>);
+
+impl Shown {
+    fn keep(&self, view: &View) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(view.clone());
+        }
+    }
+
+    fn get(&self) -> Option<View> {
+        self.0.lock().ok()?.clone()
+    }
 }
 
 /// The GPU state behind the widget. iced builds one of these per primitive
@@ -995,9 +1064,6 @@ pub struct ScenePipeline {
     /// The frame the bind group points at, and the ones still in flight
     /// behind it. Newest first.
     live: VecDeque<Live>,
-    /// Set when an import fails, so the message is printed once rather than
-    /// on every redraw.
-    failed: bool,
     /// The target this pass was built for, which is iced's surface format.
     /// A capture renders into a texture of the same format, so that what it
     /// reads back is what the compositor would have been handed.
@@ -1141,7 +1207,6 @@ impl ScenePipeline {
             blank,
             bind_group,
             live: VecDeque::new(),
-            failed: false,
             format,
             reported: false,
         }
@@ -1230,10 +1295,31 @@ impl ScenePipeline {
             println!("device: {}", dmabuf::device_report(device));
         }
         if let Some(view) = &primitive.view {
-            self.show(device, view);
+            self.show(device, view, primitive);
         }
 
-        let reframe = match &primitive.view {
+        // The pane holds the last frame this pipeline actually presented
+        // whenever the one it is offered is not on the GPU (issue #124).
+        // Frames keep arriving while imports fail, so drawing strictly by
+        // what the shell offers takes the picture away for as long as the
+        // failures last and leaves it away once the capture is stopped, which
+        // is a second failure on top of the first from where the pilot sits.
+        // Owner: "Why does the video disappear instead of just freezing on
+        // current frame though? Its jarring".
+        //
+        // Every gap rather than only the stopped one, because a hiccup that
+        // costs frames should cost frames: a squeeze under the bound took the
+        // pane to the backdrop and back before this.
+        let showing = match &primitive.view {
+            Some(view) if self.is_bound(view) => primitive.view.clone(),
+            // Nothing ever presented is the one case with nothing to hold,
+            // and the pane is the backdrop. `Stalled` says so in the terminal
+            // line when it gives up, because on screen it looks like the
+            // other kind of failure.
+            _ => primitive.shown.get(),
+        };
+
+        let reframe = match &showing {
             Some(view) if self.is_bound(view) => Reframe::new(
                 &view.lenses,
                 view.frames.size,
@@ -1251,14 +1337,14 @@ impl ScenePipeline {
         // After the uniform write, because the band reads the same block: the
         // calibration it measures against has to be the one the draw will use,
         // or the two disagree by whatever the correction walked this redraw.
-        self.measure(device, queue, primitive.view.as_ref());
+        self.measure(device, queue, showing.as_ref());
 
         // After the uniform write, and only after it: the write lands at the
         // next submit on this queue, and the capture's own submit is that
         // one. Taken here rather than in `draw` because this is the call
         // that has a device to render with.
         if let Some(request) = primitive.shutter.take() {
-            self.shoot(device, queue, request, aspect, primitive.view.as_ref());
+            self.shoot(device, queue, request, aspect, showing.as_ref());
         }
     }
 
@@ -1435,12 +1521,23 @@ impl ScenePipeline {
 
     /// Imports a newly delivered pair and points the bind group at it. A
     /// redraw that shows the same pair again does nothing here.
-    fn show(&mut self, device: &wgpu::Device, view: &View) {
-        if self.failed || self.is_bound(view) {
+    ///
+    /// A failed import costs this frame and no more (issue #124). The next
+    /// redraw tries again; what gives up is [`Stalled`], on a run of failures
+    /// that lasts, and the pilot hears about it from the shell rather than
+    /// from a terminal.
+    ///
+    /// Once it has given up, this stops trying, and that is not an
+    /// optimisation. The view that failed is never bound, so every redraw
+    /// after it would try the same import again, and each two seconds of that
+    /// raised another alert: the owner met five of them in one sitting.
+    fn show(&mut self, device: &wgpu::Device, view: &View, primitive: &ScenePrimitive) {
+        if primitive.stalled.stopped() || self.is_bound(view) {
             return;
         }
         match self.import(device, view) {
             Ok(planes) => {
+                primitive.stalled.landed();
                 self.bind_group = bind(
                     device,
                     &self.layout,
@@ -1457,10 +1554,12 @@ impl ScenePipeline {
                     _planes: planes,
                 });
                 self.live.truncate(RETAINED);
+                primitive.shown.keep(view);
             }
             Err(e) => {
-                eprintln!("kjerag: frame not shown: {e}");
-                self.failed = true;
+                primitive
+                    .stalled
+                    .failed(Instant::now(), e, primitive.shown.get().is_some());
             }
         }
     }
