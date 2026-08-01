@@ -58,6 +58,7 @@ fn main() -> Fallible<()> {
         Mode::Field => field(&options),
         Mode::Profile => profile(&options),
         Mode::Studio => studio(&options),
+        Mode::Trace => trace(&options),
     }
 }
 
@@ -69,6 +70,8 @@ enum Mode {
     Profile,
     /// Somebody else's stitch, measured across their own seam.
     Studio,
+    /// What the shipped pass's own colour state does frame to frame.
+    Trace,
 }
 
 // ------------------------------------------------------------ the sampling
@@ -1541,6 +1544,128 @@ fn strip(plane: &[f64], distance: &[Option<f64>], band: (f64, f64)) -> (Option<f
     }
 }
 
+// ------------------------------------------------------------ the flicker
+
+/// What the shipped pass's own colour state does frame to frame.
+///
+/// **A pumping colour is worse than a step.** A step is still, and an eye stops
+/// seeing what does not move; a hue that breathes is motion where the scene has
+/// none. So the shipped numbers are watched over a run rather than sampled, and
+/// the column means nothing without the positive control under it: a known step
+/// put in with alternating sign has to come back at twice its size.
+fn trace(options: &Options) -> Fallible<()> {
+    let gpu = Gpu::open()?;
+    println!("gpu:    {}", gpu.name);
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut scene = Scene::still(
+        &options.input,
+        Cue::Time(std::time::Duration::from_secs_f64(options.from)),
+    )?;
+    scene.set_horizon(match options.lock {
+        true => Horizon::Locked,
+        false => Horizon::Free,
+    });
+    scene.fit_seam(true);
+    let size = Size::new(256, 256);
+    // Per frame: the three gains, then the field evaluated at four azimuths a
+    // quarter turn apart, which is what a view sees one of.
+    let mut held: Vec<[f64; 15]> = Vec::new();
+    while scene.frame().is_some() {
+        Render {
+            gpu: &gpu,
+            scene: &scene,
+            pipeline: &mut pipeline,
+        }
+        .frame(options.camera(), Sampling::default(), size)?;
+        let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
+        let (_, tint, _) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        let mut row = [0.0f64; 15];
+        for (channel, gain) in tone.log_gain.iter().enumerate() {
+            row[channel] = f64::from(*gain);
+        }
+        for turn in 0..4 {
+            let phi = turn as f32 / 4.0 * std::f32::consts::TAU;
+            for (channel, held) in tint.at(phi.cos(), phi.sin()).iter().enumerate() {
+                row[3 + 3 * turn + channel] = f64::from(*held);
+            }
+        }
+        held.push(row);
+        if held.len() >= options.count || !scene.advance()? {
+            break;
+        }
+    }
+    println!(
+        "\ntrace:  the colour state the shipped pass drew each of {} frames with, from {:.3} s.",
+        held.len(),
+        options.from,
+    );
+    // One code at a mid grey of 128 is ln(129/128): the smallest change an
+    // 8-bit picture can carry, and what every number below is measured against.
+    let one_code = (129.0f64 / 128.0).ln();
+    println!(
+        "\n  {:<34} {:>12} {:>12} {:>14}",
+        "what", "ln rms/frame", "worst step", "codes under one"
+    );
+    let stepped = |column: usize, shake: f64| {
+        let steps: Vec<f64> = held
+            .windows(2)
+            .enumerate()
+            .map(|(index, pair)| {
+                let shaken = |at: usize, value: f64| match at % 2 {
+                    0 => value + shake,
+                    _ => value - shake,
+                };
+                (shaken(index + 1, pair[1][column]) - shaken(index, pair[0][column])).abs()
+            })
+            .collect();
+        let rms = (steps.iter().map(|s| s * s).sum::<f64>() / steps.len().max(1) as f64).sqrt();
+        (rms, steps.iter().fold(0.0, |worst: f64, s| worst.max(*s)))
+    };
+    let mut columns: Vec<(String, usize)> = CHANNELS
+        .iter()
+        .enumerate()
+        .map(|(channel, name)| (format!("the gain, {name}"), channel))
+        .collect();
+    for turn in 0..4 {
+        for (channel, name) in CHANNELS.iter().enumerate() {
+            columns.push((
+                format!("the field at {} deg, {name}", 90 * turn),
+                3 + 3 * turn + channel,
+            ));
+        }
+    }
+    let mut worst_rms: f64 = 0.0;
+    for (name, column) in &columns {
+        let (rms, worst) = stepped(*column, 0.0);
+        worst_rms = worst_rms.max(rms);
+        println!(
+            "  {name:<34} {rms:>12.6} {worst:>12.6} {:>14.0}",
+            one_code / rms.max(f64::MIN_POSITIVE),
+        );
+    }
+    println!(
+        "\n  one code at a mid grey of 128 is {one_code:.4} ln, so the worst column above is \n\
+         \t{:.0}x under what an 8-bit picture can carry. a state that cannot move one code \n\
+         \tbetween two frames cannot pump.",
+        one_code / worst_rms.max(f64::MIN_POSITIVE),
+    );
+    println!(
+        "\n  the positive control, which those columns mean nothing without: a known step \n\
+         \tput into the G gain each frame with alternating sign has to come back at 2s, in \n\
+         \tquadrature with what was already there.\n\n\
+         \x20            step        read    expected"
+    );
+    let (flicker, _) = stepped(1, 0.0);
+    for step in [0.002f64, 0.010] {
+        println!(
+            "         {step:>9.4} {:>11.5} {:>11.5}",
+            stepped(1, step).0,
+            flicker.hypot(2.0 * step),
+        );
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------ the competition
 
 /// How wide the colour transition is across somebody else's seam, in an
@@ -1725,6 +1850,7 @@ impl Options {
                         "field" => Mode::Field,
                         "profile" => Mode::Profile,
                         "studio" => Mode::Studio,
+                        "trace" => Mode::Trace,
                         _ => return Err(format!("no mode called {value}").into()),
                     }
                 }
@@ -1807,7 +1933,7 @@ fn pair(value: &str) -> Fallible<(f64, f64)> {
     Ok((low.parse()?, high.parse()?))
 }
 
-const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|studio] \
+const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|studio|trace] \
      [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [seam=factory] [verbose=1] \
      [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg] \
      [rows=lo:hi] [cols=lo:hi]";

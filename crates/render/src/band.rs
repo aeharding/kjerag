@@ -2469,11 +2469,20 @@ fn pool_along() {
 // because `pool` above estimates that better - least squares in codes rather
 // than in logs, which is the difference stage 3 measured across nine captures.
 //
-// NO TIME CONSTANT OF ITS OWN. What it is fitted to is already the per-
-// direction state, whose colour is written on the frame it is read on and
-// whose confidence is smoothed at TAU_FAR, so the field inherits that. A reset
-// empties the cells and the fit then answers zero by arithmetic, which is the
-// picture stage 3 drew.
+// SMOOTHED AT TAU_GAIN, which is `pool`'s own and for `pool`'s reason. The
+// per-direction colour is written raw on the frame it is read on - stage 3's
+// design, and stage 3 got away with it because the pooling averages 128
+// directions before anything is drawn - but a five-term fit is not an average:
+// it leans on whichever arc of the ring answered this frame, and measured with
+// no filter at all it moved 0.003 to 0.012 ln rms between frames, one to three
+// times under a code where the gain beside it is forty to a hundred. A hue
+// that breathes is motion where the scene has none, which is worse than the
+// step it is correcting. No new constant: it is the one this file smooths
+// things that do not move by, and what two lenses differ by in colour is one
+// of them.
+//
+// A seek starts the field again from no correction at all rather than from a
+// shape fitted somewhere else, which is `pool`'s rule and for `pool`'s reason.
 @compute @workgroup_size(1)
 fn pool_tint() {
   var terms = array<f32, 12>();
@@ -2516,10 +2525,16 @@ fn pool_tint() {
       terms[4u * channel + term] = clamp(fitted[term + 1u], -LIMIT_LN, LIMIT_LN);
     }
   }
-  var out: Tint;
-  out.terms = terms;
-  out.evidence = evidence;
-  band.tint = out;
+  var held = band.tint;
+  if watch.reset != 0.0 {
+    held = Tint(array<f32, 12>(), 0.0, 0.0, 0.0, 0.0);
+  }
+  let step = ease(watch.seconds, TAU_GAIN);
+  for (var term = 0u; term < 12u; term += 1u) {
+    held.terms[term] += (terms[term] - held.terms[term]) * step;
+  }
+  held.evidence += (evidence - held.evidence) * step;
+  band.tint = held;
 }
 
 // Gaussian elimination with no pivoting on a 5x5. Safe without pivoting
