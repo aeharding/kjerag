@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
+use kyerag_render::{Accuracy, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -111,20 +111,22 @@ const TOASTS: usize = 5;
 const VOLUME_POPUP: f32 = 240.0;
 
 /// Runs the shell.
-pub fn run(input: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(input: Option<PathBuf>, at: Option<Framing>) -> Result<(), Box<dyn std::error::Error>> {
     let stored = Stored::load(App::APP_ID);
     let settings = Settings::default()
         .size_limits(Limits::NONE.min_width(360.0).min_height(240.0))
         // The window opens in the configured theme rather than flashing the
         // default one first (cosmic-player `src/main.rs:154-155`).
         .theme(stored.config.app_theme.theme());
-    cosmic::app::run::<App>(settings, Flags { stored, input })?;
+    cosmic::app::run::<App>(settings, Flags { stored, input, at })?;
     Ok(())
 }
 
 pub struct Flags {
     stored: Stored,
     input: Option<PathBuf>,
+    /// Where to land, when the command line named a view as well as a file.
+    at: Option<Framing>,
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +173,16 @@ pub enum Message {
     /// A toast's close button, or its own five seconds running out: both
     /// arrive here (cosmic-files `src/app.rs:3008-3010`).
     CloseToast(u64),
+    /// Put the view on the clipboard as one line of text: `i`, or
+    /// `File > Copy current view reference`.
+    CopyView,
+    /// Go where a copied line says: `Ctrl+V`, or
+    /// `File > Go to copied view reference`. The clipboard is read by a task,
+    /// so the text arrives in the message below.
+    PasteView,
+    /// What the clipboard turned out to hold. `None` is an empty clipboard,
+    /// and most of what is not `None` is not a view either.
+    PastedView(Option<String>),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
     /// The scrubber was let go.
@@ -276,6 +288,60 @@ impl Toasts {
     }
 }
 
+/// What a pasted line asks the window to do, given what is already on screen.
+///
+/// A paste is the one input that arrives with no idea what it is. Deciding
+/// here rather than inside the shell is what lets all four answers be read in
+/// one place, and tested with no window and no file.
+#[derive(Clone, Debug, PartialEq)]
+enum Goto {
+    /// Nothing this app can read. No toast, no line, nothing at all:
+    /// `Ctrl+V` over a video means nothing in any other player either, and a
+    /// player that argues with every paste is a player nobody pastes into.
+    Nothing,
+    /// The file already on screen: seek and turn, and that is the whole of
+    /// it.
+    Here(Framing),
+    /// A view of some other file, named with the directories to find it in.
+    /// That is the terminal line, which is the one a pilot has in a report.
+    Open(PathBuf, Framing),
+    /// A view of some other file, named by that file alone. There is nothing
+    /// to open and nowhere to go; all the window can do is say which video
+    /// the line belongs to.
+    Elsewhere(PathBuf),
+}
+
+impl Goto {
+    fn read(text: Option<&str>, open: Option<&Path>) -> Self {
+        let Some((file, framing)) = text.and_then(Framing::read_line) else {
+            return Self::Nothing;
+        };
+        if names(open, &file) {
+            return Self::Here(framing);
+        }
+        match file.parent().is_some_and(|up| !up.as_os_str().is_empty()) {
+            true => Self::Open(file, framing),
+            false => Self::Elsewhere(file),
+        }
+    }
+}
+
+/// Whether a line naming `file` is naming the file on screen.
+///
+/// A copied line carries the name alone and a printed one carries the path,
+/// so both have to answer yes for the file being watched: the name is what a
+/// copy has, and the whole path is what tells two videos of the same name in
+/// two folders apart.
+fn names(open: Option<&Path>, file: &Path) -> bool {
+    let Some(open) = open else {
+        return false;
+    };
+    match file.parent().is_some_and(|up| !up.as_os_str().is_empty()) {
+        true => open == file,
+        false => open.file_name() == Some(file.as_os_str()),
+    }
+}
+
 /// The overlay's visibility, and when the pointer last asked for it.
 struct Controls {
     shown: bool,
@@ -351,6 +417,12 @@ impl cosmic::Application for App {
             Some(path) => app.update(Message::FileLoad(path)),
             None => app.retitle(),
         };
+        // A view named on the command line lands with no toast. Nothing was
+        // pasted and nobody needs telling what they just typed; the window
+        // opening at that view is the whole of the answer.
+        if let Some(at) = flags.at {
+            app.place(at);
+        }
         (app, task)
     }
 
@@ -480,6 +552,17 @@ impl cosmic::Application for App {
             }
             Message::Captured(to, still) => return self.captured(to, still),
             Message::CloseToast(id) => self.toasts.close(id),
+            Message::CopyView => {
+                self.show_controls(now);
+                return self.copy_view();
+            }
+            Message::PasteView => {
+                self.show_controls(now);
+                // The clipboard is somebody else's process on Wayland, so
+                // reading it is a task and not a call.
+                return clipboard::read().map(|text| action::app(Message::PastedView(text)));
+            }
+            Message::PastedView(text) => return self.go_to_view(text.as_deref()),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
                 let Some(open) = &mut self.open else {
@@ -813,12 +896,31 @@ impl App {
             return Task::none();
         };
         let video = open.path.clone();
+        // Read as the capture is armed, and printed against the frame the
+        // redraw after this one actually caught: a still taken with a drag in
+        // flight can be one redraw of turning ahead of the line.
+        let camera = open.scene.viewpoint().camera();
+        let horizon = open.scene.horizon();
         let (finished, waiting) = oneshot::channel();
         open.scene.capture(Request {
             width: shot::WIDTH,
             then: Box::new(move |taken| {
                 let done = taken
-                    .and_then(|still| shot::finish(&still, &video, to))
+                    .and_then(|still| {
+                        // A JPEG carries the video and the timecode in its
+                        // name and no direction anywhere, so where the still
+                        // was looking is only ever recoverable from here.
+                        // Printed before the answer is sent, which is what
+                        // puts it above the `shot:` line the shell writes
+                        // when it arrives.
+                        let framing = Framing {
+                            at: still.time,
+                            camera,
+                            horizon,
+                        };
+                        println!("view:   {}", framing.printed(&video));
+                        shot::finish(&still, &video, to)
+                    })
                     .map_err(|e| e.to_string());
                 let _ = finished.send(done);
             }),
@@ -856,6 +958,90 @@ impl App {
                 self.toast(strings::capture_failed(to, &e))
             }
         }
+    }
+
+    /// The view as one line of `reframe`'s own arguments, on the clipboard
+    /// and on the terminal.
+    ///
+    /// What a report about a 360 video is missing is the direction it was
+    /// pointing, and this is the whole of the fix: which video, which frame,
+    /// and the three angles, in a line that can be pasted into an issue and
+    /// run as a command. The clipboard copy carries the file's name and the
+    /// terminal one carries its path ([`Framing`]).
+    ///
+    /// The frame is the one on screen rather than the clock's position: a
+    /// paused scrub shows the keyframe it landed on, and what is asked for
+    /// here is the picture the pilot is looking at.
+    fn copy_view(&mut self) -> Task<Message> {
+        let Some(open) = &self.open else {
+            return Task::none();
+        };
+        let framing = Framing {
+            at: open.scene.frame().map_or(open.position, |(_, time)| time),
+            camera: open.scene.viewpoint().camera(),
+            horizon: open.scene.horizon(),
+        };
+        println!("view:   {}", framing.printed(&open.path));
+        let line = framing.copied(&open.path);
+        Task::batch([
+            self.toast(strings::VIEW_COPIED.to_owned()),
+            clipboard::write(line),
+        ])
+    }
+
+    /// Go where a copied line says: the frame it names, the direction it was
+    /// pointing, and the horizon it was held with.
+    ///
+    /// This is the other half of [`Self::copy_view`], and the pair is what
+    /// makes the line a place rather than a label. The four things a paste
+    /// can be are [`Goto`]'s four answers, decided there so they can be read
+    /// and tested without a window.
+    fn go_to_view(&mut self, text: Option<&str>) -> Task<Message> {
+        let open = self.open.as_ref().map(|open| open.path.as_path());
+        match Goto::read(text, open) {
+            Goto::Nothing => Task::none(),
+            Goto::Elsewhere(file) => self.toast(strings::view_is_from(&file)),
+            Goto::Here(framing) => {
+                self.place(framing);
+                self.toast(strings::WENT_TO_VIEW.to_owned())
+            }
+            Goto::Open(file, framing) => {
+                self.load(&file);
+                let titled = self.retitle();
+                if self.open.is_none() {
+                    return titled;
+                }
+                self.place(framing);
+                Task::batch([titled, self.toast(strings::WENT_TO_VIEW.to_owned())])
+            }
+        }
+    }
+
+    /// Put the window at a framing: seek to the frame, point the view, hold
+    /// the horizon the way it was held.
+    ///
+    /// A jump and not an animation. The seek is the exact one rather than the
+    /// keyframe a scrub settles for, because the line names one frame; the
+    /// camera lands on the next redraw, which is the only place the far end
+    /// of the zoom can be clamped to this window's shape ([`Nudge::Point`]).
+    ///
+    /// The lock is written to the config, which is what pressing `h` does:
+    /// there is one horizon setting and a view that was copied held is not
+    /// the same view unheld.
+    fn place(&mut self, framing: Framing) {
+        let locked = matches!(framing.horizon, Horizon::Locked);
+        if self.stored.config.horizon_lock != locked {
+            self.stored.config.horizon_lock = locked;
+            self.stored.write_config();
+        }
+        self.hold_horizon();
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        println!("goto:   {}", framing.printed(&open.path));
+        open.position = framing.at.min(open.duration);
+        open.scene.seek(open.position, Accuracy::Exact);
+        open.scene.nudge(Nudge::Point(framing.camera));
     }
 
     /// One toast, and the task that takes it away again five seconds later.
@@ -1264,11 +1450,99 @@ fn about() -> About {
 }
 
 /// What the shell decides on its own: which line a failed open leaves on the
-/// welcome view, and the three rules of the toast queue, which is ours now
-/// rather than libcosmic's and so is tested rather than taken on trust.
+/// welcome view, what a paste turns out to be asking for, and the three rules
+/// of the toast queue, which is ours now rather than libcosmic's and so is
+/// tested rather than taken on trust.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line of the open file's own, as the clipboard would hold it: the
+    /// name alone, which is all a copy ever carries.
+    const COPIED: &str = "VID_0001.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+    /// And as the terminal prints it, with the path in front.
+    const PRINTED: &str =
+        "/home/pilot/Videos/VID_0001.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+
+    fn watching() -> PathBuf {
+        PathBuf::from("/home/pilot/Videos/VID_0001.insv")
+    }
+
+    fn read(text: &str, open: Option<&Path>) -> Goto {
+        Goto::read(Some(text), open)
+    }
+
+    /// (a) The file on screen, named either way. A copy carries the name and
+    /// a printed line carries the path, and both are this video.
+    #[test]
+    fn a_reference_to_the_open_file_goes_there() {
+        let open = watching();
+        assert!(matches!(read(COPIED, Some(&open)), Goto::Here(_)));
+        assert!(matches!(read(PRINTED, Some(&open)), Goto::Here(_)));
+
+        let Goto::Here(framing) = read(COPIED, Some(&open)) else {
+            panic!("not here");
+        };
+        assert!((framing.at.as_secs_f64() - 754.321).abs() < 0.000_5);
+        assert!((framing.camera.yaw.to_degrees() + 37.42).abs() < 0.005);
+        assert_eq!(framing.horizon, Horizon::Locked);
+    }
+
+    /// (c) A name that is not the open file's, with nothing to find it by.
+    /// Nowhere to go, so the window says which video it belongs to and stays
+    /// where it is.
+    #[test]
+    fn a_reference_to_another_video_says_which_one() {
+        let open = watching();
+        let elsewhere = COPIED.replace("VID_0001", "VID_0002");
+        assert_eq!(
+            read(&elsewhere, Some(&open)),
+            Goto::Elsewhere(PathBuf::from("VID_0002.insv"))
+        );
+        // And with nothing open at all, which is the same answer: a name is
+        // not enough to open anything.
+        assert_eq!(
+            read(COPIED, None),
+            Goto::Elsewhere(PathBuf::from("VID_0001.insv"))
+        );
+    }
+
+    /// (b) A whole path that is not the file on screen: open it, then go.
+    /// That is the terminal line, which is the one a pilot has in a report.
+    #[test]
+    fn a_reference_carrying_a_path_opens_that_video() {
+        let other = PathBuf::from("/home/pilot/Videos/VID_0002.insv");
+        let printed = PRINTED.replace("VID_0001", "VID_0002");
+        assert!(matches!(read(&printed, Some(&watching())), Goto::Open(file, _) if file == other));
+        assert!(matches!(read(&printed, None), Goto::Open(file, _) if file == other));
+    }
+
+    /// Two videos of the same name in two folders are two videos, and only a
+    /// line carrying the path can tell them apart.
+    #[test]
+    fn the_same_name_in_another_folder_is_another_video() {
+        let printed = PRINTED.replace("/Videos/", "/Videos/2026/");
+        assert!(matches!(
+            read(&printed, Some(&watching())),
+            Goto::Open(_, _)
+        ));
+    }
+
+    /// (d) Everything else a clipboard holds, which is nearly all of it.
+    /// Nothing happens and nothing is said: `Ctrl+V` over a video means
+    /// nothing in any other player either.
+    #[test]
+    fn anything_that_is_not_a_reference_does_nothing() {
+        let open = watching();
+        for text in [
+            None,
+            Some(""),
+            Some("https://example.com"),
+            Some("VID.insv"),
+        ] {
+            assert_eq!(Goto::read(text, Some(&open)), Goto::Nothing, "{text:?}");
+        }
+    }
 
     /// The shell has to tell a build with no decoder apart from a file it
     /// cannot read, because they get different lines and only one of them is

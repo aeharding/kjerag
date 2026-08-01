@@ -417,8 +417,8 @@ video, exactly as in a window.
 ## The keyboard
 
 The map is cosmic-player's, extended with the standard app keys the other
-two first-party apps agree on. Three bare letters are invented, because no
-COSMIC app does what they do: `s`, `h` and `m`.
+two first-party apps agree on. Four bare letters are invented, because no
+COSMIC app does what they do: `s`, `h`, `m` and `i`.
 
 | key             | action                    | precedent                                            |
 | --------------- | ------------------------- | ---------------------------------------------------- |
@@ -441,6 +441,8 @@ COSMIC app does what they do: `s`, `h` and `m`.
 | `Ctrl+C`        | copy frame                | cosmic-files `src/key_bind.rs:73`                    |
 | `h`             | lock the horizon          | none; see below                                      |
 | `m`             | mute                      | none; mpv's key, see below                           |
+| `i`             | copy view reference       | none; mpv's key, see below                           |
+| `Ctrl+V`        | go to copied view         | the desktop's paste key, see below                   |
 
 Notes:
 
@@ -480,6 +482,69 @@ Notes:
   speaker button's own message, so it is remembered the same way the button
   is, and a file with no sound in it ignores it exactly as the disabled
   button does.
+- **`i` copies the view**, which is mpv's information key and lands here for
+  the same reason `m` did: no COSMIC app has the action, and mpv is the
+  player this app's users already have. What it copies is one line naming
+  the video, the frame and the framing, in `reframe`'s own argument syntax:
+
+  ```text
+  VID_20260410_185407_00_004.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1
+  ```
+
+  It is a sentence and a command at once. Pasted into an issue it says
+  exactly which picture is being talked about; pasted after
+  `cargo run --release -p kyerag-spike --bin reframe -- <path>` it renders
+  that picture again on any box. The same line goes to the terminal with the
+  whole path in front of it, and **the copy carries the file's name alone**:
+  a pilot's report lands in a public issue, and the directories above a video
+  are nobody's business.
+
+  Every capture prints the line too, because a still cannot carry it: the
+  JPEG's name says which video and which moment (issue #15) and nothing
+  anywhere says which direction, so a picture sent back months later would
+  otherwise be unplaceable.
+- **`Ctrl+V` goes there**, which is the half that makes the line a place
+  rather than a label, and it is the owner's own expectation of it: "I
+  thought I can paste into kjerag to go to that exact spot". The desktop's
+  paste key doing what a paste does everywhere, which is to put in front of
+  you the thing that was copied. It is a jump and not an animation: the seek
+  is the exact one rather than the keyframe a scrub settles for, and the
+  camera is set outright.
+
+  Four things a paste can be, and only two of them move the window:
+
+  | the clipboard holds                        | the window                                |
+  | ------------------------------------------ | ----------------------------------------- |
+  | a reference to the open video               | seeks, turns, and holds the horizon as the reference says |
+  | a reference carrying a path, another video  | opens that video and goes there           |
+  | a reference naming another video, no path   | says which video it is from, and stays    |
+  | anything else at all                        | nothing, and says nothing                 |
+
+  The last row is the one worth stating. `Ctrl+V` over a video means nothing
+  in any other player, so a clipboard holding a URL or half a sentence is the
+  normal case and it has to cost nothing: a player that argues with every
+  paste is a player nobody pastes into. There is no error line and no toast.
+
+  The third row exists because a copied reference carries the name alone. It
+  is enough to say *which* video, and not enough to find it, so the window
+  says which one rather than guessing.
+- **The command line takes a view too**, read with the same code, which makes
+  the terminal line a complete launch command:
+
+  ```sh
+  kyerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1
+  ```
+
+  `--help` says so. A view named there lands with no toast, because nothing
+  was pasted and nobody needs telling what they just typed. **The transport
+  is left alone** by all three ways in: a launch plays, as opening a file
+  always does, and a paste keeps whatever the window was doing. Landing on a
+  frame is not the same as stopping on it.
+
+  One writer and one reader, in `crates/render/src/framing.rs`, because a
+  format written twice is a format that drifts. reframe keeps its own parser,
+  since its syntax is a superset of this one; what holds the two together is
+  a test in reframe that feeds it a line from the writer.
 - Implement this as libcosmic's `HashMap<KeyBind, Action>` plus a
   `Message::Key(modifiers, physical_key, key)` from a global subscription,
   matched with `KeyBind::matches` (cosmic-player `src/main.rs:1207-1213`,
@@ -660,6 +725,24 @@ the bottom placement this PR replaced, that check fails.
 | `Copy frame` worked  | `Frame copied to the clipboard`             |
 | `Save frame` failed  | `Frame not saved: {reason}`                 |
 | `Copy frame` failed  | `Frame not copied: {reason}`                |
+| `Copy current view reference` | `View reference copied to the clipboard` |
+| `Go to copied view reference` landed | `Went to the copied view`        |
+| ... and it was another video | `That view reference is from "VID_0001.insv"` |
+
+The copy toast is the same sentence as `Copy frame` with the menu's own noun
+in it, and it names the destination for the reason the frame's does: a copy
+that does not say where it went is a copy nobody trusts enough to paste.
+Neither has a failure line, because there is nothing in either that can
+fail: the line is built out of numbers the window is already holding, and
+reading it back is arithmetic.
+
+**The two nouns are not the same noun, and that is deliberate.** The
+**reference** is the text and the **view** is the place it names, so a
+reference is copied and a view is gone to. Nobody goes to a reference. The
+third line names the video in quotes and never a path, exactly as the saved
+frame's does below, and it is the only thing the window can usefully say: a
+copied reference carries the file's name alone, which is enough to say which
+video and not enough to open it.
 
 The destination is the folder's own name in quotes and never a path, which
 is how cosmic-files names one in its toasts: `copied = Copied {$items} items
@@ -716,19 +799,40 @@ video player is a normal size. `item_height(ItemHeight::Dynamic(40))`,
 `item_width(ItemWidth::Uniform(320))`.
 
 ```
-File                      Playback                 View
-  Open video...             Play / Pause             Zoom in
-  Open recent >             Back 10 seconds          Default view
-  Close video               Forward 10 seconds       Zoom out
-  ---                       ---                      ---
-  Save frame                Previous frame           Fullscreen
-  Copy frame                Next frame               ---
-  ---                                                Settings...
-  Quit                                               About Kyerag...
+File                              Playback              View
+  Open video...                     Play / Pause          Zoom in
+  Open recent >                     Back 10 seconds       Default view
+  Close video                       Forward 10 seconds    Zoom out
+  ---                               ---                   ---
+  Save frame                        Previous frame        Fullscreen
+  Copy frame                        Next frame            ---
+  Copy current view reference                             Settings...
+  Go to copied view reference                             About Kyerag...
+  ---
+  Quit
 ```
 
 - Ellipsis on items that open a dialog, none on items that act
   (cosmic-player `Open media...` vs `Close file`, `src/menu.rs:119-121`).
+- **The two view items are named the owner's way**, and the first is his
+  wording verbatim. `Copy view` was the first spelling and it said nothing to
+  anyone who had not already been told what it did; a menu item has to work
+  for someone reading it for the first time. The counterpart mirrors it word
+  for word, because the two are one idea and half a name would hide that.
+  They are long for menu items and that is the trade: this menu is opened by
+  someone looking for something, not scanned in a hurry.
+- They sit under the two picture items rather than in `View`, which holds the
+  things that move the view. These four are all about handing something over
+  or getting it back. They are there at all because the menu is where a
+  shortcut is advertised, and `i` and `Ctrl+V` are worth finding.
+- **`Go to copied view reference` is never drawn disabled**, which is the one
+  item in this menu that is not gated on a file being open. Two reasons, and
+  either would do: a reference carrying a whole path opens the video it names,
+  so it has something to do with nothing open; and what the clipboard holds
+  cannot be known while the menu is being built, because reading a clipboard
+  on Wayland is a task whose answer arrives later and this runs on every
+  redraw. Pressed with nothing useful on the clipboard it does nothing, which
+  is the same answer `Ctrl+V` gives.
 - `Settings...` then a divider then `About <app>...` at the end of `View`
   is the shared convention: cosmic-files `src/menu.rs:762-764`, cosmic-edit
   `src/menu.rs:346-350`.
@@ -837,6 +941,18 @@ About::default()
 Plain words, no em dashes (AGENTS.md). Sentence case for labels, which is
 what the first-party apps use ("Open recent media", "Clear recent list").
 A space before a unit ("10 seconds", System76 HIG).
+
+**A label is read by someone who has not been told what it does.** That is
+the whole of why `Copy view` became `Copy current view reference`: the short
+one was clear to everybody who had already used it and to nobody else, which
+is the failure mode a menu is worst at surviving. Length is worth spending
+there. It is not worth spending in a toast, which is read in the two seconds
+before it goes.
+
+**One noun per thing.** The **reference** is the line of text and the
+**view** is the place it names, and the strings keep those apart: a reference
+is copied, a view is gone to. A vocabulary that wobbles between two words for
+one idea is what makes a small feature feel like two.
 
 No i18n in the first landing. All three first-party apps use
 `i18n-embed` + fluent with an `fl!` macro, and that is real machinery for a

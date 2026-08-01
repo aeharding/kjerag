@@ -2,9 +2,10 @@
 //!
 //! The map is cosmic-player's, extended with the standard application keys
 //! cosmic-edit and cosmic-files agree on; docs/UI.md cites every line of it.
-//! Three bare letters are invented, because no COSMIC app has a precedent
-//! for what they do: `s` (issue #16), `h` (issue #8) and `m` (issue #13,
-//! owner approved 2026-07-31).
+//! Four bare letters are invented, because no COSMIC app has a precedent
+//! for what they do: `s` (issue #16), `h` (issue #8), `m` (issue #13, owner
+//! approved 2026-07-31) and `i`, which is mpv's information key as `m` is
+//! mpv's mute key.
 //!
 //! Going through libcosmic's [`KeyBind`] rather than matching keys by hand
 //! buys two things: [`KeyBind::matches`] falls back to the physical key
@@ -39,12 +40,14 @@ pub use cosmic::widget::menu::key_bind::{KeyBind, Modifier};
 pub enum Action {
     About,
     CopyFrame,
+    CopyView,
     DefaultView,
     FileClearRecents,
     FileClose,
     FileOpen,
     FileOpenRecent(usize),
     Fullscreen,
+    GoToView,
     LockHorizon,
     Mute,
     NextFrame,
@@ -66,12 +69,14 @@ impl MenuAction for Action {
         match self {
             Self::About => Message::ToggleContextPage(ContextPage::About),
             Self::CopyFrame => Message::Capture(Destination::Copy),
+            Self::CopyView => Message::CopyView,
             Self::DefaultView => Message::Look(Nudge::Reset),
             Self::FileClearRecents => Message::FileClearRecents,
             Self::FileClose => Message::FileClose,
             Self::FileOpen => Message::FileOpen,
             Self::FileOpenRecent(index) => Message::FileOpenRecent(*index),
             Self::Fullscreen => Message::Fullscreen,
+            Self::GoToView => Message::PasteView,
             Self::LockHorizon => Message::LockHorizon,
             // The speaker button's own message, so the key mutes, persists
             // and redraws by the path the dropdown already uses.
@@ -139,6 +144,14 @@ pub fn key_binds() -> HashMap<KeyBind, Action> {
     // The frame, which issue #15 makes do something.
     bind!([], Key::Character("s".into()), SaveFrame);
     bind!([Ctrl], Key::Character("c".into()), CopyFrame);
+
+    // The view, as a line of text. mpv's own information key, bare because
+    // the picture is what the pilot's hand is on and a modifier is a second
+    // hand; `Ctrl+C` is spent on the picture already. `Ctrl+V` is the other
+    // half, doing what a paste does everywhere: putting in front of you the
+    // thing that was copied.
+    bind!([], Key::Character("i".into()), CopyView);
+    bind!([Ctrl], Key::Character("v".into()), GoToView);
 
     // The sound (issue #13). cosmic-player's map has no mute key, so this is
     // mpv's `m` rather than a COSMIC precedent; the owner asked for it on
@@ -218,6 +231,41 @@ mod tests {
             Action::CopyFrame.message(),
             Message::Capture(Destination::Copy)
         ));
+    }
+
+    /// `i` copies the view, and the two neighbouring bare letters it must not
+    /// have taken anything from are checked with it: `h` is a key held down
+    /// mid-flight and `m` is next to it on the row.
+    #[test]
+    fn the_view_key_is_bare_and_takes_nothing_from_its_neighbours() {
+        assert_eq!(
+            pressed(Modifiers::empty(), Key::Character("i".into())),
+            Some(Action::CopyView)
+        );
+        assert!(matches!(Action::CopyView.message(), Message::CopyView));
+        assert_eq!(
+            pressed(Modifiers::CTRL, Key::Character("v".into())),
+            Some(Action::GoToView)
+        );
+        assert!(matches!(Action::GoToView.message(), Message::PasteView));
+        assert_eq!(
+            pressed(Modifiers::empty(), Key::Character("h".into())),
+            Some(Action::LockHorizon)
+        );
+        assert_eq!(
+            pressed(Modifiers::empty(), Key::Character("m".into())),
+            Some(Action::Mute)
+        );
+    }
+
+    /// A modifier on the view key is a different key, and none of the three
+    /// a pilot might hit by accident does anything at all.
+    #[test]
+    fn a_modified_i_is_nothing() {
+        let i = Key::Character("i".into());
+        for modifiers in [Modifiers::CTRL, Modifiers::ALT, Modifiers::SHIFT] {
+            assert_eq!(pressed(modifiers, i.clone()), None, "{modifiers:?}");
+        }
     }
 
     /// `h` is the one key that has to work while the pilot is watching a roll
