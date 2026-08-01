@@ -413,6 +413,13 @@ impl Player {
     /// the next pair, so this only lets the clock take it. Every other step
     /// is a seek, because the frame wanted is behind the decoder and HEVC
     /// cannot be read backwards.
+    ///
+    /// The sound is left alone on the way forward, and that is not an
+    /// oversight: the ring holds the sound of the frames **after** the one on
+    /// screen, which is exactly what a step forward is asking to hear, and
+    /// the splice trims the one frame of it that has been passed. Throwing it
+    /// away instead leaves a hole as deep as the read-ahead when play
+    /// resumes, measured at 0.27 s (issue #97).
     pub fn step(&mut self, now: Instant, frames: i64) {
         self.pause(now);
         let Some(index) = self.index() else {
@@ -421,7 +428,6 @@ impl Player {
         let target = index.saturating_add_signed(frames).min(self.last_index());
         match frames == 1 && target == index + 1 {
             true => {
-                self.hush();
                 self.presenter.reseek(self.timing.time_of(target));
                 self.epochs.owe();
             }

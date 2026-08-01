@@ -34,7 +34,7 @@ use ffmpeg_next as ff;
 
 use super::sound::Sound;
 use super::track::Track;
-use super::{DrmFrame, Fallible, HwDevice, NANOS, Size, decode, media_time};
+use super::{DrmFrame, Fallible, HwDevice, NANOS, Size, decode, media_time, read_only};
 
 /// Which frame a caller wants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,9 +171,10 @@ pub struct Reader {
     /// everything else opens exactly one and reads it as it always did.
     sources: Vec<Source>,
     lanes: Vec<Lane>,
-    /// The capture's sound, when it has one and a device took it. It comes
-    /// off the packets [`Source::input`] of [`SOUND_SOURCE`] is already
-    /// reading, because there is one file handle per source and no more.
+    /// The capture's sound, when it has one and a device took it. It carries
+    /// a demuxer of its own over [`SOUND_SOURCE`]'s file: a real capture's
+    /// interleave will not let it share one, and the three seconds of silence
+    /// that proved it are issue #97 ([`Track`]).
     track: Option<Track>,
     timing: Timing,
     size: Size,
@@ -200,6 +201,9 @@ const SOUND_SOURCE: usize = 0;
 /// One file: its demuxer, its own timeline, and whether it has been read to
 /// the end.
 struct Source {
+    /// Kept because the sound opens the same file again, for its own demuxer
+    /// ([`Track::open`]).
+    path: PathBuf,
     input: ff::format::context::Input,
     /// Stream time base, shared by every video stream of this file (checked
     /// at open, and checked between files when there are two).
@@ -222,6 +226,7 @@ struct Lane {
 /// A container opened and looked at, before any decoder exists: what
 /// [`Reader::open`] needs to decide whether a second file belongs with it.
 struct Opened {
+    path: PathBuf,
     input: ff::format::context::Input,
     /// One per video stream, in container order.
     videos: Vec<Video>,
@@ -371,20 +376,14 @@ impl Reader {
 
     /// Decode this capture's sound as well, into `sound`'s ring (issue #13).
     ///
-    /// A file with no audio stream takes this and stays silent. Nothing else
-    /// about the reader changes: the sound comes off the packets a demuxer
-    /// here is already reading, and it is [`SOUND_SOURCE`]'s.
+    /// A file with no audio stream takes this and stays silent. What it costs
+    /// is a second open of [`SOUND_SOURCE`]'s file, because the sound is read
+    /// on a demuxer of its own (issue #97, [`Track`]).
     pub fn listen(mut self, sound: &Sound) -> Fallible<Self> {
         let Some(source) = self.sources.get(SOUND_SOURCE) else {
             return Ok(self);
         };
-        self.track = Track::open(
-            &source.input,
-            SOUND_SOURCE,
-            sound.pipe(),
-            sound.rate(),
-            sound.channels(),
-        )?;
+        self.track = Track::open(&source.path, sound.pipe(), sound.rate(), sound.channels())?;
         Ok(self)
     }
 
@@ -457,6 +456,13 @@ impl Reader {
     /// reader's own 21.
     pub fn read_until(&mut self, mut interrupted: impl FnMut() -> bool) -> Fallible<Read> {
         loop {
+            // Before the pictures, and on the way past every one of them: the
+            // sound reads on its own demuxer now, and this is what turns it
+            // (issue #97). Once per pair is the slowest this can happen, and
+            // a pair is 33 ms against a ring holding 500.
+            if let Some(track) = &mut self.track {
+                track.pump()?;
+            }
             if let Some(frames) = self.take()? {
                 return Ok(Read::Frames(frames));
             }
@@ -514,11 +520,12 @@ impl Reader {
             lane.decoder.flush();
             lane.queue.clear();
         }
-        // The sound goes with them. Everything already decoded is from before
-        // the seek, and a scrub that leaves a tail of it playing is the thing
-        // the epoch discipline exists to stop.
+        // The sound goes with them, on its own demuxer and to the same media
+        // time. Everything already decoded is from before the seek, and a
+        // scrub that leaves a tail of it playing is the thing the epoch
+        // discipline exists to stop.
         if let Some(track) = &mut self.track {
-            track.flush();
+            track.seek(target)?;
         }
         self.skip_before = match accuracy {
             Accuracy::Exact => index,
@@ -543,13 +550,6 @@ impl Reader {
         match packet.read(&mut self.sources[source].input) {
             Ok(()) => {
                 let stream = packet.stream();
-                if let Some(track) = self
-                    .track
-                    .as_mut()
-                    .filter(|t| (t.source, t.stream) == (source, stream))
-                {
-                    return track.take(&packet);
-                }
                 let Some(lane) = self
                     .lanes
                     .iter_mut()
@@ -565,9 +565,6 @@ impl Reader {
                 for lane in self.lanes.iter_mut().filter(|l| l.source == source) {
                     lane.decoder.send_eof()?;
                     lane.drain()?;
-                }
-                if let Some(track) = self.track.as_mut().filter(|t| t.source == source) {
-                    track.end()?;
                 }
                 Ok(())
             }
@@ -729,7 +726,7 @@ impl Lane {
 
 impl Opened {
     fn new(path: &Path) -> Fallible<Self> {
-        let input = ff::format::input(&path)?;
+        let mut input = ff::format::input(&path)?;
         let videos: Vec<Video> = input
             .streams()
             .filter(|s| s.parameters().medium() == ff::media::Type::Video)
@@ -768,7 +765,13 @@ impl Opened {
             return Err("video streams disagree about their time base".into());
         }
         let start = starts.first().copied().unwrap_or(0);
+        // The pictures, and nothing else. The sound of this file is read on a
+        // demuxer of its own (issue #97), and leaving it wanted here would
+        // have this one seeking across the file for packets nobody takes.
+        let wanted: Vec<usize> = videos.iter().map(|video| video.stream).collect();
+        read_only(&mut input, &wanted);
         Ok(Self {
+            path: path.to_owned(),
             input,
             videos,
             time_base,
@@ -781,6 +784,7 @@ impl Opened {
 
     fn into_source(self) -> Source {
         Source {
+            path: self.path,
             input: self.input,
             time_base: self.time_base,
             start: self.start,
@@ -1005,6 +1009,59 @@ mod tests {
         let paired = Reader::open(&lens0).unwrap().timing().frames;
         let alone = Reader::open(&lens1).unwrap().timing().frames;
         assert_eq!(paired, alone, "both ends of the pair count the same");
+    }
+
+    /// **Issue #97, on the owner's own path.** His April capture has one
+    /// place where the camera left 67 MB of picture between two audio
+    /// samples, 4.885 s in. Read off the pictures' demuxer, the sound for
+    /// the three and a half seconds after it arrived up to a second late,
+    /// was dropped by the splice, and he heard silence from 4.9 s to 8.2 s.
+    /// Two of the four large captures on this box have such a gap, both of
+    /// them within half a second of where he heard his.
+    ///
+    /// So the sound reads on a demuxer of its own, and this is the claim
+    /// that rests on: pumped once per frame, as
+    /// [`Reader::read_until`] pumps it, and drained as a device drains it,
+    /// the ring never runs dry through that region. The pictures are not
+    /// decoded here, so this needs no GPU; it is the sound's half of the
+    /// path he played.
+    ///
+    /// Ignored because the footage is 36 GB and lives on one box. Run it with
+    /// `cargo test -p kyerag-media -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs real footage at ~/Videos/*.insv"]
+    fn the_sound_plays_through_a_gap_in_the_interleave() {
+        const RATE: u32 = 48_000;
+        const CHANNELS: usize = 2;
+
+        let Some(path) = test_capture() else {
+            eprintln!("no .insv found, skipping");
+            return;
+        };
+        let pipe = crate::audio::Pipe::new(RATE, CHANNELS, Duration::from_millis(500));
+        let Some(mut track) = Track::open(&path, pipe.clone(), RATE, CHANNELS).unwrap() else {
+            eprintln!("{} has no sound, skipping", path.display());
+            return;
+        };
+
+        // One frame of this camera, and the sound a device takes while it is
+        // on screen.
+        let interval = Duration::from_micros(33_367);
+        let frames = (f64::from(RATE) * interval.as_secs_f64()) as usize;
+        let mut out = vec![0.0; frames * CHANNELS];
+        let mut due = Duration::ZERO;
+        while due < Duration::from_secs(12) {
+            track.pump().unwrap();
+            pipe.fill(&mut out, Some(due));
+            due += interval;
+        }
+
+        let health = pipe.health();
+        assert_eq!(health.underruns, 0, "the sound stopped: {health:?}");
+        assert_eq!(health.dropped, 0, "the ring overflowed: {health:?}");
+        // And it is still reading ahead at the end, not scraping along
+        // empty: the room the reader leaves is what covers the next gap.
+        assert!(health.queued > 100_000, "the ring ran down: {health:?}");
     }
 
     /// The two claims issue #5 rests on, which no arithmetic can check: an

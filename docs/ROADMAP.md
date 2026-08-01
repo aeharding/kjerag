@@ -460,6 +460,25 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-07-31 **The sound reads on a demuxer of its own** (issue #97, owner
+  defect). One file handle for all three streams was the simpler design and
+  the owner's April capture disproved it: the camera left 67 MB of picture
+  between the audio sample ending at 4.907 s and the next one, and
+  libavformat lets a stream fall a whole second behind before it seeks out
+  of file order, so the sound for that region arrived after its moment had
+  passed and the splice dropped it. Measured on main: silent from 4.87 s to
+  8.21 s. A second capture on this box has the same gap at 4.480 s and a
+  third has one at 1445.8 s, so it is a camera behaviour rather than one bad
+  file. The alternatives are all worse: a deeper ring cannot hold sound that
+  has not been read, reading the pictures a second ahead needs 60 more
+  surfaces than a decoder pool holds, and buffering the packets instead
+  means carrying 25 MB of undecoded picture at all times. A demuxer of its
+  own with the pictures discarded reads the sound at its own 190 kbps and is
+  immune to any interleave, for one file handle and 0.2 s of open. **And the
+  underrun count was lying**: a ring that ran dry while its head was behind
+  the picture took the splice's fade-down path and counted nothing, which is
+  why the hole measured 2.4 s when it was 3.3 s, and why issue #95 read 227
+  underruns as a burst at startup when they were this hole in the middle.
 - 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
   recorded in docs/icon.md). A round teal world with a green coast and a warm
   rim, and a small figure entering it from the upper left, drawn by

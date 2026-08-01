@@ -38,6 +38,29 @@ pub use reader::{Accuracy, Cue, Frames, Read, Reader, Timing};
 
 const NANOS: u64 = 1_000_000_000;
 
+/// Tell a container which of its streams are wanted, and discard the rest.
+///
+/// A discarded stream is not read at all: libavformat's MP4 demuxer skips its
+/// samples and seeks past them. That is what lets the sound have a demuxer of
+/// its own for the price of its own bitrate rather than the file's, and what
+/// keeps the pictures' demuxer from crossing the file to fetch sound nobody
+/// takes from it any more (issue #97).
+pub(crate) fn read_only(input: &mut ff::format::context::Input, wanted: &[usize]) {
+    for index in 0..input.nb_streams() as usize {
+        let discard = match wanted.contains(&index) {
+            true => ff::Discard::Default,
+            false => ff::Discard::All,
+        };
+        if let Some(mut stream) = input.stream_mut(index) {
+            // `StreamMut` has no setter for this one field, and reaching for
+            // the pointer is what the rest of this crate does when a
+            // container's own struct is the only place an answer lives
+            // (`Reader::sound_rate`).
+            unsafe { (*stream.as_mut_ptr()).discard = discard.into() };
+        }
+    }
+}
+
 /// A stream's timestamp as media time from the start of the file.
 ///
 /// `start` is where the container chose to begin, which it is free to put
