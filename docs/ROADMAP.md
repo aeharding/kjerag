@@ -495,6 +495,37 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-07-31 **Distribution settled** (docs/DISTRIBUTION.md). A `.insv` gets a
+  MIME type of its own, `video/x-insta360-insv`, glob only: the bytes that
+  identify one are the last 32 and shared-mime-info offsets are
+  start-relative, so the good magic rule is unreachable and the near miss
+  makes `gio` segfault. The desktop entry, the metainfo, the MIME package and
+  the icon theme tree install out of one `resources/` root, and the Flatpak
+  builds offline from the committed `flatpak/cargo-sources.json`. **The
+  channel is Flathub and nothing else** (owner): a self-hosted repository was
+  worked out in full and declined (issue #71), and Flathub is reached under
+  AGENTS.md's one scoped exception, owner-coordinated, previewed here before
+  any outward step. The licence spelling is `AGPL-3.0-only`. The app ID is
+  `dev.harding.Kjerag` (issue #66) and **nothing in the tree carries it yet,
+  on purpose**: the ID is the cosmic-config path, the icon name, the D-Bus
+  name, the Wayland `app_id` and four file names at once, so issue #75's
+  sweep moves all of them in one commit rather than leaving the entry naming
+  one ID and the binary registering another. What is left before a submission
+  is the owner's: screenshots, the X11 question, and whether
+  `xdg-config/cosmic:ro` costs persisted settings.
+
+- 2026-07-31 **`flatpak/cargo-sources.json` was stale on `main`**, and the
+  rule that should have prevented it could not: it is written per commit and
+  the failure is per merge. Issue #90 regenerated the sources on a branch cut
+  before issue #95 bumped the ffmpeg pin; both merged clean because they touch
+  different files, and `main` then held a lock file wanting ffmpeg-next 7.1
+  and a source list offering 6.1.1. Found by building the Flatpak rather than
+  by reading it, which is the only way it can be found. Fixed by
+  regenerating, and `scripts/cargo-sources.sh --check` now compares the two
+  package sets with no network and no generator, in CI and by hand. The check
+  was shown able to fail before it was believed: against the stale file it
+  names all four crates, ffmpeg-next 7.1.0 among them.
+
 - 2026-07-31 **The sound reads on a demuxer of its own** (issue #97, owner
   defect). One file handle for all three streams was the simpler design and
   the owner's April capture disproved it: the camera left 67 MB of picture

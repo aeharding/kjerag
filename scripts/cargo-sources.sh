@@ -2,7 +2,9 @@
 #
 # Regenerates flatpak/cargo-sources.json from Cargo.lock (issue #72).
 #
-#   scripts/cargo-sources.sh
+#   scripts/cargo-sources.sh            regenerate (needs the network)
+#   scripts/cargo-sources.sh --check    does the committed file cover the lock
+#                                       file? No network, no generator.
 #
 # flatpak-builder builds with no network, so every crate has to be a declared
 # source. `cargo vendor` answers that too and this repository cannot carry the
@@ -12,6 +14,16 @@
 #
 # Rerun it in any change that moves Cargo.lock. A stale cargo-sources.json is
 # not a build that fetches the missing crate, it is a build that fails.
+#
+# --check is why that rule is not enough on its own. Two branches are all it
+# takes: one bumps Cargo.lock, the other regenerates this file, both merge
+# clean because they touch different files, and main ends up with a lock file
+# and a source list that disagree. That happened on 2026-07-31 (#90 merged
+# after #95's ffmpeg bump) and the Flatpak build died on
+# `failed to select a version for the requirement ffmpeg-next = "^7.1"`,
+# offering 6.1.1. --check compares the two package sets and says which crates
+# are missing, so CI catches it on the merge rather than a person catching it
+# on a build.
 #
 # What it writes into the manifest's world:
 #
@@ -33,7 +45,8 @@
 # gitignored, needs no root, and touches nothing outside this repository. Both
 # the tool and the packages are fetched once and reused after that.
 #
-# Exit: 0 written, 1 could not run.
+# Exit: 0 written (or, under --check, the file covers the lock file), 1 could
+# not run or the check failed.
 
 set -euo pipefail
 
@@ -56,6 +69,40 @@ die() {
 }
 
 command -v python3 >/dev/null || die 'no python3'
+
+if [ "${1:-}" = --check ]; then
+	# The generator names a crates.io crate's directory <name>-<version> and a
+	# git crate's <name>, so the lock file says what dests have to be there.
+	python3 - "$root/Cargo.lock" "$out" <<-'PY' || exit 1
+		import json, sys, tomllib
+
+		lock, out = sys.argv[1], sys.argv[2]
+		dests = {s.get("dest", "") for s in json.load(open(out))}
+		missing = sorted(
+		    f"{p['name']}-{p['version']}" if p["source"].startswith("registry+") else p["name"]
+		    for p in tomllib.load(open(lock, "rb"))["package"]
+		    if p.get("source")
+		    and f"cargo/vendor/{p['name']}-{p['version']}" not in dests
+		    and f"cargo/vendor/{p['name']}" not in dests
+		)
+		if missing:
+		    print(
+		        "cargo-sources: flatpak/cargo-sources.json is stale, "
+		        f"{len(missing)} crate(s) of Cargo.lock have no source:",
+		        file=sys.stderr,
+		    )
+		    for m in missing:
+		        print(f"  {m}", file=sys.stderr)
+		    print(
+		        "cargo-sources: run scripts/cargo-sources.sh and commit the result",
+		        file=sys.stderr,
+		    )
+		    sys.exit(1)
+		print("cargo-sources: the committed sources cover Cargo.lock")
+	PY
+	exit 0
+fi
+
 mkdir -p "$work" "$root/flatpak"
 
 if [ ! -f "$tool" ]; then

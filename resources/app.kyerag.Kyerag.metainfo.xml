@@ -4,10 +4,17 @@
   COSMIC Store and GNOME Software as a nameless entry, and Flathub rejects
   it outright, so it ships with the desktop entry rather than after it.
 
-  Two things here are still owner decisions, both called out in
-  docs/DISTRIBUTION.md: the SPDX licence spelling (only vs or-later) and the
-  screenshots, which Flathub requires and which need a real window with real
-  footage in it.
+  The licence spelling is settled: AGPL-3.0-only (owner, 2026-07-31). The
+  repository says "AGPL-3.0" and carries no per-file "or any later version"
+  grant, and the SPDX identifier for that is the -only one.
+
+  One thing here is still the owner's to supply, and docs/DISTRIBUTION.md
+  section 5 says so: the screenshots, which Flathub requires and which need
+  a real window with real footage in it.
+
+  The id stays app.kyerag.Kyerag until issue #75's rename sweep, which puts
+  the settled dev.harding.Kjerag in the code and in these three file names
+  in one move (issue #66, docs/DISTRIBUTION.md 3.6).
 -->
 <component type="desktop-application">
   <id>app.kyerag.Kyerag</id>

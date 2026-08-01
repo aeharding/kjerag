@@ -44,6 +44,17 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # A change to Cargo.lock is a change to flatpak/cargo-sources.json, and two
+  # branches that each do one half of that merge clean into a main where they
+  # disagree, which is how the Flatpak build broke on 2026-07-31. The check
+  # needs no network and no toolchain: it compares the lock file's packages
+  # against the sources the committed file declares.
+  cargo-sources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/cargo-sources.sh --check
+
   # The point of the workspace (issue #19): the trailer layer builds and
   # tests on a box with no libav headers. This job installs nothing, so it
   # fails the day something drags ffmpeg into kyerag-meta's graph.

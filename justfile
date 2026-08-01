@@ -1,15 +1,23 @@
-# Installing Kyerag onto a desktop, and vendoring it for Flatpak.
+# Installing Kyerag onto a desktop.
 #
 # Not a build system: `cargo build` and the AGENTS.md gates are still the
 # way to build and check the code. This file exists because a double click
-# on a .insv needs four files in four places and two cache refreshes in the
-# right order, which is more than a README line can hold honestly.
+# on a .insv needs a binary, three files in three places, an icon theme tree
+# and two cache refreshes in the right order, which is more than a README
+# line can hold honestly.
 #
 # The recipe layout follows cosmic-player's justfile (rev 23d5944), which is
 # what a first-party COSMIC app does.
 
 name := 'kyerag'
 appid := 'app.kyerag.Kyerag'
+
+# The icons are named for the application ID issue #66 settled, and the
+# binary does not carry that name yet: issue #75's rename sweep puts it in
+# the source and collapses these two into one. Until then the entry's `Icon=`
+# key and the installed icon files are different names, so a launcher shows a
+# placeholder. Nothing else about the install depends on it.
+iconid := 'dev.harding.Kjerag'
 
 # `just install` needs root for this default. `just prefix=$HOME/.local
 # install` does not, but then the session's PATH has to contain
@@ -26,38 +34,30 @@ build-release:
 # is what teaches the system that *.insv is video/x-insta360-insv, and
 # update-desktop-database is what records who handles that type. Run the
 # second one first and it records a handler for a type nothing produces.
-install: build-release
+install: build-release install-icons
     install -Dm0755 target/release/{{ name }} {{ prefix }}/bin/{{ name }}
-    install -Dm0644 res/{{ appid }}.desktop {{ share }}/applications/{{ appid }}.desktop
-    install -Dm0644 res/{{ appid }}.metainfo.xml {{ share }}/metainfo/{{ appid }}.metainfo.xml
-    install -Dm0644 res/{{ appid }}.xml {{ share }}/mime/packages/{{ appid }}.xml
+    install -Dm0644 resources/{{ appid }}.desktop {{ share }}/applications/{{ appid }}.desktop
+    install -Dm0644 resources/{{ appid }}.metainfo.xml {{ share }}/metainfo/{{ appid }}.metainfo.xml
+    install -Dm0644 resources/{{ appid }}.xml {{ share }}/mime/packages/{{ appid }}.xml
     update-mime-database {{ share }}/mime
     update-desktop-database {{ share }}/applications
+
+# Every file of the theme tree, copied verbatim rather than listed one by
+# one. The tree is generated (resources/icons/README.md), so a list written
+# here goes stale the first time a size is added or dropped.
+install-icons:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd resources/icons
+    find hicolor -type f -print0 | while IFS= read -r -d '' f; do
+        install -Dm0644 "$f" "{{ share }}/icons/$f"
+    done
 
 uninstall:
     rm -f {{ prefix }}/bin/{{ name }}
     rm -f {{ share }}/applications/{{ appid }}.desktop
     rm -f {{ share }}/metainfo/{{ appid }}.metainfo.xml
     rm -f {{ share }}/mime/packages/{{ appid }}.xml
+    rm -f {{ share }}/icons/hicolor/*/apps/{{ iconid }}.*
     update-mime-database {{ share }}/mime
     update-desktop-database {{ share }}/applications
-
-# Everything cargo would fetch, in one tarball, so the Flatpak build can run
-# with no network. This covers the eleven git dependencies and the
-# [patch.crates-io] wgpu fork as well as crates.io: `cargo vendor` writes a
-# source replacement for each one (verified 2026-07-31, DISTRIBUTION.md 3.5).
-#
-# The `head -n -1` drops the absolute `directory = ...` line cargo prints and
-# the next line puts back a relative one, so the tarball is portable. That
-# trick is cosmic-player's.
-vendor:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p .cargo
-    cargo vendor --locked vendor | head -n -1 > .cargo/config.toml
-    echo 'directory = "vendor"' >> .cargo/config.toml
-    tar pcf vendor.tar .cargo vendor
-    rm -rf .cargo vendor
-
-clean-vendor:
-    rm -rf .cargo vendor vendor.tar

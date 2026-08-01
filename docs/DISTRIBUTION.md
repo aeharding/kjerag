@@ -9,15 +9,28 @@ development box (AMD Radeon 760M, Phoenix, `radeonsi`, kernel
 7.0.11-76070011-generic, Pop!\_OS 24.04, `flatpak` 1.16.6). Nothing here is
 quoted from documentation where a command could answer instead.
 
-The prototypes are in the tree: `res/` (what gets installed onto a desktop),
-`flatpak/app.kyerag.Kyerag.yml` (the manifest) and `justfile` (the install
-and vendor recipes). `crates/app/res/` is a different thing and stays where
-it is: those icons are `include_bytes!`d into the binary.
+The prototypes are in the tree: `resources/` (what gets installed onto a
+desktop, which is the desktop entry, the metainfo, the MIME package and the
+icon theme tree), `flatpak/app.kyerag.Kyerag.yml` (the manifest) and
+`justfile` (the install recipe). `crates/app/res/` is a different thing and
+stays where it is: the two jump-button icons are `include_bytes!`d into the
+binary.
 
-**Status.** The Flatpak builds, installs, and registers the type. A
-double click resolves to Kyerag, verified end to end. One blocker stands
-between this branch and a Flatpak built from `main` unchanged, and it is
-section 3.4.
+**Status.** The Flatpak builds, installs, and registers the type. A double
+click resolves to Kyerag, verified end to end (§3.8). The blocker this
+document was written around is gone: the workspace pins ffmpeg 7.1 and the
+runtime ships 7.1.3 (§3.4). The app has an icon (§2.4) and the crate sources
+are committed rather than tarred (§3.5).
+
+**And it builds from this tree with nothing applied to it**, which the
+Flatpak had never done before: no scratch patch, no 950 MB tarball, no
+network. Getting there turned up one defect on `main` and §3.8 is the record
+of it.
+
+**The channel is Flathub, and nothing else** (owner, 2026-07-31). Self-hosting
+a repository was considered and declined (§4.2). Flathub is reached under the
+one scoped exception in AGENTS.md, which is owner-coordinated and owner-led;
+§4.1 says what that permits and what it does not.
 
 ---
 
@@ -214,11 +227,18 @@ This also matches the code: "The camera's LRV proxy may not exist"
 
 ### 2.1 The entry
 
-`res/app.kyerag.Kyerag.desktop`. Named for the app ID rather than the binary
-because `flatpak build-export` only exports files under
+`resources/app.kyerag.Kyerag.desktop`. Named for the app ID rather than the
+binary because `flatpak build-export` only exports files under
 `share/applications`, `share/mime/packages` and `share/metainfo` whose names
 start with the app ID, and because cosmic-files, cosmic-player and
 cosmic-edit all do the same (`res/com.system76.Cosmic*.desktop`).
+
+`resources/` and not `res/`, which is where these three files started, because
+the icon tree landed at `resources/icons/` (issue #67) following the official
+`cosmic-app-template`, and two resource roots in one tree is a thing to trip
+over rather than a distinction anybody wants. cosmic-player uses `res/`; the
+template it is a template of uses `resources/`; one root matters more than
+which of the two it is.
 
 ### 2.2 `Exec=kyerag %f`, not `%U`
 
@@ -247,7 +267,7 @@ into `Exec` is a hard flatpak export failure.
 ### 2.3 `Categories=COSMIC;` fails validation, and stays
 
 ```
-$ desktop-file-validate res/app.kyerag.Kyerag.desktop
+$ desktop-file-validate resources/app.kyerag.Kyerag.desktop
 error: value "COSMIC;AudioVideo;Player;Video;" for key "Categories" …
 contains an unregistered value "COSMIC"; values extending the format should
 start with "X-"
@@ -260,25 +280,37 @@ AGENTS.md says to do what a first-party COSMIC app would do, so we keep it
 and write the finding down instead of quietly diverging. Flathub's linter
 did not object to it (§3.6).
 
-### 2.4 The icon does not exist yet
+### 2.4 The icon exists, under a name the binary does not have yet
 
-`Icon=app.kyerag.Kyerag` names an icon nothing installs. The build says so:
+The icon landed with issue #67: `resources/icons/hicolor/`, an icon theme
+tree laid out the way the Icon Theme Specification wants one, so an installer
+copies rather than converts. A scalable SVG, PNGs from 256 down to 16, and a
+drawing of its own for 32, 24 and 16. `resources/icons/README.md` says what
+each file is and `docs/icon.md` says how it got there. Both the `justfile`
+install recipe and the Flatpak manifest copy the tree whole rather than
+listing sizes, because the tree is generated and a list goes stale.
+
+Every basename is `dev.harding.Kjerag`, the application ID issue #66 settled.
+**The desktop entry still says `Icon=app.kyerag.Kyerag`**, because the binary
+still calls itself that and issue #75's rename sweep is what changes all of
+them in one move (§3.6). So until that sweep lands, the two names do not
+meet, and two things follow that a reader should not have to discover:
 
 ```
 WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
 ```
 
-and the About page already asks for the same name
-(`crates/app/src/app.rs:1079`, `icon::from_name(App::APP_ID)`). This is an
-asset the project has to acquire, not a decision code can make. What is
-needed, from the specs rather than from taste: an SVG at
-`res/icons/hicolor/scalable/apps/app.kyerag.Kyerag.svg`, a 48×48 PNG
-(the Icon Theme Specification's stated minimum), and a 256×256 PNG
-(Flathub's floor, "preferably a SVG icon or at least a 256x256 PNG"). The
-file basename must equal the app ID, because Flatpak requires it. That is
-also the layout cosmic-files ships, one SVG per nominal size 16 through 256
-under `hicolor/<size>/apps/`. Until it exists the launcher shows a generic
-placeholder and the About page shows nothing.
+the Flatpak build still says that (flatpak exports an icon only when its
+basename starts with the app ID), and a launcher still shows a generic
+placeholder. The About page and the welcome view are unaffected: they read
+`hicolor/scalable/apps/dev.harding.Kjerag.svg` as bytes rather than asking
+the icon theme for a name (`crates/app/src/app.rs`, `APP_ICON`), which is
+what issue #93 did about exactly this gap.
+
+Nothing about the sizes is left to decide. The Icon Theme Specification's
+stated minimum is 48×48, Flathub's floor is "preferably a SVG icon or at
+least a 256x256 PNG", Flatpak requires the basename to equal the app ID, and
+the tree satisfies all three.
 
 ### 2.5 How a desktop actually finds Kyerag
 
@@ -329,7 +361,8 @@ sudo just install                       # /usr/local
 just prefix=$HOME/.local install        # no root; see the PATH trap above
 ```
 
-Four files land (binary, desktop entry, metainfo, MIME package) and then two
+What lands: the binary, three files (desktop entry, metainfo, MIME package),
+and the icon theme tree copied whole out of `resources/icons/`. Then two
 caches are refreshed, in this order and not the other:
 
 ```sh
@@ -337,11 +370,15 @@ update-mime-database  $prefix/share/mime
 update-desktop-database $prefix/share/applications
 ```
 
-`update-mime-database` is what compiles `res/app.kyerag.Kyerag.xml` into the
-`globs2`/`subclasses` tables, so it is what makes `*.insv` mean anything at
-all. `update-desktop-database` then records which application handles the
-type it now knows about. Run them the other way round and the second one
-writes a cache entry for a type the first has not created yet.
+`update-mime-database` is what compiles `resources/app.kyerag.Kyerag.xml`
+into the `globs2`/`subclasses` tables, so it is what makes `*.insv` mean
+anything at all. `update-desktop-database` then records which application
+handles the type it now knows about. Run them the other way round and the
+second one writes a cache entry for a type the first has not created yet.
+
+There is no `vendor` recipe any more, and §3.5 is why: the Flatpak build's
+crate sources are committed, so nothing here has a step that needs the
+network.
 
 ---
 
@@ -457,15 +494,38 @@ The catch worth writing down: "installed by default" is not "installed".
 `flatpak install --no-related`, or a user pruning extensions, removes the
 only `hevc` decoder in the sandbox, and `hevc_vaapi` hangs off it. The
 failure is `avcodec_find_decoder` returning null on a file the app just
-opened. Worth a startup check that says so out loud rather than a black
-frame.
+opened.
 
-### 3.4 The blocker: the runtime's ffmpeg is 7.1, ours is pinned to 6.1
+**The app now says so, at open** (issue #69, shipped). `open_decoder` asks
+`avcodec_find_decoder` for the stream's own codec one line before
+ffmpeg-next asks for the same one, and refuses the file with a typed
+`MissingDecoder` carrying the codec name; the shell turns that into
 
-The workspace pins `ffmpeg-next = "6.1.1"` because Pop!\_OS 24.04 ships
-ffmpeg 6.1 and the crate major must match the headers it binds (AGENTS.md).
-The 25.08 runtime ships **ffmpeg 7.1.3**; 24.08 ships 7.0.3. There is no
-freedesktop branch with ffmpeg 6.
+> Kyerag has no HEVC decoder here, so that file cannot be played. In a
+> Flatpak, the decoder comes from the codecs-extra runtime extension.
+
+instead of "That file could not be opened.", and the terminal line reads
+`kyerag: <path> not shown: no hevc decoder in this libavcodec`.
+
+At open rather than at startup, which is what this section originally asked
+for and is not what shipped. A startup probe needs a surface to say it on,
+says it on a box that never opens a file it cannot play, and can only ever
+ask about HEVC. Asking at open costs one lookup on a path that already
+exists, asks about the codec the file actually carries, and replaces a line
+that is wrong at the moment the pilot is reading it. It is not
+Flatpak-specific either: a stripped system ffmpeg produces the same null.
+
+### 3.4 The ffmpeg pin was the blocker, and it is 7.1 now
+
+**Settled** (owner: "bump to 7"; issue #65, closed). The workspace pins
+`ffmpeg-next = "7.1"`, the 25.08 runtime ships **ffmpeg 7.1.3**, and the
+Flatpak's cargo build no longer has anything to argue with. The rest of this
+section is the measurement that produced the decision, kept because it is
+also the record of what ffmpeg 7 costs the development box.
+
+The pin used to read `6.1.1`, because Pop!\_OS 24.04 ships ffmpeg 6.1 and the
+crate major must match the headers it binds (AGENTS.md). 24.08 ships 7.0.3.
+There is no freedesktop branch with ffmpeg 6.
 
 Measured, building `-p kyerag-media` inside `org.freedesktop.Sdk//25.08`:
 
@@ -484,98 +544,105 @@ so is not `Send`; `Track` stores one (`crates/media/src/track.rs:40`), which
 makes `Reader` not `Send`, which breaks the decode thread's `spawn`
 (`crates/media/src/player.rs:176`).
 
-The fix, applied and verified in a scratch tree, is three hunks in one file:
-drop the stored field, compute it from the channel count on demand
-(`ChannelLayout::default(i32)` still exists in 7.1), and hoist one call out
-of a `&mut self.resampler` borrow. `kyerag-media` then builds clean.
+The fix is three hunks in one file: drop the stored field, compute it from
+the channel count on demand (`ChannelLayout::default(i32)` still exists in
+7.1), and hoist one call out of a `&mut self.resampler` borrow. That is what
+landed.
 
-That leaves a real decision, which is the owner's:
+The alternative it was weighed against was building ffmpeg 6.1 as a manifest
+module: no source change ever, and the Flatpak stops caring what the runtime
+ships, which would also survive the 26.08 runtime moving to ffmpeg 8. It lost
+on the price, a large extra module with our own `--enable-vaapi
+--enable-decoder=hevc` build to maintain and a Flathub reviewer asking why we
+bundle what the runtime already has.
 
-- **Bump the pin to 7.1.** One file changes, and the flatpak builds from
-  the tree unchanged. But the pin is what makes the app build against the
-  system ffmpeg on the development box, and Pop!\_OS 24.04 is on 6.1: after
-  the bump, `cargo build` on the dev box needs a newer ffmpeg than the
-  distribution has. Either the dev box moves or the dev box breaks.
-- **Build ffmpeg 6.1 as a manifest module.** No source change ever, and the
-  Flatpak stops caring what the runtime's ffmpeg is, which also survives
-  the 26.08 runtime moving to ffmpeg 8. The price is a large extra module,
-  our own `--enable-vaapi --enable-decoder=hevc` build to maintain, and a
-  Flathub reviewer asking why we bundle what the runtime already has.
+**The bill went to the development box**, which is the part of this decision
+that is still live. Ubuntu 24.04 ships ffmpeg 6.1 and will not get a 7, so
+the dev box takes its ffmpeg 7.1 from a PPA, and CI takes it from the same
+one. Without root, `scripts/ffmpeg7-local.sh` unpacks the same .debs under
+`~/.local`. AGENTS.md carries both, including the trap that decides whether
+a build is right: 6.1 and 7.1 export the same symbol names, so a link
+against the wrong one is silent and `readelf -d <binary> | grep NEEDED` is
+what settles it (`libavcodec.so.61` is 7.1, `.so.60` is 6.1).
 
-Neither is obviously right and this document does not choose. The Flatpak
-built for this branch took the first route in a scratch tree, because a
-built artifact answers more questions than an argument does.
-
-### 3.5 Sourcing cargo offline: `cargo vendor`, not the generator
+### 3.5 Sourcing cargo offline: a committed `cargo-sources.json`
 
 flatpak-builder builds with no network, so every dependency has to be a
 declared source. The workspace makes that harder than usual: eleven git
 dependencies (libcosmic and the pop-os forks it drags along) plus a
 `[patch.crates-io]` entry pointing at our own wgpu fork.
 
-`cargo vendor` handles all of it in one step. Measured on this tree, it
-emitted a source replacement per git remote, including the patch:
+**`flatpak/cargo-sources.json` is what ships** (issue #72, closed). It is
+generated from `Cargo.lock` by `flatpak-cargo-generator.py` through
+`scripts/cargo-sources.sh`, and it is committed: 1404 sources, 500 KB, one
+per crate. The manifest lists it beside the `dir` source and builds
+`--offline --locked`, so the Flatpak build has no step that touches the
+network at all.
 
-```toml
-[source."git+https://github.com/aeharding/wgpu?branch=v28-drm-modifier-backport"]
-git = "https://github.com/aeharding/wgpu"
-branch = "v28-drm-modifier-backport"
-replace-with = "vendored-sources"
-```
-
-and the vendored `wgpu-hal` is the forked one, not crates.io's: the
-`VK_EXT_image_drm_format_modifier` hunk is present in
-`vendor/wgpu-hal/src/vulkan/adapter.rs`. 668 crates, 988 MB, ~950 MB
-tarred.
-
-`just vendor` produces `vendor.tar`, and it is the only step that touches
-the network. The manifest takes it as an `archive` source with
-`strip-components: 0` and builds `--offline --locked`. The `head -n -1`
-trick in the recipe, which drops cargo's absolute `directory = …` line and
-appends a relative one, is cosmic-player's, from the same justfile the install
-recipes come from.
-
-The alternative is `flatpak-cargo-generator.py` from flatpak-builder-tools,
-which reads `Cargo.lock` and emits a `cargo-sources.json` of one source per
-crate. It was checked rather than assumed, and it does handle our case: run
-against this tree's lock file it exits 0 with 1408 sources and writes the
-right stanza for the fork,
+It needs no `[patch]` support to cover the fork, because cargo has already
+resolved the patch into an ordinary git source in the lock file
+(`Cargo.lock:5713`, and seven more crates including `naga`). The stanza it
+writes, read out of the committed file:
 
 ```toml
 [source."https://github.com/aeharding/wgpu"]
 git = "https://github.com/aeharding/wgpu"
 replace-with = "vendored-sources"
-branch = "v28-drm-modifier-backport"
+rev = "fb66f36c5cf1135c11523767652ea7a809b3e598"
 ```
 
-because it needs no `[patch]` support at all: cargo has already resolved the
-patch into an ordinary git source in the lock file (`Cargo.lock:5713`, and
-seven more crates including `naga`).
+**A `rev`, not a branch, and that closed the one real fragility.** This
+section used to end by pointing at it: the patch entry named a branch and
+every offline recipe pinned whatever commit that branch resolved to, so a
+force-push on the fork would break every recorded build. Issue #68 pinned the
+rev in the root manifest, `Cargo.lock` did not re-resolve (the hash after the
+`#` was already this commit), and the generated file inherits it.
 
-Two reasons to expect that route to win in the end, neither of them urgent:
-the generated JSON is 501 KB and can live in the repository, where a 950 MB
-tarball cannot; and it is what every COSMIC app on Flathub does
+Two traps come with this route and both are load-bearing:
+
+- **The config lands at `$CARGO_HOME/config`**, so `CARGO_HOME` must be
+  exactly `/run/build/<module-name>/cargo`. Anywhere else the file is
+  written and never read and the build dies with "you are in the offline
+  mode". The manifest's module is named `kyerag` and its `CARGO_HOME` says
+  `/run/build/kyerag/cargo`; renaming one without the other breaks the
+  build.
+- **A change to `Cargo.lock` is a change to `cargo-sources.json`**, in the
+  same commit (AGENTS.md, `scripts/cargo-sources.sh`). A stale one is not a
+  build that fetches what it is missing; it is a build that fails.
+
+The route not taken was `cargo vendor`, which is what built the first
+Flatpak. It works, and measured on this tree it emitted a source replacement
+per git remote including the patch, with the forked `wgpu-hal` rather than
+crates.io's: the `VK_EXT_image_drm_format_modifier` hunk was present in
+`vendor/wgpu-hal/src/vulkan/adapter.rs`. It lost on size. 668 crates, 988 MB,
+~950 MB tarred, which cannot live in the repository, so any published build
+would have to fetch the tarball as a release asset by URL and sha256. The
+generated JSON is also what every COSMIC app on Flathub ships
 (`dev.edfloreshz.Tasks`, `dev.edfloreshz.CosmicTweaks`,
-`io.github.pixeldoted.cosmic-ext-color-picker` all ship a
-`cargo-sources.json`), which is also what Flathub's own requirements ask
-for. Its trap is that the config it writes is `$CARGO_HOME/config`, so
-`CARGO_HOME` must be exactly `/run/build/<module-name>/cargo` or cargo never
-reads it.
+`io.github.pixeldoted.cosmic-ext-color-picker`) and what Flathub's own
+requirements ask for.
 
-`vendor.tar` is what this branch uses because it is what was built and
-installed and run. For Flathub the tarball would have to be a release asset
-fetched by URL and sha256; switching to `cargo-sources.json` instead is the
-smaller change and the better-precedented one.
+### 3.6 The app ID is `dev.harding.Kjerag`, and the code does not say so yet
 
-One real fragility either way: the patch entry pins a **branch**, and both
-tools pin the commit that branch resolved to. Force-push the fork's branch
-and every recorded build breaks. `rev = "fb66f36…"`, or a tag, costs nothing
-and removes that.
+**Settled** (owner, issue #66): `dev.harding.Kjerag`. `harding.dev` resolves
+and answers 200, which is what a reverse-DNS app ID has to assert and what
+Flathub checks, so the ID is verifiable today by a `.well-known` file or a
+DNS TXT record and costs nothing to hold.
 
-### 3.6 The app ID is not usable as it stands
+**Nothing in this branch carries it yet, on purpose.** The manifest, the
+desktop entry, the metainfo and the MIME package are still
+`app.kyerag.Kyerag`, because the app ID is a rename with one seam and issue
+#75 owns it: the crate names, the binary, `App::APP_ID`, the cosmic-config
+identifiers, these four file names and the docs all move together, in one
+mechanical PR, after the open drafts land. Renaming half of them here would
+put the tree in a state where the entry names one ID, the binary registers
+another, and cosmic-config writes to a third. The icons are the one thing
+already named `dev.harding.Kjerag` (§2.4), and §2.4 says what that costs
+until #75.
 
-The code says `app.kyerag.Kyerag` (`crates/app/src/app.rs:235`). Flathub's
-own linter, run against the manifest:
+That rename is also the last thing between the manifest and a linter with
+nothing to say about the ID. What the linter says today, run against the
+manifest as it stands:
 
 ```json
 "errors": [
@@ -589,25 +656,25 @@ own linter, run against the manifest:
 ]
 ```
 
-**`kyerag.app` does not exist.** A reverse-DNS app ID asserts control of the
-domain, and Flathub checks. Measured: `kyerag.app` has no DNS record;
-`harding.dev` resolves and answers 200; `github.com/aeharding` exists.
+**`kyerag.app` does not exist**, which is what made the ID a decision rather
+than a detail. Measured: `kyerag.app` has no DNS record; `harding.dev`
+resolves and answers 200; `github.com/aeharding` exists. The three candidates
+were `app.kyerag.Kyerag` (buy `kyerag.app` and serve real HTTPS off it, since
+`.app` is HSTS-preloaded and a parking page will not do),
+`io.github.aeharding.Kjerag` (verified by the GitHub account, the convention
+for a project with no domain), and the one that won, which needs nothing.
 
-The options, and none of them is free:
+Why it was worth settling before publishing rather than after. The app ID is
+the cosmic-config path (`~/.config/cosmic/<id>/` and
+`~/.local/state/cosmic/<id>/`, so every stored setting), the icon name, the
+desktop-entry and MIME-package file names, the metainfo `<id>`, the D-Bus
+name and the Wayland `app_id`. cosmic-config has no name-migration path, only
+version fallback, and Flatpak's end-of-life rebase does not touch host paths,
+so a rename orphans stored settings silently even when the rebase is done
+right. The project is pre-release, which is exactly why #75 can do it as a
+mechanical sweep with no migration.
 
-| ID | what it needs | note |
-| -- | ------------- | ---- |
-| `app.kyerag.Kyerag` | buy `kyerag.app` and serve it | `.app` is HSTS-preloaded, so it needs real HTTPS, not a parking page |
-| `dev.harding.Kyerag` | nothing; `harding.dev` already answers | verifiable today |
-| `io.github.aeharding.Kyerag` | the GitHub account, which exists | the convention for a project with no domain |
-
-Changing it later is not a rename of one string. The app ID is the
-cosmic-config path (`~/.config/cosmic/app.kyerag.Kyerag/`, so every stored
-setting), the icon name, the desktop-entry and MIME-package file names, the
-metainfo `<id>`, and on Flathub a published ID is close to permanent. This
-is cheap to settle now and expensive to settle after the first release.
-
-The other two linter errors are smaller:
+The other two linter errors are smaller, and both survive the rename:
 
 - `finish-args-only-wayland`: Flathub wants `--socket=fallback-x11` and
   `--share=ipc` alongside Wayland. The manifest deliberately omits them,
@@ -661,18 +728,22 @@ The other two linter errors are smaller:
   There is no `xdg-state` token in flatpak, hence the literal path.
 - **`xdg-pictures`** is where a saved still goes.
   `crates/app/src/shot.rs` resolves `XDG_SCREENSHOTS_DIR` or the pictures
-  directory. Without this the PNG lands in the sandbox's private home and
+  directory. Without this the still lands in the sandbox's private home and
   the pilot never finds it.
 - **No general filesystem access at all**, and it is not needed. Measured
   inside the installed app: `ls ~` shows exactly one entry, `Pictures`.
 - **Nothing for icons.** The UI asks the icon theme for
   `camera-photo-symbolic`, `view-fullscreen-symbolic` and friends, and
-  `/usr/share/icons` in the sandbox holds an empty `hicolor`. They resolve
-  anyway: flatpak puts the host's icon themes on `XDG_DATA_DIRS` as
-  `/run/host/share`, and all four names the app uses were found there,
-  `video-x-generic-symbolic` from the host's own `Cosmic` theme. A host with
-  no COSMIC icons installed is the untested case; `com.system76.Cosmic.BaseApp`,
-  which the COSMIC apps on Flathub build against, exists to cover it.
+  `/usr/share/icons` in the sandbox holds an empty `hicolor` before our own
+  tree is installed into it. They resolve anyway: flatpak puts the host's
+  icon themes on `XDG_DATA_DIRS` as `/run/host/share`, and all four names the
+  app uses were found there, `video-x-generic-symbolic` from the host's own
+  `Cosmic` theme. A host with no COSMIC icons installed is the untested case;
+  `com.system76.Cosmic.BaseApp`, which the COSMIC apps on Flathub build
+  against, exists to cover it. Whether to take that base is the one manifest
+  question issue #72 left open and this branch is still leaving open: on this
+  box nothing needs it, and "untested elsewhere" is not a reason to add a
+  dependency, only a reason to know where to look when a report arrives.
 
 Files reach the app two ways and both are portal-shaped:
 
@@ -719,18 +790,11 @@ double click and the file chooser both already work.
 
 ### 3.8 What the build actually produced
 
-```sh
-just vendor
-flatpak run org.flatpak.Builder --user --force-clean \
-    --repo=scratch/fp/repo scratch/fp/build flatpak/app.kyerag.Kyerag.yml
-flatpak build-bundle scratch/fp/repo kyerag.flatpak app.kyerag.Kyerag master
-```
+Two builds, and the difference between them is the point.
 
-Release build in 2m44s inside the sandbox; a 7.6 MB single-file bundle. The
-build tree had §3.4's three-hunk ffmpeg port applied; everything else,
-manifest included, is what this branch contains.
-
-Installed and checked:
+**The first one, with `vendor.tar` and §3.4's ffmpeg port applied in a
+scratch tree.** Release build in 2m44s inside the sandbox, a 7.6 MB
+single-file bundle, installed and checked:
 
 ```
 $ flatpak run app.kyerag.Kyerag --version
@@ -742,19 +806,77 @@ by-path  card1  renderD128
 ```
 
 and then run on real footage under a headless compositor, which is where
-§3.2's `dmabuf import: all extensions enabled` and 30 fps came from.
+§3.2's `dmabuf import: all extensions enabled` and its 30 fps came from.
 
-The MIME package rides along: flatpak exported it to
+Two defects that run found, both fixed in the manifest and neither visible
+without running it: saved state was silently discarded (§3.7), and the first
+version of the manifest had no `~/.local/state/cosmic` grant to discard it
+into.
+
+**The second one is this tree, unpatched**, after the ffmpeg pin and
+`cargo-sources.json` landed on `main`:
+
+```sh
+flatpak run org.flatpak.Builder --user --force-clean \
+    --state-dir=scratch/flatpak-builder \
+    --repo=scratch/fp/repo scratch/fp/build flatpak/app.kyerag.Kyerag.yml
+```
+
+and it failed, which is the useful part:
+
+```
+error: failed to select a version for the requirement `ffmpeg-next = "^7.1"`
+       (locked to 7.1.0)
+candidate versions found which didn't match: 6.1.1
+location searched: directory source `/run/build/kyerag/cargo/vendor`
+```
+
+**`flatpak/cargo-sources.json` on `main` was generated from a lock file that
+still said ffmpeg 6.1**, because issue #90 regenerated it on a branch cut
+before issue #95 bumped the pin and the two merged clean. Nothing reads that
+file except a Flatpak build, so nothing had noticed. It is regenerated here,
+and `scripts/cargo-sources.sh --check` now compares the lock file's packages
+against the sources with no network and no generator, in CI and by hand.
+
+With that fixed the build runs through:
+
+```
+Finished `release` profile [optimized] target(s) in 3m 21s
+Exporting share/applications/app.kyerag.Kyerag.desktop
+Exporting share/mime/packages/app.kyerag.Kyerag.xml
+Exporting share/metainfo/app.kyerag.Kyerag.metainfo.xml
+WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
+```
+
+No network, no patch, no tarball. The eleven icon files are in the app
+(`files/share/icons/hicolor/*/apps/dev.harding.Kjerag.*`), and the warning is
+§2.4's: the entry names `app.kyerag.Kyerag` and flatpak exports only what
+starts with the app ID, until issue #75 makes the two the same name. The
+binary links the runtime's ffmpeg and says which one, which is the check
+AGENTS.md asks for: `readelf -d` reports `libavcodec.so.61`, so ffmpeg 7.1.
+
+Three things about that second build to be exact about.
+
+- **It was not installed and not run.** §3.2's playback numbers stand on the
+  first build and have not been re-measured against this one.
+- **`--state-dir` is not decoration.** flatpak-builder's cache defaults to
+  `.flatpak-builder` in the working directory, which for this manifest is the
+  repository root, and the `dir` source copies the whole repository into the
+  build. So the default puts 1.7 GB of build cache next to the source and
+  then copies it into the next build of itself. `scratch/` is skipped and
+  gitignored, which is why the cache belongs there.
+- **Cargo warns about the file name it is given.**
+  `/run/build/kyerag/cargo/config is deprecated in favor of config.toml`.
+  That name is the generator's, cargo still reads it, and the day it stops is
+  the day this breaks; it is a thing to watch rather than a thing to patch
+  around here.
+
+The MIME package rides along: the first build's flatpak exported it to
 `~/.local/share/flatpak/exports/share/mime/packages/app.kyerag.Kyerag.xml`,
 so installing the Flatpak teaches the whole desktop what a `.insv` is. No
 separate step.
 
-Two defects the run found, both now fixed in the manifest and neither
-visible without running it: saved state was silently discarded (§3.7), and
-the first version of the manifest had no `~/.local/state/cosmic` grant to
-discard it into.
-
-Tooling installed to get here, all `--user`, no root and no system packages:
+Tooling used to get here, all `--user`, no root and no system packages:
 `org.flatpak.Builder`, `org.freedesktop.Sdk.Extension.rust-stable//25.08`,
 `org.freedesktop.Sdk.Extension.llvm21//25.08`.
 
@@ -762,87 +884,89 @@ Tooling installed to get here, all `--user`, no root and no system packages:
 
 ## 4. Publishing
 
-### 4.1 Flathub is owner-only
+### 4.1 Flathub is the channel, under one scoped exception
 
-AGENTS.md: "ALL work stays inside the owner's repositories. Never open,
-file, or comment on issues or pull requests of any outside project, ever."
-A Flathub submission is a pull request against `flathub/flathub`, and the
-subsequent app lives in a repository under the `flathub` organisation. **No
-agent may do any of it.** What follows is a description so the owner can
-decide, not a plan for anyone else to execute.
+**Flathub, and nothing else** (owner, 2026-07-31). AGENTS.md's standing rule
+is that all work stays inside the owner's repositories and that no agent
+opens, files or comments on anything outside them. A Flathub submission is a
+pull request against `flathub/flathub`, and the app afterwards lives in a
+repository under the `flathub` organisation, so it needed an exception and it
+got exactly one:
 
-The shape of it: a submission PR carries the manifest and the app ID; the
-ID's domain has to be one the owner controls (§3.6); the metainfo has to
-carry at least one screenshot; the build has to pass
-`flatpak-builder-lint`, which today reports the three errors in §3.6.
-Review is by humans and the permission set is the part they read hardest,
-which is the argument for §3.7 being as small as it is.
+> ONE scoped exception (owner-granted 2026-07-31): Flathub publishing for
+> this app, done together with the owner and with him told before every
+> outward action; everything is prepared and previewed in this repo first.
 
-Realistically the prerequisites are: pick the app ID, get an icon, take
-screenshots, resolve the ffmpeg pin, and decide the X11 question. None of
-those is a Flathub problem; they are all upstream of it.
+Read it as narrow, because it is. It covers Flathub publishing for this app
+and nothing else, no agent takes an outward step the owner has not been told
+about first, and everything an outsider would see is built and reviewed here
+before it leaves. The rest of AGENTS.md's rule is untouched: no issues, no
+pull requests, no bug reports anywhere else, ever.
 
-### 4.2 A self-hosted repo is entirely ours
+The shape of a submission: the PR carries the manifest and the app ID; the
+ID's domain has to be one the owner controls (§3.6, which is why
+`harding.dev` won); the metainfo has to carry at least one screenshot; the
+build has to pass `flatpak-builder-lint`. Review is by humans and the
+permission set is the part they read hardest, which is the argument for §3.7
+being as small as it is.
 
-Everything Flathub does can be done from this repository, with no outside
-account and no outside PR, because a flatpak remote is a static OSTree
-repository over HTTP:
+What is left before a submission is worth previewing, and none of it is a
+Flathub problem: issue #75's rename, so the ID in the tree is the ID that was
+settled; screenshots, which only the owner can take and agree to publish; and
+the X11 question, where "fix it" means someone runs the app under Xwayland
+first. §5 is the list.
 
-- `flatpak-builder --repo=<dir>` already writes one (§3.8 did).
-- `flatpak build-update-repo --gpg-sign=<key>` generates the summary and
-  signs it. Unsigned works for `--user` installs with
-  `--no-gpg-verify`, which is fine for testing and not fine for a thing
-  strangers install.
-- The repository is a directory of static files. GitHub Pages serves it.
-- Users add it with a `.flatpakrepo` file (an INI with `Url`, `Title`,
-  `GPGKey`), then `flatpak install kyerag app.kyerag.Kyerag`.
-- `flatpak build-bundle` produces the single `.flatpak` file that installs
-  with no remote at all, which is what this branch produced and what the
-  owner can click a `.insv` against today.
+### 4.2 A self-hosted repo was the alternative, and it is declined
 
-Three details that decide whether it works rather than whether it exists:
+**Declined** (owner, 2026-07-31; issue #71, closed). It was the obvious
+fallback while Flathub looked unreachable: a flatpak remote is a static
+OSTree repository over HTTP, `flatpak-builder --repo=<dir>` already writes
+one, GitHub Pages serves a directory of static files, and none of it needs
+anyone's permission. The full shape, with the GPG signing, the pruning, the
+1 GB Pages cap against the `.Debug` ref, and the finding that decides whether
+it works at all (no AppStream data means the app is installable from the
+remote and invisible in COSMIC Store, GNOME Software and Discover), is
+written down on issue #71.
 
-- **AppStream is not optional.** cosmic-store enumerates each remote and
-  reads its appstream branch; no appstream data means Kyerag is installable
-  from the remote and invisible in COSMIC Store, GNOME Software and Discover.
-  `flatpak-builder --repo` passes `--update-appstream` for you; a hand-run
-  `flatpak build-export` does not.
-- **GitHub Pages caps a site at 1 GB**, and flatpak-builder exports a
-  `.Debug` ref alongside the app. Ours is 12 MB of debuginfo against 31 MB
-  of app today, which is fine, but `--prune --prune-depth=1` on
-  `build-update-repo` is what keeps history from eating the budget, and
-  static deltas roughly double the size in exchange for much faster installs.
-- **A bundle can carry its own update path.** `build-bundle --repo-url=…`
-  makes installing the single file configure the remote too, and
-  `--runtime-repo=…flathub.flatpakrepo` means a user without the freedesktop
-  runtime gets offered it instead of an error. `--gpg-sign` on
-  `build-bundle` is a no-op for `.flatpak` files (it signs OCI images only);
-  the key goes in with `--gpg-keys`. Omitting `GPGKey=` from a
-  `.flatpakrepo` sets `gpg-verify=false` for the remote automatically, so
-  users need no `--no-gpg-verify` incantation.
+It lost on what it costs rather than on what it does: it gives up discovery,
+nobody browses a one-app remote, and it puts update delivery and key
+management on us permanently. One channel, and it is Flathub.
 
-The trade is real: a self-hosted repo gives up discovery (nobody browses
-it), and it puts update delivery and key management on us. Against that, it
-needs no permission from anyone and can ship the day the ffmpeg question is
-answered. The two are not exclusive; a self-hosted repo is a reasonable
-beta channel whether or not Flathub ever happens.
+**The single-file bundle stays**, because it is not a distribution channel:
+`flatpak build-bundle` produces one `.flatpak` that installs with no remote
+at all, which is how the owner gets a build to click a `.insv` against
+before anything is published.
 
 ---
 
-## 5. What the owner has to decide or supply
+## 5. What is settled, and what is left
 
-1. **An icon.** Nothing else can produce one. Blocks: a non-generic launcher
-   entry, the About page, and Flathub.
-2. **The app ID.** `kyerag.app` does not resolve, so `app.kyerag.Kyerag` is
-   not valid on Flathub today. Buy the domain, or move to
-   `dev.harding.Kyerag` / `io.github.aeharding.Kyerag`. Cheapest now,
-   expensive after the first release (§3.6).
-3. **The ffmpeg pin**: bump to 7.1 and move the dev box, or bundle ffmpeg
-   6.1 in the manifest (§3.4).
-4. **Whether Flathub is a goal at all**, which decides whether the X11 and
-   `xdg-config/cosmic:ro` questions matter (§3.6) and whether screenshots
-   are needed.
-5. **The licence spelling.** `res/…metainfo.xml` says `AGPL-3.0-only`
-   because the repository says "AGPL-3.0" and carries no per-file "or any
-   later version" grant. If "or later" was intended, that string and the
-   file headers should say so before anything is published under it.
+Settled on 2026-07-31, all of it by the owner:
+
+| question | answer |
+| -------- | ------ |
+| the icon | shipped, `resources/icons/` (issue #67, §2.4) |
+| the app ID | `dev.harding.Kjerag`; issue #75 puts it in the tree (§3.6) |
+| the ffmpeg pin | 7.1, and the dev box takes ffmpeg 7 from a PPA (§3.4) |
+| the channel | Flathub only, under AGENTS.md's scoped exception (§4.1) |
+| a self-hosted repo | declined (issue #71, §4.2) |
+| the licence | `AGPL-3.0-only`, which is what the metainfo already says |
+
+Left, and each one is the owner's rather than a task anybody can pick up:
+
+1. **Screenshots.** Flathub will not accept a submission without at least
+   one, and ours has to be a real window over real footage, which is the
+   owner's to take and to agree to publish. The metainfo carries the
+   commented-out `<screenshots>` block waiting for URLs.
+2. **The X11 question.** Flathub's linter wants `--socket=fallback-x11` and
+   `--share=ipc`; the manifest omits both because the frame path is Wayland
+   dmabuf and has never been run under Xwayland (§3.6). Either it is argued
+   in review or somebody runs the app under Xwayland first, and the second
+   one is work, not a decision.
+3. **`xdg-config/cosmic:ro`.** The linter wants read-only; cosmic-config
+   writes the app's own settings under that path and the two COSMIC apps
+   installed on this box both take it read-write. Whether `:ro` costs
+   persisted settings is untested (§3.6).
+4. **When to preview a submission.** Issue #75's rename is the last thing
+   that changes what a submission would contain, so the natural order is
+   rename, screenshots, preview with the owner, then the one outward step.
