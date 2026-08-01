@@ -220,6 +220,16 @@ impl SwFrame {
         Ok(frame)
     }
 
+    /// Whether the transfer landed in NV12, which is the only layout whose
+    /// second plane is one interleaved Cb/Cr grid.
+    ///
+    /// Asked rather than assumed: a caller that reads plane 1 as pairs on a
+    /// planar frame reads Cb where it means to read Cr, and what comes back
+    /// is a colour wrong by a hue rather than a read that fails.
+    pub fn nv12(&self) -> bool {
+        unsafe { (*self.0).format == ff::ffi::AVPixelFormat::AV_PIX_FMT_NV12 as i32 }
+    }
+
     /// Plane bytes and their stride, both straight from the frame.
     pub fn plane(&self, index: usize, rows: u32) -> (&[u8], u32) {
         unsafe {

@@ -21,7 +21,7 @@ mod scene;
 pub mod seam;
 mod widget;
 
-pub use band::{AZIMUTHS, Cell, KEEP, Ring, ease, time_constant};
+pub use band::{AZIMUTHS, Cell, KEEP, Ring, Tone, ease, time_constant};
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;

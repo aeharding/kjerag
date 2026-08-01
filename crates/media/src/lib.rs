@@ -39,7 +39,7 @@ pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
 pub use player::{Player, Stats};
 pub use reader::{Accuracy, Cue, Frames, Read, Reader, Timing};
-pub use walk::{Pair, Plane, Walk};
+pub use walk::{Chroma, Pair, Plane, Walk};
 
 const NANOS: u64 = 1_000_000_000;
 

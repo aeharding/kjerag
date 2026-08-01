@@ -225,13 +225,100 @@ const THREADS: usize = 64;
 /// against 0.9 reading half of it.
 const SLICES: u32 = 2;
 
+/// How long the pooled exposure gain takes to answer a change, in seconds.
+///
+/// [`TAU_FAR_S`] and not a constant of its own, for the reason that constant
+/// exists: it is what this file smooths things that **do not move** by, and
+/// the ratio between two lenses' auto-exposure loops is one of them. Each is
+/// a slow closed loop on a whole hemisphere's worth of light, and the reading
+/// is already pooled over up to [`AZIMUTHS`] directions before it is smoothed
+/// at all.
+///
+/// A gain has more reason to be smoothed hard than a bend does: a bend that
+/// flickers moves the picture inside the crossover and a gain that flickers
+/// changes the brightness of **everything**, which is the one artifact worse
+/// than the step it is correcting (issue #103, stage 3).
+const TAU_GAIN_S: f32 = TAU_FAR_S;
+
+/// The widest gain that is an exposure difference rather than a measurement
+/// coming apart, as a natural log.
+///
+/// Not a taste and not a margin, and derived the way [`super::seam`]'s
+/// `RUNAWAY_DEG` is: measured across every capture on this box and every
+/// camera in the sample corpus, the pooled reading spans -0.033 to +0.036 ln,
+/// which is 3.6 percent, and no single azimuth-frame of any of them reaches
+/// 0.14. This is four times the widest pooled reading and above every single
+/// reading, so nothing this stage measured is clipped by it; what it is here
+/// for is the case none of those captures is - a seam correlating on
+/// something that is not the same content at all, which would otherwise reach
+/// the picture as a hemisphere washing out.
+const LIMIT_LN: f32 = 0.15;
+
+/// The exposure the two lenses hand the same content over at, pooled over the
+/// whole ring, smoothed, and split between them (issue #103, stage 3).
+///
+/// **One number for the picture, not one per direction.** A gain that varied
+/// round the seam would be a brightness that changes as the view pans, which
+/// is a worse artifact than the step: the two hemispheres of a sphere should
+/// have one exposure between them, and the seam is where that becomes
+/// visible rather than where it lives.
+///
+/// It is the header of the state buffer, so the fragment shader reaches it in
+/// one read at a fixed offset rather than averaging 128 cells per pixel.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tone {
+    /// The natural log of lens 1's brightness over lens 0's, on the same
+    /// content, smoothed at [`TAU_GAIN_S`]. Zero is no correction at all, and
+    /// zero is what a file opens in, what a one-lens file stays in, and what
+    /// a seam that has never correlated stays in.
+    pub log_gain: f32,
+    /// What share of the ring was behind the last reading, 0 to 1. Never
+    /// applied: the gain is eased in rather than taxed, and this is what an
+    /// instrument reads to say how much of the circle answered.
+    pub evidence: f32,
+    /// A storage buffer's struct is laid out by its own alignment rules and
+    /// `repr(C)` does not do it for us. Four floats keeps the cells that
+    /// follow on a sixteen-byte boundary whatever [`Cell`] grows into.
+    _pad: [f32; 2],
+}
+
+impl Tone {
+    /// The two numbers a readback finds in the buffer's header, as a `Tone`.
+    pub fn read(log_gain: f32, evidence: f32) -> Self {
+        Self {
+            log_gain,
+            evidence,
+            _pad: [0.0; 2],
+        }
+    }
+
+    /// What each lens's picture is multiplied by, lens 0 first: the symmetric
+    /// split, so neither hemisphere carries the whole change and neither is
+    /// preferred.
+    ///
+    /// **Exactly one on both sides when nothing has been measured**, which is
+    /// the byte-identity of every picture this stage does not touch, and it is
+    /// an equality rather than an `exp` that ought to return 1.
+    ///
+    /// WGSL twin: `tone_split`.
+    pub fn split(&self) -> [f32; 2] {
+        let half = 0.5 * self.log_gain.clamp(-LIMIT_LN, LIMIT_LN);
+        match half == 0.0 {
+            true => [1.0, 1.0],
+            false => [half.exp(), (-half).exp()],
+        }
+    }
+}
+
 /// One direction's state, as the compute pass writes it and the fragment
 /// shader reads it.
 ///
-/// Sixteen bytes and every one of them is read by something: the first two by
-/// the pass, the second two only by an instrument. Zero is the state a file
-/// opens in and the state a direction that has never correlated stays in, and
-/// a zero disparity is no bend at all.
+/// Twenty bytes and every one of them is read by something: the first two by
+/// the pass, the third and fourth only by an instrument, and the fifth by the
+/// pooling that follows the measurement. Zero is the state a file opens in and
+/// the state a direction that has never correlated stays in, and a zero
+/// disparity is no bend at all.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cell {
@@ -252,6 +339,16 @@ pub struct Cell {
     /// far smaller than [`Self::disparity`] where the disparity is large, the
     /// band is not being read as a stereo pair.
     pub off_epi: f32,
+    /// What the two lenses' pictures of this direction's patch differ by in
+    /// brightness, as a natural log, read at the shift that made them the
+    /// **same content** (issue #103, stage 3).
+    ///
+    /// Not smoothed here: it is one reading of 441 samples, and the only
+    /// filter in the whole of stage 3 is the one on [`Tone::log_gain`] that
+    /// this is pooled into. A direction that stops correlating keeps the
+    /// reading it had and loses the confidence that weighs it, which is the
+    /// same rule the disparity takes and for the same reason.
+    pub tone: f32,
 }
 
 impl Cell {
@@ -269,14 +366,14 @@ impl Cell {
             .iter()
             .map(|cell| {
                 format!(
-                    "{} {} {} {}\n",
-                    cell.disparity, cell.confidence, cell.reach_m, cell.off_epi
+                    "{} {} {} {} {}\n",
+                    cell.disparity, cell.confidence, cell.reach_m, cell.off_epi, cell.tone,
                 )
             })
             .collect()
     }
 
-    /// The same, read back. `None` on any line that is not four numbers.
+    /// The same, read back. `None` on any line that is not five numbers.
     pub fn read(text: &str) -> Option<Vec<Self>> {
         text.lines()
             .map(|line| {
@@ -287,6 +384,7 @@ impl Cell {
                     confidence: next()?,
                     reach_m: next()?,
                     off_epi: next()?,
+                    tone: next()?,
                 })
             })
             .collect()
@@ -538,6 +636,14 @@ pub fn width(disparity_rad: f32, floor_rad: f32) -> f32 {
 /// adds is its own bindings and its own entry point.
 pub(crate) fn wgsl() -> String {
     let span = (SPAN_DEG / STEP_DEG).round() as usize;
+    let photometry = format!(
+        "const TAU_GAIN = {TAU_GAIN_S:?};\n\
+         const LIMIT_LN = {LIMIT_LN:?};\n\
+         const CLIP_HIGH = {high:?};\n\
+         const CLIP_LOW = {low:?};\n",
+        high = CLIP_HIGH,
+        low = CLIP_LOW,
+    );
     // An odd count, so a patch has a centre sample.
     let half = span / 2;
     let near = (NEAR_DEG / STEP_DEG).round() as isize;
@@ -567,7 +673,7 @@ pub(crate) fn wgsl() -> String {
          const BACK_ALONG = {back_along}u;\n\
          const BACK_ACROSS = {back_across}u;\n\
          const TAU = {tau:?};\n\
-         {CELL}{RING}{WGSL}",
+         {photometry}{CELL}{RING}{WGSL}",
         tau = std::f32::consts::TAU,
         step = STEP_DEG.to_radians(),
         perp_steps = PERP_STEPS,
@@ -592,7 +698,8 @@ pub(crate) fn wgsl() -> String {
 pub(crate) fn lookup_wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst KEEP = {KEEP:?};\n\
-         const WIDEST = {widest:?};\nconst TAU = {tau:?};\n{CELL}{RING}{LOOKUP}",
+         const WIDEST = {widest:?};\nconst TAU = {tau:?};\nconst LIMIT_LN = {LIMIT_LN:?};\n\
+         {CELL}{RING}{LOOKUP}",
         widest = WIDEST_DEG.to_radians(),
         tau = std::f32::consts::TAU,
     )
@@ -614,23 +721,53 @@ pub(crate) const STATE_BINDING: u32 = 0;
 /// for how old the state is.
 pub(crate) const WATCH_BINDING: u32 = 1;
 
-/// How many bytes the state buffer is.
-pub(crate) const BYTES: u64 = (AZIMUTHS * std::mem::size_of::<Cell>()) as u64;
+/// How many bytes the state buffer is: the pooled [`Tone`], then one [`Cell`]
+/// per direction.
+pub(crate) const BYTES: u64 =
+    (std::mem::size_of::<Tone>() + AZIMUTHS * std::mem::size_of::<Cell>()) as u64;
+
+/// Where the cells start in that buffer, for the readback that unpacks it.
+pub(crate) const CELLS_AT: usize = std::mem::size_of::<Tone>();
 
 /// How many workgroups one frame's measurement dispatches: one per direction.
 pub(crate) const GROUPS: u32 = AZIMUTHS as u32 / SLICES;
+
+/// A sample at or above this is a clipped highlight and not a brightness.
+///
+/// A ratio needs both sides to be measurements, and a highlight at the
+/// ceiling is the ceiling however much light fell on it: if one lens clips
+/// and the other does not, their difference is the sensor's range and not
+/// their exposure. The pair is dropped together, so dropping it biases
+/// nothing. The sun is in shot at the owner's own reference view, which is
+/// where this stopped being hypothetical.
+const CLIP_HIGH: f32 = 252.0 / 255.0;
+const CLIP_LOW: f32 = 2.0 / 255.0;
 
 /// How many frames it takes to read the whole circle, for the caller that has
 /// to count them.
 pub(crate) const ROUNDS: u32 = SLICES;
 
-/// Declared by both shaders, with the access each needs.
+/// Declared by both shaders, with the access each needs. Rust twins: [`Tone`],
+/// [`Cell`] and the buffer they are laid out in.
 const CELL: &str = r#"
+struct Tone {
+  log_gain: f32,
+  evidence: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
 struct Cell {
   disparity: f32,
   confidence: f32,
   reach_m: f32,
   off_epi: f32,
+  tone: f32,
+};
+
+struct State {
+  tone: Tone,
+  cells: array<Cell, AZIMUTHS>,
 };
 "#;
 
@@ -665,7 +802,29 @@ fn ring_at(centre: vec3<f32>) -> Ring {
 "#;
 
 const LOOKUP: &str = r#"
-@group(1) @binding(0) var<storage, read> band: array<Cell, AZIMUTHS>;
+@group(1) @binding(0) var<storage, read> band: State;
+
+// What each lens's picture is multiplied by, lens 0 first (issue #103,
+// stage 3). Rust twin: `Tone::split`.
+//
+// The split is symmetric because the seam cannot say which lens is wrong: a
+// correction of +x on one and -x on the other is the same picture at the
+// handover, and halving it is what keeps either hemisphere from carrying the
+// whole change. It is applied to the RGB the two planes decode to rather than
+// to the luma alone, so a hue is scaled with its own brightness and nothing
+// shifts colour.
+//
+// Exactly one on both sides when nothing has been measured, and by an
+// equality rather than by trusting `exp(0.0)`: a file with one lens stream, a
+// seam that has never correlated and every frame before the first reading all
+// reach that line, and every pixel they draw is the one stage 2 drew.
+fn tone_split() -> vec2<f32> {
+  let half = 0.5 * clamp(band.tone.log_gain, -LIMIT_LN, LIMIT_LN);
+  if half == 0.0 {
+    return vec2<f32>(1.0, 1.0);
+  }
+  return vec2<f32>(exp(half), exp(-half));
+}
 
 // The band with nothing behind it: no bend, and the crossover at the width it
 // has always been. This is what a file with one lens stream takes, what a
@@ -696,8 +855,8 @@ fn band_bend(ray: vec3<f32>) -> Band {
   let turn = atan2(body.y, body.x) / TAU * f32(AZIMUTHS);
   let low = i32(floor(turn));
   let mix = turn - f32(low);
-  let a = band[u32(low + i32(AZIMUTHS)) % AZIMUTHS];
-  let b = band[u32(low + 1 + i32(AZIMUTHS)) % AZIMUTHS];
+  let a = band.cells[u32(low + i32(AZIMUTHS)) % AZIMUTHS];
+  let b = band.cells[u32(low + 1 + i32(AZIMUTHS)) % AZIMUTHS];
   // Weighted by the evidence behind each cell, not just by which is nearer.
   // A direction that has stopped correlating stops contributing, both to what
   // the disparity is and to how much of it is applied, and a ray between one
@@ -759,7 +918,7 @@ const WGSL: &str = r#"
 // different access: `read` in the fragment shader, `read_write` here, and a
 // bind group layout declares one or the other. It also keeps a writable
 // storage buffer out of the fragment stage, which not every device allows.
-@group(1) @binding(0) var<storage, read_write> band: array<Cell, AZIMUTHS>;
+@group(1) @binding(0) var<storage, read_write> band: State;
 @group(1) @binding(1) var<uniform> watch: Watch;
 
 // Luma only. A doubled edge is geometry and geometry is in the luma, and the
@@ -788,6 +947,25 @@ var<workgroup> back: array<f32, BACK_ALONG * BACK_ACROSS>;
 // One score per candidate shift, so the peak and its two neighbours are all
 // in hand when the parabola is taken and no shift is scored twice.
 var<workgroup> scores: array<f32, EPI_SHIFTS * PERP_SHIFTS>;
+// Which candidate won, so every lane can read the same answer without
+// scoring the table twice.
+var<workgroup> winner: u32;
+// The photometry, summed cooperatively over the patch at that one winning
+// shift (issue #103, stage 3). One entry per lane, reduced by lane 0.
+//
+// After the peak and not during the search, and that is the whole cost
+// argument: the correlation scores EPI_SHIFTS * PERP_SHIFTS candidates and
+// only one of them is the same content, so a sum taken inside `correlate`
+// would be 117 sums thrown away to keep one, and it would have to carry the
+// clip test through the hot loop as well.
+var<workgroup> lit0: array<f32, THREADS>;
+var<workgroup> lit1: array<f32, THREADS>;
+var<workgroup> lit_n: array<f32, THREADS>;
+// The pooling's own two, because it is a second entry point over the same
+// buffer and not a second use of the same patch: what these hold is one
+// number per LANE over the whole ring, not one per sample of one direction.
+var<workgroup> pooled_weight: array<f32, THREADS>;
+var<workgroup> pooled_total: array<f32, THREADS>;
 
 // The map the band is read through: the camera left where it stands and the
 // view pointed nowhere, so a direction is a direction in the body's own frame
@@ -846,8 +1024,62 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   workgroupBarrier();
 
   if lane == 0u {
+    winner = peak();
+  }
+  workgroupBarrier();
+
+  // The two lenses' brightness on the SAME content, which is what the shift
+  // above just established and what no earlier exposure measurement in this
+  // project had. Cooperative, so it costs a seventh of a sample per lane.
+  photometry(lane, winner);
+  workgroupBarrier();
+
+  if lane == 0u {
     settle(cell, at);
   }
+}
+
+// The best-scoring candidate shift.
+fn peak() -> u32 {
+  var best = -2.0;
+  var found = 0u;
+  for (var i = 0u; i < EPI_SHIFTS * PERP_SHIFTS; i += 1u) {
+    if scores[i] > best {
+      best = scores[i];
+      found = i;
+    }
+  }
+  return found;
+}
+
+// Each lane's share of the two patches' brightness at the winning shift,
+// clipped samples left out in pairs.
+fn photometry(lane: u32, found: u32) {
+  let epi = found / PERP_SHIFTS;
+  let perp = found % PERP_SHIFTS;
+  let width = u32(2 * HALF + 1);
+  var sum0 = 0.0;
+  var sum1 = 0.0;
+  var count = 0.0;
+  for (var i = lane; i < PATCH; i += THREADS) {
+    let row = i / width;
+    let column = i % width;
+    let a = front[i];
+    let b = back[(row + epi) * BACK_ALONG + perp * u32(PERP_STEP) + column];
+    // A pair, both ways: a sample either lens has no picture of is not a
+    // pair, and a pair with a clipped or crushed side is the sensor's range
+    // rather than its exposure. Dropped together, so nothing is biased by
+    // dropping it.
+    if a < CLIP_LOW || b < CLIP_LOW || a > CLIP_HIGH || b > CLIP_HIGH {
+      continue;
+    }
+    sum0 += a;
+    sum1 += b;
+    count += 1.0;
+  }
+  lit0[lane] = sum0;
+  lit1[lane] = sum1;
+  lit_n[lane] = count;
 }
 
 // Zero-mean normalized cross-correlation of the two patches at candidate
@@ -895,20 +1127,14 @@ fn correlate(i: u32) -> f32 {
 // The peak, the gates, and one step of the filter. One thread, because it is
 // a few dozen operations over a table the whole workgroup has already filled.
 fn settle(cell: u32, at: Ring) {
-  var held = band[cell];
+  var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0);
+    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0);
   }
   held.reach_m = at.reach_m;
 
-  var best = -2.0;
-  var found = 0u;
-  for (var i = 0u; i < EPI_SHIFTS * PERP_SHIFTS; i += 1u) {
-    if scores[i] > best {
-      best = scores[i];
-      found = i;
-    }
-  }
+  let found = winner;
+  let best = scores[found];
   let epi = i32(found / PERP_SHIFTS);
   let perp = i32(found % PERP_SHIFTS) - PERP_STEPS;
   // A peak against the edge of the search is not a peak, it is the search
@@ -930,7 +1156,7 @@ fn settle(cell: u32, at: Ring) {
     // expires fast. A far reading is the background, which has not gone
     // anywhere. One knee decides both.
     held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
-    band[cell] = held;
+    band.cells[cell] = held;
     return;
   }
 
@@ -959,7 +1185,94 @@ fn settle(cell: u32, at: Ring) {
   held.disparity += (read - held.disparity) * step;
   held.confidence += (best - held.confidence) * step;
   held.off_epi = f32(perp * PERP_STEP) * STEP;
-  band[cell] = held;
+  held.tone = read_tone(held.tone);
+  band.cells[cell] = held;
+}
+
+// What the two lenses' pictures of this patch differ by in brightness at the
+// shift that made them the same content, as a natural log, or the reading
+// this direction already had where clipping left no pair to read.
+//
+// A ratio of MEANS rather than a mean of ratios or a regression slope: it is
+// the statistic the correction inverts. What the pass applies is one
+// multiplier over a whole hemisphere, so the number it wants is the one whose
+// inverse makes the two patches' totals equal, and that is this and nothing
+// else. The instrument prints the other two beside it
+// (`kjerag-spike --bin expose`) precisely so that claim can be checked rather
+// than believed.
+//
+// In the video's own gamma-coded luma, and the correction is applied in that
+// same space, so no transfer function is assumed at either end: what is
+// measured is a brightness match and it is inverted as one.
+fn read_tone(held: f32) -> f32 {
+  var sum0 = 0.0;
+  var sum1 = 0.0;
+  var count = 0.0;
+  for (var i = 0u; i < THREADS; i += 1u) {
+    sum0 += lit0[i];
+    sum1 += lit1[i];
+    count += lit_n[i];
+  }
+  if count <= 0.0 || sum0 <= 0.0 || sum1 <= 0.0 {
+    return held;
+  }
+  return log(sum1 / sum0);
+}
+
+// The pooled exposure, over the whole ring and over media time.
+//
+// One workgroup, dispatched straight after the measurement and in the same
+// pass, so what it pools is what was just written. Every direction that is
+// correlating contributes at the weight the bend already trusts it at
+// (`band_bend`'s `strength`), so no threshold is added here: a direction whose
+// evidence has faded fades out of the exposure too, and one that never
+// correlated was never in it.
+@compute @workgroup_size(THREADS)
+fn pool(@builtin(local_invocation_index) lane: u32) {
+  var weight = 0.0;
+  var total = 0.0;
+  for (var i = lane; i < AZIMUTHS; i += THREADS) {
+    let cell = band.cells[i];
+    let trust = clamp(cell.confidence / KEEP, 0.0, 1.0);
+    weight += trust;
+    total += trust * cell.tone;
+  }
+  pooled_weight[lane] = weight;
+  pooled_total[lane] = total;
+  workgroupBarrier();
+  if lane != 0u {
+    return;
+  }
+  var sum_weight = 0.0;
+  var sum_total = 0.0;
+  for (var i = 0u; i < THREADS; i += 1u) {
+    sum_weight += pooled_weight[i];
+    sum_total += pooled_total[i];
+  }
+  var held = band.tone;
+  // A seek starts the gain again from no correction at all rather than from
+  // an average of somewhere else, and walks in from there over TAU_GAIN. It
+  // is the one place this differs from the bend, which takes its first
+  // reading whole: a bend that arrives late leaves a doubled edge for a
+  // second and a gain that arrives instantly is a hemisphere changing
+  // brightness in one frame, which is the artifact this stage exists to not
+  // create.
+  if watch.reset != 0.0 {
+    held = Tone(0.0, 0.0, 0.0, 0.0);
+  }
+  if sum_weight <= 0.0 {
+    // Nothing on the ring is confirming anything this frame. The exposure of
+    // two lenses does not change because we stopped being able to see it, so
+    // the value is kept and only the evidence behind it is given up.
+    held.evidence -= held.evidence * ease(watch.seconds, TAU_GAIN);
+    band.tone = held;
+    return;
+  }
+  let read = clamp(sum_total / sum_weight, -LIMIT_LN, LIMIT_LN);
+  let step = ease(watch.seconds, TAU_GAIN);
+  held.log_gain += (read - held.log_gain) * step;
+  held.evidence += (sum_weight / f32(AZIMUTHS) - held.evidence) * step;
+  band.tone = held;
 }
 
 // Rust twin: `time_constant`.
