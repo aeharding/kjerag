@@ -1,2 +1,5 @@
 /target
 /scratch
+
+# agent worktrees live inside the checkout
+.worktrees/
