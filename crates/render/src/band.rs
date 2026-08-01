@@ -100,11 +100,12 @@ const STEP_DEG: f32 = 0.10;
 /// part of that or the horizon cannot be reached.
 ///
 /// The near side is set by what the bend can **carry**, not by what a lens can
-/// see: [`FOLD`] clamps the applied disparity to 1.8 degrees, so a search that
-/// reached 6 would spend its whole cost distinguishing one clamped reading
-/// from another. It is set above the clamp rather than at it so that content
-/// nearer still peaks inside the window and is refused for being pinned rather
-/// than reported at the limit.
+/// see. Since stage 4 the band opens to carry whatever the search reports
+/// ([`width`]), so this is now the near end of the whole correction: 2.6
+/// degrees is content at 0.73 m, and a reading that peaks against the edge of
+/// the window is refused for being pinned rather than reported at the limit.
+/// Widening it costs correlations, which are the pass's cheap half; widening
+/// the two grids the correlations read is what is expensive.
 const NEAR_DEG: f32 = 2.6;
 const FAR_DEG: f32 = -1.2;
 
@@ -170,13 +171,39 @@ const TAU_NEAR_S: f32 = 0.10;
 /// own gradient is the disparity divided by the band width: **the shear**.
 /// Above 1 the mapping folds and the picture is printed back over itself,
 /// which is the fold that decided the crossover could not narrow before the
-/// calibration landed (`super::projection::CROSSOVER_DEG`). This is the first
-/// time that number is computable at runtime rather than quoted, and it is
-/// what a clamp needs. 0.9 leaves the Jacobian at a tenth rather than at
-/// nothing, and what it clamps is content nearer than about 1.9 m, which is
-/// nearer than the camera maker's own manual asks a subject to be. Widening
-/// the band where it bites is stage 4's, not this stage's.
+/// calibration landed (`super::projection::CROSSOVER_DEG`). 0.9 leaves the
+/// Jacobian at a tenth rather than at nothing.
+///
+/// **One inequality, read two ways** (issue #103, stage 4). `|disparity| <=
+/// FOLD * width` is the whole of it. Stage 2 held the width at the fixed
+/// 2-degree crossover and solved for the disparity, which is [`carried`], and
+/// so threw alignment away on everything nearer than 1.06 m. Stage 4 solves
+/// the same line for the width, which is [`width`], and throws nothing away
+/// until the width runs out of room. The clamp is still here and still the
+/// guarantee; it is simply no longer what decides, because the band opens
+/// first.
 const FOLD: f32 = 0.9;
+
+/// The widest the crossover may open, in degrees.
+///
+/// It is not a taste and not a margin: it is the widest width the inequality
+/// above can ever **ask for**. The search reports at most [`NEAR_DEG`] and
+/// refuses anything that peaks against that edge, so `|disparity| / FOLD`
+/// cannot exceed this, and a band opened past it would be carrying a reading
+/// no frame can produce. Two consequences worth saying out loud: the clamp is
+/// inert for every disparity this pass can measure, and widening the search
+/// window widens the band with it, with no second number to keep in step.
+///
+/// What bounds it from the other side is the optics, and that bound is not
+/// close. The widest band plus the whole bend it carries reaches **4.04
+/// degrees** off the seam; the two lenses of the calibration fixture overlap
+/// by 14.44, which is 7.22 a side
+/// (`the_widest_band_and_its_bend_stay_inside_the_overlap`, which measures it
+/// off the file's own calibration rather than quoting the format study).
+/// `kjerag-spike --bin band` reports the same two numbers for whatever file it
+/// is given, because the overlap is a property of the camera and this ceiling
+/// is not.
+pub const WIDEST_DEG: f32 = NEAR_DEG / FOLD;
 
 /// Threads per workgroup. One workgroup reads one direction, and every thread
 /// in it scores its share of the candidate shifts.
@@ -452,12 +479,53 @@ pub fn ease(seconds: f32, tau: f32) -> f32 {
 /// The disparity the shader may actually bend by, in radians: what was
 /// measured, clamped to what the crossover can carry without folding.
 ///
-/// `band` is the crossover width in radians. See [`FOLD`].
+/// `band` is the crossover width in radians, which since stage 4 is
+/// [`width`]'s answer for that same disparity rather than a constant. See
+/// [`FOLD`].
 ///
 /// WGSL twin: `carried`.
 pub fn carried(disparity_rad: f32, band_rad: f32) -> f32 {
     let limit = FOLD * band_rad;
     disparity_rad.clamp(-limit, limit)
+}
+
+/// How wide the crossover has to be at one direction to carry `disparity_rad`
+/// without folding, in radians (issue #103, stage 4).
+///
+/// [`carried`]'s twin, out of the same inequality: the shear is the disparity
+/// over the width, so a width of `|disparity| / FOLD` sits exactly on the
+/// clamp and nothing is thrown away. Three things follow and none of them is
+/// a choice:
+///
+/// - **The far field is untouched.** Every direction reading under
+///   `FOLD * floor` - 1.8 degrees, which is everything past 1.06 m - already
+///   satisfies the inequality at the floor, so the floor is what comes back,
+///   bit for bit, and the crossover there is the 2 degrees the owner
+///   validated. A file with one lens stream and a direction that has never
+///   correlated both read zero and both get the floor.
+/// - **It never opens further than it has to.** A wider handover draws more
+///   of the picture twice, which is what the 2 degrees was narrowed to stop
+///   (`super::projection::CROSSOVER_DEG`), so the narrowest width that does
+///   not fold is also the sharpest one available.
+/// - **It needs no time constant of its own.** The disparity handed in is the
+///   smoothed, evidence-weighted one the bend itself uses, so the width
+///   inherits that direction's own constant exactly: a far-field width cannot
+///   move faster than a far-field reading, and a direction that stops
+///   correlating narrows back to the floor as its confidence fades.
+///
+/// The floor is passed in rather than read here because the crossover belongs
+/// to the projection and the shear belongs to this file, which is also why
+/// `carried` takes the width rather than assuming it.
+///
+/// WGSL twin: `band_width`.
+pub fn width(disparity_rad: f32, floor_rad: f32) -> f32 {
+    // The floor last, so that a floor set wider than [`WIDEST_DEG`] would
+    // still be honoured: a band narrower than the validated crossover is a
+    // change to the picture everywhere, and a fold is arithmetic `carried`
+    // still catches.
+    (disparity_rad.abs() / FOLD)
+        .min(WIDEST_DEG.to_radians())
+        .max(floor_rad)
 }
 
 // ------------------------------------------------------------ the shader
@@ -524,8 +592,9 @@ pub(crate) fn wgsl() -> String {
 pub(crate) fn lookup_wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst KEEP = {KEEP:?};\n\
-         const TAU = {:?};\n{CELL}{RING}{LOOKUP}",
-        std::f32::consts::TAU,
+         const WIDEST = {widest:?};\nconst TAU = {tau:?};\n{CELL}{RING}{LOOKUP}",
+        widest = WIDEST_DEG.to_radians(),
+        tau = std::f32::consts::TAU,
     )
 }
 
@@ -598,18 +667,28 @@ fn ring_at(centre: vec3<f32>) -> Ring {
 const LOOKUP: &str = r#"
 @group(1) @binding(0) var<storage, read> band: array<Cell, AZIMUTHS>;
 
+// The band with nothing behind it: no bend, and the crossover at the width it
+// has always been. This is what a file with one lens stream takes, what a
+// direction that has never correlated takes, and what a ray straight down a
+// lens's own axis takes, and it is the picture stage 1 drew.
+fn band_rest() -> Band {
+  var out: Band;
+  out.offset = vec3<f32>(0.0);
+  out.crossover = CROSSOVER;
+  return out;
+}
+
 // The bend a ray takes, in view space, scaled by the ray's own length so that
-// adding it turns the ray by the disparity in radians. Zero everywhere the
-// band has never been measured, which is a file with one lens stream, a file
-// still on its first frame, and every direction with nothing in it to
-// correlate. Rust twin: `Reframe::bend`.
-fn band_bend(ray: vec3<f32>) -> vec3<f32> {
+// adding it turns the ray by the disparity in radians, and how wide the
+// handover has to be to carry it. Rust twin: `Reframe::blend_bent`, which
+// computes the same two things from `Reframe::disparity_at`.
+fn band_bend(ray: vec3<f32>) -> Band {
   let body = reframe.view_to_body * ray;
   let flat = vec2<f32>(body.x, body.y);
   let reach = length(flat);
   if reach <= 0.0 {
     // Straight down a lens's own axis, where there is no seam and no azimuth.
-    return vec3<f32>(0.0);
+    return band_rest();
   }
   let at = ring_at(vec3<f32>(flat / reach, 0.0));
   // Between two cells, linearly, wrapping: the field is a circle and a step
@@ -630,7 +709,7 @@ fn band_bend(ray: vec3<f32>) -> vec3<f32> {
   let wb = b.confidence * mix;
   let total = wa + wb;
   if total <= 0.0 {
-    return vec3<f32>(0.0);
+    return band_rest();
   }
   let disparity = (wa * a.disparity + wb * b.disparity) / total;
   // How much of it to believe. `KEEP` is the correlation a single reading has
@@ -640,13 +719,26 @@ fn band_bend(ray: vec3<f32>) -> vec3<f32> {
   // constant: the threshold a reading must pass is the threshold a smoothed
   // reading is trusted at.
   let strength = clamp(mix2(a.confidence, b.confidence, mix) / KEEP, 0.0, 1.0);
+  let applied = disparity * strength;
   // The bend's own gradient across the band is the disparity over the band
-  // width, and past 1 the mapping folds. Rust twin: `carried`.
-  let limit = FOLD * CROSSOVER;
-  let carried = clamp(disparity * strength, -limit, limit);
+  // width, and past 1 the mapping folds. The band opens far enough to carry
+  // this reading, and the clamp holds where it cannot. Rust twins: `width`
+  // and `carried`.
+  var out: Band;
+  out.crossover = band_width(applied);
+  let limit = FOLD * out.crossover;
+  let carried = clamp(applied, -limit, limit);
   // Back into view space: view_to_body is a rotation, so its transpose is its
   // inverse, and `v * m` is `transpose(m) * v`.
-  return (carried * length(ray)) * (at.epi * reframe.view_to_body);
+  out.offset = (carried * length(ray)) * (at.epi * reframe.view_to_body);
+  return out;
+}
+
+// How wide the handover has to be to carry this disparity without folding,
+// never narrower than the crossover the projection ships and never wider than
+// the widest reading the search can return. Rust twin: `width`.
+fn band_width(disparity: f32) -> f32 {
+  return max(min(abs(disparity) / FOLD, WIDEST), CROSSOVER);
 }
 
 fn mix2(a: f32, b: f32, t: f32) -> f32 {
@@ -1115,21 +1207,139 @@ mod tests {
         assert!((settle(30.0) - settle(60.0)).abs() < 0.01);
     }
 
+    /// The floor the shipped pass hands [`width`], which is the projection's
+    /// own crossover. Written here rather than imported because that constant
+    /// is private to its own module, and `the_floor_is_the_shipped_crossover`
+    /// is what keeps the two honest.
+    const FLOOR_DEG: f32 = 2.0;
+
     #[test]
     fn the_bend_never_folds_the_crossover() {
         // Shear is the disparity over the band width and above 1 the mapping
-        // prints the picture back over itself. What the clamp has to promise
+        // prints the picture back over itself. What the pair has to promise
         // is that the Jacobian stays positive at any disparity the search can
-        // report, the near limit included.
-        let band = 2.0f32.to_radians();
+        // report, the near limit included - now that the band opens as well
+        // as the clamp closing, both halves are in the promise.
+        let floor = FLOOR_DEG.to_radians();
         for degrees in [-10.0f32, -1.2, 0.0, 0.19, 1.9, 3.5, 100.0] {
+            let band = width(degrees.to_radians(), floor);
             let shear = carried(degrees.to_radians(), band) / band;
             assert!(
                 (1.0 + shear) > 0.05,
                 "{degrees} deg leaves a Jacobian of {:.3}",
                 1.0 + shear,
             );
+            assert!(
+                shear.abs() <= FOLD + 1e-6,
+                "{degrees} deg shears the band by {shear:.3}",
+            );
         }
+    }
+
+    /// Stage 4 in one line: the width and the clamp are the same inequality.
+    #[test]
+    fn the_band_carries_every_disparity_the_search_can_report() {
+        let floor = FLOOR_DEG.to_radians();
+        // The search refuses a peak against either edge of its window, so what
+        // it can actually hand over is strictly inside [FAR_DEG, NEAR_DEG].
+        for step in 0..=200 {
+            let degrees = FAR_DEG + (NEAR_DEG - FAR_DEG) * step as f32 / 200.0;
+            let radians = degrees.to_radians();
+            let carried = carried(radians, width(radians, floor));
+            assert!(
+                (carried - radians).abs() < 1e-6,
+                "{degrees:.2} deg was cut to {:.2}",
+                carried.to_degrees(),
+            );
+        }
+        // And stage 2's fixed band did not, which is what this stage is for.
+        let near = 2.4f32.to_radians();
+        let stage2 = carried(near, floor);
+        assert!(
+            (near - stage2).to_degrees() > 0.5,
+            "the fixed band was already carrying {:.2} deg",
+            stage2.to_degrees(),
+        );
+    }
+
+    #[test]
+    fn the_far_field_keeps_the_crossover_it_had() {
+        // Bit for bit, and that matters more than it looks: the far field is
+        // where the horizon is, the pixels off the seam are supposed to be
+        // byte-identical to the picture before this stage, and a width that
+        // came back a float ulp from the floor would move every one of them.
+        let floor = FLOOR_DEG.to_radians();
+        for degrees in [-1.2f32, -0.84, -0.19, 0.0, 0.19, 0.64, 1.79, 1.8] {
+            let opened = width(degrees.to_radians(), floor);
+            assert_eq!(
+                opened.to_bits(),
+                floor.to_bits(),
+                "{degrees} deg opened the band to {:.4} deg",
+                opened.to_degrees(),
+            );
+        }
+        // A direction with no evidence reads zero and takes the floor too,
+        // which is every direction of a one-lens file and every direction of a
+        // file's first frame.
+        assert_eq!(width(0.0, floor).to_bits(), floor.to_bits());
+    }
+
+    #[test]
+    fn the_band_opens_no_further_than_the_reading_needs() {
+        let floor = FLOOR_DEG.to_radians();
+        // Monotone, so a direction drifting nearer does not step, and never
+        // past the widest reading the search can return.
+        let mut last = 0.0f32;
+        for step in 0..400 {
+            let opened = width(step as f32 * 0.01f32.to_radians(), floor);
+            assert!(opened >= last - 1e-9, "step {step}: {opened} after {last}");
+            assert!(opened <= WIDEST_DEG.to_radians() + 1e-9);
+            last = opened;
+        }
+        // In between it is exactly what the inequality asks for and not a
+        // rounded-up version of it: at 2.4 degrees of disparity the band is
+        // 2.67 and the shear is exactly FOLD.
+        let near = 2.4f32.to_radians();
+        assert!((width(near, floor) - near / FOLD).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_width_cannot_flicker_faster_than_the_reading_it_comes_from() {
+        // The whole of stage 4's temporal design, and the reason it adds no
+        // filter and no constant. The width is 1/FOLD-Lipschitz in the
+        // disparity, so the per-direction time constants stage 2 measured
+        // bound the width's own steadiness as well: 0.02 deg rms of disparity
+        // flicker cannot become more than 0.022 deg rms of width flicker,
+        // whatever the content is.
+        let floor = FLOOR_DEG.to_radians();
+        let mut worst = 0.0f64;
+        for a in -300..300 {
+            for b in -300..300 {
+                let (one, two) = (a as f32 * 0.01, b as f32 * 0.01);
+                let moved = f64::from(
+                    (width(one.to_radians(), floor) - width(two.to_radians(), floor)).abs(),
+                );
+                let read = f64::from((one - two).abs().to_radians());
+                // Slack for the f32 rounding in the two differences
+                // themselves, which is what is being compared and not what is
+                // being claimed: at a hundredth of a degree apart the two sides
+                // are 1.9e-4 and the last bits of each are noise.
+                assert!(
+                    moved <= read / f64::from(FOLD) * (1.0 + 1e-4) + 1e-12,
+                    "{one} to {two} deg moved the band by {moved}",
+                );
+                worst = worst.max(match read > 0.0 {
+                    true => moved / read,
+                    false => 0.0,
+                });
+            }
+        }
+        // And the bound is reached, so it is the truth about this function
+        // rather than a loose statement that happens to hold.
+        assert!(
+            (worst - 1.0 / f64::from(FOLD)).abs() < 1e-3,
+            "worst ratio {worst}",
+        );
     }
 
     #[test]
@@ -1141,11 +1351,34 @@ mod tests {
         const {
             assert!(FAR_DEG <= -0.9);
         }
-        // And the near side has to hold what the crossover can carry, or the
-        // clamp is never what decides.
+        // And the near side has to reach past what the crossover carries at
+        // its floor, or the band has nothing to open for and stage 4 is a
+        // no-op. This is the same line stage 2 wrote as `NEAR_DEG > FOLD *
+        // 2.0`, read from the other end.
         const {
-            assert!(NEAR_DEG > FOLD * 2.0);
+            assert!(WIDEST_DEG > FLOOR_DEG);
         }
+    }
+
+    #[test]
+    fn the_floor_is_the_shipped_crossover() {
+        // `FLOOR_DEG` above is a copy of a constant this module cannot see,
+        // and a copy that drifts would make every test above test nothing.
+        // The shipped pass is what is asked, rather than the constant.
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        let reframe = crate::projection::Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            crate::Camera::default(),
+            crate::projection::Held::default(),
+            1.0,
+            false,
+            crate::sampling::Sampling::default(),
+        );
+        assert_eq!(
+            reframe.crossover_at(0.0).to_bits(),
+            FLOOR_DEG.to_radians().to_bits(),
+        );
     }
 
     #[test]
