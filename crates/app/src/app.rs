@@ -913,7 +913,8 @@ impl App {
     /// (cosmic-player `src/main.rs:1676-1695`).
     ///
     /// The mark is the app icon at the size a first-party empty state draws
-    /// one: cosmic-files' empty folder is `.size(64)` over a `text::body`
+    /// one: cosmic-files' empty folder is `.size(64)` over a `text::body`,
+    /// and ours is twice that at the owner's direction (2026-07-31)
     /// line (`src/tab.rs:5627-5655`), and cosmic-player's welcome view is the
     /// same shape. It used to be `video-x-generic-symbolic`, which said
     /// "video" where the window can already say which video player this is.
@@ -921,7 +922,7 @@ impl App {
         let mut said = widget::column::with_capacity(3)
             .align_x(Alignment::Center)
             .spacing(8)
-            .push(icon::from_svg_bytes(APP_ICON).icon().size(64))
+            .push(icon::from_svg_bytes(APP_ICON).icon().size(128))
             .push(widget::text::body(strings::NOTHING_OPEN));
         if self.failed {
             said = said.push(widget::text::body(strings::OPEN_FAILED));
