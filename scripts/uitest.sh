@@ -197,6 +197,17 @@ else
 	launch=("$bin")
 fi
 
+# The drop checks need a second client to drag from, which is an instrument of
+# the harness rather than the thing under test: it is built even when
+# KJERAG_BIN points the run at somebody else's binary, because it is what does
+# the pressing, like wtype.
+dragsource=$root/target/release/dragsource
+if [ -n "$media" ]; then
+	printf 'building %s\n' "$dragsource"
+	(cd "$root" && cargo build --release -p kjerag-spike --bin dragsource) ||
+		die "the drag source did not build"
+fi
+
 # The pointer is harness machinery rather than the thing under test, so it is
 # built from this tree whatever KJERAG_BIN says.
 poker=$root/target/release/pointer
@@ -1642,6 +1653,86 @@ pooled_calibration() {
 	exits_clean
 }
 
+# ------------------------------------------------- the checks, with a drop
+#
+# A file dropped on the window opens it, which is the one way into the app no
+# key can reach: wtype cannot drag, so until `dragsource` existed
+# (crates/spike/src/bin/dragsource.rs) this path had no coverage anywhere, and
+# it shipped broken inside the Flatpak (issue #118).
+#
+# Two offers, because a drop is a negotiation and its halves fail separately.
+# `text/uri-list` is a path, which is what every unsandboxed source sends and
+# what the app has always read. `application/vnd.portal.filetransfer` is a key
+# for the document portal, which is the only one of the two a sandboxed app
+# can open, and the one the app ignored until this issue. Reading the key back
+# needs a session bus, so that half skips where there is none rather than
+# failing.
+#
+# The evidence is the app's own `media:` line, which it prints when it has
+# opened a file and never otherwise, and what the instrument says the app
+# asked for. The instrument is left running while the app opens: what a portal
+# drop hands over lives as long as the transfer does, and the transfer is that
+# process.
+
+# A drop opens a multi-gigabyte file, so this is READY with room for the drag
+# in front of it.
+DROP_OPEN=60
+
+dropped_files() {
+	printf '\n-- drop checks (%s)\n' "$media"
+	boot drop
+
+	if ! await_paint drop-welcome; then
+		alive || lost "a drop opens the file"
+		fail "a drop opens the file" "the window never rendered" "log: $log"
+		teardown
+		return
+	fi
+
+	a_drop_opens_the_file uri-list
+	a_drop_opens_the_file portal
+	exits_clean
+}
+
+a_drop_opens_the_file() {
+	local offer=$1
+	local check="a drop offered as $offer opens the file"
+	local report=$session/drag-$offer.log
+	local before waited=0 pid
+
+	if [ "$offer" = portal ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+		skip "$check (no session bus, so no document portal)"
+		return
+	fi
+
+	before=$(grep -c '^media:' "$log")
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$dragsource" "$media" "offer=$offer" "linger=$DROP_OPEN" >"$report" 2>&1 &
+	pid=$!
+	while [ "$waited" -le $((DROP_OPEN * 2)) ]; do
+		alive || break
+		[ "$(grep -c '^media:' "$log")" -gt "$before" ] && break
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+
+	alive || lost "$check"
+	if [ "$(grep -c '^media:' "$log")" -gt "$before" ]; then
+		pass "$check ($(read_as "$report"))"
+	else
+		fail "$check" "$(read_as "$report")" "report: $report" "log: $log"
+	fi
+}
+
+# What the app asked the drag for, which only the source can say.
+read_as() {
+	local mimes
+	mimes=$(sed -n 's/^dragsource: the target read it as /read as /p' "$1" | tr '\n' ' ')
+	printf '%s' "${mimes:-the app read nothing from the drop}"
+}
+
 # ------------------------------------------ the checks, with nothing open
 
 welcome() {
@@ -1816,6 +1907,7 @@ foreign() {
 if [ -n "$media" ]; then
 	with_media
 	pooled_calibration
+	dropped_files
 else
 	welcome
 fi

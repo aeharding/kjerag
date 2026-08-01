@@ -2883,13 +2883,19 @@ dependencies = [
 name = "kjerag-spike"
 version = "0.1.1"
 dependencies = [
+ "ashpd 0.12.3",
  "ffmpeg-next",
  "kjerag-media",
  "kjerag-meta",
  "kjerag-render",
+ "libc",
  "png 0.17.16",
  "pollster",
+ "tokio",
+ "url",
  "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wgpu",
 ]

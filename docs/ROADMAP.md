@@ -596,6 +596,86 @@ live, no keyframe UI ever.
   `scripts/quiet.sh` uses. Verified rather than assumed: the app's stream sits
   on `kjerag_quiet` while the harness runs, and `PIPEWIRE_NODE` is what puts
   it there, because pipewire-alsa is what plays what cpal writes.
+- 2026-08-01 **The shipped Flatpak took no drops, and nothing could have
+  caught it** (issue #118). A drop into a sandbox arrives as
+  `application/vnd.portal.filetransfer`, which is a key the target exchanges
+  with the document portal for paths it can open, and the app read only
+  `text/uri-list`, whose paths belong to the source's filesystem and do not
+  exist inside the sandbox. `dnd.rs` predicted exactly this in its own header
+  and it shipped anyway, because there was no drop check anywhere: `wtype`
+  presses keys and cannot drag. So the instrument came first
+  (`kjerag-spike --bin dragsource`): a second Wayland client that performs a
+  real drag with a virtual pointer and offers either shape. It found three
+  things about the harness before it could find anything about the app, each
+  of them something a desktop session has and a headless one does not.
+  libcosmic creates the `wl_data_device` a drag is delivered over only while
+  the seat has a **keyboard** (smithay-clipboard `src/state.rs:323-333`), and
+  with none in the session neither this app nor cosmic-files ever asked for
+  one. It reads the drop through the seat its last input event came from and
+  gives up with "no events received on any seat" when there has been none, so
+  a window nobody has clicked accepts a drop and then reads nothing from it.
+  And wlroots drops on a button release only if the destination has already
+  accepted, which is a round trip through another process, so a drag
+  performed at machine speed is cancelled before the target has looked at it.
+  With those three answered, the measurements: the dev build opens a
+  `uri-list` drop and refuses a portal one; the released 0.1.1 bundle refuses
+  the portal one, which is the owner's report, and reads a `uri-list` one and
+  then cannot open the path it names ("No such file or directory" for a file
+  that plainly exists). The fix is libcosmic's own two calls,
+  `on_file_transfer` and `command::file_transfer_receive`, and it needs no
+  permission at all: the portal exchange is what a sandbox is for.
+
+  What the portal arm cannot fix is a source that never registers the files.
+  cosmic-files 1.5.0 offers `text/uri-list` and nothing else (its source, and
+  the shipped binary, which does not contain the string `vnd.portal`), so a
+  drag out of the COSMIC file manager hands over a path on the host and that
+  half of the exchange is the source's. It is also the owner's own workflow,
+  so on his ruling the manifest grants `--filesystem=xdg-videos:ro`: the
+  smallest grant that covers every way a bare path arrives, which is that
+  drag, `kjerag ~/Videos/flight.insv` on a terminal, and a double click.
+  Read-only because the player never writes to footage, and the videos folder
+  rather than home because footage kept elsewhere is one `File > Open
+  video...` away through the portal at no permission at all. The day
+  cosmic-files registers its drags the grant can be reconsidered.
+
+  What is left outside the grant used to get the words a corrupt file gets,
+  and now gets its own line in issue #117's alert, only inside a Flatpak:
+  "Kjerag cannot reach that file from inside its sandbox. Open it with File >
+  Open video." The path decides it rather than the error, because libav's
+  answer for a path with no mount behind it is "No such file or directory",
+  which is a sentence about a file that is not there.
+
+  Measured on the bundle built from the branch, with the grant, on real
+  footage under `~/Videos`: a cosmic-files-shaped `uri-list` drop opens, a
+  portal drop opens, `flatpak run <app> <path>` opens, and a double click's
+  own `--file-forwarding` shape opens; the same `uri-list` drop of a path
+  outside the folder is refused with the line above. And for the two-file
+  captures of issue #123, every one of those four hands over the host path
+  and pairs both lenses (`2 of 2 calibrated`, `2 lens streams from 2 files`),
+  because both the document portal's `RetrieveFiles` and flatpak's file
+  forwarding skip the document store for a file the app can already read.
+  The file chooser does not: xdg-desktop-portal 1.18.4 registers a document
+  for every sandboxed app whatever its permissions
+  (`src/file-chooser.c`, `send_response`), so a file picked there arrives as
+  `/run/user/1000/doc/<id>/<name>`, its mate is not in that directory, and
+  the capture still plays one lens. Issue #123 stands for that path alone.
+
+  And the grant was still not enough, which the owner found by testing rather
+  than by reading: his footage library is on a NAS, mounted by the file
+  manager, so the paths his drags carry are
+  `/run/user/1000/gvfs/smb-share:server=...,share=.../...`, which a sandbox
+  cannot see either. `--filesystem=xdg-run/gvfs:ro` is the standard grant and
+  the read-only half is measured: the mount lists inside the sandbox and a
+  file on it reads. Measured through a drop, on his own share: the file
+  opens, and because the mate sits beside it there too, a two-file capture on
+  the NAS plays `2 of 2 calibrated`, `2 lens streams from 2 files` over SMB.
+  The instrument had to learn the shape as well: a mount's directory is
+  called `smb-share:server=host,share=name`, and an argument parser that
+  treats `=` as an option refuses to drag it.
+
+  What is left outside every grant refuses once per drop rather than once per
+  file, which is what a multiple selection sends: the app takes the first file
+  and says one thing about it (measured: two files in, one refusal out).
 
 - 2026-08-01 **A pane with no frame draws the backdrop, not a picture of its
   own** (owner-reported). The pass carried an animated test pattern from its
