@@ -29,6 +29,15 @@
 //! own frame. A locked view answers a different question and would have
 //! silently changed what every command in that section renders.
 //!
+//! `seam=` picks which of the app's three seam paths the render draws with:
+//! `file` fits off this file's own frames and is the default, because that is
+//! what every command in 4.8, 4.9 and 6.8 was measured with; `factory` leaves
+//! the camera's own calibration alone; and five numbers apply a **stored
+//! per-camera calibration** through `Scene::use_seam`, which is the path the
+//! app takes at open and the only way to look at what a pilot's own config
+//! draws. The applied numbers are printed by that path, so a render can be
+//! checked against what is stored rather than assumed to match it.
+//!
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
 //! are personal video and this repo is public.
 
@@ -38,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kyerag_media::Fallible;
-use kyerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, Size};
+use kyerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, SeamFit, Size};
 use kyerag_spike::{Gpu, Offscreen};
 
 /// Not sRGB, so the shader writes the video's own gamma-encoded numbers
@@ -60,7 +69,55 @@ struct Options {
     edge: u32,
     format: wgpu::TextureFormat,
     horizon: Horizon,
+    seam: Seam,
     out: PathBuf,
+}
+
+/// Which seam correction this render draws with.
+///
+/// The app has three paths and an instrument that only walks one of them
+/// cannot check the other two. `Stored` is the one the owner is looking at:
+/// five numbers out of his own config, applied through the app's own
+/// [`Scene::use_seam`], which prints them so the render can be checked
+/// against what is stored.
+enum Seam {
+    /// The calibration the camera wrote, uncorrected.
+    Factory,
+    /// Fitted off this file's own frames, which is what a camera with no
+    /// stored calibration gets.
+    File,
+    /// A stored per-camera calibration, applied exactly as the app applies
+    /// one at open.
+    Stored(SeamFit),
+}
+
+impl Seam {
+    fn hold(&self, scene: &Scene) {
+        match self {
+            Self::Factory => println!("seam:   factory calibration, no correction"),
+            Self::File => scene.fit_seam(),
+            Self::Stored(fit) => scene.use_seam(*fit),
+        }
+    }
+}
+
+/// `roll:0.71,yaw:-2.35,pitch:-1.61,cx:-1.26,cy:-14.60`, in each knob's own
+/// units, as the app's config stores them.
+fn stored(value: &str) -> Fallible<SeamFit> {
+    let mut fit = SeamFit::default();
+    for term in value.split(',') {
+        let (name, amount) = term.split_once(':').ok_or("a stored knob is knob:amount")?;
+        let amount: f64 = amount.parse()?;
+        match name {
+            "roll" => fit.roll_deg = amount,
+            "yaw" => fit.yaw_deg = amount,
+            "pitch" => fit.pitch_deg = amount,
+            "cx" => fit.cx_px = amount,
+            "cy" => fit.cy_px = amount,
+            _ => return Err(format!("no stored knob called {name}").into()),
+        }
+    }
+    Ok(fit)
 }
 
 fn main() -> Fallible<()> {
@@ -70,12 +127,8 @@ fn main() -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
 
-    // An instrument has no stored calibration to read: the app keeps that in
-    // its own config, and this is not the app. So the seam is fitted off this
-    // file, which is what every instrument did before the calibration moved
-    // to the camera (issue #48).
     let scene = Scene::still(&options.input, options.at)?;
-    scene.fit_seam();
+    options.seam.hold(&scene);
     scene.set_horizon(options.horizon);
     let primitive = scene.primitive(options.camera);
     let mut pipeline = ScenePipeline::new(&gpu.device, options.format);
@@ -108,6 +161,7 @@ impl Options {
         let mut edge = DEFAULT_EDGE;
         let mut format = FORMAT;
         let mut horizon = Horizon::Free;
+        let mut seam = Seam::File;
         let mut out = None;
 
         for arg in args {
@@ -129,6 +183,13 @@ impl Options {
                     horizon = match value.parse::<u32>()? {
                         0 => Horizon::Free,
                         _ => Horizon::Locked,
+                    }
+                }
+                "seam" => {
+                    seam = match value {
+                        "factory" => Seam::Factory,
+                        "file" => Seam::File,
+                        _ => Seam::Stored(stored(value)?),
                     }
                 }
                 "out" => out = Some(value.to_owned()),
@@ -155,10 +216,12 @@ impl Options {
             edge,
             format,
             horizon,
+            seam,
             out: PathBuf::from("scratch").join(name),
         })
     }
 }
 
 const USAGE: &str = "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] \
-     [frame=n | time=seconds] [size=px] [srgb=1] [lock=1] [out=name.png]";
+     [frame=n | time=seconds] [size=px] [srgb=1] [lock=1] \
+     [seam=factory|file|roll:0.7,yaw:-2.4,pitch:-0.7,cx:-2.6,cy:-13.8] [out=name.png]";

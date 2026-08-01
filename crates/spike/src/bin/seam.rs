@@ -1700,8 +1700,8 @@ fn parity(options: &Options) -> Fallible<()> {
         "theirs: {} at {:.2} s, {}x{}",
         theirs.file_name().unwrap_or_default().to_string_lossy(),
         options.from,
-        export.size,
-        export.size,
+        export.shape.width,
+        export.shape.height,
     );
 
     let mut best = (
@@ -1712,7 +1712,7 @@ fn parity(options: &Options) -> Fallible<()> {
             compression: 1.0,
         },
     );
-    let coarse = 48;
+    let coarse = export.shape.scaled(48);
     let small = export.resampled(coarse);
     for yaw in (0..24).map(|step| f64::from(step) * 15.0) {
         for pitch in (-5..=5).map(|step| f64::from(step) * 15.0) {
@@ -1733,7 +1733,7 @@ fn parity(options: &Options) -> Fallible<()> {
     }
     // Pattern search from the coarse winner, at the resolution the answer is
     // wanted in.
-    let fine = 200;
+    let fine = export.shape.scaled(200);
     let small = export.resampled(fine);
     let scored = |look: Look, pair: &Pair| agree(&looked(&lenses, frame, look, pair, fine), &small);
     let mut step = 8.0;
@@ -1772,15 +1772,15 @@ fn parity(options: &Options) -> Fallible<()> {
     // their tone curve and our lack of one cancel. The fit is then wanted only
     // to say which pixels are the band, and a degree of slack in a band 14
     // degrees wide is slack it can afford.
-    let ours = looked(&lenses, frame, look, &ours, export.size);
-    let seam = seam_map(&lenses, frame, look, export.size);
+    let ours = looked(&lenses, frame, look, &ours, export.shape);
+    let seam = seam_map(&lenses, frame, look, export.shape);
     println!(
         "\n{:<12} {:>14} {:>14} {:>12}",
         "picture", "in the band", "either side", "share"
     );
     for (name, luma) in [("ours", &ours), ("Insta360", &export.luma)] {
-        let inside = banded(luma, &seam, export.size, (0.0, 5.0));
-        let outside = banded(luma, &seam, export.size, (9.0, 25.0));
+        let inside = banded(luma, &seam, export.shape, (0.0, 5.0));
+        let outside = banded(luma, &seam, export.shape, (9.0, 25.0));
         println!(
             "{name:<12} {inside:>14.1} {outside:>14.1} {:>12.3}",
             match outside > 0.0 {
@@ -1802,13 +1802,13 @@ fn parity(options: &Options) -> Fallible<()> {
 
 /// Mean squared gradient over the pixels whose distance from the seam falls in
 /// `band`.
-fn banded(luma: &[f64], seam: &[f64], size: u32, band: (f64, f64)) -> f64 {
-    let size = size as usize;
+fn banded(luma: &[f64], seam: &[f64], shape: Shape, band: (f64, f64)) -> f64 {
+    let (width, height) = (shape.width as usize, shape.height as usize);
     let mut total = 0.0;
     let mut count = 0.0;
-    for y in 1..size - 1 {
-        for x in 1..size - 1 {
-            let index = y * size + x;
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let index = y * width + x;
             let past = seam[index].abs();
             if past < band.0 || past > band.1 {
                 continue;
@@ -1833,22 +1833,62 @@ fn banded(luma: &[f64], seam: &[f64], size: u32, band: (f64, f64)) -> f64 {
 }
 
 /// One frame of a stitched export, luma only.
+///
+/// Rectangular, because a stitcher's output is: the owner's own export is
+/// 16:9 and a square reader indexed off the end of it.
 struct Export {
-    size: u32,
+    shape: Shape,
     luma: Vec<f64>,
 }
 
+/// A picture's size in pixels, and the aspect every ray of it is built with.
+#[derive(Clone, Copy)]
+struct Shape {
+    width: u32,
+    height: u32,
+}
+
+impl Shape {
+    /// The same picture `width` pixels across, keeping its shape.
+    fn scaled(self, width: u32) -> Self {
+        Self {
+            width,
+            height: (u64::from(width) * u64::from(self.height) / u64::from(self.width)).max(1)
+                as u32,
+        }
+    }
+
+    fn pixels(self) -> u32 {
+        self.width * self.height
+    }
+
+    fn aspect(self) -> f64 {
+        f64::from(self.width) / f64::from(self.height)
+    }
+
+    /// Where pixel `index` sits in the picture, 0 to 1 across each axis.
+    fn uv(self, index: u32) -> [f64; 2] {
+        [
+            (f64::from(index % self.width) + 0.5) / f64::from(self.width),
+            (f64::from(index / self.width) + 0.5) / f64::from(self.height),
+        ]
+    }
+}
+
 impl Export {
-    fn resampled(&self, to: u32) -> Vec<f64> {
-        let step = f64::from(self.size) / f64::from(to);
-        (0..to * to)
+    fn resampled(&self, to: Shape) -> Vec<f64> {
+        let step = (
+            f64::from(self.shape.width) / f64::from(to.width),
+            f64::from(self.shape.height) / f64::from(to.height),
+        );
+        (0..to.pixels())
             .map(|index| {
-                let (x, y) = (index % to, index / to);
+                let (x, y) = (index % to.width, index / to.width);
                 let (sx, sy) = (
-                    (f64::from(x) * step) as usize,
-                    (f64::from(y) * step) as usize,
+                    (f64::from(x) * step.0) as usize,
+                    (f64::from(y) * step.1) as usize,
                 );
-                self.luma[sy * self.size as usize + sx]
+                self.luma[sy * self.shape.width as usize + sx]
             })
             .collect()
     }
@@ -1866,7 +1906,10 @@ fn export_frame(path: &Path, options: &Options) -> Fallible<Export> {
         .map(|(x, y)| f64::from(plane.luma[y * plane.stride + x]))
         .collect();
     Ok(Export {
-        size: probe.width,
+        shape: Shape {
+            width: probe.width,
+            height: probe.height,
+        },
         luma,
     })
 }
@@ -1896,8 +1939,8 @@ fn ffprobe_size(path: &Path) -> Fallible<MetaSize> {
 /// / c` is rectilinear at `c = 1`, equidistant in the limit at `c = 0`, and
 /// everything a consumer 360 app calls "natural" in between. A fit that lands
 /// on 1 has found a rectilinear reframe and said so.
-fn ray_of(uv: [f64; 2], half_fov: f64, compression: f64) -> [f64; 3] {
-    let (u, v) = (uv[0] * 2.0 - 1.0, uv[1] * 2.0 - 1.0);
+fn ray_of(uv: [f64; 2], half_fov: f64, compression: f64, aspect: f64) -> [f64; 3] {
+    let (u, v) = (uv[0] * 2.0 - 1.0, (uv[1] * 2.0 - 1.0) / aspect);
     let rho = u.hypot(v);
     let c = compression.max(1e-3);
     let theta = (rho * (c * half_fov).tan()).atan() / c;
@@ -1910,7 +1953,7 @@ fn ray_of(uv: [f64; 2], half_fov: f64, compression: f64) -> [f64; 3] {
 
 /// Our own pass, rendered into a candidate projection under a candidate
 /// rotation, which is what a fitted export has to be compared against.
-fn looked(lenses: &[Lens], frame: Size, view: Look, pair: &Pair, size: u32) -> Vec<f64> {
+fn looked(lenses: &[Lens], frame: Size, view: Look, pair: &Pair, shape: Shape) -> Vec<f64> {
     let reframe = Reframe::new(
         lenses,
         frame,
@@ -1923,13 +1966,14 @@ fn looked(lenses: &[Lens], frame: Size, view: Look, pair: &Pair, size: u32) -> V
         false,
         Sampling::default(),
     );
-    (0..size * size)
+    (0..shape.pixels())
         .map(|index| {
-            let uv = [
-                (f64::from(index % size) + 0.5) / f64::from(size),
-                (f64::from(index / size) + 0.5) / f64::from(size),
-            ];
-            let ray = ray_of(uv, view.fov.to_radians() / 2.0, view.compression);
+            let ray = ray_of(
+                shape.uv(index),
+                view.fov.to_radians() / 2.0,
+                view.compression,
+                shape.aspect(),
+            );
             let (weights, landings) = Weighting::Shipped.at(&reframe, ray);
             let mut luma = 0.0;
             let mut total = 0.0;
@@ -1976,7 +2020,7 @@ impl Look {
 }
 
 /// How far every pixel of that view is from the seam, in degrees.
-fn seam_map(lenses: &[Lens], frame: Size, view: Look, size: u32) -> Vec<f64> {
+fn seam_map(lenses: &[Lens], frame: Size, view: Look, shape: Shape) -> Vec<f64> {
     let reframe = Reframe::new(
         lenses,
         frame,
@@ -1989,15 +2033,16 @@ fn seam_map(lenses: &[Lens], frame: Size, view: Look, size: u32) -> Vec<f64> {
         false,
         Sampling::default(),
     );
-    (0..size * size)
+    (0..shape.pixels())
         .map(|index| {
-            let uv = [
-                (f64::from(index % size) + 0.5) / f64::from(size),
-                (f64::from(index / size) + 0.5) / f64::from(size),
-            ];
             past_seam(
                 &reframe,
-                ray_of(uv, view.fov.to_radians() / 2.0, view.compression),
+                ray_of(
+                    shape.uv(index),
+                    view.fov.to_radians() / 2.0,
+                    view.compression,
+                    shape.aspect(),
+                ),
             )
         })
         .collect()

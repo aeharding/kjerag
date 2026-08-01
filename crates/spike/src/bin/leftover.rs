@@ -556,7 +556,7 @@ fn per_file(capture: &Capture, density: f64, options: &Options) {
     let readings = capture.readings();
     candidates(&readings, capture, density, options);
     structure(&readings, capture, density);
-    per_azimuth(capture, density);
+    per_azimuth(capture, density, options);
 }
 
 /// What is left at each azimuth after the shipped fit, and what could have
@@ -574,12 +574,23 @@ fn per_file(capture: &Capture, density: f64, options: &Options) {
 /// camera's baseline. It is a reading of the column and not a claim about the
 /// scene: where the column is geometry the number is meaningless, which is
 /// exactly what the sign count decides.
-fn per_azimuth(capture: &Capture, density: f64) {
+///
+/// `moved` is the per-azimuth version of that question and the one a claim
+/// about far content needs: how far this patch's own across reading travelled
+/// between the places, minutes apart. Content the camera can see the far side
+/// of does not move between them; the harness and the wing lines do. A patch
+/// with a small `moved` and a large `across` is **far content the geometry is
+/// still wrong on**, which is the only combination the eye can blame on a
+/// calibration.
+///
+/// It scores `fixed=` where one is given, because a stored per-camera
+/// calibration is what the app applies and a fit taken off this file is not.
+fn per_azimuth(capture: &Capture, density: f64, options: &Options) {
     let readings = capture.readings();
     let shipped = Recipe {
         name: "shipped".to_owned(),
         knobs: seam::KNOBS.to_vec(),
-        preset: None,
+        preset: options.presets.first().copied(),
         ridge: seam::RIDGE,
         reject: 0.0,
     };
@@ -589,18 +600,32 @@ fn per_azimuth(capture: &Capture, density: f64) {
     let left = leftover(&readings, &fit, &capture.lenses, capture.frame);
     let positive = left.iter().filter(|axes| axes[1] > 0.0).count();
     println!(
-        "\nwhat is left at each azimuth after the shipped fit ({} px per degree):\n\
-         {:>6} {:>9} {:>9} {:>9} {:>9}",
+        "\nwhat is left at each azimuth after the {} ({} px per degree):\n\
+         {:>6} {:>9} {:>9} {:>9} {:>9} {:>7} {:>7}",
+        match shipped.preset {
+            Some(fit) => format!(
+                "stored {:+.3}/{:+.3}/{:+.3}, {:+.2}/{:+.2}",
+                fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px
+            ),
+            None => "shipped fit".to_owned(),
+        },
         density.round(),
         "phi",
         "along",
         "across",
         "px",
         "metres",
+        "moved",
+        "places",
     );
-    for (reading, axes) in readings.iter().zip(&left) {
+    let steady: Vec<&Azimuth> = capture
+        .azimuths
+        .iter()
+        .filter(|azimuth| azimuth.places() > 0)
+        .collect();
+    for ((reading, axes), azimuth) in readings.iter().zip(&left).zip(&steady) {
         println!(
-            "{:>6.0} {:>9.3} {:>9.3} {:>9.1} {:>9.1}",
+            "{:>6.0} {:>9.3} {:>9.3} {:>9.1} {:>9.1} {:>7.3} {:>7}",
             reading.at.phi.to_degrees(),
             axes[0],
             axes[1],
@@ -609,6 +634,8 @@ fn per_azimuth(capture: &Capture, density: f64) {
                 true => BASELINE_MM / 1e3 / axes[1].abs().to_radians(),
                 false => f64::INFINITY,
             },
+            azimuth.spread()[1],
+            azimuth.places(),
         );
     }
     println!(
