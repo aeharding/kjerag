@@ -173,6 +173,11 @@ pub enum Message {
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
+    /// The pass gave up on the file that was playing and stopped it
+    /// (issue #124). It arrives here because `kjerag_render`'s widget can only
+    /// hand a [`Stall`] to a message type that carries one, which is what
+    /// keeps a dead picture from being a line on a terminal nobody reads.
+    Stalled(Stall),
     /// Take a still of the view as it stands: `s`, `Ctrl+C`, the camera
     /// button, or either File menu item (issue #15).
     Capture(Destination),
@@ -195,11 +200,6 @@ pub enum Message {
     PastedView(Option<String>),
     /// The scrubber was dragged to this position, in seconds.
     Seek(f64),
-    /// The pass gave up on the file that was playing and stopped it
-    /// (issue #124). It arrives here because `kjerag_render`'s widget can only
-    /// hand a [`Stall`] to a message type that carries one, which is what
-    /// keeps a dead picture from being a line on a terminal nobody reads.
-    Stalled(Stall),
     /// The scrubber was let go.
     SeekRelease,
     /// Seconds to jump, forward or back.
@@ -606,18 +606,6 @@ impl cosmic::Application for App {
                 open.position = position;
                 open.scene.seek(position, Accuracy::Keyframe);
             }
-            Message::Stalled(stall) => {
-                // The scene has already stopped the file, sound and all: what
-                // is left is saying so (issue #124). The controls come back
-                // with it, because the alert says to open the file again and
-                // the menu that does that lives in a header bar which hides
-                // itself while a file plays.
-                let Some(open) = &self.open else {
-                    return Task::none();
-                };
-                self.alert.raise(Failure::Stopped(open.path.clone(), stall));
-                self.show_controls(now);
-            }
             Message::SeekRelease => {
                 let was_playing = self.dragging.take().unwrap_or(false);
                 if let Some(open) = &mut self.open {
@@ -650,6 +638,23 @@ impl cosmic::Application for App {
                 // this file would be thrown away with the process.
                 self.pool_seam();
                 std::process::exit(0)
+            }
+            Message::Stalled(stall) => {
+                // The scene has already stopped the file, sound and all: what
+                // is left is saying so (issue #124). The controls come back
+                // with it, because the alert says to open the file again and
+                // the menu that does that lives in a header bar which hides
+                // itself while a file plays.
+                //
+                // Nothing open is the one case with nobody to tell about:
+                // the file was closed between the redraw that gave up and
+                // this message, so the picture the pilot is missing is one he
+                // put away himself.
+                let Some(open) = &self.open else {
+                    return Task::none();
+                };
+                self.alert.raise(Failure::Stopped(open.path.clone(), stall));
+                self.show_controls(now);
             }
             Message::Report => {
                 self.report(now);
