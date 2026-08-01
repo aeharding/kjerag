@@ -557,6 +557,37 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **A paused window is owed a redraw until one arrives** (issue
+  #102, the owner's most-reported defect, confirmed four times). Under load
+  the redraw that follows the pause key can present a frame carrying **none**
+  of the window's content: the header bar is on it and the video and the
+  control row are not, and the pane is the theme's own background, one flat
+  colour, every one of its 2,150,400 bytes reading 27. Measured with three
+  probe widgets wrapped round the shell's view at three levels: not one of
+  them is visited for that present, while the pipeline's own per-present hook
+  is, so the frame is real and our content is not in it. This is the app's
+  boundary; what happens above it is iced's and is not reached from here.
+
+  What made it stand was ours. `Scene::pump` answers `Next::Never` while
+  paused, so the window asks for nothing more and holds whatever that frame
+  left: 1.9 s on the run that found it, and until the next key press in
+  general, which is what four reports described. The shell now counts what it
+  does to the window, the widget records that count when a redraw reaches it,
+  and a paused file that has not caught up is poked every 100 ms until it
+  has. In the ordinary case the redraw in the same cycle catches up and the
+  poke never runs.
+
+  **The first predicate was wrong and the measurement caught it**: it called a
+  window settled once two redraws running had drawn the same frame at the same
+  shape, which under this load is already true while playing (2.8 fps
+  presented in 5 redraws a second), so it never armed. A count the shell drives
+  cannot be satisfied by a starved decoder.
+
+  `scripts/uitest.sh` gained the check that catches it, and it runs before
+  every check that compares two captures of a paused window: `nonblack`
+  cannot see this failure, because the theme background it leaves behind is
+  not black. Issue #91's flaky toast check was this defect all along.
+
 - 2026-08-01 **The room around the ball belongs to the window** (issue #100).
   The pass wrote a flat 0.10 grey wherever no lens has a ray; it now writes
   transparent black through a premultiplied blend and paints nothing there at
