@@ -28,9 +28,9 @@ Alpha. The first tagged release and a Flathub listing are in progress.
 
 | Camera | Support |
 |---|---|
-| Insta360 X4 Air | ✅ Verified, daily use |
-| Insta360 ONE X2 | ✅ Verified |
-| Insta360 X3, X4, X5 | ⚠️ Sample tested |
+| Insta360 X4 Air | ✅ Fully Supported |
+| Insta360 ONE X2 | ✅ Fully Supported |
+| Insta360 X3, X4, X5 | ⚠️ Unverified |
 | DJI, GoPro | ❌ Not supported |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for where things stand and
