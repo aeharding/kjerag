@@ -114,10 +114,11 @@ Inserting a child in front of an id-matched child cannot widen the tree.
 Nothing about this has been raised with the upstream project and nothing will
 be (AGENTS.md, hard rules). It is recorded here.
 
-## The minimal patch
+## The minimal patch, and what it is worth
 
-Keep the existing assembly and make the length invariant hold, because every
-later stage zips against it:
+`docs/research/libcosmic-tree-diff-102.patch` applies to the fork and rev
+above from the root of that checkout. It keeps the existing assembly and makes
+the length invariant hold, because every later stage zips against it:
 
 ```diff
 --- a/iced/core/src/widget/tree.rs
@@ -147,6 +148,15 @@ later stage zips against it:
  }
 ```
 
+**Measured, and it is the proof of the diagnosis.** The same harness run,
+same footage, same 18 busy loops, with the app's own watchdog switched off so
+the patch is the only thing changed:
+
+| build | `a paused window holds its picture` | `trees=1` on the window column | frames with no shader primitive |
+| --- | --- | --- | --- |
+| shipped fork | **FAIL, 12 of 12 captures blank** | on exactly the bad build | `layers=4 prims=0,0,0,0` |
+| patched fork | **pass** | **0** | **0** |
+
 It restores the invariant and nothing else. It does **not** fix the matching:
 the child that was overwritten gets a fresh state, which is state loss of the
 kind issue #77 was about. Our own camera does not live in widget state (it is
@@ -167,3 +177,26 @@ The standing cost is a rebase per libcosmic bump, a `flatpak/cargo-sources.json`
 regeneration with it, and a fork that has to be kept alive for as long as the
 defect is unfixed upstream. Set against a one-line-per-rebase patch to a
 function that has not moved.
+
+## What the app can do without a fork
+
+Two levers, both owner calls, neither free:
+
+- **Never hide the header bar.** The bug needs the column's children to go
+  from one to two. If the header bar stays, the count never changes and the
+  tree is never short. It costs the two-second idle hide the whole control
+  overlay is built around (docs/UI.md, cosmic-player's own behaviour).
+- **Turn libcosmic's content container off** (`core.window.content_container`).
+  That takes the `COSMIC_content_container` id off our content, so the old
+  child is matched positionally instead of by id and the deferred header is
+  pushed rather than written over it: the tree ends the right length. It
+  costs the window background libcosmic paints on that branch, which is what
+  issue #100 leaves the room around the ball transparent to show.
+
+And one that is already in the app for the other half of the same defect: the
+**250 ms `Message::Tick`** that runs while playing rebuilds the view four
+times a second, so a short tree built while playing is healed before anyone
+sees it. That is why this only shows up paused, where no timer runs. Extending
+that heartbeat to a paused window that has not drawn its frame is the shape
+of the change on the branch: not a new mechanism, the existing one covering
+the case where nothing else would.

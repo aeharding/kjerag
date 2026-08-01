@@ -1,0 +1,21 @@
+--- a/iced/core/src/widget/tree.rs
++++ b/iced/core/src/widget/tree.rs
+@@ -355,6 +355,18 @@
+                 self.children.push(new_tree);
+             }
+         }
++
++        // KJERAG #102: a child inserted in front of an id-matched child is
++        // written over that child rather than inserted, so this list can end
++        // shorter than the widget's own children. Every later stage walks the
++        // two with `zip`, which stops at the shorter one, so the tail is not
++        // laid out, not updated and not drawn.
++        while self.children.len() < new_children.len() {
++            let i = self.children.len();
++            let mut tree = new_state(&new_children[i]);
++            diff(&mut tree, &mut new_children[i]);
++            self.children.push(tree);
++        }
+     }
+ }
+ 
