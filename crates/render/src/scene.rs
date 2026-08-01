@@ -1069,6 +1069,9 @@ struct Band {
     /// The second dispatch of the same pass: what the ring just read, pooled
     /// into one exposure for the picture (issue #103, stage 3).
     pool: wgpu::ComputePipeline,
+    /// The along-seam field fitted over the whole ring, dispatched beside the
+    /// exposure pooling and over the same cells (issue #103, stage 5).
+    pool_along: wgpu::ComputePipeline,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1086,6 +1089,9 @@ struct Band {
     /// before and after differ by this stage and by nothing else.
     tone_held: bool,
     /// Which round of the circle the next frame reads.
+    /// How many times the measurement is dispatched per redraw. One, except
+    /// under [`ScenePipeline::band_repeats`].
+    repeats: u32,
     slice: u32,
     /// Where the last measured frame sat in the film, so the next one knows
     /// how much media time the state has aged by, and whether what happened
@@ -1208,6 +1214,20 @@ impl ScenePipeline {
         };
         queue.write_buffer(&self.band.watch, 0, watch.bytes());
         let mut encoder = device.create_command_encoder(&Default::default());
+        // Only ever more than one under `band_repeats`, and then each in a pass
+        // of its own: dispatches inside one pass have no barrier between them
+        // and a device is free to overlap them, which measures throughput where
+        // what is wanted is one redraw's worth of latency.
+        for _ in 1..self.band.repeats {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("band repeat"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.band.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(1, &self.band.group, &[]);
+            pass.dispatch_workgroups(watch.groups(), 1, 1);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("band"),
@@ -1216,7 +1236,7 @@ impl ScenePipeline {
             pass.set_pipeline(&self.band.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, &self.band.group, &[]);
-            pass.dispatch_workgroups(band::GROUPS, 1, 1);
+            pass.dispatch_workgroups(watch.groups(), 1, 1);
             // One workgroup over the state the dispatch above just wrote.
             // Two dispatches of one pass are ordered against each other by
             // WebGPU itself, so what this pools is this frame's readings and
@@ -1225,6 +1245,8 @@ impl ScenePipeline {
                 pass.set_pipeline(&self.band.pool);
                 pass.dispatch_workgroups(1, 1, 1);
             }
+            pass.set_pipeline(&self.band.pool_along);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         queue.submit([encoder.finish()]);
     }
@@ -1437,6 +1459,22 @@ impl ScenePipeline {
         self.band.tone_held = held;
     }
 
+    /// Dispatch the measurement this many times per redraw instead of once,
+    /// so its cost can be read as a SLOPE (issue #103, stage 6).
+    ///
+    /// The same instrument-only switch as [`Self::hold_band`] and for a reason
+    /// of the same kind. A redraw's wall time on a box with other work on it is
+    /// the pass plus whatever else ran, and on this box that second term is
+    /// wider than the first: six alternating runs of two builds under a load
+    /// average of 21 came back 5.1 to 20.3 ms with the builds interleaved. The
+    /// noise is ADDITIVE and the pass is not, so `n` dispatches of it minus one
+    /// dispatch of it, over `n - 1`, is the pass with the box divided out.
+    ///
+    /// Nothing in the player calls this and no key reaches it.
+    pub fn band_repeats(&mut self, times: u32) {
+        self.band.repeats = times.max(1);
+    }
+
     /// The band as it stands, for an instrument. `None` where the device
     /// cannot map a buffer back, which is not a case the player has.
     ///
@@ -1447,8 +1485,9 @@ impl ScenePipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<Vec<band::Cell>> {
-        Ok(self.band.read(device, queue)?.1)
+    ) -> Fallible<(band::Along, Vec<band::Cell>)> {
+        let (_, along, cells) = self.band.read(device, queue)?;
+        Ok((along, cells))
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1539,6 +1578,7 @@ impl Band {
         };
         let pipeline = compute("measure");
         let pool = compute("pool");
+        let pool_along = compute("pool_along");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1578,12 +1618,14 @@ impl Band {
         Self {
             pipeline,
             pool,
+            pool_along,
             state,
             watch,
             group,
             read,
             held: false,
             tone_held: false,
+            repeats: 1,
             slice: 0,
             at: None,
         }
@@ -1606,13 +1648,15 @@ impl Band {
         match seconds {
             Some(0.0) => None,
             Some(seconds) if (0.0..band::Watch::GAP_S).contains(&seconds) => {
-                Some(band::Watch::new(seconds, false, slice))
+                Some(band::Watch::track(seconds, slice))
             }
             // The first frame of a file, and every landing after a seek. The
             // step it is given is one frame's worth, so a direction with
             // content in it starts moving immediately rather than waiting a
-            // frame for a gap to exist.
-            _ => Some(band::Watch::new(1.0 / 30.0, true, slice)),
+            // frame for a gap to exist, and it sweeps the WHOLE ring rather
+            // than the slice it happened to land on, because what it is
+            // throwing away is per direction (`band::Watch::stride`).
+            _ => Some(band::Watch::start(1.0 / 30.0)),
         }
     }
 
@@ -1622,7 +1666,7 @@ impl Band {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, Vec<band::Cell>)> {
+    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1643,6 +1687,10 @@ impl Band {
             f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
         };
         let tone = band::Tone::read(float(0), float(4));
+        let along = band::Along::read(
+            std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
+            float(band::ALONG_AT + 20),
+        );
         let cells = (0..band::AZIMUTHS)
             .map(|index| {
                 let at = band::CELLS_AT + index * std::mem::size_of::<band::Cell>();
@@ -1651,14 +1699,15 @@ impl Band {
                     confidence: float(at + 4),
                     reach_m: float(at + 8),
                     off_epi: float(at + 12),
-                    tone: float(at + 16),
-                    lit: float(at + 20),
+                    off_conf: float(at + 16),
+                    tone: float(at + 20),
+                    lit: float(at + 24),
                 }
             })
             .collect();
         drop(mapped);
         readback.unmap();
-        Ok((tone, cells))
+        Ok((tone, along, cells))
     }
 }
 

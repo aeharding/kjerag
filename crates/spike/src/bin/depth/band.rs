@@ -92,7 +92,11 @@ pub fn node(baseline: [f64; 3], phi: f64, psi: f64) -> Node {
         psi,
         centre,
         epi,
-        perp: unit(cross(centre, epi)),
+        // `epi x centre` and not the other way up. That is the one convention
+        // the tree has for this axis since issue #103 stage 6: the seam
+        // circle's own tangent towards increasing azimuth, the sign
+        // `seam::ring` publishes and `band::Ring::perp` is now built to.
+        perp: unit(cross(epi, centre)),
         reach_m,
         skew_deg: dot(epi, across).clamp(-1.0, 1.0).acos().to_degrees(),
     }
