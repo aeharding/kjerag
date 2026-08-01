@@ -583,13 +583,43 @@ live, no keyframe UI ever.
   the portal one, which is the owner's report, and reads a `uri-list` one and
   then cannot open the path it names ("No such file or directory" for a file
   that plainly exists). The fix is libcosmic's own two calls,
-  `on_file_transfer` and `command::file_transfer_receive`, and no new
-  permission in the manifest: the portal exchange is what a sandbox is for,
-  and needs no `--filesystem` at all. What it cannot fix is a source that
-  never registers the files. cosmic-files 1.5.0 offers `text/uri-list` and
-  nothing else, so a drag out of the COSMIC file manager hands any sandboxed
-  app a path it cannot open; that half of the exchange is the source's and
-  not ours.
+  `on_file_transfer` and `command::file_transfer_receive`, and it needs no
+  permission at all: the portal exchange is what a sandbox is for.
+
+  What the portal arm cannot fix is a source that never registers the files.
+  cosmic-files 1.5.0 offers `text/uri-list` and nothing else (its source, and
+  the shipped binary, which does not contain the string `vnd.portal`), so a
+  drag out of the COSMIC file manager hands over a path on the host and that
+  half of the exchange is the source's. It is also the owner's own workflow,
+  so on his ruling the manifest grants `--filesystem=xdg-videos:ro`: the
+  smallest grant that covers every way a bare path arrives, which is that
+  drag, `kjerag ~/Videos/flight.insv` on a terminal, and a double click.
+  Read-only because the player never writes to footage, and the videos folder
+  rather than home because footage kept elsewhere is one `File > Open
+  video...` away through the portal at no permission at all. The day
+  cosmic-files registers its drags the grant can be reconsidered.
+
+  What is left outside the grant used to get the words a corrupt file gets,
+  and now gets its own line in issue #117's alert, only inside a Flatpak:
+  "Kjerag cannot reach that file from inside its sandbox. Open it with File >
+  Open video." The path decides it rather than the error, because libav's
+  answer for a path with no mount behind it is "No such file or directory",
+  which is a sentence about a file that is not there.
+
+  Measured on the bundle built from the branch, with the grant, on real
+  footage under `~/Videos`: a cosmic-files-shaped `uri-list` drop opens, a
+  portal drop opens, `flatpak run <app> <path>` opens, and a double click's
+  own `--file-forwarding` shape opens; the same `uri-list` drop of a path
+  outside the folder is refused with the line above. And for the two-file
+  captures of issue #123, every one of those four hands over the host path
+  and pairs both lenses (`2 of 2 calibrated`, `2 lens streams from 2 files`),
+  because both the document portal's `RetrieveFiles` and flatpak's file
+  forwarding skip the document store for a file the app can already read.
+  The file chooser does not: xdg-desktop-portal 1.18.4 registers a document
+  for every sandboxed app whatever its permissions
+  (`src/file-chooser.c`, `send_response`), so a file picked there arrives as
+  `/run/user/1000/doc/<id>/<name>`, its mate is not in that directory, and
+  the capture still plays one lens. Issue #123 stands for that path alone.
 
 - 2026-08-01 **Another camera's 360 format is refused by name, and nothing
   in the app grades the camera it does take** (issue #107, alongside #88).

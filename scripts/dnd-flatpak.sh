@@ -67,21 +67,31 @@ printf 'building %s\n' "$dragsource"
 rm -rf "$session"
 mkdir -p "$session"
 printf 'session %s\n' "$session"
-printf 'app     %s\n' "$(flatpak info "$app" | sed -n 's/^ *Version: *//p')"
+# The commit as well as the version: two agents installing over each other in
+# one user installation is a thing that has happened (2026-08-01), and a run
+# that cannot say which build it drove proves nothing.
+printf 'app     %s, commit %s\n' \
+	"$(flatpak info "$app" | sed -n 's/^ *Version: *//p')" \
+	"$(flatpak info "$app" | sed -n 's/^ *Commit: *//p' | cut -c1-12)"
 
 runtime=$(mktemp -d "${TMPDIR:-/tmp}/kjerag-dnd-flatpak.XXXXXXXX")
 chmod 700 "$runtime"
 link=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-kjerag-dnd
 ln -sf "$runtime/wayland-0" "$link"
 
-# The launcher runs with the desktop's own runtime and data directories: a
-# Flatpak looks its installations up under XDG_DATA_HOME and reaches the
-# portals under XDG_RUNTIME_DIR, and the session below redirects both.
+# The launcher runs with the desktop's own runtime, data and config
+# directories, and all three are load-bearing. A Flatpak looks its
+# installations up under XDG_DATA_HOME, reaches the portals under
+# XDG_RUNTIME_DIR, and resolves `--filesystem=xdg-videos` by reading
+# `user-dirs.dirs` under XDG_CONFIG_HOME: with the session's own empty config
+# directory the videos folder resolves to nothing and is silently not mounted,
+# which reads exactly like the grant not working (measured, 2026-08-01).
 launcher=$session/run-flatpak.sh
 cat >"$launcher" <<EOF
 #!/usr/bin/env bash
 exec env XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}' \\
 	XDG_DATA_HOME='${XDG_DATA_HOME:-$HOME/.local/share}' \\
+	XDG_CONFIG_HOME='${XDG_CONFIG_HOME:-$HOME/.config}' \\
 	WAYLAND_DISPLAY=wayland-kjerag-dnd \\
 	flatpak run '$app'
 EOF
@@ -136,8 +146,8 @@ drop() {
 		sleep 0.5
 		waited=$((waited + 1))
 	done
-	kill "$pid" 2>/dev/null
-	wait "$pid" 2>/dev/null
+	kill "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
 
 	opened=no
 	[ "$(grep -c '^media:' "$log")" -gt "$before" ] && opened=yes
@@ -155,13 +165,13 @@ ln -sf "$media" "$outside"
 
 printf '\n'
 drop portal portal "$media" || failures=$((failures + 1))
-drop "uri-list in videos" uri-list "$media" || failures=$((failures + 1))
+drop in-videos uri-list "$media" || failures=$((failures + 1))
 
 # And the one that must NOT open, because the grant is a folder and not the
 # filesystem. What is required of it is the honest refusal rather than the
 # words a corrupt file gets (issue #118).
 before=$(grep -c '^kjerag: .* not shown' "$log")
-if drop "uri-list outside it" uri-list "$outside"; then
+if drop outside-it uri-list "$outside"; then
 	printf 'FAIL   a file outside the videos folder opened, so the grant is wider than it says\n'
 	failures=$((failures + 1))
 elif [ "$(grep -c '^kjerag: .* not shown' "$log")" -le "$before" ]; then
