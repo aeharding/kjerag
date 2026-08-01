@@ -1073,22 +1073,23 @@ pub fn fit_file(path: &Path, lenses: &[Lens], frame: Size, plan: &Plan) -> Optio
 
 // ------------------------------------------------------------ the correction
 
-/// One step of the walk, in probe steps per second.
+/// How long a correction takes to walk in, whatever its size, in seconds.
 ///
-/// A probe step is [`Knob::probe`]: 0.10 degrees of lens rotation, or 4 pixels
-/// of principal point. So this is 0.25 deg/s and 10 px/s, and the two stay in
-/// the proportion a fit moves them in, because the walk runs along the straight
-/// line between two fits rather than knob by knob. Walking the knobs
-/// separately would draw calibrations no fit ever produced, on the way.
+/// A fixed duration and not a fixed rate, which is the owner's own number:
+/// "self-fit lands as a refinement EASED IN over ~1 s". A rate was written
+/// first and measured, and it is why this comment exists: at 0.25 deg/s the
+/// cold-start fit of the owner's own camera, which is 26.8 probe steps of
+/// correction, took **10.7 seconds** to walk in, and the headless harness
+/// caught it as 803730 of 921600 pixels differing between two captures a
+/// moment apart while the file was paused. Half the sphere sliding for ten
+/// seconds is not below perception, it is the most visible thing in the
+/// window.
 ///
-/// **Chosen, not measured.** What is below perception for a seam sliding under
-/// moving content is a question about eyes, and this box has none; what the
-/// number does is bound the motion, and the bound is what can be checked. The
-/// arithmetic it is chosen against: the residual this camera's stored
-/// calibration leaves is 0.12 to 0.36 degrees along the seam and 0.57 to 0.84
-/// across (6.8), so a correction of the size playback actually asks for is
-/// walked in under four seconds, spread over a hundred frames.
-const WALK_STEPS_S: f64 = 2.5;
+/// Fixed duration inverts that: a big correction moves fast and is over, a
+/// small one is imperceptible anyway. The worst case is the cold start, and it
+/// is the landing step the owner measured at 39 to 52 view pixels; spread over
+/// a second at 30 fps that is 1.3 to 1.7 pixels a frame.
+const WALK_SECONDS: f64 = 1.0;
 
 /// The seam correction the pass runs on, and where it is heading.
 ///
@@ -1096,7 +1097,7 @@ const WALK_STEPS_S: f64 = 2.5;
 /// targets any 360 footage, near-field content generally moves, and readings
 /// land while the file plays. Two corrections live here, the one the readings
 /// ask for and the one the picture is drawn with, and the second walks towards
-/// the first at [`WALK_STEPS_S`].
+/// the first over [`WALK_SECONDS`].
 ///
 /// The walk is the whole reason the second one exists. A correction that snaps
 /// is a seam that jumps, and a jump is the one artifact an eye is built to
@@ -1112,6 +1113,14 @@ pub struct Correction {
 struct Walking {
     /// What the readings ask for.
     asked: SeamFit,
+    /// Where the walk in progress started, so the ease is measured from a
+    /// fixed point and takes the same time whatever it is crossing. Easing
+    /// towards the target from wherever the picture currently is would make
+    /// the last tenth take as long as the first, which is a different curve
+    /// and a slower one.
+    from: SeamFit,
+    /// How far along that walk the picture is, 0 to 1.
+    progress: f64,
     /// What the picture is drawn with.
     shown: SeamFit,
     /// `shown` applied to `factory`. Rebuilt only when `shown` moves, so a
@@ -1132,6 +1141,8 @@ impl Correction {
             factory: lenses.clone(),
             walking: Mutex::new(Walking {
                 asked: SeamFit::default(),
+                from: SeamFit::default(),
+                progress: 1.0,
                 shown: SeamFit::default(),
                 lenses: lenses.clone(),
                 walked: None,
@@ -1147,7 +1158,9 @@ impl Correction {
     pub fn land(&self, fit: SeamFit) {
         let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
         walking.asked = fit;
+        walking.from = fit;
         walking.shown = fit;
+        walking.progress = 1.0;
         walking.lenses = fit.applied(&self.factory).into();
         walking.walked = None;
     }
@@ -1156,7 +1169,13 @@ impl Correction {
     /// is now, and reaches it or is overtaken by a better answer first.
     pub fn ask(&self, fit: SeamFit) {
         let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
+        if walking.asked == fit {
+            return;
+        }
+        walking.from = walking.shown;
         walking.asked = fit;
+        walking.progress = 0.0;
+        walking.walked = None;
     }
 
     /// What the pass runs on this redraw, having taken one step of the walk.
@@ -1166,22 +1185,18 @@ impl Correction {
     /// instant through the primitive that would only ever be used here.
     pub fn lenses(&self) -> Arc<[Lens]> {
         let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
-        let since = walking.walked.replace(now);
-        if walking.shown == walking.asked {
+        if walking.progress >= 1.0 {
             return walking.lenses.clone();
         }
-        // The first redraw after an ask has no interval to walk over, so it
-        // walks nothing and the one after it walks from here.
+        let now = Instant::now();
+        let since = walking.walked.replace(now);
+        // The first redraw after an ask has no interval behind it, so it walks
+        // nothing and the one after it walks from here.
         let Some(seconds) = since.map(|then| now.duration_since(then).as_secs_f64()) else {
             return walking.lenses.clone();
         };
-        let steps = distance(walking.shown, walking.asked);
-        let fraction = match steps > 0.0 {
-            true => (WALK_STEPS_S * seconds / steps).min(1.0),
-            false => 1.0,
-        };
-        walking.shown = walking.shown.towards(walking.asked, fraction);
+        walking.progress = (walking.progress + seconds / WALK_SECONDS).min(1.0);
+        walking.shown = walking.from.towards(walking.asked, walking.progress);
         walking.lenses = walking.shown.applied(&self.factory).into();
         walking.lenses.clone()
     }
@@ -1198,6 +1213,11 @@ impl Correction {
 /// Probe steps rather than any one knob's own units, because the five are not
 /// commensurable: a degree of yaw and a pixel of principal point are different
 /// things, and the probe is the scale the fit itself already compares them on.
+///
+/// The tests' yardstick and nothing else's. The walk itself stopped needing it
+/// when it stopped being a rate: a fixed-duration ease does not care how far it
+/// is going, which is the point of it.
+#[cfg(test)]
 fn distance(from: SeamFit, to: SeamFit) -> f64 {
     let steps = [
         (to.roll_deg - from.roll_deg) / Knob::Roll.probe(),
@@ -1505,16 +1525,17 @@ mod tests {
         assert_eq!(correction.lenses()[0].pose.yaw_deg, lenses[0].pose.yaw_deg);
     }
 
-    /// The walk is bounded, and it is bounded per second rather than per
-    /// redraw: this is the property that stops a correction landing as a jump,
-    /// and the one a frame rate must not be able to change.
+    /// The walk is paced by the clock and not by the redraw count, and it
+    /// takes the same time whatever its size. Both halves matter: the first is
+    /// what stops a 144 Hz window correcting five times faster than a 30 Hz
+    /// one, and the second is what stops a cold-start correction taking ten
+    /// seconds, which is the defect this replaced.
     ///
     /// Wall-clock rather than an injected instant, because the walk reads the
     /// clock itself. The assertion is therefore one-sided: after a known sleep
-    /// the picture has moved at most what the rate allows over that sleep, and
-    /// a build that walked per redraw would fail it on the redraw count alone.
+    /// the picture is at most that far along, however many redraws ran.
     #[test]
-    fn the_walk_is_bounded_per_second_and_not_per_redraw() {
+    fn the_walk_is_paced_by_the_clock_and_not_by_the_redraw_count() {
         let lenses: Arc<[Lens]> = fixture_lenses().into();
         let asked = SeamFit {
             yaw_deg: -2.4,
@@ -1527,25 +1548,64 @@ mod tests {
         correction.lenses();
         assert_eq!(correction.state().0, SeamFit::default());
 
-        let slept = Duration::from_millis(120);
+        let slept = Duration::from_millis(100);
         std::thread::sleep(slept);
-        for _ in 0..20 {
+        for _ in 0..50 {
             correction.lenses();
         }
         let (shown, _) = correction.state();
-        let walked = distance(SeamFit::default(), shown);
-        let allowed = WALK_STEPS_S * (slept.as_secs_f64() + 0.5);
-        assert!(walked > 0.0, "the walk did not start");
+        let along = shown.yaw_deg / asked.yaw_deg;
+        assert!(along > 0.0, "the walk did not start");
+        // 50 redraws over 0.1 s of a 1 s walk. Paced by redraws it would be
+        // finished many times over; paced by the clock it is a tenth of the
+        // way, and the slack is this box's scheduler under load.
         assert!(
-            walked <= allowed,
-            "walked {walked:.3} steps, which is more than {allowed:.3} of clock"
+            along < 0.5,
+            "{along:.3} of the way after {:.0} ms of a {WALK_SECONDS:.0} s walk",
+            slept.as_secs_f64() * 1000.0
         );
+    }
+
+    /// A big correction and a small one take the same time, which is the whole
+    /// difference between this and the rate it replaced. The cold-start fit of
+    /// the owner's own camera is the big one: 26.8 probe steps, which at the
+    /// old 2.5 steps a second was 10.7 seconds of half the sphere sliding.
+    #[test]
+    fn a_big_correction_takes_no_longer_than_a_small_one() {
+        let lenses: Arc<[Lens]> = fixture_lenses().into();
+        let big = SeamFit {
+            roll_deg: 0.789,
+            yaw_deg: -2.450,
+            pitch_deg: -0.668,
+            cx_px: -2.55,
+            cy_px: -13.84,
+        };
+        let small = SeamFit {
+            yaw_deg: -0.02,
+            ..SeamFit::default()
+        };
         assert!(
-            shown.yaw_deg > asked.yaw_deg,
-            "the walk overshot: {:.3} past {:.3}",
-            shown.yaw_deg,
-            asked.yaw_deg
+            distance(SeamFit::default(), big) > 20.0,
+            "the big correction is not big: {:.1} steps",
+            distance(SeamFit::default(), big)
         );
+        for asked in [big, small] {
+            let correction = Correction::none(&lenses);
+            correction.ask(asked);
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(10);
+            while correction.state().0 != asked && Instant::now() < deadline {
+                correction.lenses();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let took = started.elapsed().as_secs_f64();
+            assert_eq!(correction.state().0, asked, "the walk did not arrive");
+            assert!(
+                took < WALK_SECONDS * 2.0,
+                "a correction of {:.1} steps took {took:.2} s",
+                distance(SeamFit::default(), asked)
+            );
+        }
     }
 
     /// The walk arrives, and stops. A correction that crept towards its answer
