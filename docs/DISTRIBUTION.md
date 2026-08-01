@@ -909,6 +909,72 @@ Tooling used to get here, all `--user`, no root and no system packages:
 `org.flatpak.Builder`, `org.freedesktop.Sdk.Extension.rust-stable//25.08`,
 `org.freedesktop.Sdk.Extension.llvm21//25.08`.
 
+### 3.9 The 0.1.1 bundle, measured after the fact
+
+Every build above was checked by starting it. **None of them was ever asked
+to play anything**, and 0.1.1 shipped on the strength of a window and a
+`--version` line. This is the measurement that was missing, taken on
+2026-08-01 against the published `kjerag-0.1.1-x86_64.flatpak` downloaded
+from its own release, on the §1 test bench of docs/research/gpu-pipeline.md.
+
+**It plays.** `KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh <file>`
+(the mode docs/RELEASING.md now calls the release check) against real X4 Air
+footage: 20 of 22 checks pass, the two failures are the harness's two known
+flakes (the toast placement and `ctrl+v`), and two checks skip because they
+read settings the sandbox writes to the developer's own `~/.config/cosmic`.
+Directly under `cage`, the same bundle on a 3840x3840 X4 Air file and a
+2880x2880 ONE X2 file:
+
+```
+device: dmabuf import: all extensions enabled
+play:      9.90 s, 30.00 fps presented in 30.2 redraws/s, 0 dropped,
+           0 starved, sound +3.1 ms, 0 underruns
+```
+
+Zero-copy, not the copy fallback: that line is the import's own, and it says
+`all extensions enabled` rather than naming one that is missing. Sustained
+45 s, both cameras, and the same numbers whether the path arrived on the
+command line or as a document-portal path.
+
+**What the sandbox brings its own of**, all measured inside it and all
+different from the host:
+
+| | host | sandbox (runtime 25.08) |
+|---|---|---|
+| Mesa (radeonsi + RADV) | 25.2.8 | **26.1.5** |
+| ffmpeg | 6.1.1 system, 7.1 from the PPA | **7.1.3**, the runtime's |
+| libva | 2.20.0 | **2.22.0** |
+| HEVC decoder | present | **present**, in the base runtime |
+
+The frame path in the sandbox therefore runs on a different Mesa and a
+different libva from the ones every number in docs/research was taken on, and
+it behaves the same. Two details worth keeping:
+
+- **The VA driver is found through the GL extension, not `/usr/lib/.../dri`.**
+  In the sandbox that directory holds only `intel-vaapi-driver` and
+  `nvidia-vaapi-driver` subdirectories; libva's fourth candidate,
+  `/usr/lib/x86_64-linux-gnu/GL/lib/dri/radeonsi_drv_video.so`, is the one
+  that opens. A sandbox without `org.freedesktop.Platform.GL.default` has no
+  VA-API at all.
+- **HEVC needs no `codecs-extra` extension here.** The base runtime's
+  libavcodec 61.19.101 carries the `hevc` decoder, which is what §3.3 found
+  and what `strings::open_failed` names as the thing to install if it ever is
+  not.
+
+**One real defect the run turned up, and it is not about frames.** Footage
+whose two lenses are two files (ONE X2: `..._00_001.insv` beside
+`..._10_001.insv`) opened through the file chooser gets only the file the
+pilot picked, because the document portal exports one document, and the app
+says nothing about it:
+
+```
+lens:   Insta360 ONE X2 ..., sampling 1 of 2 calibrated
+media:  1 lens stream, 2880x2880, ...
+```
+
+Half the sphere, silently, in the sandbox only. The same path passed on the
+command line with `--filesystem` gives `2 lens streams from 2 files`.
+
 ---
 
 ## 4. Publishing

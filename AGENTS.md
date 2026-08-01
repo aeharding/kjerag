@@ -126,7 +126,17 @@ headless harness before it ships:
 scripts/uitest.sh ~/Videos/<file>.insv   # or set KJERAG_TEST_MEDIA
 scripts/uitest.sh                        # no footage: the checks that
                                          # need none, and it says so
+KJERAG_FLATPAK=dev.harding.Kjerag \
+  scripts/uitest.sh ~/Videos/<file>.insv # the same checks, answered by
+                                         # the INSTALLED bundle
 ```
+
+The third is the release check (docs/RELEASING.md). A binary that plays on
+this box says nothing about a bundle that plays inside the sandbox, where
+the Mesa, the ffmpeg and the libva are the runtime's and the file arrives
+the way flatpak hands one over. 0.1.1 shipped having been installed,
+started, and seen to draw a window, and nothing had ever played a frame
+in it.
 
 It runs the release binary inside `cage` on a headless wlroots backend,
 presses keys with `wtype`, captures the output with `grim`, and reads the

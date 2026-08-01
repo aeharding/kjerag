@@ -5,6 +5,10 @@
 #
 #   scripts/uitest.sh [file.insv]      # or set KJERAG_TEST_MEDIA
 #
+# The same checks run against the installed Flatpak with
+# KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
+# it is called a release (docs/RELEASING.md).
+#
 # `cage` runs one client on a wlroots headless backend, which is a whole
 # Wayland session with no monitor and no connection to the desktop the
 # developer is looking at. `wtype` presses keys into it over the virtual
@@ -112,15 +116,47 @@ command -v wl-paste >/dev/null || clipboard=no
 #
 # KJERAG_BIN is the way to point the harness at a binary on purpose, which is
 # how that was measured, so it is taken as given and never rebuilt.
-if [ -n "${KJERAG_BIN:-}" ]; then
+#
+# KJERAG_FLATPAK runs the INSTALLED bundle instead, which is the one thing
+# nothing else checks: the release ritual runs this harness against a local
+# binary, and the bundle it then publishes was only ever started once by hand
+# to see a window (docs/RELEASING.md). 0.1.1 shipped that way. What the app
+# does inside the sandbox is a different question from what it does outside
+# one -- the runtime carries its own Mesa, its own ffmpeg and its own libva,
+# and the frame path runs through all three -- so this mode asks the same
+# questions of the same checks with the answer coming from the sandbox.
+launch=()
+if [ -n "${KJERAG_FLATPAK:-}" ]; then
+	app=$KJERAG_FLATPAK
+	flatpak info "$app" >/dev/null 2>&1 || die "no flatpak installed for $app (KJERAG_FLATPAK)"
+	printf 'flatpak %s %s, commit %s (not rebuilt)\n' "$app" \
+		"$(flatpak info "$app" | sed -n 's/^ *Version: *//p')" \
+		"$(flatpak info --show-commit "$app" | cut -c1-12)"
+	# `boot` redirects XDG_DATA_HOME, and a user installation lives under it,
+	# so flatpak inside the session would answer "not installed" for an app
+	# that is. Resolved here, before the redirect, and handed back on the
+	# command line: the redirect is what keeps the run out of the developer's
+	# directories and is worth more than this costs.
+	launch=(env "FLATPAK_USER_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/flatpak" flatpak run)
+	# The screenshot destination and the file are the only two things this
+	# mode arranges. Everything else is the shipped sandbox as a pilot gets
+	# it, which is the point of the mode: settings still escape to the
+	# developer's own ~/.config/cosmic, because that is what the installed
+	# app does, and the two checks that read them skip rather than lie.
+	launch+=("--env=XDG_SCREENSHOTS_DIR=$session/shots" "--filesystem=$session/shots")
+	[ -z "$media" ] || launch+=("--filesystem=$media:ro")
+	launch+=("$app")
+elif [ -n "${KJERAG_BIN:-}" ]; then
 	bin=$KJERAG_BIN
 	[ -x "$bin" ] || die "no binary at $bin (KJERAG_BIN)"
 	printf 'binary %s (KJERAG_BIN: not rebuilt)\n' "$bin"
+	launch=("$bin")
 else
 	bin=$root/target/release/kjerag
 	printf 'building %s\n' "$bin"
 	(cd "$root" && cargo build --release) || die "the app did not build"
 	[ -x "$bin" ] || die "no binary at $bin"
+	launch=("$bin")
 fi
 
 [ -z "$media" ] || [ -f "$media" ] || die "no file at $media"
@@ -158,7 +194,7 @@ boot() {
 		XDG_SCREENSHOTS_DIR="$session/shots" \
 		WLR_BACKENDS=headless \
 		WLR_LIBINPUT_NO_DEVICES=1 \
-		cage -- "$bin" ${file:+"$file"} >"$log" 2>&1 &
+		cage -- "${launch[@]}" ${file:+"$file"} >"$log" 2>&1 &
 	cage_pid=$!
 
 	local waited=0
@@ -1018,6 +1054,10 @@ returns_to_the_copied_view() {
 # separates a key that landed from a key that was swallowed: the two views
 # differ by a rotation that one still frame need not show.
 flips_the_horizon() {
+	if [ -n "${KJERAG_FLATPAK:-}" ]; then
+		skip "h flips the horizon lock (settings escape the sandbox to the developer's own ~/.config/cosmic, which this harness will not read or write)"
+		return
+	fi
 	local locked=$session/config/cosmic/dev.harding.Kjerag/v1/horizon_lock
 	local try=0
 	while [ "$try" -lt "$PRESSES" ]; do
@@ -1177,6 +1217,15 @@ exits_clean() {
 pooled_calibration() {
 	local check="a pooled calibration is in the first frame"
 	printf '\n-- calibration checks (%s)\n' "$media"
+
+	# The pool this writes is read through cosmic-config, which in the
+	# sandbox reaches past it to the developer's own state directory. Writing
+	# there to satisfy a check would be the harness editing the desktop it
+	# promises not to touch.
+	if [ -n "${KJERAG_FLATPAK:-}" ]; then
+		skip "$check (the sandbox's state is the developer's own ~/.local/state/cosmic)"
+		return
+	fi
 
 	# The session's directories persist between runs, so a pool a previous run
 	# stored is still there and would make this session take the path it is
