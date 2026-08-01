@@ -19,6 +19,7 @@ mod config;
 mod dnd;
 mod key_bind;
 mod menu;
+mod probe;
 mod shot;
 mod strings;
 
