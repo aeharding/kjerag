@@ -1,0 +1,52 @@
+name: scratch-appstream
+# TEMPORARY. Deleted before this branch is proposed: it exists to reproduce
+# flatpak-builder's `appstreamcli compose` failure on a runner in one minute
+# instead of after a fifteen minute build.
+on:
+  push:
+    branches: [infra/106-release-pipeline]
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder elfutils
+          dpkg -l | grep -i 'appstream\|rsvg' || true
+
+      # The layout flatpak-builder hands appstreamcli: an app dir with the
+      # installed tree under files/.
+      - run: |
+          mkdir -p app/files/share/applications app/files/share/metainfo app/files/share/icons app/files/bin
+          cp resources/dev.harding.Kjerag.desktop app/files/share/applications/
+          cp resources/dev.harding.Kjerag.metainfo.xml app/files/share/metainfo/
+          cp -r resources/icons/hicolor app/files/share/icons/
+          printf '#!/bin/sh\n' > app/files/bin/kjerag && chmod +x app/files/bin/kjerag
+          find app -type f | sort
+
+      - id: first
+        continue-on-error: true
+        run: |
+          appstreamcli compose --verbose \
+            --components=dev.harding.Kjerag \
+            --prefix=/files --origin=dev.harding.Kjerag \
+            --result-root=app \
+            --data-dir=app/files/share/app-info/xmls \
+            --icons-dir=app/files/share/app-info/icons/flatpak \
+            --media-dir=app/files/share/app-info/media \
+            app 2>&1 | tail -60
+
+      - run: |
+          sudo apt-get install -y --no-install-recommends librsvg2-common
+          rm -rf app/files/share/app-info
+          appstreamcli compose --verbose \
+            --components=dev.harding.Kjerag \
+            --prefix=/files --origin=dev.harding.Kjerag \
+            --result-root=app \
+            --data-dir=app/files/share/app-info/xmls \
+            --icons-dir=app/files/share/app-info/icons/flatpak \
+            --media-dir=app/files/share/app-info/media \
+            app 2>&1 | tail -60
