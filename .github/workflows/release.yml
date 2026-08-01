@@ -139,8 +139,8 @@ jobs:
       - uses: crazy-max/ghaction-import-gpg@v7
         id: gpg
         with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY_PIPELINETEST }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE_PIPELINETEST }}
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
       # flatter reads ./CNAME to write the Url into the index.flatpakrepo it
       # generates, so the domain has to be here before the build and not only
       # in the deployed copy.
