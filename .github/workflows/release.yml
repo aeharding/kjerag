@@ -1,6 +1,6 @@
 name: release
 # A version tag is the whole trigger, and it has two outputs (issues #106,
-# #135). One file a person can install, one per arch, on the GitHub Release:
+# #137). One file a person can install, one per arch, on the GitHub Release:
 # `flatpak install --user ./kjerag-….flatpak`. And the same build exported
 # into the signed Flatpak repository at https://kjerag.harding.dev/, which is
 # the one a person subscribes to and `flatpak update` follows.
@@ -95,7 +95,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
 
   # The other output of the tag: the signed OSTree repository the app is
-  # installed and updated from (issue #135, docs/DISTRIBUTION.md 4.3). A
+  # installed and updated from (issue #137, docs/DISTRIBUTION.md 4.3). A
   # flatpak remote is a directory of static files, so this ends where a
   # GitHub Pages branch begins.
   #
