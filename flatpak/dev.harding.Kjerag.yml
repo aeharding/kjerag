@@ -63,21 +63,25 @@ finish-args:
   # still there and still preferred, and the day cosmic-files registers its
   # drags this line can be reconsidered.
   #
-  # `:ro` because the player never writes to footage, and `xdg-videos` rather
-  # than `home` or `host` because a wider grant would not buy anything: a file
-  # anywhere else is one `File > Open video...` away, through the portal, at
-  # no permission at all.
-  - --filesystem=xdg-videos:ro
+  # Write as well as read, but not because anything writes: the file chooser
+  # portal only hands an app the real path of a pick when the standing grant
+  # covers what the dialog asked for, the dialog always asks for write (the
+  # request-side `writable` option is stripped by xdg-desktop-portal itself,
+  # measured on the bus, issue #123), and without the real path a two-file
+  # capture pairs at one lens. No code path writes footage; the player opens
+  # `.insv` read-only and its one write is a still into xdg-pictures.
+  # `xdg-videos` rather than `home` or `host` because a wider grant buys
+  # nothing: a file anywhere else is one `File > Open video...` away.
+  - --filesystem=xdg-videos
   # The same again for network shares, which is where a footage library that
   # outgrew a laptop actually lives: the file manager mounts a NAS through
   # GVFS and every path under it is `/run/user/<uid>/gvfs/<mount>/...`, which
   # is no more reachable from a sandbox than any other host path. This is the
   # standard grant for it, and playing off the share is a capability the app
   # has and the Flatpak would otherwise lose (issue #118, owner's own
-  # library). Read-only for the same reason as the line above, and measured
-  # rather than assumed: with `:ro` the mount lists inside the sandbox and a
-  # file on it reads.
-  - --filesystem=xdg-run/gvfs:ro
+  # library). Write for the same portal reason as the line above; nothing
+  # writes to the share either.
+  - --filesystem=xdg-run/gvfs
   # No other filesystem access on purpose: anything outside those arrives
   # through the file chooser portal, or as a document-portal path from a
   # source that registered it.
