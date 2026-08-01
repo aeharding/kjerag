@@ -39,7 +39,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -113,19 +113,20 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, String> {
     let Args {
-        file,
+        files,
         offer,
         linger,
     } = Args::parse(std::env::args().skip(1))?;
-    let payloads = payloads(&file, offer)?;
+    let payloads = payloads(&files, offer)?;
     println!(
-        "dragsource: offering {} for {}",
+        "dragsource: offering {} for {} file(s), first {}",
         payloads
             .iter()
             .map(|(mime, _)| mime.as_str())
             .collect::<Vec<_>>()
             .join(", "),
-        file.display()
+        files.len(),
+        files[0].display()
     );
 
     let conn = Connection::connect_to_env().map_err(|e| format!("no wayland session: {e}"))?;
@@ -237,7 +238,10 @@ there would be a drop on ourselves"
 }
 
 struct Args {
-    file: PathBuf,
+    /// Every file the drag carries, in the order given. More than one is what
+    /// a file manager sends when more than one is selected, and what the app
+    /// does with the rest is its own business.
+    files: Vec<PathBuf>,
     offer: Offer,
     linger: Duration,
 }
@@ -251,7 +255,7 @@ enum Offer {
 
 impl Args {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let mut file = None;
+        let mut files = Vec::new();
         let mut offer = Offer::Both;
         let mut linger = Duration::from_secs(20);
         for arg in args {
@@ -263,44 +267,55 @@ impl Args {
                     linger = Duration::from_secs(secs.parse().map_err(|_| format!("{arg}?"))?);
                 }
                 Some(_) => return Err(format!("{arg}?")),
-                None => file = Some(PathBuf::from(arg)),
+                None => files.push(PathBuf::from(arg)),
             }
         }
-        let file = file.ok_or("a file to drag is the one argument")?;
-        match file.is_file() {
-            true => Ok(Self {
-                file,
+        if files.is_empty() {
+            return Err(
+                "a file to drag is the one argument, and more than one is allowed".to_owned(),
+            );
+        }
+        match files.iter().find(|file| !file.is_file()) {
+            Some(missing) => Err(format!("no file at {}", missing.display())),
+            None => Ok(Self {
+                files,
                 offer,
                 linger,
             }),
-            false => Err(format!("no file at {}", file.display())),
         }
     }
 }
 
 /// What each offered mime type hands over when the target asks for it.
-fn payloads(file: &Path, offer: Offer) -> Result<Vec<(String, Vec<u8>)>, String> {
+fn payloads(files: &[PathBuf], offer: Offer) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut payloads = Vec::new();
     if offer != Offer::UriList {
         // NUL terminated because that is how the key is read back: libcosmic
         // drops the last byte of this mime type's payload before it uses it
         // (`src/widget/dnd_destination.rs:517-524`), which is GTK's own
         // convention for it.
-        let mut key = transfer_key(file)?.into_bytes();
+        let mut key = transfer_key(files)?.into_bytes();
         key.push(0);
         payloads.push((FILE_TRANSFER.to_owned(), key));
     }
     if offer != Offer::Portal {
-        let url = Url::from_file_path(file).map_err(|()| "the file has no absolute path")?;
-        payloads.push((URI_LIST.to_owned(), format!("{url}\r\n").into_bytes()));
+        let mut list = String::new();
+        for file in files {
+            let url = Url::from_file_path(file).map_err(|()| "the file has no absolute path")?;
+            list.push_str(&format!("{url}\r\n"));
+        }
+        payloads.push((URI_LIST.to_owned(), list.into_bytes()));
     }
     Ok(payloads)
 }
 
-/// Registers the file with the document portal, which is what makes a drop
-/// readable inside a sandbox, and answers with the key that stands for it.
-fn transfer_key(file: &Path) -> Result<String, String> {
-    let open = File::open(file).map_err(|e| format!("{}: {e}", file.display()))?;
+/// Registers the files with the document portal, which is what makes a drop
+/// readable inside a sandbox, and answers with the key that stands for them.
+fn transfer_key(files: &[PathBuf]) -> Result<String, String> {
+    let open: Vec<File> = files
+        .iter()
+        .map(|file| File::open(file).map_err(|e| format!("{}: {e}", file.display())))
+        .collect::<Result<_, _>>()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -313,8 +328,9 @@ fn transfer_key(file: &Path) -> Result<String, String> {
             .start_transfer(false, true)
             .await
             .map_err(|e| format!("StartTransfer: {e}"))?;
+        let fds: Vec<_> = open.iter().map(File::as_fd).collect();
         portal
-            .add_files(&key, &[&open.as_fd()])
+            .add_files(&key, &fds)
             .await
             .map_err(|e| format!("AddFiles: {e}"))?;
         Ok(key)

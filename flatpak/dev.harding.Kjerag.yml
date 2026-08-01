@@ -68,9 +68,19 @@ finish-args:
   # anywhere else is one `File > Open video...` away, through the portal, at
   # no permission at all.
   - --filesystem=xdg-videos:ro
-  # No other filesystem access on purpose: anything outside the videos folder
-  # arrives through the file chooser portal, or as a document-portal path from
-  # a source that registered it.
+  # The same again for network shares, which is where a footage library that
+  # outgrew a laptop actually lives: the file manager mounts a NAS through
+  # GVFS and every path under it is `/run/user/<uid>/gvfs/<mount>/...`, which
+  # is no more reachable from a sandbox than any other host path. This is the
+  # standard grant for it, and playing off the share is a capability the app
+  # has and the Flatpak would otherwise lose (issue #118, owner's own
+  # library). Read-only for the same reason as the line above, and measured
+  # rather than assumed: with `:ro` the mount lists inside the sandbox and a
+  # file on it reads.
+  - --filesystem=xdg-run/gvfs:ro
+  # No other filesystem access on purpose: anything outside those arrives
+  # through the file chooser portal, or as a document-portal path from a
+  # source that registered it.
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin
