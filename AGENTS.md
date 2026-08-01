@@ -142,6 +142,16 @@ CI does not run it and cannot: decode is VA-API against
 device every file is refused with `av_hwdevice_ctx_create: Input/output
 error` (measured), so a GPU-less runner would be checking nothing.
 
+## Releasing
+
+`cargo release patch --execute` on `main`, and that is the whole of it
+(issue #106): cargo-release bumps the version, stamps a dated entry into the
+metainfo changelog, tags the plain version with no `v`, and pushes. The tag is
+what makes `.github/workflows/release.yml` build the Flatpak and publish it as
+a GitHub Release. Its config is `release.toml`; its dry run, which is the
+default, runs `scripts/uitest.sh`, so the harness above is not skippable on
+the way to a tag. docs/RELEASING.md is one page and says the rest.
+
 ## Sound etiquette
 
 Any instrument or app run that emits audio (sync, playback, the app

@@ -1,0 +1,44 @@
+# cargo-release's configuration; `cargo release patch --execute` is the whole
+# release (docs/RELEASING.md). Dry run is its default, which is why there is
+# no ceremony around it here.
+#
+# The version lives in one place, `[workspace.package] version`, and this file
+# is what carries it to the other two: the metainfo entry a software centre
+# shows, and the tag the release workflow builds from.
+
+# The tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
+# 2026-08-01).
+tag-name = "{{version}}"
+tag-message = "Kjerag {{version}}"
+pre-release-commit-message = "release: {{version}}"
+
+# Five crates, one application: one version, one commit, one tag.
+shared-version = true
+consolidate-commits = true
+
+# Nothing goes to crates.io. The crate manifests say so as well
+# (`publish = false` in [workspace.package]), which is what actually stops the
+# publish step: cargo-release still prints "Publishing kjerag" and then passes
+# an empty package list to cargo, which returns without doing anything
+# (cargo-release 1.1.3, src/ops/cargo.rs:62).
+publish = false
+
+# The metainfo's <releases> is the changelog Flathub and every software centre
+# render, and this is the whole of keeping it in step: a new entry is stamped
+# at the top, newest first, dated today. `exactly = 1` is the guard - if the
+# file ever stops carrying a plain <releases>, the release stops here instead
+# of tagging a version the changelog does not mention.
+#
+# The `../../` is not a typo. cargo-release resolves a replacement's path and
+# runs a hook against the package's own directory (src/ops/replace.rs:80,
+# src/steps/hook.rs:181), and the package here is crates/app: the workspace's
+# `default-members` is what `cargo release` selects, so the other four crates
+# are skipped and this runs exactly once.
+pre-release-replacements = [
+  { file = "../../resources/dev.harding.Kjerag.metainfo.xml", search = "<releases>", replace = "<releases>\n    <release version=\"{{version}}\" type=\"development\" date=\"{{date}}\"/>", exactly = 1 },
+]
+
+# The one gate CI cannot run: the headless harness needs a GPU
+# (/dev/dri/renderD128), so a runner has nothing to check. Running it here is
+# what makes tagging without it impossible. It wants an otherwise idle box.
+pre-release-hook = ["../../scripts/uitest.sh"]

@@ -1,0 +1,65 @@
+name: release
+# A version tag is the whole trigger, and what comes out is one file a person
+# can install (issue #106): `flatpak install --user ./kjerag-….flatpak`.
+#
+# Both halves are stock. The build is Flatpak's own action, running in the
+# image Flathub builds with; the release is softprops/action-gh-release with
+# the notes GitHub writes itself. Nothing here knows anything about this
+# project that the manifest does not already say.
+#
+# The tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
+# 2026-08-01), and the pattern is the same statement: a digit-led tag starts a
+# release, a tag named `test` or `nightly` starts nothing.
+on:
+  push:
+    tags: ['[0-9]*']
+
+# What the release step writes with. Everything else stays read-only.
+permissions:
+  contents: write
+
+jobs:
+  # The gates a pull request runs, on the tagged commit, by calling the same
+  # workflow rather than restating it. It is what keeps a red commit from
+  # becoming a published artifact.
+  #
+  # scripts/uitest.sh is not among them and cannot be: it decodes on VA-API
+  # against /dev/dri/renderD128 and a runner has no GPU (AGENTS.md). It runs
+  # on the way to the tag instead, out of release.toml.
+  gates:
+    uses: ./.github/workflows/ci.yml
+
+  bundle:
+    needs: gates
+    runs-on: ubuntu-latest
+    # The image Flathub's own builds run in, on the runtime branch our
+    # manifest names. It carries flatpak-builder and the two tools its last
+    # steps need, `eu-strip` and gdk-pixbuf's SVG loader, which a bare runner
+    # does not have and this job used to install by hand.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      # Runs flatpak-builder against the committed manifest and
+      # flatpak/cargo-sources.json, installs the runtime and the two SDK
+      # extensions the manifest declares, and exports the single-file bundle
+      # with the runtime repository recorded in it, so it installs on a
+      # machine that has never had Flathub configured.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: flatpak/dev.harding.Kjerag.yml
+          bundle: kjerag-${{ github.ref_name }}-x86_64.flatpak
+          # The Release is where the bundle goes; a second copy as a workflow
+          # artifact would expire in 90 days and confuse which is which.
+          upload-artifact: false
+      - run: sha256sum kjerag-*.flatpak > kjerag-${{ github.ref_name }}-x86_64.flatpak.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            kjerag-${{ github.ref_name }}-x86_64.flatpak
+            kjerag-${{ github.ref_name }}-x86_64.flatpak.sha256
+          generate_release_notes: true
+          # A label after the version (0.1.0-rc1) is a prerelease, and GitHub
+          # is told rather than left to guess.
+          prerelease: ${{ contains(github.ref_name, '-') }}

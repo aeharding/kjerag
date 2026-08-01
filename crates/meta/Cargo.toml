@@ -5,6 +5,7 @@
 name = "kjerag-meta"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 
 [dependencies]
 prost = { workspace = true }

@@ -557,25 +557,39 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
-- 2026-08-01 **A paused window is owed a redraw until one arrives** (issue
-  #102, the owner's most-reported defect, confirmed four times). Under load
-  the redraw that follows the pause key can present a frame carrying **none**
-  of the window's content: the header bar is on it and the video and the
-  control row are not, and the pane is the theme's own background, one flat
-  colour, every one of its 2,150,400 bytes reading 27. Measured with three
-  probe widgets wrapped round the shell's view at three levels: not one of
-  them is visited for that present, while the pipeline's own per-present hook
-  is, so the frame is real and our content is not in it. This is the app's
-  boundary; what happens above it is iced's and is not reached from here.
+- 2026-08-01 **The blank paused window is a widget tree one child short**
+  (issue #102, the owner's most-reported defect, confirmed four times and then
+  met in real use). Taking your hands off a playing file hides the controls
+  and the header bar with them, and libcosmic keeps the header bar in the same
+  column as the video, so the column drops from two children to one. Pressing
+  space puts it back, and the widget tree rebuilt for that column comes back
+  **one child short**: `Tree::diff_children_custom` writes a child inserted in
+  front of an id-matched child over it instead of inserting it, and libcosmic
+  gives both children ids. `layout::flex::resolve` then walks widgets and tree
+  with `zip`, which stops at the shorter, so the content is never laid out and
+  keeps the `0x0` its slot was pre-filled with; `Column::draw` culls a
+  zero-area child, and the frame goes out as `layers=4 prims=0,0,0,0` - four
+  layers of chrome and no shader primitive at all. Header bar, no video, no
+  control row, every one of the pane's 2,150,400 bytes reading 27.
 
-  What made it stand was ours. `Scene::pump` answers `Next::Never` while
-  paused, so the window asks for nothing more and holds whatever that frame
-  left: 1.9 s on the run that found it, and until the next key press in
-  general, which is what four reports described. The shell now counts what it
-  does to the window, the widget records that count when a redraw reaches it,
-  and a paused file that has not caught up is poked every 100 ms until it
-  has. In the ordinary case the redraw in the same cycle catches up and the
-  poke never runs.
+  **`items=2 trees=1` on exactly the bad build**, against `items=2 trees=2` on
+  every good build in the same run: measured inside the shipped forks
+  (`pop-os/libcosmic` rev `dc1cf9f`) with trace prints built into a local copy
+  of them. Method, numbers and the twelve-line patch that clears it:
+  docs/research/blank-paused-window.md and
+  docs/research/libcosmic-tree-diff-102.patch. Nothing was raised with the
+  upstream project and nothing will be (AGENTS.md).
+
+  **A redraw cannot fix it** - the layout is cached in that user interface,
+  and a redraw 13 s later drew the same empty frame again. Only a rebuild
+  re-lays it out, and any message causes one. While playing, the 250 ms
+  controls poll already supplies one four times a second, which is the whole
+  reason this is only ever seen paused: `Scene::pump` answers `Next::Never`
+  there, so nothing asks and nothing arrives. What ships on the branch is that
+  same heartbeat for a paused window - the shell counts what it does to the
+  window, the widget records that count when a redraw reaches it, and a paused
+  file that has not caught up is rebuilt until it has. Usually it costs
+  nothing, because the redraw the keystroke already causes settles it.
 
   **The first predicate was wrong and the measurement caught it**: it called a
   window settled once two redraws running had drawn the same frame at the same
@@ -588,6 +602,36 @@ live, no keyframe UI ever.
   cannot see this failure, because the theme background it leaves behind is
   not black. Issue #91's flaky toast check was this defect all along.
 
+- 2026-08-01 **A version tag is the release, and nothing about it is ours**
+  (issue #106). `cargo release patch --execute` on main bumps the version,
+  stamps a dated entry into the metainfo changelog, tags the plain version
+  with no `v` in front of it, and pushes; the tag makes a workflow build the
+  Flatpak and publish `kjerag-<version>-x86_64.flatpak` and its `.sha256` as a
+  GitHub Release. The owner's rule for the whole path was that Kjerag is the
+  simplest project Flathub will ever see and its releases should be too, so
+  every piece is either an upstream tool used as its documentation intends or
+  it is gone. cargo-release owns the version, the changelog entry, the commit
+  and the tag; Flatpak's own GitHub action owns the build, in the image
+  Flathub builds with, which took a hand-written `apt-get` block and its two
+  archaeology comments (`eu-strip`, gdk-pixbuf's SVG loader) out of the tree
+  the day it arrived; softprops/action-gh-release and GitHub's own generated
+  notes own the release. What that left of our own is four lines: a tag
+  pattern, a bundle name, a `sha256sum`, and `release.toml`. An earlier
+  version of this work had a `scripts/version-check.sh` holding three copies
+  of the version in agreement, and it was deleted rather than kept: with one
+  tool writing all three from one number, the thing it verified cannot
+  disagree, and cargo-release's own `exactly = 1` on the changelog stamp is
+  the guard that the metainfo was really written. The release workflow calls
+  `ci.yml` rather than restating it, so a tag runs the gates a pull request
+  runs, and `scripts/uitest.sh` is in neither: a runner has no
+  `/dev/dri/renderD128`, so it is a cargo-release hook, which means the dry
+  run that precedes every release is also the harness run. Measured on the
+  pipeline's own test tags: about ten minutes end to end, an 8.1 MB bundle,
+  and `flatpak install --user` of it followed by `flatpak run
+  dev.harding.Kjerag --version` printing `kjerag 0.1.0`. The channel question
+  is not reopened by any of this: Flathub is still where a published app goes
+  (docs/DISTRIBUTION.md 4.1), and a single-file bundle is a file rather than a
+  channel.
 - 2026-08-01 **The room around the ball belongs to the window** (issue #100).
   The pass wrote a flat 0.10 grey wherever no lens has a ray; it now writes
   transparent black through a premultiplied blend and paints nothing there at
