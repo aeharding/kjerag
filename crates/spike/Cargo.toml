@@ -24,3 +24,25 @@ ffmpeg-next = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }
 wgpu = { workspace = true }
+# `dragsource` alone (issue #118): a drop can only be tested by a second
+# Wayland client performing the drag, because wtype presses keys and nothing
+# in the harness can drag. Every crate here is already in Cargo.lock through
+# libcosmic, so the instrument adds edges to the graph and no crate to the
+# Flatpak's source list.
+#
+# `ashpd` is the portal client, for the half of a drop a sandboxed app can
+# read: the file is registered with the document portal and the drag carries
+# the key. libcosmic reads the key back with the same crate
+# (`src/command.rs:66-72`), so both ends of the exchange are one library.
+ashpd = { workspace = true }
+# `poll` on the Wayland connection, so every wait in the instrument has an
+# end: a check that hangs is worse than a check that fails.
+libc = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+url = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true, features = ["client"] }
+# The pointer. A headless session has no input devices, so the button the drag
+# is started from comes from the virtual pointer protocol, which is the one
+# cage offers (`wlr_virtual_pointer_manager_v1_create`).
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
