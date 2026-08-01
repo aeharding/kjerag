@@ -1046,6 +1046,9 @@ struct Band {
     /// before and after differ by this stage and by nothing else.
     tone_held: bool,
     /// Which round of the circle the next frame reads.
+    /// How many times the measurement is dispatched per redraw. One, except
+    /// under [`ScenePipeline::band_repeats`].
+    repeats: u32,
     slice: u32,
     /// Where the last measured frame sat in the film, so the next one knows
     /// how much media time the state has aged by, and whether what happened
@@ -1168,6 +1171,20 @@ impl ScenePipeline {
         };
         queue.write_buffer(&self.band.watch, 0, watch.bytes());
         let mut encoder = device.create_command_encoder(&Default::default());
+        // Only ever more than one under `band_repeats`, and then each in a pass
+        // of its own: dispatches inside one pass have no barrier between them
+        // and a device is free to overlap them, which measures throughput where
+        // what is wanted is one redraw's worth of latency.
+        for _ in 1..self.band.repeats {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("band repeat"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.band.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(1, &self.band.group, &[]);
+            pass.dispatch_workgroups(watch.groups(), 1, 1);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("band"),
@@ -1376,6 +1393,22 @@ impl ScenePipeline {
         self.band.tone_held = held;
     }
 
+    /// Dispatch the measurement this many times per redraw instead of once,
+    /// so its cost can be read as a SLOPE (issue #103, stage 6).
+    ///
+    /// The same instrument-only switch as [`Self::hold_band`] and for a reason
+    /// of the same kind. A redraw's wall time on a box with other work on it is
+    /// the pass plus whatever else ran, and on this box that second term is
+    /// wider than the first: six alternating runs of two builds under a load
+    /// average of 21 came back 5.1 to 20.3 ms with the builds interleaved. The
+    /// noise is ADDITIVE and the pass is not, so `n` dispatches of it minus one
+    /// dispatch of it, over `n - 1`, is the pass with the box divided out.
+    ///
+    /// Nothing in the player calls this and no key reaches it.
+    pub fn band_repeats(&mut self, times: u32) {
+        self.band.repeats = times.max(1);
+    }
+
     /// The band as it stands, for an instrument. `None` where the device
     /// cannot map a buffer back, which is not a case the player has.
     ///
@@ -1517,6 +1550,7 @@ impl Band {
             read,
             held: false,
             tone_held: false,
+            repeats: 1,
             slice: 0,
             at: None,
         }

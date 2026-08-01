@@ -71,6 +71,7 @@ fn main() -> Fallible<()> {
         Mode::Trace => trace(&options),
         Mode::Sequence => sequence(&options),
         Mode::Render => render(&options),
+        Mode::Cost => cost(&options),
     }
 }
 
@@ -85,6 +86,8 @@ enum Mode {
     Sequence,
     /// One view before and after, and the difference at 8x.
     Render,
+    /// What the measurement costs, with the decode taken out of the timing.
+    Cost,
 }
 
 // ------------------------------------------------------------ the run
@@ -814,6 +817,97 @@ fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
     (0..AZIMUTHS).filter(|index| seen[*index]).collect()
 }
 
+// ------------------------------------------------------------ the cost
+
+/// What the band's measurement costs per redraw, with the decode outside the
+/// timing and the box's own load outside the answer (issue #103, stage 6).
+///
+/// `--bin playback` reports a whole-pass number that includes the decode, the
+/// pacing and whatever else the box is doing, and on a loaded box its spread is
+/// wider than the thing being measured: six alternating runs of two builds
+/// under a load average of 21 came back 5.1 to 20.3 ms with the two builds
+/// interleaved, which measures the box. This times **one call** - the prepare
+/// that dispatches the compute pass, the draw, and the readback that waits for
+/// both - over the same decoded frames, twice, with the band held and with it
+/// live. The decode happens between the timed calls.
+///
+/// **The minimum is the answer and the median is the check.** A redraw cannot
+/// go faster than the work in it, so the fastest of many is the least
+/// contended; a median far above it says the box was busy and not that the pass
+/// is slow.
+fn cost(options: &Options) -> Fallible<()> {
+    let gpu = Gpu::open()?;
+    println!("gpu:    {}", gpu.name);
+    let mut taken: Vec<(u32, Vec<f64>)> = Vec::new();
+    for repeats in [1u32, 1 + REPEATS] {
+        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut scene = Scene::still(&options.input, options.at())?;
+        scene.set_horizon(match options.lock {
+            true => Horizon::Locked,
+            false => Horizon::Free,
+        });
+        options.seam.hold(&scene);
+        pipeline.band_repeats(repeats);
+        let mut each = Vec::with_capacity(options.count);
+        while scene.frame().is_some() {
+            let started = std::time::Instant::now();
+            Render {
+                gpu: &gpu,
+                scene: &scene,
+                pipeline: &mut pipeline,
+            }
+            .frame(options.camera(), Sampling::default(), options.size())?;
+            each.push(started.elapsed().as_secs_f64() * 1e3);
+            if each.len() >= options.count || !scene.advance()? {
+                break;
+            }
+        }
+        taken.push((repeats, each));
+    }
+    println!(
+        "\ncost:   {} redraws at {}x{}, yaw {:.0} fov {:.0}, the decode outside the timing.\n\
+         \x20       the minimum is the answer: a redraw cannot go faster than the work in it.\n",
+        options.count,
+        options.size().width,
+        options.size().height,
+        options.yaw,
+        options.fov,
+    );
+    println!(
+        "{:<16} {:>10} {:>10} {:>10}",
+        "dispatches", "min ms", "median", "worst"
+    );
+    let mut floor = 0.0;
+    for (repeats, each) in &taken {
+        let mut sorted = each.clone();
+        sorted.sort_by(f64::total_cmp);
+        let min = sorted.first().copied().unwrap_or(0.0);
+        println!(
+            "{repeats:<16} {min:>10.3} {:>10.3} {:>10.3}",
+            sorted[sorted.len() / 2],
+            sorted.last().copied().unwrap_or(0.0),
+        );
+        match *repeats {
+            1 => floor = min,
+            _ => println!(
+                "\nthe band's measurement costs {:.3} ms per redraw, from the slope over \n\
+                 {REPEATS} extra dispatches, which is {:.1} percent of the 16.6 ms a 60 fps \n\
+                 frame has.",
+                (min - floor) / f64::from(REPEATS),
+                100.0 * (min - floor) / f64::from(REPEATS) / 16.6,
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// How many extra dispatches the slope is taken over.
+///
+/// Enough that the pass is much larger than the noise around it and few enough
+/// that a run is quick: at a couple of milliseconds a dispatch, sixteen of them
+/// is thirty milliseconds of work against a spread of a few.
+const REPEATS: u32 = 16;
+
 // ------------------------------------------------------------ pictures
 
 /// A stretch drawn frame by frame, so a rolly moment can be looked at as film
@@ -1047,6 +1141,7 @@ impl Options {
                         "trace" => Mode::Trace,
                         "sequence" => Mode::Sequence,
                         "render" => Mode::Render,
+                        "cost" => Mode::Cost,
                         _ => return Err(format!("no mode called {value}").into()),
                     }
                 }
