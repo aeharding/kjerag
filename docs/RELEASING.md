@@ -39,9 +39,11 @@ refused by `scripts/version-check.sh --notes` rather than silently dropped.
 Drop `type="development"` when the app is no longer pre-alpha.
 
 Then `cargo check` once, so `Cargo.lock` records the new version for the
-workspace's own crates. That does not touch `flatpak/cargo-sources.json`:
-path crates carry no `source` entry, so they are not sources, and
-`scripts/cargo-sources.sh --check` passes unchanged.
+workspace's own crates. That does not touch `flatpak/cargo-sources.json`, and
+the rule that a change to `Cargo.lock` is a change to that file does not bite
+here: path crates carry no `source` entry, so they are not sources. Measured
+on a 0.1.0 to 0.2.0 bump: five lines of `Cargo.lock` move and
+`scripts/cargo-sources.sh --check` still passes.
 
 ## 2. Check it here, including the one CI cannot
 
@@ -70,8 +72,8 @@ git tag -m 'Kjerag 0.2.0' v0.2.0 && git push origin v0.2.0
 ```
 
 That is the release. Watch it with `gh run watch` or the Actions tab. Measured
-on the pipeline's own test tag: 10m44s end to end, nine minutes of it the
-Flatpak build.
+on the pipeline's own test tags: 10m36s and 10m44s end to end, about nine
+minutes of it the Flatpak build.
 
 The `-m` is not decoration on this box: `tag.gpgsign` is on, a signed tag is
 an annotated tag, and a bare `git tag v0.2.0` stops with `fatal: no tag
