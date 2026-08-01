@@ -95,6 +95,13 @@ not and turns it into something the pilot can do. There is no line under them
 for a failure nobody anticipated, which is the part that makes this hold:
 there is nothing to fall back to, so nothing can be masked by falling back.
 
+A fourth line of ours is added rather than substituted, and the difference is
+the whole test: a stopped video reads the stall's own line and then "Open the
+file again.", because that open being over is a fact about the shell that the
+stall has no way to know. An addition hides nothing. The sentence it replaced
+("The picture could not be drawn, so playback stopped.") was a substitution,
+and it knew less than the stall underneath it.
+
 That makes the error messages in `meta`, `media` and `render` pilot-facing
 copy. They are still the layer's own to write, and they are still written at
 the failure site; what changed is that they are read by a person, so plain

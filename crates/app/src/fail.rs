@@ -87,7 +87,10 @@ impl Failure {
             // leaves this app is `None`.
             Self::Dropped => strings::DROPPED_NOTHING.to_owned(),
             Self::Portal(e) => e.clone(),
-            Self::Stopped(..) => strings::VIDEO_STOPPED_BODY.to_owned(),
+            // The stall's own line, and after it the one thing the stall
+            // cannot know: that this open is over and the way on is to open
+            // the file again. The terminal gets the same first half.
+            Self::Stopped(_, stall) => format!("{stall}. {}", strings::VIDEO_STOPPED_ACTION),
         }
     }
 
@@ -292,6 +295,11 @@ mod tests {
     /// Issue #124's own case, at the level the shell sees it: a picture that
     /// died mid file is an alert like any other failure, with a title of its
     /// own, because "cannot open file" is not what happened.
+    ///
+    /// And the body is the stall's own line with the way out on the end of it
+    /// (coordinator's call, 2026-08-01, on the ruling this branch is about).
+    /// It was a sentence of the shell's that knew less than the stall it stood
+    /// over, which is the thing this branch exists to delete.
     #[test]
     fn a_stopped_video_is_an_alert_and_not_a_refusal() {
         let mut alert = Alert::default();
@@ -300,12 +308,29 @@ mod tests {
         alert.raise(Failure::Stopped(file(), stall()));
         let (title, body) = alert.showing().expect("nothing on screen");
         assert_eq!(title, strings::VIDEO_STOPPED);
-        assert_eq!(body, strings::VIDEO_STOPPED_BODY);
+        assert_eq!(
+            body,
+            "61 frames could not be imported. Open the file again."
+        );
         assert_ne!(title, strings::CANNOT_OPEN);
 
         alert.close();
         assert!(!alert.is_up());
         assert_eq!(alert.showing(), None);
+    }
+
+    /// The two halves are the two things the pilot needs and neither knows the
+    /// other: the stall says what happened, in the words the terminal echo
+    /// carries, and the shell says what to do, which it is the only one in a
+    /// position to know (the capture is over and nothing is retrying).
+    #[test]
+    fn a_stopped_video_says_the_stalls_own_words_and_then_what_to_do() {
+        let raw = "17 frames could not be imported over 2.0 s, last: Too many open files";
+        let stopped = Failure::Stopped(file(), Stall::new(raw));
+        let body = stopped.said();
+        assert!(body.starts_with(raw), "{body}");
+        assert!(body.ends_with(strings::VIDEO_STOPPED_ACTION), "{body}");
+        assert!(stopped.echoed().ends_with(raw), "{}", stopped.echoed());
     }
 
     /// The terminal keeps the detail the alert leaves out: which file, and

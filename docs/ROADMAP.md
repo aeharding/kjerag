@@ -571,6 +571,18 @@ live, no keyframe UI ever.
   from being a mask, which is why the list is written down rather than left
   to judgement.
 
+  **The stopped-video alert went the same way** (coordinator's call on the
+  branch, applying the rule the branch had just written). Its body was "The
+  picture could not be drawn, so playback stopped. Open the file again.",
+  which knew less than the stall it stood over, so it did not qualify. The
+  body is the stall's own line with the action on the end of it now: "61
+  frames could not be imported over 2.0 s, last: Too many open files
+  (os error 24). Open the file again." Added rather than substituted, which
+  is the difference that makes a line of ours legitimate, and the only thing
+  that half of it carries is the one fact the render layer cannot have, that
+  this open is over. The terminal echo is unchanged, and so is everything
+  about when the alert appears and what closing it does.
+
   **Two failures had no reason to show and now do.** A drop the document
   portal refused printed its answer to the terminal and put the generic line
   in the window; it carries the portal's own words now. A drop with nothing

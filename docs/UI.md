@@ -245,10 +245,20 @@ a pilot who reads a sentence that says nothing has nothing to send.
 **And it is the only surface a failure has** (issue #124). A video that
 stopped part way through puts up the same alert with a title of its own
 ("Video stopped"), because it is the same thing from the pilot's side: no
-picture, and one action that fixes it. The alert's line is private to
-`crates/app/src/fail.rs` and nothing else in the app can put words there, so
-this is a property of the code rather than a rule to remember
-(docs/ARCHITECTURE.md). The one failure that is deliberately not an alert is a
+picture, and one action that fixes it. Its body follows the same rule as
+every other: the stall's own line, and then the action, which is the one
+thing the stall cannot know because it is the shell that decides an open is
+over.
+
+> 61 frames could not be imported over 2.0 s, last: Too many open files
+> (os error 24). Open the file again.
+
+The sentence that stood there until 2026-08-01 ("The picture could not be
+drawn, so playback stopped.") knew less than the line it stood over, and a
+line of ours is allowed over an error only when it knows more. The alert's
+line is private to `crates/app/src/fail.rs` and nothing else in the app can
+put words there, so this is a property of the code rather than a rule to
+remember (docs/ARCHITECTURE.md). The one failure that is deliberately not an alert is a
 capture that could not be written: the picture is still there and the pilot is
 still watching it, so that is a toast.
 

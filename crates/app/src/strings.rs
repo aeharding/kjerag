@@ -54,18 +54,23 @@ pub const DROPPED_NOTHING: &str =
 /// The same alert, for a video that was playing and stopped (issue #124).
 ///
 /// A title of its own, because "Cannot open file" is not what happened: the
-/// file opened, it played, and then the pictures stopped arriving. What
-/// actually failed goes to the terminal, where a bug report is written from
+/// file opened, it played, and then the pictures stopped arriving.
+pub const VIDEO_STOPPED: &str = "Video stopped";
+
+/// What to do about a stopped video, on the end of the stall's own line
 /// (`crate::fail`).
 ///
-/// The body says to open the file again because that is the only thing that
-/// works, and the app has to mean it: this open is over, and nothing behind
-/// the alert is retrying (`kjerag_render`'s `Stalled`). It was written before
-/// that was true, and the owner met the difference as five of these in one
-/// sitting.
-pub const VIDEO_STOPPED: &str = "Video stopped";
-pub const VIDEO_STOPPED_BODY: &str =
-    "The picture could not be drawn, so playback stopped. Open the file again.";
+/// This is not a sentence about the failure and it is not allowed to become
+/// one. The body was "The picture could not be drawn, so playback stopped."
+/// until 2026-08-01, which said less than the stall it was written over: the
+/// stall names the run, its length and the last error under it. So the reason
+/// is the stall's and this is the action, which the stall has no way to know,
+/// because it is the shell that decides an open is over.
+///
+/// The app has to mean it, too: nothing behind the alert is retrying
+/// (`kjerag_render`'s `Stalled`). It was written before that was true, and the
+/// owner met the difference as five of these in one sitting.
+pub const VIDEO_STOPPED_ACTION: &str = "Open the file again.";
 
 /// The file chooser.
 pub const OPEN_TITLE: &str = "Open video";
@@ -312,7 +317,7 @@ mod tests {
             DROPPED_NOTHING,
             CANNOT_OPEN,
             VIDEO_STOPPED,
-            VIDEO_STOPPED_BODY,
+            VIDEO_STOPPED_ACTION,
             CLOSE,
             OPEN_TITLE,
             INSV_FILTER,
