@@ -30,9 +30,22 @@
 //! fitted to the trace on each side of the seam with the crossover and a
 //! guard left out, and the two lines are extrapolated to the seam. Their
 //! difference there is the **step**: how far the picture moves the horizon
-//! across the handover, in view pixels and in degrees. A great circle
-//! projects to a straight line in a rectilinear view, so a horizon really is
-//! straight and a step in it is the seam's and not the terrain's.
+//! across the handover, in view pixels and in degrees.
+//!
+//! **Two windows, and they do not agree** (issue #103, stage 6). This was
+//! written on the argument that a great circle projects to a straight line, so
+//! a horizon is straight and a step in it is the seam's. What the trace
+//! follows on real footage is a treeline or a ridge a few kilometres off,
+//! which is not a great circle, and extrapolating a straight line to the seam
+//! from four degrees out turns that curvature into step: the owner's own
+//! reference frame with the band held off reads 10.4, 20.9, 30.5, 32.8 and
+//! 37.8 view px at `guard` 1.2, 1.6, 2.0, 2.5 and 3.5. So `step:` is the
+//! campaign's own window, kept so its earlier numbers stay readable, and
+//! `close:` is the same measurement over the two degrees just outside the
+//! crossover, where the fits' own rms says a line describes the points. A
+//! DIFFERENCE between two builds is trustworthy in either window, because the
+//! along-seam correction rotates one hemisphere and moves that side's whole
+//! trace by a constant (23.2 px in all three windows, measured).
 //!
 //! `trace=1` writes the trace and both fits as a table, and every run writes
 //! an overlay with the seam, the crossover edges, the fitted lines and the
@@ -43,7 +56,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use kjerag_media::Fallible;
-use kjerag_render::{Camera, Cell, Cue, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size};
+use kjerag_render::{
+    Along, Camera, Cell, Cue, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size,
+};
 use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
 
 /// How far either side of the seam the horizon is fitted, in degrees.
@@ -52,6 +67,21 @@ use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
 /// is local to the seam: the terrain a horizon runs along is straight over a
 /// few degrees and the view is 20 across.
 const FIT_DEG: f64 = 4.0;
+
+/// How far the close-in fit reaches, in degrees (issue #103, stage 6).
+///
+/// Two, because the line has to describe its own points and a ridge does not
+/// stay straight for longer than that: on the owner's reference frame the fit
+/// rms is 0.97 and 0.51 px over this window against 2.07 and 0.84 over
+/// [`FIT_DEG`] from `guard=2.5`.
+const CLOSE_DEG: f64 = 2.0;
+
+/// How far past the crossover's own edge the close-in fit starts.
+///
+/// Small, and it can be: it is measured against the crossover this frame drew
+/// rather than against the widest one stage 4 may open, so what it has to
+/// clear is the taper and not a worst case.
+const CLOSE_MARGIN_DEG: f64 = 0.2;
 
 /// How far either side of the seam is left out of both fits, in degrees.
 ///
@@ -83,10 +113,13 @@ const OUTLIER: f64 = 2.0;
 /// How many rounds of that.
 const REFITS: usize = 3;
 
-/// The outermost off-epipolar offset the band's search can return, in degrees:
-/// `PERP_DEG / PERP_STEPS` rounded to the correlation step, which is the whole
-/// range the axis is searched over either side of zero.
-const RAIL_DEG: f64 = 0.299;
+/// The outermost along-seam offset the band's search can return, in degrees,
+/// read off the band itself rather than written down here: a reading at the
+/// rail is the search running out and not an answer, and this instrument's
+/// whole point is to count them.
+fn rail_deg() -> f64 {
+    f64::from(kjerag_render::PERP_DEG) - 1e-3
+}
 
 /// How many columns either side of the crossing the horizon's own slope is
 /// read over, so the attribution below knows what this edge can and cannot
@@ -130,7 +163,7 @@ fn main() -> Fallible<()> {
     let mapped = scene
         .mapped(options.camera(), 1.0)
         .ok_or("no frame to map")?;
-    let cells = pipeline.band_state(&gpu.device, &gpu.queue)?;
+    let (along, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
     let (_, at) = scene.frame().ok_or("no frame")?;
     println!(
         "played: {frames} frame(s), ending at {:.3} s, band {}",
@@ -143,7 +176,7 @@ fn main() -> Fallible<()> {
 
     let field = Field::of(&mapped, options.size());
     let trace = Trace::of(&picture, &field, &options);
-    report(&mapped, &field, &trace, &cells, &options);
+    report(&mapped, &field, &trace, &cells, along, &options);
     if options.trace {
         trace.print();
     }
@@ -214,12 +247,43 @@ struct Trace {
     /// One entry per column that had a horizon in it: the column, the
     /// sub-pixel row, and how far past the seam that pixel is.
     points: Vec<(f64, f64, f64)>,
-    /// The two fits, as slope and intercept in `row = a * past + b`, where
-    /// `past` is degrees past the seam. Fitted against the seam angle rather
-    /// than against the column so that the extrapolation to the seam is a
-    /// read of `b` and the two sides are directly comparable.
-    fits: [Option<(f64, f64)>; 2],
-    kept: [usize; 2],
+    /// The two fits over [`FIT_DEG`] starting at [`Options::guard`], which is
+    /// the window every acceptance number in this campaign has been quoted at.
+    fits: [Option<Fitted>; 2],
+    /// The same two over [`CLOSE_DEG`], starting just outside this frame's own
+    /// crossover (issue #103, stage 6).
+    ///
+    /// **The wide window's premise is that a horizon is straight, and on real
+    /// footage it is not.** What the trace follows is a treeline or a ridge at
+    /// a few kilometres, which is not a great circle: on the owner's own
+    /// reference frame one side reads +5.32 px/deg of slope over the two
+    /// degrees outside the crossover and +2.03 over `guard=2.5`'s window, at
+    /// twice the fit rms. Extrapolating a straight line from four degrees out
+    /// turns that curvature into step, and the same frame with the band held
+    /// off reads 10.4, 20.9, 30.5, 32.8 and 37.8 view px at `guard` 1.2, 1.6,
+    /// 2.0, 2.5 and 3.5.
+    ///
+    /// The DIFFERENCE between two builds is window-independent, because the
+    /// along-seam correction is a rotation of one hemisphere and moves that
+    /// side's whole trace by a constant: 23.2 px in all three windows,
+    /// measured. So the campaign's before-and-after deltas stand and its
+    /// absolute numbers carry the terrain as well as the seam. This column is
+    /// the absolute one: the shortest window a line still describes.
+    close: [Option<Fitted>; 2],
+}
+
+/// One side's straight line through the trace, and how well it describes it.
+struct Fitted {
+    /// Slope and intercept in `row = a * past + b`, where `past` is degrees
+    /// past the seam. Fitted against the seam angle rather than against the
+    /// column so that the extrapolation to the seam is a read of `b` and the
+    /// two sides are directly comparable.
+    line: (f64, f64),
+    kept: usize,
+    /// How far the kept points sit from that line, in pixels. A step read off
+    /// two lines that do not describe their own points is a step read off the
+    /// terrain.
+    rms: f64,
 }
 
 impl Trace {
@@ -263,12 +327,14 @@ impl Trace {
         let mut trace = Self {
             points,
             fits: [None, None],
-            kept: [0, 0],
+            close: [None, None],
         };
+        // Just outside the crossover this frame actually drew, which is what
+        // stage 4 may have opened rather than what it opens at zero disparity.
+        let from = field.half_deg + CLOSE_MARGIN_DEG;
         for side in 0..2 {
-            let (fit, kept) = trace.fit(side, options);
-            trace.fits[side] = fit;
-            trace.kept[side] = kept;
+            trace.fits[side] = trace.fit(side, options.guard, FIT_DEG);
+            trace.close[side] = trace.fit(side, from, CLOSE_DEG);
         }
         trace
     }
@@ -277,10 +343,10 @@ impl Trace {
     /// and positive. A straight line, refitted with the points furthest from
     /// it dropped, because a treeline holds one tall tree and a horizon does
     /// not bend.
-    fn fit(&self, side: usize, options: &Options) -> (Option<(f64, f64)>, usize) {
+    fn fit(&self, side: usize, from: f64, reach: f64) -> Option<Fitted> {
         let inside = |past: f64| {
             let far = past.abs();
-            far >= options.guard && far <= options.guard + FIT_DEG && (past < 0.0) == (side == 0)
+            far >= from && far <= from + reach && (past < 0.0) == (side == 0)
         };
         let mut kept: Vec<(f64, f64)> = self
             .points
@@ -289,9 +355,7 @@ impl Trace {
             .map(|(_, row, past)| (*past, *row))
             .collect();
         for _ in 0..REFITS {
-            let Some(line) = line(&kept) else {
-                return (None, 0);
-            };
+            let line = line(&kept)?;
             let spread = rms(&kept, line);
             let before = kept.len();
             kept.retain(|(past, row)| (row - (line.0 * past + line.1)).abs() <= OUTLIER * spread);
@@ -299,7 +363,12 @@ impl Trace {
                 break;
             }
         }
-        (line(&kept), kept.len())
+        let line = line(&kept)?;
+        Some(Fitted {
+            line,
+            kept: kept.len(),
+            rms: rms(&kept, line),
+        })
     }
 
     /// Where the traced horizon crosses the seam, and how steeply it runs
@@ -393,7 +462,14 @@ fn line(points: &[(f64, f64)]) -> Option<(f64, f64)> {
 
 // ------------------------------------------------------------ the report
 
-fn report(mapped: &Reframe, field: &Field, trace: &Trace, cells: &[Cell], options: &Options) {
+fn report(
+    mapped: &Reframe,
+    field: &Field,
+    trace: &Trace,
+    cells: &[Cell],
+    along: Along,
+    options: &Options,
+) {
     let px_per_deg = field.px_per_deg(options.camera());
     println!(
         "\nseam:   crossover {:.2} deg wide at zero disparity, {:.1} view px; \
@@ -402,24 +478,59 @@ fn report(mapped: &Reframe, field: &Field, trace: &Trace, cells: &[Cell], option
         2.0 * field.half_deg * px_per_deg,
         px_per_deg,
     );
-    let (Some(near), Some(far)) = (trace.fits[0], trace.fits[1]) else {
+    let ([Some(near), Some(far)], close) = (&trace.fits, &trace.close) else {
         println!("step:   no horizon fitted on both sides of the seam");
         return;
     };
-    let step = far.1 - near.1;
+    let step = far.line.1 - near.line.1;
     println!(
-        "fits:   near side slope {:+.3} px/deg over {} columns, far side {:+.3} over {}",
-        near.0, trace.kept[0], far.0, trace.kept[1],
+        "fits:   near side slope {:+.3} px/deg over {} columns at rms {:.2}, \
+         far side {:+.3} over {} at {:.2}",
+        near.line.0, near.kept, near.rms, far.line.0, far.kept, far.rms,
     );
     println!(
         "step:   {:+.2} view px at the seam, which is {:+.4} deg. \
          Slopes differ by {:+.3} px/deg.",
         step,
         step / px_per_deg,
-        far.0 - near.0,
+        far.line.0 - near.line.0,
     );
-    attribute(mapped, field, trace, step);
-    band_says(cells, px_per_deg);
+    close_in(close, px_per_deg);
+    if let Some(rows) = attribute(mapped, field, trace, step) {
+        applied_at(mapped, trace, cells, along, field, rows);
+    }
+    band_says(cells, along, px_per_deg);
+}
+
+/// The same step off the two degrees just outside the crossover, where a
+/// straight line still describes the trace (issue #103, stage 6).
+///
+/// Printed beside the wide one rather than instead of it: the wide window is
+/// what every earlier acceptance number in this campaign was quoted at, and a
+/// column that quietly changed meaning would make those numbers unreadable.
+/// Where the two disagree, the rms columns say which line is describing its own
+/// points and which is describing the hill.
+fn close_in(close: &[Option<Fitted>; 2], px_per_deg: f64) {
+    let [Some(near), Some(far)] = close else {
+        println!("close:  no horizon fitted on both sides just outside the crossover");
+        return;
+    };
+    let step = far.line.1 - near.line.1;
+    println!(
+        "close:  {:+.2} view px, {:+.4} deg, off the {:.1} deg starting {:.2} past the \
+         crossover edge\n\
+         \x20       (near {} columns at rms {:.2}, far {} at {:.2}; a ridge is not a great \
+         circle, so the\n\
+         \x20       wide window above extrapolates its curvature into step)",
+        step,
+        step / px_per_deg,
+        CLOSE_DEG,
+        CLOSE_MARGIN_DEG,
+        near.kept,
+        near.rms,
+        far.kept,
+        far.rms,
+    );
 }
 
 /// Which of the seam's two axes the step is on.
@@ -428,13 +539,14 @@ fn report(mapped: &Reframe, field: &Field, trace: &Trace, cells: &[Cell], option
 /// before it means anything. The epipolar axis is the one a distance
 /// displaces content along and the one the band bends; the axis across it is
 /// the one only the calibration can reach, and **nothing in the pass ever
-/// corrects it** ([`Cell::off_epi`] is measured and never applied). What is
-/// printed is how many rows one degree on each axis would move this horizon
-/// by, so the measured step can be read as degrees of either.
-fn attribute(mapped: &Reframe, field: &Field, trace: &Trace, step: f64) {
+/// corrects it** before issue #103 stage 5. What is printed is how many rows
+/// one degree on each axis would move this horizon by, so the measured step
+/// can be read as degrees of either, and those two numbers are returned so
+/// that what the pass applied there can be read in the same units.
+fn attribute(mapped: &Reframe, field: &Field, trace: &Trace, step: f64) -> Option<(f64, f64)> {
     let Some((slope, at)) = trace.crossing() else {
         println!("axes:   no crossing to attribute the step at");
-        return;
+        return None;
     };
     let (w, h) = (f64::from(field.size.width), f64::from(field.size.height));
     let uv = |x: f64, y: f64| [(x / w) as f32, (y / h) as f32];
@@ -444,11 +556,11 @@ fn attribute(mapped: &Reframe, field: &Field, trace: &Trace, step: f64) {
         mapped.view_ray(uv(at.0, at.1 + 1.0)),
     ) else {
         println!("axes:   the crossing is off the map");
-        return;
+        return None;
     };
     let Some(ring) = mapped.seam_at(ray) else {
         println!("axes:   the crossing is not on the seam circle");
-        return;
+        return None;
     };
     // The rotation `body_ray` applies, as three columns, so its transpose
     // takes a body direction back into the view's own frame.
@@ -487,8 +599,9 @@ fn attribute(mapped: &Reframe, field: &Field, trace: &Trace, step: f64) {
         true => println!("        as {name}, the step is {:+.3} deg", step / rows),
         false => println!("        {name} is edge-on here: this horizon cannot show it"),
     };
-    read("epipolar (the band's own axis)", epi);
-    read("along the seam (never corrected)", perp);
+    read("epipolar (depth)", epi);
+    read("along the seam (the camera)", perp);
+    Some((epi, perp))
 }
 
 /// A view-space displacement as pixels, least squares over the two pixel
@@ -510,50 +623,101 @@ fn resolve(tangents: [[f64; 3]; 2], delta: [f64; 3]) -> (f64, f64) {
 
 /// What the band's own state says about the same seam, so the picture's
 /// answer and the pass's answer are printed side by side.
-fn band_says(cells: &[Cell], px_per_deg: f64) {
-    let mut measured = 0;
-    let mut railed = 0;
-    let (mut sum, mut worst) = (0.0f64, 0.0f64);
-    let (mut off_sum, mut off_worst) = (0.0f64, 0.0f64);
-    for cell in cells {
-        if cell.confidence <= 0.0 {
-            continue;
-        }
-        measured += 1;
-        let applied = f64::from(cell.disparity).to_degrees().abs();
-        sum += applied;
-        worst = worst.max(applied);
-        let off = f64::from(cell.off_epi).to_degrees().abs();
-        off_sum += off;
-        off_worst = off_worst.max(off);
-        // The off-epipolar search is three offsets wide, so a reading at the
-        // outer one is the search running out rather than an answer.
-        railed += usize::from(off >= RAIL_DEG);
-    }
-    if measured == 0 {
+///
+/// Both channels, each with its own evidence, because since stage 5 they are
+/// smoothed apart, refused apart and applied apart, and a single count would
+/// hide exactly the case this instrument was built to catch.
+fn band_says(cells: &[Cell], along: Along, px_per_deg: f64) {
+    let channel = |live: fn(&Cell) -> bool, of: fn(&Cell) -> f32| {
+        let read: Vec<f64> = cells
+            .iter()
+            .filter(|cell| live(cell))
+            .map(|cell| f64::from(of(cell)).to_degrees().abs())
+            .collect();
+        let count = read.len();
+        let sum: f64 = read.iter().sum();
+        let worst = read.iter().copied().fold(0.0, f64::max);
+        let railed = read.iter().filter(|deg| **deg >= rail_deg()).count();
+        (count, sum / count.max(1) as f64, worst, railed)
+    };
+    let (epi_n, epi_mean, epi_worst, _) = channel(|c| c.confidence > 0.0, |c| c.disparity);
+    let (off_n, off_mean, off_worst, railed) = channel(|c| c.off_conf > 0.0, |c| c.off_epi);
+    if epi_n == 0 && off_n == 0 {
         println!("band:   nothing measured: the state is the zero a file opens in");
         return;
     }
     println!(
-        "band:   {measured} of {} directions have evidence; mean |disparity| {:.3} deg \
-         ({:.1} px), worst {:.3} deg ({:.1} px)",
+        "band:   epipolar (depth): {epi_n} of {} directions have evidence; mean {epi_mean:.3} deg \
+         ({:.1} px), worst {epi_worst:.3} deg ({:.1} px)",
         cells.len(),
-        sum / measured as f64,
-        sum / measured as f64 * px_per_deg,
-        worst,
-        worst * px_per_deg,
+        epi_mean * px_per_deg,
+        epi_worst * px_per_deg,
     );
     println!(
-        "        off-epi, measured and NEVER applied: mean {:.3} deg ({:.1} px), \
-         worst {:.3} deg ({:.1} px)",
-        off_sum / measured as f64,
-        off_sum / measured as f64 * px_per_deg,
-        off_worst,
+        "        along the seam (the camera): {off_n} with evidence; mean {off_mean:.3} deg \
+         ({:.1} px), worst {off_worst:.3} deg ({:.1} px)",
+        off_mean * px_per_deg,
         off_worst * px_per_deg,
     );
     println!(
-        "        {railed} of those {measured} sit ON the off-epipolar search limit,          which is {:.0} percent: the axis is not being measured, it is being clipped",
-        100.0 * railed as f64 / measured as f64,
+        "        {railed} of those {off_n} sit ON the {:.2} deg search limit, which is {:.0} \
+         percent",
+        rail_deg(),
+        100.0 * railed as f64 / off_n.max(1) as f64,
+    );
+    println!(
+        "        the field: roll {:+.3} deg, one cycle {:.3} deg at phase {:.0}, two cycles \
+         {:.3} at {:.0},\n        over {:.1} directions of evidence",
+        f64::from(along.terms[0]).to_degrees(),
+        f64::from(along.terms[1].hypot(along.terms[2])).to_degrees(),
+        f64::from(along.terms[2].atan2(along.terms[1])).to_degrees(),
+        f64::from(along.terms[3].hypot(along.terms[4])).to_degrees(),
+        f64::from(along.terms[4].atan2(along.terms[3])).to_degrees() / 2.0,
+        along.evidence,
+    );
+    match kjerag_render::depth_leak(cells) {
+        Some(leak) => println!(
+            "        leak: the two channels correlate at {leak:+.3} round the ring. Parallax is \
+             epipolar by construction,\n        so anything but zero here is depth reaching an \
+             axis that cannot hold it",
+        ),
+        None => println!("        leak: too few directions have both channels to say"),
+    }
+}
+
+/// What the pass actually applies where the horizon crosses, which is not the
+/// same question as what the ring holds on average.
+///
+/// The two cells a crossing falls between are read the way the shader reads
+/// them - each channel at its own evidence, taxed by `KEEP` - and the answer
+/// is turned into rows through the same two axis sensitivities the
+/// attribution above prints. A correction the ring has and the crossing does
+/// not is the failure this exists to name.
+fn applied_at(
+    mapped: &Reframe,
+    trace: &Trace,
+    cells: &[Cell],
+    along: Along,
+    field: &Field,
+    rows: (f64, f64),
+) {
+    let Some((_, at)) = trace.crossing() else {
+        return;
+    };
+    let (w, h) = (f64::from(field.size.width), f64::from(field.size.height));
+    let Some(ray) = mapped.view_ray([(at.0 / w) as f32, (at.1 / h) as f32]) else {
+        return;
+    };
+    let reading = mapped.reading_at(ray, cells, along);
+    let (epi, along) = (
+        f64::from(reading.epi).to_degrees(),
+        f64::from(reading.along).to_degrees(),
+    );
+    println!(
+        "at it:  the pass applies {epi:+.3} deg epipolar and {along:+.3} deg along the seam \
+         where the horizon crosses,\n        which is {:+.1} and {:+.1} rows of this edge",
+        epi * rows.0,
+        along * rows.1,
     );
 }
 
@@ -590,19 +754,24 @@ fn overlay(picture: &Picture, field: &Field, trace: &Trace) -> Picture {
     for (x, row, _) in &trace.points {
         paint(*x as usize, *row as usize, [0, 255, 255]);
     }
+    // Both windows' fits, so the overlay shows what the two numbers in the
+    // report were read off: magenta is the wide one, cyan-green the close-in.
     for x in 0..w {
-        for (side, fit) in trace.fits.iter().enumerate() {
-            let Some((a, b)) = fit else { continue };
-            let mut column = None;
-            for y in 0..h {
-                let past = field.at(x, y);
-                if past.is_finite() && (past < 0.0) == (side == 0) {
-                    column = Some(past);
-                    break;
+        for (fits, colour) in [(&trace.fits, [255, 0, 255]), (&trace.close, [0, 255, 128])] {
+            for (side, fit) in fits.iter().enumerate() {
+                let Some(fit) = fit else { continue };
+                let mut column = None;
+                for y in 0..h {
+                    let past = field.at(x, y);
+                    if past.is_finite() && (past < 0.0) == (side == 0) {
+                        column = Some(past);
+                        break;
+                    }
                 }
+                let Some(past) = column else { continue };
+                let (a, b) = fit.line;
+                paint(x, (a * past + b).round().max(0.0) as usize, colour);
             }
-            let Some(past) = column else { continue };
-            paint(x, (a * past + b).round().max(0.0) as usize, [255, 0, 255]);
         }
     }
     Picture {

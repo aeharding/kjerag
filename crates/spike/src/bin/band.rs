@@ -49,7 +49,7 @@ use kjerag_render::Cue;
 use kjerag_render::{
     AZIMUTHS, Camera, Cell, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size,
 };
-use kjerag_spike::{FORMAT, Gpu, Picture, Render};
+use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
 
 /// How many view pixels one degree is at the width the seam residuals are
 /// quoted in: 1920 across 90 degrees, at the centre of a rectilinear view
@@ -71,6 +71,7 @@ fn main() -> Fallible<()> {
         Mode::Trace => trace(&options),
         Mode::Sequence => sequence(&options),
         Mode::Render => render(&options),
+        Mode::Cost => cost(&options),
     }
 }
 
@@ -85,6 +86,8 @@ enum Mode {
     Sequence,
     /// One view before and after, and the difference at 8x.
     Render,
+    /// What the measurement costs, with the decode taken out of the timing.
+    Cost,
 }
 
 // ------------------------------------------------------------ the run
@@ -93,6 +96,9 @@ enum Mode {
 struct Read {
     at: Duration,
     cells: Vec<Cell>,
+    /// The along-seam field fitted over the whole ring, which is what the
+    /// pass applies on that axis (issue #103, stage 5).
+    along: kjerag_render::Along,
     picture: Picture,
     /// The map this frame was drawn through. Kept because the horizon lock
     /// turns the body under the view, so which pixels are near the seam is a
@@ -121,7 +127,7 @@ fn play(
         true => Horizon::Locked,
         false => Horizon::Free,
     });
-    scene.fit_seam(true);
+    options.seam.hold(&scene);
     pipeline.hold_band(options.off);
     let mut reads = Vec::with_capacity(options.count);
     while let Some((_, at)) = scene.frame() {
@@ -132,9 +138,11 @@ fn play(
         }
         .frame(options.camera(), Sampling::default(), options.size())?;
         each(&picture, reads.len())?;
+        let (along, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
         reads.push(Read {
             at,
-            cells: pipeline.band_state(&gpu.device, &gpu.queue)?,
+            cells,
+            along,
             picture,
             mapped: scene
                 .mapped(options.camera(), 1.0)
@@ -401,6 +409,81 @@ fn geometry(last: &Read) {
         held.len(),
         held.len() - towards,
     );
+    along_seam(last);
+}
+
+/// The along-seam channel: what the ring read, what the field fitted to it,
+/// and the control that replaced not applying it (issue #103, stage 5).
+///
+/// The old control was that this axis was never applied, so a reading far
+/// smaller than the disparity said the band was a stereo pair. That claim went
+/// when the channel started reaching the picture. Its replacement is the
+/// **correlation between the two channels round the ring**: parallax is
+/// epipolar by construction, so if any of it were reaching an axis that cannot
+/// hold it - a wrong baseline, a mis-built ring - the two would move together.
+fn along_seam(last: &Read) {
+    let live: Vec<&Cell> = last.cells.iter().filter(|c| c.off_conf > 0.0).collect();
+    if live.is_empty() {
+        println!(
+            "
+along the seam: nothing correlated on that axis."
+        );
+        return;
+    }
+    let read: Vec<f64> = live
+        .iter()
+        .map(|c| f64::from(c.off_epi.to_degrees()))
+        .collect();
+    let rail = f64::from(kjerag_render::PERP_DEG) - 1e-3;
+    let railed = read.iter().filter(|deg| deg.abs() >= rail).count();
+    let terms = last.along.terms.map(|t| f64::from(t.to_degrees()));
+    println!(
+        "
+along the seam: {} of {} directions read it, worst {:.3} deg, {railed} against the 
+         {:.2} deg search limit. the axis a distance CANNOT displace content along, so what is 
+         here is the camera and nothing else.
+         the field: roll {:+.3} deg, one cycle {:.3} deg at phase {:.0}, two cycles {:.3} at 
+         {:.0}, over {:.1} directions of evidence. what the field leaves on the ring it was 
+         fitted to is {:.3} deg rms.",
+        live.len(),
+        last.cells.len(),
+        read.iter()
+            .fold(0.0, |worst: f64, deg| worst.max(deg.abs())),
+        rail,
+        terms[0],
+        terms[1].hypot(terms[2]),
+        terms[2].atan2(terms[1]).to_degrees(),
+        terms[3].hypot(terms[4]),
+        terms[4].atan2(terms[3]).to_degrees() / 2.0,
+        f64::from(last.along.evidence),
+        left(last),
+    );
+    match kjerag_render::depth_leak(&last.cells) {
+        Some(leak) => println!(
+            "the control: the two channels correlate at {leak:+.3} round the ring. parallax is 
+             epipolar by construction, so anything but zero here is depth reaching an axis that 
+             cannot hold it.",
+        ),
+        None => println!("the control: too few directions carry both channels to say."),
+    }
+}
+
+/// What the fitted field leaves on the readings it was fitted to, in degrees
+/// root mean square: the part of the along-seam residual a constant and two
+/// cycles cannot describe.
+fn left(last: &Read) -> f64 {
+    let mut total = 0.0f64;
+    let mut count = 0.0f64;
+    for (index, cell) in last.cells.iter().enumerate() {
+        if cell.off_conf <= 0.0 {
+            continue;
+        }
+        let (sin, cos) = (index as f32 / last.cells.len() as f32 * std::f32::consts::TAU).sin_cos();
+        let left = f64::from((cell.off_epi - last.along.at(cos, sin)).to_degrees());
+        total += left * left;
+        count += 1.0;
+    }
+    (total / count.max(1.0)).sqrt()
 }
 
 /// How much the applied bend moves frame to frame, and the control that says
@@ -436,6 +519,18 @@ fn flicker(reads: &[Read], options: &Options) {
         far.0 * VIEW_PX_PER_DEG,
         far.0 * 1920.0 / 24.1,
     );
+    // The along-seam field is the third thing the band puts in the picture
+    // (stage 5), and it is the one that reaches a whole hemisphere rather than
+    // a two-degree band, so it has more reason to be still than either.
+    let along = stepped_along(reads, 0.0);
+    println!(
+        "\nalong:   {:.4} deg rms frame to frame at the same {WATCHED} directions, which is \n\
+         {:.2} view px, and a worst single step of {:.4} deg. this one is applied over lens 1's \n\
+         whole picture rather than across the band, so it is the column with the most to lose.",
+        along.0,
+        along.0 * VIEW_PX_PER_DEG,
+        along.1,
+    );
     // The band's WIDTH is the second thing a reading decides (stage 4), and it
     // moves the weights of every pixel of the crossover, so it has to be as
     // steady as the bend. It has no filter of its own: it is a function of the
@@ -464,13 +559,15 @@ fn flicker(reads: &[Read], options: &Options) {
          frame has to come back at 2s, added in quadrature to what the file already had. a \n\
          flicker column is a negative result and means nothing until it is shown able to read \n\
          a positive one.\n\
-         \n             step        bend    expected       width    expected"
+         \n             step        bend    expected       along    expected       width    expected"
     );
     for step in [0.05f64, 0.20] {
         println!(
-            "         {step:>8.2}d {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
+            "         {step:>8.2}d {:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
             stepped(reads, step.to_radians()).0,
             measured.0.hypot(2.0 * step),
+            stepped_along(reads, step.to_radians()).0,
+            along.0.hypot(2.0 * step),
             stepped_width(reads, step.to_radians()).0,
             opened.0.hypot(2.0 * step),
         );
@@ -537,6 +634,20 @@ fn shaken(frame: usize, step: f64) -> f64 {
 fn stepped(reads: &[Read], shake: f64) -> (f64, f64) {
     stepped_by(reads, |read, frame, direction| {
         held(read, direction) + shaken(frame, shake)
+    })
+}
+
+/// The same for the ALONG-SEAM field (issue #103, stage 5).
+///
+/// The same directions, the same units and the same control, because it is the
+/// same kind of quantity: a number the shader reads off the band that moves
+/// the picture if it moves. What is watched is the field's own answer at each
+/// direction, which is what a pixel there is actually bent by, and not the
+/// per-direction readings it was fitted to.
+fn stepped_along(reads: &[Read], shake: f64) -> (f64, f64) {
+    stepped_by(reads, |read, frame, direction| {
+        let (sin, cos) = (direction as f32 / WATCHED as f32 * std::f32::consts::TAU).sin_cos();
+        f64::from(read.along.at(cos, sin)) + shaken(frame, shake)
     })
 }
 
@@ -706,6 +817,121 @@ fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
     (0..AZIMUTHS).filter(|index| seen[*index]).collect()
 }
 
+// ------------------------------------------------------------ the cost
+
+/// What the band's measurement costs per redraw, with the decode outside the
+/// timing and the box's own load outside the answer (issue #103, stage 6).
+///
+/// `--bin playback` reports a whole-pass number that includes the decode, the
+/// pacing and whatever else the box is doing, and on a loaded box its spread is
+/// wider than the thing being measured: six alternating runs of two builds
+/// under a load average of 21 came back 5.1 to 20.3 ms with the two builds
+/// interleaved, which measures the box. This times **one call** - the prepare
+/// that dispatches the compute pass, the draw, and the readback that waits for
+/// both - over the same decoded frames, twice, with the band held and with it
+/// live. The decode happens between the timed calls.
+///
+/// **The minimum is the answer and the median is the check.** A redraw cannot
+/// go faster than the work in it, so the fastest of many is the least
+/// contended; a median far above it says the box was busy and not that the pass
+/// is slow.
+///
+/// **The first frame is priced on its own.** The shipped search is two
+/// searches: a direction that has not got the along-seam axis looks over the
+/// whole window, and one that has looks two steps either side of what it holds
+/// (`NARROW_STEPS` in the render crate's `band`). The first frame after a seek
+/// is every direction in the first state and every frame after it is nearly all
+/// of them in the second, so one average over a run would price neither of the
+/// two things the player actually does.
+fn cost(options: &Options) -> Fallible<()> {
+    let gpu = Gpu::open()?;
+    println!("gpu:    {}", gpu.name);
+    let mut taken: Vec<(u32, Vec<f64>)> = Vec::new();
+    for repeats in [1u32, 1 + REPEATS] {
+        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut scene = Scene::still(&options.input, options.at())?;
+        scene.set_horizon(match options.lock {
+            true => Horizon::Locked,
+            false => Horizon::Free,
+        });
+        options.seam.hold(&scene);
+        pipeline.band_repeats(repeats);
+        let mut each = Vec::with_capacity(options.count);
+        while scene.frame().is_some() {
+            let started = std::time::Instant::now();
+            Render {
+                gpu: &gpu,
+                scene: &scene,
+                pipeline: &mut pipeline,
+            }
+            .frame(options.camera(), Sampling::default(), options.size())?;
+            each.push(started.elapsed().as_secs_f64() * 1e3);
+            if each.len() >= options.count || !scene.advance()? {
+                break;
+            }
+        }
+        taken.push((repeats, each));
+    }
+    println!(
+        "\ncost:   {} redraws at {}x{}, yaw {:.0} fov {:.0}, the decode outside the timing.\n\
+         \x20       the minimum is the answer: a redraw cannot go faster than the work in it.\n",
+        options.count,
+        options.size().width,
+        options.size().height,
+        options.yaw,
+        options.fov,
+    );
+    println!(
+        "{:<16} {:>10} {:>10} {:>10} {:>10}",
+        "dispatches", "seek ms", "then min", "median", "worst"
+    );
+    let mut floor = (0.0, 0.0);
+    for (repeats, each) in &taken {
+        let (seek, steady) = split(each);
+        let mut sorted = steady.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let min = sorted.first().copied().unwrap_or(0.0);
+        println!(
+            "{repeats:<16} {seek:>10.3} {min:>10.3} {:>10.3} {:>10.3}",
+            sorted[sorted.len() / 2],
+            sorted.last().copied().unwrap_or(0.0),
+        );
+        match *repeats {
+            1 => floor = (seek, min),
+            _ => {
+                let each = |now: f64, was: f64| (now - was) / f64::from(REPEATS);
+                println!(
+                    "\nthe band's measurement costs {:.3} ms on the frame a seek lands on, where \n\
+                     every direction searches the whole along-seam window, and {:.3} ms on every \n\
+                     frame after it, where the ones that have the axis look two steps either \n\
+                     side. That is {:.1} and {:.1} percent of the 16.6 ms a 60 fps frame has. \n\
+                     Both are slopes over {REPEATS} extra dispatches.",
+                    each(seek, floor.0),
+                    each(min, floor.1),
+                    100.0 * each(seek, floor.0) / 16.6,
+                    100.0 * each(min, floor.1) / 16.6,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The frame a seek landed on, and every frame after it.
+fn split(each: &[f64]) -> (f64, &[f64]) {
+    match each.split_first() {
+        Some((seek, rest)) if !rest.is_empty() => (*seek, rest),
+        _ => (each.first().copied().unwrap_or(0.0), each),
+    }
+}
+
+/// How many extra dispatches the slope is taken over.
+///
+/// Enough that the pass is much larger than the noise around it and few enough
+/// that a run is quick: at a couple of milliseconds a dispatch, sixteen of them
+/// is thirty milliseconds of work against a spread of a few.
+const REPEATS: u32 = 16;
+
 // ------------------------------------------------------------ pictures
 
 /// A stretch drawn frame by frame, so a rolly moment can be looked at as film
@@ -859,6 +1085,32 @@ fn gradient(luma: &[f32], past: &[f64], width: usize, band: (f64, f64)) -> (f64,
 
 // ------------------------------------------------------------ options
 
+/// Which of the app's three seam paths the band is read through, and the same
+/// three words `--bin step` uses.
+///
+/// It is an argument because it has to be: the band's readings and a step
+/// measured on the picture are only comparable when both are taken through the
+/// same calibration, and until stage 6 this instrument always fitted the file
+/// while `--bin seam mode=residual` always took the factory numbers, so the two
+/// were read side by side across two different calibration paths
+/// (docs/research/seam-two-axis.md).
+#[derive(Clone)]
+enum Seam {
+    Factory,
+    File,
+    Stored(kjerag_render::SeamFit),
+}
+
+impl Seam {
+    fn hold(&self, scene: &Scene) {
+        match self {
+            Self::Factory => println!("seam:   factory calibration, no correction"),
+            Self::File => scene.fit_seam(true),
+            Self::Stored(fit) => scene.use_seam(*fit),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Options {
     input: PathBuf,
@@ -881,6 +1133,8 @@ struct Options {
     /// The screen region `mode=trace` reports on: x, y, width, height, in
     /// pixels of the rendered view.
     region: [u32; 4],
+    /// Which calibration the band is read through.
+    seam: Seam,
 }
 
 impl Options {
@@ -900,6 +1154,7 @@ impl Options {
             out: None,
             save: None,
             region: [0, 0, 0, 0],
+            seam: Seam::File,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -910,6 +1165,7 @@ impl Options {
                         "trace" => Mode::Trace,
                         "sequence" => Mode::Sequence,
                         "render" => Mode::Render,
+                        "cost" => Mode::Cost,
                         _ => return Err(format!("no mode called {value}").into()),
                     }
                 }
@@ -924,6 +1180,13 @@ impl Options {
                 Some(("off", value)) => options.off = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("save", value)) => options.save = Some(PathBuf::from(value)),
+                Some(("seam", value)) => {
+                    options.seam = match value {
+                        "factory" => Seam::Factory,
+                        "file" => Seam::File,
+                        _ => Seam::Stored(seam_fit(value)?),
+                    }
+                }
                 Some(("box", value)) => {
                     let mut numbers = value.split(',').map(str::parse::<u32>);
                     let mut next = || numbers.next().transpose();
@@ -974,4 +1237,5 @@ impl Options {
 
 const USAGE: &str = "usage: band <file.insv> [mode=field|sequence|render] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
-     [out=dir] [save=state.txt] [box=x,y,w,h]";
+     [out=dir] [save=state.txt] [box=x,y,w,h] \
+     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";

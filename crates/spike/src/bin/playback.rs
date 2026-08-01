@@ -257,6 +257,13 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
             Next::At(due) => due,
             Next::Refresh => now + refresh,
             Next::Never => break,
+            // The window puts this in an alert (issue #124). An instrument
+            // has a terminal and a run to end, and a run whose picture died
+            // part way through must not be reported as a clean one.
+            Next::Stopped(stall) => {
+                eprintln!("play:   stopped: {stall}");
+                break;
+            }
         };
         let armed = burst.due(start.elapsed());
         if armed {

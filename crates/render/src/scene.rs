@@ -43,6 +43,7 @@ use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Correction, Harvest, SeamFit};
+use super::stall::{Stall, Stalled};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -60,7 +61,7 @@ const RETAINED: usize = 3;
 /// When the widget should come back, which is the whole of frame pacing:
 /// the shell sleeps until the instant the next frame is due rather than
 /// polling, so 29.97 fps content costs 29.97 redraws a second.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Next {
     /// Whenever the compositor will take a frame: playback that is still
     /// waiting for its first decoded frame, and a seek that has not landed.
@@ -69,6 +70,12 @@ pub enum Next {
     At(Instant),
     /// Nothing changes by itself: paused, ended, or a still frame.
     Never,
+    /// The picture is gone and the file has been stopped, sound and all
+    /// (issue #124). Nothing changes by itself here either, and the
+    /// difference is that somebody has to be told: this arm is how a failure
+    /// in the pass reaches the shell's alert, and there is no other way out
+    /// of this crate for one.
+    Stopped(Stall),
 }
 
 /// Which clock a decoded frame's instant is read on, before the camera's
@@ -145,6 +152,12 @@ pub struct Scene {
     /// How the pass samples where the view magnifies the source (issue #11).
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
+    /// Where the pass leaves word that it cannot draw this file any more
+    /// (issue #124). It belongs to the open capture rather than to the
+    /// pipeline, which outlives every file it draws.
+    stalled: Stalled,
+    /// And what it last managed to draw of this file, for the same reason.
+    shown: Shown,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -281,6 +294,8 @@ impl Scene {
             forced: Cell::new(None),
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
+            stalled: Stalled::default(),
+            shown: Shown::default(),
         }
     }
 
@@ -520,13 +535,24 @@ impl Scene {
         let Source::Live(player) = source else {
             return Next::Never;
         };
+        // The pass has been unable to put a frame on screen for long enough
+        // that it has given up (issue #124). Pausing is what stops the sound
+        // as well as the clock, because the sound follows the clock
+        // (`kjerag_media`'s `Beat`), and a picture that died while the audio
+        // played on is the whole of what that issue was.
+        if let Some(stall) = self.stalled.take() {
+            player.pause(now);
+            return Next::Stopped(stall);
+        }
         match player.pump(now) {
             Ok(None) => {}
             Ok(Some(taken)) => *frames = Some(taken),
+            // The decode thread has stopped and will deliver nothing more, so
+            // the answer is the same one: stop cleanly, and say so. This
+            // printed a line and paused in silence until issue #124.
             Err(e) => {
-                eprintln!("kjerag: playback stopped: {e}");
                 player.pause(now);
-                return Next::Never;
+                return Next::Stopped(Stall::new(format_args!("playback stopped: {e}")));
             }
         }
         // The end of the file stops the clock rather than leaving it running
@@ -744,7 +770,17 @@ impl Scene {
         }
     }
 
+    /// The player, for the calls that drive it: play, pause, seek, step.
+    ///
+    /// A capture the pass has given up on has none to hand out (issue #124).
+    /// The sound follows the clock, so a play press that got through here
+    /// would be sound over a picture that is not coming back, which is the
+    /// symptom this whole issue is about. The transport goes quiet with the
+    /// file it belongs to, and opening a file is the way on.
     fn player_mut(&mut self) -> Option<&mut Player> {
+        if self.stalled.stopped() {
+            return None;
+        }
         match &mut self.show.as_mut()?.playing.get_mut().source {
             Source::Live(player) => Some(player),
             Source::Stepped(_) => None,
@@ -789,6 +825,8 @@ impl Scene {
             view: self.show.as_ref().and_then(|show| show.view(held)),
             sampling: self.sampling.get(),
             shutter: self.shutter.clone(),
+            stalled: self.stalled.clone(),
+            shown: self.shown.clone(),
         }
     }
 }
@@ -1005,6 +1043,13 @@ pub struct ScenePrimitive {
     /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
     /// first, and one that never does is still armed for the next.
     shutter: Shutter,
+    /// A handle on the [`Scene`]'s stall slot, the same way and for the same
+    /// reason, in the other direction: the pass writes and the shell reads
+    /// (issue #124).
+    stalled: Stalled,
+    /// And on the slot the pass keeps the last frame it drew of this capture
+    /// in, which it both writes and reads.
+    shown: Shown,
 }
 
 /// A pair of decoded lenses and the calibration that reprojects them. Both
@@ -1017,6 +1062,30 @@ struct View {
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
     held: Held,
+}
+
+/// The last view the pass actually presented of one capture, which is what the
+/// pane holds while a newer one cannot be imported (issue #124).
+///
+/// It belongs to the capture rather than to the pipeline, for the reason the
+/// whole issue is about: iced keeps one pipeline for the life of the window,
+/// so whatever it remembers about this file it remembers about the next one.
+/// Kept on the pipeline for one commit, this opened a new file onto the last
+/// frame of the file before it, until the first frame of the new one arrived.
+/// Issue #125's check is what caught it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Shown(Arc<Mutex<Option<View>>>);
+
+impl Shown {
+    fn keep(&self, view: &View) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(view.clone());
+        }
+    }
+
+    fn get(&self) -> Option<View> {
+        self.0.lock().ok()?.clone()
+    }
 }
 
 /// The GPU state behind the widget. iced builds one of these per primitive
@@ -1036,9 +1105,6 @@ pub struct ScenePipeline {
     /// The frame the bind group points at, and the ones still in flight
     /// behind it. Newest first.
     live: VecDeque<Live>,
-    /// Set when an import fails, so the message is printed once rather than
-    /// on every redraw.
-    failed: bool,
     /// The target this pass was built for, which is iced's surface format.
     /// A capture renders into a texture of the same format, so that what it
     /// reads back is what the compositor would have been handed.
@@ -1067,6 +1133,9 @@ struct Band {
     /// The second dispatch of the same pass: what the ring just read, pooled
     /// into one exposure for the picture (issue #103, stage 3).
     pool: wgpu::ComputePipeline,
+    /// The along-seam field fitted over the whole ring, dispatched beside the
+    /// exposure pooling and over the same cells (issue #103, stage 5).
+    pool_along: wgpu::ComputePipeline,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1084,6 +1153,9 @@ struct Band {
     /// before and after differ by this stage and by nothing else.
     tone_held: bool,
     /// Which round of the circle the next frame reads.
+    /// How many times the measurement is dispatched per redraw. One, except
+    /// under [`ScenePipeline::band_repeats`].
+    repeats: u32,
     slice: u32,
     /// Where the last measured frame sat in the film, so the next one knows
     /// how much media time the state has aged by, and whether what happened
@@ -1176,7 +1248,6 @@ impl ScenePipeline {
             blank,
             bind_group,
             live: VecDeque::new(),
-            failed: false,
             format,
             reported: false,
         }
@@ -1206,6 +1277,20 @@ impl ScenePipeline {
         };
         queue.write_buffer(&self.band.watch, 0, watch.bytes());
         let mut encoder = device.create_command_encoder(&Default::default());
+        // Only ever more than one under `band_repeats`, and then each in a pass
+        // of its own: dispatches inside one pass have no barrier between them
+        // and a device is free to overlap them, which measures throughput where
+        // what is wanted is one redraw's worth of latency.
+        for _ in 1..self.band.repeats {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("band repeat"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.band.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(1, &self.band.group, &[]);
+            pass.dispatch_workgroups(watch.groups(), 1, 1);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("band"),
@@ -1214,7 +1299,7 @@ impl ScenePipeline {
             pass.set_pipeline(&self.band.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, &self.band.group, &[]);
-            pass.dispatch_workgroups(band::GROUPS, 1, 1);
+            pass.dispatch_workgroups(watch.groups(), 1, 1);
             // One workgroup over the state the dispatch above just wrote.
             // Two dispatches of one pass are ordered against each other by
             // WebGPU itself, so what this pools is this frame's readings and
@@ -1223,6 +1308,8 @@ impl ScenePipeline {
                 pass.set_pipeline(&self.band.pool);
                 pass.dispatch_workgroups(1, 1, 1);
             }
+            pass.set_pipeline(&self.band.pool_along);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         queue.submit([encoder.finish()]);
     }
@@ -1249,10 +1336,31 @@ impl ScenePipeline {
             println!("device: {}", dmabuf::device_report(device));
         }
         if let Some(view) = &primitive.view {
-            self.show(device, view);
+            self.show(device, view, primitive);
         }
 
-        let reframe = match &primitive.view {
+        // The pane holds the last frame this pipeline actually presented
+        // whenever the one it is offered is not on the GPU (issue #124).
+        // Frames keep arriving while imports fail, so drawing strictly by
+        // what the shell offers takes the picture away for as long as the
+        // failures last and leaves it away once the capture is stopped, which
+        // is a second failure on top of the first from where the pilot sits.
+        // Owner: "Why does the video disappear instead of just freezing on
+        // current frame though? Its jarring".
+        //
+        // Every gap rather than only the stopped one, because a hiccup that
+        // costs frames should cost frames: a squeeze under the bound took the
+        // pane to the backdrop and back before this.
+        let showing = match &primitive.view {
+            Some(view) if self.is_bound(view) => primitive.view.clone(),
+            // Nothing ever presented is the one case with nothing to hold,
+            // and the pane is the backdrop. `Stalled` says so in the terminal
+            // line when it gives up, because on screen it looks like the
+            // other kind of failure.
+            _ => primitive.shown.get(),
+        };
+
+        let reframe = match &showing {
             Some(view) if self.is_bound(view) => Reframe::new(
                 &view.lenses,
                 view.frames.size,
@@ -1270,14 +1378,14 @@ impl ScenePipeline {
         // After the uniform write, because the band reads the same block: the
         // calibration it measures against has to be the one the draw will use,
         // or the two disagree by whatever the correction walked this redraw.
-        self.measure(device, queue, primitive.view.as_ref());
+        self.measure(device, queue, showing.as_ref());
 
         // After the uniform write, and only after it: the write lands at the
         // next submit on this queue, and the capture's own submit is that
         // one. Taken here rather than in `draw` because this is the call
         // that has a device to render with.
         if let Some(request) = primitive.shutter.take() {
-            self.shoot(device, queue, request, aspect, primitive.view.as_ref());
+            self.shoot(device, queue, request, aspect, showing.as_ref());
         }
     }
 
@@ -1414,6 +1522,22 @@ impl ScenePipeline {
         self.band.tone_held = held;
     }
 
+    /// Dispatch the measurement this many times per redraw instead of once,
+    /// so its cost can be read as a SLOPE (issue #103, stage 6).
+    ///
+    /// The same instrument-only switch as [`Self::hold_band`] and for a reason
+    /// of the same kind. A redraw's wall time on a box with other work on it is
+    /// the pass plus whatever else ran, and on this box that second term is
+    /// wider than the first: six alternating runs of two builds under a load
+    /// average of 21 came back 5.1 to 20.3 ms with the builds interleaved. The
+    /// noise is ADDITIVE and the pass is not, so `n` dispatches of it minus one
+    /// dispatch of it, over `n - 1`, is the pass with the box divided out.
+    ///
+    /// Nothing in the player calls this and no key reaches it.
+    pub fn band_repeats(&mut self, times: u32) {
+        self.band.repeats = times.max(1);
+    }
+
     /// The band as it stands, for an instrument. `None` where the device
     /// cannot map a buffer back, which is not a case the player has.
     ///
@@ -1424,8 +1548,9 @@ impl ScenePipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<Vec<band::Cell>> {
-        Ok(self.band.read(device, queue)?.1)
+    ) -> Fallible<(band::Along, Vec<band::Cell>)> {
+        let (_, along, cells) = self.band.read(device, queue)?;
+        Ok((along, cells))
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1437,12 +1562,23 @@ impl ScenePipeline {
 
     /// Imports a newly delivered pair and points the bind group at it. A
     /// redraw that shows the same pair again does nothing here.
-    fn show(&mut self, device: &wgpu::Device, view: &View) {
-        if self.failed || self.is_bound(view) {
+    ///
+    /// A failed import costs this frame and no more (issue #124). The next
+    /// redraw tries again; what gives up is [`Stalled`], on a run of failures
+    /// that lasts, and the pilot hears about it from the shell rather than
+    /// from a terminal.
+    ///
+    /// Once it has given up, this stops trying, and that is not an
+    /// optimisation. The view that failed is never bound, so every redraw
+    /// after it would try the same import again, and each two seconds of that
+    /// raised another alert: the owner met five of them in one sitting.
+    fn show(&mut self, device: &wgpu::Device, view: &View, primitive: &ScenePrimitive) {
+        if primitive.stalled.stopped() || self.is_bound(view) {
             return;
         }
         match self.import(device, view) {
             Ok(planes) => {
+                primitive.stalled.landed();
                 self.bind_group = bind(
                     device,
                     &self.layout,
@@ -1459,10 +1595,12 @@ impl ScenePipeline {
                     _planes: planes,
                 });
                 self.live.truncate(RETAINED);
+                primitive.shown.keep(view);
             }
             Err(e) => {
-                eprintln!("kjerag: frame not shown: {e}");
-                self.failed = true;
+                primitive
+                    .stalled
+                    .failed(Instant::now(), e, primitive.shown.get().is_some());
             }
         }
     }
@@ -1507,6 +1645,7 @@ impl Band {
         };
         let pipeline = compute("measure");
         let pool = compute("pool");
+        let pool_along = compute("pool_along");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1546,12 +1685,14 @@ impl Band {
         Self {
             pipeline,
             pool,
+            pool_along,
             state,
             watch,
             group,
             read,
             held: false,
             tone_held: false,
+            repeats: 1,
             slice: 0,
             at: None,
         }
@@ -1574,13 +1715,15 @@ impl Band {
         match seconds {
             Some(0.0) => None,
             Some(seconds) if (0.0..band::Watch::GAP_S).contains(&seconds) => {
-                Some(band::Watch::new(seconds, false, slice))
+                Some(band::Watch::track(seconds, slice))
             }
             // The first frame of a file, and every landing after a seek. The
             // step it is given is one frame's worth, so a direction with
             // content in it starts moving immediately rather than waiting a
-            // frame for a gap to exist.
-            _ => Some(band::Watch::new(1.0 / 30.0, true, slice)),
+            // frame for a gap to exist, and it sweeps the WHOLE ring rather
+            // than the slice it happened to land on, because what it is
+            // throwing away is per direction (`band::Watch::stride`).
+            _ => Some(band::Watch::start(1.0 / 30.0)),
         }
     }
 
@@ -1590,7 +1733,7 @@ impl Band {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, Vec<band::Cell>)> {
+    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1611,6 +1754,10 @@ impl Band {
             f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
         };
         let tone = band::Tone::read(float(0), float(4));
+        let along = band::Along::read(
+            std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
+            float(band::ALONG_AT + 20),
+        );
         let cells = (0..band::AZIMUTHS)
             .map(|index| {
                 let at = band::CELLS_AT + index * std::mem::size_of::<band::Cell>();
@@ -1619,14 +1766,15 @@ impl Band {
                     confidence: float(at + 4),
                     reach_m: float(at + 8),
                     off_epi: float(at + 12),
-                    tone: float(at + 16),
-                    lit: float(at + 20),
+                    off_conf: float(at + 16),
+                    tone: float(at + 20),
+                    lit: float(at + 24),
                 }
             })
             .collect();
         drop(mapped);
         readback.unmap();
-        Ok((tone, cells))
+        Ok((tone, along, cells))
     }
 }
 

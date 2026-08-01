@@ -139,19 +139,28 @@ started, and seen to draw a window, and nothing had ever played a frame
 in it.
 
 It runs the release binary inside `cage` on a headless wlroots backend,
-presses keys with `wtype`, captures the output with `grim`, and reads the
-app's own report lines. The session is isolated: its own Wayland socket,
-its own home and its own XDG directories, so it neither sees the desktop
-you are looking at nor writes anything into it. **That holds in Flatpak
-mode too, with the shipped permission set untouched**: flatpak resolves a
-by-name grant against the caller's environment, so the session's `HOME`
-and `XDG_CONFIG_HOME` decide what `xdg-config/cosmic` and
+presses keys with `wtype`, moves and clicks with a pointer of its own
+(`crates/spike/src/bin/pointer.rs`, which it builds; `wlrctl` cannot do
+this job, and that file says why), captures the output with `grim`, and
+reads the app's own report lines. The session is isolated: its own Wayland
+socket, its own home and its own XDG directories, so it neither sees the
+desktop you are looking at nor writes anything into it. **That holds in
+Flatpak mode too, with the shipped permission set untouched**: flatpak
+resolves a by-name grant against the caller's environment, so the session's
+`HOME` and `XDG_CONFIG_HOME` decide what `xdg-config/cosmic` and
 `~/.local/state/cosmic` mean, and the developer's own `~/.config/cosmic`
 is never bound into the sandbox (measured; docs/DISTRIBUTION.md 3.9).
 Captures land in gitignored
 `scratch/uitest/`, because a frame of real footage is personal video.
 Needs `cage wtype grim ffmpeg` installed, plus `wl-clipboard` for the one
 check that reads the session's clipboard, which skips without it.
+
+The one thing it shares with the desktop is the sound server, because the
+speaker button is disabled on a box with no output device and the checks
+around the volume popup need it enabled. What it plays goes to the same
+null sink `scripts/quiet.sh` uses, so the sound etiquette below holds for
+the harness too; without `pactl` or a PipeWire socket it says so and plays
+silently, and those checks skip.
 
 CI does not run it and cannot: decode is VA-API against
 `/dev/dri/renderD128` (`crates/media/src/decode.rs`), and with no such

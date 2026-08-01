@@ -650,6 +650,89 @@ live, no keyframe UI ever.
   the cosmic-player idiom, where the app is given the directory and never has
   to ask. Not v1.
 
+- 2026-08-01 **A transient import error costs a frame, and every failure the
+  pilot meets goes through the alert** (issue #124, owner-reported at flatpak
+  verification). One failed frame import set a flag on the pipeline for good:
+  the picture was gone until the app was restarted, the sound played on over
+  it, and the whole of what was said was one `eprintln!` on a terminal a
+  launcher-started Flatpak sends nowhere. Measured on main's own binary under
+  the headless harness, with `dup(2)` made to answer EMFILE on the app's main
+  thread for 0.3 s: the picture froze for good, the clock ran on at 30.00 fps,
+  and the null sink still carried the sound at 15745 of 32767. The flag is
+  gone. A failed import costs that frame and the next redraw tries again; a
+  run of failures that lasts two seconds stops the file, sound and all, and
+  says so. The bound is time and not a frame count, because what the pilot is
+  looking at is a picture that has been frozen for so long, and how many
+  redraws went by inside that is a property of his display. Two seconds is the
+  shell's own "long enough that a person has noticed", the same one the
+  controls hide on. The run lives in the open capture's `Stalled` rather than
+  on the pipeline, which iced keeps for the life of the window and which is
+  why the old flag outlived every file.
+
+  **The second half is the structure**, and it is the owner's ruling: error
+  surfacing consistent by code design rather than by discipline. The alert's
+  line is now private to `crates/app/src/fail.rs` and the only way to put one
+  there is `Alert::raise(Failure)`, which prints the terminal echo with it, so
+  a bare `eprintln!` at a failure site is strictly less than calling the
+  funnel rather than an alternative to it. The engine has no way to report at
+  all: a pass that gives up leaves a `Stall`, `Scene::pump` hands it out as a
+  `Next::Stopped` arm every caller must match, and the shader widget will only
+  give that arm to a message type implementing `From<Stall>`, so the shell
+  cannot compile the video widget without a way to receive one. Adding the arm
+  broke `kjerag-spike --bin playback`, which is the mechanism working: an
+  instrument whose picture died was reporting a clean run.
+
+  **A stop is final for that open** (owner ruling, on testing the branch with
+  the fault left on permanently). The first shape re-armed as soon as the alert
+  was closed and retried on its own, so a persistent fault meant an alert every
+  two seconds: five of them in one sitting, from an app whose alert says to open
+  the file again while quietly having another go behind it. Now the `Stalled`
+  that gave up stays given up for the life of that capture. The pass stops
+  importing into it and `Scene` hands out no player, so a play press cannot
+  start the clock over a picture that is not coming back either. Reopening the
+  file is a new `Scene`, a new `Stalled` and a fresh two seconds of patience,
+  and it is what the alert asks for. Under the bound nothing changed: a hiccup
+  still costs frames.
+
+- 2026-08-01 **The volume popup closes on a press in the video, the way
+  cosmic-player's dropdowns do** (issue #126, owner-reported). It was a
+  hand-toggled bool that only the speaker button flipped, so the only way out
+  of it was the button that opened it. cosmic-player's way out is
+  `widget::mouse_area(video).on_press(Message::VideoAreaClick)`
+  (`src/main.rs:1771-1773`), whose handler closes an open dropdown and
+  otherwise plays or pauses (`1507-1513`); it also closes one on play/pause,
+  on the scrubber and its release, and on fullscreen. All of that is ours now
+  except the play/pause branch, which is the look-around grab here and was
+  already resolved against it (docs/UI.md, conflict 1). Escape is unchanged,
+  because cosmic-player's `on_escape` only leaves fullscreen.
+
+  **A comment is what kept it out.** docs/UI.md said a press in the video
+  "fires before a `mouse_area` around it could see it", which is not true and
+  was checkable: the pass returns `ButtonPressed` uncaptured on purpose, and
+  says in `crates/render/src/widget.rs` that capturing it would take the
+  double click to fullscreen away. One line justifying a choice, read as
+  settled by everyone after it (AGENTS.md, "comments record, they do not
+  argue").
+
+  **The harness grew a pointer**, because nothing in it could press anything:
+  every check before this one is a key press. `wlrctl pointer` is the packaged
+  tool for the job and cannot do it - cage advertises the seat's pointer
+  capability only while a pointer device exists, and a one-shot client's
+  device is gone before a client can bind `wl_pointer`. Measured 2026-08-01: a
+  `wlrctl` wheel that should have zoomed the view did nothing, twenty in a row
+  did nothing, and the same zoom off the keyboard reached the ball every time.
+  `crates/spike/src/bin/pointer.rs` holds the device open for half a second
+  before it moves anything, which is the whole of the difference, and the
+  clicks land.
+
+  **And a sound device**, because the speaker button is drawn disabled when
+  the box has no output, and the session's own runtime directory has no
+  PipeWire socket in it: every harness run until now said "playing silently",
+  so the popup could not be opened there at all. The session now gets the
+  desktop's socket, and the stream goes to the same null sink
+  `scripts/quiet.sh` uses. Verified rather than assumed: the app's stream sits
+  on `kjerag_quiet` while the harness runs, and `PIPEWIRE_NODE` is what puts
+  it there, because pipewire-alsa is what plays what cpal writes.
 - 2026-08-01 **The shipped Flatpak took no drops, and nothing could have
   caught it** (issue #118). A drop into a sandbox arrives as
   `application/vnd.portal.filetransfer`, which is a key the target exchanges
@@ -973,6 +1056,126 @@ live, no keyframe UI ever.
   are resolution the parabola and the seconds of averaging give back; the
   third is free because the filter is paced in seconds of media time, so a
   direction read at 15 Hz and one read at 30 settle in the same wall time.
+
+- 2026-08-01 **The two instruments disagreed because the band was wrong twice,
+  and the ruler was wrong once** (issue #103, stage 6,
+  docs/research/seam-two-axis.md sections 9 and 10). Stage 5 was capped by the
+  band's along-seam channel reading +0.06 to +0.20 deg where `--bin seam
+  mode=residual` read -0.41 to -0.46 on the same directions of the same file,
+  while the two agreed to 0.01 deg on the far side of the ring. Three faults,
+  each needed for one half of that. **(a)** `Ring::perp` was built `centre x
+  epi`, the negative of `seam::ring`'s own axis: the pass drew correctly for it
+  because it measures and applies through the same axis, but every number it
+  printed was the probe's with the sign turned over. **(b)** `reset` was a
+  property of a FRAME and the state it throws away is per DIRECTION, and a
+  frame reads every `SLICES`-th direction - so a seek reset half the ring and
+  the other half crept toward the new content at `TAU_FAR`, reaching 0.56 of
+  the truth after 120 frames. **(c)** `--bin band` had no way to be handed a
+  stored fit, so the two instruments were read under different calibrations,
+  which differ by 0.04 deg on the far side of the ring and 0.32 on the arc
+  carrying the step. After (a) and (b) the band reads **0.99 of the probe on
+  both parities**, and `--bin band` takes `seam=` so (c) cannot recur.
+
+  **The ruler was wrong too.** `--bin step` extrapolates a straight line to the
+  seam from four degrees out, on the premise that a horizon is a great circle.
+  What it traces is a ridge, and the same frame with the band held off reads
+  10.4, 20.9, 30.5, 32.8 and 37.8 view px at `guard` 1.2, 1.6, 2.0, 2.5 and
+  3.5. Every DIFFERENCE between two builds survives that - the correction
+  rotates one hemisphere and moves its whole trace by a constant, 23.2 px in
+  all three windows - so the campaign's deltas stand and its absolute numbers
+  carry the hill. It prints a `close:` column now, over the two degrees just
+  outside the frame's own crossover, with each fit's rms beside it.
+
+  At the owner's reference view, close-in column: **+17.3 view px on `main`,
+  -5.2 cold and +8.1 warm on stage 5, -6.0 cold and -5.8 warm here**. The
+  campaign's own wide column reads 32.8/30.2 on main, 10.1/23.3 on stage 5 and
+  9.4/15.4 here. What stage 6 buys is that **cold and warm now agree**: 0.2 px
+  apart where stage 5 was 13.3, because the reset reaches every direction.
+
+  **Cost, priced with the box divided out** (`--bin band mode=cost`, the slope
+  over sixteen extra dispatches, minimum of several runs at 1440x1440):
+  **0.58-0.71 ms per redraw in steady state, 3.5 to 4.3 percent of the 16.6 ms
+  a 60 fps frame has**, and 1.3-2.9 ms once on the frame a seek lands on -
+  which now sweeps the whole ring where stage 5's swept half of it. Stage 5's
+  form measures 0.89-0.93 ms; its reported +2.55 ms was `--bin playback`'s
+  whole-redraw delta on a box building four worktrees, and six alternating runs
+  of two builds under a load average of 21 came back 5.1 to 20.3 ms with the
+  builds interleaved. The whole saving is the flat-sky gate, which used to be
+  reached only after a candidate's entire double loop had run: a direction of
+  blank sky, which on a real seam is most of the ring, paid for the whole table
+  to be told there was nothing in it. A narrow re-acquisition search was built
+  on top of that and **measured out** - 0.631 against 0.632 ms on a sky seam
+  and 0.714 against 0.700 on a seam full of near ground, inside the run-to-run
+  spread on both - so it is not in the branch. The cadence the cost ruling
+  asked for has been in the pass since stage 2: `SLICES` reads half the ring
+  per frame.
+
+  **The owner's second reference view is a different defect** (issue #130). His
+  October capture is a ONE X2, and that camera refuses its own fit on every
+  file: `only 2 of 72 azimuths on the seam had content both lenses could be
+  matched on`, 3 / 2 / 2 across three captures against the 10 a five-knob fit
+  needs, so it can never build a pool entry and plays on the factory
+  calibration forever. The reason is a trap: the residual there is 1.1-1.6 deg
+  along the seam and 0.9-2.8 across, which is larger than the probe's window,
+  and widening the window makes it strictly worse because the back patch is
+  sampled as ONE rectangle grown by the whole search - at `along=3.0
+  across=6.0` every single try is refused for leaving the overlap. At that view
+  one degree epipolar moves the horizon 12 rows and one degree along the seam
+  moves it 3, the content at the seam is half a metre away, and the step is
+  5 to 6 DEGREES. Measured on `main`, on stage 5 and here it moves by about a
+  pixel in each direction, which is the right outcome for a fix aimed at
+  another axis.
+
+- 2026-08-01 **The seam has two axes and the campaign had only ever measured
+  one** (issue #103, stage 5, docs/research/seam-two-axis.md). The owner
+  rejected the horizon on `main` after stages 1 to 4 all merged on good
+  numbers, and the reason is that every acceptance number those stages carry
+  is a statistic of the **epipolar** axis, which is the axis a horizon cannot
+  show. At his fov-20 reference view one degree epipolar moves that horizon
+  **0.6 rows** and one degree **along the seam** moves it **53**, and the whole
+  band campaign moves that view by 2.6 view px of 32.8. `Cell::off_epi` had
+  measured the other axis since stage 2 and never applied it, and its search
+  saturated: three offsets at 0.30 degrees, with 44 percent of measured
+  directions cold and 67 percent warm sitting ON the limit against a corpus
+  range of 0.17 to 0.67.
+
+  Stage 5 measures it properly and puts it in the picture. The search is now
+  nineteen offsets at 0.90 degrees on the same 0.10 grid the epipolar axis
+  uses, with the same parabola between whole steps; nothing rails on any
+  camera tried. The channel has its own confidence, refused on its own,
+  because a reading pinned on the along-seam limit is a camera outside
+  anything measured and refusing the epipolar channel for it would throw
+  stage 2 away on that footage. One time constant, `TAU_FAR_S`, wherever the
+  direction looks: parallax cannot reach this axis at any distance, so what it
+  holds is the camera, and the camera does not move.
+
+  **Two things it had to learn by being built first.** Applied per direction
+  it scallops - far fewer than 128 directions correlate on a real frame, and a
+  field with holes in it applied over a hemisphere warps a horizon instead of
+  moving it (18.5 view px of correction at one end of a four-degree fit and
+  4.7 at the other). So the ring is fitted to the shape the phenomenon has:
+  constant, one cycle and two cycles, which are relative roll, principal point
+  and focal aspect, the decomposition `--bin seam` has printed since #48. Five
+  numbers, a ridge of one direction's worth of evidence, no time constant of
+  its own. And applied only across the band it does nothing - 0.03 view px of
+  32.8 - because a pose error is wrong everywhere and not only at the
+  handover, so it goes where the calibration it belongs to goes: to lens 1,
+  over its whole picture, scaled by the ray flattened into the seam plane,
+  which is exactly the `cos(elevation)` a relative roll produces.
+
+  The owner's reference view goes **32.8 to 10.1 view px cold** and **30.2 to
+  23.2 warm**, which is short of the low single digits the ruling asked for
+  and is capped by the measurement rather than by the application: at the
+  azimuths carrying his step the band reads 0.06 to 0.20 degrees where
+  `--bin seam mode=residual` reads 0.41 to 0.46 on the same directions of the
+  same file, while the two agree to 0.01 degrees on the opposite side of the
+  ring. That disagreement is the next thing to diagnose and it is what stands
+  between this and a pixel-perfect horizon. Cost is **+2.55 ms per redraw**
+  under live decode, which is out of the campaign's class and is the search's
+  and not the application's: the same width at a 0.30 grid is +0.86 ms and
+  reads 15.9 cold, and a two-pass coarse-to-fine search measured worse on both
+  counts on this GPU because sixty-four workgroups' worth of extra barriers
+  cost more than the candidates they save.
 
 - 2026-08-01 **The near end of the seam correction is now the search window,
   not the fold** (issue #103, stage 4). The crossover width and the shear

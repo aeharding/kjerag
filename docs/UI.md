@@ -220,13 +220,36 @@ The icon is loaded from the committed drawing
 (`resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg`, through
 `icon::from_svg_bytes`) rather than asked for by name. See "About" below.
 
-**Failure to open lands here too.** The welcome view returns with a second
-line of body text under the first, saying what went wrong in plain words
-("That file could not be opened."), plus a `log::warn!` with the detail.
-cosmic-player only logs (`src/video.rs:63`), which
-leaves the pilot staring at an unchanged window; a player with exactly one
-job should say when it cannot do it. No dialog: the HIG's dialog section is
-about asking the user something, and there is nothing to ask.
+**Failure to open does not land here.** It used to: the welcome view returned
+with a second line of body text under the first. The owner's call
+(2026-08-01, issue #117) is that this was the wrong surface for it, and a
+failure is now the stock alert in the middle of the window, shaped the way
+cosmic-files shapes the one it puts up for an operation that failed
+(`src/app.rs:5665-5678`): a title, the reason as the body, `dialog-error` at
+64, and one button. It says why in plain words, and the terminal carries the
+detail. cosmic-player only logs (`src/video.rs:63`), which leaves the pilot
+staring at an unchanged window; a player with exactly one job should say when
+it cannot do it.
+
+**And it is the only surface a failure has** (issue #124). A video that
+stopped part way through puts up the same alert with a title of its own
+("Video stopped"), because it is the same thing from the pilot's side: no
+picture, and one action that fixes it. The alert's line is private to
+`crates/app/src/fail.rs` and nothing else in the app can put words there, so
+this is a property of the code rather than a rule to remember
+(docs/ARCHITECTURE.md). The one failure that is deliberately not an alert is a
+capture that could not be written: the picture is still there and the pilot is
+still watching it, so that is a toast.
+
+**One alert per open, and the alert means what it says** (owner ruling,
+2026-08-01). A video that stopped is stopped: closing the alert leaves the
+window as it stands, picture held, clock and sound stopped, controls there to
+be used, and nothing retrying behind it. The transport goes quiet with the file
+it belongs to, so a play press cannot start a clock over a picture that is not
+coming back. Opening the file is the way on, which is what the alert says. The
+first shape of this re-armed as soon as the alert was closed, and the owner met
+the same alert five times over while it told him each time to open the file
+again.
 
 ## Opening a file
 
@@ -350,14 +373,25 @@ small radius (`src/theme/style/iced.rs:608-619`), so the stock one is what we
 use.
 
 **When it closes.** cosmic-player holds its controls up for as long as a
-dropdown is open (`src/main.rs:1627`) and closes the dropdown on a click in
+dropdown is open (`src/main.rs:1627`) and closes the dropdown on a press in
 the video, on fullscreen, and on every transport action
-(`src/main.rs:1192`, `1254`, `1327`, `1349`, `1501`, `1508-1513`). We cannot
-copy the first two of those. Holding the controls up while a dropdown is open
+(`src/main.rs:1192`, `1254`, `1327`, `1349`, `1501`, `1508-1513`).
+
+The second half of that is copied whole. A press in the video is
+`widget::mouse_area(video).on_press(...)` there and here, and what it sends
+closes the popup (`Message::VideoAreaClick`); play/pause, the scrubber, its
+release and fullscreen each close it where they are handled. What is not
+copied is the first half: holding the controls up while a dropdown is open
 would hold them up forever, because in this app dragging the picture is
-pointer input; and a click in the video is the look-around grab (conflict 1,
-below), which fires before a `mouse_area` around it could see it. So ours
-closes with the control row, on the same 2 s of stillness, and on fullscreen.
+pointer input. So the popup also goes when the row goes, on the same 2 s of
+stillness.
+
+This paragraph used to say that a press in the video "fires before a
+`mouse_area` around it could see it", and the popup was built with no way out
+but the button that opened it (issue #126, owner-reported). The claim was
+wrong: the pass leaves the press uncaptured on purpose, so that the
+`mouse_area` around it keeps working, and says so where it does it
+(`crates/render/src/widget.rs`, `ButtonPressed`).
 
 ### Auto-hide
 
@@ -601,7 +635,7 @@ Notes:
 | left drag on video  | look around                   | already built, issues #3 / #29    |
 | wheel over video    | zoom, anchored at the cursor  | already built                     |
 | double click        | fullscreen                    | cosmic-player `src/main.rs:1773`  |
-| single click        | nothing                       | conflict, below                   |
+| single click        | close the volume popup        | conflict, below                   |
 | move                | show the controls             | cosmic-player `src/main.rs:2119`  |
 
 **Conflict 1: the primary button.** cosmic-player makes a single click on
@@ -616,6 +650,11 @@ Resolution: the video area does not toggle playback on click. Space does,
 and the button in the control row does. Double click still toggles
 fullscreen, which is safe: the two no-op grabs it also produces move
 nothing.
+
+What the press does do is cosmic-player's other branch: it closes the volume
+popup if one is open (`src/main.rs:1508-1509`, and "When it closes" above).
+The press reaches the `mouse_area` because the pass hands it back
+uncaptured, which is also what makes the double click above work.
 
 **Conflict 2: the wheel.** Three first-party answers exist, and they
 disagree with each other:
@@ -1040,7 +1079,8 @@ reviewer can find them in one place:
    release). A 30-minute dual 3840x3840 HEVC file cannot serve an accurate
    seek per slider tick. Issue #5.
 2. **No click-to-play/pause on the video.** The press is the look-around
-   grab.
+   grab. It still closes the volume popup, which is the other half of what
+   cosmic-player does with it.
 3. **No nav bar.** No playlist, and returning `None` keeps a dead toggle
    out of the header bar.
 4. **Local paths, not URLs**, on the command line and in recents. We decode
@@ -1053,8 +1093,9 @@ reviewer can find them in one place:
 8. **Volume and mute are remembered.** cosmic-player keeps neither: both are
    GStreamer playbin properties and start at 1 and false every run. The owner
    asked for them to persist, and they go in `Config` beside the theme.
-9. **The volume popup closes with the control row**, rather than holding the
-   row open the way cosmic-player's dropdowns do. See "The volume slider".
+9. **The volume popup closes with the control row as well**, rather than
+   holding the row open the way cosmic-player's dropdowns do. Every way
+   cosmic-player closes one, we close one. See "The volume slider".
 10. **The capture toast is at the top of the window**, where cosmic-files
     puts its own at the bottom, and it is drawn rather than delegated to
     `widget::toaster`. Owner's call, and the reason is the window: the
