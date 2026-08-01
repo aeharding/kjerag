@@ -274,6 +274,34 @@ band_changed() {
 	! cmp -s <(band "$1" "$3" "$4") <(band "$2" "$3" "$4")
 }
 
+# picture <file>: everything between the header bar and the control row, which
+# is the view and none of the chrome around it. Same P6 arithmetic as `band`
+# above, from the other direction.
+#
+# The chrome has to come off for a check that compares two captures of one
+# view. Measured on this harness: two captures of the same frame at the same
+# camera differ in 14 pixels of the scrubber's thumb, because the thumb is
+# drawn at the clock's position and a copied line carries the frame's own
+# time, which is up to one frame behind it. The picture is byte for byte
+# identical.
+picture() {
+	local file=$1 magic width height depth header rows
+	{
+		read -r magic
+		read -r width height
+		read -r depth
+	} <"$file"
+	header=$((${#magic} + ${#width} + ${#height} + ${#depth} + 4))
+	rows=$((height - HEADER_BAND - CONTROL_BAND))
+	tail -c "+$((header + HEADER_BAND * width * 3 + 1))" "$file" |
+		head -c $((rows * width * 3))
+}
+
+# same_picture <a> <b>: the two captures show the same view.
+same_picture() {
+	cmp -s <(picture "$1") <(picture "$2")
+}
+
 # said <pattern>: the app printed it. Its own instruments say things no
 # capture can.
 said() {
@@ -413,6 +441,7 @@ with_media() {
 	# thing that has printed one is a capture, the two counts can be compared.
 	a_still_says_where_it_was_looking
 	copies_the_view
+	returns_to_the_copied_view
 	flips_the_horizon
 	survives_fullscreen
 	fullscreen_holds_the_view
@@ -745,6 +774,84 @@ copies_the_view() {
 		fail "$check" "the clipboard holds: $pasted" \
 			"expected: $(basename "$media") $args"
 	fi
+}
+
+# How long a toast is up, plus a beat. Two captures of the same view are only
+# the same bytes once the lines saying so have gone.
+TOAST_GONE=6
+
+# Set by returns_to_the_copied_view before its presses, read by the predicate.
+goto_lines=0
+
+more_goto_lines() {
+	[ "$(grep -c '^goto:' "$log")" -gt "$goto_lines" ]
+}
+
+# The whole loop, which is the feature: copy a view, wander off, paste, and be
+# back exactly where the copy was taken.
+#
+# The window is paused here, so the picture is a function of the frame and the
+# camera alone and two captures of one view are the same bytes. Two
+# instruments, and the first is the stronger: the app's own copied line is
+# exact to the millisecond and the hundredth of a degree, where a capture only
+# says the pixels came out the same. Both, because a line that matches while
+# the picture does not would mean the view is not what the line says it is.
+#
+# The wander is a ten second seek and a notch of zoom out: one moves the frame
+# and the other moves the camera, which are the two halves a paste has to put
+# back. A dropped key costs the check nothing, because the capture taken
+# afterwards has to differ from the first or the check says so itself.
+returns_to_the_copied_view() {
+	local check="ctrl+v goes back to the copied view"
+	local copied returned
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines goto -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after $PRESSES presses of i" "log: $log"
+		return
+	fi
+	copied=$(view_line)
+	sleep "$TOAST_GONE"
+	grab goto-there >/dev/null
+
+	key -k Right
+	key -M ctrl -k minus -m ctrl
+	alive || lost "$check"
+	grab goto-away >/dev/null
+	if same_picture "$session/goto-there.ppm" "$session/goto-away.ppm"; then
+		fail "$check" "the seek and the zoom moved nothing, so this proves nothing" \
+			"$session/goto-there.ppm" "$session/goto-away.ppm"
+		return
+	fi
+
+	goto_lines=$(grep -c '^goto:' "$log")
+	if ! press_until more_goto_lines goto -M ctrl -k v -m ctrl; then
+		alive || lost "$check"
+		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
+		return
+	fi
+	sleep "$TOAST_GONE"
+	grab goto-back >/dev/null
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines goto -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after the paste" "log: $log"
+		return
+	fi
+	returned=$(view_line)
+
+	if [ "$returned" != "$copied" ]; then
+		fail "$check" "copied:   $copied" "came back: $returned"
+		return
+	fi
+	if ! same_picture "$session/goto-there.ppm" "$session/goto-back.ppm"; then
+		fail "$check" "the line came back but the picture did not" \
+			"$session/goto-there.ppm" "$session/goto-back.ppm"
+		return
+	fi
+	pass "$check (${copied#"$media "})"
 }
 
 # `h` flips the horizon lock, which is on by default, so the session's config

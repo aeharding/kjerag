@@ -47,6 +47,7 @@ pub enum Action {
     FileOpen,
     FileOpenRecent(usize),
     Fullscreen,
+    GoToView,
     LockHorizon,
     Mute,
     NextFrame,
@@ -75,6 +76,7 @@ impl MenuAction for Action {
             Self::FileOpen => Message::FileOpen,
             Self::FileOpenRecent(index) => Message::FileOpenRecent(*index),
             Self::Fullscreen => Message::Fullscreen,
+            Self::GoToView => Message::PasteView,
             Self::LockHorizon => Message::LockHorizon,
             // The speaker button's own message, so the key mutes, persists
             // and redraws by the path the dropdown already uses.
@@ -145,8 +147,11 @@ pub fn key_binds() -> HashMap<KeyBind, Action> {
 
     // The view, as a line of text. mpv's own information key, bare because
     // the picture is what the pilot's hand is on and a modifier is a second
-    // hand; `Ctrl+C` is spent on the picture already.
+    // hand; `Ctrl+C` is spent on the picture already. `Ctrl+V` is the other
+    // half, doing what a paste does everywhere: putting in front of you the
+    // thing that was copied.
     bind!([], Key::Character("i".into()), CopyView);
+    bind!([Ctrl], Key::Character("v".into()), GoToView);
 
     // The sound (issue #13). cosmic-player's map has no mute key, so this is
     // mpv's `m` rather than a COSMIC precedent; the owner asked for it on
@@ -238,6 +243,11 @@ mod tests {
             Some(Action::CopyView)
         );
         assert!(matches!(Action::CopyView.message(), Message::CopyView));
+        assert_eq!(
+            pressed(Modifiers::CTRL, Key::Character("v".into())),
+            Some(Action::GoToView)
+        );
+        assert!(matches!(Action::GoToView.message(), Message::PasteView));
         assert_eq!(
             pressed(Modifiers::empty(), Key::Character("h".into())),
             Some(Action::LockHorizon)

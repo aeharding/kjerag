@@ -45,9 +45,15 @@ pub const CLEAR_RECENT: &str = "Clear recent list";
 pub const CLOSE_VIDEO: &str = "Close video";
 pub const SAVE_FRAME: &str = "Save frame";
 pub const COPY_FRAME: &str = "Copy frame";
-/// Beside `Copy frame`, and named the same way: the frame is the picture and
-/// the view is where it was taken from.
-pub const COPY_VIEW: &str = "Copy view";
+/// The owner's own wording, verbatim: `Copy view` said nothing to anyone who
+/// had not already been told what it did. Its counterpart mirrors it word for
+/// word, because the two are one idea and half a name would hide that.
+///
+/// The vocabulary the rest of these follow: the **reference** is the text and
+/// the **view** is the place it names. A reference is copied; a view is gone
+/// to.
+pub const COPY_VIEW: &str = "Copy current view reference";
+pub const GO_TO_VIEW: &str = "Go to copied view reference";
 pub const QUIT: &str = "Quit";
 
 /// `Playback`.
@@ -74,10 +80,14 @@ pub const SETTINGS_TITLE: &str = "Settings";
 /// own: the pilot pressed `Copy frame`, so the toast says frame.
 pub const FRAME_COPIED: &str = "Frame copied to the clipboard";
 
-/// And the same sentence for the line of text, whose noun is `Copy view`.
-/// It names the destination for the reason the frame's does: a copy that
-/// does not say where it went is a copy nobody trusts enough to paste.
-pub const VIEW_COPIED: &str = "View copied to the clipboard";
+/// And the same sentence for the line of text, with the menu item's own noun
+/// in it. It names the destination for the reason the frame's does: a copy
+/// that does not say where it went is a copy nobody trusts enough to paste.
+pub const VIEW_COPIED: &str = "View reference copied to the clipboard";
+
+/// What a paste that landed says. This one is about the place rather than the
+/// text, which is why it is the shorter noun: nobody goes to a reference.
+pub const WENT_TO_VIEW: &str = "Went to the copied view";
 
 /// The Settings page.
 pub const APPEARANCE: &str = "Appearance";
@@ -152,6 +162,17 @@ pub fn capture_failed(to: Destination, reason: &str) -> String {
     }
 }
 
+/// A pasted reference that names a video this window is not showing, and
+/// carries no directories to find it in. There is nowhere to go, so all this
+/// does is say which video it belongs to, which is the one thing the pilot
+/// cannot see for himself.
+///
+/// The file is quoted and not pathed, which is how `frame_saved` above names
+/// a destination and how cosmic-files names one.
+pub fn view_is_from(file: &Path) -> String {
+    format!("That view reference is from \"{}\"", file.display())
+}
+
 /// A recent file as the menu shows it: under the home directory, `~` stands
 /// in for it, which is what cosmic-player and cosmic-edit both do.
 pub fn recent(path: &Path) -> String {
@@ -218,6 +239,7 @@ mod tests {
             SAVE_FRAME,
             COPY_FRAME,
             COPY_VIEW,
+            GO_TO_VIEW,
             QUIT,
             PLAY_PAUSE,
             BACK_10,
@@ -237,6 +259,7 @@ mod tests {
             THEME_LIGHT,
             FRAME_COPIED,
             VIEW_COPIED,
+            WENT_TO_VIEW,
         ];
         for line in copy {
             assert!(!line.contains('\u{2014}'), "em dash in {line:?}");
@@ -244,6 +267,7 @@ mod tests {
         assert!(!about_item().contains('\u{2014}'));
         assert!(!frame_saved(Path::new("/tmp/Screenshots/a.png")).contains('\u{2014}'));
         assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
+        assert!(!view_is_from(Path::new("a.insv")).contains('\u{2014}'));
         assert!(!open_failed(Some("hevc")).contains('\u{2014}'));
     }
 

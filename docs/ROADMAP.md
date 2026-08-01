@@ -46,10 +46,23 @@ the view can be quoted**: `i` copies one line naming the video, the frame
 and the framing, written as `reframe`'s own arguments, so a report about a
 360 video carries the direction it was pointing rather than leaving everyone
 to guess it. Every capture prints the same line, because a still's name
-carries the video and the moment and nothing carries the direction. The line
-is written in `crates/render/src/framing.rs` and read back by reframe's real
-parser in a test, so the two cannot drift; the copy carries the file's name
-alone and the terminal line carries the path.
+carries the video and the moment and nothing carries the direction. The copy
+carries the file's name alone and the terminal line carries the path.
+
+**And the line is a place, not a label.** `Ctrl+V` goes there: the frame it
+names, the direction it was pointing, the horizon it was held with, as a jump
+and not an animation. A reference carrying a path opens the video it names
+first; one naming a video that is not open says which video it is from; a
+clipboard holding anything else does nothing at all, because `Ctrl+V` over a
+video means nothing in any other player either. The command line takes one
+too, so the terminal line is a complete launch command:
+`kyerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1`.
+All three read it with the one parser in `crates/render/src/framing.rs`, which
+is also where it is written; reframe's real parser reads the same line in a
+test, so no two of them can drift. Measured under the harness: copy a view,
+seek ten seconds away, zoom out a notch, paste, and the copied line comes back
+to the millisecond and the hundredth of a degree with the picture byte for
+byte what it was.
 
 **M1 is done.** The seam blend (issue #7) is the first M2 quality item and
 it has landed: where the two lenses overlap the pass mixes them by
