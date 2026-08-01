@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use kjerag_media::Fallible;
 use kjerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, SeamFit, Size};
-use kjerag_spike::{Gpu, Offscreen};
+use kjerag_spike::{Gpu, Offscreen, seam_fit};
 
 /// Not sRGB, so the shader writes the video's own gamma-encoded numbers
 /// straight out and a PNG viewer shows what the window shows. `srgb=1`
@@ -99,25 +99,6 @@ impl Seam {
             Self::Stored(fit) => scene.use_seam(*fit),
         }
     }
-}
-
-/// `roll:0.71,yaw:-2.35,pitch:-1.61,cx:-1.26,cy:-14.60`, in each knob's own
-/// units, as the app's config stores them.
-fn stored(value: &str) -> Fallible<SeamFit> {
-    let mut fit = SeamFit::default();
-    for term in value.split(',') {
-        let (name, amount) = term.split_once(':').ok_or("a stored knob is knob:amount")?;
-        let amount: f64 = amount.parse()?;
-        match name {
-            "roll" => fit.roll_deg = amount,
-            "yaw" => fit.yaw_deg = amount,
-            "pitch" => fit.pitch_deg = amount,
-            "cx" => fit.cx_px = amount,
-            "cy" => fit.cy_px = amount,
-            _ => return Err(format!("no stored knob called {name}").into()),
-        }
-    }
-    Ok(fit)
 }
 
 fn main() -> Fallible<()> {
@@ -189,7 +170,7 @@ impl Options {
                     seam = match value {
                         "factory" => Seam::Factory,
                         "file" => Seam::File,
-                        _ => Seam::Stored(stored(value)?),
+                        _ => Seam::Stored(seam_fit(value)?),
                     }
                 }
                 "out" => out = Some(value.to_owned()),

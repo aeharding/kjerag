@@ -20,3 +20,27 @@ pub use kjerag_media::{Chroma, Pair, Plane, Walk};
 pub use offscreen::{Gpu, Offscreen};
 pub use picture::{Difference, FORMAT, Picture, Render, aspect};
 pub use skyline::{Skyline, skyline};
+
+/// `roll:0.71,yaw:-2.35,pitch:-1.61,cx:-1.26,cy:-14.60`, in each knob's own
+/// units, as the app's config stores them.
+///
+/// Here rather than inside one instrument because more than one of them takes
+/// a stored per-camera calibration on the command line, and a second copy of
+/// this parser is a second chance for two instruments to disagree about what
+/// a pilot's own config says.
+pub fn seam_fit(value: &str) -> kjerag_media::Fallible<kjerag_render::SeamFit> {
+    let mut fit = kjerag_render::SeamFit::default();
+    for term in value.split(',') {
+        let (name, amount) = term.split_once(':').ok_or("a stored knob is knob:amount")?;
+        let amount: f64 = amount.parse()?;
+        match name {
+            "roll" => fit.roll_deg = amount,
+            "yaw" => fit.yaw_deg = amount,
+            "pitch" => fit.pitch_deg = amount,
+            "cx" => fit.cx_px = amount,
+            "cy" => fit.cy_px = amount,
+            _ => return Err(format!("no stored knob called {name}").into()),
+        }
+    }
+    Ok(fit)
+}
