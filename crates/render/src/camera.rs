@@ -317,7 +317,10 @@ impl Viewpoint {
     /// A press on the room around the ball takes hold of nothing, because
     /// there is nothing there to take hold of.
     pub fn grab(&mut self, uv: [f32; 2], aspect: f32) {
-        self.drag = self.hold(uv, aspect);
+        self.drag = self
+            .camera
+            .look(uv, aspect)
+            .map(|anchor| Drag { anchor, at: uv });
     }
 
     pub fn release(&mut self) {
@@ -350,11 +353,28 @@ impl Viewpoint {
     /// A held drag takes hold again at the new field of view. The direction
     /// under the cursor moved when the view widened, and a drag still solving
     /// for the old one would jump the picture on its next move.
+    ///
+    /// **A cursor in the room around the ball keeps the hold it has** (issue
+    /// #92). There is no direction there to take hold of, and a drag is a
+    /// button the hand is still holding down: letting go of it because the
+    /// wheel turned over the room killed the pan outright, and the only way
+    /// back was to release and press again. Nothing reads the kept direction
+    /// while it is stale, because the room and the pinned drag cannot be seen
+    /// at the same width: the room needs a view wider than `2 * FOV_FLAT`
+    /// (past there the sphere closes into a disc with an edge, `Screen`),
+    /// the pinned drag stops at `FOV_FLAT`, and the zoom re-takes the hold at
+    /// the width it just arrived at. The wide drag between them reads the
+    /// cursor's travel and not what is under it, which is why the pan worked
+    /// in the room until the wheel touched it.
     pub fn zoom(&mut self, steps: f32, uv: [f32; 2], aspect: f32) {
         self.camera.zoom(steps, aspect);
-        if self.drag.is_some() {
-            self.drag = self.hold(uv, aspect);
-        }
+        let Some(held) = self.drag else {
+            return;
+        };
+        self.drag = Some(Drag {
+            anchor: self.camera.look(uv, aspect).unwrap_or(held.anchor),
+            at: uv,
+        });
     }
 
     /// Apply a [`Nudge`], which zooms where the keyboard is pointing.
@@ -383,13 +403,6 @@ impl Viewpoint {
     /// middle is what a keyboard is pointing at.
     fn pointing(&self) -> [f32; 2] {
         self.drag.map_or(MIDDLE, |drag| drag.at)
-    }
-
-    fn hold(&self, uv: [f32; 2], aspect: f32) -> Option<Drag> {
-        Some(Drag {
-            anchor: self.camera.look(uv, aspect)?,
-            at: uv,
-        })
     }
 }
 
@@ -1219,6 +1232,101 @@ mod tests {
             zoom_mid_drag_holds(PINNED, |viewpoint, aspect| viewpoint.nudge(nudge, aspect));
             zoom_mid_drag_holds(WIDE, |viewpoint, aspect| viewpoint.nudge(nudge, aspect));
         }
+    }
+
+    /// A point of the ball view that is room rather than picture, and the one
+    /// the drag starts from, which is picture at every width.
+    const ROOM: [f32; 2] = [0.12, 0.2];
+
+    /// Issue #92: a zoom while the cursor is out in the room does not let go
+    /// of the drag. There is no direction out there to take hold of, and the
+    /// wide drag was never holding one.
+    ///
+    /// The drag is grabbed on the ball and hauled out into the room, which is
+    /// the owner's own gesture and works; the zoom lands there.
+    #[track_caller]
+    fn zoom_over_the_room_holds(zoom: impl FnOnce(&mut Viewpoint, f32)) {
+        let aspect = 16.0 / 9.0;
+        let mut viewpoint = at_the_ball(aspect);
+        assert!(
+            viewpoint.camera().look(ROOM, aspect).is_none(),
+            "the test point is picture, not room",
+        );
+
+        viewpoint.grab(MIDDLE, aspect);
+        assert!(viewpoint.drag_to(ROOM, aspect), "the drag stalled");
+
+        zoom(&mut viewpoint, aspect);
+        assert!(viewpoint.is_dragging(), "the zoom let go of the drag");
+
+        let zoomed = viewpoint.camera();
+        assert!(
+            viewpoint.drag_to([ROOM[0] + 0.2, ROOM[1]], aspect),
+            "the pan died at the zoom",
+        );
+        assert_ne!(viewpoint.camera().yaw, zoomed.yaw);
+    }
+
+    #[test]
+    fn zooming_over_the_room_keeps_the_drag() {
+        // Both ways the wheel goes, because the far end is a clamp rather than
+        // a state and a scroll that changes nothing at all still re-takes the
+        // hold. And both keys, which aim where the drag is holding (issue
+        // #83), so a hand out in the room aims them into the room.
+        for steps in [1.0, -1.0] {
+            zoom_over_the_room_holds(|viewpoint, aspect| viewpoint.zoom(steps, ROOM, aspect));
+        }
+        for nudge in [Nudge::ZoomIn, Nudge::ZoomOut] {
+            zoom_over_the_room_holds(|viewpoint, aspect| viewpoint.nudge(nudge, aspect));
+        }
+    }
+
+    /// The same drag on the way back in (issue #92): the hand holds the button
+    /// and scrolls the whole zoom range in from the ball, cursor parked out in
+    /// the room, so the picture comes out to meet it partway.
+    ///
+    /// Two things at every notch. The drag is alive, which is what the room
+    /// used to end. And it has not jumped: a move to where the cursor already
+    /// is asks for nothing, so anything the view does then it did on its own.
+    /// That covers both crossings the scroll makes -- the room's edge, where
+    /// the hold starts answering again, and [`FOV_FLAT`], where the drag goes
+    /// back to being pinned to the cursor -- and the second is why the kept
+    /// direction is never read stale: the room is gone a whole `FOV_FLAT`
+    /// before the pinned drag starts.
+    #[test]
+    fn scrolling_in_from_the_room_keeps_the_drag_and_does_not_jump() {
+        let aspect = 16.0 / 9.0;
+        let mut viewpoint = at_the_ball(aspect);
+        viewpoint.grab(MIDDLE, aspect);
+        assert!(viewpoint.drag_to(ROOM, aspect));
+
+        let mut over_the_room = 0;
+        let mut pinned = 0;
+        while viewpoint.camera().fov > FOV_MIN {
+            viewpoint.zoom(1.0, ROOM, aspect);
+            let camera = viewpoint.camera();
+            assert!(viewpoint.is_dragging(), "the zoom let go at {}", camera.fov);
+
+            match camera.look(ROOM, aspect) {
+                None => over_the_room += 1,
+                Some(_) if camera.fov <= FOV_FLAT => pinned += 1,
+                Some(_) => {}
+            }
+
+            viewpoint.drag_to(ROOM, aspect);
+            let moved = viewpoint.camera();
+            assert!(
+                (moved.yaw - camera.yaw).abs() < 1e-4 && (moved.pitch - camera.pitch).abs() < 1e-4,
+                "the cursor did not move but the view went from {:?} to {:?} at \
+                 fov {:.0}",
+                degrees(camera),
+                degrees(moved),
+                camera.fov.to_degrees(),
+            );
+        }
+
+        assert!(over_the_room > 0, "the scroll never started in the room");
+        assert!(pinned > 0, "the scroll never reached the pinned drag");
     }
 
     /// With no drag held the key is the only thing pointing, and it points at

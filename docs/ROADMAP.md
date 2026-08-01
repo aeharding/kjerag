@@ -394,6 +394,20 @@ and the key zooms there now, which is what the wheel has always done. With
 nothing held it still zooms about the middle, which is where a keyboard with
 no hand on the picture is pointing.
 
+**And nor does the wheel out in the room around the ball** (issue #92, owner
+reported, the last of the same family). Zoomed out to the ball, a drag that
+starts on the picture and wanders out into the grey keeps turning the view,
+which is what issue #78 bought: the wide drag reads the hand's travel and not
+what is under the cursor. Scrolling out there killed it stone dead. Every
+zoom re-takes the drag's hold at the cursor, the room has no direction under
+it to take hold of, and the whole drag was being dropped rather than the
+hold: the button was still down, the pointer moved 200 px, and the camera
+came back bit for bit identical in the widget-level reproduction. The hold is
+kept now where there is nothing to replace it with. Nothing reads it stale:
+the room only exists past 220 degrees of view and the pinned drag stops at
+110, so the wide drag, which does not use it, is the only regime the room can
+be seen from.
+
 ## Milestones
 
 - **M0 Pipeline proof** — decode one lens via VA-API, import into wgpu
@@ -479,6 +493,29 @@ live, no keyframe UI ever.
   the picture took the splice's fade-down path and counted nothing, which is
   why the hole measured 2.4 s when it was 3.3 s, and why issue #95 read 227
   underruns as a burst at startup when they were this hole in the middle.
+- 2026-07-31 (late) Seam architecture revised by three owner rulings: the
+  app targets ANY 360 footage (near-field moves in general, so per-frame
+  band alignment is the MAIN path and the per-clip table is a prior);
+  the horizon bar is pixel-perfect (calibration brings residual inside
+  the band search's capture range, per-frame alignment snaps it to zero,
+  far field included - which is how Insta360's own horizon is perfect);
+  and correction is calibrate-by-watching (seam readings harvested from
+  playback's own decoded frames, slerped in below perception, pooled
+  per camera, cached per file, no user surface at all).
+
+- 2026-07-31 **ffmpeg pin moved 6.1 -> 7.1** (owner: "Bump to 7"), which
+  supersedes the 2026-07-30 entry further down. Issue #65: the Flatpak
+  could not be built from the tree at all while the pin said 6.1, because
+  every freedesktop runtime ships ffmpeg 7 and the 25.08 one is forced by
+  libcosmic's rustc floor. The port is one file. ffmpeg 7 replaced the
+  bitmask channel layout with `AVChannelLayout`, which holds raw pointers
+  and so is not `Send`, and a `Track` rides its `Reader` onto the decode
+  thread; it now derives the layout from the channel count it already
+  keeps rather than storing one. The bill goes to the dev box: Ubuntu
+  24.04 has no ffmpeg 7 and will not get one, so ffmpeg comes from a PPA
+  (AGENTS.md, and the same one in CI) or, without sudo, from
+  `scripts/ffmpeg7-local.sh`.
+
 - 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
   recorded in docs/icon.md). A round teal world with a green coast and a warm
   rim, and a small figure entering it from the upper left, drawn by
@@ -492,6 +529,7 @@ live, no keyframe UI ever.
   named for the application ID `dev.harding.Kjerag`, the one issue #66
   settled and issue #75 will put in the code; until that rename lands the
   binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
+
 - 2026-07-31 Seam bar raised (owner): "I want the best seam support out
   there." The prod gate is not good-enough but best-shipping, Insta360's
   stitcher included. Two tracks: the per-camera geometric foundation
@@ -944,7 +982,8 @@ live, no keyframe UI ever.
 - 2026-07-30 Primary target is AMD/Intel Mesa (VA-API). NVIDIA would need
   an NVDEC backend variant; out of scope until someone needs it.
 - 2026-07-30 ffmpeg-next/ffmpeg-sys-next pinned to 6.1, matching the system
-  ffmpeg. The 8.x APIs in the research notes are not present.
+  ffmpeg. The 8.x APIs in the research notes are not present. **Superseded
+  2026-07-31**: 7.1, see the top of this log.
 - 2026-07-30 Zero-copy import is not a hand-rolled ash routine: wgpu 30's
   `Device::texture_from_dmabuf_fd` (wgpu-hal Vulkan) imports the VA-API
   planes as they come, 0.12 ms/frame for both. On libcosmic's wgpu 28 the
@@ -987,11 +1026,23 @@ live, no keyframe UI ever.
   wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
   and two wgpu-types in one graph is two incompatible `TextureFormat`s.
   `wgpu` is the only crate in that workspace anything outside it depends on.
-- 2026-07-31 The app turns libcosmic's content container off
-  (`core.window.content_container = false`). It insets the view by
-  `border_padding` on the right and, because `nav_bar.active` defaults to
-  true even with no nav model, by nothing on the left. Video wants both
-  edges (issue #22).
+- 2026-07-31 ~~The app turns libcosmic's content container off
+  (`core.window.content_container = false`)~~ (issue #22, superseded by
+  issue #93 the same day). It insets the view by `border_padding` on the
+  right and, because `nav_bar.active` defaults to true even with no nav
+  model, by nothing on the left. Video wants both edges, and turning the
+  container off is one of the two ways to get them.
+- 2026-07-31 The border padding is zeroed instead, and the content container
+  stays (`core.window.border_padding = Some(0)`, cosmic-player
+  `src/main.rs:895`, issue #93). `main_content_padding` is `[0, 0, 0, 0]`
+  either way (`app/mod.rs:632-639`), so the video still has both edges. What
+  the container is worth is the window background: libcosmic paints
+  `background(theme.transparent).base` only on the container branch
+  (`app/mod.rs:856-874`), and that colour is what makes a COSMIC window a
+  darkened pane over the compositor's blur. Without it the welcome view was
+  blur and nothing else, which is what the owner saw. cosmic-files paints no
+  background of its own either; it just leaves the container on
+  (`src/app.rs:2352-2367`, off in desktop mode only).
 - 2026-07-31 One crate per layer, in a workspace (issue #19): `kyerag-meta`,
   `kyerag-media`, `kyerag-render`, `kyerag` (the app) and `kyerag-spike`.
   The layer diagram is now a build constraint, and `kyerag-meta` builds and

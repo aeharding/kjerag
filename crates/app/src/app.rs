@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Horizon, Nudge, Request, Scene, Stats};
+use kyerag_render::{Accuracy, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -70,6 +70,17 @@ use crate::{menu, shot, strings};
 /// GPL-3.0, attributed in the files themselves).
 const JUMP_BACKWARD_ICON: &[u8] = include_bytes!("../res/icons/jump-backward-10-symbolic.svg");
 const JUMP_FORWARD_ICON: &[u8] = include_bytes!("../res/icons/jump-forward-10-symbolic.svg");
+
+/// The app icon, for the About page and the welcome view. The drawing itself,
+/// rather than the `icon::from_name(Self::APP_ID)` cosmic-edit passes to the
+/// same setter (`src/main.rs:1454-1468`): a name resolves through the icon
+/// theme, and these icons are installed as `dev.harding.Kjerag` while the
+/// binary still calls itself `app.kyerag.Kyerag`, so the lookup finds nothing.
+///
+/// TODO(#75): revisit at the rename, remembering that a name still resolves
+/// to nothing for a build run out of the source tree.
+const APP_ICON: &[u8] =
+    include_bytes!("../../../resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg");
 
 /// How long the pointer has to sit still before the controls, the header bar
 /// and the cursor go away (cosmic-player `src/main.rs:45`).
@@ -190,9 +201,10 @@ pub struct App {
     core: Core,
     /// The file on screen, if there is one.
     open: Option<Open>,
-    /// Set when the last attempt to open a file did not work, which puts a
-    /// second line under the welcome view's first.
-    failed: bool,
+    /// The line under the welcome view's first, set when the last attempt to
+    /// open a file did not work. It holds the line rather than a flag because
+    /// which line it is depends on why the open failed (issue #69).
+    failed: Option<String>,
     stored: Stored,
     key_binds: HashMap<KeyBind, Action>,
     about: About,
@@ -296,18 +308,24 @@ impl cosmic::Application for App {
     /// toggle to the header only when there is a model to toggle
     /// (`src/app/mod.rs:786`), and we have no playlist.
     fn init(mut core: Core, flags: Flags) -> (Self, Task<Self::Message>) {
-        // libcosmic's content container insets the app's view by
-        // `border_padding` on the right and, because `nav_bar.active`
-        // defaults to true even for an app with no nav model, by nothing on
-        // the left (`app/mod.rs`, `main_content_padding`). Measured at scale
-        // 1.25: 1 physical px of window border on the left against 10 on the
-        // right. Video wants both edges, so the container comes off.
-        core.window.content_container = false;
+        // Video wants both window edges, and this is cosmic-player's way of
+        // getting them (`src/main.rs:895`): zero the border padding and keep
+        // libcosmic's content container. `main_content_padding` is then
+        // `[0, 0, 0, 0]` (`app/mod.rs:632-639`), which is the same view as
+        // turning the container off, with the window background that turning
+        // it off takes away: libcosmic paints
+        // `background(theme.transparent).base` only on the container branch
+        // (`app/mod.rs:856-874`), and that colour is the whole of what makes
+        // a COSMIC window a darkened pane over the compositor's blur rather
+        // than bare blur. cosmic-files leaves the container on for the same
+        // reason and never paints a background of its own
+        // (`src/app.rs:2352-2367`, container off in desktop mode only).
+        core.window.border_padding = Some(0);
 
         let mut app = App {
             core,
             open: None,
-            failed: false,
+            failed: None,
             stored: flags.stored,
             key_binds: key_binds(),
             about: about(),
@@ -382,7 +400,7 @@ impl cosmic::Application for App {
                 // First file wins, others are ignored.
                 let Some(path) = dropped.and_then(|files| files.0.into_iter().next()) else {
                     eprintln!("kyerag: that drop carried no local file");
-                    self.failed = true;
+                    self.failed = Some(strings::open_failed(None));
                     return Task::none();
                 };
                 return self.update(Message::FileLoad(path));
@@ -393,7 +411,7 @@ impl cosmic::Application for App {
             }
             Message::FileClose => {
                 self.open = None;
-                self.failed = false;
+                self.failed = None;
                 self.show_controls(now);
                 return self.retitle();
             }
@@ -679,7 +697,7 @@ impl App {
     fn load(&mut self, path: &Path) {
         match Scene::open(path) {
             Ok(scene) => {
-                self.failed = false;
+                self.failed = None;
                 self.open = Some(Open {
                     path: path.to_path_buf(),
                     duration: scene.duration(),
@@ -693,7 +711,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("kyerag: {} not shown: {e}", path.display());
-                self.failed = true;
+                self.failed = Some(strings::open_failed(missing_decoder(&*e)));
                 self.open = None;
             }
         }
@@ -894,14 +912,21 @@ impl App {
 
     /// Nothing open: an icon, a line saying so, and the button that fixes it
     /// (cosmic-player `src/main.rs:1676-1695`).
+    ///
+    /// The mark is the app icon at the size a first-party empty state draws
+    /// one: cosmic-files' empty folder is `.size(64)` over a `text::body`,
+    /// and ours is twice that at the owner's direction (2026-07-31)
+    /// line (`src/tab.rs:5627-5655`), and cosmic-player's welcome view is the
+    /// same shape. It used to be `video-x-generic-symbolic`, which said
+    /// "video" where the window can already say which video player this is.
     fn welcome(&self) -> Element<'_, Message> {
         let mut said = widget::column::with_capacity(3)
             .align_x(Alignment::Center)
             .spacing(8)
-            .push(widget::icon::from_name("video-x-generic-symbolic").size(64))
+            .push(icon::from_svg_bytes(APP_ICON).icon().size(128))
             .push(widget::text::body(strings::NOTHING_OPEN));
-        if self.failed {
-            said = said.push(widget::text::body(strings::OPEN_FAILED));
+        if let Some(line) = &self.failed {
+            said = said.push(widget::text::body(line.as_str()));
         }
         widget::column::with_capacity(4)
             .align_x(Alignment::Center)
@@ -1176,6 +1201,21 @@ fn shift(from: Duration, seconds: f64) -> Duration {
     }
 }
 
+/// The codec a failed open could find no decoder for, and `None` for every
+/// other failure (issue #69).
+///
+/// The engine hands the shell one boxed error from the whole open, and the box
+/// arrives with whatever was put in it: `kyerag-media` refuses a stream whose
+/// codec has no decoder with a [`MissingDecoder`], and nothing between here
+/// and there re-wraps it. So this is a downcast rather than a string match.
+///
+/// The `'static` on the trait object is what makes the downcast legal: without
+/// it the reference's own lifetime becomes the object's, and `downcast_ref` is
+/// only implemented for `dyn Error + Send + Sync + 'static`.
+fn missing_decoder(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Option<&'static str> {
+    Some(e.downcast_ref::<MissingDecoder>()?.codec)
+}
+
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
 fn chooser() -> Task<Message> {
     Task::perform(
@@ -1205,10 +1245,14 @@ fn chooser() -> Task<Message> {
 /// No `developers([...])`: that setter turns name and email pairs into
 /// `mailto:` links, and this repository does not publish personal addresses.
 /// The name is in `author` and contact goes through the repository link.
+///
+/// The widget takes an `icon::Handle` and draws it at 128 px
+/// (libcosmic `src/widget/about.rs:132-141`), so the drawing goes in
+/// directly. See [`APP_ICON`] for why it is not asked for by name.
 fn about() -> About {
     About::default()
         .name(strings::APP_NAME)
-        .icon(icon::from_name(App::APP_ID))
+        .icon(icon::from_svg_bytes(APP_ICON))
         .version(env!("CARGO_PKG_VERSION"))
         .author(strings::AUTHOR)
         .comments(strings::COMMENTS)
@@ -1219,11 +1263,32 @@ fn about() -> About {
         ])
 }
 
-/// The toast queue is ours now rather than libcosmic's, so its three rules
-/// are tested here rather than taken on trust.
+/// What the shell decides on its own: which line a failed open leaves on the
+/// welcome view, and the three rules of the toast queue, which is ours now
+/// rather than libcosmic's and so is tested rather than taken on trust.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shell has to tell a build with no decoder apart from a file it
+    /// cannot read, because they get different lines and only one of them is
+    /// the pilot's to fix (issue #69). This is that test with the probe stood
+    /// in for: the error is built by hand, the way `kyerag-media` builds it on
+    /// a box whose ffmpeg has no HEVC in it.
+    #[test]
+    fn a_missing_decoder_is_told_apart_from_a_file_that_will_not_open() {
+        let missing: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(MissingDecoder { codec: "hevc" });
+        assert_eq!(missing_decoder(&*missing), Some("hevc"));
+        assert!(strings::open_failed(missing_decoder(&*missing)).contains("HEVC"));
+
+        let broken: Box<dyn std::error::Error + Send + Sync> = "file has no video stream".into();
+        assert_eq!(missing_decoder(&*broken), None);
+        assert_eq!(
+            strings::open_failed(missing_decoder(&*broken)),
+            strings::OPEN_FAILED
+        );
+    }
 
     fn lines(toasts: &Toasts) -> Vec<&str> {
         toasts

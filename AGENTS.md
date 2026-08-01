@@ -26,7 +26,20 @@ compositor:
 `cargo run --release -p kyerag-spike --bin reframe -- <file.insv> yaw=30 fov=60`
 
 The `[patch.crates-io]` wgpu entry lives in the root manifest, which is the
-only place cargo reads one.
+only place cargo reads one. It pins the fork by `rev`, not by branch, so that
+a force-push on the fork cannot break a recorded build (issue #68).
+
+**A change to `Cargo.lock` is a change to `flatpak/cargo-sources.json`.** That
+file is the Flatpak build's whole supply of crates, one source per crate,
+generated from the lock and committed so the build needs no network
+(issue #72). Regenerate and commit it in the same change:
+
+```sh
+scripts/cargo-sources.sh
+```
+
+A stale one is not a build that fetches what it is missing; it is a build that
+fails.
 
 **Two checkouts must not share a `CARGO_TARGET_DIR`.** Pointing a worktree's
 build at the main checkout's `target/` to reuse its dependency cache works
@@ -43,22 +56,38 @@ the binary carries the change before believing a number it prints.
 headers, and CI has a job with nothing installed that proves it.
 
 `ffmpeg-sys-next` binds the system ffmpeg headers through bindgen, so a
-bare box cannot build the other layers. On Pop!_OS / Ubuntu 24.04
-(ffmpeg 6.1, which is the version the root manifest pins to):
+bare box cannot build the other layers. The root manifest pins ffmpeg 7.1
+(issue #65: every freedesktop runtime ships 7 and the Flatpak has no way to
+be built against anything else), and Ubuntu 24.04 ships 6.1, so the ffmpeg
+half comes from a PPA. On Pop!_OS / Ubuntu 24.04:
 
 ```sh
-sudo apt install libavcodec-dev libavdevice-dev libavfilter-dev \
-  libavformat-dev libavutil-dev libpostproc-dev libswresample-dev \
-  libswscale-dev libclang-dev \
-  libdrm-dev libwayland-dev libxkbcommon-dev \
-  libasound2-dev
+sudo add-apt-repository -y ppa:ubuntuhandbook1/ffmpeg7 && sudo apt install \
+  libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+  libavutil-dev libpostproc-dev libswresample-dev libswscale-dev \
+  libclang-dev libdrm-dev libwayland-dev libxkbcommon-dev libasound2-dev
 ```
 
-The second to last line is libcosmic's. The last one is cpal's, which the
-sound goes out through (issue #13): its Linux target links `alsa` whatever
-host it ends up using, and PipeWire is what actually plays what it writes,
-through `pipewire-alsa`. libcosmic also needs a newer rustc than Ubuntu ships
-(`rust-version = "1.93"`); `rustup update stable`.
+`libclang-dev` is bindgen's. The three after it are libcosmic's. The last is
+cpal's, which the sound goes out through (issue #13): its Linux target links
+`alsa` whatever host it ends up using, and PipeWire is what actually plays
+what it writes, through `pipewire-alsa`. libcosmic also needs a newer rustc
+than Ubuntu ships (`rust-version = "1.93"`); `rustup update stable`.
+
+Nothing on the box loses its ffmpeg to that line. The 6.1 runtime is
+libavcodec60/libavutil58 and 7.1's is libavcodec61/libavutil59, separate
+packages that sit side by side, and only the `-dev` packages are replaced,
+which are one name per library and hold headers.
+
+Without sudo, or to leave the system on 6.1, `scripts/ffmpeg7-local.sh`
+unpacks the same PPA .debs under `~/.local` and prints the three variables
+that point a build at them; it installs nothing. The third is `RUSTFLAGS`
+and it is not optional: alsa-sys puts `-L /usr/lib/x86_64-linux-gnu` on the
+linker's command line, the system's 6.1 `libavcodec.so` lives there, and
+6.1 and 7.1 export the same names, so a build that picks up the wrong one
+links without a word and is wrong only once it runs. What settles which a
+binary got is `readelf -d <binary> | grep NEEDED`: ffmpeg 7.1 is
+`libavcodec.so.61`, 6.1 is `libavcodec.so.60`.
 
 ## Gates (run before pushing)
 

@@ -66,7 +66,6 @@ pub struct Track {
     /// asking earlier gets `AV_SAMPLE_FMT_NONE`.
     resampler: Option<Resampler>,
     format: ff::format::Sample,
-    layout: ff::ChannelLayout,
     rate: u32,
     channels: usize,
     /// Stream time base, and the PTS the container starts from.
@@ -104,7 +103,6 @@ impl Track {
             decoder: context.decoder().audio()?,
             resampler: None,
             format: ff::format::Sample::F32(ff::format::sample::Type::Planar),
-            layout: ff::ChannelLayout::default(channels as i32),
             rate,
             channels,
             time_base,
@@ -115,6 +113,17 @@ impl Track {
             pipe,
             woven: Vec::new(),
         }))
+    }
+
+    /// Where the samples are going: the plain layout for [`Self::channels`].
+    ///
+    /// Derived at each use rather than held in a field, because ffmpeg 7's
+    /// `AVChannelLayout` carries two raw pointers (`u.map` for a custom
+    /// order, and `opaque`) and so is not `Send`. A `Track` rides its
+    /// `Reader` onto the decode thread ([`Player::open`](super::Player::open)),
+    /// and `channels` is the whole of the input anyway.
+    fn layout(&self) -> ff::ChannelLayout {
+        ff::ChannelLayout::default(self.channels as i32)
     }
 
     /// Read sound until the ring is nearly full, and no further.
@@ -178,8 +187,9 @@ impl Track {
         // The resampler holds a few samples of its own. They are from before
         // the seek too, and prepending them to what lands after it would put
         // the ring's media time out by however many they are.
+        let layout = self.layout();
         if let Some(resampler) = &mut self.resampler {
-            let mut spill = ff::frame::Audio::new(self.format, self.rate as usize, self.layout);
+            let mut spill = ff::frame::Audio::new(self.format, self.rate as usize, layout);
             while matches!(resampler.flush(&mut spill), Ok(Some(_))) {}
         }
         self.pipe.flush();
@@ -218,7 +228,7 @@ impl Track {
 
     fn resampler(&mut self, first: &ff::frame::Audio) -> Fallible<&mut Resampler> {
         if self.resampler.is_none() {
-            self.resampler = Some(first.resampler(self.format, self.layout, self.rate)?);
+            self.resampler = Some(first.resampler(self.format, self.layout(), self.rate)?);
         }
         self.resampler
             .as_mut()
@@ -229,7 +239,8 @@ impl Track {
     /// when the resampler kept everything it was given, which it does at the
     /// start of a stream.
     fn weave(&mut self, frame: &ff::frame::Audio) -> Fallible<bool> {
-        let (format, layout, rate, channels) = (self.format, self.layout, self.rate, self.channels);
+        let (format, layout, rate, channels) =
+            (self.format, self.layout(), self.rate, self.channels);
         // The resampler can hand out more than it took, so the room is
         // computed from the rate change rather than assumed to be one for one.
         let room = (frame.samples() as u64 * u64::from(rate)) / u64::from(frame.rate().max(1));
