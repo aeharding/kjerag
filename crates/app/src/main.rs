@@ -17,6 +17,7 @@ mod app;
 mod args;
 mod config;
 mod dnd;
+mod fail;
 mod key_bind;
 mod menu;
 mod shot;

@@ -37,6 +37,17 @@ pub const CANNOT_OPEN: &str = "Cannot open file";
 pub const CLOSE: &str = "Close";
 pub const OPEN_FAILED: &str = "That file could not be opened.";
 
+/// The same alert, for a video that was playing and stopped (issue #124).
+///
+/// A title of its own, because "Cannot open file" is not what happened: the
+/// file opened, it played, and then the pictures stopped arriving. The body
+/// says the only thing that can be done about it, which is the one sentence
+/// the pilot needs; what actually failed goes to the terminal, where a bug
+/// report is written from (`crate::fail`).
+pub const VIDEO_STOPPED: &str = "Video stopped";
+pub const VIDEO_STOPPED_BODY: &str =
+    "The picture could not be drawn, so playback stopped. Open the file again.";
+
 /// The file chooser.
 pub const OPEN_TITLE: &str = "Open video";
 pub const INSV_FILTER: &str = "Insta360 video";
@@ -258,6 +269,8 @@ mod tests {
             OPEN_BUTTON,
             OPEN_FAILED,
             CANNOT_OPEN,
+            VIDEO_STOPPED,
+            VIDEO_STOPPED_BODY,
             CLOSE,
             OPEN_TITLE,
             INSV_FILTER,

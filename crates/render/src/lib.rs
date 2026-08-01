@@ -19,6 +19,7 @@ mod scene;
 /// Public for `kjerag-spike --bin seam`, which is the same core with the
 /// attribution and the controls printed round it.
 pub mod seam;
+mod stall;
 mod widget;
 
 pub use band::{AZIMUTHS, Cell, KEEP, Ring, Tone, ease, time_constant};
@@ -31,6 +32,7 @@ pub use projection::{Blend, Held, Landing, MAX_LENSES, Reframe, Rolling};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, Harvest, SeamFit};
+pub use stall::{STUCK_FOR, Stall};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on
 /// `Size` because `Size` belongs to `kjerag-media`, which has no wgpu.
