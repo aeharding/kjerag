@@ -24,7 +24,7 @@ the camera and press play. Zero configuration.
 
 ## Status
 
-Alpha. The first tagged release and a Flathub listing are in progress.
+Beta.
 
 | Camera | Support |
 |---|---|
