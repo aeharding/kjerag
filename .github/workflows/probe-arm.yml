@@ -1,0 +1,55 @@
+name: probe-arm
+# TEMPORARY. Deleted before this branch merges. It answers three questions
+# empirically instead of by guess: does the ffmpeg 7 PPA carry arm64, does the
+# Flathub build image exist for aarch64, and does the freedesktop 25.08
+# runtime (plus the two SDK extensions the manifest names) exist for aarch64.
+on:
+  push:
+    branches: [infra/arm64]
+  workflow_dispatch:
+
+jobs:
+  ppa-arm:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - run: dpkg --print-architecture && uname -m
+      - name: add the PPA
+        continue-on-error: true
+        run: |
+          sudo add-apt-repository -y ppa:ubuntuhandbook1/ffmpeg7
+          sudo apt-get update
+      - name: what does it offer
+        continue-on-error: true
+        run: |
+          apt-cache policy libavcodec-dev || true
+          apt-get download --print-uris libavcodec-dev || true
+      - name: install
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libpostproc-dev libswresample-dev libswscale-dev
+      - name: which major landed
+        continue-on-error: true
+        run: pkg-config --modversion libavcodec || echo "no libavcodec.pc"
+
+  container-arm:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - run: uname -m && cat /etc/os-release | head -3
+      - run: pkg-config --modversion libavcodec libavutil libavformat || echo "no ffmpeg dev in the image"
+      - run: pkg-config --modversion libdrm wayland-client xkbcommon alsa || echo "one of the four is missing"
+      - run: clang --version || echo "no clang"; ls /usr/lib/sdk 2>/dev/null || echo "no sdk extensions preinstalled"
+      - run: flatpak --version && flatpak-builder --version
+      - name: does the runtime exist for aarch64
+        run: |
+          flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          for ref in org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 \
+                     org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+                     org.freedesktop.Sdk.Extension.llvm21//25.08; do
+            echo "=== $ref"
+            flatpak remote-info --user --arch=aarch64 flathub "$ref" | head -8 || echo "MISSING for aarch64"
+          done
