@@ -146,7 +146,9 @@ impl Column {
     /// how much picture there is here to line two lenses up on.
     fn texture(&self) -> f64 {
         let mean = self.luma[0] / self.count;
-        (self.luma_square / self.count - mean * mean).max(0.0).sqrt()
+        (self.luma_square / self.count - mean * mean)
+            .max(0.0)
+            .sqrt()
     }
 
     fn add(&mut self, other: &Self) {
@@ -246,8 +248,8 @@ fn columns(
             held.luma_square += front.luma * front.luma;
             for channel in 0..3 {
                 held.sum[0][channel] += front.rgb[channel];
-                held.sum[1][channel] += back.rgb[channel] * trial.gain[channel]
-                    + trial.offset[channel];
+                held.sum[1][channel] +=
+                    back.rgb[channel] * trial.gain[channel] + trial.offset[channel];
             }
             for channel in 0..2 {
                 held.chroma[0][channel] += front.chroma[channel];
@@ -346,11 +348,7 @@ impl Field {
             .filter(|seen| class.holds(seen))
             .filter_map(|seen| {
                 let held = seen.at_seam()?;
-                Some((
-                    held.mean(0, channel),
-                    held.mean(1, channel),
-                    held.count,
-                ))
+                Some((held.mean(0, channel), held.mean(1, channel), held.count))
             })
             .collect()
     }
@@ -358,12 +356,15 @@ impl Field {
     /// The step at the seam in one channel, in codes, one reading per
     /// azimuth-frame.
     fn step(&self, class: Class, channel: usize) -> Reading {
-        Reading::of(self.seen.iter().filter(|s| class.holds(s)).filter_map(
-            |seen| {
-                let held = seen.at_seam()?;
-                Some((seen.azimuth, held.mean(1, channel) - held.mean(0, channel)))
-            },
-        ))
+        Reading::of(
+            self.seen
+                .iter()
+                .filter(|s| class.holds(s))
+                .filter_map(|seen| {
+                    let held = seen.at_seam()?;
+                    Some((seen.azimuth, held.mean(1, channel) - held.mean(0, channel)))
+                }),
+        )
     }
 
     /// One channel's step averaged per azimuth: the azimuth in radians, the
@@ -1063,10 +1064,8 @@ fn ring_fit(by_azimuth: &[(f64, f64, f64)], terms: usize) -> ([f32; 5], f64) {
         for row in 0..5 {
             for column in 0..5 {
                 let inside = row < terms && column < terms;
-                normal[row][column] += (f64::from(u8::from(inside))
-                    * weight
-                    * held[row]
-                    * held[column]) as f32;
+                normal[row][column] +=
+                    (f64::from(u8::from(inside)) * weight * held[row] * held[column]) as f32;
             }
             right[row] += (f64::from(u8::from(row < terms)) * weight * held[row] * value) as f32;
         }
@@ -1152,14 +1151,22 @@ fn controls(fields: &[Field], options: &Options) {
     };
     line("the measurement", &fields[0], "-");
     line("the same patches, NOT lined up first", &fields[1], "-");
-    line("null: lens 0 on itself, same directions", &fields[2], "0 0 0");
+    line(
+        "null: lens 0 on itself, same directions",
+        &fields[2],
+        "0 0 0",
+    );
     line(
         "null: lens 0 on itself, at the found shift",
         &fields[3],
         "0 0 0",
     );
     line("a gain of 1.02 injected into B", &fields[4], "0 0 +B*0.02");
-    line("an offset of +4 codes injected into R", &fields[5], "+4 0 0");
+    line(
+        "an offset of +4 codes injected into R",
+        &fields[5],
+        "+4 0 0",
+    );
     for (index, nudge) in PROBES.iter().enumerate() {
         line(
             &format!("alignment nudged {nudge:+.1} deg across"),
@@ -1199,9 +1206,21 @@ fn controls(fields: &[Field], options: &Options) {
     // against its own picture at the found shift, where the true field is zero
     // in every channel and at every azimuth.
     for (name, field, class) in [
-        ("lens 0 on itself, displaced +0.2 deg across", &fields[12], Class::All),
-        ("the same, on the flat content only", &fields[12], Class::Flat),
-        ("lens 0 on itself, displaced +0.5 deg across", &fields[13], Class::All),
+        (
+            "lens 0 on itself, displaced +0.2 deg across",
+            &fields[12],
+            Class::All,
+        ),
+        (
+            "the same, on the flat content only",
+            &fields[12],
+            Class::Flat,
+        ),
+        (
+            "lens 0 on itself, displaced +0.5 deg across",
+            &fields[13],
+            Class::All,
+        ),
     ] {
         println!("\n  the ring fit's own null - {name}:");
         println!(
@@ -1248,9 +1267,7 @@ fn controls(fields: &[Field], options: &Options) {
 /// What each azimuth read, so a pooled number can be checked against the things
 /// it was pooled from.
 fn table(field: &Field) {
-    println!(
-        "\n    phi   texture      lit0       dR       dG       dB    across   sun  samples"
-    );
+    println!("\n    phi   texture      lit0       dR       dG       dB    across   sun  samples");
     for seen in &field.seen {
         let Some(held) = seen.at_seam() else {
             continue;
@@ -1264,7 +1281,8 @@ fn table(field: &Field) {
             held.mean(1, 1) - held.mean(0, 1),
             held.mean(1, 2) - held.mean(0, 2),
             seen.across,
-            seen.sun.map_or_else(|| "-".to_owned(), |lens| lens.to_string()),
+            seen.sun
+                .map_or_else(|| "-".to_owned(), |lens| lens.to_string()),
             held.count,
         );
     }
@@ -1380,9 +1398,7 @@ fn across_seam(reframe: &Reframe, picture: &Picture, size: Size) {
         let high = trend(plane, at, (1.5, 8.0))?;
         Some(high - low)
     };
-    println!(
-        "\n  step across the seam, each side's trend extrapolated to it, in codes of 255:"
-    );
+    println!("\n  step across the seam, each side's trend extrapolated to it, in codes of 255:");
     let mut worst: f64 = 0.0;
     let mut values = [0.0f64; 3];
     for (channel, name) in CHANNELS.iter().enumerate() {
@@ -1502,9 +1518,7 @@ fn studio(options: &Options) -> Fallible<()> {
         .arg(format!("{}", options.from))
         .arg("-i")
         .arg(&options.input)
-        .args([
-            "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
-        ])
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
         .stdout(Stdio::piped())
         .spawn()?;
     let mut bytes = Vec::new();
@@ -1520,17 +1534,14 @@ fn studio(options: &Options) -> Fallible<()> {
         )
         .into());
     }
+    let (low, high) = options.rows(height);
     println!(
-        "studio: {width}x{height} at {:.3} s. an equirectangular frame, so a column is a \n\
-         \tlongitude: {:.4} degrees per column.",
+        "studio: {width}x{height} at {:.3} s, column means over rows {low} to {high}. \n\
+         \tone column is {:.4} degrees at the {:.0} degree field this export was written at.",
         options.from,
-        360.0 / width as f64,
+        options.fov / width as f64,
+        options.fov,
     );
-    // Column means over the rows this reads, per channel. A band of rows rather
-    // than the whole height, because the poles of an equirectangular frame are
-    // one direction smeared across the width and they would drown every column
-    // in the same pixels.
-    let (low, high) = (height / 2 - height / 8, height / 2 + height / 8);
     let mut column = vec![[0.0f64; 3]; width];
     for row in low..high {
         for x in 0..width {
@@ -1583,54 +1594,31 @@ fn size_of(path: &std::path::Path) -> Fallible<(usize, usize)> {
 /// longitude being assumed, and the width is read off how far the ramp runs.
 fn seam_transition(column: &[[f64; 3]], options: &Options) {
     let width = column.len();
-    let degrees = 360.0 / width as f64;
-    let mut curvature: Vec<f64> = Vec::with_capacity(width);
-    for x in 0..width {
-        let at = |offset: isize| {
-            let index = (x as isize + offset).rem_euclid(width as isize) as usize;
-            column[index].iter().sum::<f64>() / 3.0
-        };
-        // Over a degree either side, so what it answers is the shape of a blend
-        // and not the shape of a cloud.
-        let reach = (1.0 / degrees).round() as isize;
-        curvature.push((at(-reach) - 2.0 * at(0) + at(reach)).abs());
-    }
+    let degrees = options.fov / width as f64;
+    let (from, to) = options.columns(width);
     println!(
-        "\n  scanning the column profile's own curvature over one degree, which is where a \n\
-         \tblend's ramp starts and stops. the two largest features 180 degrees apart are the \n\
-         \ttwo seams.\n"
+        "\n  the profile, column by column. a stitcher that CORRECTS its two lenses to each \n\
+         \tother leaves this flat with a narrow join in it; one that BLENDS the difference \n\
+         \taway leaves a ramp as wide as its blend, and the width of that ramp is the width \n\
+         \tit decided an eye needs.\n"
     );
-    let mut best = (0usize, 0.0f64);
-    for x in 0..width {
-        let opposite = (x + width / 2) % width;
-        let score = curvature[x].min(curvature[opposite]);
-        if score > best.1 {
-            best = (x, score);
-        }
-    }
-    for at in [best.0, (best.0 + width / 2) % width] {
+    println!(
+        "    {:>8} {:>9} {:>9} {:>9} {:>9} {:>11}",
+        "column", "degrees", "R", "G", "B", "dR-dB /col"
+    );
+    let step = ((to - from) / 64).max(1);
+    let mut at = from;
+    while at < to {
+        let ahead = (at + step).min(width - 1);
         println!(
-            "  seam near longitude {:.1} deg (column {at}), curvature {:.3} codes:",
-            at as f64 * degrees,
-            curvature[at],
+            "    {at:>8} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>11.3}",
+            (at as f64 - width as f64 / 2.0) * degrees,
+            column[at][0],
+            column[at][1],
+            column[at][2],
+            ((column[ahead][0] - column[ahead][2]) - (column[at][0] - column[at][2])) / step as f64,
         );
-        println!(
-            "    {:>10} {:>9} {:>9} {:>9}",
-            "degrees", "R", "G", "B"
-        );
-        let reach = (options.reach / degrees).round() as isize;
-        let mut offset = -reach;
-        while offset <= reach {
-            let index = (at as isize + offset).rem_euclid(width as isize) as usize;
-            println!(
-                "    {:>10.2} {:>9.2} {:>9.2} {:>9.2}",
-                offset as f64 * degrees,
-                column[index][0],
-                column[index][1],
-                column[index][2],
-            );
-            offset += (reach / 16).max(1);
-        }
+        at += step;
     }
 }
 
@@ -1656,6 +1644,10 @@ struct Options {
     /// How far either side of a competitor's seam the transition is printed,
     /// in degrees.
     reach: f64,
+    /// Which rows and columns of a competitor's export the profile is read
+    /// over, as fractions of the frame.
+    band: (f64, f64),
+    span: (f64, f64),
 }
 
 impl Options {
@@ -1678,6 +1670,8 @@ impl Options {
             out: None,
             tag: "view".to_owned(),
             reach: 8.0,
+            band: (0.375, 0.625),
+            span: (0.0, 1.0),
         };
         for arg in args {
             match arg.split_once('=') {
@@ -1705,6 +1699,8 @@ impl Options {
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("tag", value)) => options.tag = value.to_owned(),
                 Some(("reach", value)) => options.reach = value.parse()?,
+                Some(("rows", value)) => options.band = pair(value)?,
+                Some(("cols", value)) => options.span = pair(value)?,
                 Some((key, _)) => return Err(format!("no argument called {key}").into()),
             }
         }
@@ -1734,6 +1730,22 @@ impl Options {
         self.out.clone().unwrap_or_else(|| PathBuf::from("scratch"))
     }
 
+    fn rows(&self, height: usize) -> (usize, usize) {
+        let scale = |at: f64| ((at * height as f64) as usize).min(height.saturating_sub(1));
+        (
+            scale(self.band.0),
+            scale(self.band.1).max(scale(self.band.0) + 1),
+        )
+    }
+
+    fn columns(&self, width: usize) -> (usize, usize) {
+        let scale = |at: f64| ((at * width as f64) as usize).min(width.saturating_sub(1));
+        (
+            scale(self.span.0),
+            scale(self.span.1).max(scale(self.span.0) + 1),
+        )
+    }
+
     fn stem(&self) -> String {
         self.input
             .file_stem()
@@ -1743,6 +1755,15 @@ impl Options {
     }
 }
 
+/// Two fractions of a frame, as `low:high`.
+fn pair(value: &str) -> Fallible<(f64, f64)> {
+    let (low, high) = value
+        .split_once(':')
+        .ok_or_else(|| format!("{value:?} is not low:high"))?;
+    Ok((low.parse()?, high.parse()?))
+}
+
 const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|studio] \
      [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [seam=factory] [verbose=1] \
-     [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg]";
+     [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg] \
+     [rows=lo:hi] [cols=lo:hi]";

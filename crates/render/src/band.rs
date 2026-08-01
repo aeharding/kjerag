@@ -288,62 +288,87 @@ const TAU_GAIN_S: f32 = TAU_FAR_S;
 /// otherwise reach the picture as a hemisphere washing out.
 const LIMIT_LN: f32 = 0.25;
 
-/// The exposure the two lenses hand the same content over at, pooled over the
-/// whole ring, smoothed, and split between them (issue #103, stage 3).
+/// The colour the two lenses hand the same content over at, pooled over the
+/// whole ring, smoothed, and split between them (issue #103, stages 3 and 7).
 ///
-/// **One number for the picture, not one per direction.** A gain that varied
-/// round the seam would be a brightness that changes as the view pans, which
-/// is a worse artifact than the step: the two hemispheres of a sphere should
-/// have one exposure between them, and the seam is where that becomes
-/// visible rather than where it lives.
+/// **Three numbers where stage 3 had one, and the third one is the point.**
+/// Stage 3 measured brightness and multiplied all three channels by the same
+/// gain, so whatever the two lenses disagree about that is **not** common to R,
+/// G and B survived it exactly, however well it was fitted. What survives a
+/// brightness correction is a hue, and it is measured across nine captures from
+/// four camera models at 1.6 to 15.6 codes of spread between the channels -
+/// over the one code an 8-bit picture can carry on every one of them. On one
+/// corpus camera the spread is 10.3 codes with the sun in one lens and 0.47
+/// with the sun in neither, which is the owner's own report in somebody else's
+/// footage (docs/research/insv-format.md 6.11).
+///
+/// **One number per channel for the picture, not one per direction.** A gain
+/// that varied round the seam would be a brightness that changes as the view
+/// pans, which is a worse artifact than the step: the two hemispheres of a
+/// sphere should have one exposure and one white balance between them, and the
+/// seam is where that becomes visible rather than where it lives.
 ///
 /// It is the header of the state buffer, so the fragment shader reaches it in
-/// one read at a fixed offset rather than averaging 128 cells per pixel.
+/// one read at a fixed offset rather than averaging 128 cells per pixel. It is
+/// the same sixteen bytes stage 3's was: the padding became the two channels.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tone {
-    /// The natural log of lens 1's brightness over lens 0's, on the same
-    /// content, smoothed at [`TAU_GAIN_S`]. Zero is no correction at all, and
-    /// zero is what a file opens in, what a one-lens file stays in, and what
-    /// a seam that has never correlated stays in.
-    pub log_gain: f32,
+    /// Per channel, in R, G, B order, the natural log of lens 1's picture over
+    /// lens 0's on the same content, smoothed at [`TAU_GAIN_S`]. Zero is no
+    /// correction at all, and zero is what a file opens in, what a one-lens
+    /// file stays in, and what a seam that has never correlated stays in.
+    ///
+    /// In the video's own gamma-coded space, decoded through the fragment
+    /// shader's own BT.709 matrix, which is the space the correction is applied
+    /// in: no transfer function is assumed at either end.
+    pub log_gain: [f32; 3],
     /// What share of the ring was behind the last reading, 0 to 1. Never
     /// applied: the gain is eased in rather than taxed, and this is what an
     /// instrument reads to say how much of the circle answered.
     pub evidence: f32,
-    /// A storage buffer's struct is laid out by its own alignment rules and
-    /// `repr(C)` does not do it for us. Four floats keeps the cells that
-    /// follow on a sixteen-byte boundary whatever [`Cell`] grows into.
-    _pad: [f32; 2],
 }
 
 impl Tone {
-    /// The two numbers a readback finds in the buffer's header, as a `Tone`.
-    pub fn read(log_gain: f32, evidence: f32) -> Self {
-        Self {
-            log_gain,
-            evidence,
-            _pad: [0.0; 2],
+    /// The four numbers a readback finds in the buffer's header, as a `Tone`.
+    pub fn read(log_gain: [f32; 3], evidence: f32) -> Self {
+        Self { log_gain, evidence }
+    }
+
+    /// What each lens's picture is multiplied by, per channel, lens 0 first:
+    /// the symmetric split, so neither hemisphere carries the whole change and
+    /// neither is preferred.
+    ///
+    /// **Exactly one on both sides in every channel when nothing has been
+    /// measured**, which is the byte-identity of every picture this stage does
+    /// not touch, and it is an equality rather than an `exp` that ought to
+    /// return 1.
+    ///
+    /// WGSL twin: `tone_split`.
+    pub fn split(&self) -> [[f32; 3]; 2] {
+        let half: [f32; 3] =
+            std::array::from_fn(|channel| 0.5 * self.log_gain[channel].clamp(-LIMIT_LN, LIMIT_LN));
+        match half == [0.0; 3] {
+            true => [[1.0; 3], [1.0; 3]],
+            false => [half.map(f32::exp), half.map(|h| (-h).exp())],
         }
     }
 
-    /// What each lens's picture is multiplied by, lens 0 first: the symmetric
-    /// split, so neither hemisphere carries the whole change and neither is
-    /// preferred.
-    ///
-    /// **Exactly one on both sides when nothing has been measured**, which is
-    /// the byte-identity of every picture this stage does not touch, and it is
-    /// an equality rather than an `exp` that ought to return 1.
-    ///
-    /// WGSL twin: `tone_split`.
-    pub fn split(&self) -> [f32; 2] {
-        let half = 0.5 * self.log_gain.clamp(-LIMIT_LN, LIMIT_LN);
-        match half == 0.0 {
-            true => [1.0, 1.0],
-            false => [half.exp(), (-half).exp()],
-        }
+    /// The one number stage 3 had, for an instrument that is still asking its
+    /// question: what the two lenses differ by in **brightness**, as the luma
+    /// the three gains imply.
+    pub fn luma_gain(&self) -> f32 {
+        let split = self.split();
+        (LUMA[0] * split[1][0] + LUMA[1] * split[1][1] + LUMA[2] * split[1][2])
+            .max(f32::MIN_POSITIVE)
+            .ln()
+            * 2.0
     }
 }
+
+/// What each channel is worth to brightness: BT.709's own luma weights, which
+/// is the matrix the fragment shader decodes NV12 through read the other way.
+const LUMA: [f32; 3] = [0.212_6, 0.715_2, 0.072_2];
 
 /// The along-seam correction as one field over the whole seam circle: a
 /// constant and the first two cycles of the azimuth (issue #103, stage 5).
@@ -573,6 +598,40 @@ pub struct Cell {
     /// exposure, so a pooling that leans on the dark patches reads the part
     /// that is not.
     pub lit: f32,
+    /// Each lens's mean Cb and Cr over that patch, signed about neutral, lens 0
+    /// first: `[cb0, cr0, cb1, cr1]` (issue #103, stage 7).
+    ///
+    /// **Chroma and not RGB, because the frame is NV12 and a mean is linear.**
+    /// The decode is a matrix, so the mean of the three channels is that matrix
+    /// applied to the mean luma and the mean chroma, exactly. Storing what the
+    /// planes hold rather than what they decode to means the luma half of the
+    /// reading is [`Self::tone`] and [`Self::lit`] unchanged - stage 3's own
+    /// numbers, from stage 3's own full-resolution sums - and the chroma half
+    /// is two more numbers per lens.
+    ///
+    /// Read on a coarser grid than the luma, because the chroma plane is a
+    /// quarter of the resolution to begin with and what is wanted from it is
+    /// one mean over two degrees rather than an edge.
+    pub chroma: [f32; 4],
+    /// How much this direction's **colour** reading is believed, 0 to 1
+    /// (issue #103, stage 7).
+    ///
+    /// Its own and not [`Self::confidence`], because the two answer different
+    /// questions and one of them has an answer where the other has none. A
+    /// direction of flat sky cannot be correlated - the band refuses it at
+    /// `CONTRAST`, and on a real seam that is a fifth to two thirds of the ring
+    /// - but its photometry needs no correlation to be trustworthy: what a
+    /// window displaced by `e` degrees costs is `e` times the content's own
+    /// gradient across it, so the flattest content is the cheapest of all to
+    /// read. Measured rather than argued: at the 0.2 degree residual the pass
+    /// leaves, one lens against its own displaced picture reads 0.33 to 0.76
+    /// codes rms round the ring on flat content, against a colour difference of
+    /// 2 to 10 codes there (docs/research/insv-format.md 6.11).
+    ///
+    /// So a flat direction takes 1 and a correlating one takes its own
+    /// correlation, and what decays where neither is available is this and not
+    /// the reading, which is the rule everywhere else in this file.
+    pub hue_conf: f32,
 }
 
 impl Cell {
@@ -590,7 +649,7 @@ impl Cell {
             .iter()
             .map(|cell| {
                 format!(
-                    "{} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {} {} {}\n",
                     cell.disparity,
                     cell.confidence,
                     cell.reach_m,
@@ -598,12 +657,17 @@ impl Cell {
                     cell.off_conf,
                     cell.tone,
                     cell.lit,
+                    cell.chroma[0],
+                    cell.chroma[1],
+                    cell.chroma[2],
+                    cell.chroma[3],
+                    cell.hue_conf,
                 )
             })
             .collect()
     }
 
-    /// The same, read back. `None` on any line that is not seven numbers.
+    /// The same, read back. `None` on any line that is not twelve numbers.
     pub fn read(text: &str) -> Option<Vec<Self>> {
         text.lines()
             .map(|line| {
@@ -617,9 +681,33 @@ impl Cell {
                     off_conf: next()?,
                     tone: next()?,
                     lit: next()?,
+                    chroma: [next()?, next()?, next()?, next()?],
+                    hue_conf: next()?,
                 })
             })
             .collect()
+    }
+
+    /// What the two lenses' pictures of this patch decoded to, per channel, in
+    /// codes of 1: lens 0 first.
+    ///
+    /// BT.709 full range, the fragment shader's own matrix, applied to the
+    /// means. A mean commutes with a matrix, so this is the mean of the decoded
+    /// samples exactly and not an approximation of it.
+    ///
+    /// WGSL twin: `decoded`.
+    pub fn decoded(&self) -> [[f32; 3]; 2] {
+        let lens = |luma: f32, cb: f32, cr: f32| {
+            [
+                luma + 1.5748 * cr,
+                luma - 0.1873 * cb - 0.4681 * cr,
+                luma + 1.8556 * cb,
+            ]
+        };
+        [
+            lens(self.lit, self.chroma[0], self.chroma[1]),
+            lens(self.lit * self.tone.exp(), self.chroma[2], self.chroma[3]),
+        ]
     }
 
     /// The distance to whatever is in this direction, in metres, or `None`
@@ -948,23 +1036,35 @@ pub fn ease(seconds: f32, tau: f32) -> f32 {
 /// one-lens file, a file's first frame, and a seam with nothing far-field on
 /// it. The caller keeps what it had; the exposure of two lenses does not
 /// change because we stopped being able to see it.
-pub fn pooled_gain(cells: &[Cell]) -> Option<(f32, f32)> {
-    let mut weight = 0.0;
-    let mut total = 0.0;
+pub fn pooled_gain(cells: &[Cell]) -> Option<([f32; 3], f32)> {
+    let mut weight = [0.0f32; 3];
+    let mut total = [0.0f32; 3];
     let mut count = 0.0;
     for cell in cells {
         if cell.disparity.abs() >= NEAR_KNEE_DEG.to_radians() {
             continue;
         }
-        let believed = (cell.confidence / KEEP).clamp(0.0, 1.0);
-        let trust = believed * cell.lit * cell.lit;
-        weight += trust;
-        total += trust * cell.tone.exp();
+        let believed = (cell.hue_conf / KEEP).clamp(0.0, 1.0);
+        if believed <= 0.0 {
+            continue;
+        }
+        let [low, high] = cell.decoded();
+        for channel in 0..3 {
+            // Least squares in codes, per channel: the weight is this
+            // direction's own brightness squared IN THAT CHANNEL, so a channel
+            // the seam is dark in does not lean on a channel it is bright in.
+            weight[channel] += believed * low[channel] * low[channel];
+            total[channel] += believed * low[channel] * high[channel];
+        }
         count += believed;
     }
-    match weight > 0.0 {
+    match weight.iter().all(|held| *held > 0.0) {
         true => Some((
-            (total / weight).ln().clamp(-LIMIT_LN, LIMIT_LN),
+            std::array::from_fn(|channel| {
+                (total[channel] / weight[channel])
+                    .ln()
+                    .clamp(-LIMIT_LN, LIMIT_LN)
+            }),
             count / AZIMUTHS as f32,
         )),
         false => None,
@@ -1070,6 +1170,7 @@ pub(crate) fn wgsl() -> String {
          const PATCH = {patch}u;\n\
          const BACK_ALONG = {back_along}u;\n\
          const BACK_ACROSS = {back_across}u;\n\
+         const HUE_STEP = {hue_step}u;\n\
          const TAU = {tau:?};\n\
          {photometry}{CELL}{RING}{WGSL}",
         tau = std::f32::consts::TAU,
@@ -1084,8 +1185,21 @@ pub(crate) fn wgsl() -> String {
         patch = (2 * half + 1) * (2 * half + 1),
         back_along = (2 * half + 1) as isize + 2 * PERP_STEPS as isize * perp,
         back_across = (2 * half + 1) as isize + near - far,
+        hue_step = ((2 * half + 1) / HUE_TAPS).max(1),
     )
 }
+
+/// How many chroma samples a patch is read along each axis (issue #103,
+/// stage 7).
+///
+/// The luma grids are already in workgroup memory and a chroma sample has to be
+/// fetched, so this is the whole cost of the colour reading: seven a side is 49
+/// taps a lens against the patch's 441, which is three percent of what the pass
+/// already fetches per direction. What is wanted from the chroma plane is one
+/// mean over two degrees, on a plane the encoder carries at a quarter of the
+/// luma's resolution because an eye cannot see edges in it, and 49 samples put
+/// the mean's own standard error an order under the differences being measured.
+const HUE_TAPS: usize = 7;
 
 /// The lookup half, which the fragment shader reads: the bend one ray takes.
 ///
@@ -1148,10 +1262,8 @@ pub(crate) const ROUNDS: u32 = SLICES;
 /// [`Cell`] and the buffer they are laid out in.
 const CELL: &str = r#"
 struct Tone {
-  log_gain: f32,
+  log_gain: vec3<f32>,
   evidence: f32,
-  pad0: f32,
-  pad1: f32,
 };
 
 struct Cell {
@@ -1162,7 +1274,21 @@ struct Cell {
   off_conf: f32,
   tone: f32,
   lit: f32,
+  chroma: array<f32, 4>,
+  hue_conf: f32,
 };
+
+// What one lens's mean luma and mean chroma decode to, per channel, in codes
+// of 1. BT.709 full range, the fragment shader's own matrix. A mean commutes
+// with a matrix, so this is the mean of the decoded samples and not an
+// approximation of it. Rust twin: `Cell::decoded`.
+fn decoded(luma: f32, cb: f32, cr: f32) -> vec3<f32> {
+  return vec3<f32>(
+    luma + 1.5748 * cr,
+    luma - 0.1873 * cb - 0.4681 * cr,
+    luma + 1.8556 * cb,
+  );
+}
 
 struct Along {
   terms: array<f32, 5>,
@@ -1229,26 +1355,32 @@ fn ring_at(centre: vec3<f32>) -> Ring {
 const LOOKUP: &str = r#"
 @group(1) @binding(0) var<storage, read> band: State;
 
-// What each lens's picture is multiplied by, lens 0 first (issue #103,
-// stage 3). Rust twin: `Tone::split`.
+// What lens 0's picture is multiplied by, per channel (issue #103, stages 3
+// and 7). Lens 1 takes the reciprocal, which is `tone_split_back`.
 //
 // The split is symmetric because the seam cannot say which lens is wrong: a
 // correction of +x on one and -x on the other is the same picture at the
 // handover, and halving it is what keeps either hemisphere from carrying the
-// whole change. It is applied to the RGB the two planes decode to rather than
-// to the luma alone, so a hue is scaled with its own brightness and nothing
-// shifts colour.
+// whole change. Three channels rather than stage 3's one, because a single
+// multiplier common to R, G and B cannot change what the two lenses disagree
+// about in HUE, however well it is fitted, and that residue is 1.6 to 15.6
+// codes across the corpus.
 //
-// Exactly one on both sides when nothing has been measured, and by an
-// equality rather than by trusting `exp(0.0)`: a file with one lens stream, a
-// seam that has never correlated and every frame before the first reading all
-// reach that line, and every pixel they draw is the one stage 2 drew.
-fn tone_split() -> vec2<f32> {
-  let half = 0.5 * clamp(band.tone.log_gain, -LIMIT_LN, LIMIT_LN);
-  if half == 0.0 {
-    return vec2<f32>(1.0, 1.0);
+// Exactly one on every channel of both sides when nothing has been measured,
+// and by an equality rather than by trusting `exp(0.0)`: a file with one lens
+// stream, a seam that has never correlated and every frame before the first
+// reading all reach that line, and every pixel they draw is the one stage 2
+// drew. Rust twin: `Tone::split`.
+fn tone_half() -> vec3<f32> {
+  return 0.5 * clamp(band.tone.log_gain, vec3<f32>(-LIMIT_LN), vec3<f32>(LIMIT_LN));
+}
+
+fn tone_split() -> mat2x3<f32> {
+  let half = tone_half();
+  if all(half == vec3<f32>(0.0)) {
+    return mat2x3<f32>(vec3<f32>(1.0), vec3<f32>(1.0));
   }
-  return vec2<f32>(exp(half), exp(-half));
+  return mat2x3<f32>(exp(half), exp(-half));
 }
 
 // The band with nothing behind it: no bend, and the crossover at the width it
@@ -1368,11 +1500,13 @@ fn mix2(a: f32, b: f32, t: f32) -> f32 {
 
 const WGSL: &str = r#"
 // The same group the draw binds, so the band correlates the very pictures the
-// frame after it will sample. The chroma planes are not declared: a doubled
-// edge is geometry and geometry is in the luma, and a bind group may carry
-// bindings a shader has no use for.
+// frame after it will sample. The chroma planes are declared since stage 7 and
+// read only by the photometry: a doubled edge is geometry, geometry is in the
+// luma, and the correlation never touches these.
 @group(0) @binding(1) var luma0: texture_2d<f32>;
+@group(0) @binding(2) var chroma0: texture_2d<f32>;
 @group(0) @binding(3) var luma1: texture_2d<f32>;
+@group(0) @binding(4) var chroma1: texture_2d<f32>;
 @group(0) @binding(5) var samp: sampler;
 
 // A group of its own, because the two pipelines want the same buffer with
@@ -1389,6 +1523,27 @@ fn luma_at(index: u32, uv: vec2<f32>) -> f32 {
     return textureSampleLevel(luma0, samp, uv, 0.0).r;
   }
   return textureSampleLevel(luma1, samp, uv, 0.0).r;
+}
+
+// Cb and Cr, signed about neutral, for the photometry alone (issue #103,
+// stage 7). DRM_FORMAT_GR88 is little endian G:R, so .r is Cb and .g is Cr -
+// the same reading `scene`'s own `nv12` makes of the same two textures.
+fn chroma_at(index: u32, uv: vec2<f32>) -> vec2<f32> {
+  if index == 0u {
+    return textureSampleLevel(chroma0, samp, uv, 0.0).rg - vec2<f32>(0.5);
+  }
+  return textureSampleLevel(chroma1, samp, uv, 0.0).rg - vec2<f32>(0.5);
+}
+
+// One sample of one lens's colour, or the neutral where the lens has no
+// picture there. The caller has already established from the luma grids that
+// this sample is a pair, so what is left is the fetch.
+fn hue_tap(index: u32, aim: mat3x3<f32>, ray: vec3<f32>) -> vec2<f32> {
+  let landing = look(index, aim, ray);
+  if !landing.inside {
+    return vec2<f32>(0.0);
+  }
+  return chroma_at(index, frame_uv(landing.pixel));
 }
 
 struct Watch {
@@ -1431,11 +1586,20 @@ var<workgroup> textured: bool;
 var<workgroup> lit0: array<f32, THREADS>;
 var<workgroup> lit1: array<f32, THREADS>;
 var<workgroup> lit_n: array<f32, THREADS>;
+// The colour half of the same reading, on a coarser grid (issue #103,
+// stage 7). The chroma plane is a quarter of the luma's resolution to begin
+// with and what is wanted from it is one mean over two degrees, so it is
+// sampled every HUE_STEP along each axis - about fifty taps a lens against the
+// patch's 441, which is what keeps this a few percent of the pass rather than
+// a third of it.
+var<workgroup> hue0: array<vec2<f32>, THREADS>;
+var<workgroup> hue1: array<vec2<f32>, THREADS>;
+var<workgroup> hue_n: array<f32, THREADS>;
 // The pooling's own two, because it is a second entry point over the same
 // buffer and not a second use of the same patch: what these hold is one
 // number per LANE over the whole ring, not one per sample of one direction.
-var<workgroup> pooled_weight: array<f32, THREADS>;
-var<workgroup> pooled_total: array<f32, THREADS>;
+var<workgroup> pooled_weight: array<vec3<f32>, THREADS>;
+var<workgroup> pooled_total: array<vec3<f32>, THREADS>;
 var<workgroup> pooled_count: array<f32, THREADS>;
 
 // The map the band is read through: the camera left where it stands and the
@@ -1488,8 +1652,29 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   }
   workgroupBarrier();
   if !textured {
-    // Nothing to read here. The state keeps what it had and gives up the
-    // evidence behind it, which is the same rule a refusal takes.
+    // No GEOMETRY to read here, and that is all the correlation was ever
+    // going to answer. The colour is still readable, and this is the content
+    // most of a real seam is made of: a fifth to two thirds of the ring on the
+    // nine captures measured (issue #103, stage 7). What a displaced window
+    // costs a photometry is the content's own gradient across it, so the patch
+    // the correlation refuses is the one whose colour is cheapest to trust,
+    // and the shift it is read at is zero because zero is what the calibration
+    // says and nothing here can improve on it.
+    //
+    // Only the patch, not the search grid: this is PATCH taps against the 2301
+    // the textured path fills, so a flat direction stays the cheap one.
+    let width = u32(2 * HALF + 1);
+    for (var i = lane; i < PATCH; i += THREADS) {
+      let row = i / width;
+      let column = i % width;
+      let a = f32(i32(column) - HALF) * STEP;
+      let b = f32(i32(row) - HALF) * STEP;
+      back[(row + u32(-EPI_FAR)) * BACK_ALONG + u32(PERP_STEPS * PERP_STEP) + column] =
+        tap(1u, aim1, at.centre + a * at.perp + b * at.epi);
+    }
+    workgroupBarrier();
+    photometry(lane, LEVEL, at, aim0, aim1);
+    workgroupBarrier();
     if lane == 0u {
       forget(cell, at);
     }
@@ -1515,10 +1700,11 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   }
   workgroupBarrier();
 
-  // The two lenses' brightness on the SAME content, which is what the shift
-  // above just established and what no earlier exposure measurement in this
-  // project had. Cooperative, so it costs a seventh of a sample per lane.
-  photometry(lane, winner);
+  // The two lenses' brightness and colour on the SAME content, which is what
+  // the shift above just established and what no earlier exposure measurement
+  // in this project had. Cooperative, so it costs a seventh of a sample per
+  // lane.
+  photometry(lane, winner, at, aim0, aim1);
   workgroupBarrier();
 
   if lane == 0u {
@@ -1539,15 +1725,18 @@ fn peak() -> u32 {
   return found;
 }
 
-// Each lane's share of the two patches' brightness at the winning shift,
-// clipped samples left out in pairs.
-fn photometry(lane: u32, found: u32) {
+// Each lane's share of the two patches' brightness and colour at the winning
+// shift, clipped samples left out in pairs.
+fn photometry(lane: u32, found: u32, at: Ring, aim0: mat3x3<f32>, aim1: mat3x3<f32>) {
   let epi = found / PERP_SHIFTS;
   let perp = (found % PERP_SHIFTS) * u32(PERP_STEP);
   let width = u32(2 * HALF + 1);
   var sum0 = 0.0;
   var sum1 = 0.0;
   var count = 0.0;
+  var chroma0 = vec2<f32>(0.0);
+  var chroma1 = vec2<f32>(0.0);
+  var colours = 0.0;
   for (var i = lane; i < PATCH; i += THREADS) {
     let row = i / width;
     let column = i % width;
@@ -1563,11 +1752,32 @@ fn photometry(lane: u32, found: u32) {
     sum0 += a;
     sum1 += b;
     count += 1.0;
+    // The colour, on every HUE_STEP-th sample of each axis, and on the same
+    // pairs the luma is read on so the two halves of one reading describe the
+    // same population. The luma grids are already in workgroup memory and the
+    // chroma has to be fetched, which is the whole reason for the stride.
+    if row % HUE_STEP != 0u || column % HUE_STEP != 0u {
+      continue;
+    }
+    let front_along = f32(i32(column) - HALF) * STEP;
+    let front_across = f32(i32(row) - HALF) * STEP;
+    let back_along = f32(i32(perp + column) - HALF - PERP_STEPS * PERP_STEP) * STEP;
+    let back_across = f32(i32(row + epi) - HALF + EPI_FAR) * STEP;
+    chroma0 += hue_tap(0u, aim0, at.centre + front_along * at.perp + front_across * at.epi);
+    chroma1 += hue_tap(1u, aim1, at.centre + back_along * at.perp + back_across * at.epi);
+    colours += 1.0;
   }
   lit0[lane] = sum0;
   lit1[lane] = sum1;
   lit_n[lane] = count;
+  hue0[lane] = chroma0;
+  hue1[lane] = chroma1;
+  hue_n[lane] = colours;
 }
+
+// Where in the score table the shift of zero sits, which is the shift a patch
+// with nothing in it to correlate is read at (issue #103, stage 7).
+const LEVEL: u32 = u32(-EPI_FAR) * PERP_SHIFTS + u32(PERP_STEPS);
 
 // Zero-mean normalized cross-correlation of the two patches at candidate
 // shift `i`, or -2 where either patch is short of picture. -2 rather than -1
@@ -1634,19 +1844,52 @@ fn has_picture() -> bool {
   return spread > 0.0 && sqrt(spread / count) >= CONTRAST;
 }
 
-// A direction with nothing in the picture to read. What it keeps is the
-// measurement and what it gives up is the evidence, which is the rule
-// everywhere else in this file: the reading was true when it was taken and may
-// be true still, but nothing is confirming it.
+// The state a direction starts from: no bend on either axis, no colour, and
+// this direction's own reach. Rust twin: `Cell::default` with `reach_m` set.
+fn empty(at: Ring) -> Cell {
+  return Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0, array<f32, 4>(0.0, 0.0, 0.0, 0.0), 0.0);
+}
+
+// A direction with nothing in the picture to CORRELATE. Both geometry channels
+// give up their evidence, which is the rule everywhere else in this file: the
+// reading was true when it was taken and may be true still, but nothing is
+// confirming it.
+//
+// The colour is a different question and it has an answer here (issue #103,
+// stage 7). A flat patch is the easiest photometry on the ring and the hardest
+// alignment, so this is where the two parts of one reading stop agreeing about
+// whether the direction was worth looking at.
 fn forget(cell: u32, at: Ring) {
   var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0);
+    held = empty(at);
   }
   held.reach_m = at.reach_m;
   held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
   held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
+  read_colour(&held, 1.0);
   band.cells[cell] = held;
+}
+
+// One step of the colour reading: the photometry the workgroup just summed, and
+// the confidence it is believed at.
+//
+// `reading` is 1 on a flat patch, where no correlation was needed and none was
+// made, and the correlation's own peak on a textured one. What decays where
+// clipping left no pair to read is the confidence and not the value, which is
+// this file's rule for every channel.
+//
+// A direction with NO colour evidence takes its reading whole, for the reason
+// the two geometry channels do: there is no picture behind it to move under, so
+// there is nothing for an ease to hide.
+fn read_colour(held: ptr<function, Cell>, reading: f32) {
+  let unread = (*held).hue_conf <= 0.0;
+  let learn = select(ease(watch.seconds, TAU_FAR), 1.0, watch.reset != 0.0 || unread);
+  if read_photometry(held) {
+    (*held).hue_conf += (reading - (*held).hue_conf) * learn;
+  } else {
+    (*held).hue_conf -= (*held).hue_conf * ease(watch.seconds, TAU_FAR);
+  }
 }
 
 // The peak, the gates, and one step of the filter. One thread, because it is
@@ -1654,7 +1897,7 @@ fn forget(cell: u32, at: Ring) {
 fn settle(cell: u32, at: Ring) {
   var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0);
+    held = empty(at);
   }
   held.reach_m = at.reach_m;
 
@@ -1743,9 +1986,13 @@ fn settle(cell: u32, at: Ring) {
   }
   // Stage 3's own gate, unchanged: the photometry is read at the shift that
   // made the two patches the same content, so a shift that did not establish
-  // that is not one to read a brightness at.
-  if !epi_pinned {
-    read_photometry(&held);
+  // that is not one to read a brightness at. Here the gate is real, because
+  // there IS picture in this patch: what a displaced window costs a photometry
+  // is the content's own gradient across it, and this patch has one.
+  if epi_pinned {
+    held.hue_conf -= held.hue_conf * ease(watch.seconds, TAU_FAR);
+  } else {
+    read_colour(&held, best);
   }
   band.cells[cell] = held;
 }
@@ -1776,23 +2023,33 @@ fn parabola(minus: f32, best: f32, plus: f32) -> f32 {
 // In the video's own gamma-coded luma, and the correction is applied in that
 // same space, so no transfer function is assumed at either end: what is
 // measured is a brightness match and it is inverted as one.
-fn read_photometry(held: ptr<function, Cell>) {
+fn read_photometry(held: ptr<function, Cell>) -> bool {
   var sum0 = 0.0;
   var sum1 = 0.0;
   var count = 0.0;
+  var chroma0 = vec2<f32>(0.0);
+  var chroma1 = vec2<f32>(0.0);
+  var colours = 0.0;
   for (var i = 0u; i < THREADS; i += 1u) {
     sum0 += lit0[i];
     sum1 += lit1[i];
     count += lit_n[i];
+    chroma0 += hue0[i];
+    chroma1 += hue1[i];
+    colours += hue_n[i];
   }
   // Clipping left nothing to read. The direction keeps what it had, which is
   // the same rule as a refusal: what is absent is a confirmation, not a
   // reason to believe the opposite.
-  if count <= 0.0 || sum0 <= 0.0 || sum1 <= 0.0 {
-    return;
+  if count <= 0.0 || sum0 <= 0.0 || sum1 <= 0.0 || colours <= 0.0 {
+    return false;
   }
   (*held).tone = log(sum1 / sum0);
   (*held).lit = sum0 / count;
+  let mean0 = chroma0 / colours;
+  let mean1 = chroma1 / colours;
+  (*held).chroma = array<f32, 4>(mean0.x, mean0.y, mean1.x, mean1.y);
+  return true;
 }
 
 // The pooled exposure, over the whole ring and over media time. Rust twin:
@@ -1805,8 +2062,8 @@ fn read_photometry(held: ptr<function, Cell>) {
 // that never correlated was never in it.
 @compute @workgroup_size(THREADS)
 fn pool(@builtin(local_invocation_index) lane: u32) {
-  var weight = 0.0;
-  var total = 0.0;
+  var weight = vec3<f32>(0.0);
+  var total = vec3<f32>(0.0);
   var count = 0.0;
   for (var i = lane; i < AZIMUTHS; i += THREADS) {
     let cell = band.cells[i];
@@ -1821,13 +2078,20 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
     if abs(cell.disparity) >= NEAR_KNEE {
       continue;
     }
-    // Least squares in codes: each direction weighs its own brightness
-    // squared, which is what makes this the exposure ratio and not an average
-    // over whichever patches happened to be dark.
-    let believed = clamp(cell.confidence / KEEP, 0.0, 1.0);
-    let trust = believed * cell.lit * cell.lit;
-    weight += trust;
-    total += trust * exp(cell.tone);
+    // Least squares in codes, per channel: each direction weighs its own
+    // brightness squared IN THAT CHANNEL, which is what makes this the ratio
+    // the two lenses actually differ by and not an average over whichever
+    // patches happened to be dark. Its own confidence and not the bend's,
+    // because a direction of flat sky has a colour and no correlation
+    // (`Cell::hue_conf`).
+    let believed = clamp(cell.hue_conf / KEEP, 0.0, 1.0);
+    if believed <= 0.0 {
+      continue;
+    }
+    let low = decoded(cell.lit, cell.chroma[0], cell.chroma[1]);
+    let high = decoded(cell.lit * exp(cell.tone), cell.chroma[2], cell.chroma[3]);
+    weight += believed * low * low;
+    total += believed * low * high;
     count += believed;
   }
   pooled_weight[lane] = weight;
@@ -1837,8 +2101,8 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
   if lane != 0u {
     return;
   }
-  var sum_weight = 0.0;
-  var sum_total = 0.0;
+  var sum_weight = vec3<f32>(0.0);
+  var sum_total = vec3<f32>(0.0);
   var sum_count = 0.0;
   for (var i = 0u; i < THREADS; i += 1u) {
     sum_weight += pooled_weight[i];
@@ -1854,9 +2118,9 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
   // brightness in one frame, which is the artifact this stage exists to not
   // create.
   if watch.reset != 0.0 {
-    held = Tone(0.0, 0.0, 0.0, 0.0);
+    held = Tone(vec3<f32>(0.0), 0.0);
   }
-  if sum_weight <= 0.0 {
+  if any(sum_weight <= vec3<f32>(0.0)) {
     // Nothing on the ring is confirming anything this frame. The exposure of
     // two lenses does not change because we stopped being able to see it, so
     // the value is kept and only the evidence behind it is given up.
@@ -1867,7 +2131,7 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
   // `sum_total / sum_weight` is the least-squares gain itself, because the
   // weights already carry the brightness squared. Its log is what the split
   // halves.
-  let read = clamp(log(sum_total / sum_weight), -LIMIT_LN, LIMIT_LN);
+  let read = clamp(log(sum_total / sum_weight), vec3<f32>(-LIMIT_LN), vec3<f32>(LIMIT_LN));
   let step = ease(watch.seconds, TAU_GAIN);
   held.log_gain += (read - held.log_gain) * step;
   held.evidence += (sum_count / f32(AZIMUTHS) - held.evidence) * step;
@@ -2184,6 +2448,8 @@ mod tests {
                 off_conf: 0.0,
                 tone: 0.0,
                 lit: 0.0,
+                chroma: [0.0; 4],
+                hue_conf: 0.0,
             };
             AZIMUTHS
         ];
@@ -2450,6 +2716,33 @@ mod tests {
             off_conf: 0.0,
             tone: gain.ln(),
             lit: brightness,
+            // Neutral both sides, so the three channels are the luma and a
+            // reading that is one number is one number in all of them.
+            chroma: [0.0; 4],
+            hue_conf: KEEP,
+        }
+    }
+
+    /// The same direction with a colour in it: lens 1's picture differs from
+    /// lens 0's by `gain` per channel, arrived at through the two chroma planes
+    /// the frame actually carries rather than by writing the answer in.
+    fn hue_cell(brightness: f32, gain: [f32; 3]) -> Cell {
+        // The decode is a matrix, so what makes lens 1's three channels
+        // `gain` times lens 0's is that matrix run backwards: Y from the luma
+        // weights, then Cb and Cr from what is left.
+        let low = [brightness; 3];
+        let high: [f32; 3] = std::array::from_fn(|channel| brightness * gain[channel]);
+        let coded = |rgb: [f32; 3]| {
+            let luma = LUMA[0] * rgb[0] + LUMA[1] * rgb[1] + LUMA[2] * rgb[2];
+            (luma, (rgb[2] - luma) / 1.8556, (rgb[0] - luma) / 1.5748)
+        };
+        let (luma0, cb0, cr0) = coded(low);
+        let (luma1, cb1, cr1) = coded(high);
+        Cell {
+            tone: (luma1 / luma0).ln(),
+            lit: luma0,
+            chroma: [cb0, cr0, cb1, cr1],
+            ..lit_cell(0.02, brightness, 1.0)
         }
     }
 
@@ -2463,13 +2756,70 @@ mod tests {
                 .map(|index| lit_cell(0.02, 0.2 + 0.003 * index as f32, gain))
                 .collect();
             let (read, evidence) = pooled_gain(&ring).expect("a ring that correlated");
-            assert!(
-                (read - gain.ln()).abs() < 1e-5,
-                "a ring at gain {gain} read back {}",
-                read.exp(),
-            );
+            for channel in 0..3 {
+                assert!(
+                    (read[channel] - gain.ln()).abs() < 1e-5,
+                    "a ring at gain {gain} read channel {channel} back at {}",
+                    read[channel].exp(),
+                );
+            }
             assert!((evidence - 1.0).abs() < 1e-5, "evidence {evidence}");
         }
+    }
+
+    #[test]
+    fn a_ring_that_differs_in_colour_reads_the_colour_back_channel_by_channel() {
+        // The whole of stage 7 in one assertion, and the one stage 3's pooling
+        // cannot pass: a difference that is not common to R, G and B has to
+        // come back as three numbers, in the channels it was put in and not
+        // smeared across them. The cell is built by running the fragment
+        // shader's own decode backwards, so what is written into the state is
+        // the two chroma planes a frame carries and not the answer.
+        for gain in [[1.0f32, 1.0, 1.03], [0.97, 1.0, 1.02], [1.0, 1.0, 1.0]] {
+            let ring: Vec<Cell> = (0..AZIMUTHS)
+                .map(|index| hue_cell(0.2 + 0.003 * index as f32, gain))
+                .collect();
+            let (read, _) = pooled_gain(&ring).expect("a ring that correlated");
+            for channel in 0..3 {
+                assert!(
+                    (read[channel] - gain[channel].ln()).abs() < 1e-4,
+                    "channel {channel} of {gain:?} read back {}",
+                    read[channel].exp(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_direction_has_a_colour_and_no_correlation_and_is_pooled_anyway() {
+        // The capability stage 7 adds, as the arithmetic that decides it. The
+        // band refuses a patch with under CONTRAST codes in it, so a seam of
+        // sky carries no `confidence` at all - a fifth to two thirds of the
+        // ring on the nine captures measured - and stage 3's pooling therefore
+        // read nothing there and applied to the sky a gain measured on the
+        // ground. What a flat patch does have is a colour, because what a
+        // displaced window costs a photometry is the content's own gradient
+        // across it, and that is what `hue_conf` is separate for.
+        let sky: Vec<Cell> = (0..AZIMUTHS)
+            .map(|_| Cell {
+                confidence: 0.0,
+                off_conf: 0.0,
+                ..hue_cell(0.7, [1.0, 1.0, 1.04])
+            })
+            .collect();
+        let (read, evidence) = pooled_gain(&sky).expect("a ring of sky still has a colour");
+        assert!((read[2] - 1.04f32.ln()).abs() < 1e-4, "read {read:?}");
+        assert!((evidence - 1.0).abs() < 1e-5, "evidence {evidence}");
+        // And it is `hue_conf` that decides it: a direction nothing has read at
+        // all is still nothing.
+        let unread: Vec<Cell> = sky
+            .iter()
+            .map(|cell| Cell {
+                hue_conf: 0.0,
+                ..*cell
+            })
+            .collect();
+        assert!(pooled_gain(&unread).is_none());
     }
 
     #[test]
@@ -2483,12 +2833,13 @@ mod tests {
         let dark: Vec<Cell> = (0..AZIMUTHS)
             .map(|_| Cell {
                 confidence: 0.0,
+                hue_conf: 0.0,
                 ..lit_cell(0.02, 0.5, 1.05)
             })
             .collect();
         assert!(pooled_gain(&dark).is_none());
-        assert_eq!(Tone::default().split(), [1.0, 1.0]);
-        assert_eq!(Tone::read(0.0, 0.9).split(), [1.0, 1.0]);
+        assert_eq!(Tone::default().split(), [[1.0; 3]; 2]);
+        assert_eq!(Tone::read([0.0; 3], 0.9).split(), [[1.0; 3]; 2]);
     }
 
     #[test]
@@ -2511,7 +2862,11 @@ mod tests {
             })
             .collect();
         let (read, _) = pooled_gain(&mixed).expect("half the ring is far field");
-        assert!((read - 1.02f32.ln()).abs() < 1e-5, "read {}", read.exp());
+        assert!(
+            (read[1] - 1.02f32.ln()).abs() < 1e-5,
+            "read {}",
+            read[1].exp()
+        );
     }
 
     #[test]
@@ -2529,9 +2884,9 @@ mod tests {
         // from the many to the one. An equal-weight pooling would have landed
         // at 0.9008, which is the number this has to beat.
         assert!(
-            (read.exp() - 0.9718).abs() < 1e-3,
+            (read[1].exp() - 0.9718).abs() < 1e-3,
             "one bright direction left the answer at {}",
-            read.exp(),
+            read[1].exp(),
         );
     }
 
@@ -2542,10 +2897,10 @@ mod tests {
         // hemisphere by more than an eighth, whatever it reads.
         let broken: Vec<Cell> = (0..AZIMUTHS).map(|_| lit_cell(0.02, 0.5, 4.0)).collect();
         let (read, _) = pooled_gain(&broken).expect("a ring that correlated");
-        assert_eq!(read, LIMIT_LN);
+        assert_eq!(read, [LIMIT_LN; 3]);
         let split = Tone::read(read, 1.0).split();
         assert!(
-            split[0] < 1.14 && split[1] > 0.88,
+            split[0][1] < 1.14 && split[1][1] > 0.88,
             "the guard let through {split:?}",
         );
         // And the widest thing any capture measured is nowhere near it: the
@@ -2562,16 +2917,18 @@ mod tests {
         // the middle: that is the entire correction, and it is one line of
         // arithmetic that has to hold at every size.
         for gain in [0.90f32, 0.98, 1.0, 1.05, 1.15] {
-            let split = Tone::read(gain.ln().clamp(-LIMIT_LN, LIMIT_LN), 1.0).split();
-            let lens0 = 100.0 * split[0];
-            let lens1 = 100.0 * gain.clamp(-LIMIT_LN.exp(), LIMIT_LN.exp()) * split[1];
-            assert!(
-                (lens0 - lens1).abs() < 1e-3,
-                "at gain {gain} the two sides land at {lens0} and {lens1}",
-            );
-            // Symmetric: the two multipliers are reciprocals, so the picture's
-            // own mean brightness is left where it was.
-            assert!((split[0] * split[1] - 1.0).abs() < 1e-6);
+            let split = Tone::read([gain.ln().clamp(-LIMIT_LN, LIMIT_LN); 3], 1.0).split();
+            for channel in 0..3 {
+                let lens0 = 100.0 * split[0][channel];
+                let lens1 = 100.0 * gain.clamp(-LIMIT_LN.exp(), LIMIT_LN.exp()) * split[1][channel];
+                assert!(
+                    (lens0 - lens1).abs() < 1e-3,
+                    "at gain {gain} channel {channel} lands at {lens0} and {lens1}",
+                );
+                // Symmetric: the two multipliers are reciprocals, so the
+                // picture's own mean brightness is left where it was.
+                assert!((split[0][channel] * split[1][channel] - 1.0).abs() < 1e-6);
+            }
         }
     }
 
@@ -2606,13 +2963,28 @@ mod tests {
         let back = ((2 * half + 1) as isize + 2 * PERP_STEPS as isize * perp)
             * ((2 * half + 1) as isize + near - far);
         let shifts = (near - far + 1) as usize * (2 * PERP_STEPS + 1);
-        // Plus stage 3's own: three per lane for the photometry the winning
-        // shift is read at, and three more for the pooling.
-        let bytes = 4 * (patch + back as usize + shifts + 6 * THREADS);
+        // PER ENTRY POINT, because that is what a pipeline is validated
+        // against and the three of them reach different variables. `measure`
+        // is the one that is anywhere near the limit.
+        //
+        // Its own, past the two grids and the score table: `winner` and
+        // `textured`, then the photometry's per-lane reduction - three floats
+        // for the luma sums and, since stage 7, two `vec2` for the chroma sums
+        // and one more float for their count. A `vec2<f32>` in workgroup
+        // memory is eight bytes aligned to eight, so the colour costs 1280 of
+        // these bytes and not the 2048 a `vec3` would have.
+        let measure = 4 * (patch + back as usize + shifts) + 8 + 4 * 4 * THREADS + 2 * 8 * THREADS;
         assert!(
-            bytes <= 16352,
-            "the workgroup wants {bytes} bytes of shared memory",
+            measure <= 16352,
+            "`measure` wants {measure} bytes of shared memory",
         );
+        // What is left, which is the budget any further per-lane number comes
+        // out of: 91 floats a lane, or one more `vec2` array and change.
+        assert!(16352 - measure >= 360);
+        // `pool` reduces two `vec3` and a float per lane and reaches nothing
+        // else. A `vec3` in workgroup memory is sixteen bytes.
+        let pool = 2 * 16 * THREADS + 4 * THREADS;
+        assert!(pool <= 16352, "`pool` wants {pool} bytes");
     }
 
     // -------------------------------------------------- stage 5: the other axis
@@ -2629,6 +3001,8 @@ mod tests {
             off_conf: KEEP,
             tone: 0.0,
             lit: 0.0,
+            chroma: [0.0; 4],
+            hue_conf: 0.0,
         }
     }
 

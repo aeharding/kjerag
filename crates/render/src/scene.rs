@@ -1712,7 +1712,7 @@ impl Band {
         let float = |at: usize| {
             f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
         };
-        let tone = band::Tone::read(float(0), float(4));
+        let tone = band::Tone::read(std::array::from_fn(|channel| float(4 * channel)), float(12));
         let along = band::Along::read(
             std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
             float(band::ALONG_AT + 20),
@@ -1728,6 +1728,8 @@ impl Band {
                     off_conf: float(at + 16),
                     tone: float(at + 20),
                     lit: float(at + 24),
+                    chroma: std::array::from_fn(|channel| float(at + 28 + 4 * channel)),
+                    hue_conf: float(at + 44),
                 }
             })
             .collect();
@@ -1938,18 +1940,20 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
-  // What the two lenses' exposures have to be brought together by, split
-  // between them (issue #103, stage 3). One uniform read for the whole draw,
-  // and exactly 1.0 on both sides until something has been measured, so the
-  // weights below are the weights this pass has always used and a picture
-  // with no reading behind it is the picture stage 2 drew.
+  // What the two lenses' colours have to be brought together by, per channel,
+  // split between them (issue #103, stages 3 and 7). One storage read for the
+  // whole draw, and exactly 1.0 on every channel of both sides until something
+  // has been measured, so the weights below are the weights this pass has
+  // always used and a picture with no reading behind it is the picture stage 2
+  // drew. It multiplies the RGB the two planes decode to rather than the luma
+  // alone, which is what lets three numbers reach a hue at all.
   let tone = tone_split();
   if mix.weights[0] > 0.0 {
-    rgb += (mix.weights[0] * tone.x) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
+    rgb += (mix.weights[0] * tone[0]) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += (mix.weights[1] * tone.y) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    rgb += (mix.weights[1] * tone[1]) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
     total += mix.weights[1];
   }
   // The room around the ball, written rather than painted: transparent black,
