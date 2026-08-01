@@ -690,10 +690,21 @@ impl Reframe {
         let body = self.body_ray(view_ray);
         let turn = body[1].atan2(body[0]) / std::f32::consts::TAU * cells.len() as f32;
         let low = turn.floor();
-        let held = |step: usize| {
-            cells[(low.rem_euclid(cells.len() as f32) as usize + step) % cells.len()].disparity
-        };
-        held(0) + (held(1) - held(0)) * (turn - low)
+        let mix = turn - low;
+        let cell =
+            |step: usize| cells[(low.rem_euclid(cells.len() as f32) as usize + step) % cells.len()];
+        let (a, b) = (cell(0), cell(1));
+        // Weighted by the evidence behind each cell. A direction that has
+        // stopped correlating stops contributing, and with none at all the
+        // answer is zero, which is the picture before the band existed.
+        let (wa, wb) = (a.confidence * (1.0 - mix), b.confidence * mix);
+        let total = wa + wb;
+        if total <= 0.0 {
+            return 0.0;
+        }
+        let strength = ((a.confidence + (b.confidence - a.confidence) * mix) / super::band::KEEP)
+            .clamp(0.0, 1.0);
+        (wa * a.disparity + wb * b.disparity) / total * strength
     }
 
     /// The offset one lens's ray takes for a whole disparity, in view space,

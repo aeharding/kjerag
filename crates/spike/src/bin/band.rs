@@ -59,6 +59,7 @@ fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
     match options.mode {
         Mode::Field => field(&options),
+        Mode::Trace => trace(&options),
         Mode::Sequence => sequence(&options),
         Mode::Render => render(&options),
     }
@@ -68,6 +69,9 @@ fn main() -> Fallible<()> {
 enum Mode {
     /// What the band reads over a stretch, and whether it is depth.
     Field,
+    /// One region of the screen, direction by direction and frame by frame:
+    /// what the bend applied there, and where that number came from.
+    Trace,
     /// A stretch drawn frame by frame, with the flicker of what was applied.
     Sequence,
     /// One view before and after, and the difference at 8x.
@@ -372,6 +376,133 @@ fn stepped(reads: &[Read], shake: f64) -> (f64, f64) {
     (rms, worst.to_degrees())
 }
 
+// ------------------------------------------------------------ the trace
+
+/// One region of the screen, direction by direction and frame by frame.
+///
+/// The question an owner-reported seam artifact asks is always the same one:
+/// **what did the warp apply there, and where did that number come from.** The
+/// field table answers the first for the whole circle at the end of a run; this
+/// answers both for the handful of directions that cover the pixels he pointed
+/// at, on the two frames he pointed at.
+///
+/// `read` is the number the correlation must have returned to move the state
+/// as far as it moved, recovered from the filter's own law rather than
+/// re-measured: the state moves `(read - held) * step` and every term but
+/// `read` is known. That is what makes this an attribution and not a second
+/// opinion.
+fn trace(options: &Options) -> Fallible<()> {
+    let gpu = Gpu::open()?;
+    println!("gpu:    {}", gpu.name);
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
+    let last = reads.last().expect("play returns at least one frame");
+
+    let [x, y, width, height] = options.region;
+    let covered = covering(&last.mapped, options.size(), options.region);
+    println!(
+        "\nbox:    x {x} y {y}, {width} by {height} px of a {} px view at yaw {:.1}, pitch {:.1}, \n\
+         \tfov {:.1}. {} of {AZIMUTHS} directions land in it.",
+        options.size().width,
+        options.yaw,
+        options.pitch,
+        options.fov,
+        covered.len(),
+    );
+    if covered.is_empty() {
+        println!("nothing in that box is inside the crossover, so the band bends none of it.");
+        return Ok(());
+    }
+
+    println!(
+        "\nwhat the bend applied there, frame by frame. `applied` is the disparity the shader \n\
+         used, in degrees and in view px at this view's own scale; `tau` is the time constant \n\
+         the state's own value selected, which is the whole of the temporal design; `read` is \n\
+         what the correlation must have returned to move the state that far, recovered from the \n\
+         filter's law. a `read` far from `applied` on a frame is a direction being pulled.\n"
+    );
+    let px_per_deg = f64::from(options.size().width) / options.fov;
+    for cell in covered {
+        println!(
+            "  direction {} of {AZIMUTHS}, azimuth {:.1} deg",
+            cell,
+            cell as f64 / AZIMUTHS as f64 * 360.0
+        );
+        println!(
+            "  {:>6} {:>10} {:>10} {:>9} {:>7} {:>7} {:>11}",
+            "frame", "held", "applied", "view px", "conf", "tau s", "read"
+        );
+        for (frame, at) in reads.iter().enumerate() {
+            let held = at.cells[cell];
+            let before = match frame {
+                0 => held,
+                _ => reads[frame - 1].cells[cell],
+            };
+            let step = kjerag_render::ease(
+                1.0 / 30.0 * 2.0,
+                kjerag_render::time_constant(before.disparity),
+            );
+            let read = match step > 0.0 {
+                true => f64::from(before.disparity + (held.disparity - before.disparity) / step),
+                false => f64::NAN,
+            };
+            // What the shader ACTUALLY applies, gate included, which is not
+            // the same as what the cell holds: a direction whose evidence has
+            // gone contributes proportionally less and eventually nothing.
+            let applied = f64::from(held.disparity)
+                * f64::from((held.confidence / kjerag_render::KEEP).clamp(0.0, 1.0));
+            println!(
+                "  {frame:>6} {:>9.4}d {:>9.4}d {:>9.2} {:>7.3} {:>7.2} {:>10.4}d",
+                f64::from(held.disparity).to_degrees(),
+                applied.to_degrees(),
+                applied.to_degrees() * px_per_deg,
+                held.confidence,
+                kjerag_render::time_constant(before.disparity),
+                read.to_degrees(),
+            );
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// Which directions of the circle the crossover covers inside a screen box.
+///
+/// A pixel is bent only where both lenses claim it, so a box outside the
+/// crossover has no directions at all and the band cannot be what moved it.
+fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
+    let [x, y, width, height] = region;
+    let mut seen = [false; AZIMUTHS];
+    for row in y..(y + height).min(size.height) {
+        for column in x..(x + width).min(size.width) {
+            let uv = [
+                column as f32 / size.width as f32,
+                row as f32 / size.height as f32,
+            ];
+            let Some(ray) = reframe.view_ray(uv) else {
+                continue;
+            };
+            let Some(at) = reframe.seam_at(ray) else {
+                continue;
+            };
+            // Only where the handover is actually mixing the two lenses: that
+            // is the only place a disparity reaches the picture.
+            let body = reframe.body_ray(ray);
+            let length = (body[0] * body[0] + body[1] * body[1] + body[2] * body[2]).sqrt();
+            let past = (body[2] / length).asin().to_degrees().abs();
+            if past > 1.5 {
+                continue;
+            }
+            let turn =
+                at.phi.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU * AZIMUTHS as f32;
+            for step in [turn.floor(), turn.floor() + 1.0] {
+                seen[(step as usize) % AZIMUTHS] = true;
+            }
+        }
+    }
+    (0..AZIMUTHS).filter(|index| seen[*index]).collect()
+}
+
 // ------------------------------------------------------------ pictures
 
 /// A stretch drawn frame by frame, so a rolly moment can be looked at as film
@@ -544,6 +675,9 @@ struct Options {
     out: Option<PathBuf>,
     /// Where to write the settled state, for `--bin seam band=`.
     save: Option<PathBuf>,
+    /// The screen region `mode=trace` reports on: x, y, width, height, in
+    /// pixels of the rendered view.
+    region: [u32; 4],
 }
 
 impl Options {
@@ -562,6 +696,7 @@ impl Options {
             off: false,
             out: None,
             save: None,
+            region: [0, 0, 0, 0],
         };
         for arg in args {
             match arg.split_once('=') {
@@ -569,6 +704,7 @@ impl Options {
                 Some(("mode", value)) => {
                     options.mode = match value {
                         "field" => Mode::Field,
+                        "trace" => Mode::Trace,
                         "sequence" => Mode::Sequence,
                         "render" => Mode::Render,
                         _ => return Err(format!("no mode called {value}").into()),
@@ -585,6 +721,16 @@ impl Options {
                 Some(("off", value)) => options.off = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("save", value)) => options.save = Some(PathBuf::from(value)),
+                Some(("box", value)) => {
+                    let mut numbers = value.split(',').map(str::parse::<u32>);
+                    let mut next = || numbers.next().transpose();
+                    options.region = [next()?, next()?, next()?, next()?]
+                        .map(|number| number.ok_or("box wants x,y,w,h"))
+                        .into_iter()
+                        .collect::<Result<Vec<u32>, _>>()?
+                        .try_into()
+                        .map_err(|_| "box wants x,y,w,h")?;
+                }
                 Some((key, _)) => return Err(format!("no argument called {key}").into()),
             }
         }
@@ -625,4 +771,4 @@ impl Options {
 
 const USAGE: &str = "usage: band <file.insv> [mode=field|sequence|render] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
-     [out=dir] [save=state.txt]";
+     [out=dir] [save=state.txt] [box=x,y,w,h]";

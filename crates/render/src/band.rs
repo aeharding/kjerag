@@ -134,7 +134,7 @@ const PERP_STEPS: usize = 1;
 /// This one protects one direction of one frame, the reading is smoothed over
 /// many frames before it is worth anything, and a gate too high on a hazy
 /// horizon is how the far field goes unmeasured.
-const KEEP: f32 = 0.65;
+pub const KEEP: f32 = 0.65;
 
 /// How much picture a patch needs, in 8-bit codes of standard deviation.
 /// Phase A's number and 6.8's: flat sky correlates with anything.
@@ -163,17 +163,6 @@ const TAU_FAR_S: f32 = 2.0;
 /// tracks a line crossing the seam without following the correlator frame to
 /// frame.
 const TAU_NEAR_S: f32 = 0.10;
-
-/// How long a direction that has stopped correlating takes to give its
-/// reading up, in seconds.
-///
-/// A direction goes quiet for two reasons and they want the same answer. Sky
-/// drifts into it, and sky is at infinity, so zero is right. Or the near
-/// object that was there has moved on, and zero is right again, because what
-/// is behind it is further away. Holding the last reading instead would print
-/// a stale bend on new content, so it decays, and it decays slowly enough
-/// that a lens flare or a frame of motion blur costs nothing.
-const TAU_STALE_S: f32 = 1.5;
 
 /// How much of the crossover the bend may spend, as a fraction of it.
 ///
@@ -414,6 +403,22 @@ pub fn baseline(lenses: &[Lens]) -> [f32; 3] {
 /// How fast one direction answers a change, in seconds, from what it is
 /// currently reading.
 ///
+/// **It is also how fast the direction FORGETS.** A direction that stops
+/// correlating gives its reading up at this same constant, and that
+/// symmetry is not tidiness, it is the whole of the occlusion story
+/// (issue #103, owner-reported 2026-08-01). A near reading is a reading of
+/// something between the camera and the background - a selfie stick, a hand,
+/// a boot, a passer-by - and the reason it correlates fast is the reason it
+/// expires fast: it is the thing that moves. A far reading is the background,
+/// which does not move, so it is worth keeping. One knee decides both, and it
+/// is the geometric one: 0.19 degrees is 10 m at this baseline (6.1).
+///
+/// A separate stale constant was tried first and is what the owner caught. At
+/// 1.5 seconds, a direction that had read the pilot's boot at 3.2 m went on
+/// applying 4.5 view px of that reading to the treeline behind it for 45
+/// frames, while the seam swept across the scene at 197 deg/s and the content
+/// in that direction changed completely in under one frame.
+///
 /// **The whole of stage 2's temporal design is this function.** It is read
 /// off the smoothed state rather than off the new reading, on purpose: a
 /// noisy reading on far-field content would otherwise look near for one frame
@@ -489,7 +494,6 @@ pub(crate) fn wgsl() -> String {
          const NEAR_KNEE = {knee:?};\n\
          const TAU_FAR = {far_s:?};\n\
          const TAU_NEAR = {near_s:?};\n\
-         const TAU_STALE = {stale:?};\n\
          const FOLD = {fold:?};\n\
          const PATCH = {patch}u;\n\
          const BACK_ALONG = {back_along}u;\n\
@@ -504,7 +508,6 @@ pub(crate) fn wgsl() -> String {
         knee = NEAR_KNEE_DEG.to_radians(),
         far_s = TAU_FAR_S,
         near_s = TAU_NEAR_S,
-        stale = TAU_STALE_S,
         fold = FOLD,
         patch = (2 * half + 1) * (2 * half + 1),
         back_along = (2 * half + 1) as isize + 2 * PERP_STEPS as isize * perp,
@@ -520,7 +523,8 @@ pub(crate) fn wgsl() -> String {
 /// needs: `read` in the fragment shader, `read_write` in the compute one.
 pub(crate) fn lookup_wgsl() -> String {
     format!(
-        "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst TAU = {:?};\n{CELL}{RING}{LOOKUP}",
+        "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst KEEP = {KEEP:?};\n\
+         const TAU = {:?};\n{CELL}{RING}{LOOKUP}",
         std::f32::consts::TAU,
     )
 }
@@ -615,11 +619,31 @@ fn band_bend(ray: vec3<f32>) -> vec3<f32> {
   let mix = turn - f32(low);
   let a = band[u32(low + i32(AZIMUTHS)) % AZIMUTHS];
   let b = band[u32(low + 1 + i32(AZIMUTHS)) % AZIMUTHS];
-  let disparity = mix2(a.disparity, b.disparity, mix);
+  // Weighted by the evidence behind each cell, not just by which is nearer.
+  // A direction that has stopped correlating stops contributing, both to what
+  // the disparity is and to how much of it is applied, and a ray between one
+  // live cell and one dead one takes the live one's answer at the dead one's
+  // strength. With no evidence at all the bend is zero, which is exactly the
+  // picture before this existed: the fallback is stage 1 and it is reached by
+  // arithmetic rather than by a branch. Rust twin: `Reframe::disparity_at`.
+  let wa = a.confidence * (1.0 - mix);
+  let wb = b.confidence * mix;
+  let total = wa + wb;
+  if total <= 0.0 {
+    return vec3<f32>(0.0);
+  }
+  let disparity = (wa * a.disparity + wb * b.disparity) / total;
+  // How much of it to believe. `KEEP` is the correlation a single reading has
+  // to reach before it may move the state at all, and confidence is the
+  // smoothed value of that same number, so a direction whose recent readings
+  // have not been reaching that gate is applied proportionally less. No new
+  // constant: the threshold a reading must pass is the threshold a smoothed
+  // reading is trusted at.
+  let strength = clamp(mix2(a.confidence, b.confidence, mix) / KEEP, 0.0, 1.0);
   // The bend's own gradient across the band is the disparity over the band
   // width, and past 1 the mapping folds. Rust twin: `carried`.
   let limit = FOLD * CROSSOVER;
-  let carried = clamp(disparity, -limit, limit);
+  let carried = clamp(disparity * strength, -limit, limit);
   // Back into view space: view_to_body is a rotation, so its transpose is its
   // inverse, and `v * m` is `transpose(m) * v`.
   return (carried * length(ray)) * (at.epi * reframe.view_to_body);
@@ -800,12 +824,20 @@ fn settle(cell: u32, at: Ring) {
   // wide, and a reading pinned at the limit would report the limit.
   let pinned = epi == 0 || epi == i32(EPI_SHIFTS) - 1;
   if best < KEEP || pinned {
-    // Nothing to read here this frame. What was read before gives itself up
-    // slowly rather than being held: whatever moved into this direction is
-    // further away than what left it.
-    let stale = ease(watch.seconds, TAU_STALE);
-    held.disparity -= held.disparity * stale;
-    held.confidence -= held.confidence * stale;
+    // Nothing to read here this frame. What decays is the EVIDENCE and not
+    // the measurement: the reading was true when it was taken and may be true
+    // still, but nothing is confirming it, and the pass applies a reading in
+    // proportion to how well it is being confirmed (`band_bend`). So the bend
+    // fades out on its own, and a direction that starts correlating again has
+    // its answer already in hand rather than having to learn it twice.
+    //
+    // It fades at the SAME rate the direction learns, which is the whole of
+    // the occlusion story: a near reading is a reading of something between
+    // the camera and the background - a selfie stick, a hand, a boot, someone
+    // walking past - and the reason it correlates fast is the reason it
+    // expires fast. A far reading is the background, which has not gone
+    // anywhere. One knee decides both.
+    held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
     band[cell] = held;
     return;
   }
@@ -942,6 +974,89 @@ mod tests {
         let at = Ring::of(0.7, baseline(&[]));
         assert_eq!(at.reach_m, 0.0);
         assert_eq!(at.epi, [0.0; 3]);
+    }
+
+    /// The occlusion rule, and the owner-reported defect it answers
+    /// (2026-08-01): a near reading is a reading of something that MOVES, so
+    /// the rate that tracks it is also the rate that must forget it. A boot,
+    /// a selfie stick, a hand and a passer-by are one class, and none of them
+    /// is still there a second later.
+    #[test]
+    fn a_near_reading_expires_as_fast_as_it_was_learned() {
+        let near = 1.0f32.to_radians();
+        let reads = 5.0;
+        // Five readings after it stops correlating, a near-field direction has
+        // given up nearly all of what it held. The old fixed 1.5 s constant
+        // left 81 percent of it there.
+        let mut held = near;
+        for _ in 0..reads as usize {
+            held -= held * ease(2.0 / 30.0, time_constant(held));
+        }
+        assert!(
+            held / near < 0.15,
+            "a near reading still holds {:.0} percent after five reads",
+            100.0 * held / near,
+        );
+        // And the far field keeps what it has, because the background it is
+        // looking at has not gone anywhere.
+        let far = 0.05f32.to_radians();
+        let mut held = far;
+        for _ in 0..reads as usize {
+            held -= held * ease(2.0 / 30.0, time_constant(held));
+        }
+        assert!(
+            held / far > 0.80,
+            "a far reading gave up {:.0} percent after five reads",
+            100.0 * (1.0 - held / far),
+        );
+    }
+
+    /// With nothing behind it, the bend is nothing, and nothing is exactly the
+    /// picture stage 1 drew. The fallback is reached by arithmetic and not by
+    /// a branch, which is why it cannot be forgotten.
+    #[test]
+    fn a_direction_with_no_evidence_bends_nothing() {
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        let lenses = fixture_lenses();
+        let reframe = crate::projection::Reframe::new(
+            &lenses,
+            FRAME,
+            crate::Camera::default(),
+            crate::projection::Held::default(),
+            1.0,
+            false,
+            crate::sampling::Sampling::default(),
+        );
+        let ray = [1.0, 0.0, 0.0];
+        // A whole degree of disparity, and no confidence anywhere.
+        let dead = vec![
+            Cell {
+                disparity: 1.0f32.to_radians(),
+                confidence: 0.0,
+                reach_m: 0.033,
+                off_epi: 0.0,
+            };
+            AZIMUTHS
+        ];
+        assert_eq!(reframe.disparity_at(ray, &dead), 0.0);
+        assert_eq!(
+            reframe.bend(ray, reframe.disparity_at(ray, &dead)),
+            [0.0; 3]
+        );
+        // And with full confidence it is applied whole: the gate is a gate,
+        // not a tax on every reading.
+        let live: Vec<Cell> = dead
+            .iter()
+            .map(|cell| Cell {
+                confidence: KEEP,
+                ..*cell
+            })
+            .collect();
+        let held = reframe.disparity_at(ray, &live);
+        assert!(
+            (held - 1.0f32.to_radians()).abs() < 1e-6,
+            "a fully trusted direction applied {held}",
+        );
     }
 
     #[test]
