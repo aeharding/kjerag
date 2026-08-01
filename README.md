@@ -33,6 +33,10 @@ Alpha. The first tagged release and a Flathub listing are in progress.
 | Insta360 X3, X4, X5 | ⚠️ Unverified |
 | DJI, GoPro | ❌ Not supported |
 
+Have a camera that is unverified or missing?
+[Open an issue](https://github.com/aeharding/kjerag/issues) with a short
+raw clip straight off the camera.
+
 See [docs/ROADMAP.md](docs/ROADMAP.md) for where things stand and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
 
