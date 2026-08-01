@@ -133,6 +133,27 @@ pub fn open_failed(missing: Option<&str>) -> String {
     )
 }
 
+/// A file the sandbox cannot see, which is not the same as a file that is not
+/// there (issue #118).
+///
+/// A path that arrives from a drag out of cosmic-files, from the command line
+/// or from a double click is the host's own, and inside a Flatpak most of the
+/// host is not mounted: the open fails with "No such file or directory" for a
+/// file the pilot can see in their file manager, which reads as the app
+/// calling them a liar. The manifest grants the videos folder read-only, so
+/// what is left of this is footage kept somewhere else, and the answer to that
+/// is one menu item away and costs no permission at all, so the line names it.
+///
+/// Said only inside a Flatpak, because outside one a file that is not there
+/// really is not there and this would be a lie (`app::refusal`).
+pub fn out_of_reach() -> String {
+    // The menu item carries an ellipsis, because it opens a dialog; a
+    // sentence naming it does not, because the sentence ends there.
+    format!(
+        "Kjerag cannot reach that file from inside its sandbox. Open it with {FILE} > {OPEN_TITLE}."
+    )
+}
+
 /// The other 360 cameras, named (issue #107).
 ///
 /// A GoPro `.360` or a DJI `.osv` is a valid MP4 that Kjerag cannot read a
@@ -301,6 +322,7 @@ mod tests {
         assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
         assert!(!view_is_from(Path::new("a.insv")).contains('\u{2014}'));
         assert!(!open_failed(Some("hevc")).contains('\u{2014}'));
+        assert!(!out_of_reach().contains('\u{2014}'));
         for format in [Foreign::GoPro, Foreign::Dji, Foreign::Spherical] {
             assert!(!foreign(format).contains('\u{2014}'));
         }
