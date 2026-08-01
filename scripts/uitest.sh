@@ -302,6 +302,36 @@ same_picture() {
 	cmp -s <(picture "$1") <(picture "$2")
 }
 
+# How far apart the darkest and lightest codes in the video pane may be and
+# still be called one flat colour. A window showing bare theme background
+# reads a spread of exactly 0 (measured: every one of the 2,150,400 bytes of
+# the pane reads 27 under cage); a frame of real footage reads 231 to 243
+# over the same crop, and the ball view with its dark room reads 194.
+PANE_FLAT=3
+
+# pane_spread <file>: how far apart the codes in the video pane are, over a
+# 32x18 average of everything between the header bar and the control row.
+# ffmpeg does the averaging so a single bright speck cannot answer for the
+# pane, which is the question `nonblack` cannot ask: bare theme background is
+# not black and passes that check with 100 percent of its bytes nonzero.
+pane_spread() {
+	local file=$1 rows
+	rows=$((HEADER_BAND + CONTROL_BAND))
+	ffmpeg -y -loglevel error -i "$file" \
+		-vf "crop=iw:ih-$rows:0:$HEADER_BAND,scale=32:18" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" |
+		od -An -tu1 -v | tr -s ' ' '\n' | grep -v '^$' | sort -n |
+		awk 'NR==1{lo=$1} {hi=$1} END{print hi-lo}'
+}
+
+# has_picture <file>: the video pane holds a picture rather than one flat
+# colour.
+has_picture() {
+	local spread
+	spread=$(pane_spread "$1")
+	[ -n "$spread" ] && [ "$spread" -gt "$PANE_FLAT" ]
+}
+
 # said <pattern>: the app printed it. Its own instruments say things no
 # capture can.
 said() {
@@ -426,6 +456,15 @@ with_media() {
 			"$session/paused-a.ppm" "$session/paused-b.ppm"
 	fi
 
+	# Before every check that compares two captures of a paused window,
+	# because a window with no picture in it makes all of them meaningless
+	# (issue #102, and the flake in issue #91 that it turned out to be).
+	if [ "$paused" = no ]; then
+		skip "a paused window holds its picture (nothing paused)"
+	else
+		paused_window_holds_its_picture
+	fi
+
 	# Before saves_a_still, because it wants a window with no toast on it and
 	# nothing has pressed `s` yet. A paused window keeps its control row for
 	# good, which is what lets the two captures differ by the toast alone.
@@ -484,6 +523,55 @@ more_report_lines() {
 		waited=$((waited + 1))
 	done
 	return 1
+}
+
+# How long a paused window is watched, and how often. The defect this
+# catches held an empty pane for 1.9 s on the run that found it, so the watch
+# is longer than that and is not one grab: what fails it is any capture with
+# no picture in it, not the last one.
+HOLDS_LOOKS=12
+HOLDS_EVERY=0.4
+
+# Issue #102: a paused window must show the frame it is holding, and go on
+# showing it.
+#
+# The window is paused here and the controls came back with the pause key,
+# which is a change to the shape of the window's widget tree. Measured on the
+# build before the fix, under load, three runs of three: the redraw after
+# that change can present a frame with none of the window's content in it -
+# header bar over bare theme background - and a paused scene asks for no
+# further redraws, so the empty pane stands until the next key press. Every
+# check below this one then compares two captures of a window that has no
+# picture in it, which is what made `a toast is drawn clear of the controls`
+# flaky (issue #91) and is why this check runs first.
+#
+# `nonblack` cannot see it: the theme's background is not black and passes
+# that test with every byte nonzero. What separates them is that the pane is
+# ONE colour, which no frame of footage and no view of the ball ever is.
+#
+# It bites under load and not on an idle box, which is the honest limit of it:
+# the before-and-after numbers in the pull request are from
+# `scratch/blank102/load.sh 18`, the load issue #91 measured this defect at.
+paused_window_holds_its_picture() {
+	local check="a paused window holds its picture" shot look last= blank=0
+	for look in $(seq 1 "$HOLDS_LOOKS"); do
+		alive || lost "$check"
+		shot=$(grab "holds-$look")
+		if has_picture "$shot"; then
+			rm -f "$shot"
+		else
+			blank=$((blank + 1))
+			last=$shot
+		fi
+		sleep "$HOLDS_EVERY"
+	done
+	if [ "$blank" = 0 ]; then
+		pass "$check ($HOLDS_LOOKS captures, $HOLDS_EVERY s apart)"
+	else
+		fail "$check" \
+			"$blank of $HOLDS_LOOKS captures have no picture in the pane, only \
+one flat colour" "$last"
+	fi
 }
 
 # A message that says a capture landed must not be drawn over anything the

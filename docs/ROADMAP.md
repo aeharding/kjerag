@@ -557,6 +557,51 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The blank paused window is a widget tree one child short**
+  (issue #102, the owner's most-reported defect, confirmed four times and then
+  met in real use). Taking your hands off a playing file hides the controls
+  and the header bar with them, and libcosmic keeps the header bar in the same
+  column as the video, so the column drops from two children to one. Pressing
+  space puts it back, and the widget tree rebuilt for that column comes back
+  **one child short**: `Tree::diff_children_custom` writes a child inserted in
+  front of an id-matched child over it instead of inserting it, and libcosmic
+  gives both children ids. `layout::flex::resolve` then walks widgets and tree
+  with `zip`, which stops at the shorter, so the content is never laid out and
+  keeps the `0x0` its slot was pre-filled with; `Column::draw` culls a
+  zero-area child, and the frame goes out as `layers=4 prims=0,0,0,0` - four
+  layers of chrome and no shader primitive at all. Header bar, no video, no
+  control row, every one of the pane's 2,150,400 bytes reading 27.
+
+  **`items=2 trees=1` on exactly the bad build**, against `items=2 trees=2` on
+  every good build in the same run: measured inside the shipped forks
+  (`pop-os/libcosmic` rev `dc1cf9f`) with trace prints built into a local copy
+  of them. Method, numbers and the twelve-line patch that clears it:
+  docs/research/blank-paused-window.md and
+  docs/research/libcosmic-tree-diff-102.patch. Nothing was raised with the
+  upstream project and nothing will be (AGENTS.md).
+
+  **A redraw cannot fix it** - the layout is cached in that user interface,
+  and a redraw 13 s later drew the same empty frame again. Only a rebuild
+  re-lays it out, and any message causes one. While playing, the 250 ms
+  controls poll already supplies one four times a second, which is the whole
+  reason this is only ever seen paused: `Scene::pump` answers `Next::Never`
+  there, so nothing asks and nothing arrives. What ships on the branch is that
+  same heartbeat for a paused window - the shell counts what it does to the
+  window, the widget records that count when a redraw reaches it, and a paused
+  file that has not caught up is rebuilt until it has. Usually it costs
+  nothing, because the redraw the keystroke already causes settles it.
+
+  **The first predicate was wrong and the measurement caught it**: it called a
+  window settled once two redraws running had drawn the same frame at the same
+  shape, which under this load is already true while playing (2.8 fps
+  presented in 5 redraws a second), so it never armed. A count the shell drives
+  cannot be satisfied by a starved decoder.
+
+  `scripts/uitest.sh` gained the check that catches it, and it runs before
+  every check that compares two captures of a paused window: `nonblack`
+  cannot see this failure, because the theme background it leaves behind is
+  not black. Issue #91's flaky toast check was this defect all along.
+
 - 2026-08-01 **A version tag is the release, and nothing about it is ours**
   (issue #106). `cargo release patch --execute` on main bumps the version,
   stamps a dated entry into the metainfo changelog, tags the plain version

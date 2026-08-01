@@ -144,6 +144,19 @@ pub struct Scene {
     /// How the pass samples where the view magnifies the source (issue #11).
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
+    /// How many times the shell has changed the window, and what that count
+    /// stood at when a redraw last reached this widget (issue #102,
+    /// docs/research/blank-paused-window.md).
+    ///
+    /// A paused window asks for no redraws of its own, so whatever the last
+    /// redraw put on screen is what it holds - and the redraw that follows
+    /// the pause key can draw a window whose content was never laid out,
+    /// because the widget tree libcosmic rebuilt for it came back one child
+    /// short. The two counts are how the shell notices: it counts what it
+    /// does, the widget records the count it drew at, and a paused window
+    /// that has not caught up is a window still owed one.
+    asked: Cell<u64>,
+    drawn: Cell<u64>,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -274,6 +287,8 @@ impl Scene {
             forced: Cell::new(None),
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
+            asked: Cell::new(0),
+            drawn: Cell::new(0),
         }
     }
 
@@ -728,6 +743,27 @@ impl Scene {
             false,
             self.sampling.get(),
         ))
+    }
+
+    /// The shell has done something to the window: opened a menu, moved the
+    /// view, brought the controls back with the pause key. Until a redraw
+    /// reaches the widget after this, the picture on screen is older than
+    /// what the window is now (issue #102).
+    pub fn asked(&self) {
+        self.asked.set(self.asked.get().wrapping_add(1));
+    }
+
+    /// Whether a redraw has caught up with everything the shell has asked
+    /// for. The shell keeps a paused file redrawing while this is false.
+    pub fn is_settled(&self) -> bool {
+        self.drawn.get() == self.asked.get()
+    }
+
+    /// Called by the shader widget, once per redraw that reaches it. Nothing
+    /// else may call it: what it records is that a redraw got this far,
+    /// which is the whole of what [`Self::is_settled`] means.
+    pub(crate) fn drew(&self) {
+        self.drawn.set(self.asked.get());
     }
 
     pub fn primitive(&self, camera: Camera) -> ScenePrimitive {
