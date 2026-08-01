@@ -1,14 +1,14 @@
 [package]
-name = "kyerag-render"
+name = "kjerag-render"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-kyerag-media = { workspace = true }
+kjerag-media = { workspace = true }
 # The per-lens Mei calibration the reprojection pass runs on. This is the
-# only edge into `kyerag-meta` in the graph; the trailer layer itself still
+# only edge into `kjerag-meta` in the graph; the trailer layer itself still
 # depends on nothing but prost, which is what its ffmpeg-free CI job checks.
-kyerag-meta = { workspace = true }
+kjerag-meta = { workspace = true }
 ash = { workspace = true }
 libc = { workspace = true }
 wgpu = { workspace = true }
@@ -17,5 +17,5 @@ wgpu = { workspace = true }
 ffmpeg-next = { workspace = true }
 # The three `iced::widget::shader` impls in src/widget.rs. Rust's coherence
 # rules put them in the crate that owns the types, so the layer that draws
-# the pass is also the layer that names iced. The shell stays in `kyerag`.
+# the pass is also the layer that names iced. The shell stays in `kjerag`.
 libcosmic = { workspace = true }

@@ -2,12 +2,12 @@
 //!
 //! The verification harness for issue #8. It renders a run of consecutive
 //! frames through the app's own pass and reads the angle of the horizon out
-//! of each one ([`kyerag_spike::skyline`]), several ways at once, so that the
+//! of each one ([`kjerag_spike::skyline`]), several ways at once, so that the
 //! ways can be compared on the same pixels:
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin horizon -- <file.insv> from=600 count=120
-//! cargo run --release -p kyerag-spike --bin horizon -- <file.insv> find=6
+//! cargo run --release -p kjerag-spike --bin horizon -- <file.insv> from=600 count=120
+//! cargo run --release -p kjerag-spike --bin horizon -- <file.insv> find=6
 //! ```
 //!
 //! Arguments after the path are `key=value`. `from` is where to start in
@@ -34,13 +34,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kyerag_media::Fallible;
-use kyerag_meta::{
+use kjerag_media::Fallible;
+use kjerag_meta::{
     CalibrationSet, ExposureTrack, Filter, OrientationTrack, Quat, Readout, Sweep, axis_map,
     body_from_imu,
 };
-use kyerag_render::{Camera, Cue, FrameClock, Horizon, Scene, ScenePipeline, Size};
-use kyerag_spike::{Gpu, Offscreen, Skyline, skyline};
+use kjerag_render::{Camera, Cue, FrameClock, Horizon, Scene, ScenePipeline, Size};
+use kjerag_spike::{Gpu, Offscreen, Skyline, skyline};
 
 /// Not sRGB, so the shader writes the video's own numbers straight out and
 /// the measurement reads what the window shows.

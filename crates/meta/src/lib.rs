@@ -1,4 +1,4 @@
-//! Everything Kyerag reads out of an `.insv` file that is not pixels.
+//! Everything Kjerag reads out of an `.insv` file that is not pixels.
 //!
 //! The lens calibration, the two lenses' shutter tracks, and the IMU: its
 //! samples as the sensor wrote them, and the orientation those samples
@@ -7,9 +7,9 @@
 //! the file.
 //!
 //! ```no_run
-//! let calibration = kyerag_meta::CalibrationSet::from_insv("VID.insv")?;
-//! let horizon = calibration.orientation(kyerag_meta::Filter::default());
-//! # Ok::<(), kyerag_meta::Error>(())
+//! let calibration = kjerag_meta::CalibrationSet::from_insv("VID.insv")?;
+//! let horizon = calibration.orientation(kjerag_meta::Filter::default());
+//! # Ok::<(), kjerag_meta::Error>(())
 //! ```
 //!
 //! The trailer format, the `offset_v3` grammar, the clock chain and the
@@ -47,7 +47,7 @@ pub enum Error {
     NoMetadata,
     /// The metadata record did not decode as `ExtraMetadata`.
     Protobuf(prost::DecodeError),
-    /// A metadata field Kyerag needs was absent.
+    /// A metadata field Kjerag needs was absent.
     MissingField(&'static str),
     /// A token in `offset_v3` was not a number.
     OffsetNotNumeric,

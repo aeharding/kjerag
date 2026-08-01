@@ -1,4 +1,4 @@
-//! `kyerag [options] [file] [view]`.
+//! `kjerag [options] [file] [view]`.
 //!
 //! A path, not a URL. cosmic-player parses its freestanding arguments as URLs
 //! (`src/argparse.rs:70-79`) because GStreamer streams from the network; we
@@ -8,7 +8,7 @@
 //! After the path come the view's own terms, read by the same code the
 //! clipboard is read with ([`Framing::read`]). That is what makes the line
 //! the window prints beside every capture a command as well as a report:
-//! select it out of the terminal, put `kyerag` in front of it, and the
+//! select it out of the terminal, put `kjerag` in front of it, and the
 //! window opens at that frame pointing that way.
 //!
 //! Hand rolled rather than through a parser crate: two flags, one path and
@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use kyerag_render::Framing;
+use kjerag_render::Framing;
 
 #[derive(Debug, PartialEq)]
 pub enum Args {
@@ -52,20 +52,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
 pub fn help() -> String {
     format!(
         "{}\n\n\
-         Usage: kyerag [options] [file.insv] [view]\n\n\
+         Usage: kjerag [options] [file.insv] [view]\n\n\
          Options:\n  \
          -h, --help     Show this message\n  \
          -V, --version  Show the version\n\n\
          A view is the line `i` copies in the window, which is the same line\n\
-         the window prints beside every capture. Paste one after `kyerag` and\n\
+         the window prints beside every capture. Paste one after `kjerag` and\n\
          it opens the file at that frame, pointing that way:\n\n  \
-         kyerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1",
+         kjerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1",
         version()
     )
 }
 
 pub fn version() -> String {
-    format!("kyerag {}", env!("CARGO_PKG_VERSION"))
+    format!("kjerag {}", env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(test)]
@@ -106,7 +106,7 @@ mod tests {
         assert!(parse_words("a.insv b.insv").is_err());
     }
 
-    /// The whole point: the printed line, with `kyerag` in front of it, is a
+    /// The whole point: the printed line, with `kjerag` in front of it, is a
     /// command that opens the file at that view.
     #[test]
     fn the_printed_line_is_a_launch_command() {

@@ -21,7 +21,7 @@
 //!
 //! Reading a line back is what makes the line a place and not just a label:
 //! `Ctrl+V` in the window goes there, and so does
-//! `kyerag <file> time=... yaw=...` on the command line.
+//! `kjerag <file> time=... yaw=...` on the command line.
 //!
 //! What the line does not carry is the output size, because reframe renders
 //! square and a window is not. The horizontal field of view is the same
@@ -122,7 +122,7 @@ impl Framing {
     /// The five keys, read off words that have already had the file taken out
     /// of them: what a command line hands over after the path.
     ///
-    /// `Ok(None)` is no view at all, which is `kyerag <file>` and has to stay
+    /// `Ok(None)` is no view at all, which is `kjerag <file>` and has to stay
     /// a way to open a file. Anything begun and not finished is an error,
     /// because half a view is not a place: a line missing its `fov=` would
     /// otherwise open somewhere the pilot did not ask for and say nothing.
@@ -333,7 +333,7 @@ mod tests {
     }
 
     /// The command line's own reading: nothing to apply, a whole view, and
-    /// the two ways to get it wrong. A file is opened by `kyerag <file>` with
+    /// the two ways to get it wrong. A file is opened by `kjerag <file>` with
     /// no view at all, so no terms cannot be an error.
     #[test]
     fn the_terms_are_all_of_them_or_none_of_them() {

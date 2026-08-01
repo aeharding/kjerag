@@ -11,9 +11,9 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-kyerag-media = { path = "crates/media" }
-kyerag-meta = { path = "crates/meta" }
-kyerag-render = { path = "crates/render" }
+kjerag-media = { path = "crates/media" }
+kjerag-meta = { path = "crates/meta" }
+kjerag-render = { path = "crates/render" }
 
 # The sound out (issue #13). cosmic-player has no audio output code to copy:
 # it is GStreamer playbin with only the video sink replaced, and GStreamer is
@@ -28,7 +28,7 @@ cpal = "0.18"
 # Flatpak has no way to build against anything else (issue #65). Ubuntu
 # 24.04's own 6.1 is therefore no longer enough; AGENTS.md says where the
 # dev box gets 7.1 from.
-# `kyerag-meta` is deliberately not a dependent: the trailer needs a file
+# `kjerag-meta` is deliberately not a dependent: the trailer needs a file
 # handle, not libav (issue #19).
 ffmpeg-next = "7.1"
 # libcosmic vendors iced as a submodule pinned to wgpu 28, and wgpu types
@@ -53,7 +53,7 @@ open = "5"
 png = "0.17"
 pollster = "0.4"
 # Decodes the .insv trailer's metadata record. Only the eleven fields
-# kyerag-meta declares are read; protobuf skips the rest.
+# kjerag-meta declares are read; protobuf skips the rest.
 prost = "0.14"
 # Derives the app's two cosmic-config entries, and reads the checked-in
 # calibration fixture that telemetry-parser wrote as JSON.

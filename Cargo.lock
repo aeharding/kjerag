@@ -2834,6 +2834,65 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "kjerag"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "jpeg-encoder",
+ "kjerag-render",
+ "libcosmic",
+ "open",
+ "png 0.17.16",
+ "serde",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "kjerag-media"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "ffmpeg-next",
+ "kjerag-meta",
+]
+
+[[package]]
+name = "kjerag-meta"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kjerag-render"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "ffmpeg-next",
+ "kjerag-media",
+ "kjerag-meta",
+ "libc",
+ "libcosmic",
+ "wgpu",
+]
+
+[[package]]
+name = "kjerag-spike"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "kjerag-media",
+ "kjerag-meta",
+ "kjerag-render",
+ "png 0.17.16",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
 name = "known-folders"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2881,65 +2940,6 @@ dependencies = [
  "arrayvec",
  "euclid",
  "smallvec",
-]
-
-[[package]]
-name = "kyerag"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "jpeg-encoder",
- "kyerag-render",
- "libcosmic",
- "open",
- "png 0.17.16",
- "serde",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "kyerag-media"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "ffmpeg-next",
- "kyerag-meta",
-]
-
-[[package]]
-name = "kyerag-meta"
-version = "0.1.0"
-dependencies = [
- "prost",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kyerag-render"
-version = "0.1.0"
-dependencies = [
- "ash",
- "ffmpeg-next",
- "kyerag-media",
- "kyerag-meta",
- "libc",
- "libcosmic",
- "wgpu",
-]
-
-[[package]]
-name = "kyerag-spike"
-version = "0.1.0"
-dependencies = [
- "ffmpeg-next",
- "kyerag-media",
- "kyerag-meta",
- "kyerag-render",
- "png 0.17.16",
- "pollster",
- "wgpu",
 ]
 
 [[package]]

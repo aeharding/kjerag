@@ -5,8 +5,8 @@
 //! and which clock the frames are on.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin gyro -- <file.insv>
-//! cargo run --release -p kyerag-spike --bin gyro -- <file.insv> rest=0,20
+//! cargo run --release -p kjerag-spike --bin gyro -- <file.insv>
+//! cargo run --release -p kjerag-spike --bin gyro -- <file.insv> rest=0,20
 //! ```
 //!
 //! `rest=<from>,<to>` names a stretch in seconds the camera was not moving
@@ -20,12 +20,12 @@
 
 use std::path::PathBuf;
 
-use kyerag_media::{Fallible, Reader};
-use kyerag_meta::{
+use kjerag_media::{Fallible, Reader};
+use kjerag_meta::{
     CalibrationSet, Filter, GyroSample, OrientationTrack, axis_map, body_from_imu, record_index,
 };
 
-/// Axis conventions worth printing side by side: the one Kyerag's table
+/// Axis conventions worth printing side by side: the one Kjerag's table
 /// picks, and three that published tables name. Only one of them can put
 /// gravity on the body's own vertical, and `horizon --sweep` is what tries
 /// all 24 rather than these four.

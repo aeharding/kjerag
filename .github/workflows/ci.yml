@@ -57,7 +57,7 @@ jobs:
 
   # The point of the workspace (issue #19): the trailer layer builds and
   # tests on a box with no libav headers. This job installs nothing, so it
-  # fails the day something drags ffmpeg into kyerag-meta's graph.
+  # fails the day something drags ffmpeg into kjerag-meta's graph.
   meta:
     runs-on: ubuntu-latest
     steps:
@@ -66,6 +66,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # pkg-config is pointed at nothing as well, so this job still fails on a
       # runner image that happens to ship libav headers. Verified positively:
-      # the same environment fails `cargo check -p kyerag-media` on
+      # the same environment fails `cargo check -p kjerag-media` on
       # `libavutil.pc` not found.
-      - run: PKG_CONFIG_LIBDIR=/nonexistent cargo test -p kyerag-meta
+      - run: PKG_CONFIG_LIBDIR=/nonexistent cargo test -p kjerag-meta

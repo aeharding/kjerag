@@ -20,7 +20,7 @@
 //! - **Two rounds of dropping what does not fit.** A wing across the frame is
 //!   a second long bright edge with an angle of its own.
 
-use kyerag_render::Size;
+use kjerag_render::Size;
 
 /// How many rows either side of one are averaged into it before the scan line
 /// is differenced. Enough to put sensor noise and one wing line under the

@@ -8,14 +8,17 @@ install -Dm0644 resources/icons/hicolor/48x48/apps/dev.harding.Kjerag.png \
   "$prefix"/share/icons/hicolor/48x48/apps/dev.harding.Kjerag.png
 ```
 
-Every basename is the application ID (issue #66). That is not decoration:
-the desktop entry's `Icon=` key, an `icon::from_name(APP_ID)` lookup, and
-Flatpak's export rule all resolve an icon by that exact name. The binary's
-`APP_ID` is not that name yet (issue #75), so the two places inside the app
-that show the icon, the About page and the welcome view, read
-`hicolor/scalable/apps/dev.harding.Kjerag.svg` as bytes instead
-(`crates/app/src/app.rs`, `APP_ICON`); the README at the repository root
-embeds the same file.
+Every basename is the application ID (issue #66), which since issue #75 is
+also the binary's `APP_ID`. That is not decoration: the desktop entry's
+`Icon=` key, an `icon::from_name(APP_ID)` lookup, and Flatpak's export rule
+all resolve an icon by that exact name.
+
+The two places inside the app that show the icon, the About page and the
+welcome view, still read `hicolor/scalable/apps/dev.harding.Kjerag.svg` as
+bytes (`crates/app/src/app.rs`, `APP_ICON`). A name resolves only where the
+tree is installed, and a `cargo run` out of this repository is not that;
+measured at the rename, `icon::from_name(APP_ID)` drew nothing at all there.
+The README at the repository root embeds the same file.
 
 | file | what it is |
 | ---- | ---------- |

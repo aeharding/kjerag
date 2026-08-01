@@ -1,23 +1,31 @@
 # Distribution: opening a `.insv`, and shipping a Flatpak
 
 Two questions, one document, because they share every file: what has to
-exist for a double click on a `.insv` to start Kyerag, and what has to exist
-for someone who does not build Rust to have Kyerag at all.
+exist for a double click on a `.insv` to start Kjerag, and what has to exist
+for someone who does not build Rust to have Kjerag at all.
 
 Everything called **measured** below was run on 2026-07-31 on the
 development box (AMD Radeon 760M, Phoenix, `radeonsi`, kernel
 7.0.11-76070011-generic, Pop!\_OS 24.04, `flatpak` 1.16.6). Nothing here is
 quoted from documentation where a command could answer instead.
 
+**Every run below predates the rename** (issue #75), and the transcripts are
+left as they came out, so the ID in them is the old `app.kyerag.Kyerag` and
+the binary is `kyerag`. Substituting the new spelling would make an
+unrepeated run read as a measured one. Everything outside a fenced block is
+the tree as it stands: the ID is `dev.harding.Kjerag` and the binary is
+`kjerag`. Where a name is the point rather than the setting, §2.4 and §3.6
+say which run has and has not been repeated since.
+
 The prototypes are in the tree: `resources/` (what gets installed onto a
 desktop, which is the desktop entry, the metainfo, the MIME package and the
-icon theme tree), `flatpak/app.kyerag.Kyerag.yml` (the manifest) and
+icon theme tree), `flatpak/dev.harding.Kjerag.yml` (the manifest) and
 `justfile` (the install recipe). `crates/app/res/` is a different thing and
 stays where it is: the two jump-button icons are `include_bytes!`d into the
 binary.
 
 **Status.** The Flatpak builds, installs, and registers the type. A double
-click resolves to Kyerag, verified end to end (§3.8). The blocker this
+click resolves to Kjerag, verified end to end (§3.8). The blocker this
 document was written around is gone: the workspace pins ffmpeg 7.1 and the
 runtime ships 7.1.3 (§3.4). The app has an icon (§2.4) and the crate sources
 are committed rather than tarred (§3.5).
@@ -179,7 +187,7 @@ Recommended applications:
 	app.kyerag.Kyerag.desktop
 ```
 
-Kyerag is the default and the only *recommended* handler, and the three
+Kjerag is the default and the only *recommended* handler, and the three
 generic players are still offered under Open With, inherited through the
 subclass. Drop the subclass and they disappear: a pilot who wants to check
 a file in mpv would have nothing to click. cosmic-files reaches them the
@@ -190,7 +198,7 @@ before a bug report arrives. cosmic-settings' default-applications page
 handles its **Video** row by collecting every MIME type whose name starts
 with `video` and setting the chosen application as the default for all of
 them. A pilot who picks a video player in Settings silently takes `.insv`
-away from Kyerag, and nothing tells them. That is COSMIC's behaviour, not
+away from Kjerag, and nothing tells them. That is COSMIC's behaviour, not
 something this end can fix, and the answer is to know it rather than to pick
 a dishonest top-level type to dodge it.
 
@@ -227,7 +235,7 @@ This also matches the code: "The camera's LRV proxy may not exist"
 
 ### 2.1 The entry
 
-`resources/app.kyerag.Kyerag.desktop`. Named for the app ID rather than the
+`resources/dev.harding.Kjerag.desktop`. Named for the app ID rather than the
 binary because `flatpak build-export` only exports files under
 `share/applications`, `share/mime/packages` and `share/metainfo` whose names
 start with the app ID, and because cosmic-files, cosmic-player and
@@ -240,7 +248,7 @@ over rather than a distinction anybody wants. cosmic-player uses `res/`; the
 template it is a template of uses `resources/`; one root matters more than
 which of the two it is.
 
-### 2.2 `Exec=kyerag %f`, not `%U`
+### 2.2 `Exec=kjerag %f`, not `%U`
 
 The Desktop Entry Specification's field codes: `%f` is a single local file
 path, `%F` a list of them, `%u` a single URL, `%U` a list. A launcher given
@@ -290,29 +298,34 @@ each file is and `docs/icon.md` says how it got there. Both the `justfile`
 install recipe and the Flatpak manifest copy the tree whole rather than
 listing sizes, because the tree is generated and a list goes stale.
 
-Every basename is `dev.harding.Kjerag`, the application ID issue #66 settled.
-**The desktop entry still says `Icon=app.kyerag.Kyerag`**, because the binary
-still calls itself that and issue #75's rename sweep is what changes all of
-them in one move (§3.6). So until that sweep lands, the two names do not
-meet, and two things follow that a reader should not have to discover:
+Every basename is `dev.harding.Kjerag`, the application ID issue #66 settled,
+and since issue #75 the desktop entry's `Icon=` key, the binary's `APP_ID`
+and these file names are one string. **The gap this section used to describe
+is closed**: while the entry named an ID nothing else carried, the Flatpak
+build said
 
 ```
 WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
 ```
 
-the Flatpak build still says that (flatpak exports an icon only when its
-basename starts with the app ID), and a launcher still shows a generic
-placeholder. The About page and the welcome view are unaffected: they read
+every time (flatpak exports an icon only when its basename starts with the
+app ID) and a launcher showed a generic placeholder. The export has not been
+re-run since the rename; what is known is that the two names it compares are
+now the same string.
+
+The About page and the welcome view read
 `hicolor/scalable/apps/dev.harding.Kjerag.svg` as bytes rather than asking
 the icon theme for a name (`crates/app/src/app.rs`, `APP_ICON`), which is
-what issue #93 did about exactly this gap.
+what issue #93 did about this gap and what issue #75 kept: measured at the
+rename, the name resolves for an installed build and draws nothing at all
+for a `cargo run` out of the source tree, which installs no theme.
 
 Nothing about the sizes is left to decide. The Icon Theme Specification's
 stated minimum is 48×48, Flathub's floor is "preferably a SVG icon or at
 least a 256x256 PNG", Flatpak requires the basename to equal the app ID, and
 the tree satisfies all three.
 
-### 2.5 How a desktop actually finds Kyerag
+### 2.5 How a desktop actually finds Kjerag
 
 Standard XDG, with one COSMIC wrinkle. The MIME database maps `*.insv` to
 our type, `mimeinfo.cache` maps our type to our desktop file, and
@@ -331,7 +344,7 @@ enumerates desktop entries itself and reads each one's `MimeType=` key
 (`src/mime_app.rs`, `MimeAppCache::reload`), watching the directories for
 changes. It does honour `mimeapps.list`, including the
 `cosmic-mimeapps.list` variant, for defaults and added/removed
-associations. So `update-desktop-database` is not what makes Kyerag appear
+associations. So `update-desktop-database` is not what makes Kjerag appear
 in COSMIC's own file manager, but it is still required, because every
 GLib/GTK application on the machine does read that cache.
 
@@ -342,9 +355,9 @@ to its default-application page. cosmic-files itself is unaffected: its
 MIME database loads the user data directory first.
 
 One more trap, measured and worth the line: **GIO hides a desktop entry
-whose `Exec` program is not on `PATH`.** With `Exec=kyerag` and no `kyerag`
-installed, `gio mime` listed cosmic-player and mpv and not Kyerag; changing
-`Exec` to a program that exists made Kyerag both the default and the only
+whose `Exec` program is not on `PATH`.** With `Exec=kjerag` and no `kjerag`
+installed, `gio mime` listed cosmic-player and mpv and not Kjerag; changing
+`Exec` to a program that exists made Kjerag both the default and the only
 recommended application, with nothing else altered. That is the failure mode
 of a `prefix=$HOME/.local` install on a session whose `PATH` lacks
 `~/.local/bin`: not an error message, just an app that is silently not
@@ -370,7 +383,7 @@ update-mime-database  $prefix/share/mime
 update-desktop-database $prefix/share/applications
 ```
 
-`update-mime-database` is what compiles `resources/app.kyerag.Kyerag.xml`
+`update-mime-database` is what compiles `resources/dev.harding.Kjerag.xml`
 into the `globs2`/`subclasses` tables, so it is what makes `*.insv` mean
 anything at all. `update-desktop-database` then records which application
 handles the type it now knows about. Run them the other way round and the
@@ -455,7 +468,7 @@ frame=   30 … speed=2.67x
 The second half of the pipeline is wgpu's Vulkan import of that dmabuf,
 which has to work against the *extension's* Mesa (26.1.4) rather than the
 host's, and needs the `VK_EXT_image_drm_format_modifier` enable that the
-`[patch.crates-io]` fork exists for. Kyerag reports on that itself. Running
+`[patch.crates-io]` fork exists for. Kjerag reports on that itself. Running
 the installed Flatpak on real footage inside a headless `cage` session (the
 same trick `scripts/uitest.sh` uses):
 
@@ -501,11 +514,11 @@ opened.
 ffmpeg-next asks for the same one, and refuses the file with a typed
 `MissingDecoder` carrying the codec name; the shell turns that into
 
-> Kyerag has no HEVC decoder here, so that file cannot be played. In a
+> Kjerag has no HEVC decoder here, so that file cannot be played. In a
 > Flatpak, the decoder comes from the codecs-extra runtime extension.
 
 instead of "That file could not be opened.", and the terminal line reads
-`kyerag: <path> not shown: no hevc decoder in this libavcodec`.
+`kjerag: <path> not shown: no hevc decoder in this libavcodec`.
 
 At open rather than at startup, which is what this section originally asked
 for and is not what shipped. A startup probe needs a surface to say it on,
@@ -527,7 +540,7 @@ The pin used to read `6.1.1`, because Pop!\_OS 24.04 ships ffmpeg 6.1 and the
 crate major must match the headers it binds (AGENTS.md). 24.08 ships 7.0.3.
 There is no freedesktop branch with ffmpeg 6.
 
-Measured, building `-p kyerag-media` inside `org.freedesktop.Sdk//25.08`:
+Measured, building `-p kjerag-media` inside `org.freedesktop.Sdk//25.08`:
 
 ```
 error: could not compile `ffmpeg-next` (lib) due to 30 previous errors
@@ -603,8 +616,8 @@ Two traps come with this route and both are load-bearing:
 - **The config lands at `$CARGO_HOME/config`**, so `CARGO_HOME` must be
   exactly `/run/build/<module-name>/cargo`. Anywhere else the file is
   written and never read and the build dies with "you are in the offline
-  mode". The manifest's module is named `kyerag` and its `CARGO_HOME` says
-  `/run/build/kyerag/cargo`; renaming one without the other breaks the
+  mode". The manifest's module is named `kjerag` and its `CARGO_HOME` says
+  `/run/build/kjerag/cargo`; renaming one without the other breaks the
   build.
 - **A change to `Cargo.lock` is a change to `cargo-sources.json`**, in the
   same commit (AGENTS.md, `scripts/cargo-sources.sh`). A stale one is not a
@@ -622,27 +635,24 @@ generated JSON is also what every COSMIC app on Flathub ships
 `io.github.pixeldoted.cosmic-ext-color-picker`) and what Flathub's own
 requirements ask for.
 
-### 3.6 The app ID is `dev.harding.Kjerag`, and the code does not say so yet
+### 3.6 The app ID is `dev.harding.Kjerag`, and the whole tree says so
 
 **Settled** (owner, issue #66): `dev.harding.Kjerag`. `harding.dev` resolves
 and answers 200, which is what a reverse-DNS app ID has to assert and what
 Flathub checks, so the ID is verifiable today by a `.well-known` file or a
 DNS TXT record and costs nothing to hold.
 
-**Nothing in this branch carries it yet, on purpose.** The manifest, the
-desktop entry, the metainfo and the MIME package are still
-`app.kyerag.Kyerag`, because the app ID is a rename with one seam and issue
-#75 owns it: the crate names, the binary, `App::APP_ID`, the cosmic-config
-identifiers, these four file names and the docs all move together, in one
-mechanical PR, after the open drafts land. Renaming half of them here would
-put the tree in a state where the entry names one ID, the binary registers
-another, and cosmic-config writes to a third. The icons are the one thing
-already named `dev.harding.Kjerag` (§2.4), and §2.4 says what that costs
-until #75.
+**Issue #75 put it in the tree**, all of it in one mechanical PR: the crate
+names, the binary, `App::APP_ID`, the cosmic-config identifiers, the four
+`resources/` and `flatpak/` file names and the docs. Half a rename is the
+state worth avoiding here, where the entry names one ID, the binary
+registers another, and cosmic-config writes to a third. The icons were named
+`dev.harding.Kjerag` from issue #67 and everything else now agrees with them
+(§2.4).
 
-That rename is also the last thing between the manifest and a linter with
-nothing to say about the ID. What the linter says today, run against the
-manifest as it stands:
+That rename was also the last thing between the manifest and a linter with
+nothing to say about the ID. What the linter said before it, run against the
+manifest as it then stood:
 
 ```json
 "errors": [
@@ -656,13 +666,16 @@ manifest as it stands:
 ]
 ```
 
-**`kyerag.app` does not exist**, which is what made the ID a decision rather
-than a detail. Measured: `kyerag.app` has no DNS record; `harding.dev`
+**`kyerag.app` did not exist**, which is what made the ID a decision rather
+than a detail. That linter run predates the rename and the old name is left
+in it as measured. Measured: `kyerag.app` had no DNS record; `harding.dev`
 resolves and answers 200; `github.com/aeharding` exists. The three candidates
 were `app.kyerag.Kyerag` (buy `kyerag.app` and serve real HTTPS off it, since
 `.app` is HSTS-preloaded and a parking page will not do),
 `io.github.aeharding.Kjerag` (verified by the GitHub account, the convention
-for a project with no domain), and the one that won, which needs nothing.
+for a project with no domain), and the one that won, which needs nothing. The
+linter has not been re-run since; the ID it now reads is `dev.harding.Kjerag`
+and the domain behind it is the one that answers.
 
 Why it was worth settling before publishing rather than after. The app ID is
 the cosmic-config path (`~/.config/cosmic/<id>/` and
@@ -671,10 +684,12 @@ desktop-entry and MIME-package file names, the metainfo `<id>`, the D-Bus
 name and the Wayland `app_id`. cosmic-config has no name-migration path, only
 version fallback, and Flatpak's end-of-life rebase does not touch host paths,
 so a rename orphans stored settings silently even when the rebase is done
-right. The project is pre-release, which is exactly why #75 can do it as a
-mechanical sweep with no migration.
+right. The project is pre-release, which is exactly why #75 could do it as a
+mechanical sweep with no migration: the settings, the recent files and the
+seam pool this box had under the old ID were discarded, and the pool refills
+itself by watching.
 
-The other two linter errors are smaller, and both survive the rename:
+The other two linter errors are smaller, and both survived the rename:
 
 - `finish-args-only-wayland`: Flathub wants `--socket=fallback-x11` and
   `--share=ipc` alongside Wayland. The manifest deliberately omits them,
@@ -850,8 +865,9 @@ WARNING: Icon referenced in desktop file but not exported: app.kyerag.Kyerag
 
 No network, no patch, no tarball. The eleven icon files are in the app
 (`files/share/icons/hicolor/*/apps/dev.harding.Kjerag.*`), and the warning is
-§2.4's: the entry names `app.kyerag.Kyerag` and flatpak exports only what
-starts with the app ID, until issue #75 makes the two the same name. The
+§2.4's: at the time of this run the entry named an ID the icons did not
+carry, and flatpak exports only what starts with the app ID. Issue #75 made
+the two one name, and this build has not been repeated since. The
 binary links the runtime's ffmpeg and says which one, which is the check
 AGENTS.md asks for: `readelf -d` reports `libavcodec.so.61`, so ffmpeg 7.1.
 
@@ -866,13 +882,13 @@ Three things about that second build to be exact about.
   then copies it into the next build of itself. `scratch/` is skipped and
   gitignored, which is why the cache belongs there.
 - **Cargo warns about the file name it is given.**
-  `/run/build/kyerag/cargo/config is deprecated in favor of config.toml`.
+  `/run/build/kjerag/cargo/config is deprecated in favor of config.toml`.
   That name is the generator's, cargo still reads it, and the day it stops is
   the day this breaks; it is a thing to watch rather than a thing to patch
   around here.
 
 The MIME package rides along: the first build's flatpak exported it to
-`~/.local/share/flatpak/exports/share/mime/packages/app.kyerag.Kyerag.xml`,
+`~/.local/share/flatpak/exports/share/mime/packages/dev.harding.Kjerag.xml`,
 so installing the Flatpak teaches the whole desktop what a `.insv` is. No
 separate step.
 
@@ -911,10 +927,10 @@ permission set is the part they read hardest, which is the argument for §3.7
 being as small as it is.
 
 What is left before a submission is worth previewing, and none of it is a
-Flathub problem: issue #75's rename, so the ID in the tree is the ID that was
-settled; screenshots, which only the owner can take and agree to publish; and
-the X11 question, where "fix it" means someone runs the app under Xwayland
-first. §5 is the list.
+Flathub problem: screenshots, which only the owner can take and agree to
+publish, and the X11 question, where "fix it" means someone runs the app
+under Xwayland first. Issue #75's rename was the third and it has landed, so
+the ID in the tree is the ID that was settled. §5 is the list.
 
 ### 4.2 A self-hosted repo was the alternative, and it is declined
 
@@ -946,7 +962,7 @@ Settled on 2026-07-31, all of it by the owner:
 | question | answer |
 | -------- | ------ |
 | the icon | shipped, `resources/icons/` (issue #67, §2.4) |
-| the app ID | `dev.harding.Kjerag`; issue #75 puts it in the tree (§3.6) |
+| the app ID | `dev.harding.Kjerag`, in the tree since issue #75 (§3.6) |
 | the ffmpeg pin | 7.1, and the dev box takes ffmpeg 7 from a PPA (§3.4) |
 | the channel | Flathub only, under AGENTS.md's scoped exception (§4.1) |
 | a self-hosted repo | declined (issue #71, §4.2) |
@@ -967,6 +983,6 @@ Left, and each one is the owner's rather than a task anybody can pick up:
    writes the app's own settings under that path and the two COSMIC apps
    installed on this box both take it read-write. Whether `:ro` costs
    persisted settings is untested (§3.6).
-4. **When to preview a submission.** Issue #75's rename is the last thing
-   that changes what a submission would contain, so the natural order is
-   rename, screenshots, preview with the owner, then the one outward step.
+4. **When to preview a submission.** Issue #75's rename was the last thing
+   that changes what a submission would contain and it has landed, so what
+   is left is screenshots, preview with the owner, then the one outward step.

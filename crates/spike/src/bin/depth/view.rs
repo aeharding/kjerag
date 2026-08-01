@@ -15,9 +15,9 @@
 
 use std::path::Path;
 
-use kyerag_media::Fallible;
-use kyerag_render::Reframe;
-use kyerag_spike::{Pair, Plane};
+use kjerag_media::Fallible;
+use kjerag_render::Reframe;
+use kjerag_spike::{Pair, Plane};
 
 use crate::band::{node, unit};
 use crate::strategy::Warp;
@@ -52,9 +52,9 @@ impl Look {
             true => [sin * u / rho, sin * v / rho, cos],
             false => [0.0, 0.0, 1.0],
         };
-        let turn = kyerag_meta::Mat3::rot_y(self.yaw.to_radians())
-            .times(kyerag_meta::Mat3::rot_x(self.pitch.to_radians()))
-            .times(kyerag_meta::Mat3::rot_z(self.roll.to_radians()));
+        let turn = kjerag_meta::Mat3::rot_y(self.yaw.to_radians())
+            .times(kjerag_meta::Mat3::rot_x(self.pitch.to_radians()))
+            .times(kjerag_meta::Mat3::rot_z(self.roll.to_radians()));
         unit(turn.mul_vec(view))
     }
 }

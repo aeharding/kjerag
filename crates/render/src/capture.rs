@@ -34,7 +34,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kyerag_media::{Fallible, Size};
+use kjerag_media::{Fallible, Size};
 
 /// What the shell asks for.
 pub struct Request {

@@ -5,8 +5,8 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use kyerag_media::Fallible;
-use kyerag_render::{Extent, ScenePipeline, Size, dmabuf};
+use kjerag_media::Fallible;
+use kjerag_render::{Extent, ScenePipeline, Size, dmabuf};
 
 /// A `copy_texture_to_buffer` row is padded to this, whatever the picture is
 /// wide. The 1024 px square `reframe` writes needs no padding and a 960 px

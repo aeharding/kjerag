@@ -4,7 +4,7 @@
 //! The shell owns almost nothing of the playback. It opens the file, it turns
 //! keys and buttons into transport calls, and it asks the [`Scene`] for a
 //! frame once per window redraw. The clock, the decode thread and the camera
-//! all live below it in `kyerag-render` and `kyerag-media`.
+//! all live below it in `kjerag-render` and `kjerag-media`.
 //!
 //! docs/UI.md is the specification for everything in this file, and it cites
 //! a first-party COSMIC app for every call it makes. The two places where a
@@ -16,7 +16,7 @@
 //! ships, so there is no "hold each frame for N refreshes" rule that does
 //! not drift. Every redraw instead asks the presentation clock which frame
 //! is due at that instant, and the widget then asks iced to come back at the
-//! instant the next one is due (`kyerag_render`'s `tick`, which is where the
+//! instant the next one is due (`kjerag_render`'s `tick`, which is where the
 //! clock is pumped). A frame is held for 2 refreshes at 60 Hz and for 4 or 5
 //! at 144 Hz, in whatever pattern the arithmetic gives, with no error
 //! carried forward.
@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
+use kjerag_render::{Accuracy, Framing, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -73,12 +73,18 @@ const JUMP_FORWARD_ICON: &[u8] = include_bytes!("../res/icons/jump-forward-10-sy
 
 /// The app icon, for the About page and the welcome view. The drawing itself,
 /// rather than the `icon::from_name(Self::APP_ID)` cosmic-edit passes to the
-/// same setter (`src/main.rs:1454-1468`): a name resolves through the icon
-/// theme, and these icons are installed as `dev.harding.Kjerag` while the
-/// binary still calls itself `app.kyerag.Kyerag`, so the lookup finds nothing.
+/// same setter (`src/main.rs:1454-1468`), because a name only resolves for a
+/// build whose icons are installed into an icon theme.
 ///
-/// TODO(#75): revisit at the rename, remembering that a name still resolves
-/// to nothing for a build run out of the source tree.
+/// Measured three ways through `scripts/uitest.sh`'s welcome-mark check at
+/// the rename (issue #75), which reads the colour of the patch this handle
+/// draws into: the bytes read 114 181 163 with nothing installed;
+/// `from_name` reads 27 27 27, the window background, with nothing installed;
+/// `from_name` reads 99 186 173 with the tree on `XDG_DATA_DIRS`. So the ID
+/// and the icon names now agree and the lookup does work once installed, and
+/// a `cargo run` out of this tree would still draw a 128 px hole. libcosmic
+/// hands back an empty SVG on a miss rather than a placeholder
+/// (`src/widget/icon/named.rs:136-152`), so nothing on screen would say why.
 const APP_ICON: &[u8] =
     include_bytes!("../../../resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg");
 
@@ -360,7 +366,7 @@ impl cosmic::Application for App {
     type Flags = Flags;
     type Message = Message;
 
-    const APP_ID: &'static str = "app.kyerag.Kyerag";
+    const APP_ID: &'static str = "dev.harding.Kjerag";
 
     fn core(&self) -> &Core {
         &self.core
@@ -471,7 +477,7 @@ impl cosmic::Application for App {
             Message::Dropped(dropped) => {
                 // First file wins, others are ignored.
                 let Some(path) = dropped.and_then(|files| files.0.into_iter().next()) else {
-                    eprintln!("kyerag: that drop carried no local file");
+                    eprintln!("kjerag: that drop carried no local file");
                     self.failed = Some(strings::open_failed(None));
                     return Task::none();
                 };
@@ -525,7 +531,7 @@ impl cosmic::Application for App {
             }
             Message::LaunchUrl(url) => {
                 if let Err(e) = open::that_detached(&url) {
-                    eprintln!("kyerag: {url} not opened: {e}");
+                    eprintln!("kjerag: {url} not opened: {e}");
                 }
             }
             Message::LockHorizon => {
@@ -809,7 +815,7 @@ impl App {
                 self.hold_sound();
             }
             Err(e) => {
-                eprintln!("kyerag: {} not shown: {e}", path.display());
+                eprintln!("kjerag: {} not shown: {e}", path.display());
                 self.failed = Some(strings::open_failed(missing_decoder(&*e)));
                 self.open = None;
             }
@@ -1036,7 +1042,7 @@ impl App {
                 ])
             }
             Err(e) => {
-                eprintln!("kyerag: no still: {e}");
+                eprintln!("kjerag: no still: {e}");
                 self.toast(strings::capture_failed(to, &e))
             }
         }
@@ -1473,7 +1479,7 @@ fn shift(from: Duration, seconds: f64) -> Duration {
 /// other failure (issue #69).
 ///
 /// The engine hands the shell one boxed error from the whole open, and the box
-/// arrives with whatever was put in it: `kyerag-media` refuses a stream whose
+/// arrives with whatever was put in it: `kjerag-media` refuses a stream whose
 /// codec has no decoder with a [`MissingDecoder`], and nothing between here
 /// and there re-wraps it. So this is a downcast rather than a string match.
 ///
@@ -1495,13 +1501,13 @@ fn chooser() -> Task<Message> {
                 Ok(response) => match response.url().to_file_path() {
                     Ok(path) => action::app(Message::FileLoad(path)),
                     Err(()) => {
-                        eprintln!("kyerag: {} is not a local file", response.url());
+                        eprintln!("kjerag: {} is not a local file", response.url());
                         action::none()
                     }
                 },
                 Err(file_chooser::Error::Cancelled) => action::none(),
                 Err(e) => {
-                    eprintln!("kyerag: no file chosen: {e}");
+                    eprintln!("kjerag: no file chosen: {e}");
                     action::none()
                 }
             }
@@ -1629,7 +1635,7 @@ mod tests {
     /// The shell has to tell a build with no decoder apart from a file it
     /// cannot read, because they get different lines and only one of them is
     /// the pilot's to fix (issue #69). This is that test with the probe stood
-    /// in for: the error is built by hand, the way `kyerag-media` builds it on
+    /// in for: the error is built by hand, the way `kjerag-media` builds it on
     /// a box whose ffmpeg has no HEVC in it.
     #[test]
     fn a_missing_decoder_is_told_apart_from_a_file_that_will_not_open() {

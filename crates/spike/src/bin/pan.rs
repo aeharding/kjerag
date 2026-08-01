@@ -7,8 +7,8 @@
 //! then frames arriving in real time while nothing touches the mouse.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin pan -- <file.insv> from=300
-//! cargo run --release -p kyerag-spike --bin pan -- <file.insv> from=300 png=1
+//! cargo run --release -p kjerag-spike --bin pan -- <file.insv> from=300
+//! cargo run --release -p kjerag-spike --bin pan -- <file.insv> from=300 png=1
 //! ```
 //!
 //! `from` is where to start in seconds, `pan` is how far the drag turns the
@@ -37,10 +37,10 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use kyerag_media::Fallible;
-use kyerag_meta::{CalibrationSet, Filter, OrientationTrack};
-use kyerag_render::{Camera, Scene, ScenePipeline, Size, Viewpoint};
-use kyerag_spike::{Gpu, Offscreen};
+use kjerag_media::Fallible;
+use kjerag_meta::{CalibrationSet, Filter, OrientationTrack};
+use kjerag_render::{Camera, Scene, ScenePipeline, Size, Viewpoint};
+use kjerag_spike::{Gpu, Offscreen};
 
 /// Not sRGB, so a written frame is what the window shows.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -73,7 +73,7 @@ fn main() -> Fallible<()> {
 
     scene.seek(
         Duration::from_secs_f64(options.from),
-        kyerag_render::Accuracy::Exact,
+        kjerag_render::Accuracy::Exact,
     );
     let calibration = CalibrationSet::from_insv(&options.input)?;
     let held = Held {
@@ -160,7 +160,7 @@ fn settle(scene: &mut Scene, options: &Options) -> Fallible<()> {
 
 /// The drag the shader widget would make of a press, a sweep and a release.
 ///
-/// Straight through [`Viewpoint`], which is what `kyerag_render::widget`'s
+/// Straight through [`Viewpoint`], which is what `kjerag_render::widget`'s
 /// three mouse arms call and all they do: this crate cannot name an iced
 /// event, and the arms themselves are covered by that file's own tests.
 fn drag(viewpoint: &mut Viewpoint, options: &Options, aspect: f32) {
@@ -202,7 +202,7 @@ fn bearing(scene: &Scene, held: &Held, camera: Camera) -> Option<f64> {
 /// read back out of a frame index.
 struct Held {
     track: OrientationTrack,
-    exposure: kyerag_meta::ExposureTrack,
+    exposure: kjerag_meta::ExposureTrack,
 }
 
 fn wrap(degrees: f64) -> f64 {

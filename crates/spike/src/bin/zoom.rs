@@ -5,7 +5,7 @@
 //! own pass, and the first one decides whether the rest matter.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin zoom -- <file.insv> \
+//! cargo run --release -p kjerag-spike --bin zoom -- <file.insv> \
 //!   [frame=n | time=s] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [shot=px] [lock=0]
 //! ```
 //!
@@ -41,12 +41,12 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use kyerag_media::Fallible;
-use kyerag_meta::{CalibrationSet, Lens};
-use kyerag_render::{
+use kjerag_media::Fallible;
+use kjerag_meta::{CalibrationSet, Lens};
+use kjerag_render::{
     Camera, Cue, Held, Horizon, Reframe, Request, Sampling, Scene, ScenePipeline, Size, sampling,
 };
-use kyerag_spike::{Difference, FORMAT, Gpu, Offscreen, Picture, Render, aspect};
+use kjerag_spike::{Difference, FORMAT, Gpu, Offscreen, Picture, Render, aspect};
 
 /// The zoom range, in degrees: `Camera`'s own limits, the default, and the
 /// places between them where the two planes cross their thresholds.
@@ -126,7 +126,7 @@ fn main() -> Fallible<()> {
 /// render, so a box that throttles throttles all of them together. What is
 /// reported is the **least** of the repetitions, which is the pass with
 /// nothing else on the machine, and the median beside it, which says how
-/// much else there was. `kyerag-spike --bin playback` is where dropped and
+/// much else there was. `kjerag-spike --bin playback` is where dropped and
 /// starved come from; this is where the milliseconds do.
 fn cost(render: &mut Render, options: &Options) -> Fallible<()> {
     let target = Offscreen::new(&render.gpu.device, options.output, FORMAT);

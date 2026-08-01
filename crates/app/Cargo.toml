@@ -1,10 +1,10 @@
 [package]
-name = "kyerag"
+name = "kjerag"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-kyerag-render = { workspace = true }
+kjerag-render = { workspace = true }
 # `xdg-portal` is the portal file chooser and `about` is the About page.
 # Neither is in libcosmic's default set, and features are additive with the
 # workspace entry's `wgpu` (docs/UI.md).

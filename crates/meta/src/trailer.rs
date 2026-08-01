@@ -1,4 +1,4 @@
-//! Reading the `.insv` trailer: find the records Kyerag wants, and touch
+//! Reading the `.insv` trailer: find the records Kjerag wants, and touch
 //! nothing else.
 //!
 //! Format, from docs/research/insv-format.md section 2, where three
@@ -31,12 +31,12 @@
 //!
 //! Record 15, `SecGyro`, is **not** read. No published table says what it
 //! holds, and no X4 Air or ONE X2 capture measured here carries one at all;
-//! `kyerag-spike --bin gyro` prints the record ids of a file, which is how
+//! `kjerag-spike --bin gyro` prints the record ids of a file, which is how
 //! that was checked rather than assumed.
 //!
 //! The `ExtraMetadata` field tags are transcribed from telemetry-parser's
 //! `src/insta360/extra_info.rs` (MIT OR Apache-2.0). Only the eleven
-//! fields Kyerag needs are declared; protobuf skips the other ~54.
+//! fields Kjerag needs are declared; protobuf skips the other ~54.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -68,7 +68,7 @@ const EXPOSURE_RECORDS: [u8; 2] = [4, 12];
 const BINARY: u8 = 0;
 const PROTOBUF: u8 = 1;
 
-/// The trailer fields Kyerag reads, named as the file names them.
+/// The trailer fields Kjerag reads, named as the file names them.
 #[derive(Clone, PartialEq, Message)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 #[cfg_attr(test, serde(default))]
@@ -92,7 +92,7 @@ pub(crate) struct ExtraMetadata {
     pub gyro_timestamp: f64,
     #[prost(bool, tag = "29")]
     pub is_has_gyro_timestamp: bool,
-    /// The calibration, as underscore-separated decimals. Kyerag reads
+    /// The calibration, as underscore-separated decimals. Kjerag reads
     /// this rather than `original_offset_v3` (tag 56): where the two
     /// differ, this is the one that describes the glass that was
     /// actually in front of the sensor.
@@ -196,7 +196,7 @@ impl CalibrationSet {
     }
 }
 
-/// The payloads Kyerag reads out of one trailer.
+/// The payloads Kjerag reads out of one trailer.
 #[derive(Debug)]
 pub(crate) struct Trailer {
     pub metadata: ExtraMetadata,
@@ -468,7 +468,7 @@ mod tests {
     /// file with the whole trailer in it and a `_10_` file with no trailer
     /// at all. Both are synthetic; the shape is the measured one.
     fn per_lens_capture(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("kyerag-pair-{name}"));
+        let dir = std::env::temp_dir().join(format!("kjerag-pair-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut metadata = fixture::metadata();
@@ -657,9 +657,9 @@ mod tests {
     }
 
     /// The first `.insv` under `~/Videos`, or whatever
-    /// `KYERAG_TEST_INSV` points at.
+    /// `KJERAG_TEST_INSV` points at.
     fn test_capture() -> Option<std::path::PathBuf> {
-        if let Ok(path) = std::env::var("KYERAG_TEST_INSV") {
+        if let Ok(path) = std::env::var("KJERAG_TEST_INSV") {
             return Some(path.into());
         }
         let videos = std::path::PathBuf::from(std::env::var("HOME").ok()?).join("Videos");
@@ -690,7 +690,7 @@ mod tests {
         println!("{}: {calibration:#?}", path.display());
 
         // Only what holds for any dual-fisheye capture, since
-        // KYERAG_TEST_INSV can point anywhere. The X4 Air's exact
+        // KJERAG_TEST_INSV can point anywhere. The X4 Air's exact
         // numbers are the fixture's job.
         assert_eq!(calibration.lenses.len(), 2);
         assert!(calibration.rolling_shutter_ms > 0.0);

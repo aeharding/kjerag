@@ -1,4 +1,4 @@
-//! Kyerag: a 360 video player for the COSMIC desktop.
+//! Kjerag: a 360 video player for the COSMIC desktop.
 //!
 //! ```sh
 //! cargo run --release                 # the window, with nothing open
@@ -29,7 +29,7 @@ fn main() -> ExitCode {
         Ok(args::Args::Play(input, at)) => match app::run(input, at) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("kyerag: {e}");
+                eprintln!("kjerag: {e}");
                 ExitCode::FAILURE
             }
         },
@@ -42,7 +42,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("kyerag: {e}\n\n{}", args::help());
+            eprintln!("kjerag: {e}\n\n{}", args::help());
             ExitCode::from(2)
         }
     }

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use cosmic::cosmic_config::cosmic_config_derive::CosmicConfigEntry;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::theme;
-use kyerag_render::{Harvest, SeamFit};
+use kjerag_render::{Harvest, SeamFit};
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_VERSION: u64 = 1;
@@ -227,7 +227,7 @@ impl SeamPool {
 pub struct ConfigState {
     pub recent_files: VecDeque<PathBuf>,
     /// What each camera's seam has been measured to be off by, under
-    /// [`CalibrationSet::camera_key`](kyerag_meta::CalibrationSet::camera_key)
+    /// [`CalibrationSet::camera_key`](kjerag_meta::CalibrationSet::camera_key)
     /// in hex.
     ///
     /// **State rather than config**, which is the same call cosmic-player
@@ -326,13 +326,13 @@ fn read<T: CosmicConfigEntry + Default>(
     match handler {
         Ok(handler) => {
             let entry = T::get_entry(&handler).unwrap_or_else(|(errors, entry)| {
-                eprintln!("kyerag: {what} partly unreadable: {errors:?}");
+                eprintln!("kjerag: {what} partly unreadable: {errors:?}");
                 entry
             });
             (Some(handler), entry)
         }
         Err(e) => {
-            eprintln!("kyerag: {what} will not be saved: {e}");
+            eprintln!("kjerag: {what} will not be saved: {e}");
             (None, T::default())
         }
     }
@@ -343,7 +343,7 @@ fn write<T: CosmicConfigEntry>(what: &str, entry: &T, handler: Option<&cosmic_co
         return;
     };
     if let Err(e) = entry.write_entry(handler) {
-        eprintln!("kyerag: {what} not saved: {e}");
+        eprintln!("kjerag: {what} not saved: {e}");
     }
 }
 

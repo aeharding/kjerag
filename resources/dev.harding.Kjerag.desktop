@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Kyerag
+Name=Kjerag
 GenericName=360 Video Player
 Comment=Play Insta360 dual fisheye video
-Exec=kyerag %f
-Icon=app.kyerag.Kyerag
+Exec=kjerag %f
+Icon=dev.harding.Kjerag
 Terminal=false
 StartupNotify=true
 Categories=COSMIC;AudioVideo;Player;Video;

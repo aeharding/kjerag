@@ -7,7 +7,7 @@
 //! is a paramotor flight.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin sync -- <file.insv> [seconds] [stall=at:for] [ring]
+//! cargo run --release -p kjerag-spike --bin sync -- <file.insv> [seconds] [stall=at:for] [ring]
 //! ```
 //!
 //! It runs the real [`Player`]: the same demuxer, the same decode thread, the
@@ -44,7 +44,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use kyerag_media::{Accuracy, Audio, Cue, Fallible, Player, Stats};
+use kjerag_media::{Accuracy, Audio, Cue, Fallible, Player, Stats};
 
 /// How often a line is printed, which is the app's own report cadence.
 const REPORT: Duration = Duration::from_secs(5);

@@ -5,14 +5,14 @@
 //! **pixels** at angles can go. `rolling` (issue #9) opened this walk first;
 //! `seam` (issue #48) measured the seam with it, and since the seam fit now
 //! runs at open in the app as well as in the instruments it lives here rather
-//! than in `kyerag-spike`.
+//! than in `kjerag-spike`.
 //!
 //! Nothing here interprets a stream as a lens: a capture's video streams come
 //! out in lens order and the caller decides what they are. Insta360 writes
 //! two, one per lens; a stitched export has one.
 //!
 //! A capture is not always one file. The ONE X2 writes one lens per file, so
-//! the walk opens the sibling alongside (issue #79, `kyerag_meta::sibling`)
+//! the walk opens the sibling alongside (issue #79, `kjerag_meta::sibling`)
 //! and pairs across the two the same way it pairs across two streams of one:
 //! same instant, or neither. Without it the seam instruments answer "this
 //! file carries one lens stream" on every X2 capture, which is the file's
@@ -110,14 +110,14 @@ impl Walk {
         // One lens in this file: the other one may be in the file beside it.
         // Lens order is the marker's, not the order they were named in.
         if lanes.len() == 1
-            && let Some(beside) = kyerag_meta::sibling(path)
+            && let Some(beside) = kjerag_meta::sibling(path)
         {
             let second = ff::format::input(&beside)?;
             let streams = video_streams(&second);
             if streams.len() == 1 {
                 inputs.push(second);
                 lanes.push((1, streams[0]));
-                if kyerag_meta::lens_index(path) == Some(1) {
+                if kjerag_meta::lens_index(path) == Some(1) {
                     lanes.swap(0, 1);
                 }
             }

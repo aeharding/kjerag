@@ -1,4 +1,4 @@
-# Installing Kyerag onto a desktop.
+# Installing Kjerag onto a desktop.
 #
 # Not a build system: `cargo build` and the AGENTS.md gates are still the
 # way to build and check the code. This file exists because a double click
@@ -9,19 +9,16 @@
 # The recipe layout follows cosmic-player's justfile (rev 23d5944), which is
 # what a first-party COSMIC app does.
 
-name := 'kyerag'
-appid := 'app.kyerag.Kyerag'
-
-# The icons are named for the application ID issue #66 settled, and the
-# binary does not carry that name yet: issue #75's rename sweep puts it in
-# the source and collapses these two into one. Until then the entry's `Icon=`
-# key and the installed icon files are different names, so a launcher shows a
-# placeholder. Nothing else about the install depends on it.
-iconid := 'dev.harding.Kjerag'
+name := 'kjerag'
+# The application ID issue #66 settled, which issue #75 then put in the
+# source: the binary, the entry's `Icon=` key, the installed icon files and
+# these three file names are all this one string, so `uninstall` below can
+# take the icons out with it.
+appid := 'dev.harding.Kjerag'
 
 # `just install` needs root for this default. `just prefix=$HOME/.local
 # install` does not, but then the session's PATH has to contain
-# ~/.local/bin, because the desktop entry runs `kyerag`, not a path.
+# ~/.local/bin, because the desktop entry runs `kjerag`, not a path.
 prefix := '/usr/local'
 share := prefix / 'share'
 
@@ -58,6 +55,6 @@ uninstall:
     rm -f {{ share }}/applications/{{ appid }}.desktop
     rm -f {{ share }}/metainfo/{{ appid }}.metainfo.xml
     rm -f {{ share }}/mime/packages/{{ appid }}.xml
-    rm -f {{ share }}/icons/hicolor/*/apps/{{ iconid }}.*
+    rm -f {{ share }}/icons/hicolor/*/apps/{{ appid }}.*
     update-mime-database {{ share }}/mime
     update-desktop-database {{ share }}/applications

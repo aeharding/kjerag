@@ -3,17 +3,17 @@
 //!
 //! ```sh
 //! # the disparity field, the geometry check and the controls
-//! cargo run --release -p kyerag-spike --bin depth -- <file.insv> \
+//! cargo run --release -p kjerag-spike --bin depth -- <file.insv> \
 //!   fix=roll:0.839,yaw:-2.545,pitch:-0.627 control=1
 //! # the alignment strategies, scored on the half of the band they never saw,
 //! # and their flicker frame to frame
-//! cargo run --release -p kyerag-spike --bin depth -- <file.insv> \
+//! cargo run --release -p kjerag-spike --bin depth -- <file.insv> \
 //!   fix=... mode=strategies count=16
 //! # the prototype, rendered, with the disparity it applied beside it
-//! cargo run --release -p kyerag-spike --bin depth -- <file.insv> \
+//! cargo run --release -p kjerag-spike --bin depth -- <file.insv> \
 //!   fix=... mode=render yaw=90 pitch=-60 out=scratch/depth
 //! # our stitch with and without it, against the camera maker's own
-//! cargo run --release -p kyerag-spike --bin depth -- <file.insv> \
+//! cargo run --release -p kjerag-spike --bin depth -- <file.insv> \
 //!   fix=... mode=parity against=<export.mp4> \
 //!   look=yaw:88.7,pitch:1.2,roll:0.4,fov:95.3,compression:0.83
 //! ```
@@ -53,10 +53,10 @@ mod view;
 
 use std::path::{Path, PathBuf};
 
-use kyerag_media::Fallible;
-use kyerag_meta::Size as MetaSize;
-use kyerag_render::Size;
-use kyerag_spike::Walk;
+use kjerag_media::Fallible;
+use kjerag_meta::Size as MetaSize;
+use kjerag_render::Size;
+use kjerag_spike::Walk;
 
 use band::{Accumulator, Node, baseline, norm};
 use measure::{Field, Prealign, body_up, deck, fixed, mapped, nodes, open, recover, sweep};
@@ -135,9 +135,9 @@ fn field(options: &Options) -> Fallible<()> {
 /// It runs before every mode, because every reading below is taken through it.
 fn align(
     options: &Options,
-    reframe: &kyerag_render::Reframe,
+    reframe: &kjerag_render::Reframe,
     grid: &[Node],
-    pairs: &[kyerag_spike::Pair],
+    pairs: &[kjerag_spike::Pair],
 ) -> Prealign {
     if options.raw {
         println!("\nprealign: switched off, so the epipolar search runs pinned at zero");
@@ -155,7 +155,7 @@ fn align(
 }
 
 /// What the file is and what the band is, before anything is measured.
-fn announce(options: &Options, calibration: &kyerag_meta::CalibrationSet, grid: &[Node]) {
+fn announce(options: &Options, calibration: &kjerag_meta::CalibrationSet, grid: &[Node]) {
     let t = baseline(calibration);
     println!(
         "\n{}: {} {}",
@@ -208,9 +208,9 @@ fn announce(options: &Options, calibration: &kyerag_meta::CalibrationSet, grid: 
 /// same size, it is not, and every distance below is a coincidence.
 fn geometry(
     options: &Options,
-    reframe: &kyerag_render::Reframe,
+    reframe: &kjerag_render::Reframe,
     grid: &[Node],
-    pairs: &[kyerag_spike::Pair],
+    pairs: &[kjerag_spike::Pair],
     measured: &Field,
     prealign: &Prealign,
 ) {
@@ -411,10 +411,10 @@ fn temporal(options: &Options, measured: &Field) {
 /// The two controls, both regime-sized.
 fn controls(
     options: &Options,
-    reframe: &kyerag_render::Reframe,
+    reframe: &kjerag_render::Reframe,
     grid: &[Node],
-    pairs: &[kyerag_spike::Pair],
-    calibration: &kyerag_meta::CalibrationSet,
+    pairs: &[kjerag_spike::Pair],
+    calibration: &kjerag_meta::CalibrationSet,
     measured: &Field,
     prealign: &Prealign,
 ) {
@@ -695,7 +695,7 @@ fn parity(options: &Options) -> Fallible<()> {
 }
 
 /// One frame of a stitched export, and its size.
-fn export_frame(path: &Path, options: &Options) -> Fallible<(kyerag_spike::Plane, u32)> {
+fn export_frame(path: &Path, options: &Options) -> Fallible<(kjerag_spike::Plane, u32)> {
     ffmpeg_next::init()?;
     let input = ffmpeg_next::format::input(&path)?;
     let stream = input
@@ -713,7 +713,7 @@ fn export_frame(path: &Path, options: &Options) -> Fallible<(kyerag_spike::Plane
     let mut walk = Walk::open(
         path,
         options.from,
-        kyerag_render::Size {
+        kjerag_render::Size {
             width: size.width,
             height: size.height,
         },

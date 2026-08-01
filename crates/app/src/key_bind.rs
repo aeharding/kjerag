@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use cosmic::iced::keyboard::Key;
 use cosmic::iced::keyboard::key::Named;
 use cosmic::widget::menu::action::MenuAction;
-use kyerag_render::Nudge;
+use kjerag_render::Nudge;
 
 use crate::app::{ContextPage, Message};
 use crate::shot::Destination;

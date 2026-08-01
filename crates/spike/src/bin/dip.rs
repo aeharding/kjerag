@@ -8,8 +8,8 @@
 //! sees the other's:
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin dip -- <file.insv> from=1500
-//! cargo run --release -p kyerag-spike --bin dip -- <file.insv> from=1500 inject=1
+//! cargo run --release -p kjerag-spike --bin dip -- <file.insv> from=1500
+//! cargo run --release -p kjerag-spike --bin dip -- <file.insv> from=1500 inject=1
 //! ```
 //!
 //! Arguments after the path are `key=value`. `from` is where to start in
@@ -73,12 +73,12 @@ use std::f64::consts::TAU;
 use std::fs;
 use std::path::PathBuf;
 
-use kyerag_media::Fallible;
-use kyerag_meta::{
+use kjerag_media::Fallible;
+use kjerag_meta::{
     CalibrationSet, Filter, GyroSample, GyroTrack, Mat3, OrientationTrack, Pose, Quat, axis_map,
 };
-use kyerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, Size};
-use kyerag_spike::{Gpu, Offscreen, skyline};
+use kjerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, Size};
+use kjerag_spike::{Gpu, Offscreen, skyline};
 
 /// Not sRGB, so the shader writes the video's own numbers straight out and
 /// the measurement reads what the window shows.
@@ -722,7 +722,7 @@ impl Options {
 }
 
 /// The quarter turn between `offset_v3`'s roll and the delivered frame's own
-/// vertical, which `kyerag_meta::Pose` carries and does not hand out.
+/// vertical, which `kjerag_meta::Pose` carries and does not hand out.
 const ROLL_DATUM_DEG: f64 = -90.0;
 
 const USAGE: &str = "usage: dip <file.insv> [from=seconds] [count=frames] [steps=yaws] \
@@ -887,7 +887,7 @@ fn debiased(track: &GyroTrack, rate_dps: [f64; 3], accel_g: [f64; 3]) -> GyroTra
 
 /// The order the three mounting angles are composed in, named by the axes
 /// left to right: `Zyx` is `Rz(roll) Ry(yaw) Rx(pitch)`, which is what
-/// `kyerag_meta::Pose` ships (docs/research/insv-format.md 4.8).
+/// `kjerag_meta::Pose` ships (docs/research/insv-format.md 4.8).
 #[derive(Clone, Copy)]
 enum Order {
     Zyx,

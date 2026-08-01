@@ -248,7 +248,7 @@ impl Player {
             .and_then(|rate| match Sound::open(&beat, rate) {
                 Ok(sound) => Some(sound),
                 Err(e) => {
-                    eprintln!("kyerag: playing silently: {e}");
+                    eprintln!("kjerag: playing silently: {e}");
                     None
                 }
             });
@@ -261,7 +261,7 @@ impl Player {
         // away everything but the newest before each read.
         let (commands, orders) = channel();
         thread::Builder::new()
-            .name("kyerag-decode".to_owned())
+            .name("kjerag-decode".to_owned())
             .spawn(move || decode_ahead(reader, &sender, &orders))?;
 
         Ok(Self {

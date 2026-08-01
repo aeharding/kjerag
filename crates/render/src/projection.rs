@@ -24,7 +24,7 @@
 //! in one backward mapping per output pixel, with nothing resampled and no
 //! pass added. Which way the sensor reads is not in the file, so it is
 //! measured per camera and the correction is switched off on any camera it
-//! has not been measured on (`kyerag_meta::Sweep`).
+//! has not been measured on (`kjerag_meta::Sweep`).
 //!
 //! Written from the model description in `docs/research/insv-format.md` 5.1
 //! (Mei and Rives 2007, as OpenCV's `cv::omnidir` states it). Nothing here
@@ -39,7 +39,7 @@
 
 use std::f32::consts::PI;
 
-use kyerag_meta::{Intrinsics, Lens, Pose, Quat};
+use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
 
 use super::sampling::Sampling;
 use super::{Camera, Size};
@@ -54,7 +54,7 @@ use super::{Camera, Size};
 /// of the readout the round before moved the landing across, which is a couple
 /// of percent at 500 deg/s and a tenth of that in ordinary flight.
 ///
-/// **One round, measured** (`kyerag-spike --bin rolling model=1`): against a
+/// **One round, measured** (`kjerag-spike --bin rolling model=1`): against a
 /// solve run until it stops moving, at the hardest instant of a 30-minute
 /// capture, 551 deg/s, one round leaves **4.5 px** of a 112 px correction and
 /// two leave 0.24 px. The median rate on that footage is 20 deg/s, where the
@@ -287,7 +287,7 @@ pub struct Reframe {
     linearize: f32,
     elapsed: f32,
     /// Which way across the delivered frame the sensor's rows advance
-    /// (`kyerag_meta::Sweep`), and whether the correction runs at all: both
+    /// (`kjerag_meta::Sweep`), and whether the correction runs at all: both
     /// components are zero for a file with no IMU record, and then the pass
     /// is what it was before issue #9, down to the instruction count.
     row_axis: [f32; 2],
@@ -411,7 +411,7 @@ pub const OUTSIDE_GRAY: f32 = 0.10;
 /// Where the camera body was when a frame was taken, and how the view is to
 /// be held against it.
 ///
-/// `body_from_world` is the inverse of the orientation `kyerag-meta`
+/// `body_from_world` is the inverse of the orientation `kjerag-meta`
 /// integrated: it takes a direction in the stabilized world frame to the
 /// body's own. Identity is horizon lock switched off, and then the view is in
 /// body coordinates exactly as it was before issue #8.
@@ -437,7 +437,7 @@ pub struct Held {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rolling {
     pub turn: [f64; 3],
-    /// A unit direction in delivered-frame pixels, from `kyerag_meta::Sweep`.
+    /// A unit direction in delivered-frame pixels, from `kjerag_meta::Sweep`.
     pub axis: [f64; 2],
 }
 
@@ -572,7 +572,7 @@ impl Reframe {
     /// array after the loop that filled it cannot stay in registers: measured
     /// on RADV 2026-07-31 at 2560x1440 under live decode, doing it that way
     /// costs **5.5 ms per redraw against 3.6**, which is the same scratch
-    /// memory trap the loop's own comment describes. `kyerag-spike --bin
+    /// memory trap the loop's own comment describes. `kjerag-spike --bin
     /// zoom`, which renders the pass with nothing else on the GPU, reads the
     /// two versions as equal; `--bin playback`, which runs it under live
     /// decode, is where the difference is.
@@ -667,7 +667,7 @@ impl Reframe {
     /// issue #10's other half was built as far as this test, measured, and
     /// cut, because on real footage with the horizon locked the answer holds
     /// for 9% of the time at the default field of view and letting go of it
-    /// costs 195 to 340 ms of stale far hemisphere. `kyerag-spike --bin
+    /// costs 195 to 340 ms of stale far hemisphere. `kjerag-spike --bin
     /// gating` is that measurement and this is what it reads; the numbers and
     /// the reasoning are in docs/ROADMAP.md.
     pub fn reaches(&self, lens: usize, margin: f32) -> bool {
@@ -698,7 +698,7 @@ impl Reframe {
     /// How far off its own axis this lens can still see, in radians, cap
     /// margin included. `None` for a slot with no picture in it.
     ///
-    /// For the instruments: `kyerag-spike --bin gating` reports it, and it is
+    /// For the instruments: `kjerag-spike --bin gating` reports it, and it is
     /// [`LensBlock::axis_min`] read back as an angle.
     pub fn coverage(&self, lens: usize) -> Option<f32> {
         let axis_min = self.lenses[lens].axis_min;
@@ -755,7 +755,7 @@ impl Reframe {
     /// is how [`READOUT_STEPS`] came to be the number it is rather than a
     /// guess: zero rounds is the map as it was before issue #9, and a solve
     /// run until it stops moving is what every other count is measured
-    /// against (`kyerag-spike --bin rolling model=1`).
+    /// against (`kjerag-spike --bin rolling model=1`).
     ///
     /// The shader always runs [`READOUT_STEPS`] of them.
     pub fn solve(&self, lens: usize, view_ray: [f32; 3], rounds: usize) -> Landing {
@@ -1136,7 +1136,7 @@ fn camera_rotation(camera: Camera) -> Mat3 {
 /// ([`opposed`]).
 ///
 /// The three angles and the quarter-turn datum they are measured against live
-/// in `kyerag_meta::Pose::lens_from_body`, because the IMU needs the same
+/// in `kjerag_meta::Pose::lens_from_body`, because the IMU needs the same
 /// rotation to get out of the front lens's frame and into the body's, and one
 /// settled convention wants one definition.
 fn lens_from_body(pose: &Pose, index: usize) -> Mat3 {
@@ -1561,7 +1561,7 @@ fn texel_ratio(pixel: vec2<f32>) -> f32 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use kyerag_meta::{Distortion, Sweep};
+    use kjerag_meta::{Distortion, Sweep};
 
     use crate::sampling;
 
@@ -1570,7 +1570,7 @@ pub(crate) mod tests {
         height: 3840,
     };
 
-    /// The X4 Air fixture in delivered-frame pixels: what `kyerag-meta`
+    /// The X4 Air fixture in delivered-frame pixels: what `kjerag-meta`
     /// produces from `docs/research/x4air-calibration.json`, and what its own
     /// tests assert. Copied rather than parsed because the path from the
     /// fixture to a `CalibrationSet` runs through a private constructor in a

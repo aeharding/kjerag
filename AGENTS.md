@@ -1,4 +1,4 @@
-# Kyerag — agent session guide
+# Kjerag — agent session guide
 
 Native COSMIC/Rust player for Insta360 `.insv` (dual-fisheye 360) files.
 The doctrine: **smooth playback and a correct horizon beat features**.
@@ -16,14 +16,14 @@ Performance is a feature; the target is full use of modern hardware
 ## Building
 
 The repo is a cargo workspace, one crate per layer: `crates/meta`,
-`crates/media`, `crates/render`, `crates/app` (the `kyerag` binary) and
+`crates/media`, `crates/render`, `crates/app` (the `kjerag` binary) and
 `crates/spike`. `cargo run` still starts the app, because `default-members`
 is the app; everything else takes `-p`
-(`cargo run --release -p kyerag-spike -- <file.insv>`). `crates/spike` holds
+(`cargo run --release -p kjerag-spike -- <file.insv>`). `crates/spike` holds
 a second binary, `reframe`, which runs the app's own projection pass over
 one frame and writes a PNG, so a reframed view can be looked at with no
 compositor:
-`cargo run --release -p kyerag-spike --bin reframe -- <file.insv> yaw=30 fov=60`
+`cargo run --release -p kjerag-spike --bin reframe -- <file.insv> yaw=30 fov=60`
 
 The `[patch.crates-io]` wgpu entry lives in the root manifest, which is the
 only place cargo reads one. It pins the fork by `rev`, not by branch, so that
@@ -61,8 +61,8 @@ wrong picture (issue #47, 2026-07-31). If a comparison against another commit
 is what is wanted, build each side into its own target directory, or check
 the binary carries the change before believing a number it prints.
 
-`kyerag-meta` depends on no C library and must stay that way:
-`cargo test -p kyerag-meta` is expected to pass on a box with no libav
+`kjerag-meta` depends on no C library and must stay that way:
+`cargo test -p kjerag-meta` is expected to pass on a box with no libav
 headers, and CI has a job with nothing installed that proves it.
 
 `ffmpeg-sys-next` binds the system ffmpeg headers through bindgen, so a
@@ -116,7 +116,7 @@ A change to the window, the keys or the frame path gets one run of the
 headless harness before it ships:
 
 ```sh
-scripts/uitest.sh ~/Videos/<file>.insv   # or set KYERAG_TEST_MEDIA
+scripts/uitest.sh ~/Videos/<file>.insv   # or set KJERAG_TEST_MEDIA
 scripts/uitest.sh                        # no footage: the checks that
                                          # need none, and it says so
 ```

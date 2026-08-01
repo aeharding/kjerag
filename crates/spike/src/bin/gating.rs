@@ -5,12 +5,12 @@
 //! asking. None of them needs the app.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin gating -- <file.insv> reach
-//! cargo run --release -p kyerag-spike --bin gating -- <file.insv> duty [seconds]
-//! cargo run --release -p kyerag-spike --bin gating -- <file.insv> both [seconds]
-//! cargo run --release -p kyerag-spike --bin gating -- <file.insv> mapped [seconds]
-//! cargo run --release -p kyerag-spike --bin gating -- <file.insv> one  [seconds]
-//! cargo run --release -p kyerag-spike --bin gating -- <file.insv> warm [seconds]
+//! cargo run --release -p kjerag-spike --bin gating -- <file.insv> reach
+//! cargo run --release -p kjerag-spike --bin gating -- <file.insv> duty [seconds]
+//! cargo run --release -p kjerag-spike --bin gating -- <file.insv> both [seconds]
+//! cargo run --release -p kjerag-spike --bin gating -- <file.insv> mapped [seconds]
+//! cargo run --release -p kjerag-spike --bin gating -- <file.insv> one  [seconds]
+//! cargo run --release -p kjerag-spike --bin gating -- <file.insv> warm [seconds]
 //! ```
 //!
 //! - **reach**: how much of the sphere a gate could be on for at all. A view
@@ -39,14 +39,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
-use kyerag_media::{DrmFrame, Fallible, HwDevice, Reader, open_decoder};
-use kyerag_meta::{CalibrationSet, Filter, Lens, Quat};
-use kyerag_render::{Camera, Held, MAX_LENSES, Reframe, Sampling, Size};
+use kjerag_media::{DrmFrame, Fallible, HwDevice, Reader, open_decoder};
+use kjerag_meta::{CalibrationSet, Filter, Lens, Quat};
+use kjerag_render::{Camera, Held, MAX_LENSES, Reframe, Sampling, Size};
 
 /// The window the app's own numbers are taken at.
 const ASPECT: f32 = 2560.0 / 1440.0;
 
-/// Fields of view to sweep, in degrees: `kyerag_render::Camera`'s zoom limits
+/// Fields of view to sweep, in degrees: `kjerag_render::Camera`'s zoom limits
 /// and the default between them.
 const FOVS: [f32; 5] = [20.0, 45.0, 90.0, 100.0, 110.0];
 

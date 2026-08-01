@@ -1,8 +1,8 @@
 # Linux landscape for Insta360 `.insv` (2026-07-30)
 
 What already exists for viewing, reframing and converting Insta360
-dual-fisheye `.insv` footage on Linux. This is the baseline Kyerag has to
-beat, or the reason Kyerag should not exist. Everything here was gathered
+dual-fisheye `.insv` footage on Linux. This is the baseline Kjerag has to
+beat, or the reason Kjerag should not exist. Everything here was gathered
 on 2026-07-30 from public sources; every claim carries a URL and a
 confidence rating.
 
@@ -685,7 +685,7 @@ specifically X4 Air at 8K on Linux.*
 | Kdenlive bigsh0t | Convert or hstack first | Scrub only | Frame export | **Yes** | Manual calibration | VR360 Stabilize |
 | Insta360 Studio (Wine) | Yes (GPU contested) | Yes | Yes | **Yes** | **Yes** | **Yes** |
 | MediaSDK (native Linux) | Convert only | No | n/a | No | **Yes** | **Yes** |
-| **Kyerag (proposed)** | **Yes** | **Yes** | **Yes** | later | **Yes** | **Yes** |
+| **Kjerag (proposed)** | **Yes** | **Yes** | **Yes** | later | **Yes** | **Yes** |
 
 The bottom row is the case for the project: every existing row has a hole
 in it, and no two rows combine without a conversion pass or a Windows

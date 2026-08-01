@@ -2,11 +2,11 @@
   <img src="resources/icons/hicolor/scalable/apps/dev.harding.Kjerag.svg" width="128" height="128" alt="">
 </p>
 
-<h1 align="center">Kyerag</h1>
+<h1 align="center">Kjerag</h1>
 
 <p align="center">Native 360° video player for the COSMIC desktop, written in Rust.</p>
 
-Kyerag plays Insta360 `.insv` files directly: no stitching step, no proxy
+Kjerag plays Insta360 `.insv` files directly: no stitching step, no proxy
 files, no export round-trip. Drag to reframe, scroll to zoom, take
 screenshots. The dual-fisheye footage is hardware-decoded and reprojected
 on the GPU using the calibrated lens model embedded in every `.insv` file.
@@ -26,7 +26,7 @@ lock. The gap is real; this fills it.
 
 An X4-class `.insv` is an MP4 carrying two 3840×3840 HEVC streams (one per
 lens) plus a metadata trailer with full per-lens calibration (Mei/UCM
-model), raw gyro, and per-frame exposure. Kyerag decodes both streams via
+model), raw gyro, and per-frame exposure. Kjerag decodes both streams via
 VA-API, imports the frames into wgpu zero-copy (dmabuf), and renders the
 reframed view in a single shader pass. Measured on an AMD Phoenix iGPU:
 dual-stream decode runs 2.4× realtime at 17% CPU.

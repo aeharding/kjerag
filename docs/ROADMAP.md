@@ -5,7 +5,7 @@ GitHub issues; this doc is the map, issues are the tasks.
 
 **Status 2026-07-31:** feasibility study complete (docs/research/), repo
 bootstrapped, M0 done, M1 done, and the horizon holds still.
-`cargo run --release -p kyerag-spike -- <file.insv>` decodes one 3840x3840
+`cargo run --release -p kjerag-spike -- <file.insv>` decodes one 3840x3840
 lens on VA-API, imports the dmabuf planes into wgpu with no copy, and
 renders to PNG at 103 fps (3.4x realtime). `cargo run --release --
 <file.insv>` plays the file in a libcosmic window, every frame imported
@@ -56,7 +56,7 @@ first; one naming a video that is not open says which video it is from; a
 clipboard holding anything else does nothing at all, because `Ctrl+V` over a
 video means nothing in any other player either. The command line takes one
 too, so the terminal line is a complete launch command:
-`kyerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1`.
+`kjerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1`.
 All three read it with the one parser in `crates/render/src/framing.rs`, which
 is also where it is written; reframe's real parser reads the same line in a
 test, so no two of them can drift. Measured under the harness: copy a view,
@@ -94,7 +94,7 @@ degrees peak to peak over 120 frames of calm flight and 2.86 through a
 
 Two conventions were settled on the way, both against pixels rather than
 against other people's tables. The IMU's axis convention is `xZY` for the
-X-series in Kyerag's own frame, picked out of all 24 rotations by comparing
+X-series in Kjerag's own frame, picked out of all 24 rotations by comparing
 the accelerometer's idea of up against the horizon in unlocked frames; it
 wins every stretch of two captures by 15 to 36 degrees over the runner-up.
 And the quarter-turn roll datum from issue #3 belongs to the **delivered
@@ -137,7 +137,7 @@ no hysteresis at all and 8.9 to 9.4% with the 15 degrees of margin a release
 would need. Releasing a cold gate costs 195 to 340 ms, six to eleven frames
 of stale far hemisphere, because HEVC has no way into the middle of a GOP and
 this camera's is 29 frames. Expected saving: **0.14 W**, for a state machine
-and a packet ring through the frame path. `kyerag-spike --bin gating` is the
+and a packet ring through the frame path. `kjerag-spike --bin gating` is the
 measurement and it stays runnable.
 
 **The lock-defect work of PR #51 was reverted the same day** (issues #44
@@ -156,7 +156,7 @@ refuses outright, so the horizon started **48.9 degrees** off level and
 walked back over a minute and a half. The seed now searches forward for the
 first window the filter believes completely and carries it back to the start
 of the track with the gyroscope. Measured through the projection pass with
-`kyerag-spike --bin dip`: at 6 seconds 48.9 degrees becomes **1.9** on the
+`kjerag-spike --bin dip`: at 6 seconds 48.9 degrees becomes **1.9** on the
 April capture and 14.7 becomes 8.1 on the June one, at 30 seconds 29.2
 becomes 3.9 and 6.0 becomes 2.5, and at 300 seconds both files read what
 they read before to three decimal places, which is the control. What is
@@ -233,7 +233,7 @@ one, and past 360 the frame is simply wider than the sphere: that extra is the
 room the ball sits in, painted the same grey the pass has always painted where
 no lens has the ray. Ctrl+0 comes back in one press.
 
-Measured on real footage at 2560x1440 (`kyerag-spike --bin ball`): one scroll
+Measured on real footage at 2560x1440 (`kjerag-spike --bin ball`): one scroll
 from 20 degrees to the ball, a notch at a time, rendered, and the largest
 single step is 64.3 codes at fov 402, with the largest growth of a step over
 the step before it 1.32x at fov 173 - against 1.15x inside the flat range this
@@ -288,7 +288,7 @@ this was starved of: a capture from a camera that is **not moving**, and
 Insta360's own export of the same capture as the parity benchmark. On a still
 camera there is no parallax worth the name in the far field, no rolling
 shutter and no motion blur, so what is left at the seam is the calibration.
-`kyerag-spike --bin seam` measures it round the whole seam circle and splits
+`kjerag-spike --bin seam` measures it round the whole seam circle and splits
 it into the axis parallax cannot reach and the axis it owns.
 
 The along-seam residual #7 and #42 left open, -0.36 to -1.20 degrees, is real
@@ -396,7 +396,7 @@ cosmic-player's own volume dropdown, with both settings remembered in
 cosmic-config. The wheel stayed on zoom (docs/UI.md, "Conflict 2"). Nothing is
 processed: a paramotor track is mostly wind, and it is played as recorded.
 
-`kyerag-spike --bin sync` is the measurement, and it drives the real player
+`kjerag-spike --bin sync` is the measurement, and it drives the real player
 with no GPU in it: play, pause, resume, two scrubs and a frame step on a
 printed schedule, with the app's own five-second report. Over a 325 s run of
 real footage, past those, the sound sat **0.0 ms** from the picture in 40 of
@@ -538,6 +538,29 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **Kyerag is Kjerag** (issue #75), in one mechanical sweep: five
+  crates, the binary, `App::APP_ID`, the four `resources/` and `flatpak/`
+  file names, the cosmic-config identifiers, the report prefixes, the harness
+  and every doc. The old name is gone rather than aliased (owner): no
+  compatibility spelling is read anywhere, and `KJERAG_TEST_MEDIA`,
+  `KJERAG_BIN`, `KJERAG_TEST_INSV` and `KJERAG_FFMPEG7` are the only names
+  the scripts answer to.
+
+  **cosmic-config moves with the ID and nothing migrates.** The stores live
+  under `~/.config/cosmic/<id>/` and `~/.local/state/cosmic/<id>/` and
+  cosmic-config has no name-migration path, so settings, recent files and the
+  seam pool are all discarded. Pre-release, and sanctioned in #75. The pool is
+  a cache by construction (see the entry below), so watch-to-calibrate refills
+  it silently over the next few files played; the settings are four values and
+  the recents are ten paths.
+
+  The icons kept their bytes. The name mismatch that issue #93 worked around
+  is gone and an installed build resolves `dev.harding.Kjerag` through the
+  icon theme, but a `cargo run` out of this tree installs no theme, and
+  libcosmic answers a miss with an empty SVG rather than a placeholder. All
+  three cases were measured with the harness before deciding
+  (`crates/app/src/app.rs`, `APP_ICON`).
+
 - 2026-08-01 **The calibration menu action is deleted, and the store with it.**
   Zero-config playback (AGENTS.md) leaves no room for it, and the reason is
   stronger than the doctrine: the action fitted whichever file was open, so on
@@ -565,13 +588,13 @@ live, no keyframe UI ever.
   worked out in full and declined (issue #71), and Flathub is reached under
   AGENTS.md's one scoped exception, owner-coordinated, previewed here before
   any outward step. The licence spelling is `AGPL-3.0-only`. The app ID is
-  `dev.harding.Kjerag` (issue #66) and **nothing in the tree carries it yet,
-  on purpose**: the ID is the cosmic-config path, the icon name, the D-Bus
-  name, the Wayland `app_id` and four file names at once, so issue #75's
-  sweep moves all of them in one commit rather than leaving the entry naming
-  one ID and the binary registering another. What is left before a submission
-  is the owner's: screenshots, the X11 question, and whether
-  `xdg-config/cosmic:ro` costs persisted settings.
+  `dev.harding.Kjerag` (issue #66) and the whole tree carries it since issue
+  #75: the ID is the cosmic-config path, the icon name, the D-Bus name, the
+  Wayland `app_id` and four file names at once, so the sweep moved all of
+  them in one commit rather than leave the entry naming one ID and the binary
+  registering another. What is left before a submission is the owner's:
+  screenshots, the X11 question, and whether `xdg-config/cosmic:ro` costs
+  persisted settings.
 
 - 2026-07-31 **`flatpak/cargo-sources.json` was stale on `main`**, and the
   rule that should have prevented it could not: it is written per commit and
@@ -638,8 +661,9 @@ live, no keyframe UI ever.
   down to 16, and a drawing of its own for 32, 24 and 16, because both COSMIC
   and the Pop theme redraw those sizes instead of exporting. The files are
   named for the application ID `dev.harding.Kjerag`, the one issue #66
-  settled and issue #75 will put in the code; until that rename lands the
-  binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
+  settled and issue #75 put in the code, so an installed build now resolves
+  its own icon by name. The app still draws the scalable SVG out of its own
+  bytes, because a source-tree run installs no theme to look a name up in.
 
 - 2026-07-31 Seam bar raised (owner): "I want the best seam support out
   there." The prod gate is not good-enough but best-shipping, Insta360's
@@ -743,13 +767,13 @@ live, no keyframe UI ever.
   65 to 74 ms against the PNG's 33 to 45 ms, on the worker thread that has
   already waited for the GPU and reads back 33 MB before it starts.
 - 2026-07-31 **The UI harness builds the binary it drives, every run**
-  (`scripts/uitest.sh`). It used to build only when `target/release/kyerag`
+  (`scripts/uitest.sh`). It used to build only when `target/release/kjerag`
   was missing, so a binary left over from before a `git revert` is what it
   drove: the ball check failed twice on a tree whose source passes it four
   runs out of four, and the capture it filed was the reverted design rather
   than the restored one. A harness that reports on code it did not run is
   worse than no harness, and cargo costs nothing when the binary is already
-  fresh. `KYERAG_BIN` stays the way to point it at a binary on purpose,
+  fresh. `KJERAG_BIN` stays the way to point it at a binary on purpose,
   which is how the stale one was identified.
 - 2026-07-31 **The zoom out to the ball is one projection family, not a second
   projection** (issue #47). Perspective and tiny planet are two ends of
@@ -1048,7 +1072,7 @@ live, no keyframe UI ever.
 
   A gate that is on a tenth of the time, saves a seventh of a watt, and can
   show a stale far hemisphere for a third of a second is not a trade this
-  player makes. `kyerag-spike --bin gating` is the whole measurement and
+  player makes. `kjerag-spike --bin gating` is the whole measurement and
   `Reframe::reaches` is the test it would have used, both kept so the loser
   stays measurable. What would change the answer is a shorter GOP or a
   format with cheaper random access, and the instrument would say so.
@@ -1111,7 +1135,7 @@ live, no keyframe UI ever.
   aborts on our X4 Air footage: it serializes the metadata protobuf's
   enum fields with `unsafe { transmute }` of the raw i32, and the file
   carries a value no enum in that schema has. The fix exists only on an
-  unpublished master that pulls two further git forks. Kyerag was already
+  unpublished master that pulls two further git forks. Kjerag was already
   bypassing that crate's lens profile (wrong on the Air) and would have
   had to bypass its merged exposure records (M2), so what remained was
   the record walk. `prost` decodes the eleven fields we read.
@@ -1154,15 +1178,15 @@ live, no keyframe UI ever.
   blur and nothing else, which is what the owner saw. cosmic-files paints no
   background of its own either; it just leaves the container on
   (`src/app.rs:2352-2367`, off in desktop mode only).
-- 2026-07-31 One crate per layer, in a workspace (issue #19): `kyerag-meta`,
-  `kyerag-media`, `kyerag-render`, `kyerag` (the app) and `kyerag-spike`.
-  The layer diagram is now a build constraint, and `kyerag-meta` builds and
+- 2026-07-31 One crate per layer, in a workspace (issue #19): `kjerag-meta`,
+  `kjerag-media`, `kjerag-render`, `kjerag` (the app) and `kjerag-spike`.
+  The layer diagram is now a build constraint, and `kjerag-meta` builds and
   tests with no libav headers anywhere on the box, which a CI job that
   installs nothing checks on every push. `[patch.crates-io]` moved to the
   workspace root, the only manifest cargo reads one from.
-- 2026-07-31 `kyerag-render` depends on libcosmic, for one file. The three
+- 2026-07-31 `kjerag-render` depends on libcosmic, for one file. The three
   `iced::widget::shader` impls are a foreign trait on types `render` owns,
-  and coherence forbids writing them in `kyerag`. The alternative, a set of
+  and coherence forbids writing them in `kjerag`. The alternative, a set of
   forwarding newtypes in the app crate, is more code for the same wiring;
   they live in `crates/render/src/widget.rs` and nothing else in the crate
   mentions iced.
@@ -1282,7 +1306,7 @@ live, no keyframe UI ever.
   clock on each redraw message, was built first and measured: 33-46
   redraws/s on a 60 Hz display and 1-18 dropped frames per 5 s, because the
   event has to leave iced and come back. The clock is pumped inside the
-  redraw pass instead, in `kyerag_render`'s shader widget, which costs a
+  redraw pass instead, in `kjerag_render`'s shader widget, which costs a
   `RefCell` in `Scene` and buys 30.0 redraws/s with nothing dropped.
 - 2026-07-31 The engine holds container PTS as the frame clock for now. The
   trailer's `pts_type = 2` (`VideoPtsEexposureFile`) suggests the per-frame
@@ -1310,7 +1334,7 @@ live, no keyframe UI ever.
   the file is opened, so the index is already in memory and `av_seek_frame`
   is a lookup in it: measured at 0.1 ms for the seek call itself, and 70.6 ms
   to open the 37.9 GB file. A second copy of that table would buy nothing.
-  `cargo run --release -p kyerag-spike --bin seek` is the instrument.
+  `cargo run --release -p kjerag-spike --bin seek` is the instrument.
 - 2026-07-31 A drag on the scrubber seeks to keyframes and the release seeks
   exactly (issue #5, docs/UI.md's one deliberate deviation from
   cosmic-player). Measured on the 37.9 GB file: 21 ms to a keyframe against
@@ -1353,7 +1377,7 @@ live, no keyframe UI ever.
 - 2026-07-31 The IMU axis convention is **measured, not transcribed** (issue
   #8). A three-letter convention string is only half of a convention; the
   other half is the frame it lands in, which is whatever the project it came
-  from composes next, and Kyerag's composition is its own. All 24 rotations
+  from composes next, and Kjerag's composition is its own. All 24 rotations
   were compared against the horizon in unlocked rendered frames; `xZY` wins
   every stretch of two captures, by 15 to 36 degrees over the runner-up.
 - 2026-07-31 The quarter-turn roll datum belongs to the **delivered picture**,
@@ -1361,7 +1385,7 @@ live, no keyframe UI ever.
   docs/research/insv-format.md 4.8). The IMU is bolted to the sensor and can
   tell the two readings apart: held level by its accelerometer alone, an X4
   Air comes out a quarter turn on its side through `Rz(roll - 90)` and level
-  through `Rz(roll)`. `kyerag_meta::Pose` now carries both.
+  through `Rz(roll)`. `kjerag_meta::Pose` now carries both.
 - 2026-07-31 The **gyro is aligned to the exposure records' clock**, and
   playback still paces on container PTS (issue #8). `pts_type = 2` means what
   it says: the camera's own timestamps drift from the container's nominal
@@ -1379,7 +1403,7 @@ live, no keyframe UI ever.
 - 2026-07-31 Verification is **physics in the footage**, with a Studio export
   as a later drop-in (issue #8). The owner was asleep and no reference export
   existed, so the references are that a horizon is level and an accelerometer
-  at rest reads 1 g. `kyerag-spike --bin horizon` measures the horizon's
+  at rest reads 1 g. `kjerag-spike --bin horizon` measures the horizon's
   angle in rendered frames; its own tests are its positive control, and a
   deliberately wrong axis convention is the negative one, reading 54 to 65
   degrees of standard deviation against 0.04 to 0.68 for the right answer. A
@@ -1401,7 +1425,7 @@ player that keeps 2-3 frames in flight gets that time back. The copy path
 does not reach realtime for even one of the two lenses.
 
 Playback, both lenses, 60 s of a 3840x3840 29.97 fps file, rendering
-2560x1440 (`cargo run --release -p kyerag-spike --bin playback`):
+2560x1440 (`cargo run --release -p kjerag-spike --bin playback`):
 
 | lookahead | decode        |
 | --------- | ------------- |
@@ -1498,7 +1522,7 @@ and #11 changed what a redraw does; what the table above is still good for is
 the shape, which is that a second round would cost as much again as the
 first.
 
-Hemisphere gating (issue #10), `cargo run --release -p kyerag-spike --bin
+Hemisphere gating (issue #10), `cargo run --release -p kjerag-spike --bin
 gating`. How much of the sphere a view could gate a lens off for at all, with
 the body held still, and what the view axis has to be within for it:
 
@@ -1542,7 +1566,7 @@ against 0.57 ms on one that does not (worst 6.26 ms against 3.29 ms). What
 is left is the readback and the encode, and both belong to a worker
 thread: 45 to 53 ms to encode one 8.5 MB PNG.
 
-High-quality zoom sampling (issue #11), `cargo run --release -p kyerag-spike
+High-quality zoom sampling (issue #11), `cargo run --release -p kjerag-spike
 --bin zoom`. How far the view magnifies the source, down the front lens's
 axis at 2560x1440, and how far each plane's kernel engages there:
 
@@ -1632,7 +1656,7 @@ Three properties, measured rather than argued:
   block.
 
 Seeking, 12 places from 1% to 97% of the 37.9 GB file, warm
-(`cargo run --release -p kyerag-spike --bin seek`):
+(`cargo run --release -p kjerag-spike --bin seek`):
 
 | what                          | median   | worst    |
 | ----------------------------- | -------: | -------: |

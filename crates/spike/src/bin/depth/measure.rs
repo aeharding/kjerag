@@ -3,10 +3,10 @@
 
 use std::path::Path;
 
-use kyerag_media::Fallible;
-use kyerag_meta::{CalibrationSet, Lens};
-use kyerag_render::{Camera, Held, Reframe, Sampling, Size};
-use kyerag_spike::{Pair, Walk};
+use kjerag_media::Fallible;
+use kjerag_meta::{CalibrationSet, Lens};
+use kjerag_render::{Camera, Held, Reframe, Sampling, Size};
+use kjerag_spike::{Pair, Walk};
 
 use crate::Options;
 use crate::band::{Accumulator, Node, Peak, dot, epipolar_shift, free_shift, grid, sample, unit};
@@ -213,7 +213,7 @@ pub fn open(options: &Options, path: &Path) -> Fallible<(CalibrationSet, Vec<Pai
     let mut walk = Walk::open(
         path,
         options.from,
-        kyerag_render::Size {
+        kjerag_render::Size {
             width: dim.width,
             height: dim.height,
         },
