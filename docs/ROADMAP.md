@@ -557,6 +557,39 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **aarch64 is a second runner, not a second recipe** (owner
+  directive). The gates that compile run on `ubuntu-24.04` and
+  `ubuntu-24.04-arm`, natively, and a version tag publishes
+  `kjerag-<version>-aarch64.flatpak` beside the x86_64 bundle, each built on a
+  runner of its own arch. What decided the shape was the ffmpeg PPA: the
+  workspace pins 7.1, Ubuntu 24.04 ships 6.1, and a PPA is often amd64 only,
+  so the question was put to the arm runner before anything was written.
+  `ppa:ubuntuhandbook1/ffmpeg7` publishes an arm64 index, `libavcodec-dev
+  7:7.1.1-0build1~ubuntu2404` installs out of it, and `pkg-config` then reports
+  61.19.101. So the provisioning block is untouched and both arches read the
+  one copy of it. That left the alternative unbuilt, which was moving the
+  compile jobs into the Flathub SDK container the bundle already builds in: it
+  does carry ffmpeg 7.1 dev for both arches (measured), but it has neither
+  rustup nor clang, and taking it would have traded two cached toolchain jobs
+  for a container pull to solve a problem the PPA does not have. The release
+  half was checked the same way rather than assumed: the
+  `flatpak-github-actions:freedesktop-25.08` tag starts on the arm runner and
+  reports `aarch64`, and `org.freedesktop.Platform`, `Sdk`, `rust-stable` and
+  `llvm21` all resolve at 25.08 for `--arch=aarch64` on Flathub. One trap is
+  recorded in the workflow, because it fails as a cross build rather than as a
+  missing thing: the flatpak-builder action's `arch` input defaults to the
+  literal `x86_64`, so the arm runner has to be told. Measured on the throwaway
+  tag that proved it (`0.1.1-armtest1`, published and then deleted): a 7.2 MB
+  aarch64 bundle carrying `app/dev.harding.Kjerag/aarch64/master` and
+  `runtime=org.freedesktop.Platform/aarch64/25.08`, beside the 8.1 MB x86_64
+  one. The two bundle jobs run side by side and the arm one finished first,
+  7m22 against 9m10, so the second bundle costs no wall time of its own; the
+  tag run as a whole went from 11m31 to 14m43, and that difference is one cold
+  arm cargo cache in the gates. What this is not, and the README and
+  docs/RELEASING.md say so where a person reads them, is a verified build: a
+  runner has no GPU, decode is VA-API against `/dev/dri/renderD128`, and most
+  arm devices decode through V4L2, which this app does not use. The aarch64
+  bundle is compiled and unit tested and has been run by nobody.
 - 2026-08-01 **A version tag is the release, and nothing about it is ours**
   (issue #106). `cargo release patch --execute` on main bumps the version,
   stamps a dated entry into the metainfo changelog, tags the plain version
