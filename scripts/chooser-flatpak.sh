@@ -76,6 +76,33 @@ runtime=$(mktemp -d "${TMPDIR:-/tmp}/kjerag-chooser.XXXXXXXX")
 chmod 700 "$runtime"
 printf 'runtime %s\n' "$runtime"
 
+# The app asks for a file through libcosmic, which asks through ashpd, whose
+# `OpenFileOptions` has no `writable` field at all: the option under test here
+# cannot be expressed by our call site, and RAW= makes the request by hand to
+# find out whether expressing it would have helped.
+#
+#   RAW="'writable': <false>"   the option the impl spec documents, asked for
+#   RAW="omit"                  the same request without it, as a control
+sandbox=
+command=
+if [ -n "${RAW:-}" ]; then
+	option=", ${RAW}"
+	[ "$RAW" = omit ] && option=
+	cat >"$session/probe.sh" <<PROBE
+#!/bin/sh
+# Inside the sandbox: the chooser call the app makes, made by hand.
+gdbus call --session --dest org.freedesktop.portal.Desktop \\
+	--object-path /org/freedesktop/portal/desktop \\
+	--method org.freedesktop.portal.FileChooser.OpenFile \\
+	"" "Open video" "{'handle_token': <'probe'>${option}}"
+sleep 600
+PROBE
+	chmod +x "$session/probe.sh"
+	sandbox="--filesystem=$session:ro --command=sh"
+	command="$session/probe.sh"
+	printf 'raw     OpenFile with {%s}\n' "${RAW}"
+fi
+
 cat >"$session/inner.sh" <<EOF
 #!/usr/bin/env bash
 # Inside cage, inside a private session bus. The portal services are started
@@ -92,7 +119,12 @@ export XDG_CURRENT_DESKTOP=$desktop
 export XDG_DATA_HOME='${XDG_DATA_HOME:-$HOME/.local/share}'
 export XDG_CONFIG_HOME='${XDG_CONFIG_HOME:-$HOME/.config}'
 printf 'bus %s\n' "\$DBUS_SESSION_BUS_ADDRESS"
+# The answer, and the ask. The Response signal is what the app is handed; the
+# call to the backend is what xdg-desktop-portal forwarded, which is where an
+# option the app sent either survives or is dropped.
 dbus-monitor --session "type='signal',interface='org.freedesktop.portal.Request'" \
+	"type='method_call',interface='org.freedesktop.portal.FileChooser'" \
+	"type='method_call',interface='org.freedesktop.impl.portal.FileChooser'" \
 	>'$session/response.log' 2>&1 &
 /usr/libexec/xdg-permission-store >'$session/permission.log' 2>&1 &
 /usr/libexec/xdg-document-portal >'$session/document.log' 2>&1 &
@@ -102,7 +134,7 @@ sleep 1
 sleep 2
 exec env XDG_DATA_HOME='${XDG_DATA_HOME:-$HOME/.local/share}' \\
 	XDG_CONFIG_HOME='${XDG_CONFIG_HOME:-$HOME/.config}' \\
-	flatpak run --filesystem='$runtime/doc' '$app'
+	flatpak run --filesystem='$runtime/doc' $sandbox '$app' $command
 EOF
 chmod +x "$session/inner.sh"
 
@@ -125,8 +157,12 @@ teardown() {
 	sleep 1
 	kill -KILL "$cage_pid" 2>/dev/null
 	wait "$cage_pid" 2>/dev/null
-	fusermount3 -u "$runtime/doc" 2>/dev/null
-	sleep 1
+	# Both fuse mounts the session made: the second document portal's, and
+	# the one the backend's gvfs daemon puts beside it. A directory left with
+	# either still mounted cannot be removed.
+	fusermount3 -uz "$runtime/doc" 2>/dev/null
+	fusermount3 -uz "$runtime/gvfs" 2>/dev/null
+	sleep 2
 	rm -rf "$runtime"
 }
 trap teardown EXIT
@@ -161,7 +197,9 @@ if [ -n "${KEEP:-}" ]; then
 	printf '  env XDG_RUNTIME_DIR=%s WAYLAND_DISPLAY=wayland-0 grim shot.png\n' "$runtime"
 	printf 'responses land in %s\n' "$session/response.log"
 	sleep "${KEEP}"
-	printf '\n--- what the picker answered ---\n'
+	printf '\n--- what the app asked for, and what was forwarded ---\n'
+grep -A6 -E "member=OpenFile" "$session/response.log" | head -40
+printf '\n--- what the picker answered ---\n'
 	grep -A6 -E "member=Response" "$session/response.log" | head -60
 	exit 0
 fi
@@ -183,18 +221,26 @@ dialogs() {
 }
 for attempt in 1 2 3; do
 	printf 'opening the chooser (attempt %s)\n' "$attempt"
-	before=$(dialogs)
-	click 640 474
-	waited=0
-	while [ "$(dialogs)" -le "$before" ]; do
-		sleep 1
-		waited=$((waited + 1))
-		[ "$waited" -lt 15 ] || break
-	done
-	[ "$(dialogs)" -gt "$before" ] || {
-		printf 'no dialog\n'
-		continue
-	}
+	# The raw probe asked for the dialog itself and has no window for it to
+	# be parented to, which is what the backend's line is about, so there is
+	# nothing to count and nothing to press. The app needs its button
+	# pressed, and there is no key that would do it.
+	if [ -n "${RAW:-}" ]; then
+		sleep 10
+	else
+		before=$(dialogs)
+		click 640 474
+		waited=0
+		while [ "$(dialogs)" -le "$before" ]; do
+			sleep 1
+			waited=$((waited + 1))
+			[ "$waited" -lt 15 ] || break
+		done
+		[ "$(dialogs)" -gt "$before" ] || {
+			printf 'no dialog\n'
+			continue
+		}
+	fi
 	sleep 2
 	shot "dialog-$attempt"
 	# The read-only checkbox is the backend's `writable` result, which is

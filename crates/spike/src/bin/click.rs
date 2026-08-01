@@ -35,8 +35,11 @@ use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
 use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1;
 
 const BTN_LEFT: u32 = 0x110;
-/// How long the client is given to notice it has a pointer at all.
-const SETTLE: Duration = Duration::from_millis(700);
+/// How long the client is given to notice it has a pointer at all. A window
+/// that was already up before this ran has to handle the seat gaining a
+/// capability it never had, and a dialog opened by a portal is always in that
+/// position: nothing in a headless session has a pointer until this makes one.
+const SETTLE: Duration = Duration::from_millis(1500);
 /// Between the warp and the press, and between the press and the release.
 const BEAT: Duration = Duration::from_millis(400);
 /// A cage session is one output, and this is its size unless told otherwise.
@@ -125,10 +128,15 @@ fn press(args: &[String]) -> Result<(), String> {
     roundtrip(&mut state)?;
     sleep(SETTLE);
 
-    pointer.motion_absolute(stamp(), x, y, width, height);
-    pointer.frame();
-    roundtrip(&mut state)?;
-    sleep(BEAT);
+    // Twice: the first motion is what makes the compositor give the surface
+    // under it a pointer enter, and a client that bound its pointer late has
+    // missed it.
+    for _ in 0..2 {
+        pointer.motion_absolute(stamp(), x, y, width, height);
+        pointer.frame();
+        roundtrip(&mut state)?;
+        sleep(BEAT);
+    }
 
     pointer.button(stamp(), BTN_LEFT, ButtonState::Pressed);
     pointer.frame();

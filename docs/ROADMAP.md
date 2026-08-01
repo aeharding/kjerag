@@ -592,10 +592,30 @@ live, no keyframe UI ever.
   at all. `kjerag-spike --bin click` presses it with the same wlr virtual
   pointer `dragsource` uses.
 
-  What is left is a decision rather than a fix, and it is the owner's: keeping
-  `:ro` and asking the pilot for what the sandbox cannot see, or trading the
-  read-only half of the two footage grants for a chooser that answers with
-  real paths and pairs silently. Nothing is in the app yet either way.
+  **The app cannot ask for less**, which was the owner's condition on widening
+  anything. The finer-grained lever looked plausible: the portal's impl spec
+  documents a `writable` option whose default is "no". It is documented under
+  the **results the backend returns**, not the request the app makes, and four
+  things say so, three of them measured:
+
+  - ashpd 0.12.3's `OpenFileOptions` has no `writable` field, so our call site
+    cannot express it at all;
+  - xdg-desktop-portal 1.18.4 filters request options against an allow list
+    (`open_file_options`) that does not contain it;
+  - sending it by hand from inside the sandbox (`RAW=` in
+    `scripts/chooser-flatpak.sh`, through `gdbus` in the bundle) is accepted
+    with no error and **dropped in flight**. On the bus, the app's call carries
+    `dict entry("writable", boolean false)` and what xdg-desktop-portal
+    forwards to the backend is `array [ ]`. The dialog that opens has its
+    read-only box unticked, which is the same fact in a picture;
+  - and the GTK backend never reads such an option anyway. It only writes one,
+    from a checkbox the pilot ticks by hand.
+
+  So the write bit cannot be given up per request, and the choice is the
+  owner's: keep `:ro` and ask the pilot for what the sandbox cannot see, or
+  trade the read-only half of the two footage grants for a chooser that
+  answers with real paths and pairs silently. Nothing is in the app or the
+  manifest yet either way.
 
 - 2026-08-01 **The shipped Flatpak took no drops, and nothing could have
   caught it** (issue #118). A drop into a sandbox arrives as
