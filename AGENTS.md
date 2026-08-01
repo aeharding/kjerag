@@ -117,7 +117,8 @@ app's own report lines. The session is isolated: its own Wayland socket
 and its own XDG directories, so it neither sees the desktop you are
 looking at nor writes anything into it. Captures land in gitignored
 `scratch/uitest/`, because a frame of real footage is personal video.
-Needs `cage wtype grim ffmpeg` installed.
+Needs `cage wtype grim ffmpeg` installed, plus `wl-clipboard` for the one
+check that reads the session's clipboard, which skips without it.
 
 CI does not run it and cannot: decode is VA-API against
 `/dev/dri/renderD128` (`crates/media/src/decode.rs`), and with no such
