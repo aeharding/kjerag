@@ -151,9 +151,13 @@ if [ -n "${KJERAG_FLATPAK:-}" ]; then
 	# directories and is worth more than this costs.
 	launch=(env "FLATPAK_USER_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/flatpak" flatpak run)
 	# Two paths in, and that is the whole of what this mode arranges: the
-	# file to play and the directory captures land in. Neither is a
-	# permission the frame path uses, nothing is taken away, and the shipped
-	# permission set is otherwise byte for byte the one a pilot installs.
+	# session, which is where captures land and where the synthetic files the
+	# refusal checks feed the app are written, and the file to play. Without
+	# the first, `dud` and `foreign` would hand the app a path it cannot open
+	# and read the refusal that follows as the refusal they are checking for,
+	# which is a check passing for the wrong reason. Nothing is taken away,
+	# and the shipped permission set is otherwise byte for byte the one a
+	# pilot installs.
 	#
 	# The settings are hermetic without touching that set at all. flatpak
 	# resolves a by-name grant against the CALLER's environment (measured):
@@ -161,7 +165,7 @@ if [ -n "${KJERAG_FLATPAK:-}" ]; then
 	# follows HOME, both of which `boot` points into the session. The real
 	# ~/.config/cosmic is then not bound into the sandbox at all, so the app
 	# cannot write it even though it still holds the grant that says it may.
-	launch+=("--env=XDG_SCREENSHOTS_DIR=$session/shots" "--filesystem=$session/shots")
+	launch+=("--env=XDG_SCREENSHOTS_DIR=$session/shots" "--filesystem=$session")
 	[ -z "$media" ] || launch+=("--filesystem=$media:ro")
 	launch+=("$app")
 elif [ -n "${KJERAG_BIN:-}" ]; then
@@ -523,6 +527,7 @@ with_media() {
 	fi
 
 	idle_controls_hold_the_view
+	opens_onto_the_backdrop
 	exits_clean
 }
 
@@ -1208,6 +1213,225 @@ than the room around the ball" "$file"
 	return 1
 }
 
+# ------------------------------------- the pane before the first frame
+#
+# A pane with no frame in it yet draws the backdrop, which is the same one the
+# room around the ball floats on (issue #100) - libcosmic's own pane in a
+# window, black in fullscreen - and never a picture of the pass's own. What it
+# drew until this check existed was an animated test pattern left over from
+# the first bring-up of the shader (owner-reported, 2026-08-01).
+#
+# The command line cannot show it. `kjerag file.insv` opens the file while the
+# window is still being mapped, so the decode thread has the whole mapping to
+# work in and the first frame is already there when the first pixel is drawn:
+# measured 2026-08-01 over 80 captures from launch, none of them caught a pane
+# with no frame. A window that is already up draws its pane the instant the
+# file is loaded, frame or no frame, and that is the pilot's own path.
+#
+# Ctrl+V is the only way into it from a keyboard: Ctrl+O opens a portal file
+# dialog and cage has no portal behind it. The pasted line names the file with
+# its directories, which is what makes a paste an open rather than a seek, and
+# it names a time near the end of the file, which is what makes the gap wide
+# enough to photograph: the first frame after a paste at 90% comes off a
+# keyframe walk deep in the file rather than off the head of the stream.
+# Measured on the main build of 2026-08-01: one capture caught the gap at
+# time=0, twenty caught it at time=1500 of a 1799.8 s file.
+
+# How many captures are taken once the app says it has loaded the file, and
+# how many times the whole open is repeated when a round catches nothing of
+# the gap. grim answers in about 17 ms here, so a burst covers 0.4 s; the gap
+# has measured 0.33 s on a cold window and 0.05 s on a warm one, and a round
+# whose every capture landed after the first frame has seen nothing rather
+# than seen something good.
+OPEN_BURST=24
+OPEN_ROUNDS=3
+
+# What separates the test pattern from a picture and from the backdrop.
+#
+# The pattern is a sine of the distance from the middle of the view, put into
+# blue whole, into green by the vertical place and into red by the horizontal
+# one, so two patches at mirrored places read the same green and the same blue
+# to the byte and different reds. Measured on the main build of 2026-08-01:
+# 41 97 210 on the left against 169 97 210 on the right. A frame of video is
+# not mirror symmetric (120 190 242 against 181 213 224, same run) and the
+# backdrop is flat, which is symmetric in all three channels rather than two.
+PATTERN_RED=20
+PATTERN_MATCH=1
+
+# The band of the window that is pane and nothing else: under the header bar,
+# well above the welcome view's icon, and further still above any toast.
+#
+# `flags=area` and not the default, which is what `patch_rgb` above leaves
+# alone: bicubic overshoots on a downscale this steep, and measured on a flat
+# 27 27 27 capture of this window it answers 30 26 30, a spread of 4 where the
+# picture has none. The area scaler is the mean itself, which is what both
+# readings below are asking for.
+pane_rgb() {
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=iw:ih*0.25:0:$HEADER_BAND,scale=1:1:flags=area" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+# mirror_rgb <file> <left|right>: one of two patches at places the middle of
+# the window reflects onto each other.
+mirror_rgb() {
+	local at=0.15
+	[ "$2" = left ] || at=0.75
+	ffmpeg -y -loglevel error -i "$1" \
+		-vf "crop=iw*0.10:ih*0.10:iw*$at:ih*0.45,scale=1:1:flags=area" \
+		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+is_test_pattern() {
+	local left=($1) right=($2) dr dg db
+	[ "${#left[@]}" = 3 ] && [ "${#right[@]}" = 3 ] || return 1
+	dr=$((left[0] - right[0]))
+	dg=$((left[1] - right[1]))
+	db=$((left[2] - right[2]))
+	[ "${dr#-}" -ge "$PATTERN_RED" ] &&
+		[ "${dg#-}" -le "$PATTERN_MATCH" ] &&
+		[ "${db#-}" -le "$PATTERN_MATCH" ]
+}
+
+# The pane holds nothing but pane: the window with its file closed, and the
+# window with one open whose first frame has not arrived.
+pane_is_backdrop() {
+	is_room "$(pane_rgb "$1")"
+}
+
+pane_is_clear() {
+	pane_is_backdrop "$(grab "$1")"
+}
+
+opens_onto_the_backdrop() {
+	local check="an open with no frame yet draws the backdrop"
+	if [ "$clipboard" = no ]; then
+		skip "$check (no wl-copy)"
+		return
+	fi
+
+	local seconds deep round=1
+	seconds=$(sed -n 's/^media:.*, \([0-9.]*\) s$/\1/p' "$log" | head -1)
+	deep=$(awk -v s="${seconds:-0}" 'BEGIN { printf "%.3f", s * 0.9 }')
+
+	while [ "$round" -le "$OPEN_ROUNDS" ]; do
+		open_once "$check" "$deep" || return
+		case $verdict in
+		pattern)
+			fail "$check" \
+				"the pane drew the test pattern: its mirrored halves read \
+$(mirror_rgb "$caught" left) and $(mirror_rgb "$caught" right), which no picture is" \
+				"$caught"
+			return
+			;;
+		backdrop)
+			pass "$check ($held captures of backdrop, then the frame)"
+			return
+			;;
+		esac
+		round=$((round + 1))
+	done
+	fail "$check" \
+		"$OPEN_ROUNDS opens went by with every capture already a frame, so nothing \
+was seen of the gap and this proves nothing" "$caught"
+}
+
+# Set by open_once, read by the check around it: what the burst caught, the
+# capture that says so, and how much backdrop was in it.
+verdict=
+caught=
+held=0
+
+# open_once <check> <time>: close the file, open it again from the window that
+# is still up, and classify the burst of captures that follows. Answers
+# through `verdict`; a non-zero return is a failure it has already filed.
+open_once() {
+	local check=$1 deep=$2 taken shot
+	verdict=missed
+	caught=
+	held=0
+
+	# The default view first: the band this check reads is the room itself
+	# while the view is at the ball, whatever is playing behind it.
+	key -M ctrl -k 0 -m ctrl
+	if ! press_until pane_is_clear closed -M ctrl -k w -m ctrl; then
+		alive || lost "$check"
+		fail "$check" \
+			"ctrl+w left the pane reading $(pane_rgb "$session/closed.ppm"), which is \
+still a picture" "$session/closed.ppm"
+		return 1
+	fi
+
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-copy "$media time=$deep yaw=0.00 pitch=0.00 fov=90.00 lock=1" 2>>"$log"
+
+	# No settle after the key, and the burst starts on the app's own line
+	# rather than on a sleep: all of what this check is about happens in the
+	# fraction of a second after `goto:` is printed, which is the moment the
+	# file has been loaded and the pane is about to be drawn for the first
+	# time.
+	local gotos try=0 waited
+	gotos=$(grep -c '^goto:' "$log")
+	while [ "$try" -lt "$PRESSES" ]; do
+		env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+			wtype -M ctrl -k v -m ctrl 2>>"$log"
+		waited=0
+		while [ "$(grep -c '^goto:' "$log")" -le "$gotos" ] &&
+			[ "$waited" -lt $((READY * 100)) ]; do
+			alive || lost "$check"
+			sleep 0.01
+			waited=$((waited + 1))
+		done
+		[ "$(grep -c '^goto:' "$log")" -gt "$gotos" ] && break
+		try=$((try + 1))
+	done
+	if [ "$(grep -c '^goto:' "$log")" -le "$gotos" ]; then
+		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
+		return 1
+	fi
+
+	for taken in $(seq 1 "$OPEN_BURST"); do
+		alive || lost "$check"
+		grab "$(printf 'open-%02d' "$taken")" >/dev/null
+	done
+
+	for taken in $(seq 1 "$OPEN_BURST"); do
+		shot=$(printf '%s/open-%02d.ppm' "$session" "$taken")
+		[ -s "$shot" ] || continue
+		# The control row is what says the file is open, because the window
+		# the paste came from had none: its bottom band is pane and this one
+		# is a row of buttons.
+		band_changed "$session/closed.ppm" "$shot" bottom "$CONTROL_BAND" || continue
+		if pane_is_backdrop "$shot"; then
+			held=$((held + 1))
+			verdict=backdrop
+			caught=$shot
+			continue
+		fi
+		if is_test_pattern "$(mirror_rgb "$shot" left)" "$(mirror_rgb "$shot" right)"; then
+			verdict=pattern
+			caught=$shot
+		elif [ -z "$caught" ]; then
+			# A frame, and nothing before it: the burst started after the gap
+			# had closed, and this capture is what says so.
+			caught=$shot
+		fi
+		# Either way the gap is over: the frame has landed, or the pattern
+		# this check exists for is on screen and there is nothing to add to
+		# it.
+		break
+	done
+
+	# One capture of the verdict is kept and the rest of the burst goes: two
+	# dozen captures a round of a window full of somebody's flight is a lot of
+	# personal video to leave lying about for no reading.
+	if [ -n "$caught" ]; then
+		cp "$caught" "$session/open-$verdict.ppm"
+		caught=$session/open-$verdict.ppm
+	fi
+	rm -f "$session"/open-[0-9][0-9].ppm
+}
+
 exits_clean() {
 	local status
 	quit
@@ -1347,6 +1571,114 @@ dud() {
 	exits_clean
 }
 
+# ------------------------------------- the checks, with another camera's file
+#
+# A GoPro capture opens: it is an ordinary MP4 with video in it, so the
+# refusal cannot come from a decode that failed. It comes from what the
+# container holds (`crates/meta/src/format.rs`, issue #107), which is why the
+# fixtures here are 71 bytes and no pictures: the app names the file before
+# anything is asked to decode it, and a real frame would not change a word of
+# what it says. Whether those bytes are what a GoPro really writes is that
+# module's question, and it answers it against the local sample corpus.
+#
+# Two fixtures, because there are two ways a file gets named: the first
+# carries GoPro's own `udta` boxes under a name that says nothing, and the
+# second is named `.osv` and holds nothing at all.
+#
+# What the app does with them is an alert: the stock dialog libcosmic draws
+# over the middle of the window in a modal popover. No capture can read the
+# words in it, so what is checked is that something is drawn over the view,
+# and that Escape takes it away and leaves the window byte for byte what it
+# was. A modal layer that only half goes away fails the second half, which is
+# what the pair is here to catch.
+
+# Set by the check below and read by its predicate: the window before any of
+# this, which is what dismissing the alert has to come back to.
+prior=
+
+alert_gone() {
+	local shot
+	shot=$(grab "$1")
+	same_picture "$prior" "$shot"
+}
+
+foreign() {
+	printf '\n-- foreign format checks (synthetic)\n'
+	local gopro=$session/no-name-on-it.mp4 dji=$session/named-only.osv
+	printf '\x00\x00\x00\x14ftypmp41\x00\x00\x00\x00mp41' >"$gopro"
+	printf '\x00\x00\x00\x33moov\x00\x00\x00\x2budta' >>"$gopro"
+	printf '\x00\x00\x00\x17FIRMH19.03.02.00.75\x00\x00\x00\x0cGPMF\x00\x00\x00\x00' >>"$gopro"
+	: >"$dji"
+
+	# The window with nothing open and nothing said, taken in a session of its
+	# own so that both sides of the comparison are the same window at the same
+	# size with the same state directory behind them.
+	boot welcome-plain
+	if ! await_paint welcome-plain; then
+		alive || lost "the refusal puts an alert over the window"
+		fail "the refusal puts an alert over the window" \
+			"the welcome view is black" "log: $log"
+		teardown
+		return
+	fi
+	# A capture taken the moment the output stopped being black can be a
+	# window that is still filling in, so every capture compared here is taken
+	# a beat after paint instead.
+	sleep "$SETTLE"
+	prior=$(grab welcome-settled)
+	quit >/dev/null 2>&1 || teardown
+
+	boot gopro "$gopro"
+	if await 'not shown: a GoPro capture' "$READY"; then
+		pass "a GoPro file is refused by name"
+	else
+		fail "a GoPro file is refused by name" \
+			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
+	fi
+
+	if await_paint gopro; then
+		pass "the refusal leaves a window up"
+	else
+		alive || lost "the refusal leaves a window up"
+		fail "the refusal leaves a window up" \
+			"capture is black: $session/gopro.ppm" "log: $log"
+		teardown
+		return
+	fi
+
+	sleep "$SETTLE"
+	local alerted
+	alerted=$(grab gopro-alert)
+	if same_picture "$prior" "$alerted"; then
+		fail "the refusal puts an alert over the window" \
+			"the window is what it is with nothing open and nothing said" \
+			"$prior" "$alerted"
+	else
+		pass "the refusal puts an alert over the window"
+	fi
+
+	if press_until alert_gone gopro-dismissed -k Escape; then
+		pass "escape takes the alert away and leaves the window as it was"
+	else
+		alive || lost "escape takes the alert away and leaves the window as it was"
+		fail "escape takes the alert away and leaves the window as it was" \
+			"the window did not come back to what it was" \
+			"$prior" "$session/gopro-dismissed.ppm"
+	fi
+	quit >/dev/null 2>&1 || teardown
+
+	# The other half of the rule: the bytes said nothing, so the name is what
+	# is left, and an `.osv` is DJI's.
+	boot dji "$dji"
+	if await 'not shown: a DJI capture' "$READY"; then
+		pass "an .osv with nothing in it is still named"
+	else
+		fail "an .osv with nothing in it is still named" \
+			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
+	fi
+	exits_clean
+}
+
 # ------------------------------------------------------------------- run
 
 if [ -n "$media" ]; then
@@ -1356,6 +1688,7 @@ else
 	welcome
 fi
 dud
+foreign
 
 printf '\n%s checks, %s failed\n' "$checks" "$failures"
 printf 'captures and logs: %s\n' "$session"
