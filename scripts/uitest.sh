@@ -549,7 +549,14 @@ toast_clears_the_controls() {
 # is headroom, and the loop breaks on success so headroom costs nothing.
 BALL_PRESSES=20
 ROOM_SPREAD=4
-ROOM_DARK=60
+# The room is the app's own flat OUTSIDE_GRAY and reads 25 25 25 here, so this
+# is five codes of headroom and not thirty five. It was 60, and 60 is wide
+# enough to let real footage through: measured 2026-07-31, a hillside in
+# shadow read 35 35 36 a fifth of the way out of the zoom, `reach_the_ball`
+# took it for the room and stopped there, and every check downstream then
+# compared two pictures that were never at the ball. Two of them failed
+# saying the view had reset when the captures show it holding.
+ROOM_DARK=30
 
 # reach_the_ball <name>: press ctrl+- until the patch reads the room, and
 # say whether it got there. The capture it went by is left under <name>.
