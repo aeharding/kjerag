@@ -49,9 +49,28 @@ finish-args:
   # Where a saved still goes (crates/app/src/shot.rs). Without this the file
   # lands inside the sandbox's private home and the pilot never finds it.
   - --filesystem=xdg-pictures
-  # No other filesystem access on purpose: files arrive through the file
-  # chooser portal, or as a document-portal path that flatpak's
-  # --file-forwarding hands us when a file manager opens one.
+  # Read-only access to the videos folder, which is where a 360 camera's
+  # footage is copied and the only folder this player reads from (issue #118).
+  #
+  # It is here because a bare path is still how most files arrive. A drop
+  # carries a document portal key only if the source registered the files with
+  # the portal, and cosmic-files 1.5.0 does not: it offers `text/uri-list` and
+  # nothing else (checked in its source and in the shipped binary, which does
+  # not contain the string `vnd.portal`). So a drag out of the COSMIC file
+  # manager, `kjerag ~/Videos/flight.insv` on a terminal and a double click on
+  # a `.insv` all hand over a path on the host filesystem, and without this
+  # line every one of them is a file the sandbox cannot see. The portal arm is
+  # still there and still preferred, and the day cosmic-files registers its
+  # drags this line can be reconsidered.
+  #
+  # `:ro` because the player never writes to footage, and `xdg-videos` rather
+  # than `home` or `host` because a wider grant would not buy anything: a file
+  # anywhere else is one `File > Open video...` away, through the portal, at
+  # no permission at all.
+  - --filesystem=xdg-videos:ro
+  # No other filesystem access on purpose: anything outside the videos folder
+  # arrives through the file chooser portal, or as a document-portal path from
+  # a source that registered it.
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin

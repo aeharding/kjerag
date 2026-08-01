@@ -888,7 +888,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("kjerag: {} not shown: {e}", path.display());
-                self.alert = Some(refusal(&*e));
+                self.alert = Some(refusal(&*e, path));
             }
         }
     }
@@ -1589,15 +1589,33 @@ fn missing_decoder(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Optio
     Some(e.downcast_ref::<MissingDecoder>()?.codec)
 }
 
-/// What the alert says a failed open failed for. Three lines, in the order of
+/// What the alert says a failed open failed for. Four lines, in the order of
 /// how much they can tell the pilot: the file is another camera's format
-/// (issue #107), this build has no decoder for it (issue #69), or nothing
-/// more is known than that it did not open.
-fn refusal(e: &(dyn std::error::Error + Send + Sync + 'static)) -> String {
-    match e.downcast_ref::<Foreign>() {
-        Some(foreign) => strings::foreign(*foreign),
-        None => strings::open_failed(missing_decoder(e)),
+/// (issue #107), the sandbox was never shown it (issue #118), this build has
+/// no decoder for it (issue #69), or nothing more is known than that it did
+/// not open.
+///
+/// The path decides the second one rather than the error, and on purpose. A
+/// file the sandbox has no mount for fails somewhere inside libav, which
+/// answers "No such file or directory" for a file the pilot is looking at in
+/// their file manager; asking the filesystem whether the path is there at all
+/// is the same question with none of libav's spelling in it, and it keeps the
+/// sandbox out of the layers below the shell (docs/ARCHITECTURE.md).
+fn refusal(e: &(dyn std::error::Error + Send + Sync + 'static), path: &Path) -> String {
+    if let Some(foreign) = e.downcast_ref::<Foreign>() {
+        return strings::foreign(*foreign);
     }
+    if sandboxed() && !path.exists() {
+        return strings::out_of_reach();
+    }
+    strings::open_failed(missing_decoder(e))
+}
+
+/// Whether this is running inside a Flatpak, which is a fact about the run and
+/// not about the platform: `/.flatpak-info` is the file flatpak mounts into
+/// every sandbox, and asking for it is how every toolkit asks this.
+fn sandboxed() -> bool {
+    Path::new("/.flatpak-info").exists()
 }
 
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
@@ -1781,21 +1799,50 @@ mod tests {
         );
     }
 
-    /// And the three lines a failed open can leave, told apart by the type in
-    /// the box rather than by anything in the message (issue #107). The
-    /// foreign one names the format; the other two are what they were.
+    /// And the lines a failed open can leave, told apart by the type in the
+    /// box rather than by anything in the message (issue #107). The foreign
+    /// one names the format; the others are what they were.
+    ///
+    /// The path is one that exists, so nothing here takes the sandbox arm:
+    /// that one is a fact about the run and the test below says what it is.
     #[test]
     fn another_cameras_format_gets_a_line_of_its_own() {
+        let here = Path::new(file!());
         let gopro: Box<dyn std::error::Error + Send + Sync> = Box::new(Foreign::GoPro);
-        assert_eq!(refusal(&*gopro), strings::foreign(Foreign::GoPro));
-        assert!(refusal(&*gopro).contains("GoPro"), "{}", refusal(&*gopro));
+        assert_eq!(refusal(&*gopro, here), strings::foreign(Foreign::GoPro));
+        assert!(
+            refusal(&*gopro, here).contains("GoPro"),
+            "{}",
+            refusal(&*gopro, here)
+        );
 
         let missing: Box<dyn std::error::Error + Send + Sync> =
             Box::new(MissingDecoder { codec: "hevc" });
-        assert!(refusal(&*missing).contains("HEVC"));
+        assert!(refusal(&*missing, here).contains("HEVC"));
 
         let broken: Box<dyn std::error::Error + Send + Sync> = "file has no video stream".into();
-        assert_eq!(refusal(&*broken), strings::OPEN_FAILED);
+        assert_eq!(refusal(&*broken, here), strings::OPEN_FAILED);
+    }
+
+    /// A path that is not there says so in the sandbox's words and nowhere
+    /// else (issue #118). Outside a Flatpak the same open is a file that was
+    /// deleted or renamed, and "Kjerag cannot reach that file from inside its
+    /// sandbox" would be a sentence about a sandbox that is not there.
+    ///
+    /// Both arms are exercised wherever this runs, because what decides is
+    /// `/.flatpak-info` and not the test: in CI and on a developer box the
+    /// first is what a run gets, and inside the Flatpak the second is, which
+    /// is the build the line was written for.
+    #[test]
+    fn a_path_the_sandbox_cannot_see_is_not_a_missing_file() {
+        let gone = Path::new("/nowhere/at/all/flight.insv");
+        let broken: Box<dyn std::error::Error + Send + Sync> = "No such file or directory".into();
+        let expected = match sandboxed() {
+            true => strings::out_of_reach(),
+            false => strings::OPEN_FAILED.to_owned(),
+        };
+        assert_eq!(refusal(&*broken, gone), expected);
+        assert!(strings::out_of_reach().contains(strings::OPEN_TITLE));
     }
 
     fn lines(toasts: &Toasts) -> Vec<&str> {

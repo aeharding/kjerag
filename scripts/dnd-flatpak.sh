@@ -21,10 +21,13 @@
 #              which is every GTK app and every sandboxed one. This is the
 #              one issue #118 is about and the one the fix answers.
 #   uri-list   a source that hands over a path, which is cosmic-files and
-#              most of the rest. The path is the source's filesystem and
-#              does not exist inside the sandbox, so the app reads the drop
-#              and cannot open it, and no change on this side of the drop
-#              can alter that.
+#              most of the rest. The path is the host's own, so it only opens
+#              where the sandbox can see it, which since issue #118 is the
+#              videos folder (`--filesystem=xdg-videos:ro`).
+#
+# So the same drop is made twice for the second one, inside the grant and
+# outside it. Outside it the file must not open and the window must say why:
+# what the pilot gets there is one menu item away and not a corrupt file.
 #
 # Needs `cage grim` and the Flatpak installed, and it uses the real
 # XDG_RUNTIME_DIR through a symlink: a Flatpak reaches the document portal
@@ -117,14 +120,15 @@ env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=wayland-0 \
 
 failures=0
 
+# drop <name> <offer> <file>: drag it in and say whether the app opened it.
 drop() {
-	local offer=$1
-	local report=$session/drag-$offer.log
+	local name=$1 offer=$2 file=$3
+	local report=$session/drag-$name.log
 	local before waited=0 pid opened
 
 	before=$(grep -c '^media:' "$log")
 	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=wayland-0 \
-		"$dragsource" "$media" "offer=$offer" "linger=$OPEN" >"$report" 2>&1 &
+		"$dragsource" "$file" "offer=$offer" "linger=$OPEN" >"$report" 2>&1 &
 	pid=$!
 	while [ "$waited" -le $((OPEN * 2)) ]; do
 		kill -0 "$cage_pid" 2>/dev/null || break
@@ -137,18 +141,43 @@ drop() {
 
 	opened=no
 	[ "$(grep -c '^media:' "$log")" -gt "$before" ] && opened=yes
-	printf '%-9s the file opened: %-3s   %s\n' "$offer" "$opened" \
+	printf '%-22s the file opened: %-3s  %s\n' "$name" "$opened" \
 		"$(sed -n 's/^dragsource: the target read it as /read as /p' "$report" |
 			tr '\n' ' ')"
 	[ "$opened" = yes ]
 }
 
+# A path the grant does not cover, which is the same file reached by a name
+# outside the videos folder. Nothing is copied: what is under test is the path,
+# and the sandbox has no mount for this one either way.
+outside=$session/out-of-reach.insv
+ln -sf "$media" "$outside"
+
 printf '\n'
-drop portal || failures=$((failures + 1))
-# Not a failure of the app either way: a path from outside the sandbox is
-# unopenable inside it whatever this app does with it, so what is printed is
-# what happened and nothing is required of it.
-drop uri-list
+drop portal portal "$media" || failures=$((failures + 1))
+drop "uri-list in videos" uri-list "$media" || failures=$((failures + 1))
+
+# And the one that must NOT open, because the grant is a folder and not the
+# filesystem. What is required of it is the honest refusal rather than the
+# words a corrupt file gets (issue #118).
+before=$(grep -c '^kjerag: .* not shown' "$log")
+if drop "uri-list outside it" uri-list "$outside"; then
+	printf 'FAIL   a file outside the videos folder opened, so the grant is wider than it says\n'
+	failures=$((failures + 1))
+elif [ "$(grep -c '^kjerag: .* not shown' "$log")" -le "$before" ]; then
+	printf 'FAIL   nothing was refused, so the drop never reached the open\n'
+	failures=$((failures + 1))
+else
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=wayland-0 \
+		grim -t ppm "$session/refused.ppm" 2>>"$log"
+	if cmp -s "$session/window.ppm" "$session/refused.ppm"; then
+		printf 'FAIL   the window is unchanged, so nothing was said about the refusal\n'
+		failures=$((failures + 1))
+	else
+		printf '%-22s refused, and the window says so: %s\n' "" \
+			"$session/refused.ppm"
+	fi
+fi
 
 printf '\nlogs and captures: %s\n' "$session"
 [ "$failures" = 0 ] || exit 1
