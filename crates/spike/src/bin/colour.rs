@@ -1366,6 +1366,7 @@ fn profile(options: &Options) -> Fallible<()> {
     after
         .amplified(&before)
         .save(&gpu, &out.join(format!("{stem}-3-what-moved.png")))?;
+    marked(&after, &mapped, size).save(&gpu, &out.join(format!("{stem}-4-marked.png")))?;
     let split = tone.split();
     println!(
         "\nwrote three pictures into {} at yaw {:.2}, pitch {:.2}, fov {:.2}, {} frames in.\n\
@@ -1406,16 +1407,63 @@ fn profile(options: &Options) -> Fallible<()> {
     );
     for (name, picture) in [("the band held off", &before), ("as it draws", &after)] {
         println!("\n=== {name} ===");
-        across_seam(&mapped, picture, size);
+        across_seam(&mapped, picture, size, options.window);
     }
     Ok(())
 }
 
+/// The drawn picture with the handover drawn on it, so a defect can be
+/// pointed at rather than described.
+///
+/// Three marks, and each is a claim the eye can check against the picture
+/// under it: the seam plane itself, where the two lenses meet; the crossover,
+/// which is the two degrees the pass mixes them over and therefore how sharp
+/// any residual difference is allowed to be; and the band the colour field
+/// fades out across, which is where a correction is still doing something.
+/// A step that sits inside the crossover is the handover's; one that does not
+/// is the scene's.
+fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
+    let seam = distances(reframe, size, 2, (0.0, 0.0, 1.0, 1.0));
+    let crossover = f64::from(kjerag_render::CROSSOVER_DEG) / 2.0;
+    let widest = f64::from(kjerag_render::band::WIDEST_DEG);
+    let overlap = 7.22;
+    let rgba = picture
+        .rgba
+        .chunks_exact(4)
+        .zip(&seam)
+        .flat_map(|(pixel, at)| {
+            let Some(degrees) = at else {
+                return [pixel[0], pixel[1], pixel[2], 255];
+            };
+            let away = degrees.abs();
+            // Lines and not bands: what is under them is the evidence, so the
+            // marks have to be narrow enough to leave it visible. Each is one
+            // twentieth of a degree wide, which at any view this player offers
+            // is a few pixels.
+            let at = |edge: f64| (away - edge).abs() < 0.025;
+            if away < 0.025 {
+                return [255, 40, 40, 255];
+            }
+            if at(crossover) {
+                return [60, 220, 255, 255];
+            }
+            if at(widest) || at(overlap) {
+                return [255, 230, 60, 255];
+            }
+            [pixel[0], pixel[1], pixel[2], 255]
+        })
+        .collect();
+    Picture {
+        rgba,
+        size: picture.size,
+    }
+}
+
 /// Each channel's step across the seam, and the same at the decoy.
-fn across_seam(reframe: &Reframe, picture: &Picture, size: Size) {
+fn across_seam(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64, f64)) {
     let planes = channels(picture);
-    let seam = distances(reframe, size, 2);
-    let decoy = distances(reframe, size, 0);
+    let seam = distances(reframe, size, 2, window);
+    let decoy = distances(reframe, size, 0, window);
     println!(
         "\n  {:>10} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>8}",
         "degrees", "R", "G", "B", "decoy R", "decoy G", "decoy B", "pixels"
@@ -1483,7 +1531,12 @@ fn channels(picture: &Picture) -> [Vec<f64>; 3] {
 
 /// How far past a great circle each output pixel is, in degrees, or `None`
 /// where no lens has the ray. `axis` 2 is the seam; 0 is the decoy.
-fn distances(reframe: &Reframe, size: Size, axis: usize) -> Vec<Option<f64>> {
+fn distances(
+    reframe: &Reframe,
+    size: Size,
+    axis: usize,
+    box_: (f64, f64, f64, f64),
+) -> Vec<Option<f64>> {
     let width = size.width as usize;
     (0..(size.width * size.height) as usize)
         .map(|index| {
@@ -1491,6 +1544,18 @@ fn distances(reframe: &Reframe, size: Size, axis: usize) -> Vec<Option<f64>> {
                 (index % width) as f32 / size.width as f32,
                 (index / width) as f32 / size.height as f32,
             ];
+            // A window on the picture, so a profile can be taken where ONE
+            // kind of content crosses the seam. Over a whole wide view the
+            // strips at a given distance from the seam run from sky to soil,
+            // and their mean is an average of the scene rather than a reading
+            // of the handover (issue #103, stage 7).
+            if f64::from(uv[0]) < box_.0
+                || f64::from(uv[0]) > box_.2
+                || f64::from(uv[1]) < box_.1
+                || f64::from(uv[1]) > box_.3
+            {
+                return None;
+            }
             let ray = reframe.view_ray(uv)?;
             let body = reframe.body_ray(ray);
             let length = (body[0] * body[0] + body[1] * body[1] + body[2] * body[2]).sqrt();
@@ -1817,6 +1882,9 @@ struct Options {
     /// over, as fractions of the frame.
     band: (f64, f64),
     span: (f64, f64),
+    /// Which corner-to-corner window of a DRAWN view the across-seam profile
+    /// is read over, as fractions: left, top, right, bottom.
+    window: (f64, f64, f64, f64),
 }
 
 impl Options {
@@ -1841,6 +1909,7 @@ impl Options {
             reach: 8.0,
             band: (0.375, 0.625),
             span: (0.0, 1.0),
+            window: (0.0, 0.0, 1.0, 1.0),
         };
         for arg in args {
             match arg.split_once('=') {
@@ -1871,6 +1940,16 @@ impl Options {
                 Some(("reach", value)) => options.reach = value.parse()?,
                 Some(("rows", value)) => options.band = pair(value)?,
                 Some(("cols", value)) => options.span = pair(value)?,
+                Some(("box", value)) => {
+                    let mut edges = value.split(':').map(str::parse::<f64>);
+                    let mut next = || {
+                        edges
+                            .next()
+                            .ok_or("box wants left:top:right:bottom")?
+                            .map_err(|e| e.to_string())
+                    };
+                    options.window = (next()?, next()?, next()?, next()?);
+                }
                 Some((key, _)) => return Err(format!("no argument called {key}").into()),
             }
         }
@@ -1936,4 +2015,4 @@ fn pair(value: &str) -> Fallible<(f64, f64)> {
 const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|studio|trace] \
      [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [seam=factory] [verbose=1] \
      [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg] \
-     [rows=lo:hi] [cols=lo:hi]";
+     [rows=lo:hi] [cols=lo:hi] [box=left:top:right:bottom]";
