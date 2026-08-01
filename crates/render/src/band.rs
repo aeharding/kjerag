@@ -1137,13 +1137,17 @@ struct State {
 // The along-seam correction at one azimuth, from that azimuth's own cosine and
 // sine. A direction flattened into the seam plane IS (cos, sin), so no trig
 // reaches the fragment shader. Rust twin: `Along::at`.
+//
+// Written out rather than looped because it runs per FRAGMENT and a loop
+// indexing an array by a running variable is what `blend`'s own comment warns
+// about. On RADV the two measure the same, 1.48 against 1.47 ms per redraw at
+// 2560x1440, so this is the trap avoided rather than a cost recovered.
 fn along_at(field: Along, cos: f32, sin: f32) -> f32 {
-  let basis = array<f32, 5>(1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin);
-  var total = 0.0;
-  for (var term = 0u; term < 5u; term += 1u) {
-    total += field.terms[term] * basis[term];
-  }
-  return total;
+  return field.terms[0]
+    + field.terms[1] * cos
+    + field.terms[2] * sin
+    + field.terms[3] * (cos * cos - sin * sin)
+    + field.terms[4] * (2.0 * cos * sin);
 }
 "#;
 

@@ -516,6 +516,18 @@ fn flicker(reads: &[Read], options: &Options) {
         far.0 * VIEW_PX_PER_DEG,
         far.0 * 1920.0 / 24.1,
     );
+    // The along-seam field is the third thing the band puts in the picture
+    // (stage 5), and it is the one that reaches a whole hemisphere rather than
+    // a two-degree band, so it has more reason to be still than either.
+    let along = stepped_along(reads, 0.0);
+    println!(
+        "\nalong:   {:.4} deg rms frame to frame at the same {WATCHED} directions, which is \n\
+         {:.2} view px, and a worst single step of {:.4} deg. this one is applied over lens 1's \n\
+         whole picture rather than across the band, so it is the column with the most to lose.",
+        along.0,
+        along.0 * VIEW_PX_PER_DEG,
+        along.1,
+    );
     // The band's WIDTH is the second thing a reading decides (stage 4), and it
     // moves the weights of every pixel of the crossover, so it has to be as
     // steady as the bend. It has no filter of its own: it is a function of the
@@ -544,13 +556,15 @@ fn flicker(reads: &[Read], options: &Options) {
          frame has to come back at 2s, added in quadrature to what the file already had. a \n\
          flicker column is a negative result and means nothing until it is shown able to read \n\
          a positive one.\n\
-         \n             step        bend    expected       width    expected"
+         \n             step        bend    expected       along    expected       width    expected"
     );
     for step in [0.05f64, 0.20] {
         println!(
-            "         {step:>8.2}d {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
+            "         {step:>8.2}d {:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
             stepped(reads, step.to_radians()).0,
             measured.0.hypot(2.0 * step),
+            stepped_along(reads, step.to_radians()).0,
+            along.0.hypot(2.0 * step),
             stepped_width(reads, step.to_radians()).0,
             opened.0.hypot(2.0 * step),
         );
@@ -617,6 +631,20 @@ fn shaken(frame: usize, step: f64) -> f64 {
 fn stepped(reads: &[Read], shake: f64) -> (f64, f64) {
     stepped_by(reads, |read, frame, direction| {
         held(read, direction) + shaken(frame, shake)
+    })
+}
+
+/// The same for the ALONG-SEAM field (issue #103, stage 5).
+///
+/// The same directions, the same units and the same control, because it is the
+/// same kind of quantity: a number the shader reads off the band that moves
+/// the picture if it moves. What is watched is the field's own answer at each
+/// direction, which is what a pixel there is actually bent by, and not the
+/// per-direction readings it was fitted to.
+fn stepped_along(reads: &[Read], shake: f64) -> (f64, f64) {
+    stepped_by(reads, |read, frame, direction| {
+        let (sin, cos) = (direction as f32 / WATCHED as f32 * std::f32::consts::TAU).sin_cos();
+        f64::from(read.along.at(cos, sin)) + shaken(frame, shake)
     })
 }
 
