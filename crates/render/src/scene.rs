@@ -1003,6 +1003,9 @@ struct Band {
     /// The second dispatch of the same pass: what the ring just read, pooled
     /// into one exposure for the picture (issue #103, stage 3).
     pool: wgpu::ComputePipeline,
+    /// The along-seam field fitted over the whole ring, dispatched beside the
+    /// exposure pooling and over the same cells (issue #103, stage 5).
+    pool_along: wgpu::ComputePipeline,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1159,6 +1162,8 @@ impl ScenePipeline {
                 pass.set_pipeline(&self.band.pool);
                 pass.dispatch_workgroups(1, 1, 1);
             }
+            pass.set_pipeline(&self.band.pool_along);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         queue.submit([encoder.finish()]);
     }
@@ -1358,8 +1363,9 @@ impl ScenePipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<Vec<band::Cell>> {
-        Ok(self.band.read(device, queue)?.1)
+    ) -> Fallible<(band::Along, Vec<band::Cell>)> {
+        let (_, along, cells) = self.band.read(device, queue)?;
+        Ok((along, cells))
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1441,6 +1447,7 @@ impl Band {
         };
         let pipeline = compute("measure");
         let pool = compute("pool");
+        let pool_along = compute("pool_along");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1480,6 +1487,7 @@ impl Band {
         Self {
             pipeline,
             pool,
+            pool_along,
             state,
             watch,
             group,
@@ -1524,7 +1532,7 @@ impl Band {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, Vec<band::Cell>)> {
+    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1545,6 +1553,10 @@ impl Band {
             f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
         };
         let tone = band::Tone::read(float(0), float(4));
+        let along = band::Along::read(
+            std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
+            float(band::ALONG_AT + 20),
+        );
         let cells = (0..band::AZIMUTHS)
             .map(|index| {
                 let at = band::CELLS_AT + index * std::mem::size_of::<band::Cell>();
@@ -1553,14 +1565,15 @@ impl Band {
                     confidence: float(at + 4),
                     reach_m: float(at + 8),
                     off_epi: float(at + 12),
-                    tone: float(at + 16),
-                    lit: float(at + 20),
+                    off_conf: float(at + 16),
+                    tone: float(at + 20),
+                    lit: float(at + 24),
                 }
             })
             .collect();
         drop(mapped);
         readback.unmap();
-        Ok((tone, cells))
+        Ok((tone, along, cells))
     }
 }
 

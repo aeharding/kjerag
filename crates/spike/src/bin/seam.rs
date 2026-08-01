@@ -1300,7 +1300,10 @@ impl Weighting {
         cells: &[kjerag_render::Cell],
     ) -> ([f64; 2], [Landing; 2]) {
         let ray32 = ray.map(|c| c as f32);
-        let shipped = reframe.blend_bent(ray32, reframe.disparity_at(ray32, cells));
+        let shipped = reframe.blend_bent(
+            ray32,
+            reframe.reading_at(ray32, cells, kjerag_render::Along::fit(cells)),
+        );
         let landings = shipped.landings;
         let covered = |lens: usize| landings[lens].inside;
         let weights = match self {

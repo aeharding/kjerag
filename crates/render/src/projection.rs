@@ -411,6 +411,26 @@ impl Landing {
     };
 }
 
+/// What the band moves one ray by, in view space, on each of the seam's two
+/// axes (issue #103, stage 5).
+///
+/// Two vectors and not one, because the two are applied by different laws:
+/// the epipolar one across the handover with the other lens's weight, the
+/// along-seam one to lens 1 over its whole picture. [`Reframe::bent`] says
+/// why. `Default` is no bend on either, which is the picture stage 1 drew.
+///
+/// WGSL twin: the `Band` struct's `offset` and `along`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bend {
+    /// Along [`Ring::epi`](super::band::Ring::epi), scaled by the ray's length
+    /// so that adding it turns the ray by the disparity in radians.
+    pub epi: [f32; 3],
+    /// Along [`Ring::perp`](super::band::Ring::perp), scaled by the ray
+    /// flattened into the seam plane, which is the `cos(elevation)` a relative
+    /// roll produces and what takes it to zero at both lens poles.
+    pub along: [f32; 3],
+}
+
 /// How much of the picture at one output pixel comes from each lens, and
 /// where in each lens's frame it comes from.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -565,13 +585,14 @@ impl Reframe {
     ///
     /// WGSL twin: `blend`.
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
-        self.blend_bent(view_ray, 0.0)
+        self.blend_bent(view_ray, super::band::Reading::default())
     }
 
     /// The same with the band's own correction in it (issue #103): each lens's
-    /// ray bent along the epipolar axis by the **other** lens's weight times
-    /// `disparity`, which is in radians and is what the two lenses disagree by
-    /// at this ray's azimuth.
+    /// ray bent by the **other** lens's weight times what the two lenses
+    /// disagree by at this ray's azimuth, on **both** of the seam's axes since
+    /// stage 5 - the epipolar one, which is depth, and the along-seam one,
+    /// which is the camera.
     ///
     /// The two bends then differ by exactly the disparity wherever the weights
     /// sum to 1, so the two lenses show the same content across the whole
@@ -591,7 +612,7 @@ impl Reframe {
     /// disparity is small, so the far field is the picture it always was.
     ///
     /// WGSL twin: `blend`, whose `band` argument is `band_bend`'s answer.
-    pub fn blend_bent(&self, view_ray: [f32; 3], disparity: f32) -> Blend {
+    pub fn blend_bent(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
         let reach = norm3(view_ray);
@@ -600,9 +621,9 @@ impl Reframe {
         // is what keeps this pass costing what it cost before the crossover
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
-        let band = self.crossover_at(disparity);
+        let band = self.crossover_at(reading.epi);
         let front = self.handover(axis, reach, band);
-        let bend = self.bent(view_ray, disparity, band);
+        let bend = self.bent(view_ray, reading, band);
         for lens in 0..MAX_LENSES {
             if !self.covers(lens, axis[lens], reach) {
                 continue;
@@ -617,7 +638,14 @@ impl Reframe {
                 0 => share - 1.0,
                 _ => 1.0 - share,
             };
-            let bent = std::array::from_fn(|c| view_ray[c] + carry * bend[c]);
+            // The along-seam term is not shared out: it goes to lens 1 whole,
+            // which is the convention the calibration already uses
+            // ([`super::seam::SeamFit`] turns lens 1 and leaves lens 0 alone),
+            // and it is applied over the whole picture rather than across the
+            // handover. See [`Self::bent`].
+            let turn = f32::from(u8::from(lens == 1));
+            let bent =
+                std::array::from_fn(|c| view_ray[c] + carry * bend.epi[c] + turn * bend.along[c]);
             landings[lens] = self.project(lens, bent);
             if lens < self.lens_count as usize {
                 weights[lens] = claim(landings[lens], share);
@@ -711,28 +739,47 @@ impl Reframe {
     /// cells would be a step in the picture.
     ///
     /// WGSL twin: the `band[..]` lookup inside `band_bend`.
-    pub fn disparity_at(&self, view_ray: [f32; 3], cells: &[super::band::Cell]) -> f32 {
-        if cells.is_empty() {
-            return 0.0;
-        }
+    pub fn reading_at(
+        &self,
+        view_ray: [f32; 3],
+        cells: &[super::band::Cell],
+        along: super::band::Along,
+    ) -> super::band::Reading {
         let body = self.body_ray(view_ray);
+        let reach = body[0].hypot(body[1]);
+        if cells.is_empty() || reach <= 0.0 {
+            return super::band::Reading::default();
+        }
         let turn = body[1].atan2(body[0]) / std::f32::consts::TAU * cells.len() as f32;
         let low = turn.floor();
         let mix = turn - low;
         let cell =
             |step: usize| cells[(low.rem_euclid(cells.len() as f32) as usize + step) % cells.len()];
         let (a, b) = (cell(0), cell(1));
-        // Weighted by the evidence behind each cell. A direction that has
-        // stopped correlating stops contributing, and with none at all the
-        // answer is zero, which is the picture before the band existed.
-        let (wa, wb) = (a.confidence * (1.0 - mix), b.confidence * mix);
-        let total = wa + wb;
+        super::band::Reading {
+            epi: Self::channel(a.disparity, a.confidence, b.disparity, b.confidence, mix),
+            // One fitted field over the whole circle rather than a cell
+            // lookup: see `Along`. This azimuth's cosine and sine are the ray
+            // flattened into the seam plane.
+            along: along.at(body[0] / reach, body[1] / reach),
+        }
+    }
+
+    /// One channel of one ray, weighted by the evidence behind that channel in
+    /// each cell and taxed by how much of it reaches
+    /// [`KEEP`](super::band::KEEP).
+    ///
+    /// A direction that has stopped correlating stops contributing, and with
+    /// no evidence at all the answer is zero, which is the picture before the
+    /// band existed. WGSL twin: `carry`.
+    fn channel(a: f32, wa: f32, b: f32, wb: f32, mix: f32) -> f32 {
+        let (ea, eb) = (wa * (1.0 - mix), wb * mix);
+        let total = ea + eb;
         if total <= 0.0 {
             return 0.0;
         }
-        let strength = ((a.confidence + (b.confidence - a.confidence) * mix) / super::band::KEEP)
-            .clamp(0.0, 1.0);
-        (wa * a.disparity + wb * b.disparity) / total * strength
+        let strength = ((wa + (wb - wa) * mix) / super::band::KEEP).clamp(0.0, 1.0);
+        (ea * a + eb * b) / total * strength
     }
 
     /// The offset one lens's ray takes for a whole disparity, in view space,
@@ -748,27 +795,63 @@ impl Reframe {
     /// bites only where the band has run out of room to open.
     ///
     /// WGSL twin: `band_bend`.
-    pub fn bend(&self, view_ray: [f32; 3], disparity: f32) -> [f32; 3] {
-        self.bent(view_ray, disparity, self.crossover_at(disparity))
+    pub fn bend(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Bend {
+        self.bent(view_ray, reading, self.crossover_at(reading.epi))
     }
 
     /// The same with the width already in hand, which is how [`Self::blend_bent`]
     /// asks for it: the handover needs the same number and neither of them may
     /// have its own copy.
-    fn bent(&self, view_ray: [f32; 3], disparity: f32, band: f32) -> [f32; 3] {
+    ///
+    /// **The two axes are applied by different laws, because they are
+    /// different phenomena** (issue #103, stage 5).
+    ///
+    /// The epipolar term is **parallax**: the two lenses genuinely see
+    /// different things and neither is wrong, so it is split across the
+    /// handover by the other lens's weight. That makes the two agree inside
+    /// the band and moves nothing outside it, which is the whole of stage 2.
+    /// It is what folds and what opens the crossover.
+    ///
+    /// The along-seam term is **the camera**: parallax cannot reach that axis
+    /// at any distance, so what is left there is a relative pose error the
+    /// static five-knob fit could not describe, and a pose error is wrong
+    /// everywhere and not only at the handover. Correcting it only across the
+    /// band would make the two pictures agree over two degrees and leave the
+    /// horizon still drawn in two places, which is measured: the band-local
+    /// form moves the owner's reference view by 0.03 view px of 32.8. So it is
+    /// applied the way the calibration it belongs to is applied - to lens 1,
+    /// over its whole picture, with lens 0 left exactly alone.
+    ///
+    /// The scale is `reach`, the ray flattened into the seam plane, and that
+    /// is not a taper chosen to be safe. A relative roll `w` about the body's
+    /// z displaces a direction `d` by `w x d`, which is `|w| cos(elevation)`
+    /// along the seam's own tangent at every elevation and exactly zero at
+    /// both lens poles, where an azimuth does not exist. Scaling by the
+    /// flattened length rather than the whole one **is** that factor, for
+    /// free, and it makes a constant reading exactly a relative roll - which
+    /// is what the harmonic decomposition says a constant along-seam residual
+    /// is (`kjerag-spike --bin seam`).
+    fn bent(&self, view_ray: [f32; 3], reading: super::band::Reading, band: f32) -> Bend {
         let Some(at) = self.seam_at(view_ray) else {
-            return [0.0; 3];
+            return Bend::default();
         };
-        let carried = super::band::carried(disparity, band);
-        let scale = carried * norm3(view_ray);
+        let body = self.body_ray(view_ray);
+        let epi = super::band::carried(reading.epi, band) * norm3(view_ray);
+        let along = reading.along * body[0].hypot(body[1]);
         // Back out of the body's frame. `view_to_body` is a rotation, so its
         // transpose is its inverse.
-        std::array::from_fn(|row| {
-            scale
-                * (0..3)
-                    .map(|c| self.view_to_body[row][c] * at.epi[c])
-                    .sum::<f32>()
-        })
+        let out = |axis: [f32; 3], scale: f32| {
+            std::array::from_fn(|row| {
+                scale
+                    * (0..3)
+                        .map(|c| self.view_to_body[row][c] * axis[c])
+                        .sum::<f32>()
+            })
+        };
+        Bend {
+            epi: out(at.epi, epi),
+            along: out(at.perp, along),
+        }
     }
 
     /// How far a ray is off one lens's axis, as an unnormalized cosine: one
@@ -1586,6 +1669,10 @@ struct Blend {
 // Rust twins: `Reframe::bend` and `Reframe::crossover_at`.
 struct Band {
   offset: vec3<f32>,
+  // The along-seam correction, which lens 1 takes whole and lens 0 does not
+  // take at all: it is the camera and not the scene, so it is applied the way
+  // the calibration is. Rust twin: `Bend::along`.
+  along: vec3<f32>,
   crossover: f32,
 };
 
@@ -1651,7 +1738,10 @@ fn blend(ray: vec3<f32>, band: Band) -> Blend {
       // sign that puts the two of them one whole disparity apart. Rust twin:
       // `Reframe::blend_bent`.
       let carry = select(1.0 - share, share - 1.0, index == 0u);
-      landing = project(lens, ray + carry * band.offset);
+      // The along-seam term is not shared out: lens 1 takes it whole and lens
+      // 0 does not take it at all. Rust twin: `Reframe::blend_bent`'s `turn`.
+      let turn = select(0.0, 1.0, index == 1u);
+      landing = project(lens, ray + carry * band.offset + turn * band.along);
       claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
     }
     out.landings[index] = landing;
@@ -1932,6 +2022,13 @@ pub(crate) mod tests {
         let (sin_theta, cos_theta) = theta.to_radians().sin_cos();
         let (sin_phi, cos_phi) = phi.to_radians().sin_cos();
         [sin_theta * cos_phi, sin_theta * sin_phi, cos_theta]
+    }
+
+    /// A reading on the epipolar axis alone, which is what every question
+    /// about the crossover's width is about: the along-seam axis does not
+    /// open it (`Reframe::bent`).
+    fn reading(epi: f32) -> crate::band::Reading {
+        crate::band::Reading { epi, along: 0.0 }
     }
 
     /// The lens carrying most of an output pixel, and where it lands, which
@@ -2290,7 +2387,7 @@ pub(crate) mod tests {
                     .map(|step| 70.0 + step as f32 * 0.01)
                     .filter(|theta| {
                         let weights = reframe
-                            .blend_bent(direction(*theta, phi), disparity)
+                            .blend_bent(direction(*theta, phi), reading(disparity))
                             .weights;
                         weights.iter().all(|weight| *weight > 0.0)
                     })

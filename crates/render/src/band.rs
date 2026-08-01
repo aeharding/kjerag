@@ -109,24 +109,48 @@ const STEP_DEG: f32 = 0.10;
 const NEAR_DEG: f32 = 2.6;
 const FAR_DEG: f32 = -1.2;
 
-/// How far off the epipolar axis the search looks, in degrees.
+/// How far along the seam the search looks, in degrees, either side of zero.
 ///
-/// Not applied, ever. It is here because the axis the file's own baseline
-/// names is a **prediction**: if the band is a stereo pair, the disagreement
-/// lies along it and the off-epipolar channel reads near zero. Phase A
-/// measured 0.11 to 0.17 degrees off it against 0.56 to 0.98 along it, a
-/// ratio of 4.3 to 7.8. Searching it costs [`PERP_STEPS`] times the
-/// correlations and buys the control that says the reading is depth, plus
-/// tolerance for whatever the calibration left on that axis (0.12 to 0.36
-/// degrees, which is why the range is a little wider than the residual).
-const PERP_DEG: f32 = 0.30;
+/// **This is the axis a horizon shows** (issue #103, stage 5,
+/// docs/research/seam-two-axis.md). At the owner's fov-20 reference view one
+/// degree on the epipolar axis moves the horizon 0.6 rows and one degree along
+/// the seam moves it 53, because the seam circle is near vertical, the
+/// baseline is along the lens axes, and the ground's edge runs along the
+/// azimuth. A horizon is the worst detector of epipolar error there is and the
+/// best detector of this one.
+///
+/// Parallax cannot reach it: the baseline is perpendicular to every direction
+/// on the seam circle, so a subject's distance displaces it across the seam
+/// and never along it, at any distance. What is left here is the camera - what
+/// the five-knob fit could not describe - and it is fixed in the camera's frame
+/// for the life of the file, which is what [`TAU_FAR_S`] below is claiming.
+///
+/// 0.90 is the corpus range with margin. The best per-file fit available
+/// leaves **0.17 to 0.67 degrees** across three shooters and three camera
+/// models, and the owner's pooled path leaves 0.30 to 0.47 (2026-08-01,
+/// `--bin seam mode=residual`). The old 0.30 did not measure that: it clipped
+/// it, on 44 percent of measured directions cold and 67 percent warm, and
+/// reported the limit as if it were a reading.
+///
+/// The near end of the epipolar search is set by what the bend can carry; this
+/// one is not, and that is the difference between the axes. A bend along
+/// [`Ring::perp`] is a **shear perpendicular to its own gradient**, whose
+/// Jacobian determinant is exactly 1, so it cannot fold however wide it opens
+/// ([`width`] is not asked about it); and `perp` is the seam circle's own
+/// tangent, so the bend slides content along the circle rather than off it and
+/// spends none of the overlap the two lenses share
+/// (`the_along_seam_bend_costs_no_overlap_and_cannot_fold`).
+pub const PERP_DEG: f32 = 0.90;
 
-/// How many off-epipolar offsets are tried, either side of zero.
+/// How many along-seam offsets are tried, either side of zero.
 ///
-/// Coarse on purpose: the epipolar peak barely moves with a small
-/// misregistration on the near-orthogonal axis, so this axis needs enough
-/// steps to find the correlation and not enough to resolve it.
-const PERP_STEPS: usize = 1;
+/// Nine at [`STEP_DEG`], which makes the grid **square**: the same 0.10 degrees
+/// on both axes, with the same parabola between whole steps on both, and no
+/// second resolution constant to keep in step with the first. Today's readings
+/// quantize to 0.30 degrees, which is 15 view pixels of horizon at the view the
+/// owner complained about; a third of a step is what stage 2 already resolves
+/// on the other axis and it is what a horizon at fov 20 needs here.
+const PERP_STEPS: usize = 9;
 
 /// The correlation a reading has to reach to move the state.
 ///
@@ -321,14 +345,166 @@ impl Tone {
     }
 }
 
+/// The along-seam correction as one field over the whole seam circle: a
+/// constant and the first two cycles of the azimuth (issue #103, stage 5).
+///
+/// **Five numbers for 128 directions, and each of the three terms has a
+/// name.** A relative rotation `w` displaces a seam direction `d` by `w x d`,
+/// whose along-seam component is `w.z` for every direction on the circle, so a
+/// **constant** along the seam is relative roll and nothing else can reach it.
+/// A principal-point shift is a fixed direction in the image plane, so its
+/// tangential part turns **once** round the rim. A focal aspect maps the rim
+/// circle to an ellipse, which is **twice**. That decomposition is not this
+/// stage's: `kjerag-spike --bin seam` has printed it since issue #48, and
+/// docs/research/seam-two-axis.md records it.
+///
+/// It exists because the per-direction field was built first and measured
+/// second. Applied cell by cell it **scallops**: the ring is read at 128
+/// azimuths, far fewer than that correlate on any real frame, and a horizon
+/// drawn through a field with holes in it comes out visibly warped - 18.5 view
+/// px of correction at one end of a four-degree fit and 4.7 at the other, on
+/// the owner's own reference view, which bent the horizon instead of moving
+/// it. Fitting the shape the phenomenon actually has fills the holes from the
+/// readings that exist, and does it by construction rather than by smoothing
+/// over them.
+///
+/// What it leaves is measured, not assumed: on the owner's July file under his
+/// own pooled calibration the along-seam residual round the circle is 0.314
+/// deg root mean square, 0.275 after the constant, 0.101 after one cycle and
+/// **0.094 after two** (`--bin seam mode=residual`, the structure table). A
+/// third cycle is not indicated and is not fitted.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Along {
+    /// The five coefficients, in radians: the constant, then the cosine and
+    /// sine of one cycle, then of two.
+    pub terms: [f32; 5],
+    /// How many directions' worth of evidence is behind the fit, 0 up to
+    /// [`AZIMUTHS`]. Read by instruments; the fit is already shrunk by its own
+    /// ridge and is not taxed twice.
+    pub evidence: f32,
+    /// A storage buffer's struct is laid out by its own alignment rules and
+    /// `repr(C)` does not do it for us.
+    _pad: [f32; 2],
+}
+
+impl Along {
+    /// The correction at one azimuth, in radians, from that azimuth's own
+    /// cosine and sine - which a fragment already has, because a direction
+    /// flattened into the seam plane **is** `(cos, sin)`. No trig reaches the
+    /// fragment shader.
+    ///
+    /// WGSL twin: `along_at`.
+    pub fn at(&self, cos: f32, sin: f32) -> f32 {
+        let basis = [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+        (0..5).map(|term| self.terms[term] * basis[term]).sum()
+    }
+
+    /// The whole ring's along-seam readings as one field: evidence-weighted
+    /// least squares over the five basis functions, with a ridge.
+    ///
+    /// **Rust twin of the `pool` entry point's second half**, and a twin
+    /// rather than a description: the pass solves this on the GPU where no
+    /// test can reach it, and every property claimed for it is claimed about a
+    /// function `cargo test` can call with no device and no footage.
+    ///
+    /// The ridge is [`RIDGE`] and it is what makes a thin ring safe: a term
+    /// supported by `n` directions is shrunk by about `n / (n + 1)`, which is
+    /// nothing at forty and everything at none, so a file's first frames walk
+    /// the correction in by arithmetic rather than by a second time constant.
+    /// With no evidence at all every coefficient is exactly zero, which is the
+    /// picture stage 4 drew.
+    ///
+    /// **Trust is the same `off_conf / KEEP` the bend applies itself.** No
+    /// second threshold: a direction the along-seam channel has stopped
+    /// believing is not one this should be believing either.
+    pub fn fit(cells: &[Cell]) -> Self {
+        let mut normal = [[0.0f32; 5]; 5];
+        let mut right = [0.0f32; 5];
+        let mut evidence = 0.0;
+        for (index, cell) in cells.iter().enumerate() {
+            let trust = (cell.off_conf / KEEP).clamp(0.0, 1.0);
+            if trust <= 0.0 {
+                continue;
+            }
+            let (sin, cos) = (index as f32 / cells.len() as f32 * std::f32::consts::TAU).sin_cos();
+            let basis = [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+            for row in 0..5 {
+                for (column, term) in basis.iter().enumerate() {
+                    normal[row][column] += trust * basis[row] * term;
+                }
+                right[row] += trust * basis[row] * cell.off_epi;
+            }
+            evidence += trust;
+        }
+        for (term, row) in normal.iter_mut().enumerate() {
+            row[term] += RIDGE;
+        }
+        Self {
+            terms: solve(normal, right),
+            evidence,
+            _pad: [0.0; 2],
+        }
+    }
+
+    /// The eight floats a readback finds in the buffer, as an `Along`.
+    pub fn read(terms: [f32; 5], evidence: f32) -> Self {
+        Self {
+            terms,
+            evidence,
+            _pad: [0.0; 2],
+        }
+    }
+}
+
+/// How much evidence a coefficient is shrunk against, in directions.
+///
+/// One direction's worth, which is a quantity and not a taste: it says a fit is
+/// believed in proportion to how much of the ring is behind it, and it makes a
+/// ring with nothing on it come out at exactly zero rather than at a division.
+/// A term forty directions agree on gives up two percent of itself to this; a
+/// term one direction has seen gives up half.
+const RIDGE: f32 = 1.0;
+
+/// A small symmetric positive definite system, by Gaussian elimination with no
+/// pivoting.
+///
+/// No pivoting is safe here rather than a shortcut taken: the matrix is a Gram
+/// matrix plus [`RIDGE`] on the diagonal, so it is positive definite whatever
+/// the ring holds and its pivots are never zero, even with no evidence at all.
+///
+/// WGSL twin: `solve5`.
+fn solve(mut normal: [[f32; 5]; 5], mut right: [f32; 5]) -> [f32; 5] {
+    for pivot in 0..5 {
+        let scale = normal[pivot][pivot];
+        let leading = normal[pivot];
+        for row in (pivot + 1)..5 {
+            let factor = normal[row][pivot] / scale;
+            for (column, above) in leading.iter().enumerate().skip(pivot) {
+                normal[row][column] -= factor * above;
+            }
+            right[row] -= factor * right[pivot];
+        }
+    }
+    let mut out = [0.0f32; 5];
+    for row in (0..5).rev() {
+        let mut total = right[row];
+        for column in (row + 1)..5 {
+            total -= normal[row][column] * out[column];
+        }
+        out[row] = total / normal[row][row];
+    }
+    out
+}
+
 /// One direction's state, as the compute pass writes it and the fragment
 /// shader reads it.
 ///
-/// Twenty bytes and every one of them is read by something: the first two by
-/// the pass, the third and fourth only by an instrument, and the fifth by the
-/// pooling that follows the measurement. Zero is the state a file opens in and
-/// the state a direction that has never correlated stays in, and a zero
-/// disparity is no bend at all.
+/// Seven floats and every one of them is read by something: the two axes and
+/// their two confidences by the pass, the reach only by an instrument, and the
+/// last two by the pooling that follows the measurement. Zero is the state a
+/// file opens in and the state a direction that has never correlated stays in,
+/// and a zero on either axis is no bend at all.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cell {
@@ -344,11 +520,34 @@ pub struct Cell {
     /// the geometry rather than of the picture; it is written here so an
     /// instrument reading the buffer back needs nothing else.
     pub reach_m: f32,
-    /// What the search read on the axis a distance **cannot** displace
-    /// content along, in radians. Never applied. The control: if this is not
-    /// far smaller than [`Self::disparity`] where the disparity is large, the
-    /// band is not being read as a stereo pair.
+    /// The smoothed along-seam offset, in **radians** along [`Ring::perp`]:
+    /// what the two lenses disagree about on the axis a distance cannot reach
+    /// (issue #103, stage 5).
+    ///
+    /// Smoothed at [`TAU_FAR_S`] whatever this direction's disparity is, and
+    /// that is the one place this channel deliberately differs from
+    /// [`Self::disparity`]. [`time_constant`] tracks the near field fast
+    /// because the near field is the thing that **moves**; this quantity
+    /// cannot move, because parallax is epipolar by construction and what is
+    /// left on this axis is the camera. A boot crossing the seam changes the
+    /// disparity of that direction by degrees and changes this by nothing, so
+    /// a constant that tracked it would be tracking the correlator's own
+    /// noise. Measured before it was chosen (`kjerag-spike --bin band`, the
+    /// `leak` line): across the corpus this reads no dependence on the
+    /// disparity at all.
     pub off_epi: f32,
+    /// How well the along-seam channel is correlating, 0 for a direction that
+    /// has never been read, up to 1.
+    ///
+    /// Its own and not [`Self::confidence`], because the two axes are refused
+    /// separately: a reading pinned against the near end of the epipolar
+    /// search is a depth the band cannot carry and says nothing about either
+    /// axis, but a reading pinned against the end of the **along-seam** search
+    /// is a camera outside anything measured, and refusing the epipolar
+    /// channel for it would throw away stage 2 on that footage. What decays
+    /// when nothing confirms this is the evidence and not the value, which is
+    /// stage 2's rule and for stage 2's reason.
+    pub off_conf: f32,
     /// What the two lenses' pictures of this direction's patch differ by in
     /// brightness, as a natural log, read at the shift that made them the
     /// **same content** (issue #103, stage 3).
@@ -391,11 +590,12 @@ impl Cell {
             .iter()
             .map(|cell| {
                 format!(
-                    "{} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {}\n",
                     cell.disparity,
                     cell.confidence,
                     cell.reach_m,
                     cell.off_epi,
+                    cell.off_conf,
                     cell.tone,
                     cell.lit,
                 )
@@ -403,7 +603,7 @@ impl Cell {
             .collect()
     }
 
-    /// The same, read back. `None` on any line that is not six numbers.
+    /// The same, read back. `None` on any line that is not seven numbers.
     pub fn read(text: &str) -> Option<Vec<Self>> {
         text.lines()
             .map(|line| {
@@ -414,6 +614,7 @@ impl Cell {
                     confidence: next()?,
                     reach_m: next()?,
                     off_epi: next()?,
+                    off_conf: next()?,
                     tone: next()?,
                     lit: next()?,
                 })
@@ -427,6 +628,70 @@ impl Cell {
     /// baseline is concerned.
     pub fn metres(&self) -> Option<f32> {
         (self.disparity > 0.0).then(|| self.reach_m / self.disparity)
+    }
+}
+
+/// What the band says at one direction: both axes, together (issue #103,
+/// stage 5).
+///
+/// One type rather than two arguments because they come out of one
+/// correlation, at one candidate shift, and a caller that took one without the
+/// other would be drawing half a measurement. `Default` is the picture stage 1
+/// drew: no bend on either axis.
+///
+/// WGSL twin: the two locals `band_bend` computes before it builds its offset.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Reading {
+    /// Along [`Ring::epi`], in radians. Depth, plus what the calibration left
+    /// across the seam.
+    pub epi: f32,
+    /// Along [`Ring::perp`], in radians. The camera, and nothing else can
+    /// reach it.
+    pub along: f32,
+}
+
+/// How much of the along-seam channel is parallax leaking onto an axis that
+/// cannot hold any, as a correlation coefficient over the ring: **the control
+/// that replaces not applying it** (issue #103, stage 5).
+///
+/// Until stage 5, [`Cell::off_epi`] was the control by being unused: it was
+/// searched narrowly, never applied, and the claim it backed was that a
+/// reading far smaller than the disparity means the band is being read as a
+/// stereo pair. That claim conflated two things - no leak, and a small
+/// calibration residual - and it stops being available the moment the channel
+/// is applied.
+///
+/// This is the same discrimination, measured rather than assumed, and it is
+/// strictly the sharper of the two. Parallax is one-signed and scales with
+/// nearness, so if any of it were reaching this axis - a wrong baseline, a
+/// mis-built [`Ring`], an epipolar axis that is not the file's - the two
+/// channels would move together round the circle. They must not. `None` where
+/// nothing on the ring has evidence, or where one channel does not vary.
+///
+/// It is reported by `kjerag-spike --bin band` on every run and it is what
+/// says a corpus camera is being read as a stereo pair, not the ratio.
+pub fn depth_leak(cells: &[Cell]) -> Option<f32> {
+    let held: Vec<&Cell> = cells
+        .iter()
+        .filter(|cell| cell.confidence > 0.0 && cell.off_conf > 0.0)
+        .collect();
+    if held.len() < 4 {
+        return None;
+    }
+    let count = held.len() as f32;
+    let mean = |of: fn(&Cell) -> f32| held.iter().map(|cell| of(cell)).sum::<f32>() / count;
+    let (mean_epi, mean_along) = (mean(|c| c.disparity), mean(|c| c.off_epi));
+    let mut covariance = 0.0;
+    let (mut var_epi, mut var_along) = (0.0, 0.0);
+    for cell in held {
+        let (epi, along) = (cell.disparity - mean_epi, cell.off_epi - mean_along);
+        covariance += epi * along;
+        var_epi += epi * epi;
+        var_along += along * along;
+    }
+    match var_epi > 0.0 && var_along > 0.0 {
+        true => Some(covariance / (var_epi * var_along).sqrt()),
+        false => None,
     }
 }
 
@@ -724,6 +989,7 @@ pub(crate) fn wgsl() -> String {
     let span = (SPAN_DEG / STEP_DEG).round() as usize;
     let photometry = format!(
         "const TAU_GAIN = {TAU_GAIN_S:?};\n\
+         const RIDGE = {RIDGE:?};\n\
          const LIMIT_LN = {LIMIT_LN:?};\n\
          const CLIP_HIGH = {high:?};\n\
          const CLIP_LOW = {low:?};\n",
@@ -807,13 +1073,15 @@ pub(crate) const STATE_BINDING: u32 = 0;
 /// for how old the state is.
 pub(crate) const WATCH_BINDING: u32 = 1;
 
-/// How many bytes the state buffer is: the pooled [`Tone`], then one [`Cell`]
-/// per direction.
-pub(crate) const BYTES: u64 =
-    (std::mem::size_of::<Tone>() + AZIMUTHS * std::mem::size_of::<Cell>()) as u64;
+/// How many bytes the state buffer is: the pooled [`Tone`], the pooled
+/// [`Along`], then one [`Cell`] per direction.
+pub(crate) const BYTES: u64 = (CELLS_AT + AZIMUTHS * std::mem::size_of::<Cell>()) as u64;
+
+/// Where the along-seam field starts in that buffer.
+pub(crate) const ALONG_AT: usize = std::mem::size_of::<Tone>();
 
 /// Where the cells start in that buffer, for the readback that unpacks it.
-pub(crate) const CELLS_AT: usize = std::mem::size_of::<Tone>();
+pub(crate) const CELLS_AT: usize = ALONG_AT + std::mem::size_of::<Along>();
 
 /// How many workgroups one frame's measurement dispatches: one per direction.
 pub(crate) const GROUPS: u32 = AZIMUTHS as u32 / SLICES;
@@ -848,14 +1116,35 @@ struct Cell {
   confidence: f32,
   reach_m: f32,
   off_epi: f32,
+  off_conf: f32,
   tone: f32,
   lit: f32,
 };
 
+struct Along {
+  terms: array<f32, 5>,
+  evidence: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
 struct State {
   tone: Tone,
+  along: Along,
   cells: array<Cell, AZIMUTHS>,
 };
+
+// The along-seam correction at one azimuth, from that azimuth's own cosine and
+// sine. A direction flattened into the seam plane IS (cos, sin), so no trig
+// reaches the fragment shader. Rust twin: `Along::at`.
+fn along_at(field: Along, cos: f32, sin: f32) -> f32 {
+  let basis = array<f32, 5>(1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin);
+  var total = 0.0;
+  for (var term = 0u; term < 5u; term += 1u) {
+    total += field.terms[term] * basis[term];
+  }
+  return total;
+}
 "#;
 
 /// The seam circle's geometry, shared by both shaders. Rust twin: `Ring`.
@@ -920,14 +1209,20 @@ fn tone_split() -> vec2<f32> {
 fn band_rest() -> Band {
   var out: Band;
   out.offset = vec3<f32>(0.0);
+  out.along = vec3<f32>(0.0);
   out.crossover = CROSSOVER;
   return out;
 }
 
 // The bend a ray takes, in view space, scaled by the ray's own length so that
-// adding it turns the ray by the disparity in radians, and how wide the
+// adding it turns the ray by the reading in radians, and how wide the
 // handover has to be to carry it. Rust twin: `Reframe::blend_bent`, which
-// computes the same two things from `Reframe::disparity_at`.
+// computes the same two things from `Reframe::reading_at`.
+//
+// TWO AXES since stage 5. The epipolar term is depth and the along-seam term
+// is the camera, they are read from one correlation at one candidate shift,
+// and each is applied at its own channel's evidence. Only the epipolar one
+// can fold and only the epipolar one opens the band: see `band_width`.
 fn band_bend(ray: vec3<f32>) -> Band {
   let body = reframe.view_to_body * ray;
   let flat = vec2<f32>(body.x, body.y);
@@ -944,32 +1239,31 @@ fn band_bend(ray: vec3<f32>) -> Band {
   let mix = turn - f32(low);
   let a = band.cells[u32(low + i32(AZIMUTHS)) % AZIMUTHS];
   let b = band.cells[u32(low + 1 + i32(AZIMUTHS)) % AZIMUTHS];
-  // Weighted by the evidence behind each cell, not just by which is nearer.
-  // A direction that has stopped correlating stops contributing, both to what
-  // the disparity is and to how much of it is applied, and a ray between one
-  // live cell and one dead one takes the live one's answer at the dead one's
-  // strength. With no evidence at all the bend is zero, which is exactly the
-  // picture before this existed: the fallback is stage 1 and it is reached by
-  // arithmetic rather than by a branch. Rust twin: `Reframe::disparity_at`.
-  let wa = a.confidence * (1.0 - mix);
-  let wb = b.confidence * mix;
-  let total = wa + wb;
-  if total <= 0.0 {
-    return band_rest();
-  }
-  let disparity = (wa * a.disparity + wb * b.disparity) / total;
-  // How much of it to believe. `KEEP` is the correlation a single reading has
-  // to reach before it may move the state at all, and confidence is the
-  // smoothed value of that same number, so a direction whose recent readings
-  // have not been reaching that gate is applied proportionally less. No new
-  // constant: the threshold a reading must pass is the threshold a smoothed
-  // reading is trusted at.
-  let strength = clamp(mix2(a.confidence, b.confidence, mix) / KEEP, 0.0, 1.0);
-  let applied = disparity * strength;
-  // The bend's own gradient across the band is the disparity over the band
-  // width, and past 1 the mapping folds. The band opens far enough to carry
-  // this reading, and the clamp holds where it cannot. Rust twins: `width`
-  // and `carried`.
+  // Each axis weighted by the evidence behind ITS OWN channel, not just by
+  // which cell is nearer. A direction that has stopped correlating stops
+  // contributing, both to what the reading is and to how much of it is
+  // applied, and a ray between one live cell and one dead one takes the live
+  // one's answer at the dead one's strength. With no evidence at all the bend
+  // is zero and `band_width` returns the shipped crossover, which is exactly
+  // the picture before this existed: the fallback is stage 1 and it is reached
+  // by arithmetic rather than by a branch. Rust twin: `Reframe::reading_at`.
+  let applied = carry(a.disparity, a.confidence, b.disparity, b.confidence, mix);
+  // The along-seam axis is NOT read cell by cell. It is one fitted field over
+  // the whole circle, because the phenomenon is one - a relative pose error
+  // with a constant, a one-cycle and a two-cycle term - and because a field
+  // with holes in it, applied over a whole hemisphere, warps a horizon instead
+  // of moving it. `flat / reach` is this azimuth's cosine and sine already.
+  // Rust twins: `Along::at` and `Reframe::reading_at`.
+  let along = along_at(band.along, flat.x / reach, flat.y / reach);
+  // The epipolar bend's own gradient across the band is the disparity over the
+  // band width, and past 1 the mapping folds. The band opens far enough to
+  // carry this reading, and the clamp holds where it cannot. Rust twins:
+  // `width` and `carried`.
+  //
+  // The along-seam bend asks neither of them. Its gradient is across the band
+  // and its displacement is along it, so the Jacobian it adds is off-diagonal
+  // and the determinant stays exactly 1: a shear perpendicular to its own
+  // gradient cannot fold, however wide it opens. Rust twin: `Reframe::bent`.
   var out: Band;
   out.crossover = band_width(applied);
   let limit = FOLD * out.crossover;
@@ -977,12 +1271,43 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // Back into view space: view_to_body is a rotation, so its transpose is its
   // inverse, and `v * m` is `transpose(m) * v`.
   out.offset = (carried * length(ray)) * (at.epi * reframe.view_to_body);
+  // Scaled by the FLATTENED length and not the whole one, which is the
+  // `cos(elevation)` a relative roll about the body's z produces: `w x d` is
+  // `|w| cos(elevation)` along the seam's own tangent everywhere, and exactly
+  // zero at both lens poles, where an azimuth does not exist and a per-azimuth
+  // correction would otherwise swirl. Rust twin: `Reframe::bent`.
+  out.along = (along * reach) * (at.perp * reframe.view_to_body);
   return out;
+}
+
+// One channel of one ray: the two cells' values mixed at their own evidence,
+// then taxed by how much of that evidence reaches `KEEP`.
+//
+// `KEEP` is the correlation a single reading has to reach before it may move
+// the state at all, and a confidence is the smoothed value of that same
+// number, so a direction whose recent readings have not been reaching that
+// gate is applied proportionally less. No new constant: the threshold a
+// reading must pass is the threshold a smoothed reading is trusted at. Zero
+// evidence gives exactly zero, by arithmetic. Rust twin: `Reframe::channel`.
+fn carry(a: f32, wa: f32, b: f32, wb: f32, mix: f32) -> f32 {
+  let ea = wa * (1.0 - mix);
+  let eb = wb * mix;
+  let total = ea + eb;
+  if total <= 0.0 {
+    return 0.0;
+  }
+  let strength = clamp(mix2(wa, wb, mix) / KEEP, 0.0, 1.0);
+  return (ea * a + eb * b) / total * strength;
 }
 
 // How wide the handover has to be to carry this disparity without folding,
 // never narrower than the crossover the projection ships and never wider than
 // the widest reading the search can return. Rust twin: `width`.
+//
+// The EPIPOLAR reading only, which is what keeps stage 4's acceptance exactly
+// where stage 4 measured it: the along-seam bend does not fold and therefore
+// does not ask the band for room, so this function is called with the same
+// argument it was called with before stage 5 and answers the same width.
 fn band_width(disparity: f32) -> f32 {
   return max(min(abs(disparity) / FOLD, WIDEST), CROSSOVER);
 }
@@ -1217,7 +1542,7 @@ fn correlate(i: u32) -> f32 {
 fn settle(cell: u32, at: Ring) {
   var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0);
+    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0);
   }
   held.reach_m = at.reach_m;
 
@@ -1226,55 +1551,89 @@ fn settle(cell: u32, at: Ring) {
   let epi = i32(found / PERP_SHIFTS);
   let perp = i32(found % PERP_SHIFTS) - PERP_STEPS;
   // A peak against the edge of the search is not a peak, it is the search
-  // running out: near-field content moves further across than the band is
-  // wide, and a reading pinned at the limit would report the limit.
-  let pinned = epi == 0 || epi == i32(EPI_SHIFTS) - 1;
-  if best < KEEP || pinned {
-    // Nothing to read here this frame. What decays is the EVIDENCE and not
-    // the measurement: the reading was true when it was taken and may be true
-    // still, but nothing is confirming it, and the pass applies a reading in
-    // proportion to how well it is being confirmed (`band_bend`). So the bend
-    // fades out on its own, and a direction that starts correlating again has
-    // its answer already in hand rather than having to learn it twice.
-    //
-    // It fades at the SAME rate the direction learns, which is the whole of
-    // the occlusion story: a near reading is a reading of something between
-    // the camera and the background - a selfie stick, a hand, a boot, someone
-    // walking past - and the reason it correlates fast is the reason it
-    // expires fast. A far reading is the background, which has not gone
-    // anywhere. One knee decides both.
-    held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
-    band.cells[cell] = held;
-    return;
-  }
+  // running out, and a reading pinned at the limit would report the limit.
+  // Each axis runs out for its own reason and is refused on its own, which is
+  // stage 5's one piece of new bookkeeping. The epipolar axis runs out on
+  // near-field content that moves further across than the band is wide. The
+  // along-seam axis runs out on a camera whose calibration residual is outside
+  // anything measured, and refusing the epipolar channel for THAT would throw
+  // stage 2 away on that footage for a reason that has nothing to do with it.
+  let quiet = best < KEEP;
+  let epi_pinned = quiet || epi == 0 || epi == i32(EPI_SHIFTS) - 1;
+  // The along-seam channel also stands down whenever the epipolar one does:
+  // a match at the edge of the depth window has not established what content
+  // is being compared, and an along-seam offset read off content that is not
+  // the same content is not a reading of anything.
+  let along_pinned = epi_pinned || perp == -PERP_STEPS || perp == PERP_STEPS;
 
-  // Between whole steps, because a third of a step is exactly the size this
-  // is trying to resolve. Rust twin: `super::seam::best_shift`'s `peak`.
-  let minus = scores[found - PERP_SHIFTS];
-  let plus = scores[found + PERP_SHIFTS];
-  let curve = minus - 2.0 * best + plus;
-  var refined = 0.0;
-  if curve < 0.0 {
-    refined = clamp(0.5 * (minus - plus) / curve, -1.0, 1.0);
-  }
-  let read = (f32(epi + EPI_FAR) + refined) * STEP;
-
-  // The time constant is read off what this direction has been showing, not
-  // off what it showed this frame: a noisy far-field reading must not unlock
-  // the smoothing that is keeping the horizon still. Rust twin:
-  // `time_constant`.
+  // What decays where a channel is refused is the EVIDENCE and not the
+  // measurement: the reading was true when it was taken and may be true still,
+  // but nothing is confirming it, and the pass applies a reading in proportion
+  // to how well it is being confirmed (`band_bend`). So the bend fades out on
+  // its own, and a direction that starts correlating again has its answer
+  // already in hand rather than having to learn it twice.
   //
-  // The first frame of a file, and the first after a seek, take the reading
-  // whole instead. There is no picture behind them to move under, so there is
-  // nothing for an ease to hide, and easing anyway would leave the first two
-  // seconds of film drawn with a correction of nearly nothing. The same
-  // argument, and the same answer, as `seam::Correction::land`.
-  let step = select(ease(watch.seconds, time_constant(held.disparity)), 1.0, watch.reset != 0.0);
-  held.disparity += (read - held.disparity) * step;
-  held.confidence += (best - held.confidence) * step;
-  held.off_epi = f32(perp * PERP_STEP) * STEP;
-  read_photometry(&held);
+  // The epipolar channel fades at the SAME rate the direction learns, which is
+  // the whole of the occlusion story: a near reading is a reading of something
+  // between the camera and the background - a selfie stick, a hand, a boot,
+  // someone walking past - and the reason it correlates fast is the reason it
+  // expires fast. A far reading is the background, which has not gone
+  // anywhere. One knee decides both.
+  //
+  // The along-seam channel fades at TAU_FAR wherever it is, because what it
+  // holds is the camera and the camera has not gone anywhere either. Rust
+  // twin: `Cell::off_epi`'s own docstring, and the `leak` line that measured
+  // it before it was chosen.
+  let learn = select(ease(watch.seconds, time_constant(held.disparity)), 1.0, watch.reset != 0.0);
+  let learn_along = select(ease(watch.seconds, TAU_FAR), 1.0, watch.reset != 0.0);
+  if epi_pinned {
+    held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
+  } else {
+    // Between whole steps, because a third of a step is exactly the size this
+    // is trying to resolve. Rust twin: `super::seam::best_shift`'s `peak`.
+    let read = f32(epi + EPI_FAR) + parabola(scores[found - PERP_SHIFTS], best, scores[found + PERP_SHIFTS]);
+    // The time constant is read off what this direction has been showing, not
+    // off what it showed this frame: a noisy far-field reading must not unlock
+    // the smoothing that is keeping the horizon still. Rust twin:
+    // `time_constant`.
+    //
+    // The first frame of a file, and the first after a seek, take the reading
+    // whole instead. There is no picture behind them to move under, so there
+    // is nothing for an ease to hide, and easing anyway would leave the first
+    // two seconds of film drawn with a correction of nearly nothing. The same
+    // argument, and the same answer, as `seam::Correction::land`.
+    held.disparity += (read * STEP - held.disparity) * learn;
+    held.confidence += (best - held.confidence) * learn;
+  }
+  if along_pinned {
+    held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
+  } else {
+    // The same parabola on the same grid: the along-seam neighbours are one
+    // score apart because the table runs perp fastest, where the epipolar ones
+    // are PERP_SHIFTS apart. Without it this channel quantizes to PERP_STEP,
+    // which is 15 view px of horizon at the view stage 5 exists for.
+    let read = f32(perp) + parabola(scores[found - 1u], best, scores[found + 1u]);
+    held.off_epi += (read * f32(PERP_STEP) * STEP - held.off_epi) * learn_along;
+    held.off_conf += (best - held.off_conf) * learn_along;
+  }
+  // Stage 3's own gate, unchanged: the photometry is read at the shift that
+  // made the two patches the same content, so a shift that did not establish
+  // that is not one to read a brightness at.
+  if !epi_pinned {
+    read_photometry(&held);
+  }
   band.cells[cell] = held;
+}
+
+// Where between three scores the peak really is, in steps, from the parabola
+// through them. Zero where they do not curve down, which is not a peak.
+// Rust twin: `super::seam::best_shift`'s `peak`.
+fn parabola(minus: f32, best: f32, plus: f32) -> f32 {
+  let curve = minus - 2.0 * best + plus;
+  if curve >= 0.0 {
+    return 0.0;
+  }
+  return clamp(0.5 * (minus - plus) / curve, -1.0, 1.0);
 }
 
 // What the two lenses' pictures of this patch differ by in brightness at the
@@ -1388,6 +1747,78 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
   held.log_gain += (read - held.log_gain) * step;
   held.evidence += (sum_count / f32(AZIMUTHS) - held.evidence) * step;
   band.tone = held;
+}
+
+// The along-seam field, fitted over the whole ring (issue #103, stage 5).
+// Rust twin: `Along::fit`.
+//
+// One lane, and unapologetically: this is one workgroup once per frame, over
+// 128 cells, against a correlation that reads two grids per direction over
+// half of them. What it costs is not where this pass spends anything.
+//
+// NO TIME CONSTANT OF ITS OWN, for the reason `width` has none: what it is
+// fitted to is already the smoothed, evidence-weighted per-direction state,
+// so the field inherits every direction's own constant exactly. A reset
+// empties the cells and the fit then answers zero by arithmetic, which is the
+// picture stage 4 drew.
+@compute @workgroup_size(1)
+fn pool_along() {
+  var normal = array<f32, 25>();
+  var right = array<f32, 5>();
+  var evidence = 0.0;
+  for (var index = 0u; index < AZIMUTHS; index += 1u) {
+    let cell = band.cells[index];
+    let trust = clamp(cell.off_conf / KEEP, 0.0, 1.0);
+    if trust <= 0.0 {
+      continue;
+    }
+    let phi = f32(index) / f32(AZIMUTHS) * TAU;
+    let cosine = cos(phi);
+    let sine = sin(phi);
+    let basis = array<f32, 5>(1.0, cosine, sine, cosine * cosine - sine * sine, 2.0 * cosine * sine);
+    for (var row = 0u; row < 5u; row += 1u) {
+      for (var column = 0u; column < 5u; column += 1u) {
+        normal[row * 5u + column] += trust * basis[row] * basis[column];
+      }
+      right[row] += trust * basis[row] * cell.off_epi;
+    }
+    evidence += trust;
+  }
+  // The ridge, which is what makes a thin ring safe and a bare one exactly
+  // zero. Rust twin: `RIDGE`.
+  for (var term = 0u; term < 5u; term += 1u) {
+    normal[term * 5u + term] += RIDGE;
+  }
+  var out: Along;
+  out.terms = solve5(&normal, &right);
+  out.evidence = evidence;
+  band.along = out;
+}
+
+// Gaussian elimination with no pivoting on a 5x5. Safe without pivoting
+// because the matrix is a Gram matrix plus RIDGE on its diagonal, so it is
+// positive definite whatever the ring holds. Rust twin: `solve`.
+fn solve5(normal: ptr<function, array<f32, 25>>, right: ptr<function, array<f32, 5>>) -> array<f32, 5> {
+  for (var pivot = 0u; pivot < 5u; pivot += 1u) {
+    let scale = (*normal)[pivot * 5u + pivot];
+    for (var row = pivot + 1u; row < 5u; row += 1u) {
+      let factor = (*normal)[row * 5u + pivot] / scale;
+      for (var column = pivot; column < 5u; column += 1u) {
+        (*normal)[row * 5u + column] -= factor * (*normal)[pivot * 5u + column];
+      }
+      (*right)[row] -= factor * (*right)[pivot];
+    }
+  }
+  var out = array<f32, 5>();
+  for (var step = 0u; step < 5u; step += 1u) {
+    let row = 4u - step;
+    var total = (*right)[row];
+    for (var column = row + 1u; column < 5u; column += 1u) {
+      total -= (*normal)[row * 5u + column] * out[column];
+    }
+    out[row] = total / (*normal)[row * 5u + row];
+  }
+  return out;
 }
 
 // Rust twin: `time_constant`.
@@ -1555,15 +1986,17 @@ mod tests {
                 confidence: 0.0,
                 reach_m: 0.033,
                 off_epi: 0.0,
+                off_conf: 0.0,
                 tone: 0.0,
                 lit: 0.0,
             };
             AZIMUTHS
         ];
-        assert_eq!(reframe.disparity_at(ray, &dead), 0.0);
+        let field = Along::fit(&dead);
+        assert_eq!(reframe.reading_at(ray, &dead, field), Reading::default());
         assert_eq!(
-            reframe.bend(ray, reframe.disparity_at(ray, &dead)),
-            [0.0; 3]
+            reframe.bend(ray, reframe.reading_at(ray, &dead, field)),
+            crate::projection::Bend::default(),
         );
         // And with full confidence it is applied whole: the gate is a gate,
         // not a tax on every reading.
@@ -1574,7 +2007,7 @@ mod tests {
                 ..*cell
             })
             .collect();
-        let held = reframe.disparity_at(ray, &live);
+        let held = reframe.reading_at(ray, &live, Along::fit(&live)).epi;
         assert!(
             (held - 1.0f32.to_radians()).abs() < 1e-6,
             "a fully trusted direction applied {held}",
@@ -1819,6 +2252,7 @@ mod tests {
             confidence: KEEP,
             reach_m: 0.033,
             off_epi: 0.0,
+            off_conf: 0.0,
             tone: gain.ln(),
             lit: brightness,
         }
@@ -1984,5 +2418,253 @@ mod tests {
             bytes <= 16352,
             "the workgroup wants {bytes} bytes of shared memory",
         );
+    }
+
+    // -------------------------------------------------- stage 5: the other axis
+
+    /// One direction's state with an along-seam reading in it and nothing
+    /// else, so the field can be asked questions with no GPU and no footage.
+    fn along_cell(index: usize, field: impl Fn(f32) -> f32) -> Cell {
+        let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+        Cell {
+            disparity: 0.0,
+            confidence: KEEP,
+            reach_m: 0.033,
+            off_epi: field(phi),
+            off_conf: KEEP,
+            tone: 0.0,
+            lit: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_ring_with_nothing_on_it_asks_for_no_along_seam_correction() {
+        // The byte-identity of stage 4, reached by arithmetic and not by a
+        // branch: with no evidence the normal matrix is the ridge alone and
+        // the right-hand side is zero, so every coefficient is exactly zero.
+        let field = Along::fit(&vec![Cell::default(); AZIMUTHS]);
+        assert_eq!(field.terms, [0.0; 5]);
+        assert_eq!(field.evidence, 0.0);
+        assert_eq!(field.at(1.0, 0.0), 0.0);
+        assert_eq!(field.at(-0.6, 0.8), 0.0);
+    }
+
+    #[test]
+    fn the_field_reads_back_each_of_the_three_terms_it_was_given() {
+        // The positive control. Each harmonic is planted alone at a size the
+        // corpus actually shows and read back at four azimuths, because a fit
+        // that cannot recover what it was handed has not measured anything.
+        type Shape = fn(f32) -> f32;
+        let planted: [(&str, Shape); 3] = [
+            ("relative roll", |_| 0.4f32.to_radians()),
+            ("principal point", |phi| 0.4f32.to_radians() * phi.cos()),
+            ("focal aspect", |phi| {
+                0.4f32.to_radians() * (2.0 * phi).sin()
+            }),
+        ];
+        for (name, shape) in planted {
+            let cells: Vec<Cell> = (0..AZIMUTHS)
+                .map(|index| along_cell(index, shape))
+                .collect();
+            let field = Along::fit(&cells);
+            for step in 0..4 {
+                let phi = step as f32 / 4.0 * std::f32::consts::TAU + 0.3;
+                let (sin, cos) = phi.sin_cos();
+                let read = field.at(cos, sin);
+                // The ridge shrinks a whole ring by AZIMUTHS / (AZIMUTHS + 1),
+                // which is under a percent and is the only thing between this
+                // and an equality.
+                assert!(
+                    (read - shape(phi)).abs() < 0.02 * shape(phi).abs().max(1e-3) + 1e-5,
+                    "{name} at {phi:.2} rad read {} deg for {} deg",
+                    read.to_degrees(),
+                    shape(phi).to_degrees(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_third_cycle_is_not_fitted_and_does_not_reach_the_picture() {
+        // What the model does NOT claim. Two cycles is where the measurement
+        // stopped indicating structure (docs/research/seam-two-axis.md), and a
+        // basis that stops there must leave a third cycle on the floor rather
+        // than aliasing it into the terms below.
+        let cells: Vec<Cell> = (0..AZIMUTHS)
+            .map(|index| along_cell(index, |phi| 0.5f32.to_radians() * (3.0 * phi).cos()))
+            .collect();
+        let field = Along::fit(&cells);
+        for term in field.terms {
+            assert!(
+                term.to_degrees().abs() < 0.01,
+                "a three-cycle ring produced {} deg of a fitted term",
+                term.to_degrees(),
+            );
+        }
+    }
+
+    #[test]
+    fn one_direction_is_believed_by_half_and_forty_are_believed_whole() {
+        // What the ridge is for, stated as the number it produces: a fit is
+        // believed in proportion to how much of the ring is behind it, so a
+        // file's first frames walk the correction in by arithmetic rather than
+        // by a second time constant.
+        let held = 0.4f32.to_radians();
+        let one = Along::fit(
+            &(0..AZIMUTHS)
+                .map(|index| match index {
+                    0 => along_cell(0, |_| held),
+                    _ => Cell::default(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let read = one.at(1.0, 0.0);
+        assert!(
+            (0.4 * held..0.8 * held).contains(&read),
+            "one direction alone applied {} deg of {} deg at its own azimuth",
+            read.to_degrees(),
+            held.to_degrees(),
+        );
+        let many = Along::fit(
+            &(0..AZIMUTHS)
+                .map(|index| match index % 3 {
+                    0 => along_cell(index, |_| held),
+                    _ => Cell::default(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            (many.at(1.0, 0.0) - held).abs() < 0.05 * held,
+            "forty directions applied {} deg of {} deg",
+            many.at(1.0, 0.0).to_degrees(),
+            held.to_degrees(),
+        );
+    }
+
+    #[test]
+    fn the_along_seam_bend_is_exactly_a_relative_roll() {
+        // The claim the application law rests on, checked against the
+        // calibration's own roll knob rather than against arithmetic written
+        // twice. A constant along-seam field displaces lens 1's ray by
+        // `w x d`, and `w x d` for a roll of `w` about the body's z is what
+        // `super::seam::turned` produces when it turns lens 1's roll by w.
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        let lenses = fixture_lenses();
+        let turn = 0.4;
+        let base = crate::seam::mapped(&lenses, FRAME);
+        let rolled = crate::seam::mapped(
+            &crate::seam::turned(&lenses, crate::seam::Knob::Roll, turn),
+            FRAME,
+        );
+        let cells: Vec<Cell> = (0..AZIMUTHS)
+            .map(|index| along_cell(index, |_| (turn as f32).to_radians()))
+            .collect();
+        let field = Along::fit(&cells);
+        // Off the seam plane as well as on it, because the `cos(elevation)`
+        // scale is the half of this that is not obvious.
+        for theta in [90.0f32, 75.0, 120.0] {
+            for phi in [0.0f32, 70.0, 200.0] {
+                let (sin_t, cos_t) = theta.to_radians().sin_cos();
+                let (sin_p, cos_p) = phi.to_radians().sin_cos();
+                let ray = [sin_t * cos_p, sin_t * sin_p, cos_t];
+                let bend = base.bend(ray, base.reading_at(ray, &cells, field));
+                let bent: [f32; 3] = std::array::from_fn(|c| ray[c] + bend.along[c]);
+                let (here, there) = (rolled.project(1, ray), base.project(1, bent));
+                if !here.inside || !there.inside {
+                    continue;
+                }
+                let apart = (0..2)
+                    .map(|c| (here.pixel[c] - there.pixel[c]).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                assert!(
+                    apart < 1.0,
+                    "at theta {theta} phi {phi} the bend lands {apart:.2} px from the roll",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_along_seam_bend_costs_no_overlap_and_cannot_fold() {
+        // The two properties that let this axis be applied over a whole
+        // hemisphere while the epipolar one may only be applied across the
+        // band. `perp` is the seam circle's own tangent, so the bend slides
+        // content ALONG the circle and never off it, which is why it spends
+        // none of the 7.22 degrees the two lenses share; and its gradient is
+        // across the band while its displacement is along it, so the Jacobian
+        // it adds is off-diagonal and the determinant stays 1.
+        let widest = PERP_DEG.to_radians();
+        let mut off_the_plane = 0.0f32;
+        for index in 0..AZIMUTHS {
+            let at = Ring::cell(index, BASELINE);
+            let bent: [f32; 3] = std::array::from_fn(|c| at.centre[c] + widest * at.perp[c]);
+            let unit = unit(bent);
+            off_the_plane = off_the_plane.max(unit[2].asin().abs().to_degrees());
+            // Orthogonal to the direction itself, so it is a turn and not a
+            // stretch: `|d + a * perp|` is `sqrt(1 + a * a)`, which grows only
+            // to second order in `a` and is what makes the bend a rotation
+            // rather than a magnification.
+            assert!(
+                (norm(bent) - (1.0 + widest * widest).sqrt()).abs() < 1e-6,
+                "the widest bend changes the ray's length by {}",
+                norm(bent) - 1.0,
+            );
+        }
+        // The whole search width spent at once moves a ray off the seam plane
+        // by this much, against the 7.22 degrees a side the two lenses share
+        // (`the_widest_band_and_its_bend_stay_inside_the_overlap`). It is not
+        // exactly zero because the epipolar axis is 0.4 degrees off the body's
+        // z, and it is four orders under what the overlap could pay.
+        assert!(
+            off_the_plane < 0.01,
+            "the widest along-seam bend leaves the seam plane by {off_the_plane:.4} deg",
+        );
+    }
+
+    #[test]
+    fn the_depth_control_reads_zero_on_a_stereo_ring_and_one_on_a_leaking_one() {
+        // The control that replaces not applying the channel. A ring whose
+        // along-seam readings are the camera and whose disparities are the
+        // scene must show no relation between them; one where parallax has
+        // reached the wrong axis shows all of it.
+        let stereo: Vec<Cell> = (0..AZIMUTHS)
+            .map(|index| Cell {
+                // A scene that varies round the circle, and a camera term
+                // that varies differently.
+                disparity: (index as f32 * 0.11).sin() * 0.02,
+                off_epi: (index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU).cos() * 0.007,
+                ..along_cell(index, |_| 0.0)
+            })
+            .collect();
+        let leak = depth_leak(&stereo).expect("a full ring says something");
+        assert!(leak.abs() < 0.35, "a stereo ring leaked {leak:+.3}");
+        let leaking: Vec<Cell> = stereo
+            .iter()
+            .map(|cell| Cell {
+                off_epi: 0.3 * cell.disparity,
+                ..*cell
+            })
+            .collect();
+        let leak = depth_leak(&leaking).expect("a full ring says something");
+        assert!(leak > 0.99, "a leaking ring read only {leak:+.3}");
+        assert_eq!(depth_leak(&[]), None);
+    }
+
+    #[test]
+    fn a_file_with_one_lens_stream_is_still_drawn_exactly_as_stage_one_drew_it() {
+        // Issue #39's byte-identity, now over two axes. Nothing in the band
+        // may reach a picture with no seam in it, and the fallback is
+        // arithmetic: no baseline, no ring, no bend, on either axis.
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        let lenses = fixture_lenses();
+        let reframe = crate::seam::mapped(&lenses[..1], FRAME);
+        let ray = [0.6, 0.1, 0.8];
+        let cells: Vec<Cell> = (0..AZIMUTHS)
+            .map(|index| along_cell(index, |_| 0.5f32.to_radians()))
+            .collect();
+        let bend = reframe.bend(ray, reframe.reading_at(ray, &cells, Along::fit(&cells)));
+        assert_eq!(bend.epi, [0.0; 3]);
+        assert_eq!(bend.along, [0.0; 3]);
     }
 }

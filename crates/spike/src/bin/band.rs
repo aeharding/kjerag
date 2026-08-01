@@ -93,6 +93,9 @@ enum Mode {
 struct Read {
     at: Duration,
     cells: Vec<Cell>,
+    /// The along-seam field fitted over the whole ring, which is what the
+    /// pass applies on that axis (issue #103, stage 5).
+    along: kjerag_render::Along,
     picture: Picture,
     /// The map this frame was drawn through. Kept because the horizon lock
     /// turns the body under the view, so which pixels are near the seam is a
@@ -132,9 +135,11 @@ fn play(
         }
         .frame(options.camera(), Sampling::default(), options.size())?;
         each(&picture, reads.len())?;
+        let (along, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
         reads.push(Read {
             at,
-            cells: pipeline.band_state(&gpu.device, &gpu.queue)?,
+            cells,
+            along,
             picture,
             mapped: scene
                 .mapped(options.camera(), 1.0)
@@ -401,6 +406,81 @@ fn geometry(last: &Read) {
         held.len(),
         held.len() - towards,
     );
+    along_seam(last);
+}
+
+/// The along-seam channel: what the ring read, what the field fitted to it,
+/// and the control that replaced not applying it (issue #103, stage 5).
+///
+/// The old control was that this axis was never applied, so a reading far
+/// smaller than the disparity said the band was a stereo pair. That claim went
+/// when the channel started reaching the picture. Its replacement is the
+/// **correlation between the two channels round the ring**: parallax is
+/// epipolar by construction, so if any of it were reaching an axis that cannot
+/// hold it - a wrong baseline, a mis-built ring - the two would move together.
+fn along_seam(last: &Read) {
+    let live: Vec<&Cell> = last.cells.iter().filter(|c| c.off_conf > 0.0).collect();
+    if live.is_empty() {
+        println!(
+            "
+along the seam: nothing correlated on that axis."
+        );
+        return;
+    }
+    let read: Vec<f64> = live
+        .iter()
+        .map(|c| f64::from(c.off_epi.to_degrees()))
+        .collect();
+    let rail = f64::from(kjerag_render::PERP_DEG) - 1e-3;
+    let railed = read.iter().filter(|deg| deg.abs() >= rail).count();
+    let terms = last.along.terms.map(|t| f64::from(t.to_degrees()));
+    println!(
+        "
+along the seam: {} of {} directions read it, worst {:.3} deg, {railed} against the 
+         {:.2} deg search limit. the axis a distance CANNOT displace content along, so what is 
+         here is the camera and nothing else.
+         the field: roll {:+.3} deg, one cycle {:.3} deg at phase {:.0}, two cycles {:.3} at 
+         {:.0}, over {:.1} directions of evidence. what the field leaves on the ring it was 
+         fitted to is {:.3} deg rms.",
+        live.len(),
+        last.cells.len(),
+        read.iter()
+            .fold(0.0, |worst: f64, deg| worst.max(deg.abs())),
+        rail,
+        terms[0],
+        terms[1].hypot(terms[2]),
+        terms[2].atan2(terms[1]).to_degrees(),
+        terms[3].hypot(terms[4]),
+        terms[4].atan2(terms[3]).to_degrees() / 2.0,
+        f64::from(last.along.evidence),
+        left(last),
+    );
+    match kjerag_render::depth_leak(&last.cells) {
+        Some(leak) => println!(
+            "the control: the two channels correlate at {leak:+.3} round the ring. parallax is 
+             epipolar by construction, so anything but zero here is depth reaching an axis that 
+             cannot hold it.",
+        ),
+        None => println!("the control: too few directions carry both channels to say."),
+    }
+}
+
+/// What the fitted field leaves on the readings it was fitted to, in degrees
+/// root mean square: the part of the along-seam residual a constant and two
+/// cycles cannot describe.
+fn left(last: &Read) -> f64 {
+    let mut total = 0.0f64;
+    let mut count = 0.0f64;
+    for (index, cell) in last.cells.iter().enumerate() {
+        if cell.off_conf <= 0.0 {
+            continue;
+        }
+        let (sin, cos) = (index as f32 / last.cells.len() as f32 * std::f32::consts::TAU).sin_cos();
+        let left = f64::from((cell.off_epi - last.along.at(cos, sin)).to_degrees());
+        total += left * left;
+        count += 1.0;
+    }
+    (total / count.max(1.0)).sqrt()
 }
 
 /// How much the applied bend moves frame to frame, and the control that says
