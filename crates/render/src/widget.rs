@@ -33,6 +33,22 @@ impl<Message> shader::Program<Message> for Scene {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
+        crate::trace(|| {
+            format!(
+                "program::update {} bounds={}x{}+{}+{}",
+                match event {
+                    Event::Window(window::Event::RedrawRequested(_)) => "redraw",
+                    Event::Window(_) => "window",
+                    Event::Mouse(_) => "mouse",
+                    Event::Keyboard(_) => "key",
+                    _ => "other",
+                },
+                bounds.width,
+                bounds.height,
+                bounds.x,
+                bounds.y,
+            )
+        });
         match event {
             Event::Mouse(event) => mouse_update(self, event, bounds, cursor),
             Event::Window(window::Event::RedrawRequested(now)) => {
@@ -122,6 +138,10 @@ impl shader::Primitive for ScenePrimitive {
 impl shader::Pipeline for ScenePipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         ScenePipeline::new(device, format)
+    }
+
+    fn trim(&mut self) {
+        ScenePipeline::trimmed(self);
     }
 }
 

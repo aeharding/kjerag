@@ -1344,6 +1344,13 @@ impl ScenePipeline {
             .is_some_and(|live| Arc::ptr_eq(&live.frames, &view.frames))
     }
 
+    /// SCRATCH INSTRUMENT (issue #102), not for merge: iced calls this once
+    /// per present, whether or not our primitive was in the layer, so it says
+    /// how many frames the window put on screen without the video in them.
+    pub fn trimmed(&self) {
+        super::trace(|| "pipeline::trim (a frame was presented)".to_owned());
+    }
+
     /// Stop measuring the band, which leaves its state where it is and, on a
     /// pipeline that has never measured, leaves it at the zero that bends
     /// nothing: exactly the picture stage 1 drew.
