@@ -762,8 +762,25 @@ pub struct Ring {
     /// baseline with the part along the view direction taken out, negated
     /// because lens 1 sits **behind** lens 0, so its picture of a near point
     /// is displaced towards the front lens.
+    ///
+    /// The same axis and the same sign as [`super::seam::Where::across`],
+    /// turned 0.6 to 3.5 degrees off it by the baseline's own tilt.
     pub epi: [f32; 3],
-    /// The axis a distance cannot reach, unit: across the other two.
+    /// The axis a distance cannot reach, unit: the seam circle's own tangent
+    /// towards increasing azimuth, with the epipolar tilt taken out.
+    ///
+    /// **The same axis and the same SIGN as [`super::seam::Where::along`]**,
+    /// and that is a requirement rather than an observation
+    /// (`the_two_instruments_name_the_same_two_axes`). Two instruments measure
+    /// this axis - this pass, and `--bin seam mode=residual` through
+    /// `seam::ring` - and the harmonic decomposition that names a constant
+    /// along it a relative roll is stated in the second one's convention. Built
+    /// as `centre x epi` it comes out **negated**, which is a picture the pass
+    /// still draws correctly, because it measures and applies through the same
+    /// axis and the two signs cancel; what it is not is comparable. That cost
+    /// issue #103 stage 5 its diagnosis: the two instruments were read side by
+    /// side, and a sign is invisible where a quantity passes through zero and
+    /// total where it does not (docs/research/seam-two-axis.md).
     pub perp: [f32; 3],
     /// How much of the baseline is seen from this direction, in metres, which
     /// is what turns a disparity into a distance.
@@ -803,7 +820,10 @@ impl Ring {
             phi,
             centre,
             epi,
-            perp: unit(cross(centre, epi)),
+            // `epi x centre` and not `centre x epi`: the second is the same
+            // line the other way up, and the way up is the one `seam::ring`
+            // already publishes. See [`Self::perp`].
+            perp: unit(cross(epi, centre)),
             reach_m,
         }
     }
@@ -1176,7 +1196,9 @@ fn ring_at(centre: vec3<f32>) -> Ring {
   out.centre = centre;
   out.reach_m = length(seen);
   out.epi = select(vec3<f32>(0.0), -seen / out.reach_m, out.reach_m > 0.0);
-  out.perp = normalize(cross(centre, out.epi));
+  // `epi x centre`, which is the seam circle's own tangent towards increasing
+  // azimuth and the sign `seam::ring` publishes. Rust twin: `Ring::at`.
+  out.perp = normalize(cross(out.epi, centre));
   return out;
 }
 "#;
@@ -1890,6 +1912,43 @@ mod tests {
     }
 
     #[test]
+    fn the_two_instruments_name_the_same_two_axes() {
+        // Two instruments measure the seam's two axes - this pass, through
+        // `Ring`, and `--bin seam mode=residual`, through `seam::ring` - and
+        // until stage 6 they named the along-seam one with opposite signs.
+        // Neither drew a wrong picture for it: each measures and applies
+        // through its own axis, so the two signs cancel inside each. What it
+        // cost was the ability to read one beside the other, which is how
+        // stage 5's cap was misdiagnosed as a disagreement about content
+        // (docs/research/seam-two-axis.md).
+        //
+        // The two are not the same axis to the last decimal and cannot be:
+        // `epi` is the baseline's own line and the baseline is tilted off the
+        // body's z. What they must be is the same axis to within that tilt,
+        // and pointing the same way.
+        let ring = crate::seam::ring(AZIMUTHS);
+        let mut worst_along = 1.0f64;
+        let mut worst_across = 1.0f64;
+        for (index, at) in ring.iter().enumerate() {
+            let cell = Ring::cell(index, BASELINE);
+            let along = dot(cell.perp, at.along.map(|c| c as f32));
+            let across = dot(cell.epi, at.across.map(|c| c as f32));
+            worst_along = worst_along.min(f64::from(along));
+            worst_across = worst_across.min(f64::from(across));
+        }
+        // The baseline's tilt is 3.6 degrees at its worst on the fixture, and
+        // `cos(3.6 deg)` is 0.998.
+        assert!(
+            worst_along > 0.99,
+            "the two along-seam axes agree only to {worst_along:.4} at worst",
+        );
+        assert!(
+            worst_across > 0.99,
+            "the two across-seam axes agree only to {worst_across:.4} at worst",
+        );
+    }
+
+    #[test]
     fn the_epipolar_axis_is_not_the_across_seam_tangent() {
         // Phase A's finding, which is why this file carries a baseline at all:
         // the axis the file's own geometry names is a few degrees off the
@@ -2552,16 +2611,38 @@ mod tests {
         // twice. A constant along-seam field displaces lens 1's ray by
         // `w x d`, and `w x d` for a roll of `w` about the body's z is what
         // `super::seam::turned` produces when it turns lens 1's roll by w.
+        //
+        // **How far to turn it is derived and not chosen**, from
+        // `seam::moved`, which is the residual instrument's own prediction of
+        // what a knob does to the reading. That is the whole point of the
+        // test since stage 6: a field of `f` has to be the roll that the OTHER
+        // instrument would say leaves a reading of `-f`, sign included, or the
+        // two are measuring in conventions that cannot be read side by side.
         use crate::projection::tests::{FRAME, fixture_lenses};
         let lenses = fixture_lenses();
-        let turn = 0.4;
+        let turn_of = |field_deg: f64| {
+            let base = crate::seam::mapped(&lenses, FRAME);
+            let one = crate::seam::mapped(
+                &crate::seam::turned(&lenses, crate::seam::Knob::Roll, 1.0),
+                FRAME,
+            );
+            let at = crate::seam::ring(AZIMUTHS)[0];
+            let per_degree =
+                crate::seam::moved(&base, &one, 1, &at).expect("the seam is in view")[0];
+            -field_deg / per_degree
+        };
+        let turn = turn_of(0.4);
+        assert!(
+            turn.abs() > 0.3 && turn.abs() < 0.5,
+            "a 0.4 degree field asked for a roll of {turn:.3} degrees",
+        );
         let base = crate::seam::mapped(&lenses, FRAME);
         let rolled = crate::seam::mapped(
             &crate::seam::turned(&lenses, crate::seam::Knob::Roll, turn),
             FRAME,
         );
         let cells: Vec<Cell> = (0..AZIMUTHS)
-            .map(|index| along_cell(index, |_| (turn as f32).to_radians()))
+            .map(|index| along_cell(index, |_| 0.4f32.to_radians()))
             .collect();
         let field = Along::fit(&cells);
         // Off the seam plane as well as on it, because the `cos(elevation)`
