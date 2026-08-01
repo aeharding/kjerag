@@ -28,13 +28,22 @@ gates on the tagged commit, builds the Flatpak with Flatpak's own GitHub
 action on an x86_64 and an aarch64 runner, and publishes a Release carrying
 `kjerag-0.2.0-x86_64.flatpak`, `kjerag-0.2.0-aarch64.flatpak` and a `.sha256`
 for each, with notes GitHub generates from what merged since the last tag.
-About ten minutes; the two builds run side by side. Then check what shipped:
+About ten minutes; the two builds run side by side. Then check what shipped,
+which is not the same question as whether it builds:
 
 ```sh
 gh release download 0.2.0
 flatpak install --user ./kjerag-0.2.0-x86_64.flatpak
-flatpak run dev.harding.Kjerag
+KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh ~/Videos/<file>.insv
 ```
+
+That last line is the release check. The dry run above proved a **binary**
+opens a window on this box; this proves the **bundle** plays real footage
+inside the sandbox, where the Mesa, the ffmpeg and the libva are the runtime's
+and not this machine's, and where the file arrives the way flatpak hands one
+over. 0.1.1 shipped with nothing between those two: it was installed, started
+by hand, and seen to draw. Starting is not playing, and the sandbox is where
+the frame path is least like the one the dry run tested.
 
 Only the x86_64 half is ever checked that way. The aarch64 bundle is compiled
 and unit tested by CI and run by nobody: no GPU on a runner, and no aarch64

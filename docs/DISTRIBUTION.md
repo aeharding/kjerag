@@ -909,6 +909,117 @@ Tooling used to get here, all `--user`, no root and no system packages:
 `org.flatpak.Builder`, `org.freedesktop.Sdk.Extension.rust-stable//25.08`,
 `org.freedesktop.Sdk.Extension.llvm21//25.08`.
 
+### 3.9 The 0.1.1 bundle, measured after the fact
+
+Every build above was checked by starting it. **None of them was ever asked
+to play anything**, and 0.1.1 shipped on the strength of a window and a
+`--version` line. This is the measurement that was missing, taken on
+2026-08-01 against the published `kjerag-0.1.1-x86_64.flatpak` downloaded
+from its own release, on the §1 test bench of docs/research/gpu-pipeline.md.
+
+**It plays**, and **the mode catches what it was built to catch.**
+`KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh <file>` (the mode
+docs/RELEASING.md now calls the release check) against real X4 Air footage,
+with the harness as it stands today: **32 checks, 6 failed**, against the
+native path's **32 checks, 2 failed** in the same session. Two of the six are
+the harness's standing flakes, the toast placement and `ctrl+v`. **The other
+four are real, and all four are the bundle being four weeks old**:
+
+```
+FAIL  an open with no frame yet draws the backdrop
+      the pane drew the test pattern: its mirrored halves read
+      41 98 212 and 170 98 211, which no picture is
+FAIL  a GoPro file is refused by name
+      ... not shown: file has no video stream
+FAIL  an .osv with nothing in it is still named
+FAIL  escape takes the alert away and leaves the window as it was
+```
+
+The first is the owner's own report of 0.1.1 read back to us by a machine:
+the test pattern in the picture area with no frame yet, which issue #100's
+backdrop replaced. The other three are the format refusal of issue #107,
+which 0.1.1 also predates. All four are fixed on `main` and all four pass on
+the native path, which is the control: the checks are not broken, the bundle
+is old. **That is the whole argument for this mode.** Every one of these was
+reachable by a machine on release day and none of them was asked.
+
+Directly under `cage`, the same bundle on a 3840x3840 X4 Air file and a
+2880x2880 ONE X2 file:
+
+```
+device: dmabuf import: all extensions enabled
+play:      9.90 s, 30.00 fps presented in 30.2 redraws/s, 0 dropped,
+           0 starved, sound +3.1 ms, 0 underruns
+```
+
+Zero-copy, not the copy fallback: that line is the import's own, and it says
+`all extensions enabled` rather than naming one that is missing. Sustained
+45 s, both cameras, and the same numbers whether the path arrived on the
+command line or as a document-portal path.
+
+**What the sandbox brings its own of**, all measured inside it and all
+different from the host:
+
+| | host | sandbox (runtime 25.08) |
+|---|---|---|
+| Mesa (radeonsi + RADV) | 25.2.8 | **26.1.5** |
+| ffmpeg | 6.1.1 system, 7.1 from the PPA | **7.1.3**, the runtime's |
+| libva | 2.20.0 | **2.22.0** |
+| HEVC decoder | present | **present**, in the base runtime |
+
+The frame path in the sandbox therefore runs on a different Mesa and a
+different libva from the ones every number in docs/research was taken on, and
+it behaves the same. Two details worth keeping:
+
+- **The VA driver is found through the GL extension, not `/usr/lib/.../dri`.**
+  In the sandbox that directory holds only `intel-vaapi-driver` and
+  `nvidia-vaapi-driver` subdirectories; libva's fourth candidate,
+  `/usr/lib/x86_64-linux-gnu/GL/lib/dri/radeonsi_drv_video.so`, is the one
+  that opens. A sandbox without `org.freedesktop.Platform.GL.default` has no
+  VA-API at all.
+- **HEVC needs no `codecs-extra` extension here.** The base runtime's
+  libavcodec 61.19.101 carries the `hevc` decoder, which is what §3.3 found
+  and what `strings::open_failed` names as the thing to install if it ever is
+  not.
+
+**A by-name grant is resolved against the caller's environment, which is what
+lets the harness test the shipped sandbox without writing to the desktop**
+[measured]. `--filesystem=xdg-config/cosmic` follows the launching process's
+`XDG_CONFIG_HOME`, `--filesystem=~/.local/state/cosmic` follows its `HOME`
+(and not `XDG_STATE_HOME`, which is a different directory and is ignored for
+this), and `~/.var/app/<id>` follows `HOME` as well, flatpak's own `.ld.so`
+cache included. Point those two variables at a scratch directory and the real
+`~/.config/cosmic` is **not bound into the sandbox at all**: the app still
+holds the grant, and there is nothing behind it. Proven by running the bundle
+on real footage with the redirect in place and comparing the developer's own
+directories byte for byte:
+
+```
+real Kjerag settings before: 38559f9c3810d988
+play lines: 4
+real Kjerag settings after:  38559f9c3810d988
+scratch: .../cosmic/dev.harding.Kjerag/v1/{seam_pool,recent_files}
+```
+
+One trap in that: flatpak **skips a by-name bind whose source does not
+exist**, so a scratch `~/.local/state/cosmic` that has not been created is not
+an empty grant, it is an absent one, and the app quietly has no state
+directory. `scripts/uitest.sh` makes both before it boots anything.
+
+**One real defect the run turned up, and it is not about frames.** Footage
+whose two lenses are two files (ONE X2: `..._00_001.insv` beside
+`..._10_001.insv`) opened through the file chooser gets only the file the
+pilot picked, because the document portal exports one document, and the app
+says nothing about it:
+
+```
+lens:   Insta360 ONE X2 ..., sampling 1 of 2 calibrated
+media:  1 lens stream, 2880x2880, ...
+```
+
+Half the sphere, silently, in the sandbox only. The same path passed on the
+command line with `--filesystem` gives `2 lens streams from 2 files`.
+
 ---
 
 ## 4. Publishing
