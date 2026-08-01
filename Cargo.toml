@@ -81,6 +81,7 @@ url = "2"
 # the ones winit already resolved, so nothing new enters the lock file.
 wayland-client = "0.31"
 wayland-protocols = "0.32"
+wayland-protocols-misc = "0.3"
 wayland-protocols-wlr = "0.3"
 
 [workspace.dependencies.libcosmic]

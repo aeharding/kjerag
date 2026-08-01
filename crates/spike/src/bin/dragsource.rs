@@ -61,6 +61,8 @@ use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum, deleg
 use wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
 use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
+use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
+use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
 use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1;
 use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1;
 
@@ -89,6 +91,15 @@ const STEPS: i64 = 8;
 /// A drag the compositor never answers is a broken session rather than a
 /// failed check, and every wait here is one the app cannot lengthen.
 const REPLY: Duration = Duration::from_secs(5);
+
+/// How long the target is given to answer something the compositor told it
+/// about, where the answer is not an event this can wait for.
+const SETTLE: Duration = Duration::from_millis(500);
+
+/// How long each step of the drag is held. A drag by hand is half a second
+/// of motion and a target is another process: at machine speed the whole
+/// drag is over before it has looked at it.
+const BEAT: Duration = Duration::from_millis(40);
 
 fn main() -> ExitCode {
     match run() {
@@ -130,6 +141,20 @@ fn run() -> Result<ExitCode, String> {
     pump(&mut queue, &mut state, REPLY, |s| s.configured)?;
     state.paint(&qh)?;
 
+    // Before the pointer, and not only because a drag needs one. A window
+    // receives a drag over a `wl_data_device`, libcosmic creates one only
+    // while the seat has a keyboard (smithay-clipboard `src/state.rs:323-333`),
+    // and a headless session has no input devices at all, so a target booted
+    // in one has nowhere for a drop to arrive. Measured: with no keyboard in
+    // the session neither this app nor cosmic-files ever calls
+    // `get_data_device`, and every drag ends cancelled with nothing having
+    // answered it.
+    let _keyboard = state.virtual_keyboard(&qh)?;
+    pump(&mut queue, &mut state, REPLY, |s| s.has_keyboard)?;
+    // The target creates its data device on hearing about the keyboard, which
+    // is a round trip in somebody else's process.
+    std::thread::sleep(SETTLE);
+
     let pointer = state.virtual_pointer(&qh)?;
     pump(&mut queue, &mut state, REPLY, |s| s.pointer.is_some())?;
 
@@ -138,6 +163,31 @@ fn run() -> Result<ExitCode, String> {
         "dragsource: our window is at {},{} and the output is {}x{}",
         window.0, window.1, state.output.0, state.output.1
     );
+
+    // Nothing below can tell a target that refuses a drop from a drop that
+    // landed back on us, so the drop point is checked before the drag: the
+    // pointer has to leave our own window to reach somebody else's.
+    let (drop_x, drop_y) = state.away_from(window);
+    state.warp(&pointer, drop_x, drop_y);
+    queue.roundtrip(&mut state).map_err(reply)?;
+    if state.entered.is_some() {
+        return Err(format!(
+            "our own window is still under the pointer at {drop_x},{drop_y}, so a drop \
+there would be a drop on ourselves"
+        ));
+    }
+
+    // One click on the target before the drag, which every desktop session
+    // has had and this one has not. libcosmic reads a drop through the seat
+    // its last input event came from and gives up when there has been none
+    // ("no events received on any seat", smithay-clipboard
+    // `src/dnd/state.rs:417-423`): a window in a headless session has been
+    // sent no key and no button, so it accepts the drop and then reads
+    // nothing from it. On a desktop the same window has at least been focused
+    // once, which is a modifiers event, and this is the harness's stand-in
+    // for that.
+    state.click(&pointer);
+    queue.roundtrip(&mut state).map_err(reply)?;
 
     let (grab_x, grab_y) = (window.0 + WINDOW as u32 / 2, window.1 + WINDOW as u32 / 2);
     state.warp(&pointer, grab_x, grab_y);
@@ -149,14 +199,22 @@ fn run() -> Result<ExitCode, String> {
     state.start_drag(&qh, grab)?;
     println!("dragsource: the drag is up, moving to the drop");
 
-    let (drop_x, drop_y) = state.away_from(window);
     for step in 1..=STEPS {
         let at = |from: u32, to: u32| {
             (i64::from(from) + (i64::from(to) - i64::from(from)) * step / STEPS) as u32
         };
         state.warp(&pointer, at(grab_x, drop_x), at(grab_y, drop_y));
         queue.roundtrip(&mut state).map_err(reply)?;
+        std::thread::sleep(BEAT);
     }
+
+    // Letting go before the target has answered is a cancelled drag whatever
+    // the target would have said: wlroots drops on a release only if the
+    // destination has already accepted a mime type and an action
+    // (`types/data_device/wlr_drag.c`), and the answer is a round trip
+    // through another process. A drag by hand takes half a second and never
+    // meets this; a drag by machine met it on the first run.
+    let _ = pump(&mut queue, &mut state, REPLY, |s| !s.accepted.is_empty());
     pointer.button(state.stamp(), BTN_LEFT, ButtonState::Released);
     pointer.frame();
     println!("dragsource: dropped at {drop_x},{drop_y}");
@@ -269,6 +327,7 @@ struct State {
     seat: Option<WlSeat>,
     wm_base: Option<XdgWmBase>,
     devices: Option<WlDataDeviceManager>,
+    keyboards: Option<ZwpVirtualKeyboardManagerV1>,
     pointers: Option<ZwlrVirtualPointerManagerV1>,
     globals: Vec<(u32, String, u32)>,
 
@@ -277,6 +336,9 @@ struct State {
     pointer: Option<WlPointer>,
     output: (u32, u32),
     configured: bool,
+    /// Whether the seat has a keyboard, which is what the target watches for
+    /// before it creates the data device a drag is delivered over.
+    has_keyboard: bool,
 
     /// The serial of a press over our own window, which is the one thing a
     /// compositor will start a drag from.
@@ -288,6 +350,8 @@ struct State {
     clock: Instant,
 
     payloads: Vec<(String, Vec<u8>)>,
+    /// Every answer the target gave to an offer while the drag was over it.
+    accepted: Vec<Option<String>>,
     read: Vec<String>,
     dropped: bool,
     finished: bool,
@@ -302,6 +366,7 @@ impl State {
             seat: None,
             wm_base: None,
             devices: None,
+            keyboards: None,
             pointers: None,
             globals: Vec::new(),
             surface: None,
@@ -309,11 +374,13 @@ impl State {
             pointer: None,
             output: (1280, 720),
             configured: false,
+            has_keyboard: false,
             grab: None,
             entered: None,
             at: (0, 0),
             clock: Instant::now(),
             payloads,
+            accepted: Vec::new(),
             read: Vec::new(),
             dropped: false,
             finished: false,
@@ -336,6 +403,9 @@ impl State {
                 "wl_data_device_manager" => {
                     self.devices = Some(registry.bind(name, version.min(3), qh, ()));
                 }
+                "zwp_virtual_keyboard_manager_v1" => {
+                    self.keyboards = Some(registry.bind(name, version.min(1), qh, ()));
+                }
                 "zwlr_virtual_pointer_manager_v1" => {
                     self.pointers = Some(registry.bind(name, version.min(1), qh, ()));
                 }
@@ -351,6 +421,7 @@ impl State {
             ("wl_seat", self.seat.is_none()),
             ("xdg_wm_base", self.wm_base.is_none()),
             ("wl_data_device_manager", self.devices.is_none()),
+            ("zwp_virtual_keyboard_manager_v1", self.keyboards.is_none()),
             ("zwlr_virtual_pointer_manager_v1", self.pointers.is_none()),
         ];
         match missing.iter().find(|(_, missing)| *missing) {
@@ -389,6 +460,18 @@ impl State {
         Ok(())
     }
 
+    /// A keyboard the session has no device for, so that the seat has the
+    /// capability the target's data device hangs off. No keymap is set and no
+    /// key is ever sent: what is wanted is the device, not the typing.
+    fn virtual_keyboard(&mut self, qh: &QueueHandle<Self>) -> Result<ZwpVirtualKeyboardV1, String> {
+        let seat = self.seat.as_ref().ok_or("no seat")?;
+        let keyboards = self
+            .keyboards
+            .as_ref()
+            .ok_or("no virtual keyboard manager")?;
+        Ok(keyboards.create_virtual_keyboard(seat, qh, ()))
+    }
+
     fn virtual_pointer(&mut self, qh: &QueueHandle<Self>) -> Result<ZwlrVirtualPointerV1, String> {
         let seat = self.seat.as_ref().ok_or("no seat")?;
         let devices = self.devices.as_ref().ok_or("no data device manager")?;
@@ -398,6 +481,15 @@ impl State {
         // session has no input devices, and the capability is what the
         // wl_pointer below is asked for on.
         Ok(pointers.create_virtual_pointer(Some(seat), qh, ()))
+    }
+
+    /// A press and a release where the pointer already is.
+    fn click(&mut self, pointer: &ZwlrVirtualPointerV1) {
+        pointer.button(self.stamp(), BTN_LEFT, ButtonState::Pressed);
+        pointer.frame();
+        std::thread::sleep(BEAT);
+        pointer.button(self.stamp(), BTN_LEFT, ButtonState::Released);
+        pointer.frame();
     }
 
     fn stamp(&self) -> u32 {
@@ -463,6 +555,14 @@ impl State {
     }
 
     fn verdict(&self) -> ExitCode {
+        // What the target accepted on the way, which is the difference
+        // between a window that never saw the drag and one that saw it and
+        // would not have it.
+        match self.accepted.last() {
+            Some(Some(mime)) => println!("dragsource: the target accepted {mime} while dragging"),
+            Some(None) => println!("dragsource: the target refused every mime type offered"),
+            None => println!("dragsource: no window ever answered the drag"),
+        }
         for mime in &self.read {
             println!("dragsource: the target read it as {mime}");
         }
@@ -473,7 +573,7 @@ impl State {
                 ExitCode::from(1)
             }
             (true, _, true) => {
-                println!("dragsource: the drag was cancelled, so nothing was over a destination");
+                println!("dragsource: the drag was cancelled, so nothing took the drop");
                 ExitCode::from(1)
             }
             _ => {
@@ -575,10 +675,11 @@ impl Dispatch<WlSeat, ()> for State {
         let wl_seat::Event::Capabilities { capabilities } = event else {
             return;
         };
-        let has_pointer = capabilities
-            .into_result()
-            .is_ok_and(|c| c.contains(Capability::Pointer));
-        if has_pointer && state.pointer.is_none() {
+        let Ok(capabilities) = capabilities.into_result() else {
+            return;
+        };
+        state.has_keyboard = capabilities.contains(Capability::Keyboard);
+        if capabilities.contains(Capability::Pointer) && state.pointer.is_none() {
             state.pointer = Some(seat.get_pointer(qh, ()));
         }
     }
@@ -622,6 +723,7 @@ impl Dispatch<WlDataSource, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
+            wl_data_source::Event::Target { mime_type } => state.accepted.push(mime_type),
             // The one measurement this instrument exists for: what the target
             // asked for, out of everything it was offered.
             wl_data_source::Event::Send { mime_type, fd } => {
@@ -722,5 +824,7 @@ delegate_noop!(State: ignore WlBuffer);
 delegate_noop!(State: ignore WlDataDeviceManager);
 delegate_noop!(State: ignore WlDataOffer);
 delegate_noop!(State: ignore XdgToplevel);
+delegate_noop!(State: ignore ZwpVirtualKeyboardManagerV1);
+delegate_noop!(State: ignore ZwpVirtualKeyboardV1);
 delegate_noop!(State: ignore ZwlrVirtualPointerManagerV1);
 delegate_noop!(State: ignore ZwlrVirtualPointerV1);

@@ -42,7 +42,13 @@ tokio = { workspace = true, features = ["rt", "net", "time"] }
 url = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true, features = ["client"] }
-# The pointer. A headless session has no input devices, so the button the drag
-# is started from comes from the virtual pointer protocol, which is the one
-# cage offers (`wlr_virtual_pointer_manager_v1_create`).
+# The keyboard, which a drop turns out to need: libcosmic creates the
+# `wl_data_device` a drag is delivered over only while the seat has a keyboard
+# capability (smithay-clipboard `src/state.rs:323-333`), and a headless
+# session has no input devices at all. The instrument holds one open so the
+# target has somewhere to receive the drag.
+wayland-protocols-misc = { workspace = true, features = ["client"] }
+# The pointer, for the same reason: the button the drag is started from comes
+# from the virtual pointer protocol, which is the one cage offers
+# (`wlr_virtual_pointer_manager_v1_create`).
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
