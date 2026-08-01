@@ -300,16 +300,25 @@ fn crossover(reads: &[Read]) {
     if !widest_first.is_empty() {
         println!(
             "\n           the widest of them, to point a render at. `at` is seconds into the \n\
-             file; `phi` is the azimuth round the seam circle, which is a view yaw with the \n\
-             horizon lock off.\n\n\
-             \x20          {:>7} {:>8} {:>7} {:>10} {:>9} {:>9}",
-            "frame", "at", "phi", "applied", "band", "cut px",
+             file. `view` is where to stand to see that azimuth: the seam circle runs through \n\
+             the zenith, because the two lens axes are horizontal, so it is reached by PITCH \n\
+             and not by yaw (measured 2026-08-01 with mode=trace, which is what to check it \n\
+             with again).\n\n\
+             \x20          {:>7} {:>8} {:>7} {:>10} {:>9} {:>9}   {}",
+            "frame", "at", "phi", "applied", "band", "cut px", "view (lock=0)",
         );
         for (frame, index, applied) in widest_first.iter().take(8) {
+            let phi = *index as f64 / AZIMUTHS as f64 * 360.0;
+            // phi = -pitch at yaw 90, and the half of the circle a pitch
+            // cannot reach is the same view turned round.
+            let (yaw, pitch) = match phi > 90.0 && phi < 270.0 {
+                true => (270.0, phi - 180.0),
+                false => (90.0, -phi),
+            };
             println!(
-                "           {frame:>7} {:>7.2}s {:>6.0}d {:>9.3}d {:>8.3}d {:>9.1}",
+                "           {frame:>7} {:>7.2}s {phi:>6.0}d {:>9.3}d {:>8.3}d {:>9.1}   \
+                 yaw {yaw:.0} pitch {pitch:.0}",
                 reads[*frame].at.as_secs_f64(),
-                *index as f64 / AZIMUTHS as f64 * 360.0,
                 f64::from(applied.to_degrees()),
                 f64::from(last.mapped.crossover_at(*applied).to_degrees()),
                 cut(*applied) * VIEW_PX_PER_DEG,
