@@ -1000,6 +1000,9 @@ struct Live {
 /// reads its result.
 struct Band {
     pipeline: wgpu::ComputePipeline,
+    /// The second dispatch of the same pass: what the ring just read, pooled
+    /// into one exposure for the picture (issue #103, stage 3).
+    pool: wgpu::ComputePipeline,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1009,6 +1012,13 @@ struct Band {
     read: wgpu::BindGroup,
     /// Set by an instrument to stop measuring (`ScenePipeline::hold_band`).
     held: bool,
+    /// Set by an instrument to leave the exposure alone
+    /// (`ScenePipeline::hold_tone`). The ring is still measured and the bend
+    /// is still applied; only the pooling is not dispatched, so the header
+    /// stays at the zero it was created in and `tone_split` returns exactly
+    /// one on both sides. That is the picture stage 2 drew, and it is how a
+    /// before and after differ by this stage and by nothing else.
+    tone_held: bool,
     /// Which round of the circle the next frame reads.
     slice: u32,
     /// Where the last measured frame sat in the film, so the next one knows
@@ -1141,6 +1151,14 @@ impl ScenePipeline {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, &self.band.group, &[]);
             pass.dispatch_workgroups(band::GROUPS, 1, 1);
+            // One workgroup over the state the dispatch above just wrote.
+            // Two dispatches of one pass are ordered against each other by
+            // WebGPU itself, so what this pools is this frame's readings and
+            // no barrier has to be asked for.
+            if !self.band.tone_held {
+                pass.set_pipeline(&self.band.pool);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
         }
         queue.submit([encoder.finish()]);
     }
@@ -1319,6 +1337,17 @@ impl ScenePipeline {
         self.band.held = held;
     }
 
+    /// Stop pooling the exposure, which leaves the gain at exactly one and
+    /// draws the picture stage 2 drew (issue #103, stage 3).
+    ///
+    /// The same instrument-only switch as [`Self::hold_band`] and for the same
+    /// reason: a before and after have to differ by one thing. The band is
+    /// still measured and the bend still applied, so what moves between the
+    /// two renders is the exposure alone.
+    pub fn hold_tone(&mut self, held: bool) {
+        self.band.tone_held = held;
+    }
+
     /// The band as it stands, for an instrument. `None` where the device
     /// cannot map a buffer back, which is not a case the player has.
     ///
@@ -1330,7 +1359,14 @@ impl ScenePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Fallible<Vec<band::Cell>> {
-        self.band.read(device, queue)
+        Ok(self.band.read(device, queue)?.1)
+    }
+
+    /// The pooled exposure the pass is drawing with, for an instrument
+    /// (issue #103, stage 3). Same readback, same caveat: a stall, and no
+    /// shipped path takes it.
+    pub fn band_tone(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<band::Tone> {
+        Ok(self.band.read(device, queue)?.0)
     }
 
     /// Imports a newly delivered pair and points the bind group at it. A
@@ -1393,14 +1429,18 @@ impl Band {
             immediate_size: 0,
         });
         let reading = read_layout(device);
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("band"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("measure"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let compute = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("band"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let pipeline = compute("measure");
+        let pool = compute("pool");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1439,11 +1479,13 @@ impl Band {
         });
         Self {
             pipeline,
+            pool,
             state,
             watch,
             group,
             read,
             held: false,
+            tone_held: false,
             slice: 0,
             at: None,
         }
@@ -1478,7 +1520,11 @@ impl Band {
 
     /// The state copied back to the CPU. For instruments only: see
     /// [`ScenePipeline::band_state`].
-    fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Vec<band::Cell>> {
+    fn read(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Fallible<(band::Tone, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1494,23 +1540,27 @@ impl Band {
             submission_index: Some(submission),
             timeout: None,
         })?;
-        let cells = slice
-            .get_mapped_range()
-            .chunks_exact(std::mem::size_of::<band::Cell>())
-            .map(|bytes| {
-                let read = |at: usize| {
-                    f32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-                };
+        let mapped = slice.get_mapped_range();
+        let float = |at: usize| {
+            f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
+        };
+        let tone = band::Tone::read(float(0), float(4));
+        let cells = (0..band::AZIMUTHS)
+            .map(|index| {
+                let at = band::CELLS_AT + index * std::mem::size_of::<band::Cell>();
                 band::Cell {
-                    disparity: read(0),
-                    confidence: read(4),
-                    reach_m: read(8),
-                    off_epi: read(12),
+                    disparity: float(at),
+                    confidence: float(at + 4),
+                    reach_m: float(at + 8),
+                    off_epi: float(at + 12),
+                    tone: float(at + 16),
+                    lit: float(at + 20),
                 }
             })
             .collect();
+        drop(mapped);
         readback.unmap();
-        Ok(cells)
+        Ok((tone, cells))
     }
 }
 
@@ -1721,12 +1771,18 @@ fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
 fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
+  // What the two lenses' exposures have to be brought together by, split
+  // between them (issue #103, stage 3). One uniform read for the whole draw,
+  // and exactly 1.0 on both sides until something has been measured, so the
+  // weights below are the weights this pass has always used and a picture
+  // with no reading behind it is the picture stage 2 drew.
+  let tone = tone_split();
   if mix.weights[0] > 0.0 {
-    rgb += mix.weights[0] * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
+    rgb += (mix.weights[0] * tone.x) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += mix.weights[1] * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    rgb += (mix.weights[1] * tone.y) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
     total += mix.weights[1];
   }
   // The room around the ball, written rather than painted: transparent black,

@@ -16,7 +16,7 @@ mod offscreen;
 mod picture;
 mod skyline;
 
-pub use kjerag_media::{Pair, Plane, Walk};
+pub use kjerag_media::{Chroma, Pair, Plane, Walk};
 pub use offscreen::{Gpu, Offscreen};
 pub use picture::{Difference, FORMAT, Picture, Render, aspect};
 pub use skyline::{Skyline, skyline};

@@ -332,13 +332,31 @@ and lands an ulp short: on RADV that ulp reached the picture as one code
 on 6 pixels of a million, which is enough to stop a one-stream file from
 rendering the bytes it used to.
 
-Exposure is **not** corrected. The trailer carries both lenses'
-per-frame shutter (records 4 and 12, parsed by `kjerag-meta` and kept
-apart), but the two lenses trade shutter against sensor gain to reach the
-same picture brightness, so that ratio is not a brightness ratio: applying
-the symmetric split it implies makes the step across the seam four to
-twenty times worse. Measured on two 30-minute captures;
-docs/research/insv-format.md 6.3 has the method and the table.
+Exposure is corrected, but not from the shutter records (issue #103, stage
+3). The trailer carries both lenses' per-frame shutter (records 4 and 12,
+parsed by `kjerag-meta` and kept apart) and it is **not** a brightness ratio:
+the two lenses trade shutter against sensor gain to reach the same picture
+brightness, and applying the symmetric split that ratio implies makes the step
+across the seam four to twenty times worse (6.3).
+
+What is corrected is what the band **measures**. The same compute pass that
+lines the two lenses up on the same content reads how much brighter one of
+them drew it, which is a question only that alignment makes answerable: the
+correlation that finds the shift is invariant to a brightness change, so the
+shift is not moved by the exposure and the exposure read at that shift is not
+moved by the shift. One workgroup then pools the ring into a single gain and
+`Tone::split` halves it between the two lenses, so neither hemisphere carries
+the whole change.
+
+Three things about it are measured rather than chosen, and
+docs/research/insv-format.md 6.10 has the tables: it is pooled from the **far
+field only**, at the band's own knee, because a near-field direction's
+photometry reads the alignment rather than the exposure; it is a **least
+squares in codes**, which is the only one of three poolings that lowers the
+step on all nine captures tried; and it is smoothed at the constant the far
+field already uses, so nothing was added for it. A file with one lens stream,
+and every frame before the first reading, take a gain of exactly zero and draw
+byte-identical pictures.
 
 The forward map exists twice, in `crates/render/src/projection.rs`: once in
 WGSL for the GPU and once in Rust so `cargo test` can check known angles

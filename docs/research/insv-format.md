@@ -2631,3 +2631,185 @@ the seam from **0.930 to 0.954**. Also recorded because it was wrong in the
 record: TEST.mp4 is the first 20.22 s of `VID_20260501_183417_00_003.insv`, not
 of `_00_001`, settled by cross-correlating the two files' own audio (r = 1.000
 at offset 0.0 s against 0.64 and 0.67 on the other parts).
+
+### 6.10 The exposure step is one gain, and only on the far field (issue #103, stage 3)
+
+**Confidence: HIGH for the method and the controls, HIGH for the gain, MED for
+what is left over.** Measured 2026-08-01 with `kjerag-spike --bin expose` on
+six of the owner's captures and on an X5, an X4 and an X3 from other shooters.
+
+**Everything 6.3 says about a measured brightness step is superseded, and
+nothing in it was used to build this.** The whole earlier exposure corpus was
+audited and refused (issue #103): three populations in one column, rows that
+do not divide, and a "flat sky, +1.28 percent" claim with no sky measurement
+under it. What survives of 6.3 is its negative result, which this stage did
+not re-test and does not contradict: the shutter records are not a brightness
+ratio, and the symmetric split they imply is four to twenty times worse than
+the artifact.
+
+#### The method, and what makes it new
+
+An exposure step and a misregistration are the same picture. 6.3 tried to
+separate them by sampling "the same world directions" in two annuli of the
+delivered frames, on the argument that the two annuli hold the same content
+permuted by roll. They do not: the calibration is out by 2.4 degrees at the
+seam (6.8, measured after 6.3 was written), and after it is corrected the two
+lenses still differ by the parallax of whatever is there (6.9). Two annuli of
+"the same directions" are two pictures of different content, and their ratio
+is whatever the scene's own gradient makes it.
+
+Stage 2 created the capability that fixes this. The band measures, per
+direction and per frame, the shift that makes the two lenses' pictures **the
+same content**, and the estimator that finds it is zero-mean normalized
+cross-correlation, which is invariant under `b -> g*b + o`. So the alignment
+cannot be moved by the brightness difference, and the brightness read at that
+alignment is not contaminated by the alignment. The two questions are
+orthogonal by construction rather than by hope.
+
+#### The controls, and one of them changed the design
+
+Every control is the same measurement with different sampling directions
+rather than a second code path:
+
+| trial | ln gain | has to be |
+| --- | ---: | --- |
+| the measurement | -0.0119 | - |
+| the same patches, NOT lined up first | -0.0141 | - |
+| lens 0 against its own picture, same directions | 0.0000 | 0.0000 |
+| lens 0 against its own picture, at the found shift | -0.0255 | 0.0000 |
+| a gain of 0.95 injected into lens 1 | -0.0632 | -0.0632 |
+| a gain of 1.05 injected into lens 1 | +0.0369 | +0.0369 |
+
+The injections come back exactly. The fourth row is the one that matters: it
+holds all of the misregistration and none of the exposure, and it reads twice
+what the measurement does, which says a window displaced by that much reports
+a brightness that is not one. What bounds the real error is not that row but
+the slope of the reading against a deliberate misalignment, measured at 0.005
+to 0.15 ln per degree depending on the capture. At the 0.02 degree far-field
+residual the band leaves (6.9), that is 0.0001 to 0.003 ln of confound under a
+reading of 0.005 to 0.05.
+
+**Pooling per-patch ratios was measured out by that slope and pooling totals
+was measured in**: 0.0370 ln per degree against 0.0013 on the same frames, a
+factor of 28. A displaced window's error is a boundary term, so it falls as
+the window widens, and pooling the ring's totals makes the ring one window.
+
+#### What the difference actually is: a gain, plus something that is not
+
+Fitted over patches spanning 17 to 243 codes, three models, on the same
+readings. A gain is what an exposure difference is; an offset is what veiling
+glare, a black-level pedestal and a difference in the toe of the tone curve
+are. They are indistinguishable on any one patch.
+
+The cut that decides is **how far the alignment had to move lens 1**, because
+near-field content moves by degrees, is what the darkest patches on a flight
+are made of, and is where an alignment is hardest:
+
+| capture | cut | gain alone | offset alone | both |
+| --- | --- | ---: | ---: | ---: |
+| owner 05-26, one instant | all | 2.68 | 2.35 | **1.42** |
+| owner 05-26, one instant | far field only | 1.99 | 2.01 | 1.99 |
+| corpus X4 | all | 11.96 | 10.96 | **8.75** |
+| corpus X4 | far field only | 0.53 | 0.53 | 0.53 |
+
+Residual in codes. **The additive term is a near-field artifact on every
+capture but one.** It is several codes when the near field is included and
+gone when it is not, so what read as veiling glare in a lens with the sun in
+it was the alignment of a boot. The exception is the X3, where an offset near
+-9 codes survives the cut and a gain cannot reach it; that camera is also the
+one stage 2 reads the worst far-field residual on, so the two may be one
+finding.
+
+**This is what the old corpus's three inconsistent gains were.** A
+two-parameter difference read with a one-parameter estimator returns an answer
+that depends entirely on the brightness of whatever content that estimator
+weighted, and how much near-field content a seam holds is a property of the
+capture. Three captures, three numbers, no bug.
+
+#### What ships, and why each part of it
+
+One gain, pooled from the ring, split symmetrically. Three choices, each made
+by the table rather than by the plan:
+
+| capture | readings | nothing | least squares | equal-weight logs | ratio of totals | gain read |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| owner 05-26 | 175 | 2.101 | **2.041** | 2.094 | 2.045 | 0.9963 |
+| owner 05-01 | 130 | 2.590 | **2.582** | 3.815 | 2.712 | 0.9983 |
+| owner 07-14 | 71 | 1.538 | **1.402** | 1.616 | 1.414 | 1.0044 |
+| owner 07-25 | 137 | 1.769 | **1.401** | 1.405 | 1.402 | 0.9938 |
+| owner 10-18a | 4 | 15.536 | **13.271** | 17.083 | 14.066 | 0.9477 |
+| owner 10-18b | 2 | 9.832 | **4.776** | 4.794 | 4.780 | 0.9076 |
+| corpus X5 | 831 | 4.654 | **3.086** | 3.200 | 3.088 | 0.9743 |
+| corpus X4 | 160 | 1.613 | **1.613** | 1.795 | 1.636 | 1.0002 |
+| corpus X3 | 812 | 10.685 | **8.439** | 16.535 | 9.508 | 0.9457 |
+
+Residual step in codes, over the directions the pass pools, whole captures,
+five places spread through each. **Least squares in codes is best or tied on
+all nine**; an equal-weight average of log ratios is worse than doing nothing
+on four of them, because it leans on exactly the dark patches where the
+difference is least an exposure. The gain runs **0.946 to 1.004** on the seven
+captures with more than seventy readings behind them, which is what
+`band::LIMIT_LN` is four times; the two thin ones ask for 0.908 and 0.948 and
+are admitted whole rather than clipped.
+
+The far-field gate is the band's own `NEAR_KNEE_DEG`, and no constant was
+added for it. Nor was one added for the time constant: the gain is smoothed at
+`TAU_FAR_S`, because two auto-exposure loops on two hemispheres are exactly
+the kind of thing that constant exists for.
+
+#### Vignetting: still not resolved, and now measured fresh
+
+Vignetting is radial and the two lenses see the band from opposite sides, so a
+rolloff appears as a **slope of the log ratio across the band** and a gain
+does not. Measured per capture, in ln per degree:
+
+| capture | slope | spread | standard errors |
+| --- | ---: | ---: | ---: |
+| owner 05-26 | +0.0011 | 0.0137 | 0.7 |
+| owner 05-01 | +0.0024 | 0.0093 | 2.0 |
+| owner 07-14 | -0.0011 | 0.0135 | 0.6 |
+| owner 07-25 | -0.0079 | 0.0298 | 1.6 |
+| corpus X5 | -0.0058 | 0.0208 | 3.1 |
+| corpus X4 | -0.0172 | 0.0387 | 3.3 |
+| corpus X3 | -0.0543 | 0.1165 | 5.0 |
+
+Five of seven are negative, which is the direction a rim rolloff would go. But
+the magnitudes span fifty to one across captures, which no property of a lens
+does, and the per-capture sensitivity to a deliberate misalignment is the same
+order as the reading. **No radial term is resolved, and none ships.** The old
+claim is dead in both directions: there is no measurement here supporting
+"flat, no vignetting" either.
+
+#### Chroma: measured, and under the plane's own resolution
+
+Lens 1's Cb and Cr minus lens 0's, at the seam, in signed 8-bit codes:
+-1.47 to -0.24 (Cb) and -1.19 to -0.15 (Cr) on the owner's four measurable
+captures; +1.76 and -1.69 on the X4; -4.07 and +3.74 on the X3. Through the
+BT.709 matrix the owner's worst is 2.3 codes in one channel. It is not
+corrected: it is a step in a plane the encoder already carries at a quarter of
+the luma resolution because an eye cannot see edges in it, and correcting it
+is two more numbers, two more guards and a second decomposition. Priced, not
+built.
+
+#### What it costs and what it moves
+
+Interleaved runs of `kjerag-spike --bin playback`, 20 s at 2560x1440 under
+live decode, through the null sink: `noband` 6.36 and 6.36 ms per redraw,
+`notone` 6.80 and 6.89, the whole thing 6.84 and 6.90. **Stage 3's own share
+is 0.03 ms**, which is inside the run-to-run spread. 5 to 6 dropped frames and
+0 starved in every arm including `noband`, so the drops belong to the file and
+the box.
+
+Frame to frame the pooled gain moves **0.000114 ln rms** and 0.000574 at
+worst, against the 0.0078 ln that one code at a mid grey of 128 is: 69 and 14
+times under what an 8-bit picture can carry. A known step put in with
+alternating sign comes back at exactly 2s, which is what that column means
+nothing without.
+
+A file with **one lens stream is byte-identical** at every view tried, because
+its ring never correlates, its gain stays exactly zero and `Tone::split`
+answers with an equality rather than an exponential. A two-lens file's
+hemisphere interiors are **not**: they move by at most one code of 255, mean
+0.23 to 0.90 depending on the view. That is the price of the correction and
+not a defect of it - two hemispheres cannot be made to agree without changing
+at least one of them.

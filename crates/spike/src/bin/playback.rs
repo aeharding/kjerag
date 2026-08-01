@@ -77,9 +77,10 @@ fn main() -> Fallible<()> {
     // `luma` is the half of the upgrade the delivered frame's own grid asks
     // for.
     let sample: String = parse(&args, 8, "sharp".to_owned())?;
-    // Issue #103's cost: `noband` holds the per-frame seam measurement off, so
-    // the compute pass's own share of a redraw is the difference between two
-    // runs of this binary rather than between two builds of it.
+    // Issue #103's cost: `noband` holds the per-frame seam measurement off and
+    // `notone` holds stage 3's exposure pooling off while leaving the
+    // measurement on, so each stage's own share of a redraw is the difference
+    // between two runs of this binary rather than between two builds of it.
     let band: String = parse(&args, 9, "band".to_owned())?;
 
     for lookahead in [0, 2, 4] {
@@ -105,6 +106,7 @@ fn main() -> Fallible<()> {
                 _ => Sampling::Sharp,
             },
             band: band != "noband",
+            tone: band != "notone" && band != "noband",
         },
     )
 }
@@ -199,6 +201,10 @@ struct Drawn<'a> {
     /// Whether the per-frame seam band measures (issue #103). Off is the pass
     /// as it was before it, which is what its cost is measured against.
     band: bool,
+    /// Whether the ring's readings are pooled into an exposure (stage 3). Off
+    /// with `band` on is the pass as stage 2 left it, which is what stage 3's
+    /// own share of a redraw is measured against.
+    tone: bool,
 }
 
 fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> Fallible<()> {
@@ -207,6 +213,7 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
         readout,
         sampling,
         band,
+        tone,
     } = drawn;
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
@@ -226,6 +233,8 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
     println!("sample: {sampling:?}");
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     pipeline.hold_band(!band);
+    pipeline.hold_tone(!tone);
+    println!("seam:   band {band}, exposure {tone}");
     let refresh = Duration::from_secs_f64(1.0 / f64::from(hz));
     println!(
         "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{} at yaw {:.0}, \

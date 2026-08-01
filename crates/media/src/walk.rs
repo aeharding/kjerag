@@ -42,11 +42,24 @@ pub struct Pair {
     pub lenses: Vec<Plane>,
 }
 
-/// One stream's luma plane, as the decoder handed it over.
+/// One stream's planes, as the decoder handed them over.
 pub struct Plane {
     pub luma: Vec<u8>,
     pub stride: usize,
     pub size: Size,
+    /// The interleaved Cb/Cr plane at half the resolution each way, or `None`
+    /// where the decoder handed over something that is not NV12.
+    ///
+    /// Only an instrument that asks whether the two lenses disagree about
+    /// **colour** reads this (issue #103, stage 3); everything else on this
+    /// walk is geometry, and geometry is in the luma.
+    pub chroma: Option<Chroma>,
+}
+
+/// One frame's Cb/Cr, interleaved as NV12 writes them.
+pub struct Chroma {
+    pub bytes: Vec<u8>,
+    pub stride: usize,
 }
 
 impl Plane {
@@ -56,7 +69,33 @@ impl Plane {
             luma: bytes.to_vec(),
             stride: stride as usize,
             size,
+            chroma: frame.nv12().then(|| {
+                let (bytes, stride) = frame.plane(1, size.height / 2);
+                Chroma {
+                    bytes: bytes.to_vec(),
+                    stride: stride as usize,
+                }
+            }),
         }
+    }
+
+    /// Cb and Cr at a **luma** pixel, each as a signed offset from neutral in
+    /// 8-bit codes, or `None` outside the picture or on a frame with no
+    /// chroma plane.
+    ///
+    /// Nearest neighbour, and deliberately: the chroma grid is half the luma
+    /// one each way, so a bilinear read of it would mix two colours a whole
+    /// luma pixel apart, and what is being asked here is what colour the
+    /// content at this direction is rather than where its edges are.
+    pub fn chroma_at(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let chroma = self.chroma.as_ref()?;
+        let (column, row) = ((x * 0.5) as usize, (y * 0.5) as usize);
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let at = row * chroma.stride + 2 * column;
+        let pair = chroma.bytes.get(at..at + 2)?;
+        Some((f64::from(pair[0]) - 128.0, f64::from(pair[1]) - 128.0))
     }
 
     /// Bilinear, in delivered-frame pixels. `None` outside the picture, which

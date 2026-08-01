@@ -70,13 +70,14 @@ longitude preference times coverage depth, with no feather width anywhere
 in it, and the hard line and the tone edge where the hemispheres met are
 gone. Near-field structure crossing the seam, which on this footage is the
 wing and the lines, ghosts softly instead of stepping, which is parallax
-and is the expected trade. Exposure is deliberately **not** corrected, and
-that is the finding rather than an omission: the trailer's two shutter
-records are parsed and kept apart (issue #7's other half, and the camera's
-own frame clock for #8), but measured over two 30-minute captures the
-brightness step at the seam is 0.9 to 3.5 percent while the shutter ratio
-swings 0.54 to 1.81, and applying the symmetric split those records imply
-makes the step four to twenty times worse.
+and is the expected trade. Exposure is **not** corrected from the shutter
+records, and that is the finding rather than an omission: the trailer's two
+are parsed and kept apart (issue #7's other half, and the camera's own frame
+clock for #8), but the two lenses trade shutter against sensor gain to reach
+the same picture brightness, so the ratio is not a brightness ratio and the
+symmetric split it implies makes the step four to twenty times worse. It is
+corrected instead from what the band measures on the pixels (issue #103,
+stage 3, docs/research/insv-format.md 6.10).
 
 **The horizon is locked** (issue #8), which is the second M2 item and the
 one the feasibility study called the riskiest correctness surface. The
@@ -685,6 +686,41 @@ live, no keyframe UI ever.
   (1.04 degrees a side on the X4 Air, against 3.22 today). It is priced and
   it is one constant: the ceiling follows `NEAR_DEG` on its own, so there is
   no second number to keep in step.
+
+- 2026-08-01 **The seam's exposure difference is a gain, and only on the far
+  field** (issue #103, stage 3). The whole earlier exposure corpus was refused
+  by the audit, so it was re-instrumented from zero
+  (`kjerag-spike --bin expose`). What made a trustworthy measurement possible
+  is stage 2: the band's alignment is what makes two samples the same content,
+  and the correlation that finds it is invariant to a brightness change, so
+  the two questions are orthogonal by construction. Three findings, each with
+  its own control:
+
+  **The additive term is a near-field artifact.** Fitted across patches
+  spanning 17 to 243 codes, a gain-plus-offset model beats a gain alone by 47
+  percent when near-field directions are included and by nothing at all when
+  they are not. What read as veiling glare in the lens with the sun in it was
+  the alignment of a boot. The one exception is the X3, where an offset near
+  -9 codes survives the cut; that is the priced follow-up.
+
+  **This is what the old corpus's three inconsistent gains were.** A
+  two-parameter difference read with a one-parameter estimator returns an
+  answer set by the brightness of whatever content it weighted, and how much
+  near-field content a seam holds is a property of the capture. Three
+  captures, three numbers, no bug.
+
+  **Pooling per-patch ratios was measured out.** The reading's slope against a
+  deliberate misalignment is 0.0370 ln per degree for an average of per-patch
+  ratios and 0.0013 for a pooling of totals, on the same frames: a displaced
+  window's error is a boundary term and falls as the window widens. Least
+  squares in codes then beat both on all nine captures, and an equal-weight
+  average of log ratios is worse than doing nothing on four of them.
+
+  What ships is one gain, far field only at the band's own knee, least squares
+  in codes, smoothed at the constant the far field already has, split
+  symmetrically. **No constant was added except the runaway guard**, which is
+  four times the widest gain measured. Cost 0.03 ms a redraw; frame-to-frame
+  flicker 69x under one code; one-lens files byte-identical.
 
 - 2026-08-01 **The pinned seam benchmark named the wrong file** (issue #103).
   #87 and #103 both give `VID_20260501_183417_00_001.insv` as the source of
