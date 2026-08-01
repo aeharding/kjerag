@@ -212,6 +212,12 @@ pub enum Message {
     /// hide everything if the pointer has sat still long enough.
     Tick,
     ToggleContextPage(ContextPage),
+    /// The left button went down over the video. cosmic-player takes this as
+    /// the way out of an open dropdown, and as play/pause when none is open
+    /// (`src/main.rs:1507-1513`). Ours does the first half only: the same
+    /// press is the look-around grab, so it cannot also be a transport
+    /// control (docs/UI.md, conflict 1).
+    VideoAreaClick,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -358,11 +364,14 @@ struct Controls {
     shown: bool,
     since: Instant,
     /// The volume slider, which sits in a popup above the row rather than in
-    /// it (cosmic-player `src/main.rs:1777-1807`). It goes when the row goes,
-    /// which cosmic-player does the other way round: it holds the controls up
-    /// for as long as a dropdown is open (`src/main.rs:1627`). Ours cannot,
-    /// because a drag to look around is pointer input, so the row would never
-    /// time out and the dropdown would never close.
+    /// it (cosmic-player `src/main.rs:1777-1807`). Everything that is not the
+    /// slider itself takes it away again: a press in the video, the transport,
+    /// fullscreen, and the row going ([`App::hide_volume`]).
+    ///
+    /// It goes when the row goes, which cosmic-player does the other way
+    /// round: it holds the controls up for as long as a dropdown is open
+    /// (`src/main.rs:1627`). Ours cannot, because a drag to look around is
+    /// pointer input, so the row would never time out.
     volume: bool,
 }
 
@@ -523,7 +532,7 @@ impl cosmic::Application for App {
                 // The popup is laid out against the window, so it does not
                 // survive the window changing shape under it (cosmic-player
                 // `src/main.rs:1190-1193`).
-                self.controls.volume = false;
+                self.hide_volume();
                 self.show_controls(now);
                 let mode = match self.fullscreen {
                     true => Mode::Fullscreen,
@@ -558,6 +567,7 @@ impl cosmic::Application for App {
                 if let Some(open) = &mut self.open {
                     open.scene.toggle_play(now);
                 }
+                self.hide_volume();
                 // A transport control is pointer or key input: the controls
                 // stay up long enough to see what it did.
                 self.show_controls(now);
@@ -581,6 +591,7 @@ impl cosmic::Application for App {
             Message::PastedView(text) => return self.go_to_view(text.as_deref()),
             Message::Seek(seconds) => {
                 let position = Duration::from_secs_f64(seconds.max(0.0));
+                self.hide_volume();
                 let Some(open) = &mut self.open else {
                     return Task::none();
                 };
@@ -595,6 +606,7 @@ impl cosmic::Application for App {
                 open.scene.seek(position, Accuracy::Keyframe);
             }
             Message::SeekRelease => {
+                self.hide_volume();
                 let was_playing = self.dragging.take().unwrap_or(false);
                 if let Some(open) = &mut self.open {
                     open.scene.seek(open.position, Accuracy::Exact);
@@ -661,6 +673,7 @@ impl cosmic::Application for App {
                     self.core.window.show_context = true;
                 }
             }
+            Message::VideoAreaClick => self.hide_volume(),
         }
         Task::none()
     }
@@ -999,6 +1012,15 @@ impl App {
         self.hide_cursor(true);
     }
 
+    /// Take the volume popup away, which everything that is not the slider
+    /// itself does. cosmic-player closes its dropdowns from each of these in
+    /// turn: fullscreen (`src/main.rs:1191-1192`), play and pause (`1253`),
+    /// the scrubber and its release (`1326`, `1348`), and a press in the
+    /// video (`1508-1509`).
+    fn hide_volume(&mut self) {
+        self.controls.volume = false;
+    }
+
     fn hide_cursor(&mut self, hidden: bool) {
         if let Some(open) = &mut self.open {
             open.scene.hide_cursor(hidden);
@@ -1264,12 +1286,18 @@ impl App {
     /// starts the drag that looks around, and a control that fires on press
     /// cannot coexist with a grab that starts on press. Space does it, and so
     /// does the button in the row.
+    ///
+    /// The press still arrives here, and closing the volume popup is what it
+    /// is for (issue #126). The pass does not capture it, deliberately, which
+    /// is what leaves it for this `mouse_area`
+    /// (`kjerag_render`'s widget, `ButtonPressed`).
     fn playing<'a>(&'a self, open: &'a Open) -> Element<'a, Message> {
         let video = widget::mouse_area(
             shader::Shader::new(&open.scene)
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
+        .on_press(Message::VideoAreaClick)
         .on_double_press(Message::Fullscreen);
         let stage = widget::container(video)
             .width(Length::Fill)
