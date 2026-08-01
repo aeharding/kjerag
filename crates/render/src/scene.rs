@@ -145,17 +145,16 @@ pub struct Scene {
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
     /// How many times the shell has changed the window, and what that count
-    /// stood at when a redraw last reached this widget (issue #102).
+    /// stood at when a redraw last reached this widget (issue #102,
+    /// docs/research/blank-paused-window.md).
     ///
     /// A paused window asks for no redraws of its own, so whatever the last
-    /// redraw put on screen is what it holds. Measured under the harness at
-    /// load 18: the redraw that follows the pause key can present a frame
-    /// with none of the window's content in it - probes round the shell's
-    /// view at three levels are not visited for it, while the pipeline's own
-    /// per-present hook is - and the window then holds an empty pane until
-    /// the next key press. The two counts are how it is noticed: the shell
-    /// counts what it does, the widget records the count it drew at, and a
-    /// paused window that has not caught up is a window still owed a redraw.
+    /// redraw put on screen is what it holds - and the redraw that follows
+    /// the pause key can draw a window whose content was never laid out,
+    /// because the widget tree libcosmic rebuilt for it came back one child
+    /// short. The two counts are how the shell notices: it counts what it
+    /// does, the widget records the count it drew at, and a paused window
+    /// that has not caught up is a window still owed one.
     asked: Cell<u64>,
     drawn: Cell<u64>,
 }

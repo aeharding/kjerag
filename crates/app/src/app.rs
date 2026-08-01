@@ -103,16 +103,29 @@ const CONTROLS_TIMEOUT: Duration = Duration::from_secs(2);
 /// around, and for a reframing player that is the normal way to use it.
 const CONTROLS_POLL: Duration = Duration::from_millis(250);
 
-/// How often a paused window is poked to redraw itself while a redraw still
-/// owes it one (issue #102, `Scene::is_settled`).
+/// How often a paused window is rebuilt while it has not yet drawn its frame
+/// (issue #102, docs/research/blank-paused-window.md).
 ///
-/// A paused scene asks for no redraws of its own, so the last frame the
-/// window presented is the one it holds. Measured under the harness at load
-/// 18: the redraw that follows the pause key can present a frame carrying
-/// none of the window's content, and the empty pane then stood for 1.9 s,
-/// until an unrelated key press. This is the poke that ends it, and it stops
-/// as soon as a redraw reaches the widget: measured in the same run, a poke
-/// put one through 1 ms later.
+/// Bringing the controls back adds the header bar to the one column
+/// libcosmic builds the window out of, and the widget tree it rebuilds for
+/// that column can come back **one child short**
+/// (`Tree::diff_children_custom` writes a child inserted in front of an
+/// id-matched child over it instead of inserting it). Everything downstream
+/// walks the widgets and the tree with `zip`, so the content is not laid out,
+/// keeps the 0x0 it was pre-filled with, and is culled from the draw: the
+/// window goes out with the header bar and no video and no control row.
+///
+/// A redraw does not fix it, because the layout is cached in that user
+/// interface; the next **rebuild** does, because by then the tree holds the
+/// header's own id and the content is appended. Any message causes a
+/// rebuild, and while playing the 250 ms [`CONTROLS_POLL`] already supplies
+/// one, which is why this is only ever seen paused. This is that heartbeat
+/// for a paused window, and it stops as soon as a redraw reaches the widget:
+/// measured under the harness at load 18, one poke put a redraw through 1 ms
+/// later.
+///
+/// The defect itself is in the shipped fork rather than here. The one-line
+/// patch and what it would cost to carry are in the research note.
 const SETTLE_POLL: Duration = Duration::from_millis(100);
 
 /// How often the playback report is printed while playing. It is the only
@@ -215,9 +228,10 @@ pub enum Message {
     Surface(cosmic::surface::Action),
     SystemThemeModeChange,
     Theme(AppTheme),
-    /// A paused window has not proved it drew its frame yet (issue #102).
-    /// It carries nothing and does nothing: what it is for is the rebuild
-    /// and the redraw that any message causes.
+    /// A paused window has not drawn its frame yet (issue #102). It carries
+    /// nothing and does nothing: what it is for is the **rebuild** any
+    /// message causes, which is the only thing that re-lays out a window
+    /// whose widget tree came back a child short.
     Settle,
     /// The controls are up and the file is playing: re-read the clock, and
     /// hide everything if the pointer has sat still long enough.
@@ -669,10 +683,10 @@ impl cosmic::Application for App {
                 self.stored.write_config();
                 return cosmic::command::set_theme(app_theme.theme());
             }
-            // Handled by arriving: a message rebuilds the window's view and
-            // asks for a redraw, which is the one thing a paused window that
-            // has not drawn its frame needs. Measured under the harness: a
-            // poke put a redraw through the widget 1 ms later.
+            // Handled by arriving: a message rebuilds the window's view, and
+            // a rebuild is the one thing that re-lays out a window whose tree
+            // came back short. Measured under the harness: a poke put a
+            // redraw through the widget 1 ms later.
             Message::Settle => {}
             Message::Tick => {
                 self.read_clock(now);
@@ -831,10 +845,10 @@ impl App {
     }
 
     /// A file that is not playing and is still owed a redraw (issue #102).
-    /// A playing file redraws itself and needs no help; a paused one asks
-    /// for nothing, so the window holds whatever the last redraw left on it,
-    /// and a redraw that carried none of the window's content leaves an
-    /// empty pane.
+    /// A playing file redraws itself and is rebuilt four times a second by
+    /// [`CONTROLS_POLL`], so a tree that came back short is repaired before
+    /// anyone sees it; a paused one has neither, so an empty pane would
+    /// stand until the pilot pressed something.
     fn is_settling(&self) -> bool {
         self.open
             .as_ref()
