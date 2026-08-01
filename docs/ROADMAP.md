@@ -474,6 +474,19 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-07-31 **ffmpeg pin moved 6.1 -> 7.1** (owner: "Bump to 7"), which
+  supersedes the 2026-07-30 entry further down. Issue #65: the Flatpak
+  could not be built from the tree at all while the pin said 6.1, because
+  every freedesktop runtime ships ffmpeg 7 and the 25.08 one is forced by
+  libcosmic's rustc floor. The port is one file. ffmpeg 7 replaced the
+  bitmask channel layout with `AVChannelLayout`, which holds raw pointers
+  and so is not `Send`, and a `Track` rides its `Reader` onto the decode
+  thread; it now derives the layout from the channel count it already
+  keeps rather than storing one. The bill goes to the dev box: Ubuntu
+  24.04 has no ffmpeg 7 and will not get one, so ffmpeg comes from a PPA
+  (AGENTS.md, and the same one in CI) or, without sudo, from
+  `scripts/ffmpeg7-local.sh`.
+
 - 2026-07-31 **The app has an icon** (issue #67, seven workshop rounds
   recorded in docs/icon.md). A round teal world with a green coast and a warm
   rim, and a small figure entering it from the upper left, drawn by
@@ -487,6 +500,7 @@ live, no keyframe UI ever.
   named for the application ID `dev.harding.Kjerag`, the one issue #66
   settled and issue #75 will put in the code; until that rename lands the
   binary still asks the theme for `app.kyerag.Kyerag` and will not find it.
+
 - 2026-07-31 Seam bar raised (owner): "I want the best seam support out
   there." The prod gate is not good-enough but best-shipping, Insta360's
   stitcher included. Two tracks: the per-camera geometric foundation
@@ -939,7 +953,8 @@ live, no keyframe UI ever.
 - 2026-07-30 Primary target is AMD/Intel Mesa (VA-API). NVIDIA would need
   an NVDEC backend variant; out of scope until someone needs it.
 - 2026-07-30 ffmpeg-next/ffmpeg-sys-next pinned to 6.1, matching the system
-  ffmpeg. The 8.x APIs in the research notes are not present.
+  ffmpeg. The 8.x APIs in the research notes are not present. **Superseded
+  2026-07-31**: 7.1, see the top of this log.
 - 2026-07-30 Zero-copy import is not a hand-rolled ash routine: wgpu 30's
   `Device::texture_from_dmabuf_fd` (wgpu-hal Vulkan) imports the VA-API
   planes as they come, 0.12 ms/frame for both. On libcosmic's wgpu 28 the
