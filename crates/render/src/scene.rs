@@ -156,6 +156,8 @@ pub struct Scene {
     /// (issue #124). It belongs to the open capture rather than to the
     /// pipeline, which outlives every file it draws.
     stalled: Stalled,
+    /// And what it last managed to draw of this file, for the same reason.
+    shown: Shown,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -286,6 +288,7 @@ impl Scene {
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
             stalled: Stalled::default(),
+            shown: Shown::default(),
         }
     }
 
@@ -782,6 +785,7 @@ impl Scene {
             sampling: self.sampling.get(),
             shutter: self.shutter.clone(),
             stalled: self.stalled.clone(),
+            shown: self.shown.clone(),
         }
     }
 }
@@ -1002,6 +1006,9 @@ pub struct ScenePrimitive {
     /// reason, in the other direction: the pass writes and the shell reads
     /// (issue #124).
     stalled: Stalled,
+    /// And on the slot the pass keeps the last frame it drew of this capture
+    /// in, which it both writes and reads.
+    shown: Shown,
 }
 
 /// A pair of decoded lenses and the calibration that reprojects them. Both
@@ -1014,6 +1021,30 @@ struct View {
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
     held: Held,
+}
+
+/// The last view the pass actually presented of one capture, which is what the
+/// pane holds while a newer one cannot be imported (issue #124).
+///
+/// It belongs to the capture rather than to the pipeline, for the reason the
+/// whole issue is about: iced keeps one pipeline for the life of the window,
+/// so whatever it remembers about this file it remembers about the next one.
+/// Kept on the pipeline for one commit, this opened a new file onto the last
+/// frame of the file before it, until the first frame of the new one arrived.
+/// Issue #125's check is what caught it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Shown(Arc<Mutex<Option<View>>>);
+
+impl Shown {
+    fn keep(&self, view: &View) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(view.clone());
+        }
+    }
+
+    fn get(&self) -> Option<View> {
+        self.0.lock().ok()?.clone()
+    }
 }
 
 /// The GPU state behind the widget. iced builds one of these per primitive
@@ -1033,14 +1064,6 @@ pub struct ScenePipeline {
     /// The frame the bind group points at, and the ones still in flight
     /// behind it. Newest first.
     live: VecDeque<Live>,
-    /// The last view this pipeline actually put on screen, which is what a
-    /// capture it has given up on goes on showing (issue #124). Frames keep
-    /// arriving while imports fail, so by the time it gives up the view the
-    /// shell offers is one that was never bound, and drawing by that takes
-    /// the picture away at the moment the alert says the picture stopped.
-    /// Owner, on meeting exactly that: "Why does the video disappear instead
-    /// of just freezing on current frame though? Its jarring".
-    shown: Option<View>,
     /// The target this pass was built for, which is iced's surface format.
     /// A capture renders into a texture of the same format, so that what it
     /// reads back is what the compositor would have been handed.
@@ -1184,7 +1207,6 @@ impl ScenePipeline {
             blank,
             bind_group,
             live: VecDeque::new(),
-            shown: None,
             format,
             reported: false,
         }
@@ -1273,7 +1295,7 @@ impl ScenePipeline {
             println!("device: {}", dmabuf::device_report(device));
         }
         if let Some(view) = &primitive.view {
-            self.show(device, view, &primitive.stalled);
+            self.show(device, view, primitive);
         }
 
         // The pane holds the last frame this pipeline actually presented
@@ -1294,7 +1316,7 @@ impl ScenePipeline {
             // and the pane is the backdrop. `Stalled` says so in the terminal
             // line when it gives up, because on screen it looks like the
             // other kind of failure.
-            _ => self.shown.clone(),
+            _ => primitive.shown.get(),
         };
 
         let reframe = match &showing {
@@ -1509,13 +1531,13 @@ impl ScenePipeline {
     /// optimisation. The view that failed is never bound, so every redraw
     /// after it would try the same import again, and each two seconds of that
     /// raised another alert: the owner met five of them in one sitting.
-    fn show(&mut self, device: &wgpu::Device, view: &View, stalled: &Stalled) {
-        if stalled.stopped() || self.is_bound(view) {
+    fn show(&mut self, device: &wgpu::Device, view: &View, primitive: &ScenePrimitive) {
+        if primitive.stalled.stopped() || self.is_bound(view) {
             return;
         }
         match self.import(device, view) {
             Ok(planes) => {
-                stalled.landed();
+                primitive.stalled.landed();
                 self.bind_group = bind(
                     device,
                     &self.layout,
@@ -1532,9 +1554,13 @@ impl ScenePipeline {
                     _planes: planes,
                 });
                 self.live.truncate(RETAINED);
-                self.shown = Some(view.clone());
+                primitive.shown.keep(view);
             }
-            Err(e) => stalled.failed(Instant::now(), e, self.shown.is_some()),
+            Err(e) => {
+                primitive
+                    .stalled
+                    .failed(Instant::now(), e, primitive.shown.get().is_some());
+            }
         }
     }
 
