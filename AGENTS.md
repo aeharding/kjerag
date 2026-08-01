@@ -145,6 +145,11 @@ error` (measured), so a GPU-less runner would be checking nothing.
   question before the owner is asked to test. Documenting a tradeoff in
   prose is not surfacing it: the toast-over-scrubber call was measured,
   disclosed mid-report, relayed by nobody, and found by the owner.
+- Zero-config playback (owner ruling, 2026-07-31): pressing play on any
+  file must yield the best available result with no user action, ever. No
+  calibration buttons, no setup rituals, nothing the Insta360 app would
+  not ask. Automatic background measurement that improves things silently
+  is the pattern; a menu item that gates quality is a design failure.
 - UI copy: plain words, no em dashes.
 - UI design defers to COSMIC system apps best practice (owner doctrine,
   2026-07-31): use libcosmic's stock widgets and the patterns of
