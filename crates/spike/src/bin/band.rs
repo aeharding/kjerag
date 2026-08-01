@@ -290,8 +290,34 @@ fn crossover(reads: &[Read]) {
             false => "no distance, because nothing was cut".to_owned(),
         },
     );
+    // Where it happened, so a render can be pointed at it rather than hunted
+    // for: the widest few, with the frame and the azimuth each was read at.
+    let mut widest_first: Vec<&(usize, usize, f32)> = seen
+        .iter()
+        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied) > floor)
+        .collect();
+    widest_first.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
+    if !widest_first.is_empty() {
+        println!(
+            "\n           the widest of them, to point a render at. `at` is seconds into the \n\
+             file; `phi` is the azimuth round the seam circle, which is a view yaw with the \n\
+             horizon lock off.\n\n\
+             \x20          {:>7} {:>8} {:>7} {:>10} {:>9} {:>9}",
+            "frame", "at", "phi", "applied", "band", "cut px",
+        );
+        for (frame, index, applied) in widest_first.iter().take(8) {
+            println!(
+                "           {frame:>7} {:>7.2}s {:>6.0}d {:>9.3}d {:>8.3}d {:>9.1}",
+                reads[*frame].at.as_secs_f64(),
+                *index as f64 / AZIMUTHS as f64 * 360.0,
+                f64::from(applied.to_degrees()),
+                f64::from(last.mapped.crossover_at(*applied).to_degrees()),
+                cut(*applied) * VIEW_PX_PER_DEG,
+            );
+        }
+    }
     let Some(overlap) = last.mapped.overlap() else {
-        println!("           one lens stream: no seam, no overlap, and no band to open.",);
+        println!("\n           one lens stream: no seam, no overlap, and no band to open.",);
         return;
     };
     // The ceiling's own safety, measured on this camera rather than assumed
