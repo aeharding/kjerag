@@ -218,7 +218,7 @@ fn residual(options: &Options) -> Fallible<()> {
         let calibration = CalibrationSet::from_insv(&path)?;
         let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
         let ring = ring(options.patches);
-        let lenses = options.corrected(&path, &calibration.lenses, frame);
+        let lenses = options.corrected(std::slice::from_ref(&path), &calibration.lenses, frame);
         let base = mapped(&lenses, frame);
         // Every candidate is measured on the same frames, and each is compared
         // against the measurement on the patches the two of them share: an
@@ -880,7 +880,7 @@ fn fit(options: &Options) -> Fallible<()> {
             ..seam::Plan::default()
         };
         let started = std::time::Instant::now();
-        let readings = seam::measure(&path, &lenses, frame, &plan)?;
+        let readings = seam::measure(std::slice::from_ref(&path), &lenses, frame, &plan)?;
         let read = started.elapsed().as_secs_f64();
         println!(
             "\n{}: {} of {} azimuths correlated over {} places x {} frames, read in {:.2} s",
@@ -1123,13 +1123,13 @@ impl Options {
     /// runs it for a camera it has no stored calibration for. What the eye is
     /// checking is then what the player draws on that path; `fix=` is how a
     /// stored calibration is checked, because the store belongs to the app.
-    fn corrected(&self, path: &Path, lenses: &[Lens], frame: Size) -> Vec<Lens> {
+    fn corrected(&self, files: &[PathBuf], lenses: &[Lens], frame: Size) -> Vec<Lens> {
         let lenses = fixed(lenses, &self.fix);
         if !self.fit {
             return lenses;
         }
         let started = std::time::Instant::now();
-        let Some(fitted) = seam::fit_file(path, &lenses, frame, &seam::Plan::default()) else {
+        let Some(fitted) = seam::fit_reported(files, &lenses, frame, &seam::Plan::default()) else {
             println!("fit:    no fit; the factory calibration stands");
             return lenses;
         };
@@ -1542,7 +1542,11 @@ fn viewed(lenses: &[Lens], frame: Size, camera: Camera) -> Reframe {
 fn render(options: &Options) -> Fallible<()> {
     let (calibration, pair) = frame_at(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let lenses = options.corrected(&options.input, &calibration.lenses, frame);
+    let lenses = options.corrected(
+        std::slice::from_ref(&options.input),
+        &calibration.lenses,
+        frame,
+    );
     let reframe = viewed(&lenses, frame, options.camera());
     let view = View::paint(&reframe, &pair, options.weighting(), options.size);
     let out = options.out();
@@ -1572,7 +1576,11 @@ fn render(options: &Options) -> Fallible<()> {
 fn blend(options: &Options) -> Fallible<()> {
     let (calibration, pair) = frame_at(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let lenses = options.corrected(&options.input, &calibration.lenses, frame);
+    let lenses = options.corrected(
+        std::slice::from_ref(&options.input),
+        &calibration.lenses,
+        frame,
+    );
     let reframe = viewed(&lenses, frame, options.camera());
     let ring = ring(options.patches);
 
@@ -1723,7 +1731,11 @@ fn parity(options: &Options) -> Fallible<()> {
         .ok_or("parity wants against=<export.mp4>")?;
     let (calibration, ours) = frame_at(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
-    let lenses = options.corrected(&options.input, &calibration.lenses, frame);
+    let lenses = options.corrected(
+        std::slice::from_ref(&options.input),
+        &calibration.lenses,
+        frame,
+    );
     let export = export_frame(&theirs, options)?;
     println!(
         "theirs: {} at {:.2} s, {}x{}",

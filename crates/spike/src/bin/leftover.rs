@@ -1038,8 +1038,13 @@ fn crop(options: &Options) -> Fallible<()> {
         let mut walk = Walk::open(path, options.from, frame)?;
         let pair = walk.next_pair()?.ok_or("no frame decoded")?;
         let factory = calibration.lenses.clone();
-        let fit = seam::fit_file(path, &factory, frame, &seam::Plan::default())
-            .ok_or("this file gets no fit")?;
+        let fit = seam::fit_reported(
+            std::slice::from_ref(path),
+            &factory,
+            frame,
+            &seam::Plan::default(),
+        )
+        .ok_or("this file gets no fit")?;
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
         for (name, lenses) in [
             ("factory", factory.clone()),

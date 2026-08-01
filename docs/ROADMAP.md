@@ -629,6 +629,23 @@ live, no keyframe UI ever.
   document directory earns the guidance instead, because it lists one file
   whatever is on the pilot's card.
 
+  Composing the capture at the open was not the whole of it. The owner tested
+  the branch bundle, picked both halves, and the log said both things at once:
+  `2 lens streams from 2 files` from the player, and `this file carries one
+  lens stream, so it has no seam` from the seam fit a line later. The fit
+  reopened the capture from the picked path and looked **beside** it for the
+  second lens, which is where a bare path's mate is and where a document's
+  never is, so a capture opened the proper way could never be calibrated or
+  harvested from. The fix is that a capture is its files: the reader hands
+  back the ones it opened (`Reader::paths`), the scene keeps those rather than
+  the one path it was named by, and the walk the fit reads takes them as given
+  (`Walk::over`). The drop and command-line routes passed all along for the
+  reason that hid this: two real paths sit beside each other, so looking
+  beside worked by accident of the route rather than by anything the fit knew.
+  The harness now drops both halves from a directory each, which is the
+  chooser's shape without a chooser, and fails if a capture the app read as
+  two files ever says it has one lens stream.
+
   The longer answer is issue #134, the owner's own: a folder-first shell in
   the cosmic-player idiom, where the app is given the directory and never has
   to ask. Not v1.

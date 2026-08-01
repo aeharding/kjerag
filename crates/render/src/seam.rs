@@ -55,7 +55,7 @@
 //! [`Lens`], and the pass runs on the patched calibration exactly as it ran on
 //! the factory one.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -974,13 +974,25 @@ impl Default for Plan {
     }
 }
 
-/// Every patch this file's seam offers, pooled over the frames it was read on.
-pub fn measure(path: &Path, lenses: &[Lens], frame: Size, plan: &Plan) -> Fallible<Vec<Reading>> {
+/// Every patch this capture's seam offers, pooled over the frames it was read
+/// on.
+///
+/// A capture is its files in lens order, not the one path it was named by
+/// ([`Walk::over`], issue #123). A capture picked in a sandbox's file chooser
+/// has its second lens in the pilot's second pick and nowhere beside the
+/// first, so a fit that starts from one path again reads half the capture and
+/// then says the whole of it has one lens.
+pub fn measure(
+    files: &[PathBuf],
+    lenses: &[Lens],
+    frame: Size,
+    plan: &Plan,
+) -> Fallible<Vec<Reading>> {
     let base = mapped(lenses, frame);
     let ring = ring(plan.probe.patches);
-    let mut walk = Walk::open(path, 0.0, frame)?;
+    let mut walk = Walk::over(files, 0.0, frame)?;
     if walk.streams() < 2 {
-        return Err("this file carries one lens stream, so it has no seam".into());
+        return Err("this capture carries one lens stream, so it has no seam".into());
     }
     let duration = walk.duration().as_secs_f64();
     let mut sums: Vec<(usize, f64, f64)> = vec![(0, 0.0, 0.0); ring.len()];
@@ -1029,12 +1041,12 @@ pub fn measure(path: &Path, lenses: &[Lens], frame: Size, plan: &Plan) -> Fallib
 /// out too big to be a calibration. Each of them leaves the factory
 /// calibration in place, which is what the player did before this existed.
 pub fn fit_capture(
-    path: &Path,
+    files: &[PathBuf],
     lenses: &[Lens],
     frame: Size,
     plan: &Plan,
 ) -> Result<Fitted, String> {
-    let readings = measure(path, lenses, frame, plan).map_err(|e| e.to_string())?;
+    let readings = measure(files, lenses, frame, plan).map_err(|e| e.to_string())?;
     if readings.len() < PATCHES_NEEDED {
         return Err(format!(
             "only {} of {} azimuths on the seam had content both lenses could be matched on, \
@@ -1061,8 +1073,13 @@ pub fn fit_capture(
 
 /// The same fit, for a caller with a terminal rather than a toast: the reason
 /// goes to stdout beside the rest of the app's report.
-pub fn fit_file(path: &Path, lenses: &[Lens], frame: Size, plan: &Plan) -> Option<Fitted> {
-    match fit_capture(path, lenses, frame, plan) {
+pub fn fit_reported(
+    files: &[PathBuf],
+    lenses: &[Lens],
+    frame: Size,
+    plan: &Plan,
+) -> Option<Fitted> {
+    match fit_capture(files, lenses, frame, plan) {
         Ok(fitted) => Some(fitted),
         Err(why) => {
             println!("seam:   {why}; keeping the factory calibration");

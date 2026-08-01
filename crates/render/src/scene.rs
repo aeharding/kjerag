@@ -161,7 +161,14 @@ struct Holding {
 struct Show {
     /// The capture itself, kept because a seam fit reads its own frames off
     /// it, minutes into the file, long after it was opened (issue #48).
-    path: PathBuf,
+    ///
+    /// Every file of it, in lens order, and not the one path the pilot named:
+    /// a capture written one lens per file has its second lens beside the
+    /// first by every route but the file chooser, which hands both halves
+    /// over as documents in a directory each (issue #123). The reader has
+    /// already answered where they are, and this is that answer kept rather
+    /// than asked again.
+    files: Arc<[PathBuf]>,
     /// The size of one lens's decoded frame, which the seam fit reads
     /// through the same map the pass draws with.
     frame: Size,
@@ -291,7 +298,16 @@ impl Scene {
     pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
         ours(path)?;
         let mut player = Player::open_with(path, alongside)?;
-        let calibrated = calibrated(path, player.size(), player.lenses())?;
+        let files: Arc<[PathBuf]> = player.paths().into();
+        // The trailer is the capture's rather than the picked file's, and on a
+        // camera that writes one lens per file only lens 0 carries one
+        // (`kjerag_meta::pair`). The pilot picks whichever half his file
+        // manager listed first, and a `_10_` document has no trailer and
+        // nothing beside it to borrow one from, so reading it from the file
+        // the reader put first is the difference between a capture that opens
+        // either way round and one that opens only if it was picked in the
+        // camera's own order (issue #123).
+        let calibrated = calibrated(&files[0], player.size(), player.lenses())?;
         println!(
             "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
@@ -319,7 +335,7 @@ impl Scene {
         player.play();
         Ok(Self {
             show: Some(Show::new(
-                path,
+                files,
                 frame,
                 calibrated,
                 None,
@@ -336,7 +352,8 @@ impl Scene {
     pub fn still(path: &Path, at: Cue) -> Fallible<Self> {
         ours(path)?;
         let mut reader = Reader::open(path)?;
-        let calibrated = calibrated(path, reader.size(), reader.lenses())?;
+        let files: Arc<[PathBuf]> = reader.paths().into();
+        let calibrated = calibrated(&files[0], reader.size(), reader.lenses())?;
         let frame = reader.size();
         let frames = reader.frame(at)?;
         println!(
@@ -349,7 +366,7 @@ impl Scene {
         }
         Ok(Self {
             show: Some(Show::new(
-                path,
+                files,
                 frame,
                 calibrated,
                 Some(Arc::new(frames)),
@@ -392,8 +409,13 @@ impl Scene {
         }
     }
 
-    /// Fit this file's seam from its own frames, best effort
+    /// Fit this capture's seam from its own frames, best effort
     /// (`kjerag_render::seam`).
+    ///
+    /// The whole capture, which is every file the reader opened it from: a
+    /// fit reading one file of a two-file capture finds one lens, and a
+    /// capture with one lens has no seam, so it would refuse the very
+    /// captures this exists for (issue #123).
     ///
     /// On its own thread for a file that is playing, because a fit is a
     /// second or two of decode and the picture is not waiting for it; on this
@@ -421,16 +443,16 @@ impl Scene {
             );
         }
         let stepped = matches!(show.playing.borrow().source, Source::Stepped(_));
-        let (path, lenses, frame) = (show.path.clone(), show.lenses.clone(), show.frame);
+        let (files, lenses, frame) = (show.files.clone(), show.lenses.clone(), show.frame);
         let (corrected, kept) = (show.corrected.clone(), show.harvested.clone());
         let into = drive.then(|| corrected.clone());
         if stepped {
-            fit_into(&path, &lenses, frame, into.as_ref(), &kept, true);
+            fit_into(&files, &lenses, frame, into.as_ref(), &kept, true);
             return;
         }
         let spawned = std::thread::Builder::new()
             .name("seam fit".to_owned())
-            .spawn(move || fit_into(&path, &lenses, frame, into.as_ref(), &kept, false));
+            .spawn(move || fit_into(&files, &lenses, frame, into.as_ref(), &kept, false));
         if let Err(e) = spawned {
             eprintln!("kjerag: the seam fit did not start: {e}");
         }
@@ -773,14 +795,14 @@ impl Scene {
 
 impl Show {
     fn new(
-        path: &Path,
+        files: Arc<[PathBuf]>,
         frame: Size,
         calibrated: Calibrated,
         frames: Option<Arc<Frames>>,
         source: Source,
     ) -> Self {
         Self {
-            path: path.to_path_buf(),
+            files,
             frame,
             corrected: Arc::new(Correction::none(&calibrated.lenses)),
             harvested: Harvested::default(),
@@ -820,7 +842,7 @@ impl Show {
     }
 }
 
-/// A fallback fit off one file's own frames, into the correction it will be
+/// A fallback fit off one capture's own frames, into the correction it will be
 /// drawn with and the slot the pool reads it out of.
 ///
 /// `land` for a still, which has no later moment to correct itself in, and
@@ -828,7 +850,7 @@ impl Show {
 /// there is a picture on screen, and a picture that jumps is worse than a
 /// picture that is briefly a degree out.
 fn fit_into(
-    path: &Path,
+    files: &[PathBuf],
     lenses: &Arc<[Lens]>,
     frame: Size,
     into: Option<&Arc<Correction>>,
@@ -836,7 +858,7 @@ fn fit_into(
     now: bool,
 ) -> Option<Harvest> {
     let started = Instant::now();
-    let fitted = seam::fit_file(path, lenses, frame, &seam::Plan::default())?;
+    let fitted = seam::fit_reported(files, lenses, frame, &seam::Plan::default())?;
     println!(
         "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, cy {:+.2} px ({})",
         fitted.fit.roll_deg,

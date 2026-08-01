@@ -433,6 +433,22 @@ impl Reader {
         self.lanes.len()
     }
 
+    /// The files this capture was opened from, in lens order: one for
+    /// everything but a paired per-lens capture, which is two.
+    ///
+    /// Handed on rather than looked up again. Where the other half of a
+    /// capture is depends on how it arrived -- beside the picked file, or in
+    /// a document directory of its own that names nothing else (issue #123)
+    /// -- and this is the one place that question has already been answered.
+    /// Anything that reopens the capture later, the seam fit above all, reads
+    /// half of it if it starts from the picked path again.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect()
+    }
+
     /// How many files this capture was opened from: 1 for everything but a
     /// paired per-lens capture, which is 2. For the report line only.
     pub fn files(&self) -> usize {

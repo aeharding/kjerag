@@ -135,7 +135,10 @@ pub struct Player {
     timing: Timing,
     size: Size,
     lenses: usize,
-    files: usize,
+    /// The capture's files, in lens order ([`Reader::paths`]). Kept rather
+    /// than counted: the reader goes to the decode thread at open, and it is
+    /// the one thing that knows where this capture's second lens came from.
+    files: Vec<PathBuf>,
     failure: Option<Box<dyn std::error::Error + Send + Sync>>,
     ended: bool,
     /// Which frames may go on screen, and which seek is still owed one.
@@ -248,7 +251,7 @@ impl Player {
     pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
         let mut reader = Reader::open_with(path, alongside)?.lookahead(LOOKAHEAD);
         let (timing, size) = (reader.timing(), reader.size());
-        let (lenses, files) = (reader.lenses(), reader.files());
+        let (lenses, files) = (reader.lenses(), reader.paths());
         let beat = Arc::new(Beat::default());
         let sound = reader
             .sound_rate()
@@ -301,7 +304,12 @@ impl Player {
     /// How many files this capture was opened from: 2 for a per-lens pair
     /// the reader put back together, 1 for everything else.
     pub fn files(&self) -> usize {
-        self.files
+        self.files.len()
+    }
+
+    /// Which files those are, in lens order ([`Reader::paths`]).
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.files
     }
 
     pub fn is_playing(&self) -> bool {
@@ -1328,7 +1336,7 @@ mod tests {
                     timing,
                     size: Size::new(3840, 3840),
                     lenses: 2,
-                    files: 1,
+                    files: vec![PathBuf::from("bench.insv")],
                     failure: None,
                     ended: false,
                     epochs: Epochs::default(),
