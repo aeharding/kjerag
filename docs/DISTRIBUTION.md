@@ -919,11 +919,10 @@ from its own release, on the §1 test bench of docs/research/gpu-pipeline.md.
 
 **It plays.** `KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh <file>`
 (the mode docs/RELEASING.md now calls the release check) against real X4 Air
-footage: 20 of 22 checks pass, the two failures are the harness's two known
-flakes (the toast placement and `ctrl+v`), and two checks skip because they
-read settings the sandbox writes to the developer's own `~/.config/cosmic`.
-Directly under `cage`, the same bundle on a 3840x3840 X4 Air file and a
-2880x2880 ONE X2 file:
+footage: 25 checks, 2 failed, and the two are the harness's standing flakes,
+the toast placement and `ctrl+v`, which fail identically on the native path
+in the same session. Directly under `cage`, the same bundle on a 3840x3840 X4
+Air file and a 2880x2880 ONE X2 file:
 
 ```
 device: dmabuf import: all extensions enabled
@@ -960,6 +959,30 @@ it behaves the same. Two details worth keeping:
   libavcodec 61.19.101 carries the `hevc` decoder, which is what §3.3 found
   and what `strings::open_failed` names as the thing to install if it ever is
   not.
+
+**A by-name grant is resolved against the caller's environment, which is what
+lets the harness test the shipped sandbox without writing to the desktop**
+[measured]. `--filesystem=xdg-config/cosmic` follows the launching process's
+`XDG_CONFIG_HOME`, `--filesystem=~/.local/state/cosmic` follows its `HOME`
+(and not `XDG_STATE_HOME`, which is a different directory and is ignored for
+this), and `~/.var/app/<id>` follows `HOME` as well, flatpak's own `.ld.so`
+cache included. Point those two variables at a scratch directory and the real
+`~/.config/cosmic` is **not bound into the sandbox at all**: the app still
+holds the grant, and there is nothing behind it. Proven by running the bundle
+on real footage with the redirect in place and comparing the developer's own
+directories byte for byte:
+
+```
+real Kjerag settings before: 38559f9c3810d988
+play lines: 4
+real Kjerag settings after:  38559f9c3810d988
+scratch: .../cosmic/dev.harding.Kjerag/v1/{seam_pool,recent_files}
+```
+
+One trap in that: flatpak **skips a by-name bind whose source does not
+exist**, so a scratch `~/.local/state/cosmic` that has not been created is not
+an empty grant, it is an absent one, and the app quietly has no state
+directory. `scripts/uitest.sh` makes both before it boots anything.
 
 **One real defect the run turned up, and it is not about frames.** Footage
 whose two lenses are two files (ONE X2: `..._00_001.insv` beside

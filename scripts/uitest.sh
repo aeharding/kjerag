@@ -43,6 +43,18 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 session=$root/scratch/uitest
 media=${1:-${KJERAG_TEST_MEDIA:-}}
 
+# The session's home, and the state directory inside it.
+#
+# `$STATE_HOME` is spelt the long way round rather than as `$session/state`
+# because the Flatpak's grant for the same directory is the literal
+# `~/.local/state/cosmic` (flatpak/dev.harding.Kjerag.yml), which follows HOME
+# and ignores XDG_STATE_HOME entirely (measured). Naming the same path both
+# ways is what lets one set of checks read the app's settings whether the app
+# is a binary reading XDG_STATE_HOME or a bundle reading a bind of that
+# directory.
+HOME_DIR=$session/home
+STATE_HOME=$HOME_DIR/.local/state
+
 # Opening a file reads the trailer off the end of it, which is a seek and a
 # parse over a multi-gigabyte file, so READY is generous. A report line lands
 # every 5 s, so REPORT is a little more than that.
@@ -138,11 +150,17 @@ if [ -n "${KJERAG_FLATPAK:-}" ]; then
 	# command line: the redirect is what keeps the run out of the developer's
 	# directories and is worth more than this costs.
 	launch=(env "FLATPAK_USER_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/flatpak" flatpak run)
-	# The screenshot destination and the file are the only two things this
-	# mode arranges. Everything else is the shipped sandbox as a pilot gets
-	# it, which is the point of the mode: settings still escape to the
-	# developer's own ~/.config/cosmic, because that is what the installed
-	# app does, and the two checks that read them skip rather than lie.
+	# Two paths in, and that is the whole of what this mode arranges: the
+	# file to play and the directory captures land in. Neither is a
+	# permission the frame path uses, nothing is taken away, and the shipped
+	# permission set is otherwise byte for byte the one a pilot installs.
+	#
+	# The settings are hermetic without touching that set at all. flatpak
+	# resolves a by-name grant against the CALLER's environment (measured):
+	# `xdg-config/cosmic` follows XDG_CONFIG_HOME and `~/.local/state/cosmic`
+	# follows HOME, both of which `boot` points into the session. The real
+	# ~/.config/cosmic is then not bound into the sandbox at all, so the app
+	# cannot write it even though it still holds the grant that says it may.
 	launch+=("--env=XDG_SCREENSHOTS_DIR=$session/shots" "--filesystem=$session/shots")
 	[ -z "$media" ] || launch+=("--filesystem=$media:ro")
 	launch+=("$app")
@@ -162,7 +180,11 @@ fi
 [ -z "$media" ] || [ -f "$media" ] || die "no file at $media"
 
 rm -rf "$session"
-mkdir -p "$session/shots"
+# The two directories the app keeps settings in, made before the app runs
+# rather than by it. A Flatpak's by-name grant is a bind of a host directory
+# and flatpak skips one whose source does not exist (measured), so an absent
+# directory here is not one the app creates, it is one the app cannot see.
+mkdir -p "$session/shots" "$session/config/cosmic" "$STATE_HOME/cosmic"
 printf 'session %s\n' "$session"
 [ -n "$media" ] || printf 'no test media: pass a file or set KJERAG_TEST_MEDIA for the playback checks\n'
 
@@ -186,9 +208,10 @@ boot() {
 	chmod 700 "$runtime"
 
 	env \
+		HOME="$HOME_DIR" \
 		XDG_RUNTIME_DIR="$runtime" \
 		XDG_CONFIG_HOME="$session/config" \
-		XDG_STATE_HOME="$session/state" \
+		XDG_STATE_HOME="$STATE_HOME" \
 		XDG_DATA_HOME="$session/data" \
 		XDG_CACHE_HOME="$session/cache" \
 		XDG_SCREENSHOTS_DIR="$session/shots" \
@@ -1054,10 +1077,6 @@ returns_to_the_copied_view() {
 # separates a key that landed from a key that was swallowed: the two views
 # differ by a rotation that one still frame need not show.
 flips_the_horizon() {
-	if [ -n "${KJERAG_FLATPAK:-}" ]; then
-		skip "h flips the horizon lock (settings escape the sandbox to the developer's own ~/.config/cosmic, which this harness will not read or write)"
-		return
-	fi
 	local locked=$session/config/cosmic/dev.harding.Kjerag/v1/horizon_lock
 	local try=0
 	while [ "$try" -lt "$PRESSES" ]; do
@@ -1218,20 +1237,11 @@ pooled_calibration() {
 	local check="a pooled calibration is in the first frame"
 	printf '\n-- calibration checks (%s)\n' "$media"
 
-	# The pool this writes is read through cosmic-config, which in the
-	# sandbox reaches past it to the developer's own state directory. Writing
-	# there to satisfy a check would be the harness editing the desktop it
-	# promises not to touch.
-	if [ -n "${KJERAG_FLATPAK:-}" ]; then
-		skip "$check (the sandbox's state is the developer's own ~/.local/state/cosmic)"
-		return
-	fi
-
 	# The session's directories persist between runs, so a pool a previous run
 	# stored is still there and would make this session take the path it is
 	# here to rule out. The superseded single-entry key goes too: it is
 	# derived data and nothing reads it any more.
-	local state=$session/state/cosmic/dev.harding.Kjerag/v1
+	local state=$STATE_HOME/cosmic/dev.harding.Kjerag/v1
 	rm -f "$state/seam_pool" "$state/seam_calibration"
 
 	boot fallback "$media"

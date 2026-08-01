@@ -140,9 +140,15 @@ in it.
 
 It runs the release binary inside `cage` on a headless wlroots backend,
 presses keys with `wtype`, captures the output with `grim`, and reads the
-app's own report lines. The session is isolated: its own Wayland socket
-and its own XDG directories, so it neither sees the desktop you are
-looking at nor writes anything into it. Captures land in gitignored
+app's own report lines. The session is isolated: its own Wayland socket,
+its own home and its own XDG directories, so it neither sees the desktop
+you are looking at nor writes anything into it. **That holds in Flatpak
+mode too, with the shipped permission set untouched**: flatpak resolves a
+by-name grant against the caller's environment, so the session's `HOME`
+and `XDG_CONFIG_HOME` decide what `xdg-config/cosmic` and
+`~/.local/state/cosmic` mean, and the developer's own `~/.config/cosmic`
+is never bound into the sandbox (measured; docs/DISTRIBUTION.md 3.9).
+Captures land in gitignored
 `scratch/uitest/`, because a frame of real footage is personal video.
 Needs `cage wtype grim ffmpeg` installed, plus `wl-clipboard` for the one
 check that reads the session's clipboard, which skips without it.
