@@ -1,5 +1,6 @@
-//! What the shipped band pass reads, how steady it is, and what it does to the
-//! picture (issue #103, stage 2).
+//! What the shipped band pass reads, how steady it is, how wide it opens the
+//! crossover, and what all of that does to the picture (issue #103, stages 2
+//! and 4).
 //!
 //! ```sh
 //! # what the band reads on one stretch, and its controls
@@ -24,10 +25,18 @@
 //! **applied** rather than where it was read, which is phase A's own ruling:
 //! most of the band is filled between measured directions, and watching only
 //! the directions that correlated would report the flicker of the readings and
-//! call it the flicker of the picture. `control=1` is the positive control for
-//! it, and it is the one thing a flicker column may not be believed without: a
-//! known step is put into the state each frame, alternating sign, and a step of
-//! `s` has to read back at `2s`.
+//! call it the flicker of the picture. `width` is the same statistic for the
+//! crossover width the same reading opens (stage 4), at the same directions
+//! and in the same units. `control=1` is the positive control for both, and it
+//! is the one thing a flicker column may not be believed without: a known step
+//! is put in each frame, alternating sign, and a step of `s` has to read back
+//! at `2s`.
+//!
+//! **`crossover` is measured over the whole run** and not over the state the
+//! run ended in. A direction is near field for the second or two something
+//! near it is crossing the seam and far field on either side of that, so a
+//! table of where the circle settled would miss exactly the frames stage 4 is
+//! for.
 //!
 //! PNGs land in gitignored `scratch/`: these are frames of somebody's real
 //! flights and this repo is public.
@@ -164,8 +173,18 @@ fn field(options: &Options) -> Fallible<()> {
     table(last);
     coverage(&reads);
     geometry(last);
+    crossover(&reads);
     flicker(&reads, options);
     Ok(())
+}
+
+/// What the shader actually bends by at one direction, in radians: the reading
+/// taxed by how well it is being confirmed.
+///
+/// The same arithmetic `band_bend` does, on a cell rather than on a ray, and
+/// the number both the width and the clamp are decided from.
+fn applied(cell: &Cell) -> f32 {
+    cell.disparity * (cell.confidence / kjerag_render::KEEP).clamp(0.0, 1.0)
 }
 
 /// What the band settled on, direction by direction, at the end of the run.
@@ -173,26 +192,121 @@ fn table(last: &Read) {
     println!(
         "\nwhat the band settled on. `view px` is the disagreement a 1920-wide 90 degree view \n\
          would show, at {VIEW_PX_PER_DEG} px per degree; `metres` is the distance the disparity \n\
-         stands for; `off epi` is the axis a distance CANNOT displace content along, which is \n\
-         measured and never applied.\n"
+         stands for; `band` is how wide the crossover opened to carry the reading; `cut` is what \n\
+         the fixed 2 degree band of stage 2 would have thrown away, in view px, which is the \n\
+         width of the doubled edge it left; `off epi` is the axis a distance CANNOT displace \n\
+         content along, which is measured and never applied.\n"
     );
-    println!("   phi  disparity    view px     metres  confidence    off epi");
+    println!(
+        "   phi  disparity    view px     metres       band        cut  confidence    off epi"
+    );
     for (index, cell) in last.cells.iter().enumerate() {
         if cell.confidence <= 0.0 {
             continue;
         }
         let degrees = f64::from(cell.disparity.to_degrees());
+        let applied = applied(cell);
+        let floor = last.mapped.crossover_at(0.0);
+        let cut = applied - kjerag_render::band::carried(applied, floor);
         println!(
-            "{:>6.0} {:>9.3}d {:>10.2} {:>10} {:>11.3} {:>9.3}d",
+            "{:>6.0} {:>9.3}d {:>10.2} {:>10} {:>9.3}d {:>10.2} {:>11.3} {:>9.3}d",
             index as f64 / AZIMUTHS as f64 * 360.0,
             degrees,
             degrees * VIEW_PX_PER_DEG,
             cell.metres()
                 .map_or_else(|| "-".to_owned(), |m| format!("{m:.1}")),
+            f64::from(last.mapped.crossover_at(applied).to_degrees()),
+            f64::from(cut.to_degrees()) * VIEW_PX_PER_DEG,
             cell.confidence,
             f64::from(cell.off_epi.to_degrees()),
         );
     }
+}
+
+/// How far the crossover opened, and what the fixed band was throwing away
+/// (issue #103, stage 4).
+///
+/// The two columns are the same measurement read two ways: the width solves
+/// `|disparity| <= FOLD * width` for the width, and the clamp solves it for
+/// the disparity. Everything `cut` reports is alignment the pass had measured,
+/// believed, and then declined to apply because the band could not carry it -
+/// a doubled edge that much wide, on content that near.
+fn crossover(reads: &[Read]) {
+    let last = reads.last().expect("play returns at least one frame");
+    let floor = last.mapped.crossover_at(0.0);
+    // Over the whole run and not over the settled state, because a direction
+    // is near field for the second or two its own gear is crossing the seam
+    // and far field on either side of that. A table of where the circle ended
+    // up would miss exactly the frames this stage is for.
+    let seen: Vec<(usize, usize, f32)> = reads
+        .iter()
+        .enumerate()
+        .flat_map(|(frame, read)| {
+            read.cells
+                .iter()
+                .enumerate()
+                .map(move |(index, cell)| (frame, index, applied(cell)))
+        })
+        .collect();
+    let cut = |applied: f32| {
+        f64::from((applied.abs() - kjerag_render::band::carried(applied, floor).abs()).to_degrees())
+    };
+    let open = seen
+        .iter()
+        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied) > floor)
+        .count();
+    let frames = reads.len();
+    let widest = seen
+        .iter()
+        .map(|(_, _, applied)| last.mapped.crossover_at(*applied))
+        .fold(floor, f32::max);
+    let worst = seen
+        .iter()
+        .map(|(_, _, applied)| cut(*applied))
+        .fold(0.0, f64::max);
+    // The direction the worst cut happened at, so the distance below is that
+    // reading's own geometry rather than a representative one.
+    let reach_m = seen
+        .iter()
+        .find(|(_, _, applied)| cut(*applied) >= worst)
+        .map_or(0.0, |(frame, index, _)| reads[*frame].cells[*index].reach_m);
+    println!(
+        "\ncrossover: over {frames} frames of {AZIMUTHS} directions, {open} direction-frames \n\
+         asked for more than the {:.2} deg floor, which is {:.2} percent of them, and the widest \n\
+         band any of them asked for is {:.3} deg. what stage 2's fixed band cut from those: \n\
+         {:.3} deg at worst, which is {:.1} view px of doubled edge on content at {}. this stage \n\
+         cuts nothing the search can report, so that is what it recovers.",
+        f64::from(floor.to_degrees()),
+        100.0 * open as f64 / seen.len() as f64,
+        f64::from(widest.to_degrees()),
+        worst,
+        worst * VIEW_PX_PER_DEG,
+        match worst > 0.0 {
+            // The reading a cut that size came off, back through the geometry.
+            true => format!(
+                "{:.2} m",
+                f64::from(reach_m) / (f64::from(floor.to_degrees()) * 0.9 + worst).to_radians()
+            ),
+            false => "no distance, because nothing was cut".to_owned(),
+        },
+    );
+    let Some(overlap) = last.mapped.overlap() else {
+        println!("           one lens stream: no seam, no overlap, and no band to open.",);
+        return;
+    };
+    // The ceiling's own safety, measured on this camera rather than assumed
+    // from the fixture: the widest band plus the whole bend it carries has to
+    // sit inside the ring both lenses have a picture of.
+    let ceiling = kjerag_render::band::WIDEST_DEG;
+    let reach = 0.5 * ceiling + 0.9 * ceiling;
+    println!(
+        "           these two lenses overlap by {:.2} deg, {:.2} a side. the widest the band may \n\
+         open is {ceiling:.2} deg, and that band plus the whole bend it carries reaches {reach:.2} \n\
+         deg off the seam, so the handover stays inside the overlap with {:.2} deg to spare.",
+        f64::from(overlap.to_degrees()),
+        f64::from(overlap.to_degrees()) * 0.5,
+        f64::from(overlap.to_degrees()) * 0.5 - f64::from(reach),
+    );
 }
 
 /// How much of the circle the band reached, and how much of what it reached is
@@ -287,22 +401,43 @@ fn flicker(reads: &[Read], options: &Options) {
         far.0 * VIEW_PX_PER_DEG,
         far.0 * 1920.0 / 24.1,
     );
+    // The band's WIDTH is the second thing a reading decides (stage 4), and it
+    // moves the weights of every pixel of the crossover, so it has to be as
+    // steady as the bend. It has no filter of its own: it is a function of the
+    // same smoothed reading, so this column is the temporal design's own
+    // consequence rather than a second design.
+    let opened = stepped_width(reads, 0.0);
+    let open = (0..WATCHED)
+        .filter(|direction| {
+            let last = reads.last().expect("play returns at least one frame");
+            last.mapped.crossover_at(held(last, *direction) as f32) > last.mapped.crossover_at(0.0)
+        })
+        .count();
+    println!(
+        "\nwidth:   {:.4} deg rms frame to frame at the same {WATCHED} directions, worst single \n\
+         step {:.4} deg. {open} of them have the band open past its floor at the end of the run; \n\
+         the rest sit on the floor exactly, where the width cannot move at all, which is what \n\
+         holds this column down and is also what keeps the far field the picture it was.",
+        opened.0, opened.1,
+    );
     if !options.control {
         println!("         (control=1 puts a known step in and reads it back.)");
         return;
     }
     println!(
-        "\n         the positive control. a step of `s` alternating sign each frame has to come \n\
-         back at 2s, added in quadrature to what the file already had. a flicker column is \n\
-         a negative result and means nothing until it is shown able to read a positive one.\n\
-         \n             step    expected        read"
+        "\n         the positive control, on both columns. a step of `s` alternating sign each \n\
+         frame has to come back at 2s, added in quadrature to what the file already had. a \n\
+         flicker column is a negative result and means nothing until it is shown able to read \n\
+         a positive one.\n\
+         \n             step        bend    expected       width    expected"
     );
     for step in [0.05f64, 0.20] {
-        let shaken = stepped(reads, step.to_radians());
         println!(
-            "         {step:>8.2}d {:>11.4} {:>11.4}",
+            "         {step:>8.2}d {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
+            stepped(reads, step.to_radians()).0,
             measured.0.hypot(2.0 * step),
-            shaken.0,
+            stepped_width(reads, step.to_radians()).0,
+            opened.0.hypot(2.0 * step),
         );
     }
 }
@@ -340,23 +475,56 @@ fn stepped_far(reads: &[Read]) -> (f64, usize) {
     (rms, far.len())
 }
 
+/// What the band holds at one of the [`WATCHED`] directions, in radians.
+///
+/// The same lookup the fragment shader does: between two cells, linearly,
+/// wrapping. `kjerag_render::Reframe::bend` is the shipped one; this is its
+/// arithmetic over a buffer already read back.
+fn held(read: &Read, direction: usize) -> f64 {
+    let turn = direction as f64 / WATCHED as f64 * AZIMUTHS as f64;
+    let low = turn.floor() as usize;
+    let mix = turn - low as f64;
+    let cell = |index: usize| f64::from(read.cells[index % AZIMUTHS].disparity);
+    cell(low) + (cell(low + 1) - cell(low)) * mix
+}
+
+/// A known step, alternating sign each frame: the positive control every
+/// flicker column here is read beside.
+fn shaken(frame: usize, step: f64) -> f64 {
+    match frame % 2 {
+        0 => step,
+        _ => -step,
+    }
+}
+
 /// The rms and worst frame-to-frame step of the bend, at [`WATCHED`]
 /// directions, with `shake` radians put into every other frame.
 fn stepped(reads: &[Read], shake: f64) -> (f64, f64) {
-    let at = |read: &Read, frame: usize, direction: usize| {
-        // The same lookup the fragment shader does: between two cells,
-        // linearly, wrapping. `kjerag_render::Reframe::bend` is the shipped
-        // one; this is its arithmetic over a buffer already read back.
-        let turn = direction as f64 / WATCHED as f64 * AZIMUTHS as f64;
-        let low = turn.floor() as usize;
-        let mix = turn - low as f64;
-        let cell = |index: usize| f64::from(read.cells[index % AZIMUTHS].disparity);
-        let held = cell(low) + (cell(low + 1) - cell(low)) * mix;
-        held + match frame % 2 {
-            0 => shake,
-            _ => -shake,
-        }
-    };
+    stepped_by(reads, |read, frame, direction| {
+        held(read, direction) + shaken(frame, shake)
+    })
+}
+
+/// The same for the crossover WIDTH that reading opens (issue #103, stage 4).
+///
+/// Watched at the same directions and reported in the same units, because it
+/// is the same kind of quantity: a number the shader reads off the band that
+/// moves every weight in the crossover if it moves. The shake goes into the
+/// width itself rather than into the disparity behind it, which is what stage
+/// 2's control does with the bend: what a control has to show is that the
+/// column can see a step of a size it is told, and a step put in one place and
+/// read in another would be measuring the rule instead (`band::width` has its
+/// own tests for that).
+fn stepped_width(reads: &[Read], shake: f64) -> (f64, f64) {
+    stepped_by(reads, |read, frame, direction| {
+        let opened = read.mapped.crossover_at(held(read, direction) as f32);
+        f64::from(opened) + shaken(frame, shake)
+    })
+}
+
+/// The rms and worst frame-to-frame step of whatever `at` reports, over
+/// [`WATCHED`] directions and every consecutive pair of frames.
+fn stepped_by(reads: &[Read], at: impl Fn(&Read, usize, usize) -> f64) -> (f64, f64) {
     let mut sum = 0.0;
     let mut count = 0.0;
     let mut worst: f64 = 0.0;

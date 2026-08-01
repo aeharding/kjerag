@@ -879,6 +879,25 @@ impl Reframe {
         (axis_min <= 1.0).then(|| axis_min.acos())
     }
 
+    /// How wide the ring is where **both** lenses have the picture, in
+    /// radians: the two caps' angles added and half a turn taken off.
+    ///
+    /// It is what bounds how far the crossover may open (issue #103, stage 4),
+    /// which is why it is measured off the file's own calibration rather than
+    /// quoted at 14 degrees from the format study. The caps are read tight
+    /// here, without [`CAP_MARGIN_DEG`] and without the readout's own share:
+    /// a bound computed off a generous cap does not bind.
+    ///
+    /// `None` for a file with one lens stream, which has no overlap and no
+    /// seam, and for two lenses that do not reach each other at all.
+    pub fn overlap(&self) -> Option<f32> {
+        if self.lens_count <= 1.0 {
+            return None;
+        }
+        let caps = cap(&self.lenses[0])? + cap(&self.lenses[1])?;
+        (caps > PI).then_some(caps - PI)
+    }
+
     /// Whether this lens can have any of this ray, decided before the model
     /// runs (issue #10).
     ///
@@ -1043,8 +1062,24 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
 fn coverage_floor(block: &LensBlock, widen: f32) -> f32 {
     // A slot with no picture in it, which is every lens past the file's own
     // count: no ray is ever in it and none is worth projecting.
-    if !inside_anywhere(block, 1.0) {
+    let Some(cap) = cap(block) else {
         return 2.0;
+    };
+    (cap + widen + CAP_MARGIN_DEG.to_radians())
+        .min(std::f32::consts::PI)
+        .cos()
+}
+
+/// The same before anything is added to it: how far off its own axis this
+/// lens can actually see, in radians. `None` for a slot with no picture in it.
+///
+/// Separate from [`coverage_floor`] because the two questions are different.
+/// The pass wants a cap nothing it would have kept falls outside of, so it
+/// takes the generous one; [`Reframe::overlap`] wants the boundary itself,
+/// because a bound computed off a generous cap does not bind.
+fn cap(block: &LensBlock) -> Option<f32> {
+    if !inside_anywhere(block, 1.0) {
+        return None;
     }
     let (mut outside, mut inside) = (-1.0f32, 1.0f32);
     for _ in 0..CAP_BISECTIONS {
@@ -1054,8 +1089,7 @@ fn coverage_floor(block: &LensBlock, widen: f32) -> f32 {
             false => outside = middle,
         }
     }
-    let cap = outside.clamp(-1.0, 1.0).acos() + widen + CAP_MARGIN_DEG.to_radians();
-    cap.min(std::f32::consts::PI).cos()
+    Some(outside.clamp(-1.0, 1.0).acos())
 }
 
 /// Halvings of the coverage bisection. Thirty leaves a billionth of a cosine,
@@ -2283,18 +2317,14 @@ pub(crate) mod tests {
     #[test]
     fn the_widest_band_and_its_bend_stay_inside_the_overlap() {
         let reframe = fixture(Camera::default());
-        let cap = |lens: usize| {
-            reframe
-                .coverage(lens)
-                .expect("the fixture has two lenses")
-                .to_degrees()
-                // The cap the pass carries is deliberately generous, and a
-                // generous cap would make this check generous with it.
-                - CAP_MARGIN_DEG
-        };
-        let overlap = cap(0) + cap(1) - 180.0;
+        let overlap = reframe
+            .overlap()
+            .expect("the fixture has two lenses")
+            .to_degrees();
         let widest = crate::band::WIDEST_DEG;
         let reach = 0.5 * widest + widest * 0.9;
+        // Measured on the fixture 2026-08-01: 14.44 degrees of overlap, 7.22
+        // a side, against a reach of 4.04.
         assert!(
             reach < 0.5 * overlap,
             "the widest band reaches {reach:.2} deg off the seam into an overlap of \

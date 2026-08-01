@@ -195,10 +195,14 @@ const FOLD: f32 = 0.9;
 /// window widens the band with it, with no second number to keep in step.
 ///
 /// What bounds it from the other side is the optics, and that bound is not
-/// close: the two lenses overlap by about 14 degrees, so the widest band plus
-/// the whole bend it carries sits 4.05 degrees off the seam against the 7 the
-/// overlap has (`the_widest_band_and_its_bend_stay_inside_the_overlap`, which
-/// measures it off the calibration fixture rather than quoting it).
+/// close. The widest band plus the whole bend it carries reaches **4.04
+/// degrees** off the seam; the two lenses of the calibration fixture overlap
+/// by 14.44, which is 7.22 a side
+/// (`the_widest_band_and_its_bend_stay_inside_the_overlap`, which measures it
+/// off the file's own calibration rather than quoting the format study).
+/// `kjerag-spike --bin band` reports the same two numbers for whatever file it
+/// is given, because the overlap is a property of the camera and this ceiling
+/// is not.
 pub const WIDEST_DEG: f32 = NEAR_DEG / FOLD;
 
 /// Threads per workgroup. One workgroup reads one direction, and every thread
