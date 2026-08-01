@@ -144,6 +144,28 @@ pub struct Scene {
     /// How the pass samples where the view magnifies the source (issue #11).
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
+    /// What the last two redraws drew, newest first (issue #102).
+    ///
+    /// A paused window asks for no redraws of its own, so whatever the last
+    /// one put on screen is what it holds until something else happens. That
+    /// is only safe once a redraw has actually drawn the frame the scene is
+    /// holding, at the shape the widget has now, and the window has to be
+    /// able to tell the difference: measured under the harness, the redraw
+    /// that follows the pause key can present a frame with none of the
+    /// window's content in it, and a paused scene then leaves it up.
+    /// [`Self::is_settled`] is what the shell watches, and two agreeing
+    /// draws is the whole of the test.
+    drew: Cell<[Option<Drew>; 2]>,
+}
+
+/// One redraw, as the shader widget saw it: the frame it was holding and the
+/// shape it drew into. Physical-ish pixels rather than the raw floats, so
+/// two draws of one picture compare equal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Drew {
+    frame: Option<u64>,
+    width: u32,
+    height: u32,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -274,6 +296,7 @@ impl Scene {
             forced: Cell::new(None),
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
+            drew: Cell::new([None; 2]),
         }
     }
 
@@ -728,6 +751,30 @@ impl Scene {
             false,
             self.sampling.get(),
         ))
+    }
+
+    /// Whether the paused picture on screen is the one this scene is holding.
+    ///
+    /// False until two redraws running have drawn the same frame into the
+    /// same shape, which is what says the window is showing it rather than
+    /// still catching up with a change (issue #102). The shell keeps a
+    /// paused file redrawing while this is false and stops when it is true.
+    pub fn is_settled(&self) -> bool {
+        let [last, before] = self.drew.get();
+        last.is_some() && last == before
+    }
+
+    /// Called by the shader widget once per redraw, with the shape it drew
+    /// into. Nothing else may call it: what it records is that a redraw
+    /// reached the widget, which is exactly what [`Self::is_settled`] means.
+    pub(crate) fn drew(&self, width: f32, height: f32) {
+        let now = Drew {
+            frame: self.frame().map(|(index, _)| index),
+            width: width.max(0.0) as u32,
+            height: height.max(0.0) as u32,
+        };
+        let [last, _] = self.drew.get();
+        self.drew.set([Some(now), last]);
     }
 
     pub fn primitive(&self, camera: Camera) -> ScenePrimitive {

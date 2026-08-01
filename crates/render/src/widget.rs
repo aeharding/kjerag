@@ -55,7 +55,10 @@ impl<Message> shader::Program<Message> for Scene {
         }
     }
 
-    fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> ScenePrimitive {
+    /// The one place that knows a redraw reached this widget, which is why
+    /// the shape it drew into is recorded here (issue #102).
+    fn draw(&self, _state: &(), _cursor: mouse::Cursor, bounds: Rectangle) -> ScenePrimitive {
+        self.drew(bounds.width, bounds.height);
         self.primitive(self.viewpoint().camera())
     }
 

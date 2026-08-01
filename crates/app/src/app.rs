@@ -103,6 +103,17 @@ const CONTROLS_TIMEOUT: Duration = Duration::from_secs(2);
 /// around, and for a reframing player that is the normal way to use it.
 const CONTROLS_POLL: Duration = Duration::from_millis(250);
 
+/// How often a paused window is asked to redraw itself while it has not yet
+/// proved it drew its frame (issue #102, `Scene::is_settled`).
+///
+/// A paused scene asks for no redraws of its own, so the last frame the
+/// window presented is the one it holds. Measured under the harness at load
+/// 18: the redraw that follows the pause key can present a frame carrying
+/// none of the window's content, and the empty pane then stood for 1.9 s,
+/// until an unrelated key press. This is the poke that ends it, and it runs
+/// only until two redraws running have drawn the same picture.
+const SETTLE_POLL: Duration = Duration::from_millis(100);
+
 /// How often the playback report is printed while playing. It is the only
 /// way to see dropped frames without a profiler.
 const REPORT_EVERY: Duration = Duration::from_secs(5);
@@ -203,6 +214,10 @@ pub enum Message {
     Surface(cosmic::surface::Action),
     SystemThemeModeChange,
     Theme(AppTheme),
+    /// A paused window has not proved it drew its frame yet (issue #102).
+    /// It carries nothing and does nothing: what it is for is the rebuild
+    /// and the redraw that any message causes.
+    Settle,
     /// The controls are up and the file is playing: re-read the clock, and
     /// hide everything if the pointer has sat still long enough.
     Tick,
@@ -644,6 +659,10 @@ impl cosmic::Application for App {
                 self.stored.write_config();
                 return cosmic::command::set_theme(app_theme.theme());
             }
+            // Handled by arriving: a message rebuilds the window's view and
+            // asks for a redraw, which is the one thing a paused window that
+            // did not draw its frame needs.
+            Message::Settle => {}
             Message::Tick => {
                 self.read_clock(now);
                 self.hide_idle_controls(now);
@@ -786,6 +805,9 @@ impl cosmic::Application for App {
                 sources.push(time::every(CONTROLS_POLL).map(|_| Message::Tick));
             }
         }
+        if self.is_settling() {
+            sources.push(time::every(SETTLE_POLL).map(|_| Message::Settle));
+        }
         Subscription::batch(sources)
     }
 }
@@ -795,6 +817,17 @@ impl App {
         self.open
             .as_ref()
             .is_some_and(|open| open.scene.is_playing())
+    }
+
+    /// A file that is not playing and has not drawn its frame twice running
+    /// (issue #102). A playing file redraws itself and needs no help; a
+    /// paused one asks for nothing, so the window would hold whatever the
+    /// last redraw left on it, and a redraw that carried none of the
+    /// window's content leaves an empty pane.
+    fn is_settling(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_some_and(|open| !open.scene.is_playing() && !open.scene.is_settled())
     }
 
     /// Opens a file, or leaves the welcome view up with a line saying it did
