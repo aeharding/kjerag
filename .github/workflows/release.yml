@@ -42,9 +42,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # elfutils is not flatpak-builder's dependency and is its last step:
+      # every module is stripped into a .Debug ref with `eu-strip`, and
+      # without it a build that has already compiled everything dies with
+      # `Failed to execute child process "eu-strip"` (measured, run
+      # 30699251764). The flatpak the development box builds with carries its
+      # own copy, so this is a runner-only line.
       - run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder elfutils
 
       # --install-deps-from reads the runtime, the SDK and the two SDK
       # extensions out of the manifest and installs exactly those, so the
