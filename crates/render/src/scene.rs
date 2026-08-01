@@ -1176,7 +1176,7 @@ impl ScenePipeline {
             pass.set_pipeline(&self.band.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, &self.band.group, &[]);
-            pass.dispatch_workgroups(band::GROUPS, 1, 1);
+            pass.dispatch_workgroups(watch.groups(), 1, 1);
             // One workgroup over the state the dispatch above just wrote.
             // Two dispatches of one pass are ordered against each other by
             // WebGPU itself, so what this pools is this frame's readings and
@@ -1539,13 +1539,15 @@ impl Band {
         match seconds {
             Some(0.0) => None,
             Some(seconds) if (0.0..band::Watch::GAP_S).contains(&seconds) => {
-                Some(band::Watch::new(seconds, false, slice))
+                Some(band::Watch::track(seconds, slice))
             }
             // The first frame of a file, and every landing after a seek. The
             // step it is given is one frame's worth, so a direction with
             // content in it starts moving immediately rather than waiting a
-            // frame for a gap to exist.
-            _ => Some(band::Watch::new(1.0 / 30.0, true, slice)),
+            // frame for a gap to exist, and it sweeps the WHOLE ring rather
+            // than the slice it happened to land on, because what it is
+            // throwing away is per direction (`band::Watch::stride`).
+            _ => Some(band::Watch::start(1.0 / 30.0)),
         }
     }
 

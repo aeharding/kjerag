@@ -707,27 +707,53 @@ pub struct Watch {
     /// 1 to throw the state away and start from this frame, which is what a
     /// seek, a new file and a first frame all want.
     pub reset: f32,
-    /// Which of the [`SLICES`] rounds of the circle this frame reads.
+    /// Which of this frame's [`Self::stride`] rounds of the circle it reads.
     pub slice: f32,
-    _pad: f32,
+    /// How many frames this frame's sweep takes to cover the whole ring, which
+    /// is also how many directions apart the ones it reads are.
+    ///
+    /// **1 on a reset frame, and that is not an optimization** (issue #103,
+    /// stage 6). `reset` is a property of a FRAME and the state it throws away
+    /// is per DIRECTION, so a reset frame that visits half the ring resets half
+    /// the ring: the other half kept a reading of wherever the file was before
+    /// the seek and decayed towards the new content over [`TAU_FAR_S`]. On a
+    /// fresh file the same defect reads as attenuation - half the circle eased
+    /// in from zero instead of taking its first reading whole - and it was
+    /// measured at **one third of the truth after 40 frames** while the other
+    /// half read it exactly (docs/research/seam-two-axis.md). A sweep of the
+    /// whole ring on the one frame that resets it costs one frame's worth of
+    /// the other half and is the only place the two can be made to agree.
+    pub stride: f32,
 }
 
 impl Watch {
-    /// The state ages by `seconds` of media time, or starts again.
-    ///
-    /// A gap that is not a play forward is a `reset`: the state is a running
-    /// average over what the seam has been showing, and after a seek it is an
-    /// average over somewhere else.
-    pub fn new(seconds: f32, reset: bool, slice: u32) -> Self {
+    /// The first frame of a file, and the first after a seek: the **whole
+    /// ring**, thrown away and read again.
+    pub fn start(seconds: f32) -> Self {
+        Self {
+            seconds,
+            reset: 1.0,
+            slice: 0.0,
+            stride: 1.0,
+        }
+    }
+
+    /// One slice of the ring, aged by what that slice has actually aged by.
+    pub fn track(seconds: f32, slice: u32) -> Self {
         Self {
             // What a direction of this slice has actually aged by: it was last
             // read SLICES frames ago, not one. The filter is paced in seconds,
             // so telling it the truth is the whole of what slicing costs.
             seconds: seconds * SLICES as f32,
-            reset: f32::from(u8::from(reset)),
+            reset: 0.0,
             slice: slice as f32,
-            _pad: 0.0,
+            stride: SLICES as f32,
         }
+    }
+
+    /// How many workgroups this frame dispatches: one per direction it reads.
+    pub fn groups(&self) -> u32 {
+        AZIMUTHS as u32 / (self.stride as u32).max(1)
     }
 
     /// The longest gap that is still the same stretch of film. Past it the
@@ -1103,9 +1129,6 @@ pub(crate) const ALONG_AT: usize = std::mem::size_of::<Tone>();
 /// Where the cells start in that buffer, for the readback that unpacks it.
 pub(crate) const CELLS_AT: usize = ALONG_AT + std::mem::size_of::<Along>();
 
-/// How many workgroups one frame's measurement dispatches: one per direction.
-pub(crate) const GROUPS: u32 = AZIMUTHS as u32 / SLICES;
-
 /// A sample at or above this is a clipped highlight and not a brightness.
 ///
 /// A ratio needs both sides to be measurements, and a highlight at the
@@ -1371,9 +1394,12 @@ fn luma_at(index: u32, uv: vec2<f32>) -> f32 {
 struct Watch {
   seconds: f32,
   reset: f32,
-  // Which of the SLICES rounds of the circle this frame reads.
+  // Which of this frame's `stride` rounds of the circle it reads.
   slice: f32,
-  pad1: f32,
+  // How many directions apart the ones this frame reads are: 1 on a reset
+  // frame, which sweeps the whole ring so that a reset reaches every
+  // direction and not only the slice it landed on. Rust twin: `Watch::stride`.
+  stride: f32,
 };
 
 // One lens's picture of the patch, and the other's picture of the patch plus
@@ -1437,8 +1463,9 @@ fn tap(index: u32, aim: mat3x3<f32>, ray: vec3<f32>) -> f32 {
 
 @compute @workgroup_size(THREADS)
 fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
-  // Every SLICES-th direction, one further round each frame.
-  let cell = group.x * SLICES + u32(watch.slice);
+  // Every `stride`-th direction, one further round each frame - and every
+  // direction on a reset frame, where the stride is 1.
+  let cell = group.x * u32(watch.stride) + u32(watch.slice);
   let at = ring_of(f32(cell) / f32(AZIMUTHS) * TAU);
   let aim0 = body_to_lens(0u);
   let aim1 = body_to_lens(1u);
@@ -1610,8 +1637,21 @@ fn settle(cell: u32, at: Ring) {
   // holds is the camera and the camera has not gone anywhere either. Rust
   // twin: `Cell::off_epi`'s own docstring, and the `leak` line that measured
   // it before it was chosen.
-  let learn = select(ease(watch.seconds, time_constant(held.disparity)), 1.0, watch.reset != 0.0);
-  let learn_along = select(ease(watch.seconds, TAU_FAR), 1.0, watch.reset != 0.0);
+  //
+  // A direction with NO EVIDENCE takes its reading whole for the same reason a
+  // reset frame does, and it is the same sentence: there is no picture behind
+  // it to move under, so there is nothing for an ease to hide, and easing
+  // anyway leaves it drawn with a correction of nearly nothing for two
+  // seconds. Stage 2 wrote that argument for the reset frame and applied it
+  // only there, so a direction that first correlated on any LATER frame - most
+  // of the ring, on real footage, where a seam is mostly sky until something
+  // crosses it - crept in from zero at TAU_FAR instead (issue #103, stage 6).
+  // Each channel asks its own, because they are refused separately.
+  let unread = held.confidence <= 0.0;
+  let unread_along = held.off_conf <= 0.0;
+  let fresh = watch.reset != 0.0;
+  let learn = select(ease(watch.seconds, time_constant(held.disparity)), 1.0, fresh || unread);
+  let learn_along = select(ease(watch.seconds, TAU_FAR), 1.0, fresh || unread_along);
   if epi_pinned {
     held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
   } else {
@@ -1909,6 +1949,39 @@ mod tests {
                 at.epi,
             );
         }
+    }
+
+    #[test]
+    fn a_reset_frame_reads_every_direction_and_a_tracking_frame_reads_its_slice() {
+        // What `reset` has to mean, said in the arithmetic the dispatch uses
+        // (issue #103, stage 6). `reset` throws away state that is held PER
+        // DIRECTION, so a reset frame that visits half the ring leaves the
+        // other half holding whatever it held before the seek and decaying
+        // towards the new content over TAU_FAR. Measured on the owner's July
+        // file before this was fixed: half the circle read ONE THIRD of what
+        // the other half read, on the same frames, of the same content.
+        let cover = |watch: Watch| {
+            let mut seen = vec![0usize; AZIMUTHS];
+            for group in 0..watch.groups() {
+                seen[(group * watch.stride as u32 + watch.slice as u32) as usize] += 1;
+            }
+            seen
+        };
+        assert!(
+            cover(Watch::start(0.03)).iter().all(|times| *times == 1),
+            "a reset frame does not read every direction exactly once",
+        );
+        let mut over_the_rounds = vec![0usize; AZIMUTHS];
+        for slice in 0..SLICES {
+            for (index, times) in cover(Watch::track(0.03, slice)).iter().enumerate() {
+                assert!(*times <= 1, "a tracking frame reads a direction twice");
+                over_the_rounds[index] += times;
+            }
+        }
+        assert!(
+            over_the_rounds.iter().all(|times| *times == 1),
+            "the {SLICES} rounds of the circle do not cover it exactly once",
+        );
     }
 
     #[test]

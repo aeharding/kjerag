@@ -49,7 +49,7 @@ use kjerag_render::Cue;
 use kjerag_render::{
     AZIMUTHS, Camera, Cell, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size,
 };
-use kjerag_spike::{FORMAT, Gpu, Picture, Render};
+use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
 
 /// How many view pixels one degree is at the width the seam residuals are
 /// quoted in: 1920 across 90 degrees, at the centre of a rectilinear view
@@ -124,7 +124,7 @@ fn play(
         true => Horizon::Locked,
         false => Horizon::Free,
     });
-    scene.fit_seam(true);
+    options.seam.hold(&scene);
     pipeline.hold_band(options.off);
     let mut reads = Vec::with_capacity(options.count);
     while let Some((_, at)) = scene.frame() {
@@ -967,6 +967,32 @@ fn gradient(luma: &[f32], past: &[f64], width: usize, band: (f64, f64)) -> (f64,
 
 // ------------------------------------------------------------ options
 
+/// Which of the app's three seam paths the band is read through, and the same
+/// three words `--bin step` uses.
+///
+/// It is an argument because it has to be: the band's readings and a step
+/// measured on the picture are only comparable when both are taken through the
+/// same calibration, and until stage 6 this instrument always fitted the file
+/// while `--bin seam mode=residual` always took the factory numbers, so the two
+/// were read side by side across two different calibration paths
+/// (docs/research/seam-two-axis.md).
+#[derive(Clone)]
+enum Seam {
+    Factory,
+    File,
+    Stored(kjerag_render::SeamFit),
+}
+
+impl Seam {
+    fn hold(&self, scene: &Scene) {
+        match self {
+            Self::Factory => println!("seam:   factory calibration, no correction"),
+            Self::File => scene.fit_seam(true),
+            Self::Stored(fit) => scene.use_seam(*fit),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Options {
     input: PathBuf,
@@ -989,6 +1015,8 @@ struct Options {
     /// The screen region `mode=trace` reports on: x, y, width, height, in
     /// pixels of the rendered view.
     region: [u32; 4],
+    /// Which calibration the band is read through.
+    seam: Seam,
 }
 
 impl Options {
@@ -1008,6 +1036,7 @@ impl Options {
             out: None,
             save: None,
             region: [0, 0, 0, 0],
+            seam: Seam::File,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -1032,6 +1061,13 @@ impl Options {
                 Some(("off", value)) => options.off = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("save", value)) => options.save = Some(PathBuf::from(value)),
+                Some(("seam", value)) => {
+                    options.seam = match value {
+                        "factory" => Seam::Factory,
+                        "file" => Seam::File,
+                        _ => Seam::Stored(seam_fit(value)?),
+                    }
+                }
                 Some(("box", value)) => {
                     let mut numbers = value.split(',').map(str::parse::<u32>);
                     let mut next = || numbers.next().transpose();
@@ -1082,4 +1118,5 @@ impl Options {
 
 const USAGE: &str = "usage: band <file.insv> [mode=field|sequence|render] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
-     [out=dir] [save=state.txt] [box=x,y,w,h]";
+     [out=dir] [save=state.txt] [box=x,y,w,h] \
+     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
