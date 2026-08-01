@@ -18,6 +18,14 @@
 //! good for at a failure site: it is not a shortcut past this module, it is
 //! strictly less than calling it.
 //!
+//! What the alert says is the failure's own words (owner's ruling,
+//! 2026-08-01). The funnel decides which surface a failure lands on and which
+//! title sits over it; it does not rewrite the reason, because a sentence
+//! written up here can only ever say less than the one written where the
+//! failure happened. The line that started it was "That file could not be
+//! opened.", shown over a terminal that was saying "trailer says lens frames
+//! are 2880x2880 but the stream decodes 736x368".
+//!
 //! What this does not cover, deliberately: a capture that could not be
 //! written says so in a toast, because the picture is still there and the
 //! pilot is still watching it (docs/UI.md, "The capture toast"). The funnel
@@ -44,8 +52,16 @@ pub enum Failure {
     /// no decoder for (issue #69), or anything else the engine refused it
     /// for.
     Open(PathBuf, Box<dyn Error + Send + Sync + 'static>),
-    /// A drag and drop that carried no local file.
+    /// A drag and drop that carried no local file, and the one failure here
+    /// with no error behind it: libcosmic parses the payload and hands over
+    /// what it got or nothing at all (`src/widget/dnd_destination.rs:119-120`
+    /// calls `.ok()` on the conversion), so the reason never reaches this
+    /// process.
     Dropped,
+    /// A drop whose files the document portal would not hand over (issue
+    /// #118). The portal's own message, which is the only account of it
+    /// anything on this side has.
+    Portal(String),
     /// The picture died part way through a file and the player was stopped
     /// with it, sound and all (issue #124).
     Stopped(PathBuf, Stall),
@@ -55,29 +71,36 @@ impl Failure {
     /// The alert's title, which says what happened.
     fn title(&self) -> &'static str {
         match self {
-            Self::Open(..) | Self::Dropped => strings::CANNOT_OPEN,
+            Self::Open(..) | Self::Dropped | Self::Portal(..) => strings::CANNOT_OPEN,
             Self::Stopped(..) => strings::VIDEO_STOPPED,
         }
     }
 
-    /// The alert's body, which says what the pilot can do about it.
+    /// The alert's body, which is the reason: the underlying error's own
+    /// message wherever there is one (owner's ruling, 2026-08-01).
     fn said(&self) -> String {
         match self {
             Self::Open(path, e) => refusal(&**e, path),
-            // A drop carrying no local file is a file that would not open
-            // with nothing known about why: a URL, a remote share, a
-            // selection of text.
-            Self::Dropped => strings::OPEN_FAILED.to_owned(),
-            Self::Stopped(..) => strings::VIDEO_STOPPED_BODY.to_owned(),
+            // A drop with nothing openable in it is the one line here that is
+            // not an error's own, because no error survives libcosmic's
+            // conversion: what a URL, a remote share or a selection of text
+            // leaves this app is `None`.
+            Self::Dropped => strings::DROPPED_NOTHING.to_owned(),
+            Self::Portal(e) => e.clone(),
+            // The stall's own line, and after it the one thing the stall
+            // cannot know: that this open is over and the way on is to open
+            // the file again. The terminal gets the same first half.
+            Self::Stopped(_, stall) => format!("{stall}. {}", strings::VIDEO_STOPPED_ACTION),
         }
     }
 
-    /// The terminal's line, which says what actually happened and names the
-    /// file. `scripts/uitest.sh` reads the first of these.
+    /// The terminal's line, which says the same reason and names the file.
+    /// `scripts/uitest.sh` reads the first of these.
     fn echoed(&self) -> String {
         match self {
             Self::Open(path, e) => format!("{} not shown: {e}", path.display()),
             Self::Dropped => "that drop carried no local file".to_owned(),
+            Self::Portal(e) => format!("that drop's files stayed with the portal: {e}"),
             Self::Stopped(path, stall) => format!("{} stopped: {stall}", path.display()),
         }
     }
@@ -140,13 +163,19 @@ fn missing_decoder(e: &(dyn Error + Send + Sync + 'static)) -> Option<&'static s
     Some(e.downcast_ref::<MissingDecoder>()?.codec)
 }
 
-/// What the alert says a failed open failed for. Four lines, in the order of
-/// how much they can tell the pilot: the file is another camera's format
-/// (issue #107), the sandbox was never shown it (issue #118), this build has
-/// no decoder for it (issue #69), or nothing more is known than that it did
-/// not open.
+/// What the alert says a failed open failed for, which is the error's own
+/// message unless the app knows something the error does not.
 ///
-/// The path decides the second one rather than the error, and on purpose. A
+/// It knows three things, and nothing else here is a sentence of the app's
+/// (owner's ruling, 2026-08-01): the file is another camera's format
+/// (issue #107), the sandbox was never shown it (issue #118), or this build
+/// of ffmpeg has no decoder for it and the pilot can install one (issue #69).
+/// Each of those names the failure AND what to do about it, which is more
+/// than the error underneath says; every other failure gets the error
+/// verbatim, because a line that only says the file did not open is a line
+/// that hides the one that said why.
+///
+/// The path decides the sandbox arm rather than the error, and on purpose. A
 /// file the sandbox has no mount for fails somewhere inside libav, which
 /// answers "No such file or directory" for a file the pilot is looking at in
 /// their file manager; asking the filesystem whether the path is there at all
@@ -156,10 +185,13 @@ fn refusal(e: &(dyn Error + Send + Sync + 'static), path: &Path) -> String {
     if let Some(foreign) = e.downcast_ref::<Foreign>() {
         return strings::foreign(*foreign);
     }
+    if let Some(codec) = missing_decoder(e) {
+        return strings::missing_decoder(codec);
+    }
     if sandboxed() && !path.exists() {
         return strings::out_of_reach();
     }
-    strings::open_failed(missing_decoder(e))
+    e.to_string()
 }
 
 /// Whether this is running inside a Flatpak, which is a fact about the run and
@@ -193,19 +225,30 @@ mod tests {
     fn a_missing_decoder_is_told_apart_from_a_file_that_will_not_open() {
         let missing = boxed(MissingDecoder { codec: "hevc" });
         assert_eq!(missing_decoder(&*missing), Some("hevc"));
-        assert!(strings::open_failed(missing_decoder(&*missing)).contains("HEVC"));
+        assert!(strings::missing_decoder("hevc").contains("HEVC"));
 
         let broken: Box<dyn Error + Send + Sync> = "file has no video stream".into();
         assert_eq!(missing_decoder(&*broken), None);
-        assert_eq!(
-            strings::open_failed(missing_decoder(&*broken)),
-            strings::OPEN_FAILED
-        );
+    }
+
+    /// The owner's own case (2026-08-01): the reason the terminal carried was
+    /// worth reading and the alert said "That file could not be opened." over
+    /// the top of it. There is no line to substitute any more, so this asserts
+    /// the whole body rather than a phrase inside it, and the terminal echo
+    /// carries the same words.
+    #[test]
+    fn the_alert_says_what_the_error_said() {
+        let why = "trailer says lens frames are 2880x2880 but the stream decodes 736x368";
+        let refused = Failure::Open(file(), why.into());
+        assert_eq!(refused.said(), why);
+        assert!(refused.echoed().contains(why), "{}", refused.echoed());
+        assert_eq!(refused.title(), strings::CANNOT_OPEN);
     }
 
     /// And the lines a failed open can leave, told apart by the type in the
     /// box rather than by anything in the message (issue #107). The foreign
-    /// one names the format; the others are what they were.
+    /// one names the format, the missing decoder names the install, and
+    /// anything else is itself.
     ///
     /// The path is one that exists, so nothing here takes the sandbox arm:
     /// that one is a fact about the run and the test below says what it is.
@@ -224,7 +267,7 @@ mod tests {
         assert!(refusal(&*missing, here).contains("HEVC"));
 
         let broken: Box<dyn Error + Send + Sync> = "file has no video stream".into();
-        assert_eq!(refusal(&*broken, here), strings::OPEN_FAILED);
+        assert_eq!(refusal(&*broken, here), "file has no video stream");
     }
 
     /// A path that is not there says so in the sandbox's words and nowhere
@@ -242,7 +285,8 @@ mod tests {
         let broken: Box<dyn Error + Send + Sync> = "No such file or directory".into();
         let expected = match sandboxed() {
             true => strings::out_of_reach(),
-            false => strings::OPEN_FAILED.to_owned(),
+            // Outside a sandbox libav is right and gets to say so itself.
+            false => "No such file or directory".to_owned(),
         };
         assert_eq!(refusal(&*broken, gone), expected);
         assert!(strings::out_of_reach().contains(strings::OPEN_TITLE));
@@ -251,6 +295,11 @@ mod tests {
     /// Issue #124's own case, at the level the shell sees it: a picture that
     /// died mid file is an alert like any other failure, with a title of its
     /// own, because "cannot open file" is not what happened.
+    ///
+    /// And the body is the stall's own line with the way out on the end of it
+    /// (coordinator's call, 2026-08-01, on the ruling this branch is about).
+    /// It was a sentence of the shell's that knew less than the stall it stood
+    /// over, which is the thing this branch exists to delete.
     #[test]
     fn a_stopped_video_is_an_alert_and_not_a_refusal() {
         let mut alert = Alert::default();
@@ -259,12 +308,29 @@ mod tests {
         alert.raise(Failure::Stopped(file(), stall()));
         let (title, body) = alert.showing().expect("nothing on screen");
         assert_eq!(title, strings::VIDEO_STOPPED);
-        assert_eq!(body, strings::VIDEO_STOPPED_BODY);
+        assert_eq!(
+            body,
+            "61 frames could not be imported. Open the file again."
+        );
         assert_ne!(title, strings::CANNOT_OPEN);
 
         alert.close();
         assert!(!alert.is_up());
         assert_eq!(alert.showing(), None);
+    }
+
+    /// The two halves are the two things the pilot needs and neither knows the
+    /// other: the stall says what happened, in the words the terminal echo
+    /// carries, and the shell says what to do, which it is the only one in a
+    /// position to know (the capture is over and nothing is retrying).
+    #[test]
+    fn a_stopped_video_says_the_stalls_own_words_and_then_what_to_do() {
+        let raw = "17 frames could not be imported over 2.0 s, last: Too many open files";
+        let stopped = Failure::Stopped(file(), Stall::new(raw));
+        let body = stopped.said();
+        assert!(body.starts_with(raw), "{body}");
+        assert!(body.ends_with(strings::VIDEO_STOPPED_ACTION), "{body}");
+        assert!(stopped.echoed().ends_with(raw), "{}", stopped.echoed());
     }
 
     /// The terminal keeps the detail the alert leaves out: which file, and
@@ -284,14 +350,27 @@ mod tests {
         assert!(refused.echoed().contains("not shown: a GoPro capture"));
     }
 
-    /// A failure with nothing to name still says something the pilot can act
-    /// on, rather than nothing at all.
+    /// The one failure with no error under it says what it does know, which
+    /// is that the drop held no file. libcosmic discards the conversion's own
+    /// error before this app is called, so there is nothing rawer to show.
     #[test]
     fn a_drop_with_no_file_in_it_still_says_so() {
         let dropped = Failure::Dropped;
-        assert_eq!(dropped.said(), strings::OPEN_FAILED);
+        assert_eq!(dropped.said(), strings::DROPPED_NOTHING);
         assert_eq!(dropped.title(), strings::CANNOT_OPEN);
-        assert!(!dropped.echoed().is_empty());
+        assert!(dropped.echoed().contains("no local file"));
+    }
+
+    /// And the other half of a drop that did not open: the portal answered,
+    /// and what it answered is what the pilot reads (issue #118). Before this
+    /// the reason went to the terminal and the window said "That file could
+    /// not be opened."
+    #[test]
+    fn a_portal_that_would_not_hand_the_files_over_says_why() {
+        let refused = Failure::Portal("Not allowed in sandbox".to_owned());
+        assert_eq!(refused.said(), "Not allowed in sandbox");
+        assert_eq!(refused.title(), strings::CANNOT_OPEN);
+        assert!(refused.echoed().contains("Not allowed in sandbox"));
     }
 
     /// A stall shaped like the ones the render layer raises, minus the

@@ -122,6 +122,20 @@ lost() {
 	exit 3
 }
 
+# The file holding this capture's other lens, or nothing. The naming rule is
+# `crates/meta/src/pair.rs`: the field before the clip number is the lens
+# marker, `00` or `10`, and swapping it names the mate. An X4-class capture
+# carries both lenses in the one file and names no mate, so the checks that
+# need a pair skip on one.
+lens_mate() {
+	local mate
+	[ -n "$1" ] || return 0
+	mate=$(printf '%s' "$1" | sed -E 's/_00_([^_/]*)$/_10_\1/; t; s/_10_([^_/]*)$/_00_\1/')
+	[ "$mate" != "$1" ] || return 0
+	[ -f "$mate" ] || return 0
+	printf '%s' "$mate"
+}
+
 # ------------------------------------------------------------- preflight
 
 for tool in cage wtype grim ffmpeg; do
@@ -190,6 +204,11 @@ if [ -n "${KJERAG_FLATPAK:-}" ]; then
 	# every other run is rather than out of the speakers.
 	launch+=("--env=PULSE_SINK=$QUIET_SINK" "--env=PIPEWIRE_NODE=$QUIET_SINK")
 	[ -z "$media" ] || launch+=("--filesystem=$media:ro")
+	# The other lens, on a capture that has one, for the same reason: the pair
+	# checks below hand the app both halves and a half it cannot open is a
+	# check that passes for the wrong reason.
+	mate=$(lens_mate "$media")
+	[ -z "$mate" ] || launch+=("--filesystem=$mate:ro")
 	launch+=("$app")
 elif [ -n "${KJERAG_BIN:-}" ]; then
 	bin=$KJERAG_BIN
@@ -2008,6 +2027,164 @@ a_drop_opens_the_file() {
 	fi
 }
 
+# ------------------------------- the checks, with both halves of a capture
+#
+# A capture the camera wrote one lens per file is one capture however its two
+# files arrive, and everything downstream of the open has to agree about that.
+# The seam fit was what did not: it reopened the capture from the picked path
+# alone and looked beside it for the second lens, and beside is where a
+# capture's other half is by every route but the one this issue is about
+# (#123, the owner's log of 2026-08-01). Two files and two lenses on screen,
+# and the fit calling the same capture one lens and keeping the factory
+# calibration, one line under the other. A capture opened the proper way could
+# then never be calibrated or harvested from.
+#
+# So the assertion is the app's own contradiction, and it holds by any route:
+# a capture the app read as two files never says it has one lens stream.
+#
+# A session and an empty pool per route, which is not tidiness. A fit runs on
+# a thread and takes a second or two, and the pool decides whether it runs at
+# all: two routes sharing a session means one route's answer landing in the
+# next route's log, and five fits into a run means POOL_ENOUGH is reached and
+# the fit stops happening, which would leave the assertion true and empty.
+# Both were measured here before this said `boot`.
+#
+# Four routes, because what they hand over is four different shapes:
+#
+#   beside          the two real paths, in the folder the camera wrote them
+#                   in. The route that always worked, and the control: if the
+#                   fit stops reporting at all this fails too, and the others
+#                   are not quietly passing on an absence of evidence.
+#   apart           the same two files, one directory each, neither holding
+#                   the other. That is what a multiple pick looks like coming
+#                   back through the document portal, and it is the shape
+#                   that was broken. Hard links rather than copies: real
+#                   footage is gigabytes.
+#   apart-reversed  the same, lens 1 first. The pilot picks in whatever order
+#                   his file manager listed, and only lens 0's file carries
+#                   the trailer, so this is the half of the pick order that
+#                   would not open at all: NoTrailer, because a `_10_`
+#                   document has nothing beside it to borrow one from.
+#   portal          the files registered with the document portal for real.
+#                   Inside the bundle (KJERAG_FLATPAK) this is the pilot's
+#                   own route, path for path. Outside one it proves less than
+#                   `apart` does, because the portal answers an unsandboxed
+#                   app with the real paths, and that is why `apart` exists
+#                   rather than this alone.
+
+paired_files() {
+	printf '\n-- two-file capture checks (%s)\n' "$media"
+	local route
+	for route in beside apart apart-reversed portal; do
+		a_pair_is_one_capture_to_the_seam "$route"
+	done
+}
+
+a_pair_is_one_capture_to_the_seam() {
+	local route=$1
+	local check="a two-file capture keeps its seam, arriving $route"
+	# Not `pair-$route.log`, which is what `boot` names the app's own log
+	# below.
+	local report=$session/drag-pair-$route.log
+	local mate waited=0 pid offer=uri-list first second apart swap
+
+	mate=$(lens_mate "$media")
+	if [ -z "$mate" ]; then
+		skip "$check (this capture is one file, so there is no pair to drop)"
+		return
+	fi
+	first=$media
+	second=$mate
+	case $route in
+	portal)
+		offer=portal
+		if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+			skip "$check (no session bus, so no document portal)"
+			return
+		fi
+		;;
+	apart | apart-reversed)
+		apart=$session/$route
+		rm -rf "$apart"
+		mkdir -p "$apart/one" "$apart/other"
+		first=$apart/one/${media##*/}
+		second=$apart/other/${mate##*/}
+		if ! ln "$media" "$first" 2>/dev/null || ! ln "$mate" "$second" 2>/dev/null; then
+			skip "$check (the footage will not hard link into $apart)"
+			return
+		fi
+		if [ "$route" = apart-reversed ]; then
+			swap=$first
+			first=$second
+			second=$swap
+		fi
+		;;
+	esac
+
+	rm -f "$STATE_HOME/cosmic/dev.harding.Kjerag/v1/seam_pool"
+	boot "pair-$route"
+	if ! await_paint "pair-$route-welcome"; then
+		alive || lost "$check"
+		fail "$check" "the window never rendered" "log: $log"
+		ended
+		return
+	fi
+
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$dragsource" "$first" "$second" "offer=$offer" "linger=$DROP_OPEN" \
+		>"$report" 2>&1 &
+	pid=$!
+	# The fit is a second or two of decode on a thread of its own, so what is
+	# waited for is its verdict rather than the open: a line saying what the
+	# seam came to, or a line saying why it came to nothing.
+	while [ "$waited" -le $((DROP_OPEN * 2)) ]; do
+		alive || break
+		seam_reported && break
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+
+	alive || lost "$check"
+	if ! grep -q '^media:.*from 2 files' "$log"; then
+		fail "$check" "the drop did not open as a two-file capture" \
+			"$(grep '^media:' "$log" || echo 'no media line')" \
+			"report: $report" "log: $log"
+		ended
+		return
+	fi
+	if grep -q 'one lens stream, so it has no seam' "$log"; then
+		fail "$check" "the fit read one file of the two" \
+			"$(grep '^seam:' "$log" | tr '\n' '|')" "log: $log"
+		ended
+		return
+	fi
+	if ! seam_reported; then
+		fail "$check" "the seam fit never reported in $DROP_OPEN s" \
+			"$(grep '^seam:' "$log" | tr '\n' '|')" "log: $log"
+		ended
+		return
+	fi
+	pass "$check ($(grep -c '^seam:' "$log") seam lines, none of them one-lens)"
+	ended
+}
+
+# End this check's session. Ctrl+Q rather than a signal, because a killed
+# compositor fills the log it just wrote with pages of broken pipes and the
+# log is the evidence here. Whether the exit was clean is a check of its own
+# elsewhere, five times over.
+ended() {
+	quit >/dev/null 2>&1 || teardown
+}
+
+# Whether the seam fit has said what it came to: a fit, with the patches it
+# was measured over, or a refusal that names its reason. A pooled calibration
+# landing at open is neither, and there is none in these sessions anyway.
+seam_reported() {
+	grep -q '^seam:.*\( patches, \|keeping the factory calibration\)' "$log"
+}
+
 # What the app asked the drag for, which only the source can say.
 read_as() {
 	local mimes
@@ -2042,7 +2219,14 @@ welcome() {
 # A file with video in it and no Insta360 trailer is what the app meets when
 # someone hands it an ordinary video, and it is the one playback-adjacent
 # path that needs no footage: ffmpeg writes the file in a second. What is
-# checked is that the refusal is a message and not a crash.
+# checked is that the refusal is a message and not a crash, and that the
+# message is the one the failure itself wrote.
+#
+# The second half is the owner's ruling of 2026-08-01 (AGENTS.md, "Errors are
+# the error"): the alert's body is the raw reason, not a line about a file
+# that would not open. The terminal half of that is read here directly, since
+# the trailer read fails with a sentence this script can name. The window
+# half is `refusals_differ` below, because no capture can read words.
 
 dud() {
 	printf '\n-- rejected file checks (synthetic)\n'
@@ -2052,15 +2236,19 @@ dud() {
 		-f lavfi -i "testsrc=size=320x320:rate=30:duration=1" \
 		-map 0:v -map 1:v -c:v libx265 -tag:v hvc1 -preset ultrafast \
 		"$file" 2>>"$session/ffmpeg.log"; then
-		skip "a file with no trailer is refused (no two-stream HEVC from ffmpeg here)"
+		skip "the refusal says what actually failed (no two-stream HEVC from ffmpeg here)"
+		# The comparison below is against this file's own alert, so it goes
+		# with it: an empty .insv alone has nothing to differ from.
+		skip "two failures put up two different alerts (no file to refuse)"
 		return
 	fi
 
 	boot dud "$file"
-	if await 'not shown' "$READY"; then
-		pass "a file with no trailer is refused"
+	local check="the refusal says what actually failed, in the error's own words"
+	if await 'not shown: file has no Insta360 trailer' "$READY"; then
+		pass "$check"
 	else
-		fail "a file with no trailer is refused" "nothing said so in $READY s" "log: $log"
+		fail "$check" "$(refused_with "$log")" "log: $log"
 	fi
 
 	if await_paint dud; then
@@ -2073,6 +2261,73 @@ dud() {
 		return
 	fi
 
+	# The window with this refusal's alert over it, kept for the comparison
+	# in `refusals_differ`. A beat after paint, like every capture that is
+	# compared with another one.
+	sleep "$SETTLE"
+	grab dud-alert >/dev/null
+	exits_clean
+
+	refusals_differ
+}
+
+# What the app said it would not show, with the path taken off the front.
+refused_with() {
+	sed -n 's/^kjerag: .* not shown: //p' "$1" | tail -1
+}
+
+# The alert's body is this failure's own message and not a line the app keeps
+# for failures in general (AGENTS.md, "Errors are the error").
+#
+# No capture can read the words in a dialog, so what is checked is that two
+# files that fail for two different reasons draw two different dialogs. The
+# reasons are read off the terminal and required to differ, because two files
+# that failed the same way would prove nothing; the pixels are then what says
+# the difference reached the window. Both halves are needed and the check is
+# worth what the pair is worth: on the commit before this one, both of these
+# files put up "That file could not be opened." and this fails.
+#
+# The second file is empty and named `.insv`, so it is refused by libavformat
+# rather than by the trailer read, in libavformat's own words.
+refusals_differ() {
+	local check="two failures put up two different alerts"
+	local empty=$session/nothing-in-it.insv
+	: >"$empty"
+
+	boot empty "$empty"
+	if ! await 'not shown' "$READY"; then
+		alive || lost "$check"
+		fail "$check" "an empty file was not refused in $READY s" "log: $log"
+		teardown
+		return
+	fi
+
+	local first second
+	first=$(refused_with "$session/dud.log")
+	second=$(refused_with "$log")
+	if [ "$first" = "$second" ]; then
+		fail "$check" "both files were refused with: $second" \
+			"log: $log"
+		exits_clean
+		return
+	fi
+
+	if ! await_paint empty; then
+		alive || lost "$check"
+		fail "$check" "capture is black: $session/empty.ppm" "log: $log"
+		teardown
+		return
+	fi
+	sleep "$SETTLE"
+	local alerted
+	alerted=$(grab empty-alert)
+	if same_picture "$session/dud-alert.ppm" "$alerted"; then
+		fail "$check" \
+			"the same dialog for \"$first\" and \"$second\"" \
+			"$session/dud-alert.ppm" "$alerted"
+	else
+		pass "$check ($second)"
+	fi
 	exits_clean
 }
 
@@ -2190,6 +2445,7 @@ if [ -n "$media" ]; then
 	with_media
 	pooled_calibration
 	dropped_files
+	paired_files
 	stalls
 else
 	welcome

@@ -245,6 +245,18 @@ the STREAM volume zeroed, never audible playback, and says so.
   not ask. Automatic background measurement that improves things silently
   is the pattern; a menu item that gates quality is a design failure.
 - UI copy: plain words, no em dashes.
+- Errors are the error (owner ruling, 2026-08-01): a pilot-facing error
+  surface shows the raw underlying error message, never a generic
+  substitute. An error message is authored once, at the failure site, in
+  plain words with no em dashes, and shown wherever that failure
+  surfaces, terminal and window alike. The owner met "That file could not
+  be opened." in the alert while the terminal was saying "trailer says
+  lens frames are 2880x2880 but the stream decodes 736x368". A line of
+  the app's own may sit over an error ONLY when it knows something the
+  error does not AND says what to do about it; there are three, each
+  named and justified in `fail::refusal`. Engine error strings are
+  pilot-facing copy: they are written to be read by him, and the copy
+  rules bind them.
 - UI design defers to COSMIC system apps best practice (owner doctrine,
   2026-07-31): use libcosmic's stock widgets and the patterns of
   cosmic-files / cosmic-player / cosmic-edit (header bar, standard

@@ -226,18 +226,39 @@ with a second line of body text under the first. The owner's call
 failure is now the stock alert in the middle of the window, shaped the way
 cosmic-files shapes the one it puts up for an operation that failed
 (`src/app.rs:5665-5678`): a title, the reason as the body, `dialog-error` at
-64, and one button. It says why in plain words, and the terminal carries the
-detail. cosmic-player only logs (`src/video.rs:63`), which leaves the pilot
-staring at an unchanged window; a player with exactly one job should say when
-it cannot do it.
+64, and one button. cosmic-player only logs (`src/video.rs:63`), which leaves
+the pilot staring at an unchanged window; a player with exactly one job should
+say when it cannot do it.
+
+**The body is the reason, in the failure's own words** (owner ruling,
+2026-08-01, AGENTS.md "Errors are the error"). The title is short and says
+what happened; under it goes the error's own message, verbatim, the same one
+the terminal echo carries. The line this replaced was "That file could not be
+opened.", and the owner met it over a terminal that was saying "trailer says
+lens frames are 2880x2880 but the stream decodes 736x368": one of those two
+sentences is worth reading, and it was not the one in the window. Three lines
+of the app's own survive over an error, listed in docs/ARCHITECTURE.md, and
+each of them names a fix the error itself does not know about. A pilot who
+reads a message like a developer's is a pilot who can put it in a bug report;
+a pilot who reads a sentence that says nothing has nothing to send.
 
 **And it is the only surface a failure has** (issue #124). A video that
 stopped part way through puts up the same alert with a title of its own
 ("Video stopped"), because it is the same thing from the pilot's side: no
-picture, and one action that fixes it. The alert's line is private to
-`crates/app/src/fail.rs` and nothing else in the app can put words there, so
-this is a property of the code rather than a rule to remember
-(docs/ARCHITECTURE.md). The one failure that is deliberately not an alert is a
+picture, and one action that fixes it. Its body follows the same rule as
+every other: the stall's own line, and then the action, which is the one
+thing the stall cannot know because it is the shell that decides an open is
+over.
+
+> 61 frames could not be imported over 2.0 s, last: Too many open files
+> (os error 24). Open the file again.
+
+The sentence that stood there until 2026-08-01 ("The picture could not be
+drawn, so playback stopped.") knew less than the line it stood over, and a
+line of ours is allowed over an error only when it knows more. The alert's
+line is private to `crates/app/src/fail.rs` and nothing else in the app can
+put words there, so this is a property of the code rather than a rule to
+remember (docs/ARCHITECTURE.md). The one failure that is deliberately not an alert is a
 capture that could not be written: the picture is still there and the pilot is
 still watching it, so that is a toast.
 
@@ -277,8 +298,11 @@ precedent. Wrap the shader widget in
 type whose `AllowedMimeTypes::allowed()` is `["text/uri-list"]`, modelled
 on cosmic-files' `ClipboardPaste` (`src/clipboard.rs:108-160`); the widget
 is `src/widget/dnd_destination.rs:16-27` in libcosmic and the wiring
-example is cosmic-files `src/app.rs:6491-6496`. First file wins, others are
-ignored. `FILE_TRANSFER_MIME` (`src/widget/dnd_destination.rs:33`) is the
+example is cosmic-files `src/app.rs:6491-6496`. The first file is the one
+that opens; the rest are offered to it as the set it might be part of, so
+dragging both halves of a two-file capture in together plays the whole
+sphere (issue #123). Files the naming rule does not pair with the first are
+still ignored. `FILE_TRANSFER_MIME` (`src/widget/dnd_destination.rs:33`) is the
 other half, and it did not come for free as this line once hoped: it is how
 a drop reaches a sandboxed app, and what arrives under it is a key rather
 than a payload, so it is `on_file_transfer` and a call to the document
@@ -1060,12 +1084,22 @@ before it goes.
 is copied, a view is gone to. A vocabulary that wobbles between two words for
 one idea is what makes a small feature feel like two.
 
+**An error message is not written here.** The alert's body is whatever
+failed, saying so in its own words (AGENTS.md, "Errors are the error"), so
+those sentences live at their failure sites in `meta`, `media` and `render`
+and the rules above still bind them: plain words, no em dashes, specific
+enough to be worth reading. `strings.rs` holds three lines that sit over an
+error and each says why it is one.
+
 No i18n in the first landing. All three first-party apps use
 `i18n-embed` + fluent with an `fl!` macro, and that is real machinery for a
-pre-alpha with one user. Keep every user-facing string in one module so the
-later move is mechanical, and treat this as a deliberate deviation to
+pre-alpha with one user. Keep every string this app writes in one module so
+the later move is mechanical, and treat this as a deliberate deviation to
 revisit before any public release rather than as a decision that the
-strings should live inline forever.
+strings should live inline forever. The errors are the loose end in that
+plan and they are a small one: an `.ftl` needs a key per message either way,
+and a message that is not written here is one that has to be listed by hand
+when the day comes.
 
 ## Deviations from cosmic-player, collected
 
