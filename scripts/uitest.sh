@@ -2059,8 +2059,10 @@ dud() {
 		-f lavfi -i "testsrc=size=320x320:rate=30:duration=1" \
 		-map 0:v -map 1:v -c:v libx265 -tag:v hvc1 -preset ultrafast \
 		"$file" 2>>"$session/ffmpeg.log"; then
-		skip "a file with no trailer is refused (no two-stream HEVC from ffmpeg here)"
-		skip "the refusal says what actually failed (no file to refuse)"
+		skip "the refusal says what actually failed (no two-stream HEVC from ffmpeg here)"
+		# The comparison below is against this file's own alert, so it goes
+		# with it: an empty .insv alone has nothing to differ from.
+		skip "two failures put up two different alerts (no file to refuse)"
 		return
 	fi
 
