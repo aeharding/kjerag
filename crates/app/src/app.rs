@@ -57,6 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
+use kjerag_render::capture_set::{self, Missing};
 use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, Stall, Stats};
 
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
@@ -165,6 +166,11 @@ pub enum Message {
     FileLoad(PathBuf),
     FileOpen,
     FileOpenRecent(usize),
+    /// What the chooser came back with, which is one file or several: a
+    /// capture written one lens per file is picked as two, because inside a
+    /// sandbox each arrives in a document directory of its own and neither
+    /// can be found from the other (issue #123).
+    FilesPicked(Vec<PathBuf>),
     Fullscreen,
     Key(Modifiers, Physical, Key),
     LaunchUrl(String),
@@ -511,12 +517,19 @@ impl cosmic::Application for App {
             }
             Message::ConfigState(state) => self.stored.state = state,
             Message::Dropped(dropped) => {
-                // First file wins, others are ignored.
-                let Some(path) = dropped.and_then(|files| files.0.into_iter().next()) else {
+                // The first file is the one that opens, and the rest are the
+                // set it may be part of: dragging both halves of a capture in
+                // together is one of the two ways to open one the sandbox
+                // cannot see the folder of (issue #123, the other is picking
+                // both in the chooser). Dropping two unrelated files is
+                // unchanged, because a file is only taken for a lens of the
+                // first one if the naming rule pairs them.
+                let files = dropped.map(|files| files.0).unwrap_or_default();
+                let Some((first, alongside)) = files.split_first() else {
                     self.alert.raise(Failure::Dropped);
                     return Task::none();
                 };
-                return self.update(Message::FileLoad(path));
+                return self.opened(&first.clone(), alongside, now);
             }
             Message::DroppedTransfer(key) => {
                 // The key is the drop; the files are the portal's to hand
@@ -542,10 +555,12 @@ impl cosmic::Application for App {
                 self.show_controls(now);
                 return self.retitle();
             }
-            Message::FileLoad(path) => {
-                self.load(&path);
-                self.show_controls(now);
-                return self.retitle();
+            Message::FileLoad(path) => return self.opened(&path, &[], now),
+            Message::FilesPicked(picked) => {
+                let Some((first, alongside)) = picked.split_first() else {
+                    return Task::none();
+                };
+                return self.opened(&first.clone(), alongside, now);
             }
             Message::FileOpen => return chooser(),
             Message::FileOpenRecent(index) => {
@@ -903,6 +918,50 @@ impl App {
             .is_some_and(|open| open.scene.is_playing())
     }
 
+    /// Open what the pilot pointed at, and then say the one thing about it
+    /// that cannot be seen.
+    fn opened(&mut self, path: &Path, alongside: &[PathBuf], now: Instant) -> Task<Message> {
+        self.load_with(path, alongside);
+        self.show_controls(now);
+        let retitle = self.retitle();
+        let Some(said) = self.advice(path) else {
+            return retitle;
+        };
+        Task::batch([retitle, self.toast(said.to_owned())])
+    }
+
+    /// What to tell the pilot about a capture that came in half, or `None`,
+    /// which is almost always.
+    ///
+    /// Half a sphere looks exactly like a whole one until the view is turned
+    /// round, so this is the one thing about an open file worth interrupting
+    /// for. It takes two facts to be sure of it, and either alone is a lie:
+    ///
+    /// - the capture is being read as **one** lens. An X4-class file carries
+    ///   both lenses in one container and its name still names a mate that
+    ///   was never written, so a name rule on its own would call every X4
+    ///   capture half of one;
+    /// - and the naming rule names a mate at all, which
+    ///   [`Missing::Nothing`] covers for a file whose name has no lens marker.
+    ///
+    /// What is said then depends on whether the app is in a position to know
+    /// the mate is not there. A document portal directory holds the picked
+    /// file and nothing else whatever is on the pilot's card, so absence
+    /// there is not evidence of absence and saying "it is not in the folder"
+    /// would be a claim about a folder this app has never seen.
+    fn advice(&self, path: &Path) -> Option<&'static str> {
+        let open = self.open.as_ref()?;
+        if open.path != path || open.scene.lenses() != 1 {
+            return None;
+        }
+        match capture_set::resolve(path).missing {
+            Missing::Nothing => None,
+            Missing::Unreadable => Some(strings::CAPTURE_PICK_BOTH),
+            Missing::NotBeside(_) if document(path) => Some(strings::CAPTURE_PICK_BOTH),
+            Missing::NotBeside(_) => Some(strings::CAPTURE_HALF),
+        }
+    }
+
     /// Opens a file, or says why it did not in an alert over whatever the
     /// window was already showing. cosmic-player only logs
     /// (`src/video.rs:63`), which leaves the pilot staring at an unchanged
@@ -912,8 +971,16 @@ impl App {
     /// that was playing carries on playing behind the alert, because a file
     /// that would not open is not a reason to stop the one that did.
     fn load(&mut self, path: &Path) {
+        self.load_with(path, &[]);
+    }
+
+    /// The same, told about the other files the pilot picked alongside this
+    /// one: inside a sandbox that is where a capture written one lens per
+    /// file finds its other half, because the chooser hands over a document
+    /// with nothing beside it (issue #123).
+    fn load_with(&mut self, path: &Path, alongside: &[PathBuf]) {
         self.pool_seam();
-        match Scene::open(path) {
+        match Scene::open_with(path, alongside) {
             Ok(scene) => {
                 self.alert.close();
                 self.hold_seam(&scene);
@@ -1628,32 +1695,61 @@ fn shift(from: Duration, seconds: f64) -> Duration {
     }
 }
 
+/// Whether this path is the document portal's rather than the pilot's.
+///
+/// A file picked in a sandbox's chooser comes back as
+/// `<runtime>/doc/<id>/<name>`, a directory holding that one file whatever
+/// sits beside the real one, and the app is given no way to ask where the
+/// real one is: the portal's `Documents.Info` and `Lookup` are both refused
+/// to sandboxed callers ("Not allowed in sandbox", measured 2026-08-01). So
+/// the prefix is the only tell there is, and it is enough for the only thing
+/// it decides: whether this app is in a position to say a file is missing.
+///
+/// Here rather than in `crate::fail` beside the sandbox's other question,
+/// because nothing about it is a failure: what it decides is which of two
+/// true things a toast says about a capture that opened and is playing.
+fn document(path: &Path) -> bool {
+    let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
+        return false;
+    };
+    path.starts_with(Path::new(&runtime).join("doc"))
+}
+
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
 ///
-/// The line it prints is the answer to a question the app cannot ask any
-/// other way (issue #123): what the chooser hands back inside a sandbox. A
-/// path under `/run/user/<uid>/doc/` is the document portal's translation of
-/// the file, and its directory holds that file alone, which is why a capture
-/// written as two files plays one lens when it is picked there. The portal's
-/// own `Documents.Info` is refused to sandboxed callers ("Not allowed in
-/// sandbox", measured), so the terminal is where this can be seen at all.
+/// It takes more than one file, which is not a convenience: inside a sandbox
+/// it is the only way to open a capture the camera wrote one lens per file
+/// unless that capture is somewhere a grant already covers (issue #123). What
+/// comes back from a pick is not the path the pilot pointed at but a document,
+/// `/run/user/<uid>/doc/<id>/<name>`, in a directory holding it alone, so the
+/// mate cannot be found beside it and the pilot naming both halves is the
+/// answer. Picking one file still opens it, and the shell says how to do
+/// better ([`Kjerag::advice`]).
+///
+/// The line it prints is what the chooser handed back, which the app can
+/// learn no other way: the document portal's own `Documents.Info` is refused
+/// to sandboxed callers ("Not allowed in sandbox", measured).
 fn chooser() -> Task<Message> {
     Task::perform(
         async {
             let dialog = file_chooser::open::Dialog::new()
                 .title(strings::OPEN_TITLE)
                 .filter(FileFilter::new(strings::INSV_FILTER).glob("*.insv"));
-            match dialog.open_file().await {
-                Ok(response) => match response.url().to_file_path() {
-                    Ok(path) => {
-                        println!("chose:  {}", response.url());
-                        action::app(Message::FileLoad(path))
+            match dialog.open_files().await {
+                Ok(response) => {
+                    let mut picked = Vec::new();
+                    for url in response.urls() {
+                        println!("chose:  {url}");
+                        match url.to_file_path() {
+                            Ok(path) => picked.push(path),
+                            Err(()) => eprintln!("kjerag: {url} is not a local file"),
+                        }
                     }
-                    Err(()) => {
-                        eprintln!("kjerag: {} is not a local file", response.url());
-                        action::none()
+                    match picked.is_empty() {
+                        true => action::none(),
+                        false => action::app(Message::FilesPicked(picked)),
                     }
-                },
+                }
                 Err(file_chooser::Error::Cancelled) => action::none(),
                 Err(e) => {
                     eprintln!("kjerag: no file chosen: {e}");

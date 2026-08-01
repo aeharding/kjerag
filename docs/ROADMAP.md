@@ -557,6 +557,99 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The chooser hands back a document because the grant is read
+  only, not because it is a chooser** (issue #123, measured, no fix yet). A
+  file picked in `File > Open video` arrives as `/run/user/<uid>/doc/<id>/
+  <name>`, a directory holding that one file, so a capture written as two
+  files plays one lens. The reason is one permission wide. xdg-desktop-portal
+  1.18.4 passes every picked file to the document portal with
+  `AS_NEEDED_BY_APP` (`src/file-chooser.c`, `src/documents.c`), the document
+  portal skips the store when `flatpak info --file-access` says the app
+  already has the access being asked for, and the access being asked for
+  includes write unless the backend answers `writable: false`.
+  xdg-desktop-portal-cosmic never answers it (`FileChooserResult` has no such
+  field) and xdg-desktop-portal-gtk answers it only when the pilot ticks "Open
+  files read-only". So `xdg-videos:ro` says `read-only`, the request wanted
+  write, and a document is registered.
+
+  Both answers were produced, which is what makes the first one believable.
+  `scripts/chooser-probe.py` makes the chooser's own `Documents.AddFull` call
+  with each permission set: write asked returns a doc id for a file under
+  `~/Videos` and for one on the file manager's network mount, read only
+  returns an empty doc id for both, which is the real path. With the two
+  grants temporarily made read-write through `flatpak override`, all four
+  return the real path. `scripts/chooser-flatpak.sh` then drove a real dialog
+  end to end: the whole portal stack runs a second time inside a headless cage
+  session on its own D-Bus bus, so the backend draws its dialog there and
+  nothing lands on the desktop, and the evidence is the portal's own
+  `Request.Response` signal. Default: a document path, `not shown`. The same
+  pick with the read-only box ticked: the real path, `sampling 2 of 2
+  calibrated`, `2 lens streams from 2 files`.
+
+  That harness needed one thing the repo did not have: `wtype` delivers
+  character keys into a cage session and no named ones (Return, BackSpace, the
+  arrows never arrive), so a dialog answered by a button could not be answered
+  at all. `kjerag-spike --bin click` presses it with the same wlr virtual
+  pointer `dragsource` uses.
+
+  **The app cannot ask for less**, which was the owner's condition on widening
+  anything. The finer-grained lever looked plausible: the portal's impl spec
+  documents a `writable` option whose default is "no". It is documented under
+  the **results the backend returns**, not the request the app makes, and four
+  things say so, three of them measured:
+
+  - ashpd 0.12.3's `OpenFileOptions` has no `writable` field, so our call site
+    cannot express it at all;
+  - xdg-desktop-portal 1.18.4 filters request options against an allow list
+    (`open_file_options`) that does not contain it;
+  - sending it by hand from inside the sandbox (`RAW=` in
+    `scripts/chooser-flatpak.sh`, through `gdbus` in the bundle) is accepted
+    with no error and **dropped in flight**. On the bus, the app's call carries
+    `dict entry("writable", boolean false)` and what xdg-desktop-portal
+    forwards to the backend is `array [ ]`. The dialog that opens has its
+    read-only box unticked, which is the same fact in a picture;
+  - and the GTK backend never reads such an option anyway. It only writes one,
+    from a checkbox the pilot ticks by hand.
+
+  So the write bit cannot be given up per request, and the owner's ruling is
+  that it is not given up at all: **the grants stay read only and the manifest
+  does not change**. The chooser keeps handing over a document, and what the
+  app does about it is ask for what it cannot see. It takes more than one file
+  now, the picked set is paired by name rather than by directory, a drop
+  carries its set the same way, and a capture that arrived half says which of
+  the two proper ways to open it the pilot has left: pick both files, or drag
+  them in. Half is still played, because a pilot who asked for a file gets the
+  file.
+
+  Two facts are needed before any of that is said, and either alone is a lie.
+  The capture is read as ONE lens, and the naming rule names a mate: an
+  X4-class file names one too and carries both lenses in its container, so a
+  name rule on its own would call every X4 capture half of one (measured: it
+  stays silent). A readable folder with no mate in it earns the toast; a
+  document directory earns the guidance instead, because it lists one file
+  whatever is on the pilot's card.
+
+  Composing the capture at the open was not the whole of it. The owner tested
+  the branch bundle, picked both halves, and the log said both things at once:
+  `2 lens streams from 2 files` from the player, and `this file carries one
+  lens stream, so it has no seam` from the seam fit a line later. The fit
+  reopened the capture from the picked path and looked **beside** it for the
+  second lens, which is where a bare path's mate is and where a document's
+  never is, so a capture opened the proper way could never be calibrated or
+  harvested from. The fix is that a capture is its files: the reader hands
+  back the ones it opened (`Reader::paths`), the scene keeps those rather than
+  the one path it was named by, and the walk the fit reads takes them as given
+  (`Walk::over`). The drop and command-line routes passed all along for the
+  reason that hid this: two real paths sit beside each other, so looking
+  beside worked by accident of the route rather than by anything the fit knew.
+  The harness now drops both halves from a directory each, which is the
+  chooser's shape without a chooser, and fails if a capture the app read as
+  two files ever says it has one lens stream.
+
+  The longer answer is issue #134, the owner's own: a folder-first shell in
+  the cosmic-player idiom, where the app is given the directory and never has
+  to ask. Not v1.
+
 - 2026-08-01 **A transient import error costs a frame, and every failure the
   pilot meets goes through the alert** (issue #124, owner-reported at flatpak
   verification). One failed frame import set a flag on the pipeline for good:
@@ -698,9 +791,8 @@ live, no keyframe UI ever.
   and pairs both lenses (`2 of 2 calibrated`, `2 lens streams from 2 files`),
   because both the document portal's `RetrieveFiles` and flatpak's file
   forwarding skip the document store for a file the app can already read.
-  The file chooser does not: xdg-desktop-portal 1.18.4 registers a document
-  for every sandboxed app whatever its permissions
-  (`src/file-chooser.c`, `send_response`), so a file picked there arrives as
+  The file chooser is one permission short of skipping it too, which the
+  2026-08-01 entry above measures: a file picked there arrives as
   `/run/user/1000/doc/<id>/<name>`, its mate is not in that directory, and
   the capture still plays one lens. Issue #123 stands for that path alone.
 
