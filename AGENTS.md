@@ -26,7 +26,20 @@ compositor:
 `cargo run --release -p kyerag-spike --bin reframe -- <file.insv> yaw=30 fov=60`
 
 The `[patch.crates-io]` wgpu entry lives in the root manifest, which is the
-only place cargo reads one.
+only place cargo reads one. It pins the fork by `rev`, not by branch, so that
+a force-push on the fork cannot break a recorded build (issue #68).
+
+**A change to `Cargo.lock` is a change to `flatpak/cargo-sources.json`.** That
+file is the Flatpak build's whole supply of crates, one source per crate,
+generated from the lock and committed so the build needs no network
+(issue #72). Regenerate and commit it in the same change:
+
+```sh
+scripts/cargo-sources.sh
+```
+
+A stale one is not a build that fetches what it is missing; it is a build that
+fails.
 
 **Two checkouts must not share a `CARGO_TARGET_DIR`.** Pointing a worktree's
 build at the main checkout's `target/` to reuse its dependency cache works

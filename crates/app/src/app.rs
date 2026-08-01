@@ -57,7 +57,7 @@ use cosmic::widget::menu::Action as _;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
-use kyerag_render::{Accuracy, Horizon, Nudge, Request, Scene, Stats};
+use kyerag_render::{Accuracy, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -201,9 +201,10 @@ pub struct App {
     core: Core,
     /// The file on screen, if there is one.
     open: Option<Open>,
-    /// Set when the last attempt to open a file did not work, which puts a
-    /// second line under the welcome view's first.
-    failed: bool,
+    /// The line under the welcome view's first, set when the last attempt to
+    /// open a file did not work. It holds the line rather than a flag because
+    /// which line it is depends on why the open failed (issue #69).
+    failed: Option<String>,
     stored: Stored,
     key_binds: HashMap<KeyBind, Action>,
     about: About,
@@ -324,7 +325,7 @@ impl cosmic::Application for App {
         let mut app = App {
             core,
             open: None,
-            failed: false,
+            failed: None,
             stored: flags.stored,
             key_binds: key_binds(),
             about: about(),
@@ -399,7 +400,7 @@ impl cosmic::Application for App {
                 // First file wins, others are ignored.
                 let Some(path) = dropped.and_then(|files| files.0.into_iter().next()) else {
                     eprintln!("kyerag: that drop carried no local file");
-                    self.failed = true;
+                    self.failed = Some(strings::open_failed(None));
                     return Task::none();
                 };
                 return self.update(Message::FileLoad(path));
@@ -410,7 +411,7 @@ impl cosmic::Application for App {
             }
             Message::FileClose => {
                 self.open = None;
-                self.failed = false;
+                self.failed = None;
                 self.show_controls(now);
                 return self.retitle();
             }
@@ -696,7 +697,7 @@ impl App {
     fn load(&mut self, path: &Path) {
         match Scene::open(path) {
             Ok(scene) => {
-                self.failed = false;
+                self.failed = None;
                 self.open = Some(Open {
                     path: path.to_path_buf(),
                     duration: scene.duration(),
@@ -710,7 +711,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("kyerag: {} not shown: {e}", path.display());
-                self.failed = true;
+                self.failed = Some(strings::open_failed(missing_decoder(&*e)));
                 self.open = None;
             }
         }
@@ -924,8 +925,8 @@ impl App {
             .spacing(8)
             .push(icon::from_svg_bytes(APP_ICON).icon().size(128))
             .push(widget::text::body(strings::NOTHING_OPEN));
-        if self.failed {
-            said = said.push(widget::text::body(strings::OPEN_FAILED));
+        if let Some(line) = &self.failed {
+            said = said.push(widget::text::body(line.as_str()));
         }
         widget::column::with_capacity(4)
             .align_x(Alignment::Center)
@@ -1200,6 +1201,21 @@ fn shift(from: Duration, seconds: f64) -> Duration {
     }
 }
 
+/// The codec a failed open could find no decoder for, and `None` for every
+/// other failure (issue #69).
+///
+/// The engine hands the shell one boxed error from the whole open, and the box
+/// arrives with whatever was put in it: `kyerag-media` refuses a stream whose
+/// codec has no decoder with a [`MissingDecoder`], and nothing between here
+/// and there re-wraps it. So this is a downcast rather than a string match.
+///
+/// The `'static` on the trait object is what makes the downcast legal: without
+/// it the reference's own lifetime becomes the object's, and `downcast_ref` is
+/// only implemented for `dyn Error + Send + Sync + 'static`.
+fn missing_decoder(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Option<&'static str> {
+    Some(e.downcast_ref::<MissingDecoder>()?.codec)
+}
+
 /// The XDG portal file chooser (cosmic-player `src/main.rs:1066-1085`).
 fn chooser() -> Task<Message> {
     Task::perform(
@@ -1247,11 +1263,32 @@ fn about() -> About {
         ])
 }
 
-/// The toast queue is ours now rather than libcosmic's, so its three rules
-/// are tested here rather than taken on trust.
+/// What the shell decides on its own: which line a failed open leaves on the
+/// welcome view, and the three rules of the toast queue, which is ours now
+/// rather than libcosmic's and so is tested rather than taken on trust.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shell has to tell a build with no decoder apart from a file it
+    /// cannot read, because they get different lines and only one of them is
+    /// the pilot's to fix (issue #69). This is that test with the probe stood
+    /// in for: the error is built by hand, the way `kyerag-media` builds it on
+    /// a box whose ffmpeg has no HEVC in it.
+    #[test]
+    fn a_missing_decoder_is_told_apart_from_a_file_that_will_not_open() {
+        let missing: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(MissingDecoder { codec: "hevc" });
+        assert_eq!(missing_decoder(&*missing), Some("hevc"));
+        assert!(strings::open_failed(missing_decoder(&*missing)).contains("HEVC"));
+
+        let broken: Box<dyn std::error::Error + Send + Sync> = "file has no video stream".into();
+        assert_eq!(missing_decoder(&*broken), None);
+        assert_eq!(
+            strings::open_failed(missing_decoder(&*broken)),
+            strings::OPEN_FAILED
+        );
+    }
 
     fn lines(toasts: &Toasts) -> Vec<&str> {
         toasts
