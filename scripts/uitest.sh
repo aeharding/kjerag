@@ -1826,6 +1826,27 @@ that away" \
 			"$session/stalled-alert.ppm" "$session/stalled-dismissed-b.ppm"
 	fi
 
+	# What the picture that stopped is, once the alert is out of the way: a
+	# picture. The pane holds the last frame the pass managed to present rather
+	# than falling to the backdrop, because a video that vanishes at the moment
+	# it stops reads as a second failure on top of the first. Owner, on the
+	# shape this replaced: "Why does the video disappear instead of just
+	# freezing on current frame though? Its jarring".
+	#
+	# `pane_is_backdrop` is issue #125's own reading, a mean of the band under
+	# the header, and what lets it tell the room from a picture is that this
+	# footage reads sky there: 185 224 241 against the room's 27 27 27. Taken
+	# with the alert dismissed, so nothing is drawn over what is being read,
+	# and the two captures behind it were already shown to be the same bytes,
+	# which is the frame being held rather than a video still running.
+	check="the stopped picture is the last frame, not the backdrop"
+	if pane_is_backdrop "$session/stalled-dismissed-b.ppm"; then
+		fail "$check" "the pane reads $(pane_rgb "$session/stalled-dismissed-b.ppm"), \
+which is the room and not a frame" "$session/stalled-dismissed-b.ppm"
+	else
+		pass "$check (the pane reads $(pane_rgb "$session/stalled-dismissed-b.ppm"))"
+	fi
+
 	# (3) The owner's ruling. The gate is still on, the alert has been closed,
 	# and from here this open is over: one alert for one open, whatever the
 	# pilot does next. Space is what he does next, because a stopped picture

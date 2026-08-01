@@ -1033,6 +1033,14 @@ pub struct ScenePipeline {
     /// The frame the bind group points at, and the ones still in flight
     /// behind it. Newest first.
     live: VecDeque<Live>,
+    /// The last view this pipeline actually put on screen, which is what a
+    /// capture it has given up on goes on showing (issue #124). Frames keep
+    /// arriving while imports fail, so by the time it gives up the view the
+    /// shell offers is one that was never bound, and drawing by that takes
+    /// the picture away at the moment the alert says the picture stopped.
+    /// Owner, on meeting exactly that: "Why does the video disappear instead
+    /// of just freezing on current frame though? Its jarring".
+    shown: Option<View>,
     /// The target this pass was built for, which is iced's surface format.
     /// A capture renders into a texture of the same format, so that what it
     /// reads back is what the compositor would have been handed.
@@ -1170,6 +1178,7 @@ impl ScenePipeline {
             blank,
             bind_group,
             live: VecDeque::new(),
+            shown: None,
             format,
             reported: false,
         }
@@ -1245,7 +1254,28 @@ impl ScenePipeline {
             self.show(device, view, &primitive.stalled);
         }
 
-        let reframe = match &primitive.view {
+        // The pane holds the last frame this pipeline actually presented
+        // whenever the one it is offered is not on the GPU (issue #124).
+        // Frames keep arriving while imports fail, so drawing strictly by
+        // what the shell offers takes the picture away for as long as the
+        // failures last and leaves it away once the capture is stopped, which
+        // is a second failure on top of the first from where the pilot sits.
+        // Owner: "Why does the video disappear instead of just freezing on
+        // current frame though? Its jarring".
+        //
+        // Every gap rather than only the stopped one, because a hiccup that
+        // costs frames should cost frames: a squeeze under the bound took the
+        // pane to the backdrop and back before this.
+        let showing = match &primitive.view {
+            Some(view) if self.is_bound(view) => primitive.view.clone(),
+            // Nothing ever presented is the one case with nothing to hold,
+            // and the pane is the backdrop. `Stalled` says so in the terminal
+            // line when it gives up, because on screen it looks like the
+            // other kind of failure.
+            _ => self.shown.clone(),
+        };
+
+        let reframe = match &showing {
             Some(view) if self.is_bound(view) => Reframe::new(
                 &view.lenses,
                 view.frames.size,
@@ -1263,14 +1293,14 @@ impl ScenePipeline {
         // After the uniform write, because the band reads the same block: the
         // calibration it measures against has to be the one the draw will use,
         // or the two disagree by whatever the correction walked this redraw.
-        self.measure(device, queue, primitive.view.as_ref());
+        self.measure(device, queue, showing.as_ref());
 
         // After the uniform write, and only after it: the write lands at the
         // next submit on this queue, and the capture's own submit is that
         // one. Taken here rather than in `draw` because this is the call
         // that has a device to render with.
         if let Some(request) = primitive.shutter.take() {
-            self.shoot(device, queue, request, aspect, primitive.view.as_ref());
+            self.shoot(device, queue, request, aspect, showing.as_ref());
         }
     }
 
@@ -1463,8 +1493,9 @@ impl ScenePipeline {
                     _planes: planes,
                 });
                 self.live.truncate(RETAINED);
+                self.shown = Some(view.clone());
             }
-            Err(e) => stalled.failed(Instant::now(), e),
+            Err(e) => stalled.failed(Instant::now(), e, self.shown.is_some()),
         }
     }
 

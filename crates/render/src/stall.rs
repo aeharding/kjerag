@@ -114,7 +114,14 @@ impl Stalled {
     /// A capture that has already been given up on counts nothing and says
     /// nothing: it is stopped, and the pass has no reason to be importing into
     /// it at all (`ScenePipeline::show` asks before it tries).
-    pub(crate) fn failed(&self, now: Instant, why: impl fmt::Display) {
+    ///
+    /// `has_frame` is whether the pass has a frame to hold on screen once it
+    /// gives up. It usually does, and the pilot gets a frozen picture under
+    /// the alert. When it does not, because nothing was ever presented, the
+    /// pane falls to the backdrop, and the terminal line is where that is
+    /// said: on screen the two look like different bugs and the alert says
+    /// the same thing about both.
+    pub(crate) fn failed(&self, now: Instant, why: impl fmt::Display, has_frame: bool) {
         let Ok(mut state) = self.0.lock() else {
             return;
         };
@@ -134,8 +141,12 @@ impl Stalled {
         state.run = None;
         state.stopped = true;
         state.raised = Some(Stall::new(format!(
-            "{failures} frames could not be imported over {:.1} s, last: {why}",
+            "{failures} frames could not be imported over {:.1} s, last: {why}{}",
             lasted.as_secs_f64(),
+            match has_frame {
+                true => "",
+                false => ", and no frame was ever shown, so the pane is empty",
+            },
         )));
     }
 
@@ -193,7 +204,7 @@ mod tests {
         let stalled = Stalled::default();
         let start = Instant::now();
         for frame in 0..15 {
-            stalled.failed(start + Duration::from_millis(frame * 33), "EMFILE");
+            stalled.failed(start + Duration::from_millis(frame * 33), "EMFILE", true);
         }
         assert_eq!(stalled.take(), None);
 
@@ -209,7 +220,7 @@ mod tests {
         let stalled = Stalled::default();
         let start = Instant::now();
         for minute in 0..10 {
-            stalled.failed(start + Duration::from_secs(minute * 60), "EMFILE");
+            stalled.failed(start + Duration::from_secs(minute * 60), "EMFILE", true);
             stalled.landed();
         }
         assert_eq!(stalled.take(), None);
@@ -223,15 +234,17 @@ mod tests {
         let start = Instant::now();
         let mut at = Duration::ZERO;
         while at < STUCK_FOR {
-            stalled.failed(start + at, "EMFILE");
+            stalled.failed(start + at, "EMFILE", true);
             assert_eq!(stalled.take(), None, "gave up after {at:?}");
             at += Duration::from_millis(33);
         }
 
-        stalled.failed(start + STUCK_FOR, "EMFILE");
+        stalled.failed(start + STUCK_FOR, "EMFILE", true);
         let raised = stalled.take().expect("nothing raised after STUCK_FOR");
         assert!(raised.to_string().contains("EMFILE"), "{raised}");
         assert!(raised.to_string().contains("2.0 s"), "{raised}");
+        // There was a frame to hold, so the line says nothing about the pane.
+        assert!(!raised.to_string().contains("pane is empty"), "{raised}");
 
         // Taken, so it is said once: a shell that redraws again does not put
         // the alert up a second time.
@@ -248,8 +261,8 @@ mod tests {
         let start = Instant::now();
         assert!(!stalled.stopped());
 
-        stalled.failed(start, "EMFILE");
-        stalled.failed(start + STUCK_FOR, "EMFILE");
+        stalled.failed(start, "EMFILE", true);
+        stalled.failed(start + STUCK_FOR, "EMFILE", true);
         assert!(stalled.take().is_some());
         assert!(stalled.stopped());
 
@@ -257,11 +270,26 @@ mod tests {
         // looks like. Nothing counts and nothing is raised again.
         let mut at = STUCK_FOR;
         while at < Duration::from_secs(60) {
-            stalled.failed(start + at, "EMFILE");
+            stalled.failed(start + at, "EMFILE", true);
             at += Duration::from_millis(33);
         }
         assert_eq!(stalled.take(), None);
         assert!(stalled.stopped());
+    }
+
+    /// The one case with nothing to freeze on: every import of this file
+    /// failed, the first included, so there is no picture to hold under the
+    /// alert and the pane is the backdrop. The pilot is told the same thing
+    /// either way, because there is the same one thing to do about it; the
+    /// terminal is where the difference is written down.
+    #[test]
+    fn a_stop_with_no_frame_to_hold_says_so() {
+        let stalled = Stalled::default();
+        let start = Instant::now();
+        stalled.failed(start, "EMFILE", false);
+        stalled.failed(start + STUCK_FOR, "EMFILE", false);
+        let raised = stalled.take().expect("nothing raised after STUCK_FOR");
+        assert!(raised.to_string().contains("pane is empty"), "{raised}");
     }
 
     /// The way back is a new capture, so what says the latch is not the old
@@ -271,8 +299,8 @@ mod tests {
     fn opening_the_file_again_is_a_fresh_detector() {
         let stopped = Stalled::default();
         let start = Instant::now();
-        stopped.failed(start, "EMFILE");
-        stopped.failed(start + STUCK_FOR, "EMFILE");
+        stopped.failed(start, "EMFILE", true);
+        stopped.failed(start + STUCK_FOR, "EMFILE", true);
         assert!(stopped.stopped());
 
         let reopened = Stalled::default();
@@ -280,7 +308,7 @@ mod tests {
         assert_eq!(reopened.take(), None);
 
         // And it has the same patience the first one had.
-        reopened.failed(start, "EMFILE");
+        reopened.failed(start, "EMFILE", true);
         assert_eq!(reopened.take(), None);
         assert!(!reopened.stopped());
         reopened.landed();
