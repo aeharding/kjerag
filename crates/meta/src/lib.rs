@@ -39,6 +39,12 @@ pub use trailer::record_index;
 
 /// Everything that can go wrong between an `.insv` path and a
 /// [`CalibrationSet`].
+///
+/// **The pilot reads these.** A failed open carries whatever it failed on up
+/// to the shell, and the alert shows that message word for word (AGENTS.md,
+/// "Errors are the error"), so these sentences are UI copy: plain words, no
+/// em dashes, and specific enough to be worth reading. The test at the foot
+/// of this file holds the em dash half of that.
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
@@ -108,5 +114,57 @@ mod fixture {
 
     pub fn metadata() -> super::trailer::ExtraMetadata {
         serde_json::from_str(JSON).expect("fixture matches the metadata shape")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These are what the pilot is shown when an open fails, so the UI copy
+    /// rule binds them (AGENTS.md).
+    ///
+    /// The `match` is the ratchet: it has no wildcard arm, so a variant added
+    /// later does not compile until it is named here, and naming it is where
+    /// its wording gets looked at.
+    #[test]
+    fn no_error_the_alert_can_show_carries_an_em_dash() {
+        let every = [
+            Error::Io(std::io::Error::other("that file is not readable")),
+            Error::NoTrailer,
+            Error::NoMetadata,
+            // A real decode of real rubbish, because prost's own constructor
+            // for one of these is deprecated and the message is what is under
+            // test.
+            Error::Protobuf(
+                prost::Message::decode(&[0xff, 0xff][..])
+                    .map(|_: trailer::ExtraMetadata| ())
+                    .expect_err("two 0xff bytes are not a metadata record"),
+            ),
+            Error::MissingField("dimension"),
+            Error::OffsetNotNumeric,
+            Error::OffsetGrammar {
+                lens_count: 2,
+                tokens: 3,
+            },
+            Error::CanvasMismatch,
+            Error::DegenerateCanvas,
+        ];
+        for e in &every {
+            let named = match e {
+                Error::Io(_) => "Io",
+                Error::NoTrailer => "NoTrailer",
+                Error::NoMetadata => "NoMetadata",
+                Error::Protobuf(_) => "Protobuf",
+                Error::MissingField(_) => "MissingField",
+                Error::OffsetNotNumeric => "OffsetNotNumeric",
+                Error::OffsetGrammar { .. } => "OffsetGrammar",
+                Error::CanvasMismatch => "CanvasMismatch",
+                Error::DegenerateCanvas => "DegenerateCanvas",
+            };
+            let said = e.to_string();
+            assert!(!said.contains('\u{2014}'), "em dash in {named}: {said}");
+            assert!(!said.is_empty(), "{named} says nothing");
+        }
     }
 }

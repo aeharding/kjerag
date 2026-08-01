@@ -1,4 +1,9 @@
-//! Every string the pilot can read, in one place.
+//! Every string this app writes for the pilot, in one place.
+//!
+//! Not every string he reads: what a failure says is the failure's own
+//! message, written where it happened and shown verbatim (AGENTS.md,
+//! `crate::fail`). Three lines here are the exception and each says why it is
+//! one.
 //!
 //! No i18n in the first landing. All three first-party COSMIC apps put their
 //! copy behind `i18n-embed` + fluent and an `fl!` macro, which is real
@@ -33,9 +38,18 @@ pub const OPEN_BUTTON: &str = "Open video";
 /// The alert a file that would not open puts up, which is a stock dialog in
 /// the middle of the window (owner's call, 2026-08-01). The title says what
 /// happened, the body below says why, and the one button takes it away.
+///
+/// There is no line here for "it did not open", and that is the point: the
+/// body is the failure's own message (`crate::fail`, AGENTS.md).
 pub const CANNOT_OPEN: &str = "Cannot open file";
 pub const CLOSE: &str = "Close";
-pub const OPEN_FAILED: &str = "That file could not be opened.";
+
+/// A drop that held nothing this app can open, which is the one failure with
+/// no error behind it to show instead: libcosmic converts the payload and
+/// keeps only what converted (`src/widget/dnd_destination.rs:119-120`), so a
+/// URL, a remote share or a selection of text all arrive as nothing at all.
+pub const DROPPED_NOTHING: &str =
+    "That drop carried no file. Drag a .insv file in from your file manager.";
 
 /// The same alert, for a video that was playing and stopped (issue #124).
 ///
@@ -125,23 +139,23 @@ pub fn about_item() -> String {
     format!("About {APP_NAME}...")
 }
 
-/// Why the open did not work, as the alert's body.
-///
-/// `missing` is the codec this ffmpeg has no decoder for, which is a different
-/// failure from a file that will not open and has a different answer
-/// (issue #69): nothing is wrong with the file, and one install fixes every
-/// file of that kind at once. Inside a Flatpak it is the way this happens, and
-/// the extension is named because that name is the whole of the pilot's fix
+/// A codec this ffmpeg has no decoder for, which is a different failure from
+/// a file that will not open and has a different answer (issue #69): nothing
+/// is wrong with the file, and one install fixes every file of that kind at
+/// once. Inside a Flatpak it is the way this happens, and the extension is
+/// named because that name is the whole of the pilot's fix
 /// (docs/DISTRIBUTION.md 3.3). The sentence stays true off Flatpak, where a
 /// stripped ffmpeg has the same shape.
+///
+/// One of the three lines the shell is still allowed to write over an error
+/// (`crate::fail::refusal`), because which package carries the decoder is
+/// something `kjerag-media` has no way of knowing: what it says is "no hevc
+/// decoder in this libavcodec", which is true and leaves the pilot nowhere.
 ///
 /// The codec is ffmpeg's own short name, upper-cased: `HEVC`, `H264`. Not a
 /// table of prettier spellings, because the reason to print it is that it can
 /// be searched for and repeated in a bug report.
-pub fn open_failed(missing: Option<&str>) -> String {
-    let Some(codec) = missing else {
-        return OPEN_FAILED.to_owned();
-    };
+pub fn missing_decoder(codec: &str) -> String {
     format!(
         "Kjerag has no {} decoder here, so that file cannot be played. \
          In a Flatpak, the decoder comes from the codecs-extra runtime extension.",
@@ -272,6 +286,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use kjerag_render::{MissingDecoder, Stall};
+
     use super::*;
 
     #[test]
@@ -293,7 +309,7 @@ mod tests {
             COMMENTS,
             NOTHING_OPEN,
             OPEN_BUTTON,
-            OPEN_FAILED,
+            DROPPED_NOTHING,
             CANNOT_OPEN,
             VIDEO_STOPPED,
             VIDEO_STOPPED_BODY,
@@ -339,10 +355,29 @@ mod tests {
         assert!(!frame_saved(Path::new("/tmp/Screenshots/a.png")).contains('\u{2014}'));
         assert!(!capture_failed(Destination::Save, "no").contains('\u{2014}'));
         assert!(!view_is_from(Path::new("a.insv")).contains('\u{2014}'));
-        assert!(!open_failed(Some("hevc")).contains('\u{2014}'));
+        assert!(!missing_decoder("hevc").contains('\u{2014}'));
         assert!(!out_of_reach().contains('\u{2014}'));
         for format in [Foreign::GoPro, Foreign::Dji, Foreign::Spherical] {
             assert!(!foreign(format).contains('\u{2014}'));
+        }
+    }
+
+    /// The pilot reads engine errors now, so they are pilot-facing copy and
+    /// the same rule binds them (AGENTS.md, and `crate::fail` for how they
+    /// get there). This is the app's half: the error types the shell can name.
+    /// `kjerag-meta` tests its own `Error` in its own crate, which is where
+    /// those sentences are written.
+    #[test]
+    fn no_engine_error_the_alert_can_show_carries_an_em_dash() {
+        let said = [
+            MissingDecoder { codec: "hevc" }.to_string(),
+            Foreign::GoPro.to_string(),
+            Foreign::Dji.to_string(),
+            Foreign::Spherical.to_string(),
+            Stall::new("61 frames could not be imported").to_string(),
+        ];
+        for line in said {
+            assert!(!line.contains('\u{2014}'), "em dash in {line:?}");
         }
     }
 
@@ -376,10 +411,9 @@ mod tests {
     /// other branch of it honestly.
     #[test]
     fn a_missing_decoder_names_the_codec_and_the_extension() {
-        let line = open_failed(Some("hevc"));
+        let line = missing_decoder("hevc");
         assert!(line.contains("HEVC"), "{line}");
         assert!(line.contains("codecs-extra"), "{line}");
-        assert_eq!(open_failed(None), OPEN_FAILED);
     }
 
     /// The toast answers one question, which is where to look for the still.
