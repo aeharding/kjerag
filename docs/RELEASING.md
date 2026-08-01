@@ -66,11 +66,16 @@ The bump goes to `main` through a pull request like any other change. Then,
 on the merged commit:
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+git tag -m 'Kjerag 0.2.0' v0.2.0 && git push origin v0.2.0
 ```
 
-That is the release. Watch it with `gh run watch` or the Actions tab; it takes
-about half an hour, most of it the Flatpak build.
+That is the release. Watch it with `gh run watch` or the Actions tab. Measured
+on the pipeline's own test tag: 10m44s end to end, nine minutes of it the
+Flatpak build.
+
+The `-m` is not decoration on this box: `tag.gpgsign` is on, a signed tag is
+an annotated tag, and a bare `git tag v0.2.0` stops with `fatal: no tag
+message?` before it makes anything.
 
 ## 4. Verify the artifact
 
@@ -96,7 +101,7 @@ To exercise the pipeline without spending a version number, tag a prerelease
 of the version the tree already carries:
 
 ```sh
-git tag v0.2.0-rc1 && git push origin v0.2.0-rc1
+git tag -m 'Pipeline test' v0.2.0-rc1 && git push origin v0.2.0-rc1
 ```
 
 The version in front of the dash still has to be the workspace's, the build is

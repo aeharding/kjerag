@@ -14,9 +14,9 @@ permissions:
   contents: write
 
 jobs:
-  # First, because it is seconds and the rest is half an hour: a tag naming a
-  # version the tree does not carry is a mistake at the keyboard, not
-  # something to find out after a build.
+  # First, because it is five seconds and the rest is ten minutes: a tag
+  # naming a version the tree does not carry is a mistake at the keyboard,
+  # not something to find out after a build.
   version:
     runs-on: ubuntu-latest
     steps:
@@ -116,5 +116,6 @@ jobs:
           *) flag= ;;
           esac
           gh release create "$GITHUB_REF_NAME" $flag \
+            --title "$GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             "$name" "$name.sha256"
