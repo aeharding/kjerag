@@ -172,6 +172,16 @@ if [ -n "${KJERAG_FLATPAK:-}" ]; then
 	# ~/.config/cosmic is then not bound into the sandbox at all, so the app
 	# cannot write it even though it still holds the grant that says it may.
 	launch+=("--env=XDG_SCREENSHOTS_DIR=$session/shots" "--filesystem=$session")
+	# Where the sound would go, since a sandbox inherits nothing from `boot`'s
+	# environment. This mode has none to route today: the bundle holds
+	# `--socket=pulseaudio`, flatpak binds that socket out of the caller's
+	# runtime directory, and the session's own has only the PipeWire one in
+	# it, so the app says "playing silently" and the checks that need sound
+	# skip (measured 2026-08-01, with the desktop's sink muted for the length
+	# of it: silent with these two and silent without them). They are here so
+	# that the day this session carries a pulse socket, it is routed the way
+	# every other run is rather than out of the speakers.
+	launch+=("--env=PULSE_SINK=$QUIET_SINK" "--env=PIPEWIRE_NODE=$QUIET_SINK")
 	[ -z "$media" ] || launch+=("--filesystem=$media:ro")
 	launch+=("$app")
 elif [ -n "${KJERAG_BIN:-}" ]; then
