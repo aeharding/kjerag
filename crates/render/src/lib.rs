@@ -32,18 +32,6 @@ pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, Harvest, SeamFit};
 
-/// SCRATCH INSTRUMENT (issue #102), not for merge: a stamped line on stderr
-/// when `KJERAG_TRACE=1`, so a run under the harness says what the redraw
-/// path did at the instant a capture found the window empty.
-pub fn trace(line: impl FnOnce() -> String) {
-    use std::sync::LazyLock;
-    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("KJERAG_TRACE").is_some());
-    static FROM: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
-    if *ON {
-        eprintln!("trace {:9.3} {}", FROM.elapsed().as_secs_f64(), line());
-    }
-}
-
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on
 /// `Size` because `Size` belongs to `kjerag-media`, which has no wgpu.
 pub trait Extent {

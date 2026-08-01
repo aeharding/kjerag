@@ -707,16 +707,6 @@ impl cosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        kjerag_render::trace(|| {
-            format!(
-                "view open={} controls={} header={} fullscreen={} ctx={}",
-                self.open.is_some(),
-                self.controls.shown,
-                self.core.window.show_headerbar,
-                self.fullscreen,
-                self.core.window.show_context,
-            )
-        });
         let shown = match &self.open {
             Some(open) => self.playing(open),
             None => self.welcome(),
@@ -736,22 +726,15 @@ impl cosmic::Application for App {
         // is not a free rearrangement: the toast reached the screen on the
         // first capture after it landed with a fixed tree, and on the sixth,
         // two seconds later, with a tree that grew a layer.
-        let content = crate::probe::probe(
-            "stack",
-            Stack::with_children(vec![crate::probe::probe("shown", shown).into(), self.toast_stack()]),
-        );
+        let content = Stack::with_children(vec![shown, self.toast_stack()]);
         // cosmic-player implements no drag and drop, so this follows
         // cosmic-files (`src/app.rs:6491-6496`). The destination is the whole
         // window rather than only the video: a file dropped on "No video
         // open" is the drop most worth catching, and it is the one a video
         // widget would not be there to catch.
-        crate::probe::probe(
-            "root",
-            dnd_destination_for_data(
-                Element::from(content),
-                |dropped: Option<Dropped>, _action| Message::Dropped(dropped),
-            ),
-        )
+        dnd_destination_for_data(content, |dropped: Option<Dropped>, _action| {
+            Message::Dropped(dropped)
+        })
         .into()
     }
 

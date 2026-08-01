@@ -33,22 +33,6 @@ impl<Message> shader::Program<Message> for Scene {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
-        crate::trace(|| {
-            format!(
-                "program::update {} bounds={}x{}+{}+{}",
-                match event {
-                    Event::Window(window::Event::RedrawRequested(_)) => "redraw",
-                    Event::Window(_) => "window",
-                    Event::Mouse(_) => "mouse",
-                    Event::Keyboard(_) => "key",
-                    _ => "other",
-                },
-                bounds.width,
-                bounds.height,
-                bounds.x,
-                bounds.y,
-            )
-        });
         match event {
             Event::Mouse(event) => mouse_update(self, event, bounds, cursor),
             Event::Window(window::Event::RedrawRequested(now)) => {
@@ -72,18 +56,7 @@ impl<Message> shader::Program<Message> for Scene {
     }
 
     fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> ScenePrimitive {
-        let primitive = self.primitive(self.viewpoint().camera());
-        crate::trace(|| {
-            format!(
-                "program::draw bounds={}x{}+{}+{} view={}",
-                _bounds.width,
-                _bounds.height,
-                _bounds.x,
-                _bounds.y,
-                primitive.has_view(),
-            )
-        });
-        primitive
+        self.primitive(self.viewpoint().camera())
     }
 
     /// `Hidden` is how a pointer disappears in iced: the winit conversion maps
@@ -138,10 +111,6 @@ impl shader::Primitive for ScenePrimitive {
 impl shader::Pipeline for ScenePipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         ScenePipeline::new(device, format)
-    }
-
-    fn trim(&mut self) {
-        ScenePipeline::trimmed(self);
     }
 }
 
@@ -198,9 +167,7 @@ fn mouse_update<Message>(
 /// is what keeps 29.97 fps content off a 60 Hz grid; `kjerag::app` documents
 /// the pacing, and the measurement that rejected the alternative.
 fn tick<Message>(scene: &Scene, now: Instant) -> Option<Action<Message>> {
-    let next = scene.pump(now);
-    crate::trace(|| format!("tick {next:?}"));
-    match next {
+    match scene.pump(now) {
         Next::At(due) => Some(Action::request_redraw_at(due)),
         Next::Refresh => Some(Action::request_redraw()),
         Next::Never => None,

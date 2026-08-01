@@ -943,13 +943,6 @@ pub struct ScenePrimitive {
     shutter: Shutter,
 }
 
-impl ScenePrimitive {
-    /// SCRATCH INSTRUMENT (issue #102), not for merge.
-    pub fn has_view(&self) -> bool {
-        self.view.is_some()
-    }
-}
-
 /// A pair of decoded lenses and the calibration that reprojects them. Both
 /// halves are shared, so a redraw that changes nothing but the camera costs
 /// two atomic increments.
@@ -1194,17 +1187,6 @@ impl ScenePipeline {
         if let Some(view) = &primitive.view {
             self.show(device, view);
         }
-        super::trace(|| {
-            format!(
-                "pipeline::prepare aspect={aspect} view={} bound={} live={}",
-                primitive.view.is_some(),
-                primitive
-                    .view
-                    .as_ref()
-                    .is_some_and(|view| self.is_bound(view)),
-                self.live.len(),
-            )
-        });
 
         let reframe = match &primitive.view {
             Some(view) if self.is_bound(view) => Reframe::new(
@@ -1331,7 +1313,6 @@ impl ScenePipeline {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        super::trace(|| "pipeline::draw".to_owned());
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &self.band.read, &[]);
@@ -1342,13 +1323,6 @@ impl ScenePipeline {
         self.live
             .front()
             .is_some_and(|live| Arc::ptr_eq(&live.frames, &view.frames))
-    }
-
-    /// SCRATCH INSTRUMENT (issue #102), not for merge: iced calls this once
-    /// per present, whether or not our primitive was in the layer, so it says
-    /// how many frames the window put on screen without the video in them.
-    pub fn trimmed(&self) {
-        super::trace(|| "pipeline::trim (a frame was presented)".to_owned());
     }
 
     /// Stop measuring the band, which leaves its state where it is and, on a
