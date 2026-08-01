@@ -557,6 +557,38 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **A pane with no frame draws the backdrop, not a picture of its
+  own** (owner-reported). The pass carried an animated test pattern from its
+  first bring-up, a sine of the distance from the middle of the view on a wall
+  clock, and drew it wherever the uniform block said there was no frame: every
+  open from a window that was already up showed it until the first decoded
+  frame landed, and any state where frames never arrive showed it for good. It
+  is gone, and with it the clock that animated it, the two uniform fields that
+  carried that clock and the flag beside it, and the redraw the widget asked
+  for on every compositor refresh while nothing was open. What is left is the
+  mechanism the room around the ball already uses (issue #100): no frame is no
+  lens with a ray, which is transparent everywhere, which is the shell's
+  backdrop - libcosmic's pane in a window, black in fullscreen. Opening a file
+  is now a pane that is already there and a picture that arrives on it.
+
+  **The harness had never looked there**, and the check that does is the
+  interesting half. The command line cannot reach the state at all:
+  `kjerag file.insv` opens the file while the window is still being mapped, so
+  the decode thread has the whole mapping to work in and the first frame is
+  there before the first pixel is drawn (measured over 80 captures from
+  launch, none of them in the gap). A paste over `Ctrl+V` opens the file from
+  a window that is already up, which is the pilot's own path and the only one
+  a keyboard has - `Ctrl+O` opens a portal dialog cage has no portal behind -
+  and naming a time 90% into the file widens the gap from one capture to
+  twenty, because the first frame then comes off a keyframe walk rather than
+  off the head of the stream. The pattern is told from a picture by its own
+  symmetry: it scales into red by the horizontal place and into green by the
+  vertical one over a blue that is neither, so two patches at mirrored places
+  read the same green and the same blue to the byte and different reds, which
+  no frame of video does. Against the build this branch started from the check
+  fails on 41 98 211 against 170 98 211; with the pattern gone it passes on
+  the backdrop, five captures of it before the frame.
+
 - 2026-08-01 **Another camera's 360 format is refused by name, and nothing
   in the app grades the camera it does take** (issue #107, alongside #88).
   Two halves of the same honesty. The refusal: a GoPro `.360` and a DJI
