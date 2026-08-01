@@ -589,6 +589,18 @@ live, no keyframe UI ever.
   broke `kjerag-spike --bin playback`, which is the mechanism working: an
   instrument whose picture died was reporting a clean run.
 
+  **A stop is final for that open** (owner ruling, on testing the branch with
+  the fault left on permanently). The first shape re-armed as soon as the alert
+  was closed and retried on its own, so a persistent fault meant an alert every
+  two seconds: five of them in one sitting, from an app whose alert says to open
+  the file again while quietly having another go behind it. Now the `Stalled`
+  that gave up stays given up for the life of that capture. The pass stops
+  importing into it and `Scene` hands out no player, so a play press cannot
+  start the clock over a picture that is not coming back either. Reopening the
+  file is a new `Scene`, a new `Stalled` and a fresh two seconds of patience,
+  and it is what the alert asks for. Under the bound nothing changed: a hiccup
+  still costs frames.
+
 - 2026-08-01 **The volume popup closes on a press in the video, the way
   cosmic-player's dropdowns do** (issue #126, owner-reported). It was a
   hand-toggled bool that only the speaker button flipped, so the only way out

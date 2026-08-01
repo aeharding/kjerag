@@ -1689,6 +1689,10 @@ pooled_calibration() {
 # How long the app is given to notice, which is the render layer's own bound
 # (`STUCK_FOR`, two seconds) and then some.
 STUCK_BY=8
+# How long the stop is watched after the alert is closed, with the import still
+# failing. Four times the bound: the shape the owner rejected raised its next
+# alert two seconds in, and did it five times over.
+FINAL_BY=8
 # How long a hiccup lasts. Well under the bound, and long enough to cover
 # several frames at 30 fps.
 HICCUP=0.4
@@ -1822,8 +1826,68 @@ that away" \
 			"$session/stalled-alert.ppm" "$session/stalled-dismissed-b.ppm"
 	fi
 
+	# (3) The owner's ruling. The gate is still on, the alert has been closed,
+	# and from here this open is over: one alert for one open, whatever the
+	# pilot does next. Space is what he does next, because a stopped picture
+	# with a transport under it invites a press, and the shape this replaced
+	# answered one with two more seconds of retries and the same alert again.
+	check="the stop is final: one alert, and nothing restarts it"
+	local said_so
+	said_so=$(grep -c -- "$STOPPED" "$log")
+	reports=$(grep -c '^play:' "$log")
+	key -k space
+	key -k space
+	sleep "$FINAL_BY"
+	if [ "$(grep -c -- "$STOPPED" "$log")" -gt "$said_so" ]; then
+		fail "$check" "it said so again, $FINAL_BY s and two play presses later" \
+			"$(grep -- "$STOPPED" "$log" | grep -o 'stopped:.*' | tail -1)" "log: $log"
+	elif [ "$(grep -c '^play:' "$log")" -gt "$reports" ]; then
+		fail "$check" "a play press started the clock over a picture that had gone" \
+			"$(grep '^play:' "$log" | tail -1)" "log: $log"
+	else
+		pass "$check (one alert in $FINAL_BY s, and two play presses moved nothing)"
+	fi
+
+	# (4) And the way back, which is the one the alert names. The gate comes
+	# off and the pilot opens the file: a new capture, a new stall detector,
+	# and a picture again. Dropping it is how the harness opens a file into a
+	# window that is already up (`dropped_files`).
+	check="opening the file again plays it"
+	rm -f "$gate"
+	if reopened; then
+		pass "$check"
+	else
+		alive || lost "$check"
+		fail "$check" "the file was dropped on the window and it did not play" \
+			"report: $session/drag-reopen.log" "log: $log"
+	fi
+
 	exits_clean
 	wrap=()
+}
+
+# The file, dropped on a window that has given up on it, plays. True when the
+# app opens it (`media:`) and then reports on it (`play:`), which is the clock
+# running again, and the sound with it.
+reopened() {
+	local media_before play_before waited=0 pid
+	media_before=$(grep -c '^media:' "$log")
+	play_before=$(grep -c '^play:' "$log")
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$dragsource" "$media" "offer=uri-list" "linger=$DROP_OPEN" \
+		>"$session/drag-reopen.log" 2>&1 &
+	pid=$!
+	while [ "$waited" -le $((DROP_OPEN * 2)) ]; do
+		alive || break
+		[ "$(grep -c '^media:' "$log")" -gt "$media_before" ] &&
+			[ "$(grep -c '^play:' "$log")" -gt "$play_before" ] && break
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	[ "$(grep -c '^media:' "$log")" -gt "$media_before" ] &&
+		[ "$(grep -c '^play:' "$log")" -gt "$play_before" ]
 }
 
 # Whatever was drawn over the window is gone. Only means anything while the

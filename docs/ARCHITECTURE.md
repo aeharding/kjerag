@@ -79,6 +79,15 @@ Three pieces hold it up.
   message type implementing `From<Stall>`. The shell cannot compile the video
   widget without a way to receive one.
 
+A stop is final for the capture it happened to, which is the owner's second
+ruling on the issue (2026-08-01). The `Stalled` that gave up says so for the
+rest of that capture's life: the pass stops importing into it, and `Scene`
+stops handing out its player, so nothing the pilot presses can run a clock over
+a picture that is not coming back. Opening the file builds another `Scene` with
+another `Stalled`, which is the whole of the recovery and the only thing the
+alert asks for. The shape before it re-armed on the next redraw and raised the
+same alert every two seconds.
+
 Deliberately not in the funnel: a capture that could not be written says so in
 a toast, because the picture is still there and the pilot is still watching it
 (docs/UI.md). The funnel is for the failures that leave him with no video.

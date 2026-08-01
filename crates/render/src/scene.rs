@@ -726,7 +726,17 @@ impl Scene {
         }
     }
 
+    /// The player, for the calls that drive it: play, pause, seek, step.
+    ///
+    /// A capture the pass has given up on has none to hand out (issue #124).
+    /// The sound follows the clock, so a play press that got through here
+    /// would be sound over a picture that is not coming back, which is the
+    /// symptom this whole issue is about. The transport goes quiet with the
+    /// file it belongs to, and opening a file is the way on.
     fn player_mut(&mut self) -> Option<&mut Player> {
+        if self.stalled.stopped() {
+            return None;
+        }
         match &mut self.show.as_mut()?.playing.get_mut().source {
             Source::Live(player) => Some(player),
             Source::Stepped(_) => None,
@@ -1425,8 +1435,13 @@ impl ScenePipeline {
     /// redraw tries again; what gives up is [`Stalled`], on a run of failures
     /// that lasts, and the pilot hears about it from the shell rather than
     /// from a terminal.
+    ///
+    /// Once it has given up, this stops trying, and that is not an
+    /// optimisation. The view that failed is never bound, so every redraw
+    /// after it would try the same import again, and each two seconds of that
+    /// raised another alert: the owner met five of them in one sitting.
     fn show(&mut self, device: &wgpu::Device, view: &View, stalled: &Stalled) {
-        if self.is_bound(view) {
+        if stalled.stopped() || self.is_bound(view) {
             return;
         }
         match self.import(device, view) {

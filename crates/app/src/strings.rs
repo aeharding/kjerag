@@ -40,10 +40,15 @@ pub const OPEN_FAILED: &str = "That file could not be opened.";
 /// The same alert, for a video that was playing and stopped (issue #124).
 ///
 /// A title of its own, because "Cannot open file" is not what happened: the
-/// file opened, it played, and then the pictures stopped arriving. The body
-/// says the only thing that can be done about it, which is the one sentence
-/// the pilot needs; what actually failed goes to the terminal, where a bug
-/// report is written from (`crate::fail`).
+/// file opened, it played, and then the pictures stopped arriving. What
+/// actually failed goes to the terminal, where a bug report is written from
+/// (`crate::fail`).
+///
+/// The body says to open the file again because that is the only thing that
+/// works, and the app has to mean it: this open is over, and nothing behind
+/// the alert is retrying (`kjerag_render`'s `Stalled`). It was written before
+/// that was true, and the owner met the difference as five of these in one
+/// sitting.
 pub const VIDEO_STOPPED: &str = "Video stopped";
 pub const VIDEO_STOPPED_BODY: &str =
     "The picture could not be drawn, so playback stopped. Open the file again.";

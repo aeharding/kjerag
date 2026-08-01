@@ -15,11 +15,21 @@
 //! inside that is a property of his display and his footage rather than of
 //! the failure.
 //!
-//! The run lives in the [`Stalled`] the open capture owns, not on the
-//! pipeline, and that is what keeps the latch from coming back. iced builds
-//! one pipeline per renderer and keeps it for the life of the window, so
-//! anything the pipeline remembers about a failure it remembers about every
-//! later file as well.
+//! When the run does outlast the bound, that capture is over and stays over.
+//! The owner's ruling (2026-08-01, issue #124) came from testing the first
+//! shape of this, which re-armed as soon as the alert was closed and had
+//! another go on its own: "I keep pressing OK and it keeps coming back. Very
+//! buggy!" Five alerts in one sitting, from an app whose alert was telling him
+//! to open the file again while quietly retrying behind it. So there is one
+//! alert per open, and the way back is the pilot opening the file, which is a
+//! new capture with a new one of these.
+//!
+//! That the stop is remembered here rather than on the pipeline is the whole
+//! difference from what issue #124 started as. iced builds one pipeline per
+//! renderer and keeps it for the life of the window, so a flag there is one
+//! every later file inherits. The old bug was not that a stop was remembered;
+//! it was remembered by the wrong thing, and after one frame rather than after
+//! two seconds.
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -87,6 +97,8 @@ struct State {
     run: Option<Run>,
     /// Raised once a run outlasts [`STUCK_FOR`], and taken by the shell.
     raised: Option<Stall>,
+    /// Set when the bound trips and never cleared: this capture is over.
+    stopped: bool,
 }
 
 /// One unbroken run of failed imports: when it started, and how many frames
@@ -99,14 +111,16 @@ struct Run {
 impl Stalled {
     /// One import failed.
     ///
-    /// Giving up ends the run as well as raising the stall, so the count
-    /// starts again from nothing: a pilot who presses play after being told
-    /// gets the same two seconds of patience the first attempt had, and is
-    /// told again if it is still stuck.
+    /// A capture that has already been given up on counts nothing and says
+    /// nothing: it is stopped, and the pass has no reason to be importing into
+    /// it at all (`ScenePipeline::show` asks before it tries).
     pub(crate) fn failed(&self, now: Instant, why: impl fmt::Display) {
         let Ok(mut state) = self.0.lock() else {
             return;
         };
+        if state.stopped {
+            return;
+        }
         let run = state.run.get_or_insert(Run {
             since: now,
             failures: 0,
@@ -118,6 +132,7 @@ impl Stalled {
         }
         let failures = run.failures;
         state.run = None;
+        state.stopped = true;
         state.raised = Some(Stall::new(format!(
             "{failures} frames could not be imported over {:.1} s, last: {why}",
             lasted.as_secs_f64(),
@@ -136,6 +151,18 @@ impl Stalled {
     /// The stall the shell has to say out loud, once.
     pub(crate) fn take(&self) -> Option<Stall> {
         self.0.lock().ok()?.raised.take()
+    }
+
+    /// Whether this capture has been given up on, which nothing sets back.
+    ///
+    /// Two things read it and they are the two halves of what the owner asked
+    /// for: the pass stops importing, so there is no second run to raise a
+    /// second alert, and the scene stops handing out its player, so nothing
+    /// the pilot presses can start the clock over a picture that is not
+    /// coming back. His way out is to open the file, which builds another
+    /// `Scene` and another one of these.
+    pub(crate) fn stopped(&self) -> bool {
+        self.0.lock().is_ok_and(|state| state.stopped)
     }
 }
 
@@ -211,23 +238,52 @@ mod tests {
         assert_eq!(stalled.take(), None);
     }
 
-    /// Giving up starts the clock again rather than latching, so a pilot who
-    /// presses play into a still-stuck pipeline is told again, and one who
-    /// presses play into a healthy one is not told at all.
+    /// And giving up is the end of this capture, which is the owner's ruling
+    /// after testing the shape that re-armed: closing the alert let the pass
+    /// try again, and two seconds later it said the same thing, five times
+    /// over. However long the failures go on, one open is one alert.
     #[test]
-    fn giving_up_is_not_a_latch() {
+    fn giving_up_is_the_end_of_this_capture() {
         let stalled = Stalled::default();
         let start = Instant::now();
+        assert!(!stalled.stopped());
+
         stalled.failed(start, "EMFILE");
         stalled.failed(start + STUCK_FOR, "EMFILE");
         assert!(stalled.take().is_some());
+        assert!(stalled.stopped());
 
-        // The very next failure is the start of a new run, not the end of the
-        // old one.
-        stalled.failed(start + STUCK_FOR + Duration::from_millis(33), "EMFILE");
+        // A minute of redraws still failing, which is what the gate left on
+        // looks like. Nothing counts and nothing is raised again.
+        let mut at = STUCK_FOR;
+        while at < Duration::from_secs(60) {
+            stalled.failed(start + at, "EMFILE");
+            at += Duration::from_millis(33);
+        }
         assert_eq!(stalled.take(), None);
+        assert!(stalled.stopped());
+    }
 
-        stalled.failed(start + STUCK_FOR * 2 + Duration::from_millis(33), "EMFILE");
-        assert!(stalled.take().is_some());
+    /// The way back is a new capture, so what says the latch is not the old
+    /// one is that nothing here carries over: opening the file again builds
+    /// another `Scene`, and its `Stalled` has never heard of this one.
+    #[test]
+    fn opening_the_file_again_is_a_fresh_detector() {
+        let stopped = Stalled::default();
+        let start = Instant::now();
+        stopped.failed(start, "EMFILE");
+        stopped.failed(start + STUCK_FOR, "EMFILE");
+        assert!(stopped.stopped());
+
+        let reopened = Stalled::default();
+        assert!(!reopened.stopped());
+        assert_eq!(reopened.take(), None);
+
+        // And it has the same patience the first one had.
+        reopened.failed(start, "EMFILE");
+        assert_eq!(reopened.take(), None);
+        assert!(!reopened.stopped());
+        reopened.landed();
+        assert!(!reopened.stopped());
     }
 }
