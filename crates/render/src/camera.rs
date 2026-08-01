@@ -271,7 +271,7 @@ fn wrap(angle: f32) -> f32 {
 /// next redraw applies it.
 ///
 /// [`Scene`]: super::Scene
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Nudge {
     ZoomIn,
     ZoomOut,
@@ -279,6 +279,14 @@ pub enum Nudge {
     /// cosmic-files and cosmic-edit resets only zoom, because zoom is all
     /// those apps have (docs/UI.md open question 4).
     Reset,
+    /// Point the view exactly here: a copied view coming back, from `Ctrl+V`
+    /// or from the command line.
+    ///
+    /// It arrives as a nudge rather than straight onto the camera for the one
+    /// thing a nudge knows and the shell does not: the far end of the zoom is
+    /// a function of the window's shape, so a view copied in a wide window has
+    /// to be brought inside what a narrow one can show.
+    Point(Camera),
 }
 
 /// A drag in progress: what it took hold of, and where the cursor was last
@@ -387,6 +395,17 @@ impl Viewpoint {
             // picture straight back on the next move.
             Nudge::Reset => {
                 self.camera = Camera::default();
+                self.drag = None;
+            }
+            // Same as the reset and for the same reason, with a camera that
+            // came from somewhere else. The field of view is the one number
+            // that cannot be taken as given: this window may be a different
+            // shape from the one the view was copied in.
+            Nudge::Point(camera) => {
+                self.camera = Camera {
+                    fov: camera.fov.clamp(FOV_MIN, fov_ceiling(aspect)),
+                    ..camera
+                };
                 self.drag = None;
             }
         }
@@ -1159,6 +1178,57 @@ mod tests {
 
         viewpoint.nudge(Nudge::Reset, aspect);
         assert_eq!(viewpoint.camera(), Camera::default());
+    }
+
+    /// A copied view lands exactly where it was copied: three numbers in,
+    /// three numbers out, whatever the view was doing before.
+    #[test]
+    fn a_pointed_view_lands_where_it_was_told() {
+        let aspect = 16.0 / 9.0;
+        let wanted = Camera {
+            yaw: 144.4_f32.to_radians(),
+            pitch: 0.9_f32.to_radians(),
+            fov: 24.1_f32.to_radians(),
+        };
+        let mut viewpoint = at_the_ball(aspect);
+        viewpoint.nudge(Nudge::Point(wanted), aspect);
+        assert_eq!(viewpoint.camera(), wanted);
+    }
+
+    /// The far end of the zoom is a function of the window's shape, so a view
+    /// copied at the ball in one window has to come inside what another can
+    /// show. Nothing else about the view is touched by that.
+    #[test]
+    fn a_pointed_view_is_brought_inside_this_window() {
+        let wide = 16.0 / 9.0;
+        let square = 1.0;
+        assert!(fov_ceiling(wide) > fov_ceiling(square));
+
+        let copied = at_the_ball(wide).camera();
+        let mut viewpoint = Viewpoint::default();
+        viewpoint.nudge(Nudge::Point(copied), square);
+        assert_eq!(viewpoint.camera().fov, fov_ceiling(square));
+        assert_eq!(viewpoint.camera().yaw, copied.yaw);
+
+        // And a view that this window can show is left alone.
+        let near = Camera {
+            fov: 24.1_f32.to_radians(),
+            ..copied
+        };
+        viewpoint.nudge(Nudge::Point(near), square);
+        assert_eq!(viewpoint.camera(), near);
+    }
+
+    /// A drag holding the picture is let go by a jump, exactly as the reset
+    /// lets it go: the direction the hand grabbed is not where the view has
+    /// landed, and re-anchoring there would haul the picture straight back.
+    #[test]
+    fn a_pointed_view_lets_a_drag_go() {
+        let mut viewpoint = Viewpoint::default();
+        viewpoint.grab(MIDDLE, 1.0);
+        assert!(viewpoint.is_dragging());
+        viewpoint.nudge(Nudge::Point(Camera::default()), 1.0);
+        assert!(!viewpoint.is_dragging());
     }
 
     /// A zoom in the middle of a drag re-reads what the cursor is over, so

@@ -157,3 +157,93 @@ impl Options {
 
 const USAGE: &str = "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] \
      [frame=n | time=seconds] [size=px] [srgb=1] [lock=1] [out=name.png]";
+
+/// The app's copied view line is a command line for this binary, and the only
+/// way to know that is to hand one to the parser above.
+///
+/// [`Framing`] writes the line and [`Options::parse`] reads it, so nothing
+/// here restates the format: a field renamed on either side stops parsing or
+/// stops matching, and both are this test failing.
+#[cfg(test)]
+mod tests {
+    use kyerag_render::Framing;
+
+    use super::*;
+
+    /// Half a unit in the last place each side prints, which is the whole of
+    /// what the round trip can lose.
+    const TIME_SLACK: f64 = 0.000_5;
+    const ANGLE_SLACK: f32 = 0.005;
+
+    fn parse(line: &str) -> Options {
+        Options::parse(line.split_whitespace().map(str::to_owned))
+            .unwrap_or_else(|e| panic!("reframe would not take {line:?}: {e}"))
+    }
+
+    /// Copied in the window, pasted after `reframe`, and the same view comes
+    /// out: the file, the frame, all three angles and the horizon.
+    #[test]
+    fn a_copied_view_line_is_a_reframe_command() {
+        let framing = Framing {
+            at: Duration::from_millis(754_321),
+            camera: Camera {
+                yaw: (-37.42_f32).to_radians(),
+                pitch: 8.06_f32.to_radians(),
+                fov: 64.3_f32.to_radians(),
+            },
+            horizon: Horizon::Locked,
+        };
+        let options = parse(&framing.copied(Path::new("/home/pilot/Videos/VID_0001.insv")));
+
+        assert_eq!(options.input, PathBuf::from("VID_0001.insv"));
+        assert!(matches!(options.horizon, Horizon::Locked));
+        match options.at {
+            Cue::Time(time) => assert!(
+                (time.as_secs_f64() - framing.at.as_secs_f64()).abs() < TIME_SLACK,
+                "{time:?}"
+            ),
+            other => panic!("a copied view seeks by time, not {other:?}"),
+        }
+        for (parsed, wanted, axis) in [
+            (options.camera.yaw, framing.camera.yaw, "yaw"),
+            (options.camera.pitch, framing.camera.pitch, "pitch"),
+            (options.camera.fov, framing.camera.fov, "fov"),
+        ] {
+            let off = (parsed - wanted).to_degrees().abs();
+            assert!(off < ANGLE_SLACK, "{axis} is {off} degrees out");
+        }
+    }
+
+    /// The terminal line is the same command with the path in front of it,
+    /// which is what makes it runnable from anywhere.
+    #[test]
+    fn a_printed_view_line_carries_the_whole_path() {
+        let framing = Framing {
+            at: Duration::ZERO,
+            camera: Camera::default(),
+            horizon: Horizon::Free,
+        };
+        let file = Path::new("/home/pilot/Videos/VID_0001.insv");
+        let options = parse(&framing.printed(file));
+
+        assert_eq!(options.input, file);
+        assert!(matches!(options.horizon, Horizon::Free));
+        assert_eq!(options.at, Cue::Time(Duration::ZERO));
+    }
+
+    /// And the view a line reproduces is drawn from the same numbers the
+    /// window drew: the parse lands in the very [`Camera`] the render pass
+    /// takes, not in a copy of it.
+    #[test]
+    fn the_parsed_view_is_the_default_view_where_the_window_left_it() {
+        let framing = Framing {
+            at: Duration::from_millis(1_500),
+            camera: Camera::default(),
+            horizon: Horizon::Locked,
+        };
+        assert_eq!(
+            parse(&framing.copied(Path::new("f.insv"))).camera,
+            Camera::default()
+        );
+    }
+}

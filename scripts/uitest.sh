@@ -25,6 +25,9 @@
 # `h` writes a config the developer's desktop never sees and pressing `s`
 # writes a still into scratch/ rather than into their screenshots folder.
 #
+# Needs `cage wtype grim ffmpeg`, and `wl-paste` for the clipboard check,
+# which skips without it.
+#
 # Local only, and never in CI: see "UI verification" in AGENTS.md.
 #
 # Exit: 0 all checks passed, 1 a check failed, 2 the harness could not run,
@@ -95,6 +98,11 @@ lost() {
 for tool in cage wtype grim ffmpeg; do
 	command -v "$tool" >/dev/null || die "$tool is not installed (AGENTS.md, UI verification)"
 done
+
+# One check reads the session's clipboard and nothing else wants this, so a
+# box without it loses that half of that check rather than the whole run.
+clipboard=yes
+command -v wl-paste >/dev/null || clipboard=no
 
 # The build is part of the run, not a fallback for a missing binary. Cargo
 # is a no-op on a fresh one, and the version that only built when the file
@@ -266,6 +274,34 @@ band_changed() {
 	! cmp -s <(band "$1" "$3" "$4") <(band "$2" "$3" "$4")
 }
 
+# picture <file>: everything between the header bar and the control row, which
+# is the view and none of the chrome around it. Same P6 arithmetic as `band`
+# above, from the other direction.
+#
+# The chrome has to come off for a check that compares two captures of one
+# view. Measured on this harness: two captures of the same frame at the same
+# camera differ in 14 pixels of the scrubber's thumb, because the thumb is
+# drawn at the clock's position and a copied line carries the frame's own
+# time, which is up to one frame behind it. The picture is byte for byte
+# identical.
+picture() {
+	local file=$1 magic width height depth header rows
+	{
+		read -r magic
+		read -r width height
+		read -r depth
+	} <"$file"
+	header=$((${#magic} + ${#width} + ${#height} + ${#depth} + 4))
+	rows=$((height - HEADER_BAND - CONTROL_BAND))
+	tail -c "+$((header + HEADER_BAND * width * 3 + 1))" "$file" |
+		head -c $((rows * width * 3))
+}
+
+# same_picture <a> <b>: the two captures show the same view.
+same_picture() {
+	cmp -s <(picture "$1") <(picture "$2")
+}
+
 # said <pattern>: the app printed it. Its own instruments say things no
 # capture can.
 said() {
@@ -401,6 +437,11 @@ with_media() {
 
 	zooms_out_to_the_ball
 	saves_a_still
+	# Both before `i`, which prints view lines of its own: while the only
+	# thing that has printed one is a capture, the two counts can be compared.
+	a_still_says_where_it_was_looking
+	copies_the_view
+	returns_to_the_copied_view
 	flips_the_horizon
 	survives_fullscreen
 	fullscreen_holds_the_view
@@ -508,7 +549,14 @@ toast_clears_the_controls() {
 # is headroom, and the loop breaks on success so headroom costs nothing.
 BALL_PRESSES=20
 ROOM_SPREAD=4
-ROOM_DARK=60
+# The room is the app's own flat OUTSIDE_GRAY and reads 25 25 25 here, so this
+# is five codes of headroom and not thirty five. It was 60, and 60 is wide
+# enough to let real footage through: measured 2026-07-31, a hillside in
+# shadow read 35 35 36 a fifth of the way out of the zoom, `reach_the_ball`
+# took it for the room and stopped there, and every check downstream then
+# compared two pictures that were never at the ball. Two of them failed
+# saying the view had reset when the captures show it holding.
+ROOM_DARK=30
 
 # reach_the_ball <name>: press ctrl+- until the patch reads the room, and
 # say whether it got there. The capture it went by is left under <name>.
@@ -642,6 +690,175 @@ saves_a_still() {
 	else
 		fail "s saves a still" "the still is black: $still"
 	fi
+}
+
+# The arguments half of a view line, which is `reframe`'s own syntax: the same
+# keys in the same order, and each number printed to the places
+# `crates/render/src/framing.rs` prints it to. The round trip through
+# reframe's parser is a unit test; what this adds is that the line reaching a
+# terminal is that line and not a debug print near it.
+VIEW_ARGS='time=[0-9]+\.[0-9]{3} yaw=-?[0-9]+\.[0-9]{2} pitch=-?[0-9]+\.[0-9]{2}'
+VIEW_ARGS="$VIEW_ARGS fov=-?[0-9]+\.[0-9]{2} lock=[01]"
+
+# view <n> -> the nth-from-last view line, with its label taken off.
+view_line() {
+	grep '^view:' "$log" | tail -"${1:-1}" | head -1 | sed 's/^view:[[:space:]]*//'
+}
+
+# A still carries the video and the timecode in its file name and no direction
+# anywhere, so a capture the pilot sends back months later is only placeable if
+# the terminal said where it was looking. Every capture prints one line, which
+# while nothing has pressed `i` yet means the two counts are equal.
+a_still_says_where_it_was_looking() {
+	local check="every still prints where it was looking"
+	local shots views
+	shots=$(grep -c '^shot:' "$log")
+	views=$(grep -c '^view:' "$log")
+	if [ "$shots" = 0 ]; then
+		skip "$check (nothing was captured)"
+	elif [ "$views" = "$shots" ]; then
+		pass "$check ($views for $shots)"
+	else
+		fail "$check" "$views view lines for $shots captures" "log: $log"
+	fi
+}
+
+# Set by copies_the_view before its presses, read by the predicate below.
+view_lines=0
+
+more_view_lines() {
+	[ "$(grep -c '^view:' "$log")" -gt "$view_lines" ]
+}
+
+# `i` copies the view: one line naming the video, the frame and the framing,
+# which is what turns "it looks wrong here" into coordinates anyone can
+# render.
+#
+# Two instruments, because they answer different halves. The terminal line
+# says the app built the line and carries the whole path, and the clipboard
+# says the compositor is holding it, which is the half a pilot actually
+# pastes from. Comparing the two also pins the one rule that separates them:
+# the copy names the file and never the directories above it, because a
+# pilot's report lands in a public issue.
+#
+# wl-paste rather than a hook: it reads the real selection off the real
+# session. cage advertises no wlr-data-control, so this is the ordinary
+# focus path, which needs the seat to have a keyboard; the keys pressed
+# before this point are what put one there.
+copies_the_view() {
+	local check="i copies the view"
+	local printed args pasted
+	view_lines=$(grep -c '^view:' "$log")
+
+	if ! press_until more_view_lines view -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after $PRESSES presses of i" "log: $log"
+		return
+	fi
+
+	printed=$(view_line)
+	args=${printed#"$media "}
+	if [ "$args" = "$printed" ]; then
+		fail "$check" "the printed line does not start with $media" "$printed"
+		return
+	fi
+	if ! printf '%s' "$args" | grep -qE "^$VIEW_ARGS\$"; then
+		fail "$check" "these are not reframe's arguments" "$args"
+		return
+	fi
+
+	if [ "$clipboard" = no ]; then
+		pass "$check (terminal only: $args)"
+		skip "the view reaches the clipboard (no wl-paste)"
+		return
+	fi
+	pasted=$(env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-paste --no-newline 2>>"$log")
+	alive || lost "$check"
+	if [ "$pasted" = "$(basename "$media") $args" ]; then
+		pass "$check ($pasted)"
+	else
+		fail "$check" "the clipboard holds: $pasted" \
+			"expected: $(basename "$media") $args"
+	fi
+}
+
+# How long a toast is up, plus a beat. Two captures of the same view are only
+# the same bytes once the lines saying so have gone.
+TOAST_GONE=6
+
+# Set by returns_to_the_copied_view before its presses, read by the predicate.
+goto_lines=0
+
+more_goto_lines() {
+	[ "$(grep -c '^goto:' "$log")" -gt "$goto_lines" ]
+}
+
+# The whole loop, which is the feature: copy a view, wander off, paste, and be
+# back exactly where the copy was taken.
+#
+# The window is paused here, so the picture is a function of the frame and the
+# camera alone and two captures of one view are the same bytes. Two
+# instruments, and the first is the stronger: the app's own copied line is
+# exact to the millisecond and the hundredth of a degree, where a capture only
+# says the pixels came out the same. Both, because a line that matches while
+# the picture does not would mean the view is not what the line says it is.
+#
+# The wander is a ten second seek and a notch of zoom out: one moves the frame
+# and the other moves the camera, which are the two halves a paste has to put
+# back. A dropped key costs the check nothing, because the capture taken
+# afterwards has to differ from the first or the check says so itself.
+returns_to_the_copied_view() {
+	local check="ctrl+v goes back to the copied view"
+	local copied returned
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines goto -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after $PRESSES presses of i" "log: $log"
+		return
+	fi
+	copied=$(view_line)
+	sleep "$TOAST_GONE"
+	grab goto-there >/dev/null
+
+	key -k Right
+	key -M ctrl -k minus -m ctrl
+	alive || lost "$check"
+	grab goto-away >/dev/null
+	if same_picture "$session/goto-there.ppm" "$session/goto-away.ppm"; then
+		fail "$check" "the seek and the zoom moved nothing, so this proves nothing" \
+			"$session/goto-there.ppm" "$session/goto-away.ppm"
+		return
+	fi
+
+	goto_lines=$(grep -c '^goto:' "$log")
+	if ! press_until more_goto_lines goto -M ctrl -k v -m ctrl; then
+		alive || lost "$check"
+		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
+		return
+	fi
+	sleep "$TOAST_GONE"
+	grab goto-back >/dev/null
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines goto -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after the paste" "log: $log"
+		return
+	fi
+	returned=$(view_line)
+
+	if [ "$returned" != "$copied" ]; then
+		fail "$check" "copied:   $copied" "came back: $returned"
+		return
+	fi
+	if ! same_picture "$session/goto-there.ppm" "$session/goto-back.ppm"; then
+		fail "$check" "the line came back but the picture did not" \
+			"$session/goto-there.ppm" "$session/goto-back.ppm"
+		return
+	fi
+	pass "$check (${copied#"$media "})"
 }
 
 # `h` flips the horizon lock, which is on by default, so the session's config

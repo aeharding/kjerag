@@ -56,6 +56,18 @@ pub fn menu_bar<'a>(
                         // is nothing to take a still of without a file.
                         enabled(has_file, strings::SAVE_FRAME, Action::SaveFrame),
                         enabled(has_file, strings::COPY_FRAME, Action::CopyFrame),
+                        // Under the two picture items rather than in `View`,
+                        // which holds the things that move the view rather
+                        // than the things that take something away from it.
+                        enabled(has_file, strings::COPY_VIEW, Action::CopyView),
+                        // The one item in this menu that is never drawn
+                        // disabled. A reference carrying a whole path opens
+                        // the video it names, so it has something to do with
+                        // nothing open; and what the clipboard holds cannot
+                        // be known here anyway, because reading it is a task
+                        // whose answer arrives later and this runs on every
+                        // redraw.
+                        Item::Button(strings::GO_TO_VIEW.to_owned(), None, Action::GoToView),
                         Item::Divider,
                         Item::Button(strings::QUIT.to_owned(), None, Action::Quit),
                     ],
