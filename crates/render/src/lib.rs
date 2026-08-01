@@ -1,5 +1,5 @@
 //! wgpu: frame import and the shader pass. No demuxing and no decoding; it
-//! takes frames from `kyerag-media` and hands the pass to iced (src/widget.rs).
+//! takes frames from `kjerag-media` and hands the pass to iced (src/widget.rs).
 
 mod camera;
 mod capture;
@@ -12,7 +12,7 @@ mod projection;
 pub mod sampling;
 mod scene;
 /// The per-camera seam calibration, and the fit behind it (issue #48).
-/// Public for `kyerag-spike --bin seam`, which is the same core with the
+/// Public for `kjerag-spike --bin seam`, which is the same core with the
 /// attribution and the controls printed round it.
 pub mod seam;
 mod widget;
@@ -20,15 +20,15 @@ mod widget;
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;
-pub use kyerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
-pub use kyerag_meta::{Quat, Readout, Sweep};
+pub use kjerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
+pub use kjerag_meta::{Quat, Readout, Sweep};
 pub use projection::{Blend, Held, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe, Rolling};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, Harvest, SeamFit};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on
-/// `Size` because `Size` belongs to `kyerag-media`, which has no wgpu.
+/// `Size` because `Size` belongs to `kjerag-media`, which has no wgpu.
 pub trait Extent {
     fn extent(self) -> wgpu::Extent3d;
 }

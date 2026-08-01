@@ -9,7 +9,7 @@
 //! seeks exactly (that keyframe, then every frame between).
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin seek -- <file.insv>
+//! cargo run --release -p kjerag-spike --bin seek -- <file.insv>
 //! ```
 //!
 //! It measures two shapes of scrub. One seek at a time is what a hand that
@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use kyerag_media::{Accuracy, Cue, Fallible, Player, Reader};
+use kjerag_media::{Accuracy, Cue, Fallible, Player, Reader};
 
 /// Where in the file each seek asks for, as a fraction of its length. The
 /// order jumps about on purpose: that is what a drag does, and a walk in

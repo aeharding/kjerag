@@ -3,9 +3,9 @@
 //!
 //! ```sh
 //! # what is left on his flight footage, and what every candidate fix leaves
-//! cargo run --release -p kyerag-spike --bin leftover -- <a.insv> <b.insv> ...
+//! cargo run --release -p kjerag-spike --bin leftover -- <a.insv> <b.insv> ...
 //! # the same seam drawn as one lens against the other, before and after
-//! cargo run --release -p kyerag-spike --bin leftover -- <file.insv> mode=crop \
+//! cargo run --release -p kjerag-spike --bin leftover -- <file.insv> mode=crop \
 //!   yaw=90 pitch=0 fov=40 from=900
 //! ```
 //!
@@ -18,7 +18,7 @@
 //! offset edge, and turning it reads as a jump. **The number to drive down is
 //! `d`, and this instrument is what measures what is left of it.**
 //!
-//! Everything is read through the shipped code (`kyerag_render::seam`), on the
+//! Everything is read through the shipped code (`kjerag_render::seam`), on the
 //! frames the app itself reads at open, so what is scored here is what the
 //! player draws.
 //!
@@ -40,14 +40,14 @@
 
 use std::path::{Path, PathBuf};
 
-use kyerag_media::Fallible;
-use kyerag_meta::{CalibrationSet, Lens};
-use kyerag_render::seam::{
+use kjerag_media::Fallible;
+use kjerag_meta::{CalibrationSet, Lens};
+use kjerag_render::seam::{
     self, Knob, Probe, Reading, Refused, SeamFit, Where, least_squares, mapped, moved, read_ring,
     ring, rms, turned, unit,
 };
-use kyerag_render::{Camera, Held, Reframe, Sampling, Size};
-use kyerag_spike::{Pair, Walk};
+use kjerag_render::{Camera, Held, Reframe, Sampling, Size};
+use kjerag_spike::{Pair, Walk};
 
 const USAGE: &str = "usage: leftover <file.insv> [<file.insv> ...] \
                      [mode=table|crop] [yaw=] [pitch=] [fov=] [from=] [size=] [ridge=]";
@@ -680,7 +680,7 @@ fn separation(steady: &[&Azimuth], density: f64) {
 
 /// This camera's inter-lens baseline, in millimetres, which is what turns a
 /// disparity into a distance. Read off the owner's own files by
-/// `kyerag-spike --bin seam`, which prints it per capture; it is the same
+/// `kjerag-spike --bin seam`, which prints it per capture; it is the same
 /// number on every X4 Air file here.
 const BASELINE_MM: f64 = 33.35;
 

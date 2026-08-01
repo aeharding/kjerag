@@ -48,7 +48,7 @@
 //! degrees of world angle with no rotation to undo; each calibration field is
 //! then turned by a probe amount and the map is asked what that does to the
 //! same patches, which is a column of the design matrix in the units
-//! `offset_v3` writes. `kyerag-spike --bin seam` is the same core with the
+//! `offset_v3` writes. `kjerag-spike --bin seam` is the same core with the
 //! attribution, the harmonics and the controls printed round it.
 //!
 //! Nothing here decides what a picture looks like: the answer is a patch to a
@@ -59,8 +59,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use kyerag_media::{Fallible, Plane, Walk};
-use kyerag_meta::Lens;
+use kjerag_media::{Fallible, Plane, Walk};
+use kjerag_meta::Lens;
 
 use super::projection::{Held, Reframe};
 use super::sampling::Sampling;

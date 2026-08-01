@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use cosmic::iced::clipboard::mime::AsMimeTypes;
 use jpeg_encoder::{ColorType, SamplingFactor};
-use kyerag_render::{Fallible, Shot};
+use kjerag_render::{Fallible, Shot};
 
 /// How wide a still is, whatever the window is.
 ///
@@ -166,7 +166,7 @@ fn stem(video: &Path) -> &str {
     video
         .file_stem()
         .and_then(OsStr::to_str)
-        .unwrap_or("kyerag")
+        .unwrap_or("kjerag")
 }
 
 /// `<video>_<timecode>.jpg`: which video, and where in it.

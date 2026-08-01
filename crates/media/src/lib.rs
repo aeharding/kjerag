@@ -4,7 +4,7 @@
 //! Five layers, smallest first:
 //!
 //! - [`decode`] is the ffmpeg plumbing: the VA-API device, one decoder per
-//!   stream, and the map to DRM_PRIME that [`kyerag_render`] imports.
+//!   stream, and the map to DRM_PRIME that [`kjerag_render`] imports.
 //! - [`audio`] is the ring of samples between the decode thread and the sound
 //!   card, and the arithmetic that keeps it on the picture's clock. No ffmpeg
 //!   and no device in it, so `cargo test` covers all of it.
@@ -19,9 +19,9 @@
 //!   clock; it never sets it.
 //! - [`walk`] is the other delivery: the same frames in **system memory**,
 //!   which is what anything reading the delivered pixels at angles needs
-//!   (the seam fit of issue #48, and `kyerag-spike --bin rolling`).
+//!   (the seam fit of issue #48, and `kjerag-spike --bin rolling`).
 //!
-//! [`kyerag_render`]: <https://docs.rs/kyerag-render>
+//! [`kjerag_render`]: <https://docs.rs/kjerag-render>
 
 mod audio;
 mod decode;
@@ -83,7 +83,7 @@ pub type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// A frame size in pixels. NV12 chroma is half of luma in both axes, and
 /// getting that halving wrong is a silent half-image, so it has a name.
-/// `kyerag-render` turns one of these into a `wgpu::Extent3d`; that half
+/// `kjerag-render` turns one of these into a `wgpu::Extent3d`; that half
 /// cannot live here, because this crate has no wgpu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {

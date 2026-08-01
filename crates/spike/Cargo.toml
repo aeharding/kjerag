@@ -1,11 +1,11 @@
 # The M0 measuring instrument, kept out of the app's dependency graph: png
 # and pollster exist for this binary alone.
 [package]
-name = "kyerag-spike"
+name = "kjerag-spike"
 version.workspace = true
 edition.workspace = true
 
-# `cargo run -p kyerag-spike` still means the measuring instrument, as every
+# `cargo run -p kjerag-spike` still means the measuring instrument, as every
 # doc says it does, now that `reframe` is a second binary in this crate.
 default-run = "spike"
 
@@ -14,11 +14,11 @@ name = "spike"
 path = "src/main.rs"
 
 [dependencies]
-kyerag-media = { workspace = true }
+kjerag-media = { workspace = true }
 # The IMU track and the orientation it integrates to, which `gyro` reports
 # on and `horizon` renders against (issue #8).
-kyerag-meta = { workspace = true }
-kyerag-render = { workspace = true }
+kjerag-meta = { workspace = true }
+kjerag-render = { workspace = true }
 ffmpeg-next = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }

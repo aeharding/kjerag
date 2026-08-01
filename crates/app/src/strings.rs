@@ -15,14 +15,14 @@ use std::path::Path;
 
 use crate::shot::Destination;
 
-pub const APP_NAME: &str = "Kyerag";
+pub const APP_NAME: &str = "Kjerag";
 pub const COMMENTS: &str = "360 video player for the COSMIC desktop";
 pub const LICENSE: &str = "AGPL-3.0-only";
 pub const AUTHOR: &str = "Alexander Harding";
 pub const REPOSITORY: &str = "Repository";
-pub const REPOSITORY_URL: &str = "https://github.com/aeharding/kyerag";
+pub const REPOSITORY_URL: &str = "https://github.com/aeharding/kjerag";
 pub const SUPPORT: &str = "Support";
-pub const SUPPORT_URL: &str = "https://github.com/aeharding/kyerag/issues";
+pub const SUPPORT_URL: &str = "https://github.com/aeharding/kjerag/issues";
 
 /// The welcome view, and the line that says an open did not work.
 pub const NOTHING_OPEN: &str = "No video open";
@@ -96,7 +96,7 @@ pub const THEME_SYSTEM: &str = "Match desktop";
 pub const THEME_DARK: &str = "Dark";
 pub const THEME_LIGHT: &str = "Light";
 
-/// `About Kyerag...`, and the drawer's own title.
+/// `About Kjerag...`, and the drawer's own title.
 pub fn about_item() -> String {
     format!("About {APP_NAME}...")
 }
@@ -119,13 +119,13 @@ pub fn open_failed(missing: Option<&str>) -> String {
         return OPEN_FAILED.to_owned();
     };
     format!(
-        "Kyerag has no {} decoder here, so that file cannot be played. \
+        "Kjerag has no {} decoder here, so that file cannot be played. \
          In a Flatpak, the decoder comes from the codecs-extra runtime extension.",
         codec.to_uppercase()
     )
 }
 
-/// `{file name} - Kyerag`, and plain `Kyerag` with nothing open.
+/// `{file name} - Kjerag`, and plain `Kjerag` with nothing open.
 ///
 /// cosmic-files writes its equivalent with an em dash
 /// (`src/app.rs:1888-1898`); a window title is UI copy, so ours is a hyphen.
@@ -212,9 +212,9 @@ mod tests {
         let path = PathBuf::from("/home/pilot/Videos/VID_20260731_120000_00_007.insv");
         assert_eq!(
             window_title(Some(&path)),
-            "VID_20260731_120000_00_007.insv - Kyerag"
+            "VID_20260731_120000_00_007.insv - Kjerag"
         );
-        assert_eq!(window_title(None), "Kyerag");
+        assert_eq!(window_title(None), "Kjerag");
     }
 
     /// AGENTS.md forbids em dashes in anything the pilot reads, and a
@@ -277,7 +277,7 @@ mod tests {
     ///
     /// This is the whole of the wording, checked with no ffmpeg in sight: the
     /// probe that decides which branch runs is one `avcodec_find_decoder` call
-    /// in `kyerag-media`, and a box whose ffmpeg has HEVC cannot exercise the
+    /// in `kjerag-media`, and a box whose ffmpeg has HEVC cannot exercise the
     /// other branch of it honestly.
     #[test]
     fn a_missing_decoder_names_the_codec_and_the_extension() {

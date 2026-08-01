@@ -4,16 +4,16 @@
 //!
 //! ```sh
 //! # the residual round the seam circle, its structure, and the fit
-//! cargo run --release -p kyerag-spike --bin seam -- <static.insv> both=1 \
+//! cargo run --release -p kjerag-spike --bin seam -- <static.insv> both=1 \
 //!   knobs=roll,yaw,pitch,cx,cy control=1 also=<other-static.insv>
 //! # a fitted correction, applied and looked at with no blend to hide it
-//! cargo run --release -p kyerag-spike --bin seam -- <file.insv> mode=render \
+//! cargo run --release -p kjerag-spike --bin seam -- <file.insv> mode=render \
 //!   yaw=90 bands=0 fix=roll:0.80,yaw:-2.29,pitch:-0.82,cx:-4.59,cy:-14.73
 //! # what a narrower blend buys, and what it costs
-//! cargo run --release -p kyerag-spike --bin seam -- <file.insv> mode=blend \
+//! cargo run --release -p kjerag-spike --bin seam -- <file.insv> mode=blend \
 //!   yaw=90 pitch=-60 bands=14,8,4,2,1,0.5,0
 //! # our stitch against the camera maker's own, on the same capture
-//! cargo run --release -p kyerag-spike --bin seam -- <file.insv> mode=parity \
+//! cargo run --release -p kjerag-spike --bin seam -- <file.insv> mode=parity \
 //!   against=<their-export.mp4>
 //! ```
 //!
@@ -52,7 +52,7 @@
 //!   maps the rim circle to an ellipse.
 //!
 //! The instrument does not assume any of that. It fits the correction through
-//! the shipped map itself (`kyerag_render::Reframe`, the shader's own Rust
+//! the shipped map itself (`kjerag_render::Reframe`, the shader's own Rust
 //! twin) by perturbing one calibration field at a time and reading what that
 //! does to the same patches, so the answer comes out in the units `offset_v3`
 //! writes and the analytic reading above is only the check on it.
@@ -73,14 +73,14 @@
 
 use std::path::{Path, PathBuf};
 
-use kyerag_media::Fallible;
-use kyerag_meta::{CalibrationSet, Lens, Mat3, Quat, Size as MetaSize};
-use kyerag_render::seam::{
+use kjerag_media::Fallible;
+use kjerag_meta::{CalibrationSet, Lens, Mat3, Quat, Size as MetaSize};
+use kjerag_render::seam::{
     self, Found, Knob, Probe, Reading, Refused, Where, least_squares, mapped, moved, read_ring,
     ring, rms, turned, unit,
 };
-use kyerag_render::{Camera, Held, Landing, Reframe, Sampling, Size};
-use kyerag_spike::{Pair, Walk};
+use kjerag_render::{Camera, Held, Landing, Reframe, Sampling, Size};
+use kjerag_spike::{Pair, Walk};
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
@@ -1635,7 +1635,7 @@ fn blend(options: &Options) -> Fallible<()> {
 /// describe.
 ///
 /// The camera's own rotation is `Ry(yaw) Rx(pitch)` and it takes a view ray to
-/// the body (`kyerag_render::projection`), so its transpose is what brings a
+/// the body (`kjerag_render::projection`), so its transpose is what brings a
 /// body direction back into the view to be tested against the frustum.
 fn in_view(options: &Options, ray: [f64; 3]) -> bool {
     let camera = Mat3::rot_y(options.yaw.to_radians())

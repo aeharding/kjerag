@@ -18,9 +18,9 @@
 //! so [`Node`] carries the epipolar direction the calibration actually says
 //! and reports how far it is from the naive one.
 
-use kyerag_meta::CalibrationSet;
-use kyerag_render::Reframe;
-use kyerag_spike::Plane;
+use kjerag_meta::CalibrationSet;
+use kjerag_render::Reframe;
+use kjerag_spike::Plane;
 
 /// The vector from lens 0's centre to lens 1's, in the body's frame, metres.
 ///

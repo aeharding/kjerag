@@ -33,7 +33,7 @@
 /// [`FrameClock::Container`] is: a quality change is a difference between two
 /// pictures, and the losing side has to be renderable through the **same**
 /// pass as the winner or what is measured is the harness. Nothing in the
-/// shell offers the choice; `kyerag-spike --bin zoom` is what reaches it.
+/// shell offers the choice; `kjerag-spike --bin zoom` is what reaches it.
 ///
 /// **The chroma plane is not upgraded**, and that is a measurement rather
 /// than an oversight. Chroma is magnified at every field of view this player

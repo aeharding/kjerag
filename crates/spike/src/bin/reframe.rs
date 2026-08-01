@@ -6,9 +6,9 @@
 //! primitive, so what lands in the PNG is what the window would show.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin reframe -- <file.insv>
-//! cargo run --release -p kyerag-spike --bin reframe -- <file.insv> yaw=40 pitch=-15 fov=60
-//! cargo run --release -p kyerag-spike --bin reframe -- <file.insv> frame=1500
+//! cargo run --release -p kjerag-spike --bin reframe -- <file.insv>
+//! cargo run --release -p kjerag-spike --bin reframe -- <file.insv> yaw=40 pitch=-15 fov=60
+//! cargo run --release -p kjerag-spike --bin reframe -- <file.insv> frame=1500
 //! ```
 //!
 //! Arguments after the path are `key=value`: `yaw`, `pitch` and `fov` in
@@ -46,9 +46,9 @@ use std::path::{Path, PathBuf};
 
 use std::time::Duration;
 
-use kyerag_media::Fallible;
-use kyerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, SeamFit, Size};
-use kyerag_spike::{Gpu, Offscreen};
+use kjerag_media::Fallible;
+use kjerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, SeamFit, Size};
+use kjerag_spike::{Gpu, Offscreen};
 
 /// Not sRGB, so the shader writes the video's own gamma-encoded numbers
 /// straight out and a PNG viewer shows what the window shows. `srgb=1`
@@ -234,7 +234,7 @@ const USAGE: &str = "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] 
 /// stops matching, and both are this test failing.
 #[cfg(test)]
 mod tests {
-    use kyerag_render::Framing;
+    use kjerag_render::Framing;
 
     use super::*;
 

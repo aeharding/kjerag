@@ -12,7 +12,7 @@
 //! attached, and this is where the number comes from.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin playback -- <file.insv> [seconds] [hz] [shots]
+//! cargo run --release -p kjerag-spike --bin playback -- <file.insv> [seconds] [hz] [shots]
 //! ```
 //!
 //! `shots` is issue #15's measurement: that many screen captures, spread
@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
-use kyerag_media::{Fallible, Reader};
-use kyerag_render::{
+use kjerag_media::{Fallible, Reader};
+use kjerag_render::{
     Camera, Extent, Next, Readout, Request, Sampling, Scene, ScenePipeline, Shot, Size, Sweep,
     dmabuf,
 };
@@ -49,7 +49,7 @@ const OUTPUT: Size = Size {
 /// Pairs each depth of the decode-side benchmark pulls.
 const BENCH_PAIRS: usize = 200;
 
-/// What the app asks for (`kyerag::shot::WIDTH`), so the burst costs what a
+/// What the app asks for (`kjerag::shot::WIDTH`), so the burst costs what a
 /// pilot's `s` key costs.
 const SHOT_WIDTH: u32 = 3840;
 
@@ -180,7 +180,7 @@ fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
 /// pair imported and reprojected.
 ///
 /// The shell sleeps until the instant the scene says the next frame is due
-/// (`iced`'s `RedrawRequest::At`, from `kyerag_render`'s widget), so this
+/// (`iced`'s `RedrawRequest::At`, from `kjerag_render`'s widget), so this
 /// does too. `hz` is the display's refresh rate, and caps how often a redraw
 /// can happen when the scene asks for one as soon as possible.
 fn play(
@@ -386,7 +386,7 @@ impl Burst {
 
 /// Worker thread: the spike's own version of what the app does with a
 /// [`Shot`], which is a PNG on disk. No naming policy here; the app owns
-/// that (`kyerag::shot`).
+/// that (`kjerag::shot`).
 fn write_png(shot: &Shot) -> Fallible<String> {
     let began = Instant::now();
     let out = PathBuf::from("scratch").join(format!("playback-frame{}.png", shot.index));

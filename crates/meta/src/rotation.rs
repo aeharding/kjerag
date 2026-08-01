@@ -7,7 +7,7 @@
 //! and renormalized on every step, and a quaternion is what stays a rotation
 //! under that.
 //!
-//! `kyerag-render` has its own `Mat3` for the shader block, in `f32` columns
+//! `kjerag-render` has its own `Mat3` for the shader block, in `f32` columns
 //! the way WGSL lays one out. This one is the `f64` half that the
 //! calibration is read in, and [`Mat3::rows`] is how the two meet.
 
@@ -22,7 +22,7 @@ impl Mat3 {
         Self(rows)
     }
 
-    /// Row major, which is how `kyerag-render` reads one into its own matrix.
+    /// Row major, which is how `kjerag-render` reads one into its own matrix.
     pub fn rows(self) -> [[f64; 3]; 3] {
         self.0
     }

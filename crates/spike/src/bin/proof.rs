@@ -10,7 +10,7 @@
 //!
 //! ```sh
 //! ffmpeg -i shot.jpg -vf scale=320:-1,format=gray -f rawvideo -y shot.gray
-//! cargo run --release -p kyerag-spike --bin proof -- <file.insv> \
+//! cargo run --release -p kjerag-spike --bin proof -- <file.insv> \
 //!   time=9.576 lock=1 shot=shot.gray shape=320x225 \
 //!   seam=roll:0.789,yaw:-2.450,pitch:-0.668,cx:-2.55,cy:-13.84 out=after.png
 //! ```
@@ -30,9 +30,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kyerag_media::Fallible;
-use kyerag_render::{Camera, Cue, Horizon, Sampling, Scene, ScenePipeline, SeamFit, Size};
-use kyerag_spike::{FORMAT, Gpu, Picture, Render};
+use kjerag_media::Fallible;
+use kjerag_render::{Camera, Cue, Horizon, Sampling, Scene, ScenePipeline, SeamFit, Size};
+use kjerag_spike::{FORMAT, Gpu, Picture, Render};
 
 /// How wide the rendered proof is, in pixels. 1920 because that is the width
 /// the seam residuals are quoted in view pixels at (docs 6.8), so what is

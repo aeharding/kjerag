@@ -6,8 +6,8 @@
 //! round does not fail to remove the skew, it doubles it.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin rolling -- <file.insv> model=1
-//! cargo run --release -p kyerag-spike --bin rolling -- <file.insv> from=1043 count=12
+//! cargo run --release -p kjerag-spike --bin rolling -- <file.insv> model=1
+//! cargo run --release -p kjerag-spike --bin rolling -- <file.insv> from=1043 count=12
 //! ```
 //!
 //! Two instruments, and the second is the one that answers the question.
@@ -28,7 +28,7 @@
 //!
 //! The frames are decoded to system memory rather than imported, because this
 //! instrument samples the delivered picture at angles rather than drawing it:
-//! the map it samples through is `kyerag_render::Reframe`, the shader's own
+//! the map it samples through is `kjerag_render::Reframe`, the shader's own
 //! Rust twin, so what is measured is the pass that ships.
 //!
 //! Nothing here writes an image. The numbers are the output, and the footage
@@ -37,10 +37,10 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use kyerag_media::Fallible;
-use kyerag_meta::{CalibrationSet, Filter, OrientationTrack, Quat, Readout, Sweep};
-use kyerag_render::{Camera, Held, Reframe, Rolling, Sampling, Size};
-use kyerag_spike::{Pair, Plane, Walk};
+use kjerag_media::Fallible;
+use kjerag_meta::{CalibrationSet, Filter, OrientationTrack, Quat, Readout, Sweep};
+use kjerag_render::{Camera, Held, Reframe, Rolling, Sampling, Size};
+use kjerag_spike::{Pair, Plane, Walk};
 
 /// A unit vector, as the projection's own mirror normalizes one.
 fn normalize(v: [f32; 3]) -> [f32; 3] {
@@ -1301,7 +1301,7 @@ fn report(name: &str, what: &str, values: &[f64]) {
 /// the sensor and the row that content came off, which grows along the
 /// picture, and a displacement that grows along a line curves it.
 ///
-/// This is the prediction `kyerag-spike --bin horizon readout=off` is measured
+/// This is the prediction `kjerag-spike --bin horizon readout=off` is measured
 /// against. It is computed through the shipped map rather than by a formula,
 /// so what it predicts is what the pass would do.
 fn bend(calibration: &CalibrationSet, readout: Readout, options: &Options) {
@@ -1376,7 +1376,7 @@ fn bend(calibration: &CalibrationSet, readout: Readout, options: &Options) {
 /// at the measured rate, which is the negative of the body's own rotation.
 fn raw_turn(
     calibration: &CalibrationSet,
-    to_body: kyerag_meta::Mat3,
+    to_body: kjerag_meta::Mat3,
     at: i64,
     span: i64,
 ) -> [f64; 3] {

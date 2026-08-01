@@ -27,7 +27,7 @@
 
 set -uo pipefail
 
-prefix=${KYERAG_FFMPEG7:-$HOME/.local/ffmpeg71-dev}
+prefix=${KJERAG_FFMPEG7:-$HOME/.local/ffmpeg71-dev}
 libdir=$prefix/usr/lib/x86_64-linux-gnu
 ppa=https://ppa.launchpadcontent.net/ubuntuhandbook1/ffmpeg7/ubuntu
 dist=noble

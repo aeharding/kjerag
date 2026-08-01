@@ -6,7 +6,7 @@ Where a first-party app has already answered a question, this document
 copies its answer and cites the file. Where none has, it says so instead of
 inventing a house style.
 
-Kyerag's one shape that no COSMIC app shares: the middle of the window is
+Kjerag's one shape that no COSMIC app shares: the middle of the window is
 not a picture, it is a view direction. Dragging in it means something, and
 that single fact is what most of the tensions below come from.
 
@@ -80,7 +80,7 @@ The composition, read at the revisions above:
 2. Blur itself is not asked for by the app. libcosmic requests it per
    surface over `ext-background-effect-v1` whenever the theme is frosted and
    `Core::auto_blur` allows it (`src/app/cosmic.rs:911-929`,
-   `src/core.rs:544-553`, `573-600`), and Kyerag takes the default. So the
+   `src/core.rs:544-553`, `573-600`), and Kjerag takes the default. So the
    blur the owner saw was already ours.
 3. What darkens it is one widget: the container libcosmic wraps the header
    bar and the content in, whose background is
@@ -122,7 +122,7 @@ cosmic-player `src/main.rs:1646-1655`, cosmic-files `src/app.rs:6411-6420`,
 cosmic-edit `src/main.rs:3029-3037`.
 
 `header_end` holds app-level buttons that are not part of the content;
-cosmic-files puts its search there (`src/app.rs:6422-6455`). Kyerag puts
+cosmic-files puts its search there (`src/app.rs:6422-6455`). Kjerag puts
 nothing there. Every action we have is either a transport control, which
 belongs in the overlay row, or a menu item.
 
@@ -148,7 +148,7 @@ cosmic-player's `ProjectNode` tree (`src/project.rs`) is the pattern.
 
 ### Window title
 
-`{file name} - Kyerag`, and plain `Kyerag` with nothing open.
+`{file name} - Kjerag`, and plain `Kjerag` with nothing open.
 
 cosmic-files writes `format!("{tab_title} — {}", fl!("cosmic-files"))`
 (`src/app.rs:1888-1898`), with an em dash. AGENTS.md forbids em dashes in
@@ -170,7 +170,7 @@ Centered column, in this order (cosmic-player `src/main.rs:1676-1695`):
 4. flexible space
 
 cosmic-player uses `folder-symbolic` and "No video or audio file open" /
-"Open file". Kyerag uses the app icon, "No video open", and "Open video".
+"Open file". Kjerag uses the app icon, "No video open", and "Open video".
 The elementary HIG's welcome-screen page, which the System76 HIG defers to,
 describes exactly this shape: explain the situation, then offer the action
 that fixes it.
@@ -233,7 +233,7 @@ ignored. Also handle `FILE_TRANSFER_MIME`
 (`src/widget/dnd_destination.rs:33`) if it comes for free; it is how the
 portal hands over files from sandboxed sources.
 
-**The command line.** `kyerag <file.insv>` already works. Keep it a path,
+**The command line.** `kjerag <file.insv>` already works. Keep it a path,
 not a URL: cosmic-player parses freestanding arguments as URLs
 (`src/argparse.rs:70-79`) because GStreamer streams from the network, and
 we decode local files only. Add `--help` and `--version` (cosmic-player
@@ -343,7 +343,7 @@ timer would hide the controls out from under someone who paused to look
 around, which for a reframing player is the normal way to use it. So: the
 timeout is checked only while playing.
 
-Kyerag's equivalent hook is the redraw the scene already drives; the check
+Kjerag's equivalent hook is the redraw the scene already drives; the check
 belongs where "a frame was presented" is known.
 
 ### The cursor
@@ -493,7 +493,7 @@ Notes:
 
   It is a sentence and a command at once. Pasted into an issue it says
   exactly which picture is being talked about; pasted after
-  `cargo run --release -p kyerag-spike --bin reframe -- <path>` it renders
+  `cargo run --release -p kjerag-spike --bin reframe -- <path>` it renders
   that picture again on any box. The same line goes to the terminal with the
   whole path in front of it, and **the copy carries the file's name alone**:
   a pilot's report lands in a public issue, and the directories above a video
@@ -532,7 +532,7 @@ Notes:
   the terminal line a complete launch command:
 
   ```sh
-  kyerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1
+  kjerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1
   ```
 
   `--help` says so. A view named there lands with no toast, because nothing
@@ -560,7 +560,7 @@ Notes:
 
 ## The pointer, and the two conflicts
 
-| input               | Kyerag                        | note                              |
+| input               | Kjerag                        | note                              |
 | ------------------- | ----------------------------- | --------------------------------- |
 | left drag on video  | look around                   | already built, issues #3 / #29    |
 | wheel over video    | zoom, anchored at the cursor  | already built                     |
@@ -569,7 +569,7 @@ Notes:
 | move                | show the controls             | cosmic-player `src/main.rs:2119`  |
 
 **Conflict 1: the primary button.** cosmic-player makes a single click on
-the video toggle play/pause (`src/main.rs:1771-1772`, `1507-1513`). Kyerag
+the video toggle play/pause (`src/main.rs:1771-1772`, `1507-1513`). Kjerag
 cannot: the same press starts a drag to look around
 (`crates/render/src/widget.rs`, `ButtonPressed` grabs immediately), and a
 control that fires on press cannot coexist with a grab that starts on
@@ -591,7 +591,7 @@ disagree with each other:
   tests for both halves).
 - libcosmic scrollables: a bare wheel scrolls, everywhere else.
 
-Kyerag has no scrollable content in the video area, and the wheel is already
+Kjerag has no scrollable content in the video area, and the wheel is already
 bound to zoom. Keep it: a bare wheel over the video zooms the view. It matches
 cosmic-files' meaning (the wheel resizes what you are looking at) without
 cosmic-files' modifier, which exists there only because a file list also
@@ -623,7 +623,7 @@ zoom.
 **Mute is `m`.** cosmic-player binds no mute key: its `key_bind.rs` is `f`,
 `Alt+Enter`, `Space`, the two arrows, `.`, `,` and `a`, and mute is reachable
 only through the dropdown's button (and through MPRIS, which we do not have
-yet). Kyerag binds it anyway, which is mpv's key and is in keeping with the
+yet). Kjerag binds it anyway, which is mpv's key and is in keeping with the
 two bare letters this app had already invented where no COSMIC app had a
 precedent (`s` for save frame, `h` for the horizon lock). The owner approved
 it on 2026-07-31. The key sends the speaker button's own message, so mute
@@ -814,7 +814,7 @@ File                              Playback              View
   Copy current view reference                             Fullscreen
   Go to copied view reference                             ---
   ---                                                     Settings...
-  Quit                                                    About Kyerag...
+  Quit                                                    About Kjerag...
 ```
 
 - Ellipsis on items that open a dialog, none on items that act
@@ -930,15 +930,15 @@ Message::ToggleContextPage(ContextPage::About))` (cosmic-edit
 
 ```rust
 About::default()
-    .name("Kyerag")
+    .name("Kjerag")
     .icon(icon::from_svg_bytes(APP_ICON))
     .version(env!("CARGO_PKG_VERSION"))
     .author("Alexander Harding")
     .comments("360 video player for the COSMIC desktop")
     .license("AGPL-3.0-only")
     .links([
-        ("Repository", "https://github.com/aeharding/kyerag"),
-        ("Support", "https://github.com/aeharding/kyerag/issues"),
+        ("Repository", "https://github.com/aeharding/kjerag"),
+        ("Support", "https://github.com/aeharding/kjerag/issues"),
     ])
 ```
 
@@ -958,13 +958,17 @@ About::default()
   `into`), and the widget draws it at a fixed 128 px with
   `ContentFit::Contain` (`src/widget/about.rs:132-141`), so
   `icon::from_svg_bytes` (`src/widget/icon/handle.rs:95-100`) goes in where
-  cosmic-edit puts `icon::from_name`. A name is the thing to use once it
-  resolves, and it does not yet: the icons are installed as
-  `dev.harding.Kjerag` (`resources/icons/`) and the binary's `APP_ID` is
-  still `app.kyerag.Kyerag` until issue #75 renames it. Even after #75, a
-  name only resolves for a build whose icons are installed into an icon
-  theme, which a `cargo run` from the source tree is not, so the bytes are
-  not purely a bridge. Same handle in the welcome view, above.
+  cosmic-edit puts `icon::from_name`. Issue #75 closed the half of this that
+  was a name mismatch: the icons in `resources/icons/` and the binary's
+  `APP_ID` are both `dev.harding.Kjerag` now. The bytes stayed anyway,
+  because a name resolves only for a build whose icons are installed into an
+  icon theme and a `cargo run` from the source tree is not one. Measured at
+  the rename with `scripts/uitest.sh`'s welcome-mark check, which reads the
+  colour where the handle draws: bytes 114 181 163 with nothing installed,
+  `from_name` 27 27 27 (the window background) with nothing installed, and
+  `from_name` 99 186 173 with the tree on `XDG_DATA_DIRS`. A miss is an empty
+  SVG, not a placeholder (`src/widget/icon/named.rs:136-152`), so the failure
+  is a silent 128 px hole. Same handle in the welcome view, above.
 
 ## Copy
 

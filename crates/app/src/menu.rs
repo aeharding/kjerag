@@ -26,7 +26,7 @@ use crate::key_bind::Action;
 use crate::strings;
 
 /// The bar's id, which is how libcosmic remembers the width it collapses at.
-static MENU_ID: LazyLock<Id> = LazyLock::new(|| Id::new("kyerag-menu-bar"));
+static MENU_ID: LazyLock<Id> = LazyLock::new(|| Id::new("kjerag-menu-bar"));
 
 pub fn menu_bar<'a>(
     core: &Core,

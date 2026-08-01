@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use kyerag_media::Fallible;
-use kyerag_render::{Camera, Sampling, Scene, ScenePipeline, Size};
+use kjerag_media::Fallible;
+use kjerag_render::{Camera, Sampling, Scene, ScenePipeline, Size};
 
 use super::{Gpu, Offscreen};
 

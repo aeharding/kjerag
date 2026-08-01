@@ -9,7 +9,7 @@
 //! **A capture is not always one file (issue #79).** The ONE X2 and the
 //! models before it write one lens per file, so the same invariant has to
 //! hold across two containers: [`Reader::open`] finds the sibling
-//! (`kyerag_meta::sibling`), opens a demuxer for each, and pumps whichever
+//! (`kjerag_meta::sibling`), opens a demuxer for each, and pumps whichever
 //! one is behind. Two files of one capture share a frame grid exactly -
 //! measured on all three X2 pairs on this box, both files carry `time_base`
 //! 1/30000, a `start_time` of 0 and the identical PTS series 0, 1001,
@@ -139,10 +139,10 @@ pub enum Read {
 }
 
 /// One instant of the recording: every lens at the same PTS, mapped to
-/// DRM_PRIME and ready for `kyerag_render::dmabuf::import`.
+/// DRM_PRIME and ready for `kjerag_render::dmabuf::import`.
 ///
 /// Dropping this returns the surfaces to the decoder's pools, so it has to
-/// outlive every texture imported from it (`kyerag_render::ScenePipeline`
+/// outlive every texture imported from it (`kjerag_render::ScenePipeline`
 /// keeps a few alive behind the one it is drawing).
 pub struct Frames {
     /// Counting from the first frame of the file, derived from the PTS.
@@ -262,7 +262,7 @@ impl Shape {
     /// The name has already said they belong together; this is the verifying
     /// half, and it is deliberately about the pictures rather than about the
     /// trailer, because the second file of an X2 pair **has no trailer** to
-    /// check (`kyerag_meta::pair`). Two lenses of one capture are one video
+    /// check (`kjerag_meta::pair`). Two lenses of one capture are one video
     /// stream each, the same size, the same rate, the same time base and the
     /// same length. Measured on all three X2 pairs on this box: they agree on
     /// every one of those, and their frame counts are exactly one apart.
@@ -296,7 +296,7 @@ impl Reader {
             // opening the `_10_` file has to deliver lens 1 second all the
             // same, or every lens the shader reprojects is the other one's
             // and the sphere comes out inside out.
-            Some(beside) => match kyerag_meta::lens_index(path) {
+            Some(beside) => match kjerag_meta::lens_index(path) {
                 Some(1) => vec![beside, named],
                 _ => vec![named, beside],
             },
@@ -502,7 +502,7 @@ impl Reader {
     /// `av_seek_frame` is a lookup in it. That is why the cost of a seek does
     /// not depend on where in a 36 GB file it lands. Building a second copy
     /// of that table would buy nothing;
-    /// `cargo run --release -p kyerag-spike --bin seek` is the measurement.
+    /// `cargo run --release -p kjerag-spike --bin seek` is the measurement.
     pub fn seek(&mut self, at: Cue, accuracy: Accuracy) -> Fallible<()> {
         let index = at.index(self.timing);
         // Stream index -1 means the timestamp is in AV_TIME_BASE units,
@@ -818,12 +818,12 @@ fn partner(path: &Path, first: &Opened) -> Option<Opened> {
     if shape.lenses != 1 {
         return None;
     }
-    let beside: PathBuf = kyerag_meta::sibling(path)?;
+    let beside: PathBuf = kjerag_meta::sibling(path)?;
     let second = match Opened::new(&beside) {
         Ok(second) => second,
         Err(e) => {
             eprintln!(
-                "kyerag: {} is not readable, one lens only: {e}",
+                "kjerag: {} is not readable, one lens only: {e}",
                 beside.display()
             );
             return None;
@@ -834,7 +834,7 @@ fn partner(path: &Path, first: &Opened) -> Option<Opened> {
         .is_some_and(|beside| shape.pairs_with(beside))
     {
         eprintln!(
-            "kyerag: {} is not this capture's other lens, one lens only",
+            "kjerag: {} is not this capture's other lens, one lens only",
             beside.display()
         );
         return None;
@@ -944,10 +944,10 @@ mod tests {
         assert!(Timing::new(ff::Rational::new(0, 0), 0).is_err());
     }
 
-    /// The first `.insv` under `~/Videos`, or whatever `KYERAG_TEST_INSV`
+    /// The first `.insv` under `~/Videos`, or whatever `KJERAG_TEST_INSV`
     /// points at.
     fn test_capture() -> Option<std::path::PathBuf> {
-        if let Ok(path) = std::env::var("KYERAG_TEST_INSV") {
+        if let Ok(path) = std::env::var("KJERAG_TEST_INSV") {
             return Some(path.into());
         }
         let videos = std::path::PathBuf::from(std::env::var("HOME").ok()?).join("Videos");
@@ -969,16 +969,16 @@ mod tests {
     /// files, and the pair invariant holds across the two containers.
     ///
     /// Ignored because it needs a per-lens pair on disk. Run it with
-    /// `KYERAG_TEST_INSV=~/Videos/Insta/VID_20000101_110000_00_002.insv \
-    ///  cargo test -p kyerag-media -- --ignored --nocapture`.
+    /// `KJERAG_TEST_INSV=~/Videos/Insta/VID_20000101_110000_00_002.insv \
+    ///  cargo test -p kjerag-media -- --ignored --nocapture`.
     #[test]
-    #[ignore = "needs a per-lens .insv pair, named by KYERAG_TEST_INSV"]
+    #[ignore = "needs a per-lens .insv pair, named by KJERAG_TEST_INSV"]
     fn a_per_lens_pair_opens_as_one_capture_from_either_file() {
         let Some(lens0) = test_capture() else {
             eprintln!("no .insv found, skipping");
             return;
         };
-        let Some(lens1) = kyerag_meta::sibling(&lens0) else {
+        let Some(lens1) = kjerag_meta::sibling(&lens0) else {
             eprintln!("{} has no sibling, skipping", lens0.display());
             return;
         };
@@ -1027,7 +1027,7 @@ mod tests {
     /// path he played.
     ///
     /// Ignored because the footage is 36 GB and lives on one box. Run it with
-    /// `cargo test -p kyerag-media -- --ignored --nocapture`.
+    /// `cargo test -p kjerag-media -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs real footage at ~/Videos/*.insv"]
     fn the_sound_plays_through_a_gap_in_the_interleave() {
@@ -1070,7 +1070,7 @@ mod tests {
     /// would make a scrub run ahead of the pilot's hand.
     ///
     /// Ignored because the footage is 36 GB and lives on one box. Run it with
-    /// `cargo test -p kyerag-media -- --ignored --nocapture`.
+    /// `cargo test -p kjerag-media -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs real footage at ~/Videos/*.insv"]
     fn a_real_file_lands_where_it_is_told() {

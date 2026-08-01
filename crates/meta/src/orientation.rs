@@ -4,8 +4,8 @@
 //!
 //! The output is one quaternion per IMU sample, `world_from_body`, taking a
 //! direction in the camera body's frame to the stabilized world frame. Both
-//! frames are the one the rest of Kyerag uses: **x right, y down, z forward**,
-//! and in the world frame y is gravity. `kyerag-render` composes the inverse
+//! frames are the one the rest of Kjerag uses: **x right, y down, z forward**,
+//! and in the world frame y is gravity. `kjerag-render` composes the inverse
 //! into its view rotation, so a body that rolls leaves the world where it was.
 //!
 //! ## Why a complementary filter and not something cleverer
@@ -70,7 +70,7 @@ const STORE_US: i64 = 5_000;
 /// Both are time constants in seconds, and both limits are the useful ones:
 /// an infinite `tilt_seconds` is the gyroscope alone, a zero `yaw_seconds` is
 /// no heading stabilization at all, and an infinite `yaw_seconds` locks the
-/// view to the heading the file starts on. The harness in `kyerag-spike` uses
+/// view to the heading the file starts on. The harness in `kjerag-spike` uses
 /// exactly those limits to bracket what the shipped numbers buy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Filter {
@@ -336,7 +336,7 @@ impl Filter {
     ///   [`Filter::trust`] rather than any of it. That is worth the difference
     ///   between a horizon 13.8 degrees off level at 6 seconds and one 1.8
     ///   degrees off, measured on the April 10 capture through the render path
-    ///   (`kyerag-spike --bin dip`), because the window it settles for
+    ///   (`kjerag-spike --bin dip`), because the window it settles for
     ///   otherwise is one taken during the launch.
     /// - **Every reading carried back before it is averaged.** The window may
     ///   sit seconds after the start of the track, and the body will have
@@ -742,7 +742,7 @@ mod tests {
         // trust window as it converges on the step this track makes at 2 s,
         // and it is believed on the way through. Against that, the seed this
         // replaced put the April 10 capture 48.9 degrees off at 6 s, measured
-        // through the render path by `kyerag-spike --bin dip`.
+        // through the render path by `kjerag-spike --bin dip`.
         assert!(at(6.0) < 3.0, "{} degrees at 6 s", at(6.0));
         // And that much decays at `tilt_seconds` like anything else the
         // correction has to undo.

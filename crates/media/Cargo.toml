@@ -1,5 +1,5 @@
 [package]
-name = "kyerag-media"
+name = "kjerag-media"
 version.workspace = true
 edition.workspace = true
 
@@ -8,5 +8,5 @@ cpal = { workspace = true }
 # The `.insv` naming convention that says where a capture's other lens
 # lives (issue #79). `meta` owns what an `.insv` is; this layer owns what a
 # container is, and the pairing needs both halves.
-kyerag-meta = { workspace = true }
+kjerag-meta = { workspace = true }
 ffmpeg-next = { workspace = true }

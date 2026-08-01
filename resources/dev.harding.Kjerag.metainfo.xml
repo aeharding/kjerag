@@ -12,21 +12,21 @@
   section 5 says so: the screenshots, which Flathub requires and which need
   a real window with real footage in it.
 
-  The id stays app.kyerag.Kyerag until issue #75's rename sweep, which puts
-  the settled dev.harding.Kjerag in the code and in these three file names
-  in one move (issue #66, docs/DISTRIBUTION.md 3.6).
+  The id is the application ID issue #66 settled and issue #75 put in the
+  code, so it is also this file's name, the binary's `APP_ID`, the icon
+  basenames and the cosmic-config directories (docs/DISTRIBUTION.md 3.6).
 -->
 <component type="desktop-application">
-  <id>app.kyerag.Kyerag</id>
+  <id>dev.harding.Kjerag</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>AGPL-3.0-only</project_license>
 
-  <name>Kyerag</name>
+  <name>Kjerag</name>
   <summary>Play Insta360 360 video</summary>
 
   <description>
     <p>
-      Kyerag plays Insta360 .insv files directly: no stitching step, no proxy
+      Kjerag plays Insta360 .insv files directly: no stitching step, no proxy
       files, no export round trip. Drag to reframe, scroll to zoom, take
       screenshots.
     </p>
@@ -37,15 +37,15 @@
     </p>
   </description>
 
-  <launchable type="desktop-id">app.kyerag.Kyerag.desktop</launchable>
+  <launchable type="desktop-id">dev.harding.Kjerag.desktop</launchable>
 
   <provides>
     <mediatype>video/x-insta360-insv</mediatype>
   </provides>
 
-  <url type="homepage">https://github.com/aeharding/kyerag</url>
-  <url type="bugtracker">https://github.com/aeharding/kyerag/issues</url>
-  <url type="vcs-browser">https://github.com/aeharding/kyerag</url>
+  <url type="homepage">https://github.com/aeharding/kjerag</url>
+  <url type="bugtracker">https://github.com/aeharding/kjerag/issues</url>
+  <url type="vcs-browser">https://github.com/aeharding/kjerag</url>
 
   <developer id="dev.harding">
     <name>Alex Harding</name>
@@ -72,7 +72,7 @@
     take and to agree to publish.
   <screenshots>
     <screenshot type="default">
-      <image>https://…/kyerag-reframe.png</image>
+      <image>https://…/kjerag-reframe.png</image>
       <caption>Reframing a shot</caption>
     </screenshot>
   </screenshots>

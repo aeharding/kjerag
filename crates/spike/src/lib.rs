@@ -7,7 +7,7 @@
 //! wants [`skyline`]. [`Picture`] is the third of them: a rendered view and
 //! what separates two of them, which `zoom` and `ball` both ask for.
 //!
-//! The frames themselves come from `kyerag_media::Walk`, re-exported here
+//! The frames themselves come from `kjerag_media::Walk`, re-exported here
 //! because the instruments that read the **delivered** picture rather than a
 //! rendered one all reach for it: it moved into `media` when the seam fit
 //! started running at open in the app as well (issue #48).
@@ -16,7 +16,7 @@ mod offscreen;
 mod picture;
 mod skyline;
 
-pub use kyerag_media::{Pair, Plane, Walk};
+pub use kjerag_media::{Pair, Plane, Walk};
 pub use offscreen::{Gpu, Offscreen};
 pub use picture::{Difference, FORMAT, Picture, Render, aspect};
 pub use skyline::{Skyline, skyline};

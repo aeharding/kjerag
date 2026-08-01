@@ -3,7 +3,7 @@
 # Headless UI checks: drive the real app in a throwaway compositor and look
 # at what came out.
 #
-#   scripts/uitest.sh [file.insv]      # or set KYERAG_TEST_MEDIA
+#   scripts/uitest.sh [file.insv]      # or set KJERAG_TEST_MEDIA
 #
 # `cage` runs one client on a wlroots headless backend, which is a whole
 # Wayland session with no monitor and no connection to the desktop the
@@ -37,7 +37,7 @@ set -uo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 session=$root/scratch/uitest
-media=${1:-${KYERAG_TEST_MEDIA:-}}
+media=${1:-${KJERAG_TEST_MEDIA:-}}
 
 # Opening a file reads the trailer off the end of it, which is a seek and a
 # parse over a multi-gigabyte file, so READY is generous. A report line lands
@@ -110,14 +110,14 @@ command -v wl-paste >/dev/null || clipboard=no
 # binary built before a `git revert` failed the ball check for an hour while
 # the source it was meant to be checking passed on every run.
 #
-# KYERAG_BIN is the way to point the harness at a binary on purpose, which is
+# KJERAG_BIN is the way to point the harness at a binary on purpose, which is
 # how that was measured, so it is taken as given and never rebuilt.
-if [ -n "${KYERAG_BIN:-}" ]; then
-	bin=$KYERAG_BIN
-	[ -x "$bin" ] || die "no binary at $bin (KYERAG_BIN)"
-	printf 'binary %s (KYERAG_BIN: not rebuilt)\n' "$bin"
+if [ -n "${KJERAG_BIN:-}" ]; then
+	bin=$KJERAG_BIN
+	[ -x "$bin" ] || die "no binary at $bin (KJERAG_BIN)"
+	printf 'binary %s (KJERAG_BIN: not rebuilt)\n' "$bin"
 else
-	bin=$root/target/release/kyerag
+	bin=$root/target/release/kjerag
 	printf 'building %s\n' "$bin"
 	(cd "$root" && cargo build --release) || die "the app did not build"
 	[ -x "$bin" ] || die "no binary at $bin"
@@ -128,7 +128,7 @@ fi
 rm -rf "$session"
 mkdir -p "$session/shots"
 printf 'session %s\n' "$session"
-[ -n "$media" ] || printf 'no test media: pass a file or set KYERAG_TEST_MEDIA for the playback checks\n'
+[ -n "$media" ] || printf 'no test media: pass a file or set KJERAG_TEST_MEDIA for the playback checks\n'
 
 # --------------------------------------------------------- the session
 
@@ -146,7 +146,7 @@ log=
 boot() {
 	local label=$1 file=${2:-}
 	log=$session/$label.log
-	runtime=$(mktemp -d "${TMPDIR:-/tmp}/kyerag-uitest.XXXXXXXX")
+	runtime=$(mktemp -d "${TMPDIR:-/tmp}/kjerag-uitest.XXXXXXXX")
 	chmod 700 "$runtime"
 
 	env \
@@ -647,10 +647,16 @@ is_room() {
 }
 
 # The mark above "No video open" is the app icon, which the binary carries as
-# bytes (`crates/app/src/app.rs`, `APP_ICON`) because the icon theme has
-# nothing under this app's ID yet (issue #75). Colour in that patch is what
-# separates the drawing from the symbolic icon it replaced, and from an SVG
-# that failed to load, which draws nothing at all.
+# bytes (`crates/app/src/app.rs`, `APP_ICON`) because this run has no icon
+# theme to look a name up in. Colour in that patch is what separates the
+# drawing from the symbolic icon it replaced, and from an SVG that failed to
+# load, which draws nothing at all.
+#
+# That is also how the bytes were kept at issue #75's rename rather than
+# dropped for `icon::from_name(APP_ID)`: this check reads 27 27 27, one flat
+# grey, for a name lookup here, and colour for the same build with the icon
+# tree on XDG_DATA_DIRS. It catches a missing drawing, which is what makes
+# the negative worth anything.
 #
 # It says nothing about the window background, which the same issue changed:
 # under cage there is no compositor blur, so the theme's opaque background is
@@ -876,7 +882,7 @@ returns_to_the_copied_view() {
 # separates a key that landed from a key that was swallowed: the two views
 # differ by a rotation that one still frame need not show.
 flips_the_horizon() {
-	local locked=$session/config/cosmic/app.kyerag.Kyerag/v1/horizon_lock
+	local locked=$session/config/cosmic/dev.harding.Kjerag/v1/horizon_lock
 	local try=0
 	while [ "$try" -lt "$PRESSES" ]; do
 		key -k h
@@ -1037,7 +1043,7 @@ pooled_calibration() {
 	# stored is still there and would make this session take the path it is
 	# here to rule out. The superseded single-entry key goes too: it is
 	# derived data and nothing reads it any more.
-	local state=$session/state/cosmic/app.kyerag.Kyerag/v1
+	local state=$session/state/cosmic/dev.harding.Kjerag/v1
 	rm -f "$state/seam_pool" "$state/seam_calibration"
 
 	boot fallback "$media"

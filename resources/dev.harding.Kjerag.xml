@@ -4,7 +4,7 @@
   Why this name, why no magic rule, and why .lrv is left alone:
   docs/DISTRIBUTION.md section 1.
 
-  Installed to $prefix/share/mime/packages/app.kyerag.Kyerag.xml. The file
+  Installed to $prefix/share/mime/packages/dev.harding.Kjerag.xml. The file
   name has to start with the app ID or flatpak build-export will not export
   it.
 -->

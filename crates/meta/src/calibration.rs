@@ -251,7 +251,7 @@ impl Pose {
     ///
     /// This is lens 0's whole story. Lens 1 additionally sits in a nominal
     /// arrangement the file does not record, a half turn about the body's
-    /// vertical, which `kyerag-render` multiplies on the right of this
+    /// vertical, which `kjerag-render` multiplies on the right of this
     /// (docs/research/insv-format.md 4.9). The **order** of the three
     /// angles is not settled, and neither camera can settle it: yaw and
     /// pitch are 0.103 and 0.07 degrees on the X4 Air, so every ordering
@@ -558,7 +558,7 @@ impl GyroConfig {
 /// [`super::axis_map`] reads, where a lower case letter is negated.
 ///
 /// **Measured, not transcribed (issue #8).** The string is only half of a
-/// convention; the other half is the frame it lands in. Kyerag takes it
+/// convention; the other half is the frame it lands in. Kjerag takes it
 /// through [`Pose::sensor_from_body`] into the body frame the reprojection
 /// pass uses, which is not the frame any other project's table is written
 /// against, so this table is derived from footage rather than copied and
@@ -571,7 +571,7 @@ impl GyroConfig {
 /// degrees off and the runner-up of the 24 reads 15.1 to 36.6. What is left
 /// is the accelerometer's own disagreement with vertical in flight, which is
 /// real acceleration and not a convention. The command is
-/// `cargo run --release -p kyerag-spike --bin horizon -- <file.insv>
+/// `cargo run --release -p kjerag-spike --bin horizon -- <file.insv>
 /// from=<seconds> sweep=1`, and docs/research/insv-format.md 8.5 has the
 /// tables.
 ///
@@ -605,15 +605,15 @@ impl GyroConfig {
 /// | 191318, 1.0 s | dirt, and a pair of boots | sky, and a helmet from below |
 ///
 /// A pair of boots seen from above is the nadir. The renders are
-/// `kyerag-spike --bin reframe -- <file.insv> time=5 yaw=15.1 pitch=39.4`
+/// `kjerag-spike --bin reframe -- <file.insv> time=5 yaw=15.1 pitch=39.4`
 /// and its half turn; they are frames of somebody's flying day, so they
 /// stay on the box.
 ///
 /// telemetry-parser's no-`offset_v3` table names `xZy` for this model, and
-/// that is **not** this answer and could not have been: in Kyerag's frame
+/// that is **not** this answer and could not have been: in Kjerag's frame
 /// `xZy` has determinant -1, so it is a reflection rather than a mounting,
 /// and the sweep does not even enumerate it. It is carried in
-/// `kyerag-spike --bin horizon` as a standing wrong answer instead, where
+/// `kjerag-spike --bin horizon` as a standing wrong answer instead, where
 /// it puts the line 22 degrees from where `Zxy` puts it. That is 8.4's
 /// point with a number on it: a string is only half of a convention, and
 /// the other half is the frame it lands in.
@@ -656,7 +656,7 @@ fn imu_orientation(camera_model: &str) -> &'static str {
 /// frame only, read it back at 0.79 to 0.84, and reported the down-frame term
 /// of the same fits as not repeating. It repeats wherever an injected control
 /// works; the stretch that disagreed is the one where injecting a known
-/// displacement reads back at -0.10. `kyerag-spike --bin rolling pair=1` now
+/// displacement reads back at -0.10. `kjerag-spike --bin rolling pair=1` now
 /// injects all four directions and prints what each reads back.
 ///
 /// The seam says nothing about this and cannot: two sensors reading down
@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(Sweep::Up.axis(), [0.0, -1.0]);
     }
 
-    /// The convention the sweep in `kyerag-spike --bin horizon` settled, and
+    /// The convention the sweep in `kjerag-spike --bin horizon` settled, and
     /// the fixture is the camera it was settled on.
     #[test]
     fn the_x4_air_gets_the_measured_imu_orientation() {

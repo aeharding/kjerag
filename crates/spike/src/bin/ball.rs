@@ -5,7 +5,7 @@
 //! in a number alone.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike --bin ball -- <file.insv> \
+//! cargo run --release -p kjerag-spike --bin ball -- <file.insv> \
 //!   [frame=n | time=s] [yaw=deg] [pitch=deg] [size=px] [lock=1]
 //! ```
 //!
@@ -33,12 +33,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kyerag_media::Fallible;
-use kyerag_meta::CalibrationSet;
-use kyerag_render::{
+use kjerag_media::Fallible;
+use kjerag_meta::CalibrationSet;
+use kjerag_render::{
     Camera, Cue, Held, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size, sampling,
 };
-use kyerag_spike::{FORMAT, Gpu, Offscreen, Picture, Render, aspect};
+use kjerag_spike::{FORMAT, Gpu, Offscreen, Picture, Render, aspect};
 
 /// The window the player's own cost numbers are taken at, and what every
 /// picture here is rendered at unless `size=` says otherwise. Its shape is

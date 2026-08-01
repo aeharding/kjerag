@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kyerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
-use kyerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack, Quat, Readout};
+use kjerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
+use kjerag_meta::{CalibrationSet, ExposureTrack, Filter, Lens, OrientationTrack, Quat, Readout};
 
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
@@ -71,7 +71,7 @@ pub enum Next {
 /// orientation is looked up at that instant (issue #8).
 ///
 /// The player uses [`Self::Exposure`] and this exists so the losing
-/// hypothesis stays measurable: `kyerag-spike --bin horizon` renders the same
+/// hypothesis stays measurable: `kjerag-spike --bin horizon` renders the same
 /// frames both ways and reports what the difference is worth in degrees of
 /// horizon tilt. Nothing in the shell offers the choice.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -224,7 +224,7 @@ impl Motion {
     /// `None` where there is nothing to correct with, or nothing known to
     /// correct: a file with no IMU record, a trailer with no readout time,
     /// and any camera whose readout direction has not been measured
-    /// (`kyerag_meta::Sweep::Unknown`, which today is everything but an X4).
+    /// (`kjerag_meta::Sweep::Unknown`, which today is everything but an X4).
     /// The pass is then what it was before issue #9, and the picture with it.
     fn rolling(&self, at: i64, readout: Readout) -> Option<Rolling> {
         let span = (readout.seconds * 1e6) as i64;
@@ -381,7 +381,7 @@ impl Scene {
     }
 
     /// Fit this file's seam from its own frames, best effort
-    /// (`kyerag_render::seam`).
+    /// (`kjerag_render::seam`).
     ///
     /// On its own thread for a file that is playing, because a fit is a
     /// second or two of decode and the picture is not waiting for it; on this
@@ -420,7 +420,7 @@ impl Scene {
             .name("seam fit".to_owned())
             .spawn(move || fit_into(&path, &lenses, frame, into.as_ref(), &kept, false));
         if let Err(e) = spawned {
-            eprintln!("kyerag: the seam fit did not start: {e}");
+            eprintln!("kjerag: the seam fit did not start: {e}");
         }
     }
 
@@ -486,7 +486,7 @@ impl Scene {
             Ok(None) => {}
             Ok(Some(taken)) => *frames = Some(taken),
             Err(e) => {
-                eprintln!("kyerag: playback stopped: {e}");
+                eprintln!("kjerag: playback stopped: {e}");
                 player.pause(now);
                 return Next::Never;
             }
@@ -830,7 +830,7 @@ type Harvested = Arc<Mutex<Option<Harvest>>>;
 /// One lens entry per decoded stream, and in the same order: the trailer
 /// writes its lens blocks in the order the container carries the streams,
 /// and a paired per-lens capture opens lens 0's file first, so the two
-/// orders are the same one (`kyerag_meta::lens_index`).
+/// orders are the same one (`kjerag_meta::lens_index`).
 ///
 /// **The calibration belongs to the capture, not to the file** (issue #79).
 /// A camera that writes one lens per file writes one trailer for the pair
@@ -1216,7 +1216,7 @@ impl ScenePipeline {
                 self.live.truncate(RETAINED);
             }
             Err(e) => {
-                eprintln!("kyerag: frame not shown: {e}");
+                eprintln!("kjerag: frame not shown: {e}");
                 self.failed = true;
             }
         }
@@ -1444,7 +1444,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kyerag_meta::{Filter, GyroSample, GyroTrack, Sweep};
+    use kjerag_meta::{Filter, GyroSample, GyroTrack, Sweep};
 
     /// A camera rolling at a constant rate, as an orientation track: enough
     /// for the one question this module owns, which is whether a frame's
@@ -1459,7 +1459,7 @@ mod tests {
             .collect();
         Filter::default().solve(
             &GyroTrack::from_samples(samples),
-            kyerag_meta::Mat3::IDENTITY,
+            kjerag_meta::Mat3::IDENTITY,
         )
     }
 

@@ -6,7 +6,7 @@
 //! saving is a measured number rather than a claim.
 //!
 //! ```sh
-//! cargo run --release -p kyerag-spike -- <file.insv> [frames] [stream]
+//! cargo run --release -p kjerag-spike -- <file.insv> [frames] [stream]
 //! ```
 //!
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
-use kyerag_media::{DrmFrame, Fallible, HwDevice, SwFrame, open_decoder};
-use kyerag_render::{Extent, Planes, Size, dmabuf};
+use kjerag_media::{DrmFrame, Fallible, HwDevice, SwFrame, open_decoder};
+use kjerag_render::{Extent, Planes, Size, dmabuf};
 
 /// Offscreen render target edge. Small on purpose: the spike measures the
 /// frame path, not a display, and reading back a 3840 square costs 59 MB.

@@ -74,7 +74,7 @@ impl Sound {
                 let latency = stamp.playback.duration_since(stamp.callback);
                 filling.fill(out, reading.running_at(now + latency));
             },
-            |e| eprintln!("kyerag: sound stopped: {e}"),
+            |e| eprintln!("kjerag: sound stopped: {e}"),
             None,
         )?;
         stream.play()?;

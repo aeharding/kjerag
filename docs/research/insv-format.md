@@ -1,6 +1,6 @@
 # The Insta360 `.insv` format, and what it takes to reframe it
 
-Feasibility study, 2026-07-30. This is the format reference for Kyerag:
+Feasibility study, 2026-07-30. This is the format reference for Kjerag:
 what an `.insv` actually contains, what the calibration numbers mean, what
 the seam and the gyro cost you, and what was ruled out. Quote it to settle
 disputes.
@@ -13,7 +13,7 @@ worked examples below use it.
 
 ## License context
 
-Kyerag is **AGPL-3.0**. GPL-3.0 is one-way compatible with AGPL-3.0, so
+Kjerag is **AGPL-3.0**. GPL-3.0 is one-way compatible with AGPL-3.0, so
 Gyroflow's `distortion_models/insta360.wgsl` (GPL-3.0-or-later) is usable
 as a **direct reference implementation with attribution**, not merely as
 clean-room input. Files that derive from it carry their own SPDX header.
@@ -21,7 +21,7 @@ This matters for section 5: the projection math does not have to be
 re-derived from the Mei paper, though the paper and OpenCV's `omnidir`
 remain the better-documented description of the same model.
 
-`telemetry-parser` is MIT OR Apache-2.0 and imposes nothing. Kyerag reads
+`telemetry-parser` is MIT OR Apache-2.0 and imposes nothing. Kjerag reads
 the trailer itself (see 4.6 for why) but transcribes that project's
 protobuf field tags, which is exactly what the licence permits.
 
@@ -58,7 +58,7 @@ merged.
 The camera also writes an `LRV_*.lrv` proxy alongside each `.insv`:
 H.264 instead of HEVC, 5 to 10x smaller, both lenses side by side in one
 track (MED, from `faeton/insta360-quicklook`, which uses exactly this as
-its playback source). Kyerag does **not** depend on it (see the decisions
+its playback source). Kjerag does **not** depend on it (see the decisions
 log in ROADMAP.md): the proxy may be absent, so full-resolution decode
 has to stand alone.
 
@@ -100,8 +100,8 @@ the trailer. It is not a lens of anything, and a pairing rule that
 matched "the marker field differs" rather than `00` and `10`
 specifically would swallow it.
 
-Kyerag pairs at open: `kyerag_meta::sibling` for the name,
-`kyerag_media::Reader` for two demuxers in lockstep matched on frame
+Kjerag pairs at open: `kjerag_meta::sibling` for the name,
+`kjerag_media::Reader` for two demuxers in lockstep matched on frame
 index, and `CalibrationSet::from_capture` for the trailer reach. Opening
 either file of a pair renders the same sphere, byte for byte. A per-lens
 file whose partner is not on the card renders exactly what it rendered
@@ -235,7 +235,7 @@ Record 1 is a protobuf message, roughly 65 fields. Two public schemas:
   `CameraOffsetCalib { offset_v3_cam0, offset_v3_cam1, *_refined,
   offset_v7_* }`. All undocumented.
 
-Fields Kyerag cares about, with fixture values:
+Fields Kjerag cares about, with fixture values:
 
 | field | tag | X4 Air fixture | why it matters |
 |---|---|---|---|
@@ -243,7 +243,7 @@ Fields Kyerag cares about, with fixture values:
 | `fw_version` | 3 | `v1.2.7_build1` | calibration grammar has changed across firmware generations |
 | `offset` | 5 | 16 floats | v1 calibration, legacy |
 | `offset_v2` | 53 | 34 floats | v2 calibration, legacy |
-| **`offset_v3`** | 54 | **40 floats** | the model Kyerag uses |
+| **`offset_v3`** | 54 | **40 floats** | the model Kjerag uses |
 | `original_offset*` | 17/55/56 | identical to the above | factory vs adjusted (see 4.5) |
 | `dimension` | 19 | 3840 x 3840 | per-lens delivered frame size |
 | `window_crop_info` | 27 | src 7680x7680, dst 7424x7424 | sensor crop; feeds the focal scale |
@@ -334,7 +334,7 @@ Independent corroboration on a non-Air X4 (firmware v1.4.8), from
 `version_word = 197632`. The grammar holds across both; the numbers do
 not, so **never hardcode a calibration, always read it from the file**.
 
-A second corroboration, this one first-hand: Kyerag read an
+A second corroboration, this one first-hand: Kjerag read an
 `Insta360 ONE X2` capture (firmware `v1.0.62_build2`) on 2026-07-30. Same
 40-token shape, `lens_count = 2`, `xi = 1.72859`, `tz = -0.021103`
 (21.1 mm, a smaller body), `lensType 41`, canvas 6080 x 3040 against a
@@ -395,7 +395,7 @@ when sniffing an unknown string.
 
 ### 4.4 The older grammars
 
-Present in the fixture, not used by Kyerag, recorded so a future reader
+Present in the fixture, not used by Kjerag, recorded so a future reader
 can identify a string by token count (MED, inferred from the fixture):
 
 - **`offset` (v1)**, 16 tokens: `count`, then 6 fields per lens
@@ -422,7 +422,7 @@ optics and therefore the calibration.** On the fixture the two are
 byte-identical and `offset_convert_states` is null, which is consistent
 with a bare camera and does not distinguish the hypotheses.
 
-Kyerag should read `offset_v3`, not `original_offset_v3`: if they ever
+Kjerag should read `offset_v3`, not `original_offset_v3`: if they ever
 differ, the adjusted one describes the glass that was actually in front
 of the sensor.
 
@@ -453,10 +453,10 @@ of the sensor.
    integer, which is why the checked-in fixture shows `audio_mode` as the
    number 9 rather than a name.
 
-Kyerag reads `offset_v3` directly rather than consuming the synthesized
+Kjerag reads `offset_v3` directly rather than consuming the synthesized
 Gyroflow lens profile, so the first two bugs are not on its path either.
 Bug 3 is the one that decided the design: master is unpublished and pulls
-two further git forks, so Kyerag walks the trailer itself
+two further git forks, so Kjerag walks the trailer itself
 (`crates/meta/src/trailer.rs`, section 2 above) and decodes record 1 with
 `prost`. All three are worth upstreaming.
 
@@ -489,7 +489,7 @@ tolerance rather than an optical spec. `yaw` and `pitch` being sub-degree
 in the same block supports "these are tolerances, and 90 is a deliberate
 sensor rotation".
 
-Gyroflow uses it as roll, and so does Kyerag.
+Gyroflow uses it as roll, and so does Kjerag.
 
 ### 4.8 Composing yaw, pitch and roll (settled 2026-07-31)
 
@@ -509,7 +509,7 @@ right, y down, z out along the optical axis**, with the image plane in the
 ordinary photographic sense (`px = fx*x' + cx`, `py = fy*y' + cy`).
 
 **The 90 degree datum is the finding.** Applying `roll` as the file writes
-it renders the world a quarter turn on its side. Kyerag carries the
+it renders the world a quarter turn on its side. Kjerag carries the
 correction as `ROLL_DATUM_DEG` in `crates/render/src/projection.rs`.
 
 ### The frames that settled it
@@ -572,7 +572,7 @@ own numbers predict:
 | `+90` | +1.246 deg |
 | `0` or `180` | 181 deg |
 
-`kyerag-spike --bin seam` measures **+1.086** on a still frame of 191318
+`kjerag-spike --bin seam` measures **+1.086** on a still frame of 191318
 and **+1.188** on 193615, within 0.16 degrees of the prediction, at an
 instrument repeatability of 0.02. The two quarter-turn datums are
 indistinguishable there by construction, which is what the plumb reference
@@ -589,7 +589,7 @@ Reproduce any row with the headless instrument, which runs the app's own
 pass and writes a PNG:
 
 ```sh
-cargo run --release -p kyerag-spike --bin reframe -- <file.insv> \
+cargo run --release -p kjerag-spike --bin reframe -- <file.insv> \
   yaw=-24 pitch=-63 fov=60
 ```
 
@@ -622,7 +622,7 @@ yaw is 0.039 degrees. Something has to supply it, and there are three
 candidates that all point lens 1 backwards:
 
 ```
-lens_1 = Rz(roll - 90) * Ry(yaw) * Rx(pitch) * Ry(180)     <- Kyerag
+lens_1 = Rz(roll - 90) * Ry(yaw) * Rx(pitch) * Ry(180)     <- Kjerag
 lens_1 = Ry(180) * Rz(roll - 90) * Ry(yaw) * Rx(pitch)
 lens_1 = Rz(roll - 90) * Ry(yaw) * Rx(pitch) * Rx(180)
 ```
@@ -645,7 +645,7 @@ along-seam displacement is therefore a clean measure of the relative roll
 of the two lenses, with parallax subtracted by geometry rather than by
 assumption.
 
-So: render the same view twice with `kyerag-spike --bin reframe`, once
+So: render the same view twice with `kjerag-spike --bin reframe`, once
 from each lens (a temporary two-line patch to the pick), on an X4 Air
 frame with distant content sitting on the seam, and correlate a patch of
 the overlap band between the two. The residual is the shift that
@@ -653,7 +653,7 @@ correlates best.
 
 | composition | along-seam residual | correlation |
 | --- | --- | --- |
-| `... * Ry(180)` (Kyerag) | **0.4 degrees** | 0.97 to 0.99 |
+| `... * Ry(180)` (Kjerag) | **0.4 degrees** | 0.97 to 0.99 |
 | `Ry(180) * ...` | 1.5 degrees | 0.95 to 0.97 |
 | `... * Rx(180)` | no peak at all | 0.02 to 0.18 |
 
@@ -773,7 +773,7 @@ then through the camera matrix to pixels. Gyroflow's
 `src/core/stabilization/distortion_models/insta360.wgsl` is this in 20
 lines of WGSL, and is a usable reference under our license.
 
-**Only the forward direction is on Kyerag's path.** Reframing asks "for
+**Only the forward direction is on Kjerag's path.** Reframing asks "for
 this output pixel's view ray, which source pixel do I sample", which is
 exactly what the forward map answers. Gyroflow's 200-iteration Newton
 `undistort_point` solves the other direction and is not needed.
@@ -831,7 +831,7 @@ from the camera to reduce the visibility of stitch lines."* Community
 figures put the X3 near 0.6 m, the X4 near 0.8 m, and an X4 with lens
 guards past 1 m.
 
-For the footage Kyerag targets, almost everything is past 3 m and this is
+For the footage Kjerag targets, almost everything is past 3 m and this is
 close to a non-issue. Thin near-field structures are the exception, and
 they are exactly what ghosts worst.
 
@@ -923,7 +923,7 @@ slowly from the overlap band, is the fallback if a capture ever shows a
 step the blend cannot hide, and it costs a GPU readback per frame; do not
 build it before that capture exists.
 
-Records 4 and 12 are still worth parsing, and Kyerag parses them: they
+Records 4 and 12 are still worth parsing, and Kjerag parses them: they
 are the camera's own frame clock if `pts_type = 2` means what it says
 (section 8.3), and they are what this measurement was made against.
 
@@ -1019,7 +1019,7 @@ into the one backward map (`crates/render/src/projection.rs`). Which way the
 sensor reads is not in the file, so it was measured off the pictures, and on
 an X4 Air the answer is that **the readout runs down the delivered frame**:
 `1.00 +-0.12` of a whole frame in the trailer's own 15.883 ms, against
-`0.02 +-0.07` across it. `kyerag_meta::Sweep::Down` is what the calibration
+`0.02 +-0.07` across it. `kjerag_meta::Sweep::Down` is what the calibration
 answers for an X4 and the correction is on. Every other camera keeps
 `Sweep::Unknown`, which is a zero axis and no correction at all.
 
@@ -1143,7 +1143,7 @@ lens 1 is mounted a half turn round and down is down in both.
 A great circle projects to a straight line in a rectilinear view, so a bend in
 a rendered horizon is the picture's and not the world's, and a readout draws
 one: the displacement grows along the picture and a displacement that grows
-along a line curves it. `kyerag-spike --bin horizon readout=...` renders runs
+along a line curves it. `kjerag-spike --bin horizon readout=...` renders runs
 of frames through the app's own pass under each candidate and measures the
 horizon's own fit residual with the same `skyline` issue #8 used
 (`Skyline::spread`).
@@ -1321,7 +1321,7 @@ fitted numbers.** Measured 2026-07-31 on two captures from a camera that was
 worth the name in the far field, no rolling shutter (0.1 deg/s rms, 0.3 deg/s
 peak), no motion blur, and an accelerometer that is gravity and nothing else
 (100 percent of the samples inside the filter's own trust window). Instrument:
-`kyerag-spike --bin seam`.
+`kjerag-spike --bin seam`.
 
 The headline is not the along-seam residual 4.9 left open. It is the axis 4.9
 declined to put a number on:
@@ -1367,7 +1367,7 @@ seam while leaving 0.46 along it.
 
 #### The fitted correction, and what it is worth
 
-Fitted through the shipped map (`kyerag_render::Reframe`) by perturbing one
+Fitted through the shipped map (`kjerag_render::Reframe`) by perturbing one
 field of **lens 1** at a time and reading what that does to the same patches,
 so the answer is in the units `offset_v3` writes. The seam sees only the two
 lenses' disagreement and cannot say which lens is wrong; quoting it all on
@@ -1514,9 +1514,9 @@ hard visible tear.
 
 **Confidence: HIGH.** Measured 2026-07-31 on seven of the owner's X4 Air
 captures spanning three and a half months plus a ONE X2 clip, through the
-shipped code (`kyerag_render::seam`, which is this section's own fitter moved
+shipped code (`kjerag_render::seam`, which is this section's own fitter moved
 out of the instrument so there is one of it). Instrument for the tables below:
-`kyerag-spike --bin leftover`, which scores any candidate correction against
+`kjerag-spike --bin leftover`, which scores any candidate correction against
 the frames the app itself reads.
 
 **The correction belongs to the camera.** The five knobs are fitted once, on a
@@ -1725,7 +1725,7 @@ That last number took three attempts, and the two that failed are worth
 recording. Reading the two lenses' angles back out of the `Blend` array after
 the loop that fills it -- the obvious way to write this, since the landings are
 right there -- costs **5.5 ms per redraw against 3.6**, because a value read
-back out of an array cannot stay in registers. `kyerag-spike --bin zoom`,
+back out of an array cannot stay in registers. `kjerag-spike --bin zoom`,
 which renders the same pass with nothing else on the GPU, reads the two
 versions as **equal**; only `--bin playback`, under live decode, shows it.
 
@@ -1813,7 +1813,7 @@ documentation, which says 360 mode records raw and applies FlowState in
 the App or Studio at export time. Horizon lock is part of that
 export-time pass.
 
-For Kyerag this is not a nice-to-have. Without it, a reframed view
+For Kjerag this is not a nice-to-have. Without it, a reframed view
 inherits every roll and yaw of a camera on a moving mount, and the same
 gyro pipeline carries rolling-shutter correction (6.5).
 
@@ -1873,13 +1873,13 @@ The gyro and accel streams are then additionally rotated by the lens
 `let (sy, cy) = (roll.sin(), roll.cos())`. Read the arithmetic, not the
 identifiers.
 
-**And the deeper trap, which is why Kyerag transcribes none of it (8.5).**
+**And the deeper trap, which is why Kjerag transcribes none of it (8.5).**
 A three-letter string is only half of a convention; the other half is the
 frame it lands in, and that frame is whatever the project it came from
-composes next. Kyerag's chain is its own (`Rz(roll) Ry(yaw) Rx(pitch)`
+composes next. Kjerag's chain is its own (`Rz(roll) Ry(yaw) Rx(pitch)`
 inverted, into the body frame of 4.8), so a string copied from a table
 written against a different composition means nothing here. The table in
-`kyerag_meta::imu_orientation` is measured against footage instead, and 8.5
+`kjerag_meta::imu_orientation` is measured against footage instead, and 8.5
 is the measurement.
 
 ### 8.5 The IMU convention, the filter, and how both were settled
@@ -1948,7 +1948,7 @@ disagreement with vertical in flight: it measures specific force, and a
 paramotor in air is not in free fall.
 
 Reproduce with
-`cargo run --release -p kyerag-spike --bin horizon -- <file.insv> from=1500 sweep=1`.
+`cargo run --release -p kjerag-spike --bin horizon -- <file.insv> from=1500 sweep=1`.
 
 #### The datum belongs to the picture, not to the sensor (settles a 4.8 leftover)
 
@@ -1961,7 +1961,7 @@ already turned a quarter turn.
 the picture.** Held level by its accelerometer alone, an X4 Air comes out a
 quarter turn on its side when the IMU is taken through `Rz(roll - 90)` and
 level through `Rz(roll)`. So the sensor image really is delivered rotated,
-and the datum is the picture's. `kyerag_meta::Pose` carries both:
+and the datum is the picture's. `kjerag_meta::Pose` carries both:
 `lens_from_body` with the datum for the reprojection pass, `sensor_from_body`
 without it for the IMU.
 
@@ -2086,7 +2086,7 @@ A pair of boots seen from above is the nadir. Three for three, and the
 renders are one command each:
 
 ```sh
-cargo run --release -p kyerag-spike --bin reframe -- <file.insv> \
+cargo run --release -p kjerag-spike --bin reframe -- <file.insv> \
   time=5 yaw=15.1 pitch=39.4 fov=90
 ```
 
@@ -2113,7 +2113,7 @@ read next to every number. The 4.92 degree mean is the ridge's own slope,
 not a lock error; the 0.11 and 0.33 are the lock.
 
 **telemetry-parser's own X2 string is `xZy`, and it is not this answer.**
-In Kyerag's frame `xZy` has determinant -1, so it is a reflection rather
+In Kjerag's frame `xZy` has determinant -1, so it is a reflection rather
 than a mounting and the sweep does not enumerate it at all; `horizon`
 carries it as a standing wrong answer, where it puts the line 22 degrees
 from where `Zxy` puts it. That is 8.4's point with a number on it.
@@ -2131,7 +2131,7 @@ an accelerometer at rest reads 1 g.
 ### 8.6 Which clock the frames are on (settled)
 
 **Confidence: HIGH.** `pts_type = 2` means what its name says: the exposure
-records are the camera's own frame clock, and Kyerag aligns the gyro to them
+records are the camera's own frame clock, and Kjerag aligns the gyro to them
 (`ExposureTrack::frame_time_us`).
 
 The container's PTS is a nominal 30000/1001 grid. The camera's own
@@ -2211,7 +2211,7 @@ The seed now searches forward for the first window of accelerometer the
 running filter would believe **completely**, and carries it back to the
 start of the track with the gyroscope. Tilt of the estimated vertical,
 measured through the app's own projection pass with
-`kyerag-spike --bin dip`, 12 frames x 36 yaws at 100 degrees:
+`kjerag-spike --bin dip`, 12 frames x 36 yaws at 100 degrees:
 
 | seconds into the file | April, before | April, after | June #1, before | June #1, after |
 | ---: | ---: | ---: | ---: | ---: |
@@ -2329,7 +2329,7 @@ every number.
   most valuable. ~1200 lines, reaches PSNR 22.5 to 22.9 dB against Studio
   at 7680 x 3840. Its `PIPELINE.md`, `old/FINDINGS.md` and
   `x5_pipeline.md` are the source for the measured numbers in sections 5
-  and 6. Its design principle is Kyerag's: *"stitching, stabilization,
+  and 6. Its design principle is Kjerag's: *"stitching, stabilization,
   rolling shutter, undistortion fused into a single backward-mapping per
   output pixel. No double-resampling."*
 - **`AdrianEddy/telemetry-parser`** (MIT OR Apache-2.0). The trailer
@@ -2366,7 +2366,7 @@ every number.
 Ecosystem gap worth stating: a crates.io survey found **no** Rust crate
 for dual-fisheye reprojection, Insta360 stitching, or MediaSDK bindings.
 `telemetry-parser` and `exiftool-rs` are the only crates that know the
-word "insta360". Kyerag is filling real empty space.
+word "insta360". Kjerag is filling real empty space.
 
 ## 10. Unknowns
 
@@ -2384,7 +2384,7 @@ Ordered by how much they would cost us.
    rolloff in the blend band. Would need flat-field calibration.
 3. ~~**`pts_type = VideoPtsEexposureFile` semantics.**~~ Settled in 8.6:
    they are the camera's own clock, they drift from the container's nominal
-   grid at 6.4 ppm, and Kyerag aligns the gyro to them.
+   grid at 6.4 ppm, and Kjerag aligns the gyro to them.
 4. **Records 14 (Euler) and 18 (Quaternions).** If populated, they are
    free orientation and skip integration and drift entirely. Unknown
    whether the X4 Air writes them.

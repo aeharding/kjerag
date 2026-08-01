@@ -48,7 +48,7 @@ pub fn force_extensions(args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_
     }
 }
 
-/// A device that can import, for the headless binaries in `kyerag-spike`,
+/// A device that can import, for the headless binaries in `kjerag-spike`,
 /// which build their own instead of using iced's.
 ///
 /// A plain `request_device` yields a device that cannot import a tiled

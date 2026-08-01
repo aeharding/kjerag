@@ -7,22 +7,22 @@ a dependency it does not declare, so the diagram below is enforced by
 `cargo build` rather than by good intentions.
 
 ```
-crates/app      kyerag         libcosmic shell + window. The view is an
+crates/app      kjerag         libcosmic shell + window. The view is an
                                `iced::widget::shader` around a Scene, and
                                the mouse reaches it through that widget.
-crates/render   kyerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
+crates/render   kjerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
                                RGB + Mei reprojection + seam blend),
                                camera state (drag = yaw/pitch, scroll = FOV),
                                offscreen render for screenshots
-crates/media    kyerag-media   ffmpeg demux, dual VA-API HEVC decoders in
+crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
                                frames by index or timestamp. One demuxer per
                                file of the capture, which is two on the
                                cameras that write one lens per file. No UI.
-crates/meta     kyerag-meta    .insv trailer, read directly: per-lens Mei
+crates/meta     kjerag-meta    .insv trailer, read directly: per-lens Mei
                                calibration, gyro track, per-frame exposure.
                                No UI, no ffmpeg, no wgpu.
-crates/spike    kyerag-spike   the headless instruments, kept out of the
+crates/spike    kjerag-spike   the headless instruments, kept out of the
                                app's dependency graph: `spike` (M0 frame-path
                                timings) and `reframe` (the projection pass to
                                a PNG, no compositor needed)
@@ -30,7 +30,7 @@ crates/spike    kyerag-spike   the headless instruments, kept out of the
 
 `app` -> `render` -> `media` -> `meta`, `render` -> `meta` as well for the
 calibration the shader runs on, and `meta` depends on nothing but `prost`.
-That last one is the point of the split: `cargo test -p kyerag-meta` passes
+That last one is the point of the split: `cargo test -p kjerag-meta` passes
 on a box with no libav headers, and a CI job that installs nothing proves it
 on every push.
 
@@ -138,7 +138,7 @@ answers one question per redraw: which frame belongs on screen at this
 `Instant`. Nothing counts ticks. 29.97 fps divides evenly into no refresh
 rate anyone ships, so a frame has a due time and the shell sleeps until it
 (`iced`'s `RedrawRequest::At`, requested by the shader widget in
-`kyerag_render::widget`). Pumping the clock from a shell-side
+`kjerag_render::widget`). Pumping the clock from a shell-side
 `window::frames()` subscription instead was written and measured first: 33
 to 46 redraws a second against a 60 Hz display, and 1 to 18 dropped frames
 every 5 s, because the redraw event has to leave iced and come back before
@@ -176,7 +176,7 @@ grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
   6.1 `hwcontext_vaapi.c:1337`): the map waits for the decode to finish.
   The spike's 7.64 ms "deliver" is mostly this wait with one frame in
   flight; keep 2-3 frames in flight to hide it. Measured on the player
-  (`kyerag-spike --bin playback`): mapping the oldest queued frame rather
+  (`kjerag-spike --bin playback`): mapping the oldest queued frame rather
   than the newest takes dual-stream decode from 2.19x realtime at depth 0
   to 2.46x at depth 2, and 2.47x at depth 4. `Reader::lookahead` is that
   depth and the engine sets it to 2.
@@ -245,7 +245,7 @@ that takes it carries an SPDX header. Nothing does today. Static calibrated
 warp with a smooth blend; no optical flow (measured to not help). A reframed
 view centered near a lens axis contains no seam at all.
 
-`kyerag-meta` turns that string into a `CalibrationSet` whose pixel numbers
+`kjerag-meta` turns that string into a `CalibrationSet` whose pixel numbers
 are already in delivered-frame coordinates (3840x3840 per lens), not the
 15360x7680 side-by-side calibration canvas the file writes them on. The
 shader consumes them as they come; nothing downstream rescales.
@@ -292,7 +292,7 @@ past where a seam would have been.
 The camera's own calibration is out by degrees at the seam on the owner's
 unit: 2.4 across it, which is 43 px of the delivered frame and reads as a
 doubled tree trunk. It is a relative lens tilt with a principal-point error
-under it, and `kyerag_render::seam` measures and corrects it **per camera**,
+under it, and `kjerag_render::seam` measures and corrects it **per camera**,
 because that is what it is: fitted file by file the same pair of lenses asks
 for five answers 15 view pixels apart, while one answer fitted on a capture
 from a camera standing still reads the same along-seam number on three and a
@@ -333,7 +333,7 @@ on 6 pixels of a million, which is enough to stop a one-stream file from
 rendering the bytes it used to.
 
 Exposure is **not** corrected. The trailer carries both lenses'
-per-frame shutter (records 4 and 12, parsed by `kyerag-meta` and kept
+per-frame shutter (records 4 and 12, parsed by `kjerag-meta` and kept
 apart), but the two lenses trade shutter against sensor gain to reach the
 same picture brightness, so that ratio is not a brightness ratio: applying
 the symmetric split it implies makes the step across the seam four to
@@ -397,7 +397,7 @@ a quarter turn out along the frame's own horizontal axis has a ray no pitch
 can move, which is zero over zero in the height solve and would have left a
 NaN camera that never comes back.
 
-Measured on the X4 Air at 2560x1440 (`kyerag-spike --bin ball`):
+Measured on the X4 Air at 2560x1440 (`kjerag-spike --bin ball`):
 
 - **No pop.** One scroll from 20 degrees to the ball, a notch at a time,
   rendered: the largest single step is 64.3 codes at fov 402, and the largest
@@ -478,7 +478,7 @@ block is also what makes a **still** right without being told: the capture
 draws this same pipeline into a target of its own size (issue #15), and a
 quad of that target steps a smaller share of the picture by itself. A 3840 px
 still off a 2560 px window is byte for byte a 3840 px render of the same
-view, which `kyerag-spike --bin zoom` checks rather than assumes.
+view, which `kjerag-spike --bin zoom` checks rather than assumes.
 
 **The chroma plane is not upgraded**, and that is the measurement rather than
 an omission. NV12's two planes are two grids: chroma is half the size, so one
@@ -536,7 +536,7 @@ and why a still capture cannot answer this question.
 
 The trailer's IMU record is read at open, integrated once, and the result is
 a `world_from_body` quaternion every 5 ms of the file
-(`kyerag_meta::OrientationTrack`). The pass composes its inverse between the
+(`kjerag_meta::OrientationTrack`). The pass composes its inverse between the
 lens mounting and the camera:
 
 ```
@@ -559,7 +559,7 @@ deliberate turn is not. Every constant is measured, and the tables are in
 docs/research/insv-format.md 8.5.
 
 Verification without a Studio export: physics in the footage itself.
-`kyerag-spike --bin horizon` renders runs of frames through the app's own
+`kjerag-spike --bin horizon` renders runs of frames through the app's own
 pass and measures the angle of the horizon in each. Residual sway is 0.23
 degrees peak to peak over 120 frames of calm flight and 2.86 through a
 61 deg/s roll, against a picture whose horizon leaves the frame entirely with
@@ -581,7 +581,7 @@ offset when `is_has_gyro_timestamp`, per-lens exposure timestamps, and
 rolling-shutter row time (15.9 ms on the X4 Air). Failure mode is a
 swimming horizon, not a crash. Two of them are now nailed down and measured
 (below and in issue #8's entry above); the harness that measures them is
-`kyerag-spike --bin horizon`, and a Studio export drops into it as one more
+`kjerag-spike --bin horizon`, and a Studio export drops into it as one more
 row.
 
 One of those is now nailed down. **The trailer's tick is not always a
@@ -590,7 +590,7 @@ whichever tick the file uses. The X4 Air sets the flag and writes
 microseconds; the ONE X2 does not and writes milliseconds, including in
 `first_frame_timestamp`. That is the "divide by 1000 twice" of the format
 study read as what it is, and it is measured against both cameras'
-exposure tracks in `kyerag_meta::ExposureTrack`. The gyro track reads on the
+exposure tracks in `kjerag_meta::ExposureTrack`. The gyro track reads on the
 same `Clock`, and then takes `gyro_timestamp` off it as milliseconds (1.6 ms
 on the X4 Air).
 

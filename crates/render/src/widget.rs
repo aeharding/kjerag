@@ -2,7 +2,7 @@
 //!
 //! These three impls put a foreign trait (`iced::widget::shader`) on types
 //! this crate owns, so Rust's coherence rules require them to live here
-//! rather than in `kyerag`: that, and nothing else, is why the render layer
+//! rather than in `kjerag`: that, and nothing else, is why the render layer
 //! names libcosmic. Nothing above this file decides anything about the pass
 //! or the view direction; the shell only builds a `shader::Shader` around a
 //! [`Scene`], which is where the [`Viewpoint`] lives.
@@ -164,7 +164,7 @@ fn mouse_update<Message>(
 /// pass that then draws the result: the scene takes the frame that is due and
 /// says when the next one is, and the returned [`Action`] is what makes iced
 /// sleep until exactly that instant. Waking per frame rather than per refresh
-/// is what keeps 29.97 fps content off a 60 Hz grid; `kyerag::app` documents
+/// is what keeps 29.97 fps content off a 60 Hz grid; `kjerag::app` documents
 /// the pacing, and the measurement that rejected the alternative.
 fn tick<Message>(scene: &Scene, now: Instant) -> Option<Action<Message>> {
     match scene.pump(now) {
