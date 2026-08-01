@@ -83,6 +83,16 @@ const OUTLIER: f64 = 2.0;
 /// How many rounds of that.
 const REFITS: usize = 3;
 
+/// The outermost off-epipolar offset the band's search can return, in degrees:
+/// `PERP_DEG / PERP_STEPS` rounded to the correlation step, which is the whole
+/// range the axis is searched over either side of zero.
+const RAIL_DEG: f64 = 0.299;
+
+/// How many columns either side of the crossing the horizon's own slope is
+/// read over, so the attribution below knows what this edge can and cannot
+/// show. Wide enough to average a treeline, narrow enough to be local.
+const CROSSING_PX: f64 = 120.0;
+
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
     let gpu = Gpu::open()?;
@@ -102,10 +112,7 @@ fn main() -> Fallible<()> {
     // and only the pass fills it.
     let mut frames = 0usize;
     let mut picture = None;
-    loop {
-        let Some((_, at)) = scene.frame() else {
-            break;
-        };
+    while let Some((_, at)) = scene.frame() {
         picture = Some(
             Render {
                 gpu: &gpu,
@@ -136,7 +143,7 @@ fn main() -> Fallible<()> {
 
     let field = Field::of(&mapped, options.size());
     let trace = Trace::of(&picture, &field, &options);
-    report(&field, &trace, &cells, &options);
+    report(&mapped, &field, &trace, &cells, &options);
     if options.trace {
         trace.print();
     }
@@ -295,6 +302,24 @@ impl Trace {
         (line(&kept), kept.len())
     }
 
+    /// Where the traced horizon crosses the seam, and how steeply it runs
+    /// there: the slope in rows per column, fitted over the columns nearest
+    /// the crossing on both sides of it.
+    fn crossing(&self) -> Option<(f64, (f64, f64))> {
+        let at = self
+            .points
+            .iter()
+            .min_by(|a, b| a.2.abs().total_cmp(&b.2.abs()))?;
+        let near: Vec<(f64, f64)> = self
+            .points
+            .iter()
+            .filter(|(x, _, _)| (x - at.0).abs() <= CROSSING_PX)
+            .map(|(x, row, _)| (*x, *row))
+            .collect();
+        let (slope, intercept) = line(&near)?;
+        Some((slope, (at.0, slope * at.0 + intercept)))
+    }
+
     /// The trace as a median row per quarter degree of seam angle, which is
     /// what a terrain that is not a razor can be read through: the seam is a
     /// straight line in this picture, so a step in the profile at zero is the
@@ -368,7 +393,7 @@ fn line(points: &[(f64, f64)]) -> Option<(f64, f64)> {
 
 // ------------------------------------------------------------ the report
 
-fn report(field: &Field, trace: &Trace, cells: &[Cell], options: &Options) {
+fn report(mapped: &Reframe, field: &Field, trace: &Trace, cells: &[Cell], options: &Options) {
     let px_per_deg = field.px_per_deg(options.camera());
     println!(
         "\nseam:   crossover {:.2} deg wide at zero disparity, {:.1} view px; \
@@ -393,13 +418,101 @@ fn report(field: &Field, trace: &Trace, cells: &[Cell], options: &Options) {
         step / px_per_deg,
         far.0 - near.0,
     );
+    attribute(mapped, field, trace, step);
     band_says(cells, px_per_deg);
+}
+
+/// Which of the seam's two axes the step is on.
+///
+/// A row difference is all an edge can report, so it has to be attributed
+/// before it means anything. The epipolar axis is the one a distance
+/// displaces content along and the one the band bends; the axis across it is
+/// the one only the calibration can reach, and **nothing in the pass ever
+/// corrects it** ([`Cell::off_epi`] is measured and never applied). What is
+/// printed is how many rows one degree on each axis would move this horizon
+/// by, so the measured step can be read as degrees of either.
+fn attribute(mapped: &Reframe, field: &Field, trace: &Trace, step: f64) {
+    let Some((slope, at)) = trace.crossing() else {
+        println!("axes:   no crossing to attribute the step at");
+        return;
+    };
+    let (w, h) = (f64::from(field.size.width), f64::from(field.size.height));
+    let uv = |x: f64, y: f64| [(x / w) as f32, (y / h) as f32];
+    let (Some(ray), Some(right), Some(down)) = (
+        mapped.view_ray(uv(at.0, at.1)),
+        mapped.view_ray(uv(at.0 + 1.0, at.1)),
+        mapped.view_ray(uv(at.0, at.1 + 1.0)),
+    ) else {
+        println!("axes:   the crossing is off the map");
+        return;
+    };
+    let Some(ring) = mapped.seam_at(ray) else {
+        println!("axes:   the crossing is not on the seam circle");
+        return;
+    };
+    // The rotation `body_ray` applies, as three columns, so its transpose
+    // takes a body direction back into the view's own frame.
+    let columns: [[f32; 3]; 3] = std::array::from_fn(|axis| {
+        mapped.body_ray(std::array::from_fn(|c| f32::from(u8::from(c == axis))))
+    });
+    let reach = (0..3)
+        .map(|c| f64::from(ray[c]) * f64::from(ray[c]))
+        .sum::<f64>()
+        .sqrt();
+    let radian = 1.0_f64.to_radians() * reach;
+    let tangents = [right, down]
+        .map(|other| std::array::from_fn::<f64, 3, _>(|c| f64::from(other[c]) - f64::from(ray[c])));
+    // How many rows this edge shows of one degree along a body axis: the
+    // displacement resolved into pixels, then across the edge.
+    let shown = |axis: [f32; 3]| {
+        let view: [f64; 3] = std::array::from_fn(|c| {
+            (0..3)
+                .map(|a| f64::from(columns[c][a]) * f64::from(axis[a]) * radian)
+                .sum()
+        });
+        let (dx, dy) = resolve(tangents, view);
+        dy - slope * dx
+    };
+    let (epi, perp) = (shown(ring.epi), shown(ring.perp));
+    println!(
+        "axes:   the horizon crosses the seam at phi {:.0} deg, drawn at {:+.3} px per px. \
+         One degree epipolar moves it {:+.1} rows, one degree across the epipolar axis \
+         {:+.1} rows.",
+        ring.phi.to_degrees(),
+        slope,
+        epi,
+        perp,
+    );
+    let read = |name: &str, rows: f64| match rows.abs() > 1.0 {
+        true => println!("        as {name}, the step is {:+.3} deg", step / rows),
+        false => println!("        {name} is edge-on here: this horizon cannot show it"),
+    };
+    read("epipolar (the band's own axis)", epi);
+    read("along the seam (never corrected)", perp);
+}
+
+/// A view-space displacement as pixels, least squares over the two pixel
+/// tangents, which are not orthogonal in general.
+fn resolve(tangents: [[f64; 3]; 2], delta: [f64; 3]) -> (f64, f64) {
+    let dot = |a: [f64; 3], b: [f64; 3]| (0..3).map(|c| a[c] * b[c]).sum::<f64>();
+    let (a, b, c) = (
+        dot(tangents[0], tangents[0]),
+        dot(tangents[0], tangents[1]),
+        dot(tangents[1], tangents[1]),
+    );
+    let (p, q) = (dot(tangents[0], delta), dot(tangents[1], delta));
+    let determinant = a * c - b * b;
+    match determinant != 0.0 {
+        true => ((p * c - q * b) / determinant, (a * q - b * p) / determinant),
+        false => (0.0, 0.0),
+    }
 }
 
 /// What the band's own state says about the same seam, so the picture's
 /// answer and the pass's answer are printed side by side.
 fn band_says(cells: &[Cell], px_per_deg: f64) {
     let mut measured = 0;
+    let mut railed = 0;
     let (mut sum, mut worst) = (0.0f64, 0.0f64);
     let (mut off_sum, mut off_worst) = (0.0f64, 0.0f64);
     for cell in cells {
@@ -413,6 +526,9 @@ fn band_says(cells: &[Cell], px_per_deg: f64) {
         let off = f64::from(cell.off_epi).to_degrees().abs();
         off_sum += off;
         off_worst = off_worst.max(off);
+        // The off-epipolar search is three offsets wide, so a reading at the
+        // outer one is the search running out rather than an answer.
+        railed += usize::from(off >= RAIL_DEG);
     }
     if measured == 0 {
         println!("band:   nothing measured: the state is the zero a file opens in");
@@ -434,6 +550,10 @@ fn band_says(cells: &[Cell], px_per_deg: f64) {
         off_sum / measured as f64 * px_per_deg,
         off_worst,
         off_worst * px_per_deg,
+    );
+    println!(
+        "        {railed} of those {measured} sit ON the off-epipolar search limit,          which is {:.0} percent: the axis is not being measured, it is being clipped",
+        100.0 * railed as f64 / measured as f64,
     );
 }
 
