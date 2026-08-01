@@ -142,6 +142,20 @@ CI does not run it and cannot: decode is VA-API against
 device every file is refused with `av_hwdevice_ctx_create: Input/output
 error` (measured), so a GPU-less runner would be checking nothing.
 
+## Releasing
+
+A `v*` tag is the whole trigger (issue #106): `.github/workflows/release.yml`
+runs the gates above on the tagged commit, builds the Flatpak from the
+committed manifest and `flatpak/cargo-sources.json`, and publishes one
+installable `.flatpak` bundle and its checksum as a GitHub Release. The
+version is one string in the workspace manifest, the metainfo's newest
+`<release>` and the tag, and `scripts/version-check.sh` is what says they
+agree.
+
+docs/RELEASING.md is the ritual, step by step. The step CI cannot do for you
+is the one above: `scripts/uitest.sh` needs a GPU, so a local run on the
+commit being tagged is part of tagging it.
+
 ## Sound etiquette
 
 Any instrument or app run that emits audio (sync, playback, the app

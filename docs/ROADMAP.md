@@ -557,6 +557,29 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **A version tag is the release** (issue #106). Pushing `v*`
+  builds the Flatpak on a runner from the committed manifest and
+  `flatpak/cargo-sources.json` and publishes one installable
+  `kjerag-<version>-x86_64.flatpak` and its `.sha256` as a GitHub Release,
+  with the metainfo's newest `<release>` as the body. Three decisions worth
+  keeping. The workspace manifest is the one place a version is written, and
+  `scripts/version-check.sh` makes the metainfo and the tag agree with it
+  before the build starts, so a bundle cannot claim a version the tree does
+  not carry; a tag may add a prerelease label (`v0.1.0-rc1`) and the version
+  in front of the dash is still checked, which is how the pipeline is
+  exercised without spending a version number. The release workflow **calls**
+  `ci.yml` rather than restating it, so a tag runs the gates a pull request
+  runs, `cargo-sources --check` and `name-check` included, and there is one
+  copy of them to keep honest. And `scripts/uitest.sh` is in neither: a
+  runner has no `/dev/dri/renderD128`, so it stays a human step before the
+  tag, and docs/RELEASING.md lists it with the gates. Measured on the
+  development box, the same build the workflow runs: an 8.1 MB bundle, the
+  cargo release build 1m58s inside the sandbox, and `flatpak install --user`
+  of that bundle followed by `flatpak run dev.harding.Kjerag --version`
+  printing `kjerag 0.1.0`. The channel question is not reopened by any of
+  this: Flathub is still where a published app goes
+  (docs/DISTRIBUTION.md 4.1), and a single-file bundle is a file rather than
+  a channel.
 - 2026-08-01 **The room around the ball belongs to the window** (issue #100).
   The pass wrote a flat 0.10 grey wherever no lens has a ray; it now writes
   transparent black through a premultiplied blend and paints nothing there at
