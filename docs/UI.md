@@ -101,14 +101,30 @@ only for the desktop-icon layer (`src/app.rs:2352-2367`). Its darkened
 window is entirely libcosmic's doing. So matching it is a matter of keeping
 the container, which is what `border_padding = Some(0)` above is for.
 
-**The video needs nothing further.** cosmic-player paints `Color::BLACK`
-behind its video widget and `Color::TRANSPARENT` when there is no video, so
-that libcosmic's translucent background shows through in the second case
-(`src/main.rs:1711-1714`, applied at `2092-2101`). It needs the black
-because a GStreamer video widget does not necessarily fill its bounds; our
-shader writes alpha 1 to every pixel of its own (`crates/render`'s
-fragment shader returns `vec4(rgb, 1.0)`), so there is nothing to see
-through and no second background to paint. The chrome over the video is
+**The room around the ball is that same pane** (issue #100). cosmic-player
+paints `Color::BLACK` behind its video widget and `Color::TRANSPARENT` when
+there is no video, so that libcosmic's translucent background shows through in
+the second case (`src/main.rs:1711-1714`, applied at `2092-2101`). Ours paints
+one or the other of those two under the video, in `app::backdrop`, and which
+one is the whole of the feature:
+
+- **In a window, nothing.** The pass writes the room transparent (alpha 0,
+  premultiplied), so what shows there is the pane behind it: darkened
+  translucency over the compositor's blur with a frosted theme, and the same
+  colour opaque without one. The ball floats on exactly what the welcome view
+  sits on, which is the look the owner asked for, and the no-blur case needs
+  no fallback of its own because it is the same line of libcosmic either way.
+- **In fullscreen, black.** There is no desktop behind a fullscreen window to
+  show through, and black is what a player puts around a picture. It is set
+  from the same `self.fullscreen` as `show_headerbar`, in the view the
+  fullscreen message rebuilds.
+
+A still is neither: the capture pass clears black and the transparent room
+flattens onto that, so a JPEG of a ball view has a black room and no alpha in
+it anywhere (JPEG has no channel for one).
+
+Everywhere but the room the shader still writes alpha 1, so the picture is
+opaque to the window's edges. The chrome over the video is
 unchanged and already first-party: the control row is
 `theme::Container::WindowBackground` (cosmic-player `src/main.rs:2056`,
 `2081`), which resolves to the same `background(transparent).base`
@@ -412,7 +428,9 @@ is forced by the file, not by taste.
 
 The header bar comes back on exit, subject to the auto-hide rule above.
 In fullscreen the control row still appears on pointer movement, over the
-video, exactly as in a window.
+video, exactly as in a window. What is not the same as in a window is what
+sits behind the video: black rather than the theme's pane. See "The
+background" above.
 
 ## The keyboard
 

@@ -22,7 +22,7 @@ pub use capture::{Request, Shot, Then};
 pub use framing::Framing;
 pub use kjerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
 pub use kjerag_meta::{Quat, Readout, Sweep};
-pub use projection::{Blend, Held, Landing, MAX_LENSES, OUTSIDE_GRAY, Reframe, Rolling};
+pub use projection::{Blend, Held, Landing, MAX_LENSES, Reframe, Rolling};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, Harvest, SeamFit};

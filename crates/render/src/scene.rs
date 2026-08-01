@@ -994,7 +994,17 @@ impl ScenePipeline {
                 module: &module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(format.into())],
+                // Blending, which the pass did without until issue #100: the
+                // picture writes alpha 1 and replaces exactly what a
+                // replacing pipeline replaced, and the room around the ball
+                // writes alpha 0 and leaves whatever the shell drew behind
+                // the widget exactly as it found it. Premultiplied, which is
+                // what the room's own colour already is: black at alpha 0.
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -1365,10 +1375,13 @@ fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
   return vec3<f32>(wave * uv.x, wave * uv.y, wave);
 }
 
-// Each lens's picture at that ray, mixed by its weight, or grey where no lens
-// has the ray. A lens weighted zero is not sampled at all, so outside the
+// Each lens's picture at that ray, mixed by its weight, or the room where no
+// lens has the ray. A lens weighted zero is not sampled at all, so outside the
 // overlap this is the single fetch the hard pick took before issue #7, and
 // the second fetch is what the blend band costs.
+//
+// The alpha rides back with the colour: 1 for a picture, and the room's own
+// for the room, which is what the target then blends by.
 //
 // `ratio` is each lens's magnification at its own landing, in delivered-frame
 // texels per output pixel (issue #11). It arrives as an argument because the
@@ -1380,7 +1393,7 @@ fn gradient(uv: vec2<f32>, t: f32) -> vec3<f32> {
 // `textureSample` computes its own level from derivatives and needs uniform
 // control flow to do it, and every one of these textures has a single level
 // anyway.
-fn picture(mix: Blend, ratio: vec2<f32>) -> vec3<f32> {
+fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
   if mix.weights[0] > 0.0 {
@@ -1391,7 +1404,11 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec3<f32> {
     rgb += mix.weights[1] * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
     total += mix.weights[1];
   }
-  return select(OUTSIDE_GRAY, rgb, total > 0.0);
+  // The room around the ball, written rather than painted: transparent black,
+  // which through the pass's premultiplied blend leaves what is under the
+  // widget alone (issue #100). Black is what makes it premultiplied; what
+  // fills the room is the shell's business and not this pass's.
+  return select(vec4<f32>(0.0), vec4<f32>(rgb, 1.0), total > 0.0);
 }
 
 // BT.709 full range: ffprobe reports bt709 and the camera writes yuvj420p.
@@ -1436,8 +1453,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[1].pixel),
   );
   let lens = picture(mix, ratio);
-  let rgb = select(gradient(in.uv, reframe.elapsed), lens, reframe.has_frame > 0.5);
-  return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), 1.0);
+  let rgb = select(gradient(in.uv, reframe.elapsed), lens.rgb, reframe.has_frame > 0.5);
+  // The gradient is opaque wherever it is drawn: it stands in for a file
+  // rather than sitting in a room, so the only transparency a redraw can
+  // carry is a room the file left.
+  let alpha = select(1.0, lens.a, reframe.has_frame > 0.5);
+  return vec4<f32>(select(rgb, linearize(rgb), reframe.linearize > 0.5), alpha);
 }
 "#;
 

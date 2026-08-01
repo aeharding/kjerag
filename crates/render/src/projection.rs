@@ -169,8 +169,10 @@ pub(crate) struct Screen {
     /// about 0.18.
     shrink: f32,
     /// The plane radius the sphere ends at, which is where `theta` reaches
-    /// half a turn. Past it the frame is looking at nothing at all and the
-    /// pass paints [`OUTSIDE_GRAY`], which is the room the ball sits in.
+    /// half a turn. Past it the frame is looking at nothing at all, and the
+    /// pass writes nothing at all: the room the ball sits in is transparent
+    /// and what fills it is whatever the shell put behind the video
+    /// (issue #100).
     ///
     /// [`f32::MAX`] wherever the sphere has no edge in the plane: at `shrink`
     /// of 1/2 and above, `theta` cannot reach half a turn however far out the
@@ -351,9 +353,9 @@ struct LensBlock {
 
 /// Where a view ray lands in one lens's image, in delivered-frame pixels.
 ///
-/// `inside` false means the ray missed this lens. Missing every lens is what
-/// the shader paints [`OUTSIDE_GRAY`] for; missing one of two is ordinary,
-/// and is most of what [`Reframe::blend`] is weighing.
+/// `inside` false means the ray missed this lens. Missing every lens is the
+/// room around the ball, which the shader writes transparent; missing one of
+/// two is ordinary, and is most of what [`Reframe::blend`] is weighing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Landing {
     pub pixel: [f32; 2],
@@ -396,17 +398,12 @@ pub struct Blend {
 }
 
 impl Blend {
-    /// Whether any lens has this ray at all. False is what the shader paints
-    /// [`OUTSIDE_GRAY`] for.
+    /// Whether any lens has this ray at all. False is the room around the
+    /// ball, which the shader writes transparent rather than painting.
     pub fn is_covered(&self) -> bool {
         self.weights.iter().any(|weight| *weight > 0.0)
     }
 }
-
-/// What the shader paints where no lens has a picture. Neutral and dark,
-/// in the same gamma-encoded space as the video, so the sRGB branch treats
-/// it the same way it treats a sampled pixel.
-pub const OUTSIDE_GRAY: f32 = 0.10;
 
 /// Where the camera body was when a frame was taken, and how the view is to
 /// be held against it.
@@ -1268,7 +1265,7 @@ pub(crate) fn wgsl() -> String {
     // `{:?}` rather than `{}`: Rust's Display drops the decimal point on a
     // whole number, and `vec3<f32>(1)` is a type error in WGSL.
     format!(
-        "const OUTSIDE_GRAY = vec3<f32>({OUTSIDE_GRAY:?});\nconst MAX_LENSES = {MAX_LENSES}u;\n\
+        "const MAX_LENSES = {MAX_LENSES}u;\n\
          const READOUT_STEPS = {READOUT_STEPS}u;\nconst CROSSOVER = {:?};\n{WGSL}",
         CROSSOVER_DEG.to_radians(),
     )
@@ -1346,7 +1343,7 @@ struct Blend {
 // x right, y down, z forward, matching the lens frame the model projects in.
 // Rust twin: `Screen::ray`, whose `Option` this `w` is: 1 where the frame is
 // looking at the sphere and 0 in the room around the ball, which no lens can
-// have and the pass paints OUTSIDE_GRAY.
+// have and the pass leaves transparent.
 fn view_ray(uv: vec2<f32>) -> vec4<f32> {
   let screen = reframe.screen;
   let extent = (uv * 2.0 - vec2<f32>(1.0)) * screen.half_extent;
@@ -3133,8 +3130,8 @@ pub(crate) mod tests {
 
     /// The far end of the zoom, which is the whole point of issue #47: the
     /// ball sits inside the frame, round, centred, with room around it, and
-    /// the room is the same grey the pass has always painted where no lens
-    /// has the ray.
+    /// the room is every direction no lens has, which is what the pass leaves
+    /// transparent (issue #100).
     #[test]
     fn the_ball_sits_in_the_frame_with_room_around_it() {
         for aspect in [0.6, 1.0, WIDE] {
