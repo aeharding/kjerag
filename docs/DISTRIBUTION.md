@@ -917,12 +917,34 @@ to play anything**, and 0.1.1 shipped on the strength of a window and a
 2026-08-01 against the published `kjerag-0.1.1-x86_64.flatpak` downloaded
 from its own release, on the §1 test bench of docs/research/gpu-pipeline.md.
 
-**It plays.** `KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh <file>`
-(the mode docs/RELEASING.md now calls the release check) against real X4 Air
-footage: 25 checks, 2 failed, and the two are the harness's standing flakes,
-the toast placement and `ctrl+v`, which fail identically on the native path
-in the same session. Directly under `cage`, the same bundle on a 3840x3840 X4
-Air file and a 2880x2880 ONE X2 file:
+**It plays**, and **the mode catches what it was built to catch.**
+`KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh <file>` (the mode
+docs/RELEASING.md now calls the release check) against real X4 Air footage,
+with the harness as it stands today: **32 checks, 6 failed**, against the
+native path's **32 checks, 2 failed** in the same session. Two of the six are
+the harness's standing flakes, the toast placement and `ctrl+v`. **The other
+four are real, and all four are the bundle being four weeks old**:
+
+```
+FAIL  an open with no frame yet draws the backdrop
+      the pane drew the test pattern: its mirrored halves read
+      41 98 212 and 170 98 211, which no picture is
+FAIL  a GoPro file is refused by name
+      ... not shown: file has no video stream
+FAIL  an .osv with nothing in it is still named
+FAIL  escape takes the alert away and leaves the window as it was
+```
+
+The first is the owner's own report of 0.1.1 read back to us by a machine:
+the test pattern in the picture area with no frame yet, which issue #100's
+backdrop replaced. The other three are the format refusal of issue #107,
+which 0.1.1 also predates. All four are fixed on `main` and all four pass on
+the native path, which is the control: the checks are not broken, the bundle
+is old. **That is the whole argument for this mode.** Every one of these was
+reachable by a machine on release day and none of them was asked.
+
+Directly under `cage`, the same bundle on a 3840x3840 X4 Air file and a
+2880x2880 ONE X2 file:
 
 ```
 device: dmabuf import: all extensions enabled
