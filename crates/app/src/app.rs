@@ -453,6 +453,15 @@ impl cosmic::Application for App {
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         let now = Instant::now();
+        // Every message rebuilds the window's view and asks for a redraw, so
+        // every message but the settle poke leaves the picture on screen one
+        // behind until that redraw arrives (issue #102). The poke itself does
+        // not count, or a paused window could never catch up with it.
+        if !matches!(message, Message::Settle)
+            && let Some(open) = &self.open
+        {
+            open.scene.asked();
+        }
         match message {
             Message::AudioDropdown => {
                 self.controls.volume = !self.controls.volume;
@@ -661,7 +670,8 @@ impl cosmic::Application for App {
             }
             // Handled by arriving: a message rebuilds the window's view and
             // asks for a redraw, which is the one thing a paused window that
-            // did not draw its frame needs.
+            // has not drawn its frame needs. Measured under the harness: a
+            // poke put a redraw through the widget 1 ms later.
             Message::Settle => {}
             Message::Tick => {
                 self.read_clock(now);
@@ -819,11 +829,11 @@ impl App {
             .is_some_and(|open| open.scene.is_playing())
     }
 
-    /// A file that is not playing and has not drawn its frame twice running
-    /// (issue #102). A playing file redraws itself and needs no help; a
-    /// paused one asks for nothing, so the window would hold whatever the
-    /// last redraw left on it, and a redraw that carried none of the
-    /// window's content leaves an empty pane.
+    /// A file that is not playing and is still owed a redraw (issue #102).
+    /// A playing file redraws itself and needs no help; a paused one asks
+    /// for nothing, so the window holds whatever the last redraw left on it,
+    /// and a redraw that carried none of the window's content leaves an
+    /// empty pane.
     fn is_settling(&self) -> bool {
         self.open
             .as_ref()
