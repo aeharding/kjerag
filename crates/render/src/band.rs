@@ -391,58 +391,12 @@ pub struct Tone {
     /// applied: the gain is eased in rather than taxed, and this is what an
     /// instrument reads to say how much of the circle answered.
     pub evidence: f32,
-    /// Per channel, in codes of 1, what is left between the two lenses after
-    /// the gain: the **additive** term (issue #103, stage 8).
-    ///
-    /// **A gain and an offset are different phenomena and the seam holds
-    /// both.** A gain is two auto-exposure loops disagreeing, which is a ratio,
-    /// and it is the whole of the difference on bright content. An offset is
-    /// light scattered inside one lens onto everything it images, which is a
-    /// count of photons and not a ratio, and on **dark** content it is the whole
-    /// of the difference: a step of 6.5 codes on 21-code soil needs a gain of
-    /// 1.35, which is four times the widest gain ever measured and which would
-    /// move the sky in the same frame by 66 codes (docs/research/seam-blending.md
-    /// 2). Stage 3 and stage 7 each measured this term on bright flat content,
-    /// where it is indistinguishable from a gain, and each declined it for that
-    /// reason. Neither measured dark content, which is where it lives.
-    ///
-    /// **Applied inside the blend region only, and eased out of it.** The owner
-    /// reserved on whether a player may move a hemisphere's black level, and
-    /// this does not: what is corrected is the handover, so the correction is
-    /// carried where the handover is and faded to nothing by the angle the two
-    /// lenses stop sharing a picture at ([`fade`]). Away from the seam every
-    /// hemisphere keeps the black it was delivered with.
-    pub offset: [f32; 3],
-    /// A storage buffer's struct is laid out by its own alignment rules and
-    /// `repr(C)` does not do it for us.
-    _pad: f32,
 }
 
 impl Tone {
-    /// The eight numbers a readback finds in the buffer's header, as a `Tone`.
-    pub fn read(log_gain: [f32; 3], offset: [f32; 3], evidence: f32) -> Self {
-        Self {
-            log_gain,
-            evidence,
-            offset,
-            _pad: 0.0,
-        }
-    }
-
-    /// What each lens's picture has ADDED to it, per channel, lens 0 first, in
-    /// codes of 1: the same symmetric split the gain takes, for the same
-    /// reason.
-    ///
-    /// The measurement is `lens 1 = gain * lens 0 + offset` on the same
-    /// content, so after the gain is split the two are still `offset` apart,
-    /// and half of it each is what brings them together without preferring
-    /// either. **Exactly zero on both sides when nothing has been measured.**
-    ///
-    /// WGSL twin: `tone_lift`.
-    pub fn lift(&self) -> [[f32; 3]; 2] {
-        let half: [f32; 3] =
-            std::array::from_fn(|channel| 0.5 * self.offset[channel].clamp(-LIMIT_OFF, LIMIT_OFF));
-        [half, half.map(std::ops::Neg::neg)]
+    /// The four numbers a readback finds in the buffer's header, as a `Tone`.
+    pub fn read(log_gain: [f32; 3], evidence: f32) -> Self {
+        Self { log_gain, evidence }
     }
 
     /// What each lens's picture is multiplied by, per channel, lens 0 first:
@@ -910,6 +864,47 @@ pub struct Cell {
     /// opening late is a seam that stays sharp for a moment longer, and the
     /// cost of shutting late is a wing drawn twice.
     pub open: f32,
+    /// What is left between the two lenses at THIS direction after the pooled
+    /// gain, per channel, in codes of 1: the **additive** term, per direction
+    /// (issue #103, stage 8).
+    ///
+    /// **A gain and an offset are different phenomena, and the seam holds one
+    /// of each.** A gain is two auto-exposure loops disagreeing; it is a ratio,
+    /// it is a property of the two cameras, and it is therefore ONE number for
+    /// the whole ring and the whole hemisphere ([`Tone`]). An offset is light
+    /// scattered inside one lens onto everything it images; it is a count of
+    /// photons and not a ratio, it is a property of where the SCENE's light is
+    /// coming from, and it is therefore different at every azimuth. On dark
+    /// content it is the whole of the difference: a step of 6.5 codes on
+    /// 21-code soil needs a gain of 1.35, which is four times the widest gain
+    /// ever measured and which would move the sky in the same frame by 66 codes
+    /// (docs/research/seam-blending.md 2).
+    ///
+    /// **Per direction, because the ring was measured and it is not a shape.**
+    /// Stage 7 fitted the ring's colour through a constant, one cycle and two,
+    /// which is the basis the geometry uses. Measured at the owner's own
+    /// reference instant that basis leaves **4.2 to 5.5 codes rms** round the
+    /// ring against a frame-to-frame noise floor of 0.8 to 1.0
+    /// (`kjerag-spike --bin colour`, the `rings` table): what varies round a
+    /// seam is not a low-order shape and no low-order shape reaches it. So this
+    /// is the reading itself, at the direction it was read at, and stage 7's
+    /// five-term field is deleted rather than extended.
+    ///
+    /// **Applied inside the blend region only, and eased out of it.** The owner
+    /// reserved on whether a player may move a hemisphere's black level, and
+    /// this does not: what is corrected is the handover, so the correction is
+    /// carried where the handover is and faded to nothing by the angle the two
+    /// lenses stop sharing a picture at ([`fade`]). Away from the seam every
+    /// hemisphere keeps the black it was delivered with. That is also what
+    /// makes a per-direction number safe here where stage 3 refused one: a
+    /// field over body directions does not move when the view does, and this
+    /// one is gone before it reaches anything but the handover.
+    ///
+    /// Smoothed at [`TAU_GAIN_S`], which is the constant this file smooths
+    /// things that do not move by. It needs one and stage 7 measured why: the
+    /// per-direction reading is one frame's, its own noise is about a code, and
+    /// a colour that breathes is motion where the scene has none.
+    pub offset: [f32; 3],
 }
 
 impl Cell {
@@ -927,7 +922,7 @@ impl Cell {
             .iter()
             .map(|cell| {
                 format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
                     cell.disparity,
                     cell.confidence,
                     cell.reach_m,
@@ -941,12 +936,15 @@ impl Cell {
                     cell.chroma[3],
                     cell.hue_conf,
                     cell.open,
+                    cell.offset[0],
+                    cell.offset[1],
+                    cell.offset[2],
                 )
             })
             .collect()
     }
 
-    /// The same, read back. `None` on any line that is not thirteen numbers.
+    /// The same, read back. `None` on any line that is not sixteen numbers.
     pub fn read(text: &str) -> Option<Vec<Self>> {
         text.lines()
             .map(|line| {
@@ -963,6 +961,7 @@ impl Cell {
                     chroma: [next()?, next()?, next()?, next()?],
                     hue_conf: next()?,
                     open: next()?,
+                    offset: [next()?, next()?, next()?],
                 })
             })
             .collect()
@@ -2760,7 +2759,7 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
     band.tone = held;
     return;
   }
-  let level = sum_level / sum_count;
+  let ring_level = sum_level / sum_count;
   // The two-by-two normal system for `high = gain * low + offset`, per
   // channel, in RATIO space: the residual is divided by the level it sits on
   // before it is squared, which is a weight of one over that level squared.
@@ -2790,9 +2789,9 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
       if mid <= 0.0 || low <= 0.0 || high <= 0.0 {
         continue;
       }
-      let weight = believed * (level[channel] / mid) * (level[channel] / mid);
-      let u = low / level[channel];
-      let v = high / level[channel];
+      let weight = believed * (ring_level[channel] / mid) * (ring_level[channel] / mid);
+      let u = low / ring_level[channel];
+      let v = high / ring_level[channel];
       aa += weight * u * u;
       ab += weight * u;
       bb += weight;
@@ -2808,7 +2807,7 @@ fn pool(@builtin(local_invocation_index) lane: u32) {
       continue;
     }
     gain[channel] = read;
-    offset[channel] = (aa * yb - ab * ya) / det * level[channel];
+    offset[channel] = (aa * yb - ab * ya) / det * ring_level[channel];
   }
   let read_gain = clamp(log(gain), vec3<f32>(-LIMIT_LN), vec3<f32>(LIMIT_LN));
   let read_offset = clamp(offset, vec3<f32>(-LIMIT_OFF), vec3<f32>(LIMIT_OFF));

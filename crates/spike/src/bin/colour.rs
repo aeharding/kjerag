@@ -1349,6 +1349,22 @@ fn profile(options: &Options) -> Fallible<()> {
         // and most of a sky seam is only ever the first.
         let colours =
             cells.iter().filter(|cell| cell.hue_conf > 0.0).count() as f32 / cells.len() as f32;
+        let open: f32 = cells.iter().map(|cell| cell.open).sum::<f32>() / cells.len() as f32;
+        let widest = cells
+            .iter()
+            .map(|cell| cell.open)
+            .fold(0.0f32, f32::max);
+        println!(
+            "band:   offset R {:+.4} G {:+.4} B {:+.4} codes of 255; openness mean {:.3}, \n\
+             \tmost open direction {:.3}; {} of {} directions have a colour",
+            255.0 * tone.offset[0],
+            255.0 * tone.offset[1],
+            255.0 * tone.offset[2],
+            open,
+            widest,
+            cells.iter().filter(|cell| cell.hue_conf > 0.0).count(),
+            cells.len(),
+        );
         Ok((
             shot.ok_or("no frame decoded at that instant")?,
             mapped,
