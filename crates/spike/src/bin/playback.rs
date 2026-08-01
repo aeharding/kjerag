@@ -201,7 +201,7 @@ fn play(
     // file, which is what every instrument did before the calibration moved
     // to the camera (issue #48).
     let mut scene = Scene::open(input)?;
-    scene.fit_seam();
+    scene.fit_seam(true);
     if let (Some(forced), Some(file)) = (forced(readout), scene.readout()) {
         scene.set_readout(Some(forced(file)));
     }

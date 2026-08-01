@@ -88,6 +88,15 @@ impl Default for Config {
 /// both of 6.8's bad captures where the residual did not.
 const POOLED: usize = 16;
 
+/// How many fits a camera's pool wants before it stops asking for more.
+///
+/// Odd, so the median is a sample rather than a midpoint between two, and
+/// small enough to be reached in a few sittings: five tolerates two
+/// contaminated fits, which is one more than the record's seven captures
+/// contain (04-10, and the deck capture that never gets pooled at all). Past
+/// this a file is drawn with the pooled answer and costs no fit.
+pub const POOL_ENOUGH: usize = 5;
+
 /// The widest residual a fit may leave and still be pooled, in degrees.
 ///
 /// Read off the applied-and-re-read table (6.8, and

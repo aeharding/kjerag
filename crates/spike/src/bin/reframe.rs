@@ -95,7 +95,7 @@ impl Seam {
     fn hold(&self, scene: &Scene) {
         match self {
             Self::Factory => println!("seam:   factory calibration, no correction"),
-            Self::File => scene.fit_seam(),
+            Self::File => scene.fit_seam(true),
             Self::Stored(fit) => scene.use_seam(*fit),
         }
     }

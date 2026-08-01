@@ -371,8 +371,17 @@ impl Scene {
         show.corrected.land(fit);
     }
 
-    /// The pool does not know this camera yet: fit one from this file's own
-    /// frames instead, best effort (`kyerag_render::seam`).
+    /// Ask for this correction, walking to it rather than landing it. What a
+    /// freshly pooled fit does to the file it was measured on: the picture is
+    /// already up, so it must not jump.
+    pub fn aim_seam(&self, fit: SeamFit) {
+        if let Some(show) = &self.show {
+            show.corrected.ask(fit);
+        }
+    }
+
+    /// Fit this file's seam from its own frames, best effort
+    /// (`kyerag_render::seam`).
     ///
     /// On its own thread for a file that is playing, because a fit is a
     /// second or two of decode and the picture is not waiting for it; on this
@@ -381,27 +390,35 @@ impl Scene {
     /// A fit that lands while the file plays is **asked for** rather than
     /// landed: the picture walks to it over the next few seconds, because by
     /// then there is a picture to jump.
-    pub fn fit_seam(&self) {
+    /// `drive` puts the answer into the picture as well as into the pool,
+    /// which is what a camera with nothing pooled needs. A camera that already
+    /// has a pooled answer is drawing with it, and this file's own fit is
+    /// evidence for the next median rather than a picture of its own: the
+    /// shell folds it in and asks for the median that comes out.
+    pub fn fit_seam(&self, drive: bool) {
         let Some(show) = &self.show else {
             return;
         };
         if show.lenses.len() < 2 {
             return;
         }
-        println!(
-            "seam:   nothing pooled for this camera yet, so it is fitted from this file, best \
-             effort, while it plays"
-        );
+        if drive {
+            println!(
+                "seam:   nothing pooled for this camera yet, so it is fitted from this file, \
+                 best effort, while it plays"
+            );
+        }
         let stepped = matches!(show.playing.borrow().source, Source::Stepped(_));
         let (path, lenses, frame) = (show.path.clone(), show.lenses.clone(), show.frame);
         let (corrected, kept) = (show.corrected.clone(), show.harvested.clone());
+        let into = drive.then(|| corrected.clone());
         if stepped {
-            fit_into(&path, &lenses, frame, &corrected, &kept, true);
+            fit_into(&path, &lenses, frame, into.as_ref(), &kept, true);
             return;
         }
         let spawned = std::thread::Builder::new()
             .name("seam fit".to_owned())
-            .spawn(move || fit_into(&path, &lenses, frame, &corrected, &kept, false));
+            .spawn(move || fit_into(&path, &lenses, frame, into.as_ref(), &kept, false));
         if let Err(e) = spawned {
             eprintln!("kyerag: the seam fit did not start: {e}");
         }
@@ -410,8 +427,14 @@ impl Scene {
     /// What this file's own frames came to, for the pool to keep if it is good
     /// enough. `None` until a fallback fit has landed, and on a file whose
     /// camera the pool already knew, which fits nothing.
+    ///
+    /// **Taken, not read.** The shell asks on a timer as well as on the way
+    /// out, because the way out is not always taken: `Ctrl+Q` is
+    /// `std::process::exit(0)` and runs no shutdown. Taking it means the
+    /// answer is folded into the pool exactly once however many times it is
+    /// asked for, so the timer costs a lock and nothing else.
     pub fn seam_harvest(&self) -> Option<Harvest> {
-        *self.show.as_ref()?.harvested.lock().ok()?
+        self.show.as_ref()?.harvested.lock().ok()?.take()
     }
 
     /// Take the next frame of a stepped scene, on this thread. `false` at the
@@ -764,7 +787,7 @@ fn fit_into(
     path: &Path,
     lenses: &Arc<[Lens]>,
     frame: Size,
-    into: &Arc<Correction>,
+    into: Option<&Arc<Correction>>,
     kept: &Harvested,
     now: bool,
 ) -> Option<Harvest> {
@@ -779,9 +802,11 @@ fn fit_into(
         fitted.fit.cy_px,
         fitted.describe(started.elapsed().as_secs_f64()),
     );
-    match now {
-        true => into.land(fitted.fit),
-        false => into.ask(fitted.fit),
+    if let Some(into) = into {
+        match now {
+            true => into.land(fitted.fit),
+            false => into.ask(fitted.fit),
+        }
     }
     let harvest = Harvest {
         fit: fitted.fit,

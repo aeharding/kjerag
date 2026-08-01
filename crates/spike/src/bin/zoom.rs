@@ -102,7 +102,7 @@ fn main() -> Fallible<()> {
     // file, which is what every instrument did before the calibration moved
     // to the camera (issue #48).
     let scene = Scene::still(&options.input, options.at)?;
-    scene.fit_seam();
+    scene.fit_seam(true);
     scene.set_horizon(options.horizon);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let render = Render {

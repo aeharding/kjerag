@@ -69,7 +69,7 @@ fn main() -> Fallible<()> {
     // file, which is what every instrument did before the calibration moved
     // to the camera (issue #48).
     let mut scene = Scene::still(&options.input, options.at())?;
-    scene.fit_seam();
+    scene.fit_seam(true);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);
     let aspect = options.size.width as f32 / options.size.height as f32;
@@ -670,7 +670,7 @@ fn conventions_against_the_picture(
     // file, which is what every instrument did before the calibration moved
     // to the camera (issue #48).
     let mut scene = Scene::still(&options.input, options.at())?;
-    scene.fit_seam();
+    scene.fit_seam(true);
     scene.set_horizon(Horizon::Free);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);

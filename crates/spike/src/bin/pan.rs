@@ -59,7 +59,7 @@ fn main() -> Fallible<()> {
     // file, which is what every instrument did before the calibration moved
     // to the camera (issue #48).
     let mut scene = Scene::open(&options.input)?;
-    scene.fit_seam();
+    scene.fit_seam(true);
     let aspect = BOUNDS.width as f32 / BOUNDS.height as f32;
 
     // Everything the window would build, because the picture has to be

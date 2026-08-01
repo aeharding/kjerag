@@ -59,7 +59,7 @@ use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
 use kyerag_render::{Accuracy, Horizon, MissingDecoder, Nudge, Request, Scene, Stats};
 
-use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
+use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
 use crate::key_bind::{Action, JUMP, key_binds};
 use crate::shot::{Destination, Done};
@@ -522,8 +522,21 @@ impl cosmic::Application for App {
                 }
                 self.show_controls(now);
             }
-            Message::Quit => std::process::exit(0),
-            Message::Report => self.report(now),
+            Message::Quit => {
+                // Before the exit, because the exit is a real one: nothing
+                // below this runs any shutdown, so a fit that landed during
+                // this file would be thrown away with the process.
+                self.pool_seam();
+                std::process::exit(0)
+            }
+            Message::Report => {
+                self.report(now);
+                // The fit lands on a thread of its own with no message to
+                // announce it, and the pilot may never close the file: five
+                // seconds is soon enough and `seam_harvest` takes rather than
+                // reads, so this is a lock on every report and nothing more.
+                self.pool_seam();
+            }
             Message::ShowControls => self.show_controls(now),
             Message::Surface(action) => {
                 return cosmic::task::message(cosmic::Action::Cosmic(
@@ -746,19 +759,24 @@ impl App {
     /// Nothing is asked of the pilot either way (AGENTS.md, zero-config
     /// playback). The terminal line is the whole of what is said about it.
     fn hold_seam(&self, scene: &Scene) {
-        let pooled = scene
-            .camera_key()
-            .map_or(0, |c| self.stored.state.seam_pooled(c));
-        match scene.camera_key().and_then(|c| self.stored.state.seam(c)) {
-            Some(fit) => {
-                println!(
-                    "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, \
-                     cy {:+.2} px (pooled over {pooled} fits of this camera)",
-                    fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
-                );
-                scene.use_seam(fit);
-            }
-            None => scene.fit_seam(),
+        let Some(camera) = scene.camera_key() else {
+            return;
+        };
+        let pooled = self.stored.state.seam_pooled(camera);
+        if let Some(fit) = self.stored.state.seam(camera) {
+            println!(
+                "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, \
+                 cy {:+.2} px (pooled over {pooled} fits of this camera)",
+                fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
+            );
+            scene.use_seam(fit);
+        }
+        // The pool keeps growing until it has enough to median over, and this
+        // is the whole of "calibrate by watching": a camera with one fit in it
+        // is drawn with that fit and still learns from the next file, because
+        // one fit is one flight's parallax and the median over several is not.
+        if pooled < config::POOL_ENOUGH {
+            scene.fit_seam(pooled == 0);
         }
     }
 
@@ -778,14 +796,19 @@ impl App {
         else {
             return;
         };
-        if self.stored.state.harvest(camera, harvest) {
-            println!(
-                "seam:   kept that fit, {} azimuths leaving {:.3} deg; this camera's pool is {}",
-                harvest.patches,
-                harvest.residual_deg,
-                self.stored.state.seam_pooled(camera),
-            );
-            self.stored.write_state();
+        if !self.stored.state.harvest(camera, harvest) {
+            return;
+        }
+        let pooled = self.stored.state.seam_pooled(camera);
+        println!(
+            "seam:   kept that fit, {} azimuths leaving {:.3} deg; this camera's pool is {pooled}",
+            harvest.patches, harvest.residual_deg,
+        );
+        self.stored.write_state();
+        // The median moved, so the picture follows it. Walked, not landed:
+        // there has been a picture on screen for seconds by now.
+        if let Some(fit) = self.stored.state.seam(camera) {
+            open.scene.aim_seam(fit);
         }
     }
 
