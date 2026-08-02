@@ -26,6 +26,8 @@ pub mod local_warp;
 pub mod raw_register;
 /// Non-rendering evidence gate for any future source-coordinate residual map.
 pub mod residual_gate;
+/// Offline calibrated body-sphere residual sidecar generator/format.
+pub mod residual_sidecar;
 
 pub use kjerag_media::{Chroma, Pair, Plane, Walk};
 pub use offscreen::{Gpu, Offscreen};
