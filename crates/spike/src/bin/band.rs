@@ -138,7 +138,7 @@ fn play(
         }
         .frame(options.camera(), Sampling::default(), options.size())?;
         each(&picture, reads.len())?;
-        let (along, _, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        let (along, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
         reads.push(Read {
             at,
             cells,

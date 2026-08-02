@@ -1307,13 +1307,7 @@ fn profile(options: &Options) -> Fallible<()> {
     std::fs::create_dir_all(&out)?;
     let size = Size::new(options.size, options.size);
 
-    let draw = |held: bool| -> Fallible<(
-        Picture,
-        Reframe,
-        kjerag_render::Tone,
-        kjerag_render::Tint,
-        f32,
-    )> {
+    let draw = |held: bool| -> Fallible<(Picture, Reframe, kjerag_render::Tone, f32)> {
         let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
         pipeline.hold_tone(held);
         let mut scene = Scene::still(
@@ -1343,38 +1337,41 @@ fn profile(options: &Options) -> Fallible<()> {
             .mapped(options.camera(), 1.0)
             .ok_or("no frame to map")?;
         let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
-        let (_, tint, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
         // How much of the ring answered about COLOUR, which is not how much
         // answered about geometry: the two are separate channels since stage 7
         // and most of a sky seam is only ever the first.
         let colours =
             cells.iter().filter(|cell| cell.hue_conf > 0.0).count() as f32 / cells.len() as f32;
         let open: f32 = cells.iter().map(|cell| cell.open).sum::<f32>() / cells.len() as f32;
-        let widest = cells
+        let widest = cells.iter().map(|cell| cell.open).fold(0.0f32, f32::max);
+        // What the per-direction offsets look like round the ring, which is
+        // what stage 8 draws the seam with: the mean, the widest, and how many
+        // directions carry one at all.
+        let held: Vec<f32> = cells
             .iter()
-            .map(|cell| cell.open)
-            .fold(0.0f32, f32::max);
+            .filter(|cell| cell.hue_conf > 0.0)
+            .map(|cell| 255.0 * cell.offset[1])
+            .collect();
+        let mean = match held.is_empty() {
+            true => 0.0,
+            false => held.iter().sum::<f32>() / held.len() as f32,
+        };
+        let worst = held.iter().fold(0.0f32, |held, now| held.max(now.abs()));
         println!(
-            "band:   offset R {:+.4} G {:+.4} B {:+.4} codes of 255; openness mean {:.3}, \n\
-             \tmost open direction {:.3}; {} of {} directions have a colour",
-            255.0 * tone.offset[0],
-            255.0 * tone.offset[1],
-            255.0 * tone.offset[2],
-            open,
-            widest,
-            cells.iter().filter(|cell| cell.hue_conf > 0.0).count(),
-            cells.len(),
+            "band:   the per-direction offset in G: mean {mean:+.2}, widest {worst:.2} codes of \n\
+             \t255 over {} directions; openness mean {open:.3}, most open {widest:.3}",
+            held.len(),
         );
         Ok((
             shot.ok_or("no frame decoded at that instant")?,
             mapped,
             tone,
-            tint,
             colours,
         ))
     };
-    let (before, mapped, _, _, _) = draw(true)?;
-    let (after, _, tone, tint, colours) = draw(false)?;
+    let (before, mapped, _, _) = draw(true)?;
+    let (after, _, tone, colours) = draw(false)?;
 
     let stem = format!("{}-{}", options.stem(), options.tag);
     before.save(&gpu, &out.join(format!("{stem}-1-held.png")))?;
@@ -1406,20 +1403,6 @@ fn profile(options: &Options) -> Fallible<()> {
         split[1][0],
         split[1][1],
         split[1][2],
-    );
-    println!(
-        "field:  what the ring says ROUND the seam, on top of that, as the amplitude of each \n\
-         \tcycle in codes at a mid grey of 128, evidence {:.1} directions:\n\
-         \t  R one cycle {:.2}, two cycles {:.2}\n\
-         \t  G one cycle {:.2}, two cycles {:.2}\n\
-         \t  B one cycle {:.2}, two cycles {:.2}",
-        tint.evidence,
-        128.0 * f64::from(tint.terms[0]).hypot(f64::from(tint.terms[1])),
-        128.0 * f64::from(tint.terms[2]).hypot(f64::from(tint.terms[3])),
-        128.0 * f64::from(tint.terms[4]).hypot(f64::from(tint.terms[5])),
-        128.0 * f64::from(tint.terms[6]).hypot(f64::from(tint.terms[7])),
-        128.0 * f64::from(tint.terms[8]).hypot(f64::from(tint.terms[9])),
-        128.0 * f64::from(tint.terms[10]).hypot(f64::from(tint.terms[11])),
     );
     for (name, picture) in [("the band held off", &before), ("as it draws", &after)] {
         println!("\n=== {name} ===");
@@ -1957,7 +1940,7 @@ fn trace(options: &Options) -> Fallible<()> {
     let size = Size::new(256, 256);
     // Per frame: the three gains, then the field evaluated at four azimuths a
     // quarter turn apart, which is what a view sees one of.
-    let mut held: Vec<[f64; 15]> = Vec::new();
+    let mut held: Vec<[f64; 16]> = Vec::new();
     while scene.frame().is_some() {
         Render {
             gpu: &gpu,
@@ -1966,17 +1949,29 @@ fn trace(options: &Options) -> Fallible<()> {
         }
         .frame(options.camera(), Sampling::default(), size)?;
         let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
-        let (_, tint, _) = pipeline.band_state(&gpu.device, &gpu.queue)?;
-        let mut row = [0.0f64; 15];
+        let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        let mut row = [0.0f64; 16];
         for (channel, gain) in tone.log_gain.iter().enumerate() {
             row[channel] = f64::from(*gain);
         }
+        // The per-direction offsets at four azimuths a quarter turn apart,
+        // which is what a view sees one of, AS A RATIO against the brightness
+        // they sit on: a state applied in codes has to be watched in the space
+        // an eye reads it in, which is the whole of stage 8's method (issue
+        // #103, stage 8).
         for turn in 0..4 {
-            let phi = turn as f32 / 4.0 * std::f32::consts::TAU;
-            for (channel, held) in tint.at(phi.cos(), phi.sin()).iter().enumerate() {
-                row[3 + 3 * turn + channel] = f64::from(*held);
+            let cell = &cells[turn * cells.len() / 4];
+            let [low, _] = cell.decoded();
+            for channel in 0..3 {
+                row[3 + 3 * turn + channel] = match low[channel] > 0.0 {
+                    true => f64::from(cell.offset[channel] / low[channel]),
+                    false => 0.0,
+                };
             }
         }
+        // And how wide the handover is at one of them, in degrees, which is
+        // the other per-direction state stage 8 adds.
+        row[15] = f64::from(cells[0].open);
         held.push(row);
         if held.len() >= options.count || !scene.advance()? {
             break;
@@ -2017,11 +2012,12 @@ fn trace(options: &Options) -> Fallible<()> {
     for turn in 0..4 {
         for (channel, name) in CHANNELS.iter().enumerate() {
             columns.push((
-                format!("the field at {} deg, {name}", 90 * turn),
+                format!("the offset at {} deg, {name}", 90 * turn),
                 3 + 3 * turn + channel,
             ));
         }
     }
+    columns.push(("the openness at 0 deg".to_owned(), 15));
     let mut worst_rms: f64 = 0.0;
     for (name, column) in &columns {
         let (rms, worst) = stepped(*column, 0.0);

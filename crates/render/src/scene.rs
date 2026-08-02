@@ -1133,10 +1133,6 @@ struct Band {
     /// The second dispatch of the same pass: what the ring just read, pooled
     /// into one exposure for the picture (issue #103, stage 3).
     pool: wgpu::ComputePipeline,
-    /// What the ring's colour does ROUND the seam, fitted over the same cells
-    /// and dispatched beside the pooling that takes its constant out
-    /// (issue #103, stage 7).
-    pool_tint: wgpu::ComputePipeline,
     /// The along-seam field fitted over the whole ring, dispatched beside the
     /// exposure pooling and over the same cells (issue #103, stage 5).
     pool_along: wgpu::ComputePipeline,
@@ -1311,7 +1307,6 @@ impl ScenePipeline {
             if !self.band.tone_held {
                 pass.set_pipeline(&self.band.pool);
                 pass.dispatch_workgroups(1, 1, 1);
-                pass.set_pipeline(&self.band.pool_tint);
                 pass.dispatch_workgroups(1, 1, 1);
             }
             pass.set_pipeline(&self.band.pool_along);
@@ -1554,9 +1549,9 @@ impl ScenePipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Along, band::Tint, Vec<band::Cell>)> {
-        let (_, along, tint, cells) = self.band.read(device, queue)?;
-        Ok((along, tint, cells))
+    ) -> Fallible<(band::Along, Vec<band::Cell>)> {
+        let (_, along, cells) = self.band.read(device, queue)?;
+        Ok((along, cells))
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1651,7 +1646,6 @@ impl Band {
         };
         let pipeline = compute("measure");
         let pool = compute("pool");
-        let pool_tint = compute("pool_tint");
         let pool_along = compute("pool_along");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
@@ -1692,7 +1686,6 @@ impl Band {
         Self {
             pipeline,
             pool,
-            pool_tint,
             pool_along,
             state,
             watch,
@@ -1741,7 +1734,7 @@ impl Band {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, band::Along, band::Tint, Vec<band::Cell>)> {
+    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1761,18 +1754,10 @@ impl Band {
         let float = |at: usize| {
             f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
         };
-        let tone = band::Tone::read(
-            std::array::from_fn(|channel| float(4 * channel)),
-            std::array::from_fn(|channel| float(16 + 4 * channel)),
-            float(12),
-        );
+        let tone = band::Tone::read(std::array::from_fn(|channel| float(4 * channel)), float(12));
         let along = band::Along::read(
             std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
             float(band::ALONG_AT + 20),
-        );
-        let tint = band::Tint::read(
-            std::array::from_fn(|term| float(band::TINT_AT + 4 * term)),
-            float(band::TINT_AT + 48),
         );
         let cells = (0..band::AZIMUTHS)
             .map(|index| {
@@ -1788,12 +1773,13 @@ impl Band {
                     chroma: std::array::from_fn(|channel| float(at + 28 + 4 * channel)),
                     hue_conf: float(at + 44),
                     open: float(at + 48),
+                    offset: std::array::from_fn(|channel| float(at + 52 + 4 * channel)),
                 }
             })
             .collect();
         drop(mapped);
         readback.unmap();
-        Ok((tone, along, tint, cells))
+        Ok((tone, along, cells))
     }
 }
 

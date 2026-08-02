@@ -23,8 +23,7 @@ mod stall;
 mod widget;
 
 pub use band::{
-    AZIMUTHS, Along, Cell, KEEP, PERP_DEG, Reading, Ring, Tint, Tone, depth_leak, ease,
-    time_constant,
+    AZIMUTHS, Along, Cell, KEEP, PERP_DEG, Reading, Ring, Tone, depth_leak, ease, time_constant,
 };
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
