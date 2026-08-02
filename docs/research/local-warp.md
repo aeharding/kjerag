@@ -43,6 +43,12 @@ evidence cannot identify their exact run-time gates or outputs, but it does
 establish that they are learned content-adaptive fusion aids, not a
 camera-agnostic calibration table.
 
+The newer locally available Studio 5.9.2 installer lists the same five
+hashed `.ins` assets byte-for-byte among its own model set.  This confirms the
+flow/fusion layer is shared Insta360 renderer infrastructure, not a
+Premiere-bridge workaround; it does not add any inference about when a given
+mode runs.
+
 The engineering consequence is deliberately limited: Kjerag already consumes
 the per-unit `offset_v3` calibration, which is the appropriate first layer.
 Any later adaptive seam method must be independently measured, optional, and
