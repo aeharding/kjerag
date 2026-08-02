@@ -196,6 +196,16 @@ defect that lives in one part of the range.
 
 ---
 
+> **STATUS, 2026-08-01: the APPLICATION described below was built, rejected by
+> the owner, and REMOVED. What shipped from it is nothing; what survives is the
+> measurement layer and the findings.** He tested it twice: *"I dont think its
+> aggressive enough with blending"*, and then, after the wide form, *"Honestly
+> the 7+8 seam looks worse than before... weird artifacts extending down and up.
+> I don't think this approach is valid."* Sections 9 to 13 describe machinery
+> that no longer exists in the tree; they are kept because the measurements in
+> them are true and were expensive, and because section 15 only means anything
+> against them. Section 16 is what the whole thing is worth.
+
 # Stage 8: what was built, and what it is worth
 
 **Status:** built and measured. **Date:** 2026-08-01. Everything above is the
@@ -388,3 +398,50 @@ feature shows at.
 
 That makes the local-warp-versus-pose decision the true blocker of "no line",
 and it is not this stage's to make. **No local warp is built here.**
+
+
+---
+
+## 16. What this cost, and the one rule that comes out of it
+
+**The application is gone. The instruments stay.** PR #138 ends as a
+measurement-only change: the shipped crates are main's, byte for byte, and the
+whole branch is one instrument file and this record.
+
+**The process finding, which is the expensive part and the durable one.** Every
+acceptance statistic this campaign has ever used STRADDLES THE SEAM. Stage 8
+noticed that the statistic was in the wrong units and fixed that, and the
+replacement straddled the seam too. So nothing ever measured what an applied
+correction does to the picture it is painted OVER, and the owner rejected two
+builds on an artifact class the entire acceptance layer was structurally unable
+to see. A per-direction field applied over wide spatial support paints each
+direction's own noise along that direction's whole sweep: it is stage 5's
+scalloping on the photometric axis, and stage 5's own lesson did not transfer
+because nobody had written it down as a rule about FIELDS rather than about
+geometry.
+
+**The rule: a field that is applied over an area is accepted on the area, not
+on the boundary.** Any correction with spatial support owes two numbers - what
+it does at the seam, and how smooth it is everywhere else - and the second one
+needs its own instrument with its own plants. That instrument now exists
+(`kjerag-spike --bin colour`, the interior block), it is registered as the
+anti-acceptance for photometric work in docs/research/reference-views.md, and
+it separates the three builds cleanly:
+
+| build | interior roughness | worst neighbour step |
+| --- | ---: | ---: |
+| main, as shipped: one gain over the whole ring | **0.03%** | 0.18% |
+| the salvage: a five-term shape that cannot stripe | 0.53% | 2.26% |
+| **the rejected build: per direction, wide support** | **1.01%** | 1.99% |
+| its own null: nothing applied at all | 0.000% | 0.000% |
+| a planted 0.5-code ripple, eight cycles | 2.07% | 0.69% |
+| a planted 2.0-code ripple | 8.27% | 2.76% |
+
+**And one finding that is not affected by any of it**, because it is about the
+pictures and not about the correction: at every reference view the owner has
+given, the residual line's excess over what the same content reads a few
+degrees away is at or under the just-noticeable difference at the one and two
+pixel lags, while at the azimuth his own gear crosses the seam it is +5.87
+percent and turning the entire photometric stage on moved it from 5.94 to 5.94.
+**What still reads as a line at the seam is geometric.** That is the foundation
+of the local-warp-versus-pose decision, and it is the campaign's next question.
