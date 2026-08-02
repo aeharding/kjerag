@@ -34,7 +34,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kjerag_media::{Accuracy, Cue, Frames, Player, Reader, ResidualSidecar, Stats};
+use kjerag_media::{
+    Accuracy, Cue, Frames, Player, Reader, ResidualIdentity, ResidualSidecar, Stats,
+};
 use kjerag_meta::{
     CalibrationSet, ExposureTrack, Filter, Format, Lens, OrientationTrack, Quat, Readout,
 };
@@ -59,6 +61,16 @@ const FUSION_MAP_BINDING: u32 = SAMPLER_BINDING + 1;
 
 /// `(du, dv, confidence, reserved)` needs signed, filterable channels.
 const FUSION_MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Whether a body-sphere residual belongs to the frame now being rendered.
+///
+/// Its generator viewport is deliberately absent: the shader converts view
+/// rays to this capture's body frame before it looks the residual up.
+fn sidecar_matches(identity: ResidualIdentity, camera: u64, timestamp: Duration) -> bool {
+    identity.calibration == [0.0; 5]
+        && identity.camera_key == camera
+        && identity.pts_ns == timestamp.as_nanos().try_into().unwrap_or(u64::MAX)
+}
 
 /// Frames kept alive behind the one being drawn.
 ///
@@ -1468,21 +1480,11 @@ impl ScenePipeline {
             return;
         };
         let id = sidecar.identity;
-        let exact = id.calibration == [0.0; 5]
-            && id.camera_key == view.camera
-            && id.pts_ns
-                == view
-                    .frames
-                    .timestamp
-                    .as_nanos()
-                    .try_into()
-                    .unwrap_or(u64::MAX)
-            && id.camera
-                == [
-                    primitive.camera.yaw,
-                    primitive.camera.pitch,
-                    primitive.camera.fov,
-                ];
+        // A residual is indexed on the capture's body sphere. It therefore
+        // follows every viewport orientation and FOV; only the capture frame,
+        // camera, and factory calibration identify its safe domain. The
+        // header camera remains provenance metadata, not an applicability gate.
+        let exact = sidecar_matches(id, view.camera, view.frames.timestamp);
         if !exact {
             if self.fusion_sidecar.take().is_some() {
                 self.live.clear();
@@ -2176,11 +2178,13 @@ fn fusion_weights(weights: vec2<f32>, ray: vec3<f32>) -> vec2<f32> {
 }
 
 // Residual values are capture-owned body-sphere coordinates, rather than
-// viewport coordinates. A map stays fixed while the pilot pans or changes
-// field of view, and cannot become a hidden change to calibrated projection.
+// viewport coordinates. Convert the view ray before indexing: a map stays
+// fixed while the pilot pans or changes field of view, and cannot become a
+// hidden change to calibrated projection.
 fn fusion_map_uv(ray: vec3<f32>) -> vec2<f32> {
-  let azimuth = atan2(ray.x, ray.z);
-  let elevation = asin(clamp(ray.y, -1.0, 1.0));
+  let body = reframe.view_to_body * ray;
+  let azimuth = atan2(body.x, body.z);
+  let elevation = asin(clamp(body.y, -1.0, 1.0));
   return vec2<f32>(azimuth / 6.28318530718 + 0.5, 0.5 - elevation / 3.14159265359);
 }
 
@@ -2364,6 +2368,16 @@ mod tests {
         assert!(SHADER.contains("fn fusion_lens1_uv("));
         assert!(SHADER.contains("reframe.fusion_map_mode != 2.0"));
         assert!(SHADER.contains("fusion_lens1_uv(frame_uv(mix.landings[1].pixel), ray)"));
+        let map_uv = SHADER
+            .find("fn fusion_map_uv(ray: vec3<f32>)")
+            .expect("scene declares body-sphere map coordinates");
+        let body = SHADER[map_uv..]
+            .find("let body = reframe.view_to_body * ray;")
+            .expect("map converts its view ray into the capture body frame");
+        let azimuth = SHADER[map_uv..]
+            .find("atan2(body.x, body.z)")
+            .expect("map azimuth reads body coordinates");
+        assert!(body < azimuth, "body conversion precedes map indexing");
         assert!(SHADER.contains("fn fusion_weights("));
         assert!(SHADER.contains("band_confidence(ray)"));
         assert!(SHADER.contains("band_detail_bias(ray)"));
@@ -2373,6 +2387,25 @@ mod tests {
         let lookup = band::lookup_wgsl();
         assert!(lookup.contains("detail_bias: f32"));
         assert!(lookup.contains("fn band_detail_bias"));
+    }
+
+    #[test]
+    fn body_sphere_sidecar_matches_across_generator_viewports() {
+        let base = ResidualIdentity {
+            camera_key: 42,
+            calibration: [0.0; 5],
+            pts_ns: 7_000_000_000,
+            camera: [0.0, 0.0, 90.0],
+        };
+        let panned = ResidualIdentity {
+            camera: [1.2, -0.4, 35.0],
+            ..base
+        };
+        let frame = Duration::from_secs(7);
+        assert!(sidecar_matches(base, 42, frame));
+        assert!(sidecar_matches(panned, 42, frame));
+        assert!(!sidecar_matches(base, 43, frame));
+        assert!(!sidecar_matches(base, 42, Duration::from_secs(8)));
     }
 
     #[test]

@@ -15,7 +15,11 @@ const PATCH: usize = 4;
 const SEARCH: usize = 3;
 const SPACING: usize = 2 * (PATCH + SEARCH) + 3;
 
-/// A map is meaningful only for this exact frame, calibration and viewpoint.
+/// A map is meaningful only for this exact frame and calibration.
+///
+/// `camera` records the generator viewport for provenance. The map itself is
+/// indexed on the capture body sphere, so it remains valid after the viewer
+/// pans or changes field of view.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Header {
     pub camera_key: u64,

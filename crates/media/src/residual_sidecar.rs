@@ -10,6 +10,8 @@ pub struct ResidualIdentity {
     /// Explicit seam correction; `[0; 5]` means factory calibration.
     pub calibration: [f64; 5],
     pub pts_ns: u64,
+    /// Generator viewport retained for provenance only. Body-sphere lookup
+    /// deliberately does not restrict application to this view.
     pub camera: [f32; 3],
 }
 

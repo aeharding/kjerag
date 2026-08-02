@@ -77,9 +77,11 @@ keep `UV(P)` wholly determined by the existing calibrated projection; make a
 typed `validity(P)`, `colour(P)`, and `alpha(P)` layer explicit; and permit a
 separate residual *source-coordinate* map only where its exact fixed feature
 has `ProvenFar300`, reciprocal and temporal closure, and held-out prediction.
-The fallback residual map is identically zero.  The map must never use a
-screen/view coordinate, must never alter the calibrated lookup wholesale, and
-must refuse uncertain-depth and horizon-sky texture.  A horizon may only
+The fallback residual map is identically zero. The map must never use a
+screen/view coordinate: the renderer converts its view ray into the capture
+body frame before indexing it, so the same exact-frame map remains valid while
+the viewer pans or changes FOV. It must never alter the calibrated lookup
+wholesale, and must refuse uncertain-depth and horizon-sky texture. A horizon may only
 supply its edge-normal acceptance measurement.
 
 The newer locally available Studio 5.9.2 installer lists the same five

@@ -1036,7 +1036,7 @@ impl App {
                     scene.use_seam(SeamFit::default());
                     scene.set_residual_sidecar(sidecar.clone());
                     println!(
-                        "research residual: factory seam only; awaiting exact frame/view match"
+                        "research residual: factory seam only; awaiting exact frame match (body-sphere map follows the view)"
                     );
                 } else {
                     self.hold_seam(&scene);
