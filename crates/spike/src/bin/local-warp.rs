@@ -68,18 +68,27 @@ fn main() -> Fallible<()> {
     let pair = walk
         .next_pair()?
         .ok_or("no synchronized raw lens pair at that instant")?;
-    if (pair.at.as_secs_f64() - at.as_secs_f64()).abs() > 0.050 {
+    require_same_pts(at, pair.at)?;
+    println!(
+        "pts:    raw pair and warmed Scene both at {:.9} s",
+        at.as_secs_f64()
+    );
+    let coverage = raw_register::coverage_census(&map, &pair.lenses, options.size, options.size);
+    println!(
+        "coverage: view rays {}; outside view {}",
+        coverage.view_rays, coverage.outside_view
+    );
+    for (lens, coverage) in coverage.lenses.iter().enumerate() {
         println!(
-            "warning: raw pair landed at {:.3} s, not rendered {:.3} s",
-            pair.at.as_secs_f64(),
-            at.as_secs_f64()
+            "          lens {lens}: projected {}; readable {}; source-boundary {}",
+            coverage.projected, coverage.readable, coverage.source_boundary
         );
     }
     let supports = options.supports()?;
     for row in raw_register::select_ladder(&map, &pair.lenses, &candidates, &supports) {
         let health = row.health;
         println!(
-            "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\nhealth:  candidates {}; reference-complete {}; search positions {}; target-complete {}; readings {}; refusals [support {}, aperture {}, peak {}]",
+            "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\nhealth:  candidates {}; reference-complete {}; search positions {}; target-complete {}; readings {}; refusals [support {}, aperture {}, peak {}]\ncoverage: reference [projected-out {}, source-boundary {}]; target [projected-out {}, source-boundary {}]",
             row.support.span_deg,
             row.support.search_deg,
             row.support.step_deg,
@@ -91,6 +100,10 @@ fn main() -> Fallible<()> {
             health.no_complete_patch,
             health.aperture,
             health.no_peak,
+            health.reference_projected_out,
+            health.reference_source_boundary,
+            health.target_projected_out,
+            health.target_source_boundary,
         );
         match row.result {
             Ok(reading) => {
@@ -119,6 +132,22 @@ fn main() -> Fallible<()> {
         }
     }
     Ok(())
+}
+
+/// `Scene` and `Walk` both report the container's media time as an exact
+/// nanosecond `Duration`; they use the same floor conversion from PTS.  A
+/// tolerance would therefore turn a different decoded frame into a seeming
+/// raw-lens observation.  Refuse instead of registering it.
+fn require_same_pts(scene: Duration, raw: Duration) -> Fallible<()> {
+    if scene == raw {
+        return Ok(());
+    }
+    Err(format!(
+        "refused: warmed Scene PTS {:.9} s differs from raw-pair PTS {:.9} s; no registration was inferred",
+        scene.as_secs_f64(),
+        raw.as_secs_f64()
+    )
+    .into())
 }
 
 struct Options {
@@ -258,6 +287,8 @@ const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{Options, Seam};
 
     fn options(args: &[&str]) -> Options {
@@ -317,5 +348,16 @@ mod tests {
             .supports()
             .expect("one span broadcasts");
         assert!(broadcast.iter().all(|support| support.span_deg == 2.0));
+    }
+
+    #[test]
+    fn raw_pair_must_have_the_warmed_scenes_exact_pts() {
+        assert!(
+            super::require_same_pts(Duration::from_nanos(1001), Duration::from_nanos(1001)).is_ok()
+        );
+        assert!(
+            super::require_same_pts(Duration::from_nanos(1001), Duration::from_nanos(1002))
+                .is_err()
+        );
     }
 }
