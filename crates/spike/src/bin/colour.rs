@@ -1484,7 +1484,7 @@ fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
 /// over. One pixel is the sharpest thing a display can show; 32 is a quarter of
 /// a degree at the view the owner complained at, which is around where a
 /// gradient stops being an edge and starts being shading.
-const LAGS: [usize; 6] = [1, 2, 4, 8, 16, 32];
+const LAGS: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 /// The contrast an eye is held to. Weber, so it is a ratio and not a count of
 /// codes: 1 percent is the standard just-noticeable difference on a large flat
@@ -1634,7 +1634,13 @@ fn binned(
 /// view of ploughed soil that is larger than the artifact; the same pair
 /// measured across the seam is the handover plus that texture, and the decoy
 /// circle is what says how much of it is which.
-fn eye_at(planes: &[Vec<f64>; 3], distance: &[Option<f64>], size: Size, reach: f64) -> Option<Eye> {
+fn eye_at(
+    planes: &[Vec<f64>; 3],
+    distance: &[Option<f64>],
+    size: Size,
+    reach: f64,
+    centre: f64,
+) -> Option<Eye> {
     let rate = degrees_per_pixel(distance, size)?;
     let bins = binned(planes, distance, rate, reach);
     if bins.len() < 8 {
@@ -1651,7 +1657,12 @@ fn eye_at(planes: &[Vec<f64>; 3], distance: &[Option<f64>], size: Size, reach: f
             let high = low + lag;
             // Straddling, and by the degrees rather than by the index: a bin
             // with no pixels in it is not in the list at all.
-            if bins[low].0 > 0.0 || bins[high].0 < 0.0 {
+            // Straddling THE LINE BEING ASKED ABOUT, by the degrees rather
+            // than by the index: a bin with no pixels in it is not in the list
+            // at all. `centre` is zero for the seam and a few degrees either
+            // way for the controls that say what this content reads anywhere
+            // (issue #103, stage 8, the line decomposition).
+            if bins[low].0 > centre || bins[high].0 < centre {
                 continue;
             }
             for channel in 0..3 {
@@ -1735,7 +1746,7 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
     // is there to hold one kind of content across the HANDOVER, and the decoy
     // circle is a quarter turn away from it.
     let decoy = distances(reframe, size, 0, (0.0, 0.0, 1.0, 1.0));
-    let Some(here) = eye_at(&planes, &seam, size, reach) else {
+    let Some(here) = eye_at(&planes, &seam, size, reach, 0.0) else {
         println!("\n  the eye: not enough of the seam is inside the window to profile");
         return;
     };
@@ -1751,8 +1762,62 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
             false => "OVER",
         },
     );
+    // THE LINE'S AUTHOR (issue #103, stage 8). The owner's report after the
+    // wide matching landed was that it "still effectively looks like a line",
+    // and a line at one pixel has two possible authors: a photometric STEP,
+    // which is a difference in level and shows on content with no gradient at
+    // all, or a MISREGISTRATION, which is a difference in position and shows
+    // only where there is content to draw twice. The same statistic straddling
+    // a line a few degrees away, in the same window and the same content, is
+    // what separates them: a photometric step is at the seam and nowhere else,
+    // and texture is everywhere.
+    println!(
+        "\n  the line's author: the same statistic straddling a line a few degrees\n\
+         \x20 off the seam, in the same window and the same content.\n\n\
+         \x20   where{:>10}{:>10}{:>10}{:>10}",
+        "1px", "2px", "8px", "32px",
+    );
+    let show = |name: &str, read: &Eye| {
+        println!(
+            "    {name:<14}{:>9.2}%{:>9.2}%{:>9.2}%{:>9.2}%",
+            100.0 * read.steepest[0],
+            100.0 * read.steepest[1],
+            100.0 * read.steepest[3],
+            100.0 * read.steepest[5],
+        );
+    };
+    let mut away: Vec<Eye> = Vec::new();
+    for centre in [-12.0, -6.0, 6.0, 12.0] {
+        if let Some(read) = eye_at(&planes, &seam, size, reach, centre) {
+            show(&format!("{centre:+.0} deg off"), &read);
+            away.push(read);
+        }
+    }
+    show("THE SEAM", &here);
+    if !away.is_empty() {
+        let mean = |slot: usize| {
+            away.iter().map(|read| read.steepest[slot]).sum::<f64>() / away.len() as f64
+        };
+        let excess: Vec<f64> = [0usize, 1, 3, 5]
+            .iter()
+            .map(|slot| here.steepest[*slot] - mean(*slot))
+            .collect();
+        println!(
+            "    {:<14}{:>+9.2}%{:>+9.2}%{:>+9.2}%{:>+9.2}%\n\
+             \x20   ^ what the seam has that this content does not have anywhere. A\n\
+             \x20     PHOTOMETRIC step is a difference in LEVEL and shows on content with\n\
+             \x20     no gradient at all; a MISREGISTRATION is a difference in POSITION and\n\
+             \x20     shows only where there is content to draw twice, at the lag its own\n\
+             \x20     size in pixels puts it at, and no photometry moves it.",
+            "the excess",
+            100.0 * excess[0],
+            100.0 * excess[1],
+            100.0 * excess[2],
+            100.0 * excess[3],
+        );
+    }
     println!("\n  controls, the same statistic through the same geometry:");
-    match eye_at(&planes, &decoy, size, reach) {
+    match eye_at(&planes, &decoy, size, reach, 0.0) {
         Some(there) => println!(
             "    a circle with no handover on it, which is what the scene contributes\n      {}",
             there.report()
@@ -1761,8 +1826,13 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
     }
     let rate = here.degrees_per_pixel;
     for (ratio, pixels) in [(1.0, 1.0), (1.02, 1.0), (1.05, 1.0), (1.05, 64.0)] {
-        let Some(read) = eye_at(&flat(&seam, rate, 100.0, ratio, pixels), &seam, size, reach)
-        else {
+        let Some(read) = eye_at(
+            &flat(&seam, rate, 100.0, ratio, pixels),
+            &seam,
+            size,
+            reach,
+            0.0,
+        ) else {
             continue;
         };
         let want = (ratio - 1.0) / ((ratio + 1.0) / 2.0);
