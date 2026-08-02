@@ -172,10 +172,12 @@ error` (measured), so a GPU-less runner would be checking nothing.
 `cargo release patch --execute` on `main`, and that is the whole of it
 (issue #106): cargo-release bumps the version, stamps a dated entry into the
 metainfo changelog, tags the plain version with no `v`, and pushes. The tag is
-what makes `.github/workflows/release.yml` build the Flatpak and publish it as
-a GitHub Release. Its config is `release.toml`; its dry run, which is the
-default, runs `scripts/uitest.sh`, so the harness above is not skippable on
-the way to a tag. docs/RELEASING.md is one page and says the rest.
+what makes `.github/workflows/release.yml` build the Flatpak, publish it as a
+GitHub Release, and export it into the signed repository at kjerag.harding.dev,
+which is the channel (issue #137, docs/DISTRIBUTION.md 4). Its config is
+`release.toml`; its dry run, which is the default, runs `scripts/uitest.sh`, so
+the harness above is not skippable on the way to a tag. docs/RELEASING.md is
+one page and says the rest.
 
 ## Sound etiquette
 
@@ -195,11 +197,11 @@ the STREAM volume zeroed, never audible playback, and says so.
   includes "goodwill" bug reports and backport offers to dependencies.
   Forking a dependency into the owner's account for our own use is fine;
   interacting with the upstream project is not. Third-party findings are
-  documented in our own docs and issues only. ONE scoped exception
-  (owner-granted 2026-07-31): Flathub publishing for this app, done
-  together with the owner and with him told before every outward action;
-  everything is prepared and previewed in this repo first. Self-hosted
-  flatpak distribution is declined by the owner; Flathub is the channel.
+  documented in our own docs and issues only. The one scoped exception,
+  granted 2026-07-31 for Flathub publishing, is retired unused: Flathub is
+  not open to this project and the channel is Kjerag's own signed Flatpak
+  repository at kjerag.harding.dev (owner, 2026-08-01; issue #137,
+  docs/DISTRIBUTION.md 4). No outward step is authorized.
 - Subagents may write and commit directly on working branches (explicitly
   authorized by the owner, 2026-07-30); main changes only land via PR.
 - Work queue is GitHub issues. Claim an issue by commenting; close via PR.
@@ -243,6 +245,18 @@ the STREAM volume zeroed, never audible playback, and says so.
   not ask. Automatic background measurement that improves things silently
   is the pattern; a menu item that gates quality is a design failure.
 - UI copy: plain words, no em dashes.
+- Errors are the error (owner ruling, 2026-08-01): a pilot-facing error
+  surface shows the raw underlying error message, never a generic
+  substitute. An error message is authored once, at the failure site, in
+  plain words with no em dashes, and shown wherever that failure
+  surfaces, terminal and window alike. The owner met "That file could not
+  be opened." in the alert while the terminal was saying "trailer says
+  lens frames are 2880x2880 but the stream decodes 736x368". A line of
+  the app's own may sit over an error ONLY when it knows something the
+  error does not AND says what to do about it; there are three, each
+  named and justified in `fail::refusal`. Engine error strings are
+  pilot-facing copy: they are written to be read by him, and the copy
+  rules bind them.
 - UI design defers to COSMIC system apps best practice (owner doctrine,
   2026-07-31): use libcosmic's stock widgets and the patterns of
   cosmic-files / cosmic-player / cosmic-edit (header bar, standard

@@ -48,9 +48,13 @@ pub const STUCK_FOR: Duration = Duration::from_secs(2);
 
 /// The picture stopped and will not come back by itself (issue #124).
 ///
-/// One line, and it is the developer's. What the pilot is told is the shell's
-/// alert, and that says the same thing however the picture died, because the
-/// answer is the same one: open the file again.
+/// One line, and the pilot reads it. The shell puts it in the alert with
+/// "Open the file again." on the end and echoes it to the terminal unchanged
+/// (`fail::Failure::Stopped`). It was the developer's alone until 2026-08-01,
+/// when the owner ruled that a failure says why in its own words: the
+/// sentence that used to stand here in the window knew less than this line
+/// does. So this is UI copy now, and the rules for it bind: plain words, no
+/// em dashes, specific enough to be worth reading (AGENTS.md).
 ///
 /// The shell cannot be handed one of these and quietly do nothing with it. It
 /// arrives as a [`Next::Stopped`] arm, which every caller of
@@ -118,9 +122,9 @@ impl Stalled {
     /// `has_frame` is whether the pass has a frame to hold on screen once it
     /// gives up. It usually does, and the pilot gets a frozen picture under
     /// the alert. When it does not, because nothing was ever presented, the
-    /// pane falls to the backdrop, and the terminal line is where that is
-    /// said: on screen the two look like different bugs and the alert says
-    /// the same thing about both.
+    /// pane falls to the backdrop, and the line says so: an empty pane and a
+    /// frozen one look like different bugs from the outside, and the one
+    /// sentence the pilot is given is where the difference is written down.
     pub(crate) fn failed(&self, now: Instant, why: impl fmt::Display, has_frame: bool) {
         let Ok(mut state) = self.0.lock() else {
             return;

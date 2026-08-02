@@ -1,11 +1,15 @@
 name: release
-# A version tag is the whole trigger, and what comes out is one file a person
-# can install, one per arch (issue #106):
-# `flatpak install --user ./kjerag-….flatpak`.
+# A version tag is the whole trigger, and it has two outputs (issues #106,
+# #137). One file a person can install, one per arch, on the GitHub Release:
+# `flatpak install --user ./kjerag-….flatpak`. And the same build exported
+# into the signed Flatpak repository at https://kjerag.harding.dev/, which is
+# the one a person subscribes to and `flatpak update` follows.
 #
-# Both halves are stock. The build is Flatpak's own action, running in the
-# image Flathub builds with; the release is softprops/action-gh-release with
-# the notes GitHub writes itself. Nothing here knows anything about this
+# Every step is stock. The bundle is Flatpak's own action, running in the image
+# Flathub builds with; the release is softprops/action-gh-release with the
+# notes GitHub writes itself; the repository is andyholmes/flatter, signed with
+# crazy-max/ghaction-import-gpg and pushed to the Pages branch by
+# JamesIves/github-pages-deploy-action. Nothing here knows anything about this
 # project that the manifest does not already say.
 #
 # The tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
@@ -89,3 +93,112 @@ jobs:
           # A label after the version (0.1.0-rc1) is a prerelease, and GitHub
           # is told rather than left to guess.
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # The other output of the tag: the signed OSTree repository the app is
+  # installed and updated from (issue #137, docs/DISTRIBUTION.md 4.3). A
+  # flatpak remote is a directory of static files, so this ends where a
+  # GitHub Pages branch begins.
+  #
+  # It builds the manifest a second time rather than reusing the bundle above,
+  # because a bundle is an export of a repository and not a repository: there
+  # is no supported way back. Two builds per arch per tag is the price, and a
+  # release-profile build inside the sandbox is about four minutes.
+  pages:
+    needs: gates
+    strategy:
+      # One repository, two arches, and they share its cache: the second job
+      # restores what the first saved and adds to it, so what is deployed
+      # carries both. That only holds while they do not run at once, which is
+      # what max-parallel says (flatter's README, "Multiple Architectures").
+      max-parallel: 1
+      # An arch that fails is not a reason to throw away the other's build.
+      # The deploy is the whole repository as the cache holds it, so whichever
+      # arch succeeded is what gets published.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    # flatter's own image for Rust apps on this runtime branch: flatpak,
+    # flatpak-builder, rsync for the deploy, and the freedesktop 25.08
+    # Platform, Sdk and rust-stable already installed for BOTH arches, which
+    # is what makes the same tag work on the arm runner. llvm21 is the one
+    # thing the manifest names that the image does not carry, and
+    # --install-deps-from below is what fetches it.
+    container:
+      image: ghcr.io/andyholmes/flatter/rust:25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      # The signature is the whole reason a remote can be trusted over plain
+      # HTTP. No secret, no key, no repository: this step fails the job rather
+      # than publishing something a client would have to be told to ignore.
+      - uses: crazy-max/ghaction-import-gpg@v7
+        id: gpg
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+      # flatter reads ./CNAME to write the Url into the index.flatpakrepo it
+      # generates, so the domain has to be here before the build and not only
+      # in the deployed copy.
+      - run: cp flatpak/pages/CNAME .
+      - uses: andyholmes/flatter@main
+        id: build
+        with:
+          files: flatpak/dev.harding.Kjerag.yml
+          # The action's default is the string `x86_64`, so the arm runner has
+          # to be told, exactly as the bundle job above is told.
+          arch: ${{ matrix.arch }}
+          gpg-sign: ${{ steps.gpg.outputs.fingerprint }}
+          flatpak-builder-args: |
+            --install-deps-from=flathub
+      # What turns a directory of OSTree objects into something a person can
+      # click. The two descriptor files are written here and not committed
+      # because they carry the public half of the signing key: rotate the
+      # secret and the next tag rewrites them, rather than leaving a file in
+      # the tree that quietly names a key nobody signs with any more.
+      - name: Describe the repository
+        env:
+          REPO: ${{ steps.build.outputs.repository }}
+          FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+        run: |
+          set -eu
+          # CNAME, .nojekyll and the landing page. .nojekyll is load-bearing:
+          # a branch-source Pages site is a Jekyll build by default, and
+          # Jekyll drops paths beginning with an underscore, which an OSTree
+          # static delta name can (its checksums are base64 with `_` in the
+          # alphabet).
+          cp -r flatpak/pages/. "$REPO"/
+          url="https://$(cat flatpak/pages/CNAME)/"
+          key=$(gpg --export "$FINGERPRINT" | base64 -w0)
+          cat > "$REPO/kjerag.flatpakrepo" <<EOF
+          [Flatpak Repo]
+          Title=Kjerag
+          Url=$url
+          GPGKey=$key
+          EOF
+          # One click installs the app and adds the remote it came from, so
+          # the next release arrives on its own. RuntimeRepo is what lets it
+          # work on a machine that has never had Flathub configured: the app
+          # is ours, the runtime under it is not.
+          cat > "$REPO/dev.harding.Kjerag.flatpakref" <<EOF
+          [Flatpak Ref]
+          Title=Kjerag
+          Name=dev.harding.Kjerag
+          Branch=stable
+          Url=$url
+          SuggestRemoteName=kjerag
+          GPGKey=$key
+          RuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo
+          IsRuntime=false
+          EOF
+      # The repository is the site, at the root of it, so the remote URL is
+      # the bare domain. single-commit because the branch is an artifact and
+      # not a history: every deploy replaces it whole.
+      - uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: ${{ steps.build.outputs.repository }}
+          single-commit: true
