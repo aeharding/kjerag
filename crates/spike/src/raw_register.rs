@@ -48,11 +48,83 @@ pub enum Refused {
     Aperture,
 }
 
-/// The fixed, angular instrument grid.  These are global physical quantities,
-/// not image-pixel or per-view tuning knobs.
-const STEP_DEG: f64 = 0.08;
-const SPAN_DEG: f64 = 3.7;
-const SEARCH_DEG: f64 = 3.0;
+/// One globally declared raw-lens support.  It is angular rather than pixel
+/// sized so it means the same physical neighbourhood in every named view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Support {
+    pub span_deg: f64,
+    pub search_deg: f64,
+    pub step_deg: f64,
+}
+
+impl Support {
+    fn valid(self) -> bool {
+        self.span_deg.is_finite()
+            && self.search_deg.is_finite()
+            && self.step_deg.is_finite()
+            && self.span_deg > 0.0
+            && self.search_deg > 0.0
+            && self.step_deg > 0.0
+    }
+
+    fn half(self) -> isize {
+        (self.span_deg.to_radians() / (2.0 * self.step_deg.to_radians())).round() as isize
+    }
+
+    fn search_steps(self) -> isize {
+        (self.search_deg.to_radians() / self.step_deg.to_radians()).floor() as isize
+    }
+}
+
+/// The support sweep shipped with the instrument.  It is deliberately global:
+/// it may be narrowed or widened on the command line, but never per view,
+/// frame, candidate, or result.
+pub const SUPPORT_LADDER: [Support; 4] = [
+    Support {
+        span_deg: 1.20,
+        search_deg: 1.00,
+        step_deg: 0.08,
+    },
+    Support {
+        span_deg: 2.00,
+        search_deg: 1.60,
+        step_deg: 0.08,
+    },
+    Support {
+        span_deg: 2.80,
+        search_deg: 2.40,
+        step_deg: 0.08,
+    },
+    Support {
+        span_deg: 3.68,
+        search_deg: 3.00,
+        step_deg: 0.08,
+    },
+];
+
+/// Accounting behind one support result.  In particular, `reference_complete`
+/// and `complete_target_patches` separate loss of geometric support from a
+/// complete but rank-deficient (aperture) patch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegistrationHealth {
+    pub candidates: usize,
+    pub reference_complete: usize,
+    pub searched_offsets: usize,
+    pub complete_target_patches: usize,
+    pub readings: usize,
+    pub no_complete_patch: usize,
+    pub aperture: usize,
+    pub no_peak: usize,
+}
+
+/// One row of a support ladder.  A refusal is evidence, not an omitted row.
+#[derive(Clone, Copy, Debug)]
+pub struct SupportResult {
+    pub support: Support,
+    pub result: Result<Reading, Refused>,
+    pub health: RegistrationHealth,
+}
+
 const BINS: usize = 72;
 
 /// Candidate locations on the visible seam, one closest-to-seam pixel per
@@ -115,35 +187,86 @@ pub fn select(
     planes: &[Plane],
     candidates: &[Candidate],
 ) -> Result<Reading, Refused> {
+    select_with_support(map, planes, candidates, SUPPORT_LADDER[3]).result
+}
+
+/// Run the declared global support ladder.  Every candidate is attempted at
+/// every rung; a successful small patch is not permission to hide a larger
+/// patch's support or aperture refusal.
+pub fn select_ladder(
+    map: &Reframe,
+    planes: &[Plane],
+    candidates: &[Candidate],
+    supports: &[Support],
+) -> Vec<SupportResult> {
+    supports
+        .iter()
+        .copied()
+        .map(|support| select_with_support(map, planes, candidates, support))
+        .collect()
+}
+
+/// Register and select one declared support, retaining all refusal counts.
+pub fn select_with_support(
+    map: &Reframe,
+    planes: &[Plane],
+    candidates: &[Candidate],
+    support: Support,
+) -> SupportResult {
+    let mut health = RegistrationHealth {
+        candidates: candidates.len(),
+        ..RegistrationHealth::default()
+    };
     if candidates.is_empty() {
-        return Err(Refused::NoVisibleSeam);
+        return SupportResult {
+            support,
+            result: Err(Refused::NoVisibleSeam),
+            health,
+        };
     }
-    if planes.len() < 2 {
-        return Err(Refused::NoCompletePatch);
+    if planes.len() < 2 || !support.valid() || support.half() < 1 || support.search_steps() < 1 {
+        health.no_complete_patch = candidates.len();
+        return SupportResult {
+            support,
+            result: Err(Refused::NoCompletePatch),
+            health,
+        };
     }
-    let mut outside = 0usize;
-    let mut aperture = 0usize;
     let mut best: Option<Reading> = None;
     for candidate in candidates {
-        match read(map, &planes[0], &planes[1], *candidate) {
+        match read(
+            map,
+            &planes[0],
+            &planes[1],
+            *candidate,
+            support,
+            &mut health,
+        ) {
             Ok(reading) if best.is_none_or(|held| reading.score > held.score) => {
+                health.readings += 1;
                 best = Some(reading)
             }
-            Ok(_) => {}
-            Err(Refused::NoCompletePatch) => outside += 1,
-            Err(Refused::Aperture) => aperture += 1,
-            Err(_) => {}
+            Ok(_) => health.readings += 1,
+            Err(Refused::NoCompletePatch) => health.no_complete_patch += 1,
+            Err(Refused::Aperture) => health.aperture += 1,
+            Err(Refused::NoPeak) => health.no_peak += 1,
+            Err(Refused::NoVisibleSeam) => {}
         }
     }
-    best.ok_or_else(|| {
-        if outside == candidates.len() {
+    let result = best.ok_or_else(|| {
+        if health.no_complete_patch == candidates.len() {
             Refused::NoCompletePatch
-        } else if aperture + outside == candidates.len() {
+        } else if health.aperture + health.no_complete_patch == candidates.len() {
             Refused::Aperture
         } else {
             Refused::NoPeak
         }
-    })
+    });
+    SupportResult {
+        support,
+        result,
+        health,
+    }
 }
 
 fn read(
@@ -151,22 +274,27 @@ fn read(
     front: &Plane,
     back: &Plane,
     candidate: Candidate,
+    support: Support,
+    health: &mut RegistrationHealth,
 ) -> Result<Reading, Refused> {
-    let step = STEP_DEG.to_radians();
-    let half = (SPAN_DEG.to_radians() / (2.0 * step)) as isize;
+    let step = support.step_deg.to_radians();
+    let half = support.half();
     let a = sample(map, front, 0, candidate.node, half, step, [0.0, 0.0])
         .ok_or(Refused::NoCompletePatch)?;
-    let coarse = SEARCH_DEG.to_radians() / step;
+    health.reference_complete += 1;
+    let coarse = support.search_steps();
     let mut winner: Option<([isize; 2], f64)> = None;
     // This is deliberately an unconstrained 2-D search.  A physical depth
     // hypothesis can later explain the epi term, but must not manufacture a
     // zero perp term before the evidence has been read.
-    for i in -(coarse as isize)..=(coarse as isize) {
-        for j in -(coarse as isize)..=(coarse as isize) {
+    for i in -coarse..=coarse {
+        for j in -coarse..=coarse {
+            health.searched_offsets += 1;
             let offset = [i as f64 * step, j as f64 * step];
             let Some(b) = sample(map, back, 1, candidate.node, half, step, offset) else {
                 continue;
             };
+            health.complete_target_patches += 1;
             let r = correlation(&a, &b);
             if winner.is_none_or(|(_, held)| r > held) {
                 winner = Some(([i, j], r));
@@ -174,7 +302,7 @@ fn read(
         }
     }
     let ([i, j], correlation) = winner.ok_or(Refused::NoCompletePatch)?;
-    if i.abs() as f64 >= coarse || j.abs() as f64 >= coarse {
+    if i.abs() >= coarse || j.abs() >= coarse {
         return Err(Refused::NoPeak);
     }
     let offset = [i as f64 * step, j as f64 * step];
@@ -327,5 +455,42 @@ mod tests {
     #[test]
     fn correlation_refuses_flat_content_by_reporting_no_agreement() {
         assert_eq!(correlation(&[1.0; 4], &[1.0; 4]), 0.0);
+    }
+
+    fn planted_crossing(support: Support, shift: [f64; 2]) -> Vec<RegistrationSample> {
+        let half = support.half();
+        (-half..=half)
+            .flat_map(|row| {
+                (-half..=half).map(move |column| {
+                    // A small non-collinear textured crossing.  This is a
+                    // planted local linearization, not an image-size proxy:
+                    // each rung gets its own angular support and grid count.
+                    let gradient = [1.0 + row as f64 * 0.03, 0.7 + column as f64 * 0.02];
+                    RegistrationSample {
+                        residual: gradient[0] * shift[0] + gradient[1] * shift[1],
+                        gradient,
+                        weight: 1.0,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_declared_support_recovers_the_same_planted_two_axis_shift() {
+        let wanted = [0.37, -0.22];
+        for support in SUPPORT_LADDER {
+            let reading = local_warp::register(&planted_crossing(support, wanted))
+                .expect("the planted crossing has two textured axes");
+            assert!(
+                (reading.displacement.x - wanted[0]).abs() < 1e-12,
+                "span {} recovered {} instead of {}",
+                support.span_deg,
+                reading.displacement.x,
+                wanted[0]
+            );
+            assert!((reading.displacement.y - wanted[1]).abs() < 1e-12);
+            assert!(reading.condition.is_finite());
+        }
     }
 }

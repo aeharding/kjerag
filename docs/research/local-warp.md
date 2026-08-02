@@ -63,6 +63,17 @@ the strongest two-axis raw-lens registration in the baseline-derived
 `[perp, epi]` frame, and reports its covariance and structure-tensor condition.
 A rank-deficient edge is refused for the aperture problem.
 
+The probe sweeps one declared, global angular support ladder (1.20/1.00,
+2.00/1.60, 2.80/2.40, and 3.68/3.00 degrees of span/search at 0.08-degree
+sampling). `span=` and `search=` may replace that ladder only for the whole
+invocation; comma-separated lists are paired, with a single value broadcast
+over the other list. Each rung reports candidate count, reference-complete
+patches, attempted offsets, complete target patches, accepted readings, and
+the support/aperture/peak refusal counts. Thus a growing support refusal is
+evidence of lens geometry, while complete patches that increasingly refuse
+for aperture are evidence of inadequate two-axis texture. Neither is silently
+promoted to a displacement, and the sweep does not choose a rung or a view.
+
 This does **not** yet make a shared pose Jacobian, establish an empirically
 calibrated condition threshold, or infer/apply a warp. Its uncertainty is the
 local linearized luma residual only; repeatability and raw-versus-scene PTS
