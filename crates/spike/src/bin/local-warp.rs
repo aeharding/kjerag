@@ -11,7 +11,7 @@ use std::time::Duration;
 use kjerag_media::Fallible;
 use kjerag_meta::CalibrationSet;
 use kjerag_render::{Camera, Cue, Horizon, Sampling, Scene, ScenePipeline, Size};
-use kjerag_spike::{FORMAT, Gpu, Render, Walk, raw_register};
+use kjerag_spike::{FORMAT, Gpu, Render, Walk, raw_register, seam_fit};
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
@@ -24,7 +24,11 @@ fn main() -> Fallible<()> {
     let gpu = Gpu::open()?;
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let mut scene = Scene::still(&options.input, options.start())?;
-    scene.fit_seam(true);
+    // The map drives both the warm render and the raw-lens projections below.
+    // Hold one explicitly selected calibration before either so a comparison
+    // is not silently between a file fit in one path and another baseline in
+    // the other.
+    options.seam.hold(&scene);
     scene.set_horizon(if options.lock {
         Horizon::Locked
     } else {
@@ -108,7 +112,28 @@ struct Options {
     fov: f64,
     size: u32,
     lock: bool,
+    seam: Seam,
 }
+
+/// The same three seam paths that `step` and `reframe` expose.  Stage 9's
+/// raw pixels remain raw; this choice only fixes the camera-frame map through
+/// which both lenses are sampled.
+enum Seam {
+    Factory,
+    File,
+    Stored(kjerag_render::SeamFit),
+}
+
+impl Seam {
+    fn hold(&self, scene: &Scene) {
+        match self {
+            Self::Factory => println!("seam:   factory calibration, no correction"),
+            Self::File => scene.fit_seam(true),
+            Self::Stored(fit) => scene.use_seam(*fit),
+        }
+    }
+}
+
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Fallible<Self> {
         let mut out = Self {
@@ -120,6 +145,10 @@ impl Options {
             fov: 20.0,
             size: 1024,
             lock: true,
+            // The shipped/configured baseline is this file's fitted
+            // calibration, as it is in `step`; `factory` is an explicit
+            // control rather than an accidental alternate baseline.
+            seam: Seam::File,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -131,6 +160,13 @@ impl Options {
                 Some(("fov", v)) => out.fov = v.parse()?,
                 Some(("size", v)) => out.size = v.parse()?,
                 Some(("lock", v)) => out.lock = v.parse::<u32>()? != 0,
+                Some(("seam", value)) => {
+                    out.seam = match value {
+                        "factory" => Seam::Factory,
+                        "file" => Seam::File,
+                        _ => Seam::Stored(seam_fit(value)?),
+                    }
+                }
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
@@ -153,4 +189,44 @@ impl Options {
         Size::new(self.size, self.size)
     }
 }
-const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg [size=px] [lock=0]";
+const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
+     [size=px] [lock=0] [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
+
+#[cfg(test)]
+mod tests {
+    use super::{Options, Seam};
+
+    fn options(args: &[&str]) -> Options {
+        Options::parse(args.iter().map(|arg| arg.to_string())).expect("valid local-warp options")
+    }
+
+    #[test]
+    fn seam_defaults_to_the_file_calibration() {
+        assert!(matches!(options(&["flight.insv"]).seam, Seam::File));
+    }
+
+    #[test]
+    fn seam_accepts_each_explicit_calibration_path() {
+        assert!(matches!(
+            options(&["flight.insv", "seam=factory"]).seam,
+            Seam::Factory
+        ));
+        assert!(matches!(
+            options(&["flight.insv", "seam=file"]).seam,
+            Seam::File
+        ));
+        let Seam::Stored(fit) = options(&[
+            "flight.insv",
+            "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+        ])
+        .seam
+        else {
+            panic!("stored seam fit was not parsed")
+        };
+        assert_eq!(fit.roll_deg, 0.6);
+        assert_eq!(fit.yaw_deg, -2.1);
+        assert_eq!(fit.pitch_deg, -0.9);
+        assert_eq!(fit.cx_px, -9.5);
+        assert_eq!(fit.cy_px, -11.9);
+    }
+}
