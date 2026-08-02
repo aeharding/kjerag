@@ -60,6 +60,63 @@ pub enum Decision {
     Refused(Refusal),
 }
 
+/// One missing prerequisite in an observation-only eligibility report.
+///
+/// This is deliberately distinct from [`Refusal`].  A refusal means the
+/// declared evidence was collected and did not meet the gate; unavailable
+/// means the instrument has not collected enough same-site evidence to call
+/// the gate at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    FarFieldClassification,
+    ReciprocalControl,
+    TemporalClosure,
+    HeldOutAssignment,
+}
+
+/// Per-site result for a residual-candidate diagnostic.
+///
+/// The report keeps the original declaration next to its result, preventing a
+/// later caller from replacing an unavailable site with a nearby textured one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SiteReport {
+    pub site: StripSite,
+    pub outcome: Result<Decision, Unavailable>,
+}
+
+/// Assemble and assess one fixed-site diagnostic without inventing evidence.
+///
+/// `local-warp`'s current temporal path can produce the first and third
+/// inputs for some sites, but it does not yet preserve a same-time reciprocal
+/// control or an externally declared held-out assignment.  Such a site is
+/// reported as unavailable rather than being silently assigned a role or
+/// treated as eligible.  Once all inputs are present this calls [`gate`]
+/// unchanged, retaining every refusal it already defines.
+pub fn report(
+    site: StripSite,
+    far_field: Option<Classification>,
+    reciprocal: Option<BidirectionalOutcome>,
+    temporal_closure: Option<Result<TrackClosure, TrackClosureRefused>>,
+    assignment: Option<Assignment>,
+) -> SiteReport {
+    let outcome = match (far_field, reciprocal, temporal_closure, assignment) {
+        (None, _, _, _) => Err(Unavailable::FarFieldClassification),
+        (_, None, _, _) => Err(Unavailable::ReciprocalControl),
+        (_, _, None, _) => Err(Unavailable::TemporalClosure),
+        (_, _, _, None) => Err(Unavailable::HeldOutAssignment),
+        (Some(far_field), Some(reciprocal), Some(temporal_closure), Some(assignment)) => {
+            Ok(gate(Evidence {
+                site,
+                far_field,
+                reciprocal,
+                temporal_closure,
+                assignment,
+            }))
+        }
+    };
+    SiteReport { site, outcome }
+}
+
 /// Admit only a proven-far, held-out site with both successful controls.
 ///
 /// Success here means the reciprocal and temporal operations completed at the
@@ -92,7 +149,7 @@ pub fn gate(evidence: Evidence) -> Decision {
 
 #[cfg(test)]
 mod tests {
-    use super::{Assignment, Decision, Evidence, Refusal, gate};
+    use super::{Assignment, Decision, Evidence, Refusal, Unavailable, gate, report};
     use crate::{
         far_field::Classification,
         raw_register::{
@@ -221,6 +278,61 @@ mod tests {
         assert_eq!(
             gate(input),
             Decision::Refused(Refusal::EvidenceSiteMismatch)
+        );
+    }
+
+    #[test]
+    fn report_preserves_the_declared_site_when_runtime_evidence_is_incomplete() {
+        let input = evidence();
+        let diagnostic = report(
+            input.site,
+            Some(input.far_field),
+            None,
+            Some(input.temporal_closure),
+            Some(input.assignment),
+        );
+        assert_eq!(diagnostic.site, input.site);
+        assert_eq!(diagnostic.outcome, Err(Unavailable::ReciprocalControl));
+
+        let diagnostic = report(
+            input.site,
+            Some(input.far_field),
+            Some(input.reciprocal),
+            Some(input.temporal_closure),
+            None,
+        );
+        assert_eq!(diagnostic.outcome, Err(Unavailable::HeldOutAssignment));
+    }
+
+    #[test]
+    fn complete_report_delegates_to_the_existing_gate_without_new_thresholds() {
+        let input = evidence();
+        let diagnostic = report(
+            input.site,
+            Some(input.far_field),
+            Some(input.reciprocal),
+            Some(input.temporal_closure),
+            Some(input.assignment),
+        );
+        assert_eq!(
+            diagnostic.outcome,
+            Ok(Decision::HeldOutEligible(super::HeldOutCandidate {
+                site: input.site
+            }))
+        );
+
+        let mut refused = input;
+        refused.assignment = Assignment::Training;
+        assert_eq!(
+            report(
+                refused.site,
+                Some(refused.far_field),
+                Some(refused.reciprocal),
+                Some(refused.temporal_closure),
+                Some(refused.assignment),
+            )
+            .outcome,
+            Ok(Decision::Refused(Refusal::NotHeldOut))
         );
     }
 }
