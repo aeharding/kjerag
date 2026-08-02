@@ -462,6 +462,38 @@ struct TemporalHealth {
     stereo_aperture: usize,
     placeable: usize,
     unplaceable: usize,
+    near: StratumHealth,
+    mid: StratumHealth,
+    far: StratumHealth,
+}
+
+#[derive(Default)]
+struct StratumHealth {
+    readings: usize,
+    references: usize,
+    evolutions: usize,
+    epi_sum: f64,
+    perp_sum: f64,
+    covariance_epi_epi_sum: f64,
+    covariance_epi_perp_sum: f64,
+    covariance_perp_perp_sum: f64,
+}
+
+impl StratumHealth {
+    fn reference(&mut self) {
+        self.readings += 1;
+        self.references += 1;
+    }
+
+    fn evolution(&mut self, evolution: StereoEvolution) {
+        self.readings += 1;
+        self.evolutions += 1;
+        self.epi_sum += evolution.displacement_rad.epi;
+        self.perp_sum += evolution.displacement_rad.perp;
+        self.covariance_epi_epi_sum += evolution.covariance_rad2.epi_epi;
+        self.covariance_epi_perp_sum += evolution.covariance_rad2.epi_perp;
+        self.covariance_perp_perp_sum += evolution.covariance_rad2.perp_perp;
+    }
 }
 
 struct TemporalAnchor<'a> {
@@ -523,6 +555,10 @@ fn report_temporal(
         .copied()
         .map(|site| Some(raw_register::TrackState::new(site, cap)))
         .collect();
+    // This is the first accepted registration per immutable declared site,
+    // irrespective of whether its disparity was placeable. It is never
+    // replaced by a later, more convenient depth stratum.
+    let mut first_stereo: Vec<Option<raw_register::StripSiteReading>> = vec![None; sites.len()];
     let mut health = TemporalHealth::default();
     for _ in 0..frames {
         if !scene.advance()? {
@@ -545,7 +581,7 @@ fn report_temporal(
             .ok_or("raw lens pair ended during temporal track")?;
         require_same_pts(next_at, next_pair.at)?;
         health.transitions += 1;
-        for state in &mut states {
+        for (index, state) in states.iter_mut().enumerate() {
             let Some(current) = *state else {
                 continue;
             };
@@ -572,12 +608,41 @@ fn report_temporal(
                     ) {
                         Ok(stereo) => {
                             health.stereo_readings += 1;
+                            let first = first_stereo[index];
+                            if first.is_none() {
+                                first_stereo[index] = Some(stereo);
+                            }
                             match depth_proxy(anchor.baseline, stereo) {
                                 Placement::Depth {
                                     metres,
                                     conservative_far_metres,
                                 } => {
                                     health.placeable += 1;
+                                    let stratum = depth_stratum(metres);
+                                    if let Some(first) = first {
+                                        let evolution = stereo_evolution(first, stereo)
+                                            .expect("one immutable track cannot change its site");
+                                        stratum_health(&mut health, stratum).evolution(evolution);
+                                        if options.trace {
+                                            println!(
+                                                "temporal evolution: {:?}; delta from this track's first stereo [epi {:+.4}, perp {:+.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²",
+                                                stratum,
+                                                evolution.displacement_rad.epi.to_degrees(),
+                                                evolution.displacement_rad.perp.to_degrees(),
+                                                evolution.covariance_rad2.epi_epi,
+                                                evolution.covariance_rad2.epi_perp,
+                                                evolution.covariance_rad2.perp_perp,
+                                            );
+                                        }
+                                    } else {
+                                        stratum_health(&mut health, stratum).reference();
+                                        if options.trace {
+                                            println!(
+                                                "temporal evolution: {:?}; first accepted stereo reference retained",
+                                                stratum,
+                                            );
+                                        }
+                                    }
                                     if options.trace {
                                         println!(
                                             "temporal stereo: phi {:.2} deg; tracked offset [epi {:.4}, perp {:.4}] deg; displacement [epi {:.4}, perp {:.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; depth proxy {:.2} m (one-sigma far {:.2} m)",
@@ -661,10 +726,100 @@ fn report_temporal(
         health.placeable,
         health.unplaceable,
     );
+    report_stratum("near <3 m", &health.near);
+    report_stratum("mid 3-10 m", &health.mid);
+    report_stratum("far >=10 m", &health.far);
     println!(
         "temporal closure: unavailable (this opt-in is one forward lens-0 traversal; no reverse traversal was inferred); no depth, pose fit, or warp applied"
     );
     Ok(())
+}
+
+/// Fixed depth reporting strata. They are declared here rather than inferred
+/// from the capture, texture, or distribution of successful tracks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DepthStratum {
+    Near,
+    Mid,
+    Far,
+}
+
+fn depth_stratum(metres: f64) -> DepthStratum {
+    if metres < 3.0 {
+        DepthStratum::Near
+    } else if metres < 10.0 {
+        DepthStratum::Mid
+    } else {
+        DepthStratum::Far
+    }
+}
+
+fn stratum_health(health: &mut TemporalHealth, stratum: DepthStratum) -> &mut StratumHealth {
+    match stratum {
+        DepthStratum::Near => &mut health.near,
+        DepthStratum::Mid => &mut health.mid,
+        DepthStratum::Far => &mut health.far,
+    }
+}
+
+fn report_stratum(name: &str, health: &StratumHealth) {
+    if health.evolutions == 0 {
+        println!(
+            "temporal stratum: {name}; readings {}; first references {}; evolution unavailable",
+            health.readings, health.references,
+        );
+        return;
+    }
+    let count = health.evolutions as f64;
+    // Each evolution is a difference of independently registered frames, so
+    // its covariance is propagated below and the displayed mean covariance is
+    // the sum divided by n². No empirical fit or reweighting is applied.
+    println!(
+        "temporal stratum: {name}; readings {}; first references {}; evolutions {}; mean delta [epi {:+.4}, perp {:+.4}] deg; covariance of mean [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²",
+        health.readings,
+        health.references,
+        health.evolutions,
+        (health.epi_sum / count).to_degrees(),
+        (health.perp_sum / count).to_degrees(),
+        health.covariance_epi_epi_sum / count.powi(2),
+        health.covariance_epi_perp_sum / count.powi(2),
+        health.covariance_perp_perp_sum / count.powi(2),
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StereoEvolution {
+    displacement_rad: raw_register::CameraDisplacement,
+    covariance_rad2: raw_register::CameraCovariance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvolutionRefused {
+    MismatchedSite,
+}
+
+/// Difference two same-lens-pair registrations of one fixed tracked site.
+/// Frame-level registration errors are treated as independent here, so their
+/// full covariance matrices add. The caller retains a first accepted reading
+/// rather than selecting a later baseline.
+fn stereo_evolution(
+    first: raw_register::StripSiteReading,
+    current: raw_register::StripSiteReading,
+) -> Result<StereoEvolution, EvolutionRefused> {
+    if first.site != current.site {
+        return Err(EvolutionRefused::MismatchedSite);
+    }
+    Ok(StereoEvolution {
+        displacement_rad: raw_register::CameraDisplacement {
+            epi: current.displacement_rad.epi - first.displacement_rad.epi,
+            perp: current.displacement_rad.perp - first.displacement_rad.perp,
+        },
+        covariance_rad2: raw_register::CameraCovariance {
+            epi_epi: current.covariance_rad2.epi_epi + first.covariance_rad2.epi_epi,
+            epi_perp: current.covariance_rad2.epi_perp + first.covariance_rad2.epi_perp,
+            perp_perp: current.covariance_rad2.perp_perp + first.covariance_rad2.perp_perp,
+        },
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1436,6 +1591,34 @@ mod tests {
         assert_eq!(
             super::depth_proxy([0.0; 3], stereo_reading(0.02, 0.002)),
             super::Placement::Unplaceable
+        );
+    }
+
+    #[test]
+    fn fixed_depth_strata_and_stereo_evolution_keep_full_covariance() {
+        assert_eq!(super::depth_stratum(2.999), super::DepthStratum::Near);
+        assert_eq!(super::depth_stratum(3.0), super::DepthStratum::Mid);
+        assert_eq!(super::depth_stratum(9.999), super::DepthStratum::Mid);
+        assert_eq!(super::depth_stratum(10.0), super::DepthStratum::Far);
+
+        let first = stereo_reading(0.02, 0.002);
+        let mut current = stereo_reading(0.026, 0.003);
+        current.displacement_rad.perp = -0.004;
+        current.covariance_rad2.epi_perp = 5.0e-7;
+        current.covariance_rad2.perp_perp = 8.0e-6;
+        let evolution = super::stereo_evolution(first, current)
+            .expect("the same declared site can evolve over time");
+        assert!((evolution.displacement_rad.epi - 0.006).abs() < 1e-12);
+        assert!((evolution.displacement_rad.perp + 0.004).abs() < 1e-12);
+        assert!((evolution.covariance_rad2.epi_epi - 13.0e-6).abs() < 1e-15);
+        assert!((evolution.covariance_rad2.epi_perp - 5.0e-7).abs() < 1e-15);
+        assert!((evolution.covariance_rad2.perp_perp - 9.0e-6).abs() < 1e-15);
+
+        let mut other = current;
+        other.site.root.view_pixel = [1.0, 0.0];
+        assert_eq!(
+            super::stereo_evolution(first, other),
+            Err(super::EvolutionRefused::MismatchedSite)
         );
     }
 }
