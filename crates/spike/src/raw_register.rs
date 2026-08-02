@@ -9,9 +9,9 @@ use kjerag_render::Reframe;
 
 use crate::local_warp::{self, RegistrationSample};
 
-/// One point on the body `z = 0` seam, with the axes the recorded baseline
-/// gives it.  `perp` is the axis no physical disparity can reach; `epi` is
-/// the epipolar axis, in the sign used by the old depth instrument.
+/// One point on the rendered crossover contour, with the axes the recorded
+/// baseline gives it. `perp` is the axis no physical disparity can reach;
+/// `epi` is the epipolar axis, in the sign used by the old depth instrument.
 #[derive(Clone, Copy, Debug)]
 pub struct Node {
     pub centre: [f64; 3],
@@ -25,7 +25,12 @@ pub struct Node {
 #[derive(Clone, Copy, Debug)]
 pub struct Candidate {
     pub node: Node,
-    pub view_pixel: [u32; 2],
+    /// The view-space root that produced `node`. Kept for locator controls;
+    /// registration itself starts afresh from `node` and raw planes.
+    pub view_ray: [f32; 3],
+    /// The output-raster location of the traced contour root. It is a
+    /// location only: raw planes below remain the registration evidence.
+    pub view_pixel: [f32; 2],
 }
 
 /// A raw measurement in radians on `[perp, epi]` axes.
@@ -196,48 +201,72 @@ pub struct SupportResult {
 
 const BINS: usize = 72;
 
-/// Candidate locations on the visible seam, one closest-to-seam pixel per
-/// camera-frame azimuth bin.  A view not containing `body.z = 0` returns no
-/// candidates rather than borrowing a location from another view.
+/// Candidate locations on the visible rendered crossover, one per
+/// camera-frame azimuth bin.
+///
+/// The body's `z = 0` circle is a useful nominal seam, but it is not the
+/// line the pass hands over on after a selected lens calibration: the pass
+/// centres the crossover on the two optical axes, then coverage depth moves
+/// its final 50/50 point again. Trace the latter, from the same `Blend` the
+/// fragment shader uses. A view which has no two-lens 50/50 contour returns
+/// no candidates rather than borrowing a nominal body-circle location.
 pub fn visible_candidates(
     map: &Reframe,
     width: u32,
     height: u32,
     baseline: [f64; 3],
 ) -> Vec<Candidate> {
-    let mut picked: [Option<(f64, Candidate)>; BINS] = [None; BINS];
+    let mut picked: [Option<(f32, Candidate)>; BINS] = [None; BINS];
+    let mut samples = vec![None; (width * height) as usize];
     for y in 0..height {
         for x in 0..width {
             let uv = [
                 (x as f32 + 0.5) / width as f32,
                 (y as f32 + 0.5) / height as f32,
             ];
-            let Some(view) = map.view_ray(uv) else {
+            samples[(y * width + x) as usize] = sample_crossover(map, uv);
+        }
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y * width + x) as usize;
+            let Some(here) = samples[index] else {
                 continue;
             };
-            let body = map.body_ray(view).map(f64::from);
-            let length = norm(body);
-            if length == 0.0 {
-                continue;
-            }
-            let latitude = (body[2] / length).abs();
-            // Keep only pixels whose cell can plausibly contain the zero
-            // contour.  The later per-bin minimum is the actual contour
-            // approximation; this guard keeps lens-axis views from creating
-            // a fake seam candidate.
-            if latitude > 2.0_f64.to_radians() {
-                continue;
-            }
-            let phi = body[1].atan2(body[0]);
-            let bin = ((phi.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU * BINS as f64)
-                .floor() as usize)
-                % BINS;
-            let candidate = Candidate {
-                node: node(baseline, phi),
-                view_pixel: [x, y],
-            };
-            if picked[bin].is_none_or(|(held, _)| latitude < held) {
-                picked[bin] = Some((latitude, candidate));
+            for (dx, dy) in [(1, 0), (0, 1)] {
+                let (next_x, next_y) = (x + dx, y + dy);
+                if next_x >= width || next_y >= height {
+                    continue;
+                }
+                let Some(next) = samples[(next_y * width + next_x) as usize] else {
+                    continue;
+                };
+                let Some((view, weight)) = crossover_root(map, here, next) else {
+                    continue;
+                };
+                let body = unit(map.body_ray(view).map(f64::from));
+                if norm(body) == 0.0 {
+                    continue;
+                }
+                let phi = body[1].atan2(body[0]);
+                let bin = ((phi.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU
+                    * BINS as f64)
+                    .floor() as usize)
+                    % BINS;
+                let candidate = Candidate {
+                    node: node(baseline, body),
+                    view_ray: view,
+                    view_pixel: [
+                        x as f32 + 0.5 + dx as f32 * 0.5,
+                        y as f32 + 0.5 + dy as f32 * 0.5,
+                    ],
+                };
+                // Prefer the root whose two lens claims are furthest from an
+                // edge. This only chooses among already-valid 50/50 roots;
+                // it never promotes a rendered pixel to measurement data.
+                if picked[bin].is_none_or(|(held, _)| weight > held) {
+                    picked[bin] = Some((weight, candidate));
+                }
             }
         }
     }
@@ -246,6 +275,78 @@ pub fn visible_candidates(
         .flatten()
         .map(|(_, candidate)| candidate)
         .collect()
+}
+
+/// One raster sample that can participate in a genuine two-lens crossover.
+/// The score is the signed final rendered-weight difference, not the nominal
+/// lens-axis difference; coverage-depth claims are deliberately included.
+#[derive(Clone, Copy)]
+struct CrossoverSample {
+    view: [f32; 3],
+    difference: f32,
+}
+
+fn sample_crossover(map: &Reframe, uv: [f32; 2]) -> Option<CrossoverSample> {
+    let view = map.view_ray(uv)?;
+    let blend = map.blend(view);
+    (blend.weights[0] > 0.0
+        && blend.weights[1] > 0.0
+        && blend.landings[0].inside
+        && blend.landings[1].inside)
+        .then_some(CrossoverSample {
+            view,
+            difference: blend.weights[0] - blend.weights[1],
+        })
+}
+
+/// A zero of the final rendered weights along one raster edge. The bisection
+/// is in view-ray space, which is sufficient for a subpixel contour root and
+/// lets the runtime `Blend` remain the sole definition of the crossover.
+fn crossover_root(
+    map: &Reframe,
+    left: CrossoverSample,
+    right: CrossoverSample,
+) -> Option<([f32; 3], f32)> {
+    if left.difference == 0.0 {
+        return Some((left.view, crossover_weight(map, left.view)?));
+    }
+    if right.difference == 0.0 {
+        return Some((right.view, crossover_weight(map, right.view)?));
+    }
+    if left.difference.signum() == right.difference.signum() {
+        return None;
+    }
+    let (mut low, mut high) = (left.view, right.view);
+    let low_sign = left.difference.signum();
+    for _ in 0..24 {
+        let middle = unit_f32(std::array::from_fn(|axis| 0.5 * (low[axis] + high[axis])));
+        let middle_difference = sample_crossover_ray(map, middle)?;
+        if middle_difference.signum() == low_sign {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let root = unit_f32(std::array::from_fn(|axis| 0.5 * (low[axis] + high[axis])));
+    Some((root, crossover_weight(map, root)?))
+}
+
+fn sample_crossover_ray(map: &Reframe, view: [f32; 3]) -> Option<f32> {
+    let blend = map.blend(view);
+    (blend.weights[0] > 0.0
+        && blend.weights[1] > 0.0
+        && blend.landings[0].inside
+        && blend.landings[1].inside)
+        .then_some(blend.weights[0] - blend.weights[1])
+}
+
+fn crossover_weight(map: &Reframe, view: [f32; 3]) -> Option<f32> {
+    let blend = map.blend(view);
+    (blend.weights[0] > 0.0
+        && blend.weights[1] > 0.0
+        && blend.landings[0].inside
+        && blend.landings[1].inside)
+        .then_some(blend.weights[0].min(blend.weights[1]))
 }
 
 /// Register and select the most informative complete raw patch.  A complete
@@ -448,9 +549,9 @@ fn peak(legal: &[([isize; 2], f64)], coarse: isize) -> Result<([isize; 2], f64),
     Ok((offset, correlation))
 }
 
-fn node(baseline: [f64; 3], phi: f64) -> Node {
-    let (sin, cos) = phi.sin_cos();
-    let centre = [cos, sin, 0.0];
+fn node(baseline: [f64; 3], centre: [f64; 3]) -> Node {
+    let centre = unit(centre);
+    let phi = centre[1].atan2(centre[0]);
     let seen = std::array::from_fn(|k| baseline[k] - dot(baseline, centre) * centre[k]);
     let epi = match norm(seen) > 0.0 {
         true => unit(seen.map(|v| -v)),
@@ -555,15 +656,109 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
     if n > 0.0 { v.map(|x| x / n) } else { [0.0; 3] }
 }
 
+fn unit_f32(v: [f32; 3]) -> [f32; 3] {
+    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if n > 0.0 { v.map(|x| x / n) } else { [0.0; 3] }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kjerag_meta::{Distortion, Intrinsics, Lens, Pose};
     #[test]
     fn baseline_axes_are_orthogonal_to_the_ray() {
-        let node = node([0.0, 0.0, -0.033], 0.7);
+        let node = node([0.0, 0.0, -0.033], [0.7f64.cos(), 0.7f64.sin(), 0.0]);
         assert!(dot(node.centre, node.epi).abs() < 1e-12);
         assert!(dot(node.centre, node.perp).abs() < 1e-12);
         assert!(dot(node.epi, node.perp).abs() < 1e-12);
+    }
+
+    fn lenses(back_pitch_deg: f64) -> Vec<Lens> {
+        let intrinsics = Intrinsics {
+            xi: 2.31494,
+            fx: 3665.9397,
+            fy: 3667.4194,
+            cx: 1920.0,
+            cy: 1920.0,
+        };
+        let distortion = Distortion {
+            k1: 0.95820886,
+            k2: -1.80141151,
+            k3: 3.57555127,
+            p1: 0.0,
+            p2: 0.0,
+        };
+        vec![
+            Lens {
+                intrinsics,
+                distortion,
+                pose: Pose {
+                    yaw_deg: 0.0,
+                    pitch_deg: 0.0,
+                    roll_deg: 90.0,
+                    translation_m: [0.0; 3],
+                },
+                lens_type: 131,
+            },
+            Lens {
+                intrinsics,
+                distortion,
+                pose: Pose {
+                    yaw_deg: 0.0,
+                    pitch_deg: back_pitch_deg,
+                    roll_deg: 90.0,
+                    translation_m: [0.0, 0.0, -0.033],
+                },
+                lens_type: 131,
+            },
+        ]
+    }
+
+    fn crossover_map(back_pitch_deg: f64) -> Reframe {
+        Reframe::new(
+            &lenses(back_pitch_deg),
+            kjerag_render::Size::new(3840, 3840),
+            kjerag_render::Camera {
+                yaw: 90.0_f32.to_radians(),
+                pitch: 0.0,
+                fov: 70.0_f32.to_radians(),
+            },
+            kjerag_render::Held::default(),
+            1.0,
+            false,
+            kjerag_render::Sampling::default(),
+        )
+    }
+
+    #[test]
+    fn traced_candidates_are_actual_two_lens_weight_roots() {
+        let map = crossover_map(3.0);
+        let candidates = visible_candidates(&map, 320, 320, [0.0, 0.0, -0.033]);
+        assert!(!candidates.is_empty(), "the crossover should be visible");
+        for candidate in &candidates {
+            let blend = map.blend(candidate.view_ray);
+            assert!(blend.weights[0] > 0.0 && blend.weights[1] > 0.0);
+            assert!(blend.landings[0].inside && blend.landings[1].inside);
+            assert!(
+                (blend.weights[0] - blend.weights[1]).abs() < 1e-5,
+                "root weighs {:?}",
+                blend.weights
+            );
+        }
+    }
+
+    #[test]
+    fn actual_crossover_follows_an_asymmetric_pose_not_body_z_zero() {
+        let map = crossover_map(3.0);
+        let candidates = visible_candidates(&map, 320, 320, [0.0, 0.0, -0.033]);
+        let displaced = candidates
+            .iter()
+            .map(|candidate| candidate.node.centre[2].abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            displaced > 0.01,
+            "the asymmetric lens pose should move its actual crossover off nominal body.z=0; got {displaced}"
+        );
     }
     #[test]
     fn correlation_refuses_flat_content_by_reporting_no_agreement() {
