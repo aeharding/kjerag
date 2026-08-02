@@ -85,51 +85,49 @@ fn main() -> Fallible<()> {
         );
     }
     let supports = options.supports()?;
-    for row in raw_register::select_ladder(&map, &pair.lenses, &candidates, &supports) {
+    for row in supports.into_iter().map(|support| {
+        raw_register::overlap_strip_lattice(&map, &pair.lenses, &candidates, support)
+    }) {
         let health = row.health;
         println!(
-            "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\nhealth:  candidates {}; reference-complete {}; search positions {}; target-complete {}; readings {}; refusals [support {}, aperture {}, peak {}]\ncoverage: reference [projected-out {}, source-boundary {}]; target [projected-out {}, source-boundary {}]",
+            "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\nlattice: roots {}; sites {}; reference-complete {}; target shifts {}; target-complete {}\ncoverage: reference [projected-out {}, source-boundary {}]; target [projected-out {}, source-boundary {}]",
             row.support.span_deg,
             row.support.search_deg,
             row.support.step_deg,
-            health.candidates,
+            health.roots,
+            health.sites,
             health.reference_complete,
             health.searched_offsets,
-            health.complete_target_patches,
-            health.readings,
-            health.no_complete_patch,
-            health.aperture,
-            health.no_peak,
+            health.target_complete,
             health.reference_projected_out,
             health.reference_source_boundary,
             health.target_projected_out,
             health.target_source_boundary,
         );
-        match row.result {
-            Ok(reading) => {
-                let sigma = [
-                    reading.covariance_rad2[0][0].max(0.0).sqrt().to_degrees(),
-                    reading.covariance_rad2[1][1].max(0.0).sqrt().to_degrees(),
-                ];
+        for site in row.sites {
+            println!(
+                "site: root view ({:.2}, {:.2}), body phi {:.2} deg; offset [perp {:.2}, epi {:.2}] deg; reference {:?}",
+                site.site.root.view_pixel[0],
+                site.site.root.view_pixel[1],
+                site.site.root.node.phi.to_degrees(),
+                site.site.offset_rad[0].to_degrees(),
+                site.site.offset_rad[1].to_degrees(),
+                site.reference,
+            );
+            for target in site.target {
                 println!(
-                    "selected: view ({}, {}), body phi {:.2} deg\nraw:      shift [perp {:.4}, epi {:.4}] deg; 1σ [{:.4}, {:.4}] deg\nquality:  r {:.4}, condition {:.2}, selector {:.4}",
-                    reading.candidate.view_pixel[0],
-                    reading.candidate.view_pixel[1],
-                    reading.candidate.node.phi.to_degrees(),
-                    reading.shift_rad[0].to_degrees(),
-                    reading.shift_rad[1].to_degrees(),
-                    sigma[0],
-                    sigma[1],
-                    reading.correlation,
-                    reading.condition,
-                    reading.score,
-                );
-                println!(
-                    "meaning: raw-lens local registration only; it neither proves a warp model nor changes the renderer."
+                    "  shift: steps [perp {}, epi {}]; target offset [perp {:.2}, epi {:.2}] deg; {:?}",
+                    target.steps[0],
+                    target.steps[1],
+                    target.offset_rad[0].to_degrees(),
+                    target.offset_rad[1].to_degrees(),
+                    target.coverage,
                 );
             }
-            Err(reason) => println!("refused: {reason:?}; no two-axis registration was inferred"),
         }
+        println!(
+            "meaning: fixed raw-lens coverage only; no texture score selected a view or a warp."
+        );
     }
     Ok(())
 }
