@@ -10,6 +10,11 @@ publish.workspace = true
 # doc says it does, now that `reframe` is a second binary in this crate.
 default-run = "spike"
 
+# Not released on its own: the workspace releases once, as the app crate
+# (release.toml).
+[package.metadata.release]
+release = false
+
 [[bin]]
 name = "spike"
 path = "src/main.rs"
