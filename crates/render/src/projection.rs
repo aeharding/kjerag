@@ -3694,19 +3694,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reframe_uploads_default_off_and_the_explicit_overlap_ab_mode() {
+    fn reframe_uploads_default_off_and_the_explicit_detail_guided_ab_mode() {
         let reframe = fixture(Camera::default());
         let blank = Reframe::blank(WIDE, false);
-        let dominant = fixture(Camera::default()).with_fusion_mode(FusionMode::Dominant);
+        let detail_guided = fixture(Camera::default()).with_fusion_mode(FusionMode::Dominant);
 
         assert_eq!(reframe.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
         assert_eq!(blank.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
-        assert_eq!(dominant.fusion_map_mode, Fusion::DOMINANT_MODE);
+        assert_eq!(detail_guided.fusion_map_mode, Fusion::DOMINANT_MODE);
         // `bytes` is the exact slice passed to `Queue::write_buffer`; this
         // also executes the upload invariant above for both constructors.
         assert_eq!(reframe.bytes().len(), std::mem::size_of::<Reframe>());
         assert_eq!(blank.bytes().len(), std::mem::size_of::<Reframe>());
-        assert_eq!(dominant.bytes().len(), std::mem::size_of::<Reframe>());
+        assert_eq!(detail_guided.bytes().len(), std::mem::size_of::<Reframe>());
     }
 
     #[test]

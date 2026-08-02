@@ -105,7 +105,7 @@ pub fn menu_bar<'a>(
                         // Keeping it beside the view controls makes the A/B
                         // state visible while inspecting the seam.
                         Item::CheckBox(
-                            strings::RESEARCH_DOMINANT_FUSION.to_owned(),
+                            strings::RESEARCH_DETAIL_GUIDED_FUSION.to_owned(),
                             None,
                             research_fusion,
                             Action::ToggleResearchFusion,

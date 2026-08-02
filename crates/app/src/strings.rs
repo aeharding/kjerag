@@ -128,7 +128,7 @@ pub const ZOOM_OUT: &str = "Zoom out";
 /// app and Studio call it, so it is the words this pilot already has.
 pub const LOCK_HORIZON: &str = "Lock horizon";
 /// An intentionally non-persistent experiment, not a normal picture setting.
-pub const RESEARCH_DOMINANT_FUSION: &str = "Research only: dominant seam fusion (A/B)";
+pub const RESEARCH_DETAIL_GUIDED_FUSION: &str = "Research only: detail-guided seam fusion (A/B)";
 pub const FULLSCREEN: &str = "Fullscreen";
 /// The ellipsis is on the menu item, which opens something; the page it opens
 /// is titled without one.
@@ -358,7 +358,7 @@ mod tests {
             DEFAULT_VIEW,
             ZOOM_OUT,
             LOCK_HORIZON,
-            RESEARCH_DOMINANT_FUSION,
+            RESEARCH_DETAIL_GUIDED_FUSION,
             FULLSCREEN,
             SETTINGS,
             APPEARANCE,
