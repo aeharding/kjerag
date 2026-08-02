@@ -19,7 +19,7 @@ name: site
 on:
   workflow_dispatch:
 
-# The deploy's.
+# What the deploy writes with. Everything else stays read-only.
 permissions:
   contents: write
 
@@ -47,10 +47,10 @@ jobs:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
       - run: scripts/pages-site.sh site "${{ steps.gpg.outputs.fingerprint }}"
-      # The deploy replaces the branch with this directory, so a half a
-      # checkout would publish half a repository. Both arches have to resolve
-      # to a commit object that is here, and the signed summary has to answer
-      # for them, before anything is pushed.
+      # The deploy replaces the branch with this directory, so half a checkout
+      # would publish half a repository. Both arches have to resolve to a
+      # commit object that is here, and the signed summary has to answer for
+      # them, before anything is pushed.
       - name: The repository is whole
         env:
           FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
