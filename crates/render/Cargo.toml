@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# Not released on its own: the workspace releases once, as the app crate
+# (release.toml).
+[package.metadata.release]
+release = false
+
 [dependencies]
 kjerag-media = { workspace = true }
 # The per-lens Mei calibration the reprojection pass runs on. This is the

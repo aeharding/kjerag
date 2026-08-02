@@ -3,3 +3,4 @@
 
 # agent worktrees live inside the checkout
 .worktrees/
+target-uitest/

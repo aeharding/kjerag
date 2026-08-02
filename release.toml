@@ -16,6 +16,15 @@ pre-release-commit-message = "release: {{version}}"
 shared-version = true
 consolidate-commits = true
 
+# The other four declare `release = false` in their own
+# [package.metadata.release], which is that field's documented use ("usually
+# disabled for internal crates in a workspace", cargo-release docs/reference.md).
+# It is not redundant with `default-members`: a crate left out only by that list
+# is one cargo-release thinks you might have meant to release, so it warns about
+# skipping it on every run, once per crate, carrying every file that changed
+# since the last tag. The warning is reached only when the config has not
+# already said `release = false` (cargo-release 1.1.3, src/steps/release.rs:97).
+
 # Nothing goes to crates.io. The crate manifests say so as well
 # (`publish = false` in [workspace.package]), which is what actually stops the
 # publish step: cargo-release still prints "Publishing kjerag" and then passes

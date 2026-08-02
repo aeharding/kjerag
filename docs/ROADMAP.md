@@ -579,6 +579,35 @@ live, no keyframe UI ever.
   the app, meet the refusal that names their format, and send a clip toward
   support. The description says which cameras work today, mirroring the
   README's table, so that is an invitation rather than a bait.
+- 2026-08-01 **The seam probe stops assuming the camera knows where its own
+  lenses point** (issue #130, branch `fix/130-x2-fit`,
+  docs/research/seam-two-axis.md 11). The owner's ONE X2 could never be
+  calibrated: 3, 2 and 2 azimuths of 72 on his three captures against the 10 a
+  five-knob fit needs, so that camera's pool stayed empty and zero-config
+  playback delivered the factory calibration for good. Its two lens axes are
+  recorded **2.835 degrees from opposed** where his X4 Air's are 0.308, and the
+  seam reads 2.1 to 2.9 degrees along against a search window of 2.0.
+
+  Two faults. The back patch was sampled as ONE rectangle grown by the whole
+  search and refused entire if any corner left the picture, so a candidate near
+  the truth was refused for where the widest candidate landed: 157 of 432 tries
+  against 0 on the X4 Air, and widening the window made it **strictly worse**
+  (at 3.0 by 6.0 degrees all 144 tries were refused and nothing reached the
+  correlation). And the window was centred on the calibration itself, which on
+  this camera is the thing that is wrong.
+
+  The fix is one rule each and neither is a widening: a summed-area table of
+  the holes makes the refusal a **candidate's** rather than the rectangle's,
+  and a coarse wide pass acquires where the ring actually sits before the
+  reading pass runs, along the seam only (parallax cannot reach that axis) and
+  only where the offset is outside the window already searched. The three
+  captures now fit 50, 42 and 65 azimuths and agree with each other to 0.06
+  degrees of roll; round the ring at the owner's October reference moment the
+  seam goes from 2.570 along and 2.830 across to **0.257 and 0.267**, which
+  puts that camera in the same range as every other one in the corpus. Ten of
+  the eleven two-lens captures on this box come back with the same fit to the
+  last digit; the eleventh is the corpus X4, mildly starved too, whose fit
+  improves on both axes when re-read off the pixels.
 
 - 2026-08-01 **Kjerag has its own channel: a signed Flatpak repository at
   `kjerag.harding.dev`** (issue #137, owner). The same version tag that
@@ -1226,8 +1255,10 @@ live, no keyframe UI ever.
   file: `only 2 of 72 azimuths on the seam had content both lenses could be
   matched on`, 3 / 2 / 2 across three captures against the 10 a five-knob fit
   needs, so it can never build a pool entry and plays on the factory
-  calibration forever. The reason is a trap: the residual there is 1.1-1.6 deg
-  along the seam and 0.9-2.8 across, which is larger than the probe's window,
+  calibration forever. The reason is a trap: the residual there reads 1.1-1.6
+  deg along the seam and 0.9-2.8 across, which is larger than the probe's
+  window (and those four readings are themselves clipped by it: with the window
+  moved onto the ring it is 2.1-2.9 deg along - see 2026-08-01 above),
   and widening the window makes it strictly worse because the back patch is
   sampled as ONE rectangle grown by the whole search - at `along=3.0
   across=6.0` every single try is refused for leaving the overlap. At that view

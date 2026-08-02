@@ -77,7 +77,7 @@ use kjerag_media::Fallible;
 use kjerag_meta::{CalibrationSet, Lens, Mat3, Quat, Size as MetaSize};
 use kjerag_render::seam::{
     self, Found, Knob, Probe, Reading, Refused, Where, least_squares, mapped, moved, read_ring,
-    ring, rms, turned, unit,
+    read_ring_centred, ring, rms, turned, unit,
 };
 use kjerag_render::{Camera, Held, Landing, Reframe, Sampling, Size};
 use kjerag_spike::{Pair, Walk};
@@ -375,14 +375,39 @@ fn sweep(
         .collect();
     let mut measured = 0usize;
     let mut refused = Refused::default();
+    let mut centre = None;
     for _ in 0..options.count {
         let Some(pair) = walk.next_pair()? else {
             break;
         };
+        // Where along the seam this ring's own picture sits, which is where
+        // the search is centred (issue #130). The camera's answer and not the
+        // frame's, so it is asked for once and held and every frame of the run
+        // is read the same way; nought is the search where the calibration
+        // puts it.
+        if centre.is_none()
+            && let Some((_, reframe)) = candidates.first()
+        {
+            centre = seam::acquired(reframe, &pair.lenses, ring, &options.probe());
+            if let Some(centre) = centre {
+                println!(
+                    "gross:  the along-seam search is centred {:+.2} deg from the calibration's \
+                     own answer",
+                    centre as f64 * options.step,
+                );
+            }
+        }
         let found: Vec<Vec<Option<Found>>> = candidates
             .iter()
             .map(|(_, reframe)| {
-                read_ring(reframe, &pair.lenses, ring, &options.probe(), &mut refused)
+                read_ring_centred(
+                    reframe,
+                    &pair.lenses,
+                    ring,
+                    &options.probe(),
+                    centre.unwrap_or(0),
+                    &mut refused,
+                )
             })
             .collect();
         for (candidate, patches) in found.iter().zip(&mut patches) {

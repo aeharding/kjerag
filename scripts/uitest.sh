@@ -3,7 +3,11 @@
 # Headless UI checks: drive the real app in a throwaway compositor and look
 # at what came out.
 #
-#   scripts/uitest.sh [file.insv]      # or set KJERAG_TEST_MEDIA
+#   scripts/uitest.sh [file.insv] [offset.insv]
+#
+# or set KJERAG_TEST_MEDIA and KJERAG_TEST_MEDIA_OFFSET. The second file is a
+# capture from a camera whose lenses are degrees from where its calibration
+# says, which is one check of its own and skips without one (issue #130).
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -52,6 +56,13 @@ set -uo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 session=$root/scratch/uitest
 media=${1:-${KJERAG_TEST_MEDIA:-}}
+
+# A capture from a camera whose lenses are degrees from where its own
+# calibration says they point, which is a fit that used to be impossible and
+# is one check of its own below (issue #130). Not the playback media, because
+# the two questions want different footage and only one of them is about the
+# window: KJERAG_TEST_MEDIA_OFFSET names it, and the check skips without one.
+offset_media=${2:-${KJERAG_TEST_MEDIA_OFFSET:-}}
 
 # The session's home, and the state directory inside it.
 #
@@ -1683,6 +1694,68 @@ pooled_calibration() {
 	exits_clean
 }
 
+# ------------------------- the checks, with a camera pointing somewhere else
+#
+# A fit that never happens is silent by design: the file keeps the factory
+# calibration, one line says why, and that camera's pool stays empty for good.
+# On the owner's ONE X2 that was every capture, 2 or 3 azimuths of 72 against
+# the ten a fit needs, because the search ran two degrees either side of where
+# the camera says its lenses point and they are nearly three degrees from
+# there (issue #130). Zero-config playback then delivered the weakest of the
+# three calibration paths on that camera, for ever, and said so once.
+#
+# So the claim under test is the pool's, end to end and through the app: a
+# capture whose lenses are degrees off its own calibration is fitted from its
+# own frames while it plays, and that fit reaches the camera's pool. Reading
+# the pool file rather than the report line is deliberate - the line is what
+# the fit said, the file is what the next session will draw with, and this
+# issue is about the second one.
+#
+# On main it fails at the first assertion, with "too few to fit" in the log.
+#
+# It needs a capture from such a camera, which is not the playback media:
+# KJERAG_TEST_MEDIA_OFFSET names it and the check skips without one.
+
+a_camera_pointing_elsewhere_is_still_fitted() {
+	local check="a capture whose lenses are degrees off its calibration reaches the pool"
+	printf '\n-- offset calibration checks (%s)\n' "${offset_media:-none}"
+	if [ -z "$offset_media" ]; then
+		skip "$check (set KJERAG_TEST_MEDIA_OFFSET to a capture from such a camera)"
+		return
+	fi
+	local state=$STATE_HOME/cosmic/dev.harding.Kjerag/v1
+	local pool=$state/seam_pool
+	rm -f "$pool" "$state/seam_calibration"
+
+	boot offset "$offset_media"
+	if ! await 'nothing pooled for this camera yet' "$READY"; then
+		fail "$check" "the file never reached the fallback fit in $READY s" \
+			"$(grep '^seam:' "$log" || echo 'no seam line')" "log: $log"
+		teardown
+		return
+	fi
+	# The fit is a second or two of decode on a thread of its own, and the
+	# pool is written on the report timer, which is every 5 s.
+	if ! await 'kept that fit' $((READY + REPORT)); then
+		fail "$check" "no fit reached the pool in $((READY + REPORT)) s" \
+			"$(grep '^seam:' "$log" | tr '\n' '|')" "log: $log"
+		teardown
+		return
+	fi
+	local azimuths
+	azimuths=$(sed -n 's/^seam:.*kept that fit, \([0-9]*\) azimuths.*/\1/p' "$log" | head -1)
+	quit >/dev/null 2>&1 || teardown
+	if [ ! -s "$pool" ]; then
+		fail "$check" "the fit was kept and no pool was written" "log: $log"
+		return
+	fi
+	if ! grep -q 'patches:' "$pool"; then
+		fail "$check" "the pool has no fit in it" "$(cat "$pool")" "log: $log"
+		return
+	fi
+	pass "$check ($azimuths azimuths, pooled)"
+}
+
 # ---------------------------------------- the checks, with the import failing
 #
 # Issue #124. A frame import can fail for reasons that pass: the box runs out
@@ -2450,6 +2523,7 @@ if [ -n "$media" ]; then
 else
 	welcome
 fi
+a_camera_pointing_elsewhere_is_still_fitted
 dud
 foreign
 
