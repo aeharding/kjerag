@@ -75,30 +75,48 @@ fn main() -> Fallible<()> {
             at.as_secs_f64()
         );
     }
-    match raw_register::select(&map, &pair.lenses, &candidates) {
-        Ok(reading) => {
-            let sigma = [
-                reading.covariance_rad2[0][0].max(0.0).sqrt().to_degrees(),
-                reading.covariance_rad2[1][1].max(0.0).sqrt().to_degrees(),
-            ];
-            println!(
-                "selected: view ({}, {}), body phi {:.2} deg\nraw:      shift [perp {:.4}, epi {:.4}] deg; 1σ [{:.4}, {:.4}] deg\nquality:  r {:.4}, condition {:.2}, selector {:.4}",
-                reading.candidate.view_pixel[0],
-                reading.candidate.view_pixel[1],
-                reading.candidate.node.phi.to_degrees(),
-                reading.shift_rad[0].to_degrees(),
-                reading.shift_rad[1].to_degrees(),
-                sigma[0],
-                sigma[1],
-                reading.correlation,
-                reading.condition,
-                reading.score,
-            );
-            println!(
-                "meaning: raw-lens local registration only; it neither proves a warp model nor changes the renderer."
-            );
+    let supports = options.supports()?;
+    for row in raw_register::select_ladder(&map, &pair.lenses, &candidates, &supports) {
+        let health = row.health;
+        println!(
+            "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\\nhealth:  candidates {}; reference-complete {}; search positions {}; target-complete {}; readings {}; refusals [support {}, aperture {}, peak {}]",
+            row.support.span_deg,
+            row.support.search_deg,
+            row.support.step_deg,
+            health.candidates,
+            health.reference_complete,
+            health.searched_offsets,
+            health.complete_target_patches,
+            health.readings,
+            health.no_complete_patch,
+            health.aperture,
+            health.no_peak,
+        );
+        match row.result {
+            Ok(reading) => {
+                let sigma = [
+                    reading.covariance_rad2[0][0].max(0.0).sqrt().to_degrees(),
+                    reading.covariance_rad2[1][1].max(0.0).sqrt().to_degrees(),
+                ];
+                println!(
+                    "selected: view ({}, {}), body phi {:.2} deg\nraw:      shift [perp {:.4}, epi {:.4}] deg; 1σ [{:.4}, {:.4}] deg\nquality:  r {:.4}, condition {:.2}, selector {:.4}",
+                    reading.candidate.view_pixel[0],
+                    reading.candidate.view_pixel[1],
+                    reading.candidate.node.phi.to_degrees(),
+                    reading.shift_rad[0].to_degrees(),
+                    reading.shift_rad[1].to_degrees(),
+                    sigma[0],
+                    sigma[1],
+                    reading.correlation,
+                    reading.condition,
+                    reading.score,
+                );
+                println!(
+                    "meaning: raw-lens local registration only; it neither proves a warp model nor changes the renderer."
+                );
+            }
+            Err(reason) => println!("refused: {reason:?}; no two-axis registration was inferred"),
         }
-        Err(reason) => println!("refused: {reason:?}; no two-axis registration was inferred"),
     }
     Ok(())
 }
@@ -113,6 +131,8 @@ struct Options {
     size: u32,
     lock: bool,
     seam: Seam,
+    spans: Option<Vec<f64>>,
+    searches: Option<Vec<f64>>,
 }
 
 /// The same three seam paths that `step` and `reframe` expose.  Stage 9's
@@ -149,6 +169,8 @@ impl Options {
             // calibration, as it is in `step`; `factory` is an explicit
             // control rather than an accidental alternate baseline.
             seam: Seam::File,
+            spans: None,
+            searches: None,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -167,6 +189,8 @@ impl Options {
                         _ => Seam::Stored(seam_fit(value)?),
                     }
                 }
+                Some(("span", value)) => out.spans = Some(degrees(value)?),
+                Some(("search", value)) => out.searches = Some(degrees(value)?),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
@@ -188,9 +212,49 @@ impl Options {
     fn size(&self) -> Size {
         Size::new(self.size, self.size)
     }
+    fn supports(&self) -> Fallible<Vec<raw_register::Support>> {
+        let default = raw_register::SUPPORT_LADDER;
+        match (&self.spans, &self.searches) {
+            (None, None) => Ok(default.to_vec()),
+            (spans, searches) => {
+                let spans = spans.as_deref().unwrap_or(&[]);
+                let searches = searches.as_deref().unwrap_or(&[]);
+                let count = spans.len().max(searches.len());
+                if count == 0
+                    || (spans.len() != 1 && spans.len() != count)
+                    || (searches.len() != 1 && searches.len() != count)
+                {
+                    return Err(
+                        "span/search must each provide one value or equally many values".into(),
+                    );
+                }
+                Ok((0..count)
+                    .map(|index| raw_register::Support {
+                        span_deg: spans.get(index).copied().unwrap_or(spans[0]),
+                        search_deg: searches.get(index).copied().unwrap_or(searches[0]),
+                        step_deg: default[0].step_deg,
+                    })
+                    .collect())
+            }
+        }
+    }
 }
+fn degrees(value: &str) -> Fallible<Vec<f64>> {
+    let values: Result<Vec<f64>, _> = value.split(',').map(str::parse).collect();
+    let values = values?;
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err("angular support values must be positive finite degrees".into());
+    }
+    Ok(values)
+}
+
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] \\
+     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[cfg(test)]
 mod tests {
@@ -228,5 +292,30 @@ mod tests {
         assert_eq!(fit.pitch_deg, -0.9);
         assert_eq!(fit.cx_px, -9.5);
         assert_eq!(fit.cy_px, -11.9);
+    }
+
+    #[test]
+    fn angular_supports_are_global_and_pair_or_broadcast() {
+        let paired = options(&["flight.insv", "span=1.2,2.8", "search=1.0,2.4"])
+            .supports()
+            .expect("paired angular ladder");
+        assert_eq!(
+            paired
+                .iter()
+                .map(|support| support.span_deg)
+                .collect::<Vec<_>>(),
+            vec![1.2, 2.8]
+        );
+        assert_eq!(
+            paired
+                .iter()
+                .map(|support| support.search_deg)
+                .collect::<Vec<_>>(),
+            vec![1.0, 2.4]
+        );
+        let broadcast = options(&["flight.insv", "span=2.0", "search=1.0,1.6"])
+            .supports()
+            .expect("one span broadcasts");
+        assert!(broadcast.iter().all(|support| support.span_deg == 2.0));
     }
 }
