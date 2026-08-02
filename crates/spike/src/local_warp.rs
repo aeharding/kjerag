@@ -273,11 +273,10 @@ pub fn register(samples: &[RegistrationSample]) -> Result<Registration, Registra
         {
             return Err(RegistrationRefused::InvalidSample { sample: index });
         }
-        for row in 0..2 {
-            right[row] += sample.weight * sample.gradient[row] * sample.residual;
-            for column in 0..2 {
-                normal[row][column] +=
-                    sample.weight * sample.gradient[row] * sample.gradient[column];
+        for (row, gradient) in sample.gradient.iter().enumerate() {
+            right[row] += sample.weight * gradient * sample.residual;
+            for (column, other) in sample.gradient.iter().enumerate() {
+                normal[row][column] += sample.weight * gradient * other;
             }
         }
     }
