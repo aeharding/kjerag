@@ -500,9 +500,9 @@ fn solve(mut normal: [[f32; 5]; 5], mut right: [f32; 5]) -> [f32; 5] {
 /// One direction's state, as the compute pass writes it and the fragment
 /// shader reads it.
 ///
-/// Seven floats and every one of them is read by something: the two axes and
-/// their two confidences by the pass, the reach only by an instrument, and the
-/// last two by the pooling that follows the measurement. Zero is the state a
+/// Eight floats and every one of them is read by something: the two axes and
+/// their two confidences by the pass, the reach only by an instrument, the
+/// photometry by pooling, and the detail bias by research fusion. Zero is the state a
 /// file opens in and the state a direction that has never correlated stays in,
 /// and a zero on either axis is no bend at all.
 #[repr(C)]
@@ -573,6 +573,11 @@ pub struct Cell {
     /// exposure, so a pooling that leans on the dark patches reads the part
     /// that is not.
     pub lit: f32,
+    /// Signed, aligned luma-detail preference: positive means source 0 holds
+    /// more gradient energy, negative means source 1 does.  It is accepted,
+    /// smoothed and forgotten with [`Self::confidence`], so an unconfirmed
+    /// patch cannot continue preferring either source.
+    pub detail_bias: f32,
 }
 
 impl Cell {
@@ -590,7 +595,7 @@ impl Cell {
             .iter()
             .map(|cell| {
                 format!(
-                    "{} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {}\n",
                     cell.disparity,
                     cell.confidence,
                     cell.reach_m,
@@ -598,12 +603,13 @@ impl Cell {
                     cell.off_conf,
                     cell.tone,
                     cell.lit,
+                    cell.detail_bias,
                 )
             })
             .collect()
     }
 
-    /// The same, read back. `None` on any line that is not seven numbers.
+    /// The same, read back. `None` on any line that is not eight numbers.
     pub fn read(text: &str) -> Option<Vec<Self>> {
         text.lines()
             .map(|line| {
@@ -617,6 +623,7 @@ impl Cell {
                     off_conf: next()?,
                     tone: next()?,
                     lit: next()?,
+                    detail_bias: next()?,
                 })
             })
             .collect()
@@ -1162,6 +1169,7 @@ struct Cell {
   off_conf: f32,
   tone: f32,
   lit: f32,
+  detail_bias: f32,
 };
 
 struct Along {
@@ -1269,6 +1277,31 @@ fn band_confidence(ray: vec3<f32>) -> f32 {
   let a = band.cells[u32(low + i32(AZIMUTHS)) % AZIMUTHS];
   let b = band.cells[u32(low + 1 + i32(AZIMUTHS)) % AZIMUTHS];
   return clamp((1.0 - mix) * a.confidence + mix * b.confidence, 0.0, KEEP) / KEEP;
+}
+
+// The smoothed detail preference over the same circular cells.  The value is
+// evidence-weighted before interpolation: a stale cell can neither choose a
+// source nor dilute a live neighbour. `band_confidence` remains a separate
+// gate at the call site, so this function cannot turn an unconfirmed bias
+// into a visible weight change.
+fn band_detail_bias(ray: vec3<f32>) -> f32 {
+  let body = reframe.view_to_body * ray;
+  let reach = length(vec2<f32>(body.x, body.y));
+  if reach <= 0.0 {
+    return 0.0;
+  }
+  let turn = atan2(body.y, body.x) / TAU * f32(AZIMUTHS);
+  let low = i32(floor(turn));
+  let mix = turn - f32(low);
+  let a = band.cells[u32(low + i32(AZIMUTHS)) % AZIMUTHS];
+  let b = band.cells[u32(low + 1 + i32(AZIMUTHS)) % AZIMUTHS];
+  let wa = (1.0 - mix) * a.confidence;
+  let wb = mix * b.confidence;
+  let total = wa + wb;
+  if total <= 0.0 {
+    return 0.0;
+  }
+  return clamp((wa * a.detail_bias + wb * b.detail_bias) / total, -1.0, 1.0);
 }
 
 // The band with nothing behind it: no bend, and the crossover at the width it
@@ -1451,6 +1484,12 @@ var<workgroup> textured: bool;
 var<workgroup> lit0: array<f32, THREADS>;
 var<workgroup> lit1: array<f32, THREADS>;
 var<workgroup> lit_n: array<f32, THREADS>;
+// Squared central luma gradients in the two patches at the winning,
+// correlation-aligned shift.  Unlike an output-space sharpness statistic,
+// these are measured before blending and name which raw source retained more
+// local detail of the same scene content.
+var<workgroup> detail0: array<f32, THREADS>;
+var<workgroup> detail1: array<f32, THREADS>;
 // The pooling's own two, because it is a second entry point over the same
 // buffer and not a second use of the same patch: what these hold is one
 // number per LANE over the whole ring, not one per sample of one direction.
@@ -1568,6 +1607,8 @@ fn photometry(lane: u32, found: u32) {
   var sum0 = 0.0;
   var sum1 = 0.0;
   var count = 0.0;
+  var energy0 = 0.0;
+  var energy1 = 0.0;
   for (var i = lane; i < PATCH; i += THREADS) {
     let row = i / width;
     let column = i % width;
@@ -1583,10 +1624,25 @@ fn photometry(lane: u32, found: u32) {
     sum0 += a;
     sum1 += b;
     count += 1.0;
+    // A central difference only where all four neighbours are in this same,
+    // accepted patch. The winning shift has already aligned them, so this is
+    // source detail rather than a double-edge detector.
+    if row > 0u && row + 1u < width && column > 0u && column + 1u < width {
+      let a_x = front[row * width + column + 1u] - front[row * width + column - 1u];
+      let a_y = front[(row + 1u) * width + column] - front[(row - 1u) * width + column];
+      let b_x = back[(row + epi) * BACK_ALONG + perp + column + 1u]
+        - back[(row + epi) * BACK_ALONG + perp + column - 1u];
+      let b_y = back[(row + epi + 1u) * BACK_ALONG + perp + column]
+        - back[(row + epi - 1u) * BACK_ALONG + perp + column];
+      energy0 += a_x * a_x + a_y * a_y;
+      energy1 += b_x * b_x + b_y * b_y;
+    }
   }
   lit0[lane] = sum0;
   lit1[lane] = sum1;
   lit_n[lane] = count;
+  detail0[lane] = energy0;
+  detail1[lane] = energy1;
 }
 
 // Zero-mean normalized cross-correlation of the two patches at candidate
@@ -1661,10 +1717,11 @@ fn has_picture() -> bool {
 fn forget(cell: u32, at: Ring) {
   var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0);
+    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0, 0.0);
   }
   held.reach_m = at.reach_m;
   held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
+  held.detail_bias -= held.detail_bias * ease(watch.seconds, time_constant(held.disparity));
   held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
   band.cells[cell] = held;
 }
@@ -1674,7 +1731,7 @@ fn forget(cell: u32, at: Ring) {
 fn settle(cell: u32, at: Ring) {
   var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0);
+    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0, 0.0);
   }
   held.reach_m = at.reach_m;
 
@@ -1733,6 +1790,7 @@ fn settle(cell: u32, at: Ring) {
   let learn_along = select(ease(watch.seconds, TAU_FAR), 1.0, fresh || unread_along);
   if epi_pinned {
     held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
+    held.detail_bias -= held.detail_bias * ease(watch.seconds, time_constant(held.disparity));
   } else {
     // Between whole steps, because a third of a step is exactly the size this
     // is trying to resolve. Rust twin: `super::seam::best_shift`'s `peak`.
@@ -1749,6 +1807,7 @@ fn settle(cell: u32, at: Ring) {
     // argument, and the same answer, as `seam::Correction::land`.
     held.disparity += (read * STEP - held.disparity) * learn;
     held.confidence += (best - held.confidence) * learn;
+    held.detail_bias += (read_detail_bias() - held.detail_bias) * learn;
   }
   if along_pinned {
     held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
@@ -1813,6 +1872,28 @@ fn read_photometry(held: ptr<function, Cell>) {
   }
   (*held).tone = log(sum1 / sum0);
   (*held).lit = sum0 / count;
+}
+
+// A finite, scale-normalized source preference from the two aligned detail
+// energies.  Zero is the only answer when there is no usable texture, so an
+// accepted low-detail patch cannot manufacture a preference. Rust twin:
+// `fusion::quality_bias`.
+fn read_detail_bias() -> f32 {
+  var energy0 = 0.0;
+  var energy1 = 0.0;
+  for (var i = 0u; i < THREADS; i += 1u) {
+    energy0 += detail0[i];
+    energy1 += detail1[i];
+  }
+  if energy0 <= 0.0 || energy1 <= 0.0 {
+    return 0.0;
+  }
+  // Scale first so an instrumented/synthetic high-energy patch cannot make
+  // the sum overflow. Rust twin: `fusion::quality_bias`.
+  let scale = max(energy0, energy1);
+  energy0 /= scale;
+  energy1 /= scale;
+  return clamp((energy0 - energy1) / (energy0 + energy1), -1.0, 1.0);
 }
 
 // The pooled exposure, over the whole ring and over media time. Rust twin:
@@ -2204,6 +2285,7 @@ mod tests {
                 off_conf: 0.0,
                 tone: 0.0,
                 lit: 0.0,
+                detail_bias: 0.0,
             };
             AZIMUTHS
         ];
@@ -2470,7 +2552,24 @@ mod tests {
             off_conf: 0.0,
             tone: gain.ln(),
             lit: brightness,
+            detail_bias: 0.0,
         }
+    }
+
+    #[test]
+    fn cell_round_trip_keeps_the_quality_bias_with_the_other_gpu_state() {
+        let cells = vec![Cell {
+            disparity: 0.1,
+            confidence: 0.8,
+            reach_m: 0.033,
+            off_epi: -0.02,
+            off_conf: 0.7,
+            tone: 0.03,
+            lit: 0.4,
+            detail_bias: -0.25,
+        }];
+        assert_eq!(Cell::read(&Cell::write(&cells)), Some(cells));
+        assert_eq!(std::mem::size_of::<Cell>(), 32);
     }
 
     #[test]
@@ -2628,7 +2727,7 @@ mod tests {
         let shifts = (near - far + 1) as usize * (2 * PERP_STEPS + 1);
         // Plus stage 3's own: three per lane for the photometry the winning
         // shift is read at, and three more for the pooling.
-        let bytes = 4 * (patch + back as usize + shifts + 6 * THREADS);
+        let bytes = 4 * (patch + back as usize + shifts + 8 * THREADS);
         assert!(
             bytes <= 16352,
             "the workgroup wants {bytes} bytes of shared memory",
@@ -2649,6 +2748,7 @@ mod tests {
             off_conf: KEEP,
             tone: 0.0,
             lit: 0.0,
+            detail_bias: 0.0,
         }
     }
 

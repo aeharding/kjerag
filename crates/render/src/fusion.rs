@@ -34,6 +34,64 @@ impl FusionMode {
     }
 }
 
+/// The largest share of an existing two-source handover that a quality read
+/// may transfer in one direction.  It is a bound on a blend decision, not on
+/// geometry: neither source can become invalid and the weights still sum to
+/// one.
+#[allow(
+    dead_code,
+    reason = "the CPU twins exist to prove the GPU-only fusion arithmetic"
+)]
+pub(crate) const MAX_QUALITY_TRANSFER: f32 = 0.35;
+
+/// A signed comparison of aligned source detail energies.
+///
+/// Positive means lens 0 retained more local luma gradient energy; negative
+/// means lens 1 did.  The normalized difference makes exposure scale mostly
+/// cancel and, unlike an absolute sharpness score, has a fixed finite range.
+/// Non-finite or empty measurements refuse to express a preference.
+#[allow(
+    dead_code,
+    reason = "the GPU correlator owns live detail measurement; tests exercise this twin"
+)]
+pub(crate) fn quality_bias(detail0: f32, detail1: f32) -> f32 {
+    if !detail0.is_finite() || !detail1.is_finite() || detail0 <= 0.0 || detail1 <= 0.0 {
+        return 0.0;
+    }
+    // Divide by the larger first: it is algebraically the same normalized
+    // difference but cannot overflow when a synthetic/instrumented input is
+    // near `f32::MAX`.
+    let scale = detail0.max(detail1);
+    let (detail0, detail1) = (detail0 / scale, detail1 / scale);
+    ((detail0 - detail1) / (detail0 + detail1)).clamp(-1.0, 1.0)
+}
+
+/// Reweight an already-valid overlap from correlation confidence and a signed
+/// quality preference.  This is the CPU twin of `fusion_weights` in scene
+/// WGSL.  A sole claimant, absent evidence, or malformed input is unchanged.
+#[allow(
+    dead_code,
+    reason = "the renderer uses its WGSL twin; tests retain the host-side invariant"
+)]
+pub(crate) fn quality_weights(weights: [f32; 2], confidence: f32, bias: f32) -> [f32; 2] {
+    if !weights
+        .iter()
+        .all(|weight| weight.is_finite() && *weight >= 0.0)
+        || weights[0] <= 0.0
+        || weights[1] <= 0.0
+        || !confidence.is_finite()
+        || !bias.is_finite()
+    {
+        return weights;
+    }
+    let transfer =
+        (bias.clamp(-1.0, 1.0) * confidence.clamp(0.0, 1.0) * weights[0].min(weights[1])).clamp(
+            -MAX_QUALITY_TRANSFER * weights[0].min(weights[1]),
+            MAX_QUALITY_TRANSFER * weights[0].min(weights[1]),
+        );
+    [weights[0] + transfer, weights[1] - transfer]
+}
+
 /// One lens's contribution to a fused output pixel.
 ///
 /// `uv` follows the shader's existing [`frame_uv`](super::projection::wgsl)
@@ -231,5 +289,25 @@ mod tests {
         );
 
         assert_eq!(fusion.sources, [Source::REFUSED; MAX_LENSES]);
+    }
+
+    #[test]
+    fn quality_bias_is_signed_bounded_and_refuses_bad_measurements() {
+        assert_eq!(quality_bias(4.0, 4.0), 0.0);
+        assert!(quality_bias(9.0, 1.0) > 0.0);
+        assert!(quality_bias(1.0, 9.0) < 0.0);
+        assert_eq!(quality_bias(0.0, 1.0), 0.0);
+        assert_eq!(quality_bias(f32::NAN, 1.0), 0.0);
+        assert!(quality_bias(f32::MAX, f32::MIN_POSITIVE).is_finite());
+    }
+
+    #[test]
+    fn quality_weights_only_transfer_a_confident_two_source_overlap() {
+        assert_eq!(quality_weights([1.0, 0.0], 1.0, 1.0), [1.0, 0.0]);
+        assert_eq!(quality_weights([0.4, 0.6], 0.0, 1.0), [0.4, 0.6]);
+        let shifted = quality_weights([0.5, 0.5], 1.0, 1.0);
+        assert!(shifted[0] > 0.5 && shifted[1] < 0.5);
+        assert!((shifted[0] + shifted[1] - 1.0).abs() < f32::EPSILON);
+        assert!(shifted.iter().all(|weight| (0.0..=1.0).contains(weight)));
     }
 }

@@ -1816,6 +1816,7 @@ impl Band {
                     off_conf: float(at + 16),
                     tone: float(at + 20),
                     lit: float(at + 24),
+                    detail_bias: float(at + 28),
                 }
             })
             .collect();
@@ -2062,13 +2063,19 @@ fn fusion_weights(weights: vec2<f32>, ray: vec3<f32>) -> vec2<f32> {
   if reframe.fusion_map_mode != 1.0 || weights.x <= 0.0 || weights.y <= 0.0 {
     return weights;
   }
-  // The existing band measures whether these two source patches are the same
-  // content. At the correlator's own confidence gate, choose the source that
-  // calibration already gave the larger claim; below it, interpolate back to
-  // the shipped blend. No image value, residual map, calibration parameter,
-  // or tone value participates in this decision.
-  let dominant = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), weights.x >= weights.y);
-  return mix(weights, dominant, band_confidence(ray));
+  // The compute pass measured raw-luma detail only after the correlator found
+  // the same content in both patches. It returns a signed, finite preference,
+  // not a hard source pick. Confidence gates the transfer and its size is
+  // bounded by the smaller existing claim, so this cannot create a claimant,
+  // move a UV, alter calibrated geometry, or change total exposure.
+  let confidence = band_confidence(ray);
+  let bias = band_detail_bias(ray);
+  let transfer = clamp(
+    bias * confidence * min(weights.x, weights.y),
+    -0.35 * min(weights.x, weights.y),
+    0.35 * min(weights.x, weights.y),
+  );
+  return vec2<f32>(weights.x + transfer, weights.y - transfer);
 }
 
 fn picture(mix: Blend, ratio: vec2<f32>, ray: vec3<f32>) -> vec4<f32> {
@@ -2219,7 +2226,7 @@ mod tests {
         assert_eq!(rolling.axis, [1.0, 0.0]);
     }
 
-    /// The future map is an append-only group-0 ABI change.  It cannot alter
+    /// The future map is an append-only group-0 ABI change. It cannot alter
     /// the current fetches: the only shader occurrence is its declaration.
     #[test]
     fn fusion_map_binding_is_append_only_and_inert() {
@@ -2235,11 +2242,17 @@ mod tests {
         assert!(sampler < map, "map follows the existing sampler");
         assert!(
             !SHADER.contains("textureSample(fusion_residual"),
-            "the dominant-source experiment does not sample a residual map"
+            "the quality-fusion experiment does not sample a residual map"
         );
         assert!(SHADER.contains("fn fusion_weights("));
         assert!(SHADER.contains("band_confidence(ray)"));
+        assert!(SHADER.contains("band_detail_bias(ray)"));
+        assert!(SHADER.contains("min(weights.x, weights.y)"));
+        assert!(SHADER.contains("-0.35 * min(weights.x, weights.y)"));
         assert!(SHADER.contains("weights.x <= 0.0 || weights.y <= 0.0"));
+        let lookup = band::lookup_wgsl();
+        assert!(lookup.contains("detail_bias: f32"));
+        assert!(lookup.contains("fn band_detail_bias"));
     }
 
     #[test]
