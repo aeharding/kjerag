@@ -41,6 +41,7 @@ use std::f32::consts::PI;
 
 use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
 
+use super::fusion::Fusion;
 use super::sampling::Sampling;
 use super::{Camera, Size};
 
@@ -325,11 +326,16 @@ pub struct Reframe {
     /// are two grids and reach 1:1 an octave of zoom apart. [`Sampling`] is
     /// the names they come in.
     sharpen: [f32; 2],
+    /// Fusion is represented by the pre-existing first word of this block's
+    /// trailing padding. It is always [`Fusion::DISABLED_MAP_MODE`]: the GPU
+    /// has neither a map binding nor a path that can select one. Naming the
+    /// word on both ABI sides makes that prohibition reviewable.
+    fusion_map_mode: f32,
     /// A uniform block's size rounds up to its own alignment, which the
     /// matrices in [`LensBlock`] make 16 bytes. WGSL does that itself;
     /// `repr(C)` does not, and the two sizes have to agree or
     /// `min_binding_size` rejects the pipeline.
-    _pad: [f32; 4],
+    _pad: [f32; 3],
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -513,7 +519,8 @@ impl Reframe {
                 .rolling
                 .map_or([0.0; 2], |rolling| rolling.axis.map(|c| c as f32)),
             sharpen: sampling.limits(),
-            _pad: [0.0; 4],
+            fusion_map_mode: Fusion::DISABLED_MAP_MODE,
+            _pad: [0.0; 3],
         }
     }
 
@@ -543,13 +550,19 @@ impl Reframe {
             row_axis: [0.0; 2],
             // Every ray misses every lens, so no plane is ever sampled.
             sharpen: Sampling::default().limits(),
-            _pad: [0.0; 4],
+            fusion_map_mode: Fusion::DISABLED_MAP_MODE,
+            _pad: [0.0; 3],
         }
     }
 
     /// The block as the GPU reads it. Every field is an `f32` and `repr(C)`
     /// packs them, so there are no padding bytes and no invalid patterns.
     pub fn bytes(&self) -> &[u8] {
+        // Construction is private to this module, but keep the only GPU
+        // fusion mode an executable invariant as well as a convention. A
+        // future map cannot become live by writing a nonzero flag into this
+        // block without first changing this check and supplying a binding.
+        debug_assert_eq!(self.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
         unsafe {
             std::slice::from_raw_parts(
                 std::ptr::from_ref(self).cast::<u8>(),
@@ -1652,12 +1665,16 @@ struct Reframe {
   // `Reframe::sharpen`.
   sharpen_luma: f32,
   sharpen_chroma: f32,
+  // The only fusion-map mode the renderer can construct is zero. There is no
+  // map binding and `picture` continues to consume `Blend` directly; this
+  // named ABI word makes that disabled contract explicit. Rust twin:
+  // `Reframe::fusion_map_mode`.
+  fusion_map_mode: f32,
   // WGSL rounds this block's size up to its own 16-byte alignment. Rust twin:
   // `Reframe::_pad`, which is what makes the two sizes agree.
   pad0: f32,
   pad1: f32,
   pad2: f32,
-  pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -3664,6 +3681,39 @@ pub(crate) mod tests {
         // 288 before the band's two fields, which add a padded mat3x3 and a
         // padded vec3 (issue #103).
         assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16);
+    }
+
+    #[test]
+    fn every_uploaded_reframe_explicitly_disables_fusion_maps() {
+        let reframe = fixture(Camera::default());
+        let blank = Reframe::blank(WIDE, false);
+
+        assert_eq!(reframe.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
+        assert_eq!(blank.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
+        // `bytes` is the exact slice passed to `Queue::write_buffer`; this
+        // also executes the upload invariant above for both constructors.
+        assert_eq!(reframe.bytes().len(), std::mem::size_of::<Reframe>());
+        assert_eq!(blank.bytes().len(), std::mem::size_of::<Reframe>());
+    }
+
+    #[test]
+    fn disabled_fusion_mode_occupies_the_declared_wgsl_uniform_word() {
+        // The preceding fields occupy 336 bytes under WGSL uniform layout:
+        // two 112-byte lenses, a padded mat3x3, padded baseline, `Screen`,
+        // four scalar frame fields, `row_axis`, and `sharpen`.
+        assert_eq!(std::mem::offset_of!(Reframe, fusion_map_mode), 336);
+
+        let shader = wgsl();
+        let sharpen = shader
+            .find("sharpen_chroma: f32,")
+            .expect("WGSL Reframe has sharpen_chroma");
+        let fusion = shader
+            .find("fusion_map_mode: f32,")
+            .expect("WGSL Reframe has fusion_map_mode");
+        let padding = shader
+            .find("pad0: f32,")
+            .expect("WGSL Reframe has trailing padding");
+        assert!(sharpen < fusion && fusion < padding);
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {

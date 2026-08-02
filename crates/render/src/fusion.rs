@@ -1,16 +1,17 @@
 //! The per-source representation of a seam fusion decision.
 //!
-//! This is intentionally a CPU-only, crate-private model for now.  The
-//! renderer continues to consume [`Blend`](super::Blend) directly, so merely
-//! constructing [`Fusion::disabled`] cannot change a sampled coordinate, a
-//! blend weight, or the output pixels.  Keeping the identity case explicit
-//! gives a later, evidence-gated fusion map one typed place to add a source
-//! coordinate residual without turning a screen-space adjustment into part of
-//! the calibrated projection.
+//! The renderer carries [`Self::DISABLED_MAP_MODE`] in its existing uniform
+//! block, but does not read a fusion map and continues to consume
+//! [`Blend`](super::Blend) directly. Thus merely constructing
+//! [`Fusion::disabled`] cannot change a sampled coordinate, a blend weight,
+//! or the output pixels. Keeping the identity case explicit gives a later,
+//! evidence-gated fusion map one typed place to add a source coordinate
+//! residual without turning a screen-space adjustment into part of the
+//! calibrated projection.
 
 #![allow(
     dead_code,
-    reason = "the identity representation deliberately precedes GPU plumbing"
+    reason = "only the disabled mode is wired; the per-pixel identity representation awaits evidence-gated map use"
 )]
 
 use super::{Blend, MAX_LENSES, Size};
@@ -49,6 +50,13 @@ pub(crate) struct Fusion {
 }
 
 impl Fusion {
+    /// Uniform value which prohibits a fusion-map lookup.
+    ///
+    /// This is deliberately the only mode the renderer can construct. It
+    /// occupies pre-existing ABI padding in [`super::Reframe`], so carrying it
+    /// adds no binding and cannot make a map available by accident.
+    pub(crate) const DISABLED_MAP_MODE: f32 = 0.0;
+
     /// Copy the calibrated [`Blend`] as an identity source-fusion decision.
     ///
     /// A source is active only if the existing blend claims it, its landing is
