@@ -49,6 +49,15 @@ use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 /// The sampler binding, which sits after every lens's two planes.
 const SAMPLER_BINDING: u32 = 1 + 2 * MAX_LENSES as u32;
 
+/// The map binding follows the shared picture sampler.  It is deliberately a
+/// texture rather than a field in [`Reframe`]: a residual is owned by one
+/// capture's body-sphere coordinates, never by the calibrated projection or
+/// a pipeline that may later draw another capture.
+const FUSION_MAP_BINDING: u32 = SAMPLER_BINDING + 1;
+
+/// `(du, dv, confidence, reserved)` needs signed, filterable channels.
+const FUSION_MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 /// Frames kept alive behind the one being drawn.
 ///
 /// An imported texture aliases the decoder's surface: dropping the
@@ -1094,6 +1103,10 @@ pub struct ScenePipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// A zero residual and zero confidence.  It is bound on every draw while
+    /// map mode remains zero, so a future, explicitly enabled map cannot
+    /// accidentally inherit a previous capture's texture.
+    fusion_identity: wgpu::Texture,
     uniforms: wgpu::Buffer,
     /// The seam band, measured on the frame the draw is about to sample and
     /// dispatched from `prepare` (issue #103).
@@ -1236,13 +1249,22 @@ impl ScenePipeline {
             mapped_at_creation: false,
         });
         let blank = blank_planes(device);
+        let fusion_identity = blank_fusion_map(device);
         let band = Band::new(device, &layout);
-        let bind_group = bind(device, &layout, &uniforms, [&blank; MAX_LENSES], &sampler);
+        let bind_group = bind(
+            device,
+            &layout,
+            &uniforms,
+            [&blank; MAX_LENSES],
+            &sampler,
+            &fusion_identity,
+        );
 
         Self {
             pipeline,
             layout,
             sampler,
+            fusion_identity,
             uniforms,
             band,
             blank,
@@ -1589,6 +1611,7 @@ impl ScenePipeline {
                     // for every binding the layout declares.
                     std::array::from_fn(|lens| planes.get(lens).unwrap_or(&self.blank)),
                     &self.sampler,
+                    &self.fusion_identity,
                 );
                 self.live.push_front(Live {
                     frames: view.frames.clone(),
@@ -1787,6 +1810,7 @@ fn bind(
     uniforms: &wgpu::Buffer,
     lenses: [&Planes; MAX_LENSES],
     sampler: &wgpu::Sampler,
+    fusion_map: &wgpu::Texture,
 ) -> wgpu::BindGroup {
     // The views have to outlive the descriptor that borrows them, so they are
     // built before it rather than inside it.
@@ -1811,6 +1835,11 @@ fn bind(
     entries.push(wgpu::BindGroupEntry {
         binding: SAMPLER_BINDING,
         resource: wgpu::BindingResource::Sampler(sampler),
+    });
+    let fusion_view = fusion_map.create_view(&Default::default());
+    entries.push(wgpu::BindGroupEntry {
+        binding: FUSION_MAP_BINDING,
+        resource: wgpu::BindingResource::TextureView(&fusion_view),
     });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scene"),
@@ -1855,6 +1884,7 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         count: None,
     });
+    entries.push(texture(FUSION_MAP_BINDING));
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("scene"),
         entries: &entries,
@@ -1930,6 +1960,27 @@ fn blank_planes(device: &wgpu::Device) -> Planes {
     }
 }
 
+/// One body-sphere texel containing `(du, dv, confidence, reserved) = 0`.
+///
+/// WebGPU initializes texture memory before exposing it to a shader.  The
+/// map has no consumer while `Reframe::fusion_map_mode` is zero, but binding
+/// this explicit identity resource keeps the later enable boundary
+/// capture-owned and makes an omitted map fail closed.
+fn blank_fusion_map(device: &wgpu::Device) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fusion identity"),
+        size: Size::new(1, 1).extent(),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // Signed sub-pixel offsets need a floating-point representation; the
+        // alpha channel is reserved for the map's confidence.
+        format: FUSION_MAP_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
 /// The half of the shader that belongs to this file. `projection::WGSL`
 /// declares the uniform block, the view ray and the forward map, and is
 /// concatenated ahead of this.
@@ -1957,6 +2008,10 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 @group(0) @binding(3) var luma1: texture_2d<f32>;
 @group(0) @binding(4) var chroma1: texture_2d<f32>;
 @group(0) @binding(5) var samp: sampler;
+// Capture-owned body-sphere residual: `(du, dv, confidence, reserved)`.
+// It is intentionally declared but unread: every constructor sets
+// `reframe.fusion_map_mode` to zero, and no nonzero mode exists yet.
+@group(0) @binding(6) var fusion_residual: texture_2d<f32>;
 
 // Each lens's picture at that ray, mixed by its weight, or the room where no
 // lens has the ray. A lens weighted zero is not sampled at all, so outside the
@@ -2121,5 +2176,25 @@ mod tests {
             "{turn} degrees across the readout"
         );
         assert_eq!(rolling.axis, [1.0, 0.0]);
+    }
+
+    /// The future map is an append-only group-0 ABI change.  It cannot alter
+    /// the current fetches: the only shader occurrence is its declaration.
+    #[test]
+    fn fusion_map_binding_is_append_only_and_inert() {
+        assert_eq!(FUSION_MAP_BINDING, SAMPLER_BINDING + 1);
+        assert_eq!(FUSION_MAP_FORMAT, wgpu::TextureFormat::Rgba16Float);
+
+        let sampler = SHADER
+            .find("@group(0) @binding(5) var samp: sampler;")
+            .expect("scene declares the shared sampler");
+        let map = SHADER
+            .find("@group(0) @binding(6) var fusion_residual: texture_2d<f32>;")
+            .expect("scene declares the residual map");
+        assert!(sampler < map, "map follows the existing sampler");
+        assert!(
+            !SHADER.contains("textureSample(fusion_residual"),
+            "disabled map is not sampled by the current renderer"
+        );
     }
 }
