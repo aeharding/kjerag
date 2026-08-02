@@ -328,7 +328,7 @@ pub struct Reframe {
     sharpen: [f32; 2],
     /// Fusion is represented by the pre-existing first word of this block's
     /// trailing padding. It selects only an evidence-gated change to the
-    /// existing overlap weights; it is never a coordinate or colour control.
+    /// existing overlap weights or a capture-owned research residual map.
     fusion_map_mode: f32,
     /// A uniform block's size rounds up to its own alignment, which the
     /// matrices in [`LensBlock`] make 16 bytes. WGSL does that itself;
@@ -557,11 +557,10 @@ impl Reframe {
     /// The block as the GPU reads it. Every field is an `f32` and `repr(C)`
     /// packs them, so there are no padding bytes and no invalid patterns.
     pub fn bytes(&self) -> &[u8] {
-        // This word is an enum ABI, not an arbitrary shader control. In
-        // particular neither value can make the bound residual texture live.
+        // This word is an enum ABI, not an arbitrary shader control.
         debug_assert!(matches!(
             self.fusion_map_mode,
-            Fusion::DISABLED_MAP_MODE | Fusion::DOMINANT_MODE
+            Fusion::DISABLED_MAP_MODE | Fusion::DOMINANT_MODE | Fusion::DENSE_RESIDUAL_MODE
         ));
         unsafe {
             std::slice::from_raw_parts(
@@ -3698,15 +3697,18 @@ pub(crate) mod tests {
         let reframe = fixture(Camera::default());
         let blank = Reframe::blank(WIDE, false);
         let detail_guided = fixture(Camera::default()).with_fusion_mode(FusionMode::Dominant);
+        let dense_residual = fixture(Camera::default()).with_fusion_mode(FusionMode::DenseResidual);
 
         assert_eq!(reframe.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
         assert_eq!(blank.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
         assert_eq!(detail_guided.fusion_map_mode, Fusion::DOMINANT_MODE);
+        assert_eq!(dense_residual.fusion_map_mode, Fusion::DENSE_RESIDUAL_MODE);
         // `bytes` is the exact slice passed to `Queue::write_buffer`; this
         // also executes the upload invariant above for both constructors.
         assert_eq!(reframe.bytes().len(), std::mem::size_of::<Reframe>());
         assert_eq!(blank.bytes().len(), std::mem::size_of::<Reframe>());
         assert_eq!(detail_guided.bytes().len(), std::mem::size_of::<Reframe>());
+        assert_eq!(dense_residual.bytes().len(), std::mem::size_of::<Reframe>());
     }
 
     #[test]

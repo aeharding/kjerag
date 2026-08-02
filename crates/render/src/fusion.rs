@@ -23,6 +23,11 @@ pub enum FusionMode {
     /// In a correlated overlap, prefer the calibrated source that already
     /// has the larger claim.
     Dominant,
+    /// Apply a capture-owned source-coordinate residual to lens 1.
+    ///
+    /// This research-only path is identity until a caller supplies a measured
+    /// residual texture with positive confidence.
+    DenseResidual,
 }
 
 impl FusionMode {
@@ -30,6 +35,7 @@ impl FusionMode {
         match self {
             Self::Disabled => 0.0,
             Self::Dominant => 1.0,
+            Self::DenseResidual => 2.0,
         }
     }
 }
@@ -138,6 +144,8 @@ impl Fusion {
     pub(crate) const DISABLED_MAP_MODE: f32 = 0.0;
 
     pub(crate) const DOMINANT_MODE: f32 = 1.0;
+    /// Uniform value which permits only lens 1's source-coordinate residual.
+    pub(crate) const DENSE_RESIDUAL_MODE: f32 = 2.0;
 
     /// Copy the calibrated [`Blend`] as an identity source-fusion decision.
     ///

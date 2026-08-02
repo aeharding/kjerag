@@ -16,6 +16,8 @@ mod offscreen;
 mod picture;
 mod skyline;
 
+/// CPU-only bounded NCC estimator for a future capture-owned residual map.
+pub mod dense_residual;
 /// Pure conservative far-field classification for Stage 9 temporal stereo.
 pub mod far_field;
 pub mod local_warp;

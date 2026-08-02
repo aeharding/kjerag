@@ -2078,6 +2078,29 @@ fn fusion_weights(weights: vec2<f32>, ray: vec3<f32>) -> vec2<f32> {
   return vec2<f32>(weights.x + transfer, weights.y - transfer);
 }
 
+// Residual values are capture-owned body-sphere coordinates, rather than
+// viewport coordinates. A map stays fixed while the pilot pans or changes
+// field of view, and cannot become a hidden change to calibrated projection.
+fn fusion_map_uv(ray: vec3<f32>) -> vec2<f32> {
+  let azimuth = atan2(ray.x, ray.z);
+  let elevation = asin(clamp(ray.y, -1.0, 1.0));
+  return vec2<f32>(azimuth / 6.28318530718 + 0.5, 0.5 - elevation / 3.14159265359);
+}
+
+// Mode two applies a measured normalized UV residual to lens 1 only. The
+// identity resource has zero confidence, which is an exact no-op. This does
+// not alter the ray, calibrated landing, validity, blend weights, or lens 0.
+fn fusion_lens1_uv(uv: vec2<f32>, ray: vec3<f32>) -> vec2<f32> {
+  if reframe.fusion_map_mode != 2.0 {
+    return uv;
+  }
+  let residual = textureSampleLevel(fusion_residual, samp, fusion_map_uv(ray), 0.0);
+  if residual.z <= 0.0 {
+    return uv;
+  }
+  return uv + residual.xy * residual.z;
+}
+
 fn picture(mix: Blend, ratio: vec2<f32>, ray: vec3<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
@@ -2093,7 +2116,7 @@ fn picture(mix: Blend, ratio: vec2<f32>, ray: vec3<f32>) -> vec4<f32> {
     total += weights.x;
   }
   if weights.y > 0.0 {
-    rgb += (weights.y * tone.y) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    rgb += (weights.y * tone.y) * nv12(luma1, chroma1, fusion_lens1_uv(frame_uv(mix.landings[1].pixel), ray), ratio.y);
     total += weights.y;
   }
   // The room around the ball, written rather than painted: transparent black,
@@ -2226,8 +2249,8 @@ mod tests {
         assert_eq!(rolling.axis, [1.0, 0.0]);
     }
 
-    /// The future map is an append-only group-0 ABI change. It cannot alter
-    /// the current fetches: the only shader occurrence is its declaration.
+    /// The map is an append-only group-0 ABI change. It has a dedicated mode
+    /// and can alter only lens 1's source UV before that lens's NV12 fetch.
     #[test]
     fn fusion_map_binding_is_append_only_and_inert() {
         assert_eq!(FUSION_MAP_BINDING, SAMPLER_BINDING + 1);
@@ -2240,10 +2263,10 @@ mod tests {
             .find("@group(0) @binding(6) var fusion_residual: texture_2d<f32>;")
             .expect("scene declares the residual map");
         assert!(sampler < map, "map follows the existing sampler");
-        assert!(
-            !SHADER.contains("textureSample(fusion_residual"),
-            "the quality-fusion experiment does not sample a residual map"
-        );
+        assert!(SHADER.contains("textureSampleLevel(fusion_residual"));
+        assert!(SHADER.contains("fn fusion_lens1_uv("));
+        assert!(SHADER.contains("reframe.fusion_map_mode != 2.0"));
+        assert!(SHADER.contains("fusion_lens1_uv(frame_uv(mix.landings[1].pixel), ray)"));
         assert!(SHADER.contains("fn fusion_weights("));
         assert!(SHADER.contains("band_confidence(ray)"));
         assert!(SHADER.contains("band_detail_bias(ray)"));
@@ -2261,6 +2284,8 @@ mod tests {
         assert_eq!(scene.fusion_mode(), FusionMode::Disabled);
         scene.set_fusion_mode(FusionMode::Dominant);
         assert_eq!(scene.fusion_mode(), FusionMode::Dominant);
+        scene.set_fusion_mode(FusionMode::DenseResidual);
+        assert_eq!(scene.fusion_mode(), FusionMode::DenseResidual);
         scene.set_fusion_mode(FusionMode::Disabled);
         assert_eq!(scene.fusion_mode(), FusionMode::Disabled);
     }
