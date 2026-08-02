@@ -1202,6 +1202,92 @@ mod tests {
         )
     }
 
+    fn central_site(map: &Reframe) -> StripSite {
+        StripSite {
+            root: visible_candidates(map, 320, 320, [0.0, 0.0, -0.033])
+                .into_iter()
+                .next()
+                .expect("the crossover fixture exposes a root"),
+            offset_rad: [0.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn central_response_is_zero_when_both_perturbations_are_the_base_map() {
+        let base = crossover_map(0.0);
+        let response = central_site_response(&base, &base, &base, central_site(&base), 0.25)
+            .expect("the fixture has a regular central lens-1 projection");
+        assert_eq!(
+            response,
+            CameraDisplacement {
+                epi: 0.0,
+                perp: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn central_response_is_finite_and_reverses_with_the_known_map_perturbation() {
+        let base = crossover_map(0.0);
+        let minus = crossover_map(-0.5);
+        let plus = crossover_map(0.5);
+        let site = central_site(&base);
+        let forward = central_site_response(&base, &minus, &plus, site, 0.5)
+            .expect("the pitched maps retain this fixed physical site");
+        let reverse = central_site_response(&base, &plus, &minus, site, 0.5)
+            .expect("reversing the maps retains the same fixed physical site");
+        assert!(forward.epi.is_finite() && forward.perp.is_finite());
+        assert!(forward.epi.abs() > 1e-8 || forward.perp.abs() > 1e-8);
+        assert!((forward.epi + reverse.epi).abs() < 1e-9);
+        assert!((forward.perp + reverse.perp).abs() < 1e-9);
+    }
+
+    #[test]
+    fn central_response_refuses_invalid_step_singular_axes_and_projected_out_sites() {
+        let base = crossover_map(0.0);
+        let site = central_site(&base);
+        assert_eq!(
+            central_site_response(&base, &base, &base, site, 0.0),
+            Err(ResponseRefused::InvalidStep)
+        );
+
+        let singular = StripSite {
+            root: Candidate {
+                node: Node {
+                    perp: [0.0; 3],
+                    epi: [0.0; 3],
+                    ..site.root.node
+                },
+                ..site.root
+            },
+            ..site
+        };
+        assert_eq!(
+            central_site_response(&base, &base, &base, singular, 0.25),
+            Err(ResponseRefused::Singular)
+        );
+
+        let body = [0.0, 0.0, 1.0];
+        let out = StripSite {
+            root: Candidate {
+                node: node([0.0, 0.0, -0.033], body),
+                view_ray: base.view_ray_from_body(body.map(|axis| axis as f32)),
+                view_pixel: [0.0, 0.0],
+            },
+            offset_rad: [0.0, 0.0],
+        };
+        assert!(
+            !base
+                .project(1, base.view_ray_from_body(body.map(|axis| axis as f32)))
+                .inside,
+            "the fixture's north-pole body ray must be outside lens 1"
+        );
+        assert_eq!(
+            central_site_response(&base, &base, &base, out, 0.25),
+            Err(ResponseRefused::ProjectedOut)
+        );
+    }
+
     #[test]
     fn traced_candidates_are_actual_two_lens_weight_roots() {
         let map = crossover_map(3.0);
