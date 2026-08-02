@@ -210,6 +210,34 @@ it is already sufficient to **refuse** deriving an applied camera-frame warp
 from the current raw residual.  A static calibrated displacement may not be
 fitted to an effect that changes with the proxy for scene depth.
 
+## Stage 9 decision on the available corpus
+
+**No local warp is authorized from the current four owner references.**  The
+same depth-linked evolution appeared at both April references under the same
+explicit May fit: at 43.143 the near/mid/far epipolar means were `+0.7812`,
+`+0.2005`, and `-0.1725` degrees; at 45.145 they were `+0.2369`, `+0.2638`,
+and `+0.0884` degrees.  Each run retained its own sites and refusals and was
+reported separately.  The May one-step temporal replay closure also passed:
+BAD closed all 153 fixed sites at mean `[epi -0.0007, perp +0.0081]` degrees;
+GOOD closed 131, with two unavailable forward tracks and two reverse refusals,
+at `[+0.0051, -0.0386]`.  This establishes that the tracker itself is not
+merely drifting while the depth strata move.
+
+The owner views face roughly opposite seam azimuths, so they are not
+same-feature cross-view pairs.  More importantly, every available reference
+exhibits a depth/disparity-linked raw effect.  It is therefore unsafe to turn
+that raw disparity into a deterministic camera-frame residual: doing so would
+bake scene parallax into the seam and fail the zero-outside-support and
+held-out-view rules.  Stage 9 has produced a reusable instrument and a refusal,
+not an applied geometry change.
+
+An applied follow-up needs new evidence: overlapping views of the same
+physical feature (or a controlled static capture), under one stored/pooled
+seam fit, with at least four independent 2-D features.  It must show a
+repeatable residual that is independent of depth stratum and predicts held-out
+features/captures.  Until then, `feat/warp` must not add a local warp or merge
+one as a seam fix.
+
 For a shared-pose comparison across captures, `seam=file` is not a valid
 baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
