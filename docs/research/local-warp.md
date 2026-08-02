@@ -238,6 +238,50 @@ repeatable residual that is independent of depth stratum and predicts held-out
 features/captures.  Until then, `feat/warp` must not add a local warp or merge
 one as a seam fix.
 
+## Required controlled-capture protocol
+
+The next experiment is a *paired-observation* capture, not another selection
+of two attractive seam screenshots.  Before looking at a registration score,
+record the following manifest alongside the capture: the two view poses, exact
+PTS anchor and replay frame IDs, one explicit stored or pooled `seam=` fit,
+the support/search rung, and the feature and hold-out assignments.  The same
+fit is supplied to every view and every replay; `seam=file` is prohibited.
+
+1. Capture a static scene from two overlapping views so that each declared
+   physical feature is visible in both raw lens observations at the same PTS.
+   Declare at least four spatially distinct, textured, non-aperture features
+   before fitting.  Each is one two-axis correspondence with its full 2-by-2
+   covariance; multiple samples of an edge, or of one object patch, are not
+   independent features.
+2. Declare the depth bins before registration: near under 3 m, mid 3--10 m,
+   far at least 10 m, plus **Unplaceable**.  Retain every refusal and
+   unplaceable feature in the report.  A depth-independent claim needs
+   accepted features in every stratum it claims to cover; absent strata narrow
+   the claim rather than being pooled away.
+3. Track those same declared features over the predeclared contiguous replay
+   frames.  Do not re-trace, replace, or texture-select a feature after the
+   anchor.  Run both forward and reverse tracking, report per-feature
+   forward/backward closure with summed covariance, and refuse a feature that
+   cannot close.  This control distinguishes tracker drift from a repeatable
+   camera-frame residual.
+4. Split by physical feature *and* by capture/replay before fitting.  Fit the
+   shared five-knob pose, and only a subsequently proposed bounded warp, on
+   the development partition.  Freeze support, taper, axes, fit parameters,
+   and condition rule before opening the hold-out partition.  No held-out
+   feature may be used to choose a site, tune a threshold, or refit either
+   model.
+5. Accept neither model on an average alone.  On the held-out features and
+   held-out replay/capture, report the covariance-normalized residual by depth
+   stratum, pose prediction, local-model prediction, and closure.  A local
+   warp is eligible only if the global-pose model is rejected by the calibrated
+   controls, its residual is repeatable across time and depth rather than
+   parallax-linked, and it predicts every predeclared held-out group without
+   moving the defect elsewhere.  Otherwise the result is a refusal.
+
+This protocol supplies the missing physical correspondence and independence;
+the current May/April opposite-yaw views do not.  It does not authorize an
+implementation change by itself.
+
 For a shared-pose comparison across captures, `seam=file` is not a valid
 baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
