@@ -200,19 +200,21 @@ assigned a made-up depth.  No depth-invariance claim is possible from this
 count alone.  The next report uses predeclared near (under 3 m), mid (3--10
 m), and far (at least 10 m) strata and retains the unplaceable population.
 
-The fixed-stratum evolution result is adverse to a static local warp on both
-May sides.  BAD's four-transition means were near `+0.3872`, mid `+0.2712`,
-and far `-0.0119` degrees on the epipolar axis (4, 7, and 3 anchor tracks).
-GOOD independently gave `+0.3417`, `+0.2779`, and `+0.0532` degrees (9, 18,
-and 10 anchors).  The populations are small and the forward temporal closure
-control remains outstanding, so this is not a final physical measurement;
-it is already sufficient to **refuse** deriving an applied camera-frame warp
-from the current raw residual.  A static calibrated displacement may not be
-fitted to an effect that changes with the proxy for scene depth.
+The fixed-stratum evolution result rules out fitting one warp to **all** raw
+depths: BAD's four-transition means were near `+0.3872`, mid `+0.2712`, and
+the instrument's current `far >=10 m` bucket `-0.0119` degrees on the
+epipolar axis (4, 7, and 3 anchor tracks); GOOD independently gave `+0.3417`,
+`+0.2779`, and `+0.0532` degrees (9, 18, and 10 anchors).  It does **not**
+settle the infinity-only question.  Ten metres is terrain, not the horizon;
+the present far proxy is an upper distance bound rather than proof a feature
+is beyond 300 m, and `Unplaceable` includes the zero/uncertain disparity that
+infinity can produce.  These numbers therefore refuse an all-depth warp, not
+a far-field-only candidate.
 
-## Stage 9 decision on the available corpus
+## Stage 9 decision on the available all-depth corpus
 
-**No local warp is authorized from the current four owner references.**  The
+**No all-depth local warp is authorized from the current four owner
+references.**  The
 same depth-linked evolution appeared at both April references under the same
 explicit May fit: at 43.143 the near/mid/far epipolar means were `+0.7812`,
 `+0.2005`, and `-0.1725` degrees; at 45.145 they were `+0.2369`, `+0.2638`,
@@ -224,19 +226,21 @@ at `[+0.0051, -0.0386]`.  This establishes that the tracker itself is not
 merely drifting while the depth strata move.
 
 The owner views face roughly opposite seam azimuths, so they are not
-same-feature cross-view pairs.  More importantly, every available reference
-exhibits a depth/disparity-linked raw effect.  It is therefore unsafe to turn
-that raw disparity into a deterministic camera-frame residual: doing so would
-bake scene parallax into the seam and fail the zero-outside-support and
-held-out-view rules.  Stage 9 has produced a reusable instrument and a refusal,
-not an applied geometry change.
+same-feature cross-view pairs.  The all-depth raw effect is parallax-linked,
+so turning it into a deterministic camera-frame residual would bake terrain
+parallax into the seam.  Stage 9 has produced a reusable instrument and an
+all-depth refusal, not an applied geometry change.  The far-field seam problem
+remains open.
 
-An applied follow-up needs new evidence: overlapping views of the same
-physical feature (or a controlled static capture), under one stored/pooled
-seam fit, with at least four independent 2-D features.  It must show a
-repeatable residual that is independent of depth stratum and predicts held-out
-features/captures.  Until then, `feat/warp` must not add a local warp or merge
-one as a seam fix.
+The far-field follow-up needs a stricter classification, not a calibration
+scene: `ProvenFar300` only when a predeclared one-sided maximum disparity
+still implies a distance of at least 300 m; separate `FiniteButNotFar`,
+`Uncertain`, and invalid populations; and an explicit stable sky/earth
+horizon class.  Horizon measurements are one-dimensional edge-normal
+acceptance evidence, never invented 2-D pose rows.  A candidate can use only
+fixed, textured `ProvenFar300` sites with PTS lock, reciprocal and
+forward/reverse closure, covariance, and held-outs.  Until then, `feat/warp`
+must not add a local warp or merge one as a seam fix.
 
 ## Required controlled-capture protocol
 
