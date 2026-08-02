@@ -21,6 +21,16 @@ five-knob pose explain all of those crossings within the tracing error? If it
 cannot, is the residue a smooth, camera-frame-local geometric displacement
 with finite support rather than a view-specific adjustment?
 
+That question has an observability gate. Four horizon crossings are four
+**scalar edge-normal** constraints, not four two-axis observations. They
+cannot reject a five-knob map: their Jacobian has rank at most four and no
+residual degrees of freedom. `band::Along` also has five free harmonic terms;
+it is a smooth residual field, not a three-knob pose that can be assumed
+instead. Stage 9 needs either three or more true two-axis correspondences, or
+at least six independent, nonparallel scalar features whose five-knob
+Jacobian is well-conditioned. A horizon is acceptance evidence, never a
+substitute for its missing tangent measurement.
+
 ## First deliverable
 
 `kjerag-spike --bin local-warp` is an instruments-only deliverable. It takes
@@ -76,6 +86,16 @@ promoted to a displacement, and the sweep does not choose a rung or a view.
 Target coverage is evaluated at each candidate shift, not over the enclosing
 search rectangle: unavailable offsets are omitted, while a maximum on the
 declared search rail, a tied maximum, or no complete target patch refuses.
+
+Raw coverage is itself a result. Shrinking an angular patch does not create
+overlap, and a lens-separated *rendered* image would be contaminated by the
+pass's bend, blend, tone, colour conversion and sampling. The evidence source
+remains synchronized raw planes projected through the warmed `Reframe` map.
+The next diagnostic emits CPU-only per-lens valid masks and a per-candidate
+coverage census. A valid sample is exactly `Landing.inside &&
+Plane::at(...).is_some()`; renderer cap pretests and blend weights are not
+part of it. The raw pair's PTS must equal the warmed frame for a geometric
+reading; a loose warning cannot promote it to evidence.
 
 This does **not** yet make a shared pose Jacobian, establish an empirically
 calibrated condition threshold, or infer/apply a warp. Its uncertainty is the
