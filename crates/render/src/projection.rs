@@ -1743,10 +1743,6 @@ struct Band {
   // of the seam plane, which is what fades the colour field.
   azimuth: vec2<f32>,
   off_seam: f32,
-  // What the two lenses still differ by at this direction after the pooled
-  // gain, per channel, in codes of 1: the additive term, read where it was
-  // measured (issue #103, stage 8). Rust twin: `band::Cell::offset`.
-  lift: vec3<f32>,
 };
 
 // x right, y down, z forward, matching the lens frame the model projects in.

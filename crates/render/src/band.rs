@@ -525,6 +525,104 @@ impl Along {
     }
 }
 
+/// The additive term round the seam, per channel, as a shape that **cannot**
+/// stripe (issue #103, stage 8, after the owner rejected the per-direction
+/// form).
+///
+/// **What went wrong.** Stage 8's first two forms applied [`Cell::offset`] at
+/// the direction it was measured at. Each direction's reading carries its own
+/// noise, and a field applied over a wide support paints that noise along the
+/// whole sweep of the direction it belongs to: the owner saw **dark streaks
+/// running away from the seam** across his soil and rejected the branch. It is
+/// stage 5's scalloping, on the photometric axis, and it was invisible to every
+/// acceptance statistic in the campaign because all of them straddle the seam
+/// and none of them looked at the field's own interior
+/// (`kjerag-spike --bin colour`, the interior block).
+///
+/// **What the measurement actually supported.** The per-direction form was
+/// justified by a residual of 4.2 to 5.5 codes rms round the ring against a
+/// frame-to-frame noise floor of 0.8 to 1.0. That floor was measured between
+/// CONSECUTIVE frames, where the content at a direction is nearly the same, so
+/// it measured the sensor and not the content: what a misregistration costs a
+/// photometry is the content's own gradient across the window, and on textured
+/// soil that is most of the residual. Read at instants far enough apart for the
+/// content to have changed, what persists at a direction is far less than what
+/// the ring residual claimed.
+///
+/// So the shape is the one the geometry uses and stage 7 used: a constant, one
+/// cycle of the azimuth and two. Five terms per channel is not a taste - it is
+/// the harmonic content a relative property of two cameras can have - and
+/// nothing outside it can be drawn as a stripe because nothing outside it
+/// exists.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Glare {
+    /// Per channel, in R, G, B order, five coefficients in codes of 1: the
+    /// constant, then the cosine and sine of one cycle, then of two.
+    pub terms: [f32; 15],
+    /// How many directions' worth of evidence is behind the fit.
+    pub evidence: f32,
+}
+
+impl Glare {
+    /// The additive term at one azimuth, per channel, in codes of 1, from that
+    /// azimuth's own cosine and sine - which a fragment already has.
+    ///
+    /// WGSL twin: `glare_at`.
+    pub fn at(&self, cos: f32, sin: f32) -> [f32; 3] {
+        let basis = [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+        std::array::from_fn(|channel| {
+            (0..5)
+                .map(|term| self.terms[5 * channel + term] * basis[term])
+                .sum::<f32>()
+                .clamp(-LIMIT_OFF, LIMIT_OFF)
+        })
+    }
+
+    /// The whole ring's additive readings as one field per channel: the same
+    /// weighted least squares [`Along::fit`] runs, over [`Cell::offset`].
+    ///
+    /// **Rust twin of the `pool_glare` entry point.**
+    pub fn fit(cells: &[Cell]) -> Self {
+        let mut terms = [0.0f32; 15];
+        let mut evidence = 0.0;
+        for channel in 0..3 {
+            let mut normal = [[0.0f32; 5]; 5];
+            let mut right = [0.0f32; 5];
+            evidence = 0.0;
+            for (index, cell) in cells.iter().enumerate() {
+                let trust = (cell.hue_conf / KEEP).clamp(0.0, 1.0);
+                if trust <= 0.0 {
+                    continue;
+                }
+                let (sin, cos) =
+                    (index as f32 / cells.len() as f32 * std::f32::consts::TAU).sin_cos();
+                let basis = [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+                for row in 0..5 {
+                    for (column, term) in basis.iter().enumerate() {
+                        normal[row][column] += trust * basis[row] * term;
+                    }
+                    right[row] += trust * basis[row] * cell.offset[channel];
+                }
+                evidence += trust;
+            }
+            for (term, row) in normal.iter_mut().enumerate() {
+                row[term] += RIDGE;
+            }
+            let fitted = solve(normal, right);
+            for term in 0..5 {
+                terms[5 * channel + term] = fitted[term];
+            }
+        }
+        Self { terms, evidence }
+    }
+
+    /// The sixteen floats a readback finds in the buffer, as a `Glare`.
+    pub fn read(terms: [f32; 15], evidence: f32) -> Self {
+        Self { terms, evidence }
+    }
+}
+
 /// How much evidence a coefficient is shrunk against, in directions.
 ///
 /// One direction's worth, which is a quantity and not a taste: it says a fit is
@@ -1580,8 +1678,11 @@ pub(crate) const BYTES: u64 = (CELLS_AT + AZIMUTHS * std::mem::size_of::<Cell>()
 /// Where the along-seam field starts in that buffer.
 pub(crate) const ALONG_AT: usize = std::mem::size_of::<Tone>();
 
+/// Where the smooth additive field starts in that buffer.
+pub(crate) const GLARE_AT: usize = ALONG_AT + std::mem::size_of::<Along>();
+
 /// Where the cells start in that buffer, for the readback that unpacks it.
-pub(crate) const CELLS_AT: usize = ALONG_AT + std::mem::size_of::<Along>();
+pub(crate) const CELLS_AT: usize = GLARE_AT + std::mem::size_of::<Glare>();
 
 /// A sample at or above this is a clipped highlight and not a brightness.
 ///
@@ -1642,11 +1743,34 @@ struct Along {
   pad1: f32,
 };
 
+struct Glare {
+  terms: array<f32, 15>,
+  evidence: f32,
+};
+
 struct State {
   tone: Tone,
   along: Along,
+  glare: Glare,
   cells: array<Cell, AZIMUTHS>,
 };
+
+// The additive term at one azimuth, per channel, in codes of 1. A direction
+// flattened into the seam plane IS (cos, sin), so no trig reaches the fragment
+// shader. Rust twin: `Glare::at`.
+fn glare_at(field: Glare, cos: f32, sin: f32) -> vec3<f32> {
+  let basis = array<f32, 5>(1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin);
+  var out: vec3<f32>;
+  for (var channel = 0u; channel < 3u; channel += 1u) {
+    let at = 5u * channel;
+    out[channel] = field.terms[at] * basis[0]
+      + field.terms[at + 1u] * basis[1]
+      + field.terms[at + 2u] * basis[2]
+      + field.terms[at + 3u] * basis[3]
+      + field.terms[at + 4u] * basis[4];
+  }
+  return clamp(out, vec3<f32>(-LIMIT_OFF), vec3<f32>(LIMIT_OFF));
+}
 
 // The along-seam correction at one azimuth, from that azimuth's own cosine and
 // sine. A direction flattened into the seam plane IS (cos, sin), so no trig
@@ -1757,7 +1881,7 @@ fn colour_split(at: Band) -> mat2x3<f32> {
 // Exactly zero on both sides when nothing has been measured, and by an
 // equality rather than by trusting a multiply. Rust twin: `Tone::lift`.
 fn tone_lift(at: Band) -> mat2x3<f32> {
-  let half = 0.5 * tint_fade(at) * clamp(at.lift, vec3<f32>(-LIMIT_OFF), vec3<f32>(LIMIT_OFF));
+  let half = 0.5 * tint_fade(at) * glare_at(band.glare, at.azimuth.x, at.azimuth.y);
   if all(half == vec3<f32>(0.0)) {
     return mat2x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0));
   }
@@ -1806,7 +1930,6 @@ fn band_rest() -> Band {
   // reading either, and the fade answers zero out there anyway.
   out.azimuth = vec2<f32>(1.0, 0.0);
   out.off_seam = 1.0;
-  out.lift = vec3<f32>(0.0);
   return out;
 }
 
@@ -1848,16 +1971,6 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // and it means what it says at a direction that never correlated, which is
   // most of a sky seam. Rust twin: `Reframe::reading_at`.
   let open = mix2(a.open, b.open, mix);
-  // The photometry at this direction, between the two cells at the evidence
-  // behind each, which is the same rule the geometry takes: a direction that
-  // has stopped being read stops contributing and a ray between one live cell
-  // and one dead one takes the live one's answer at the dead one's strength.
-  // With no evidence anywhere the offset is exactly zero, which is the picture
-  // stage 7 drew. Rust twin: `Reframe::reading_at`.
-  var lift: vec3<f32>;
-  for (var channel = 0u; channel < 3u; channel += 1u) {
-    lift[channel] = carry(a.offset[channel], a.hue_conf, b.offset[channel], b.hue_conf, mix);
-  }
   // The along-seam axis is NOT read cell by cell. It is one fitted field over
   // the whole circle, because the phenomenon is one - a relative pose error
   // with a constant, a one-cycle and a two-cycle term - and because a field
@@ -1881,7 +1994,6 @@ fn band_bend(ray: vec3<f32>) -> Band {
   out.azimuth = flat / reach;
   out.off_seam = body.z / length(body);
   out.crossover = band_width(applied, open);
-  out.lift = lift;
   let limit = FOLD * out.crossover / SLOPE;
   let carried = clamp(applied, -limit, limit);
   // Back into view space: view_to_body is a rotation, so its transpose is its
@@ -2794,6 +2906,58 @@ fn pool_along() {
   out.terms = solve5(&normal, &right);
   out.evidence = evidence;
   band.along = out;
+}
+
+// The additive term round the ring, fitted over the same cells the geometry is
+// fitted over (issue #103, stage 8). Rust twin: `Glare::fit`.
+//
+// One lane, for `pool_along`'s reason. NO TIME CONSTANT OF ITS OWN, for
+// `pool_along`'s reason too: what it is fitted to is already the smoothed,
+// evidence-weighted per-direction state, so the field inherits every
+// direction's own constant exactly. A reset empties the cells and the fit then
+// answers zero by arithmetic, which is the picture before this existed.
+//
+// This is what the picture is drawn with, and `Cell::offset` is only what it is
+// fitted from. Five terms cannot carry a stripe.
+@compute @workgroup_size(1)
+fn pool_glare() {
+  var terms = array<f32, 15>();
+  var evidence = 0.0;
+  if watch.hold != 0.0 {
+    band.glare = Glare(terms, 0.0);
+    return;
+  }
+  for (var channel = 0u; channel < 3u; channel += 1u) {
+    var normal = array<f32, 25>();
+    var right = array<f32, 5>();
+    evidence = 0.0;
+    for (var index = 0u; index < AZIMUTHS; index += 1u) {
+      let cell = band.cells[index];
+      let trust = clamp(cell.hue_conf / KEEP, 0.0, 1.0);
+      if trust <= 0.0 {
+        continue;
+      }
+      let phi = f32(index) / f32(AZIMUTHS) * TAU;
+      let cosine = cos(phi);
+      let sine = sin(phi);
+      let basis = array<f32, 5>(1.0, cosine, sine, cosine * cosine - sine * sine, 2.0 * cosine * sine);
+      for (var row = 0u; row < 5u; row += 1u) {
+        for (var column = 0u; column < 5u; column += 1u) {
+          normal[row * 5u + column] += trust * basis[row] * basis[column];
+        }
+        right[row] += trust * basis[row] * cell.offset[channel];
+      }
+      evidence += trust;
+    }
+    for (var term = 0u; term < 5u; term += 1u) {
+      normal[term * 5u + term] += RIDGE;
+    }
+    let fitted = solve5(&normal, &right);
+    for (var term = 0u; term < 5u; term += 1u) {
+      terms[5u * channel + term] = fitted[term];
+    }
+  }
+  band.glare = Glare(terms, evidence);
 }
 
 // Gaussian elimination with no pivoting on a 5x5. Safe without pivoting

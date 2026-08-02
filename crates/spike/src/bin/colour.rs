@@ -1337,7 +1337,7 @@ fn profile(options: &Options) -> Fallible<()> {
             .mapped(options.camera(), 1.0)
             .ok_or("no frame to map")?;
         let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
-        let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        let (_, glare, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
         // How much of the ring answered about COLOUR, which is not how much
         // answered about geometry: the two are separate channels since stage 7
         // and most of a sky seam is only ever the first.
@@ -1358,10 +1358,25 @@ fn profile(options: &Options) -> Fallible<()> {
             false => held.iter().sum::<f32>() / held.len() as f32,
         };
         let worst = held.iter().fold(0.0f32, |held, now| held.max(now.abs()));
+        // What is DRAWN is the five-term fit, not the per-direction reading:
+        // the per-direction form striped and the owner rejected it. Both are
+        // printed, so the fit can be checked against what it was fitted from.
+        let ring: Vec<f32> = (0..8)
+            .map(|turn| {
+                let phi = turn as f32 / 8.0 * std::f32::consts::TAU;
+                255.0 * glare.at(phi.cos(), phi.sin())[1]
+            })
+            .collect();
         println!(
-            "band:   the per-direction offset in G: mean {mean:+.2}, widest {worst:.2} codes of \n\
-             \t255 over {} directions; openness mean {open:.3}, most open {widest:.3}",
+            "band:   measured per direction in G: mean {mean:+.2}, widest {worst:.2} codes over \n\
+             \t{} directions. DRAWN, the five-term fit at eight azimuths: {}\n\
+             \topenness mean {open:.3}, most open {widest:.3}, evidence {:.1} directions",
             held.len(),
+            ring.iter()
+                .map(|v| format!("{v:+.2}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            glare.evidence,
         );
         if std::env::var("KJERAG_CELLS").is_ok() {
             println!("cells:  phi hue_conf open offsetR offsetG offsetB disparity_deg");
@@ -1990,11 +2005,11 @@ fn interior(
         // is looking, and the level in the denominator is what makes this a
         // Weber number rather than a count of codes.
         let (mut lift, mut level) = (0.0, 0.0);
-        for channel in 0..3 {
+        for (channel, weight) in LUMA.iter().enumerate() {
             let a = f64::from(before.rgba[4 * index + channel]);
             let b = f64::from(after.rgba[4 * index + channel]);
-            lift += LUMA[channel] * (b - a);
-            level += LUMA[channel] * a;
+            lift += weight * (b - a);
+            level += weight * a;
         }
         if level <= 0.0 || level > DARK {
             continue;
@@ -2264,7 +2279,7 @@ fn trace(options: &Options) -> Fallible<()> {
         }
         .frame(options.camera(), Sampling::default(), size)?;
         let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
-        let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        let (_, _, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
         let mut row = [0.0f64; 16];
         for (channel, gain) in tone.log_gain.iter().enumerate() {
             row[channel] = f64::from(*gain);

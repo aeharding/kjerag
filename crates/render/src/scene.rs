@@ -1136,6 +1136,9 @@ struct Band {
     /// The along-seam field fitted over the whole ring, dispatched beside the
     /// exposure pooling and over the same cells (issue #103, stage 5).
     pool_along: wgpu::ComputePipeline,
+    /// The additive term round the ring, as the smooth shape the picture is
+    /// actually drawn with (issue #103, stage 8).
+    pool_glare: wgpu::ComputePipeline,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1314,6 +1317,8 @@ impl ScenePipeline {
                 pass.dispatch_workgroups(1, 1, 1);
             }
             pass.set_pipeline(&self.band.pool_along);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.band.pool_glare);
             pass.dispatch_workgroups(1, 1, 1);
         }
         queue.submit([encoder.finish()]);
@@ -1553,9 +1558,9 @@ impl ScenePipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Along, Vec<band::Cell>)> {
-        let (_, along, cells) = self.band.read(device, queue)?;
-        Ok((along, cells))
+    ) -> Fallible<(band::Along, band::Glare, Vec<band::Cell>)> {
+        let (_, along, glare, cells) = self.band.read(device, queue)?;
+        Ok((along, glare, cells))
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1651,6 +1656,7 @@ impl Band {
         let pipeline = compute("measure");
         let pool = compute("pool");
         let pool_along = compute("pool_along");
+        let pool_glare = compute("pool_glare");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1691,6 +1697,7 @@ impl Band {
             pipeline,
             pool,
             pool_along,
+            pool_glare,
             state,
             watch,
             group,
@@ -1738,7 +1745,7 @@ impl Band {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
+    ) -> Fallible<(band::Tone, band::Along, band::Glare, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1763,6 +1770,10 @@ impl Band {
             std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
             float(band::ALONG_AT + 20),
         );
+        let glare = band::Glare::read(
+            std::array::from_fn(|term| float(band::GLARE_AT + 4 * term)),
+            float(band::GLARE_AT + 60),
+        );
         let cells = (0..band::AZIMUTHS)
             .map(|index| {
                 let at = band::CELLS_AT + index * std::mem::size_of::<band::Cell>();
@@ -1783,7 +1794,7 @@ impl Band {
             .collect();
         drop(mapped);
         readback.unmap();
-        Ok((tone, along, cells))
+        Ok((tone, along, glare, cells))
     }
 }
 
