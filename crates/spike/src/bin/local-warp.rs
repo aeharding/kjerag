@@ -68,7 +68,12 @@ fn main() -> Fallible<()> {
             );
         };
         let sites = raw_register::overlap_strip_sites(&candidates);
-        report_temporal(&gpu, &options, &warmed, frame, &sites, *support, frames)?;
+        let anchor = TemporalAnchor {
+            warmed: &warmed,
+            frame,
+            baseline,
+        };
+        report_temporal(&gpu, &options, anchor, &sites, *support, frames)?;
         return Ok(());
     }
     if options.fit && supports.len() != 1 {
@@ -451,6 +456,18 @@ struct TemporalHealth {
     aperture: usize,
     excursion: usize,
     ended: usize,
+    stereo_readings: usize,
+    stereo_no_complete: usize,
+    stereo_no_peak: usize,
+    stereo_aperture: usize,
+    placeable: usize,
+    unplaceable: usize,
+}
+
+struct TemporalAnchor<'a> {
+    warmed: &'a Warmed,
+    frame: Size,
+    baseline: [f64; 3],
 }
 
 /// Sequential, one-lens raw tracking after the same rendered warm-up used to
@@ -459,8 +476,7 @@ struct TemporalHealth {
 fn report_temporal(
     gpu: &Gpu,
     options: &Options,
-    anchor: &Warmed,
-    frame: Size,
+    anchor: TemporalAnchor<'_>,
     sites: &[raw_register::StripSite],
     support: raw_register::Support,
     frames: usize,
@@ -488,7 +504,7 @@ fn report_temporal(
         }
     }
     let (_, at) = scene.frame().ok_or("no frame decoded at temporal anchor")?;
-    if at != anchor.at || rendered != anchor.rendered {
+    if at != anchor.warmed.at || rendered != anchor.warmed.rendered {
         return Err(
             "refused: temporal anchor did not reproduce the declared warm traversal".into(),
         );
@@ -496,7 +512,7 @@ fn report_temporal(
     let mut previous_map = scene
         .mapped(options.camera(), 1.0)
         .ok_or("no map at temporal anchor")?;
-    let mut walk = Walk::open(&options.input, at.as_secs_f64(), frame)?;
+    let mut walk = Walk::open(&options.input, at.as_secs_f64(), anchor.frame)?;
     let mut previous_pair = walk
         .next_pair()?
         .ok_or("no synchronized raw lens pair at temporal anchor")?;
@@ -545,6 +561,66 @@ fn report_temporal(
                 Ok(reading) => {
                     health.tracked += 1;
                     *state = Some(reading.state);
+                    // This is a same-time stereo reading at the temporal
+                    // state, not another locator. A stereo refusal does not
+                    // discard the successful temporal state above.
+                    match raw_register::register_track_state(
+                        &next_map,
+                        &next_pair.lenses,
+                        reading.state,
+                        support,
+                    ) {
+                        Ok(stereo) => {
+                            health.stereo_readings += 1;
+                            match depth_proxy(anchor.baseline, stereo) {
+                                Placement::Depth {
+                                    metres,
+                                    conservative_far_metres,
+                                } => {
+                                    health.placeable += 1;
+                                    if options.trace {
+                                        println!(
+                                            "temporal stereo: phi {:.2} deg; tracked offset [epi {:.4}, perp {:.4}] deg; displacement [epi {:.4}, perp {:.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; depth proxy {:.2} m (one-sigma far {:.2} m)",
+                                            reading.state.site.root.node.phi.to_degrees(),
+                                            reading.state.accumulated_rad.epi.to_degrees(),
+                                            reading.state.accumulated_rad.perp.to_degrees(),
+                                            stereo.displacement_rad.epi.to_degrees(),
+                                            stereo.displacement_rad.perp.to_degrees(),
+                                            stereo.covariance_rad2.epi_epi,
+                                            stereo.covariance_rad2.epi_perp,
+                                            stereo.covariance_rad2.perp_perp,
+                                            metres,
+                                            conservative_far_metres,
+                                        );
+                                    }
+                                }
+                                Placement::Unplaceable => {
+                                    health.unplaceable += 1;
+                                    if options.trace {
+                                        println!(
+                                            "temporal stereo: phi {:.2} deg; tracked offset [epi {:.4}, perp {:.4}] deg; displacement [epi {:.4}, perp {:.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; Unplaceable",
+                                            reading.state.site.root.node.phi.to_degrees(),
+                                            reading.state.accumulated_rad.epi.to_degrees(),
+                                            reading.state.accumulated_rad.perp.to_degrees(),
+                                            stereo.displacement_rad.epi.to_degrees(),
+                                            stereo.displacement_rad.perp.to_degrees(),
+                                            stereo.covariance_rad2.epi_epi,
+                                            stereo.covariance_rad2.epi_perp,
+                                            stereo.covariance_rad2.perp_perp,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(refusal) => match refusal {
+                            raw_register::Refused::NoCompletePatch
+                            | raw_register::Refused::NoVisibleSeam => {
+                                health.stereo_no_complete += 1
+                            }
+                            raw_register::Refused::NoPeak => health.stereo_no_peak += 1,
+                            raw_register::Refused::Aperture => health.stereo_aperture += 1,
+                        },
+                    }
                 }
                 Err(refusal) => {
                     match refusal {
@@ -565,8 +641,8 @@ fn report_temporal(
     }
     let active = states.iter().filter(|state| state.is_some()).count();
     println!(
-        "temporal: lens 0; anchor {:.9} s; requested frames {}; transitions {}; declared sites {}; active {}; ended {}; successful steps {}; no-complete {}; no-peak {}; aperture {}; excursion {}; cap {:.2} deg",
-        anchor.at.as_secs_f64(),
+        "temporal: lens 0; anchor {:.9} s; requested frames {}; transitions {}; declared sites {}; active {}; ended {}; successful steps {}; no-complete {}; no-peak {}; aperture {}; excursion {}; cap {:.2} deg\ntemporal stereo: readings {}; no-complete {}; no-peak {}; aperture {}; positive-epi depth proxies {}; Unplaceable {}",
+        anchor.warmed.at.as_secs_f64(),
         frames,
         health.transitions,
         sites.len(),
@@ -578,11 +654,55 @@ fn report_temporal(
         health.aperture,
         health.excursion,
         TEMPORAL_EXCURSION_CAP_DEG,
+        health.stereo_readings,
+        health.stereo_no_complete,
+        health.stereo_no_peak,
+        health.stereo_aperture,
+        health.placeable,
+        health.unplaceable,
     );
     println!(
         "temporal closure: unavailable (this opt-in is one forward lens-0 traversal; no reverse traversal was inferred); no depth, pose fit, or warp applied"
     );
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    /// The ordinary triangulation proxy, plus a one-standard-deviation
+    /// far-distance value which uses the smaller still-positive disparity.
+    Depth {
+        metres: f64,
+        conservative_far_metres: f64,
+    },
+    /// Non-positive/uncertain epipolar disparity, or an invalid baseline, is
+    /// intentionally not made into a signed or infinite depth claim.
+    Unplaceable,
+}
+
+fn depth_proxy(baseline: [f64; 3], reading: raw_register::StripSiteReading) -> Placement {
+    let baseline_m = baseline.iter().map(|axis| axis.powi(2)).sum::<f64>().sqrt();
+    let sigma = reading.covariance_rad2.epi_epi.sqrt();
+    let lower = reading.displacement_rad.epi - sigma;
+    if !baseline_m.is_finite()
+        || baseline_m <= 0.0
+        || !reading.displacement_rad.epi.is_finite()
+        || !sigma.is_finite()
+        || lower <= 0.0
+        || lower >= std::f64::consts::FRAC_PI_2
+    {
+        return Placement::Unplaceable;
+    }
+    let metres = baseline_m / reading.displacement_rad.epi.tan();
+    let conservative_far_metres = baseline_m / lower.tan();
+    if metres.is_finite() && metres > 0.0 && conservative_far_metres.is_finite() {
+        Placement::Depth {
+            metres,
+            conservative_far_metres,
+        }
+    } else {
+        Placement::Unplaceable
+    }
 }
 
 struct Options {
@@ -948,8 +1068,11 @@ mod tests {
     use std::time::Duration;
 
     use kjerag_spike::local_warp::{Covariance, Displacement, Jacobian, Observation};
+    use kjerag_spike::raw_register::{
+        CameraCovariance, CameraDisplacement, Candidate, Node, StripSite, StripSiteReading,
+    };
 
-    use super::{Options, Seam};
+    use super::{Options, Placement, Seam};
 
     fn options(args: &[&str]) -> Options {
         Options::parse(args.iter().map(|arg| arg.to_string())).expect("valid local-warp options")
@@ -1263,6 +1386,56 @@ mod tests {
         assert!(
             super::require_same_pts(Duration::from_nanos(1001), Duration::from_nanos(1002))
                 .is_err()
+        );
+    }
+
+    fn stereo_reading(epi: f64, epi_sigma: f64) -> StripSiteReading {
+        let site = StripSite {
+            root: Candidate {
+                node: Node {
+                    centre: [1.0, 0.0, 0.0],
+                    perp: [0.0, 1.0, 0.0],
+                    epi: [0.0, 0.0, 1.0],
+                    phi: 0.0,
+                },
+                view_ray: [1.0, 0.0, 0.0],
+                view_pixel: [0.0, 0.0],
+            },
+            offset_rad: [0.0, 0.0],
+        };
+        StripSiteReading {
+            site,
+            epi_axis: site.root.node.epi,
+            perp_axis: site.root.node.perp,
+            displacement_rad: CameraDisplacement { epi, perp: 0.0 },
+            covariance_rad2: CameraCovariance {
+                epi_epi: epi_sigma * epi_sigma,
+                epi_perp: 0.0,
+                perp_perp: 1.0e-6,
+            },
+            condition: 1.0,
+            correlation: 1.0,
+        }
+    }
+
+    #[test]
+    fn temporal_depth_proxy_requires_a_conservatively_positive_epi_disparity() {
+        let Placement::Depth {
+            metres,
+            conservative_far_metres,
+        } = super::depth_proxy([0.033, 0.0, 0.0], stereo_reading(0.02, 0.002))
+        else {
+            panic!("positive disparity beyond one sigma is placeable")
+        };
+        assert!(metres > 0.0);
+        assert!(conservative_far_metres > metres);
+        assert_eq!(
+            super::depth_proxy([0.033, 0.0, 0.0], stereo_reading(0.002, 0.003)),
+            super::Placement::Unplaceable
+        );
+        assert_eq!(
+            super::depth_proxy([0.0; 3], stereo_reading(0.02, 0.002)),
+            super::Placement::Unplaceable
         );
     }
 }

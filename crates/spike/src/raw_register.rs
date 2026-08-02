@@ -647,6 +647,19 @@ pub fn register_strip_sites(
         .collect()
 }
 
+/// Register the two raw lenses at a temporal state's accumulated body-fixed
+/// location.  The state supplies the original [`StripSite`] identity and its
+/// immutable axes; this function only changes where that one site is sampled.
+/// It never traces a new crossover or chooses a more textured neighbour.
+pub fn register_track_state(
+    map: &Reframe,
+    planes: &[Plane],
+    state: TrackState,
+    support: Support,
+) -> Result<StripSiteReading, Refused> {
+    register_site_direction_at(map, planes, state.site, track_offset(state), support, 0, 1)
+}
+
 /// Register every supplied site in both raw-lens directions.
 ///
 /// This is a control, not an alternative estimator: it does not rank sites,
@@ -704,6 +717,26 @@ fn register_site_direction(
     reference_lens: usize,
     target_lens: usize,
 ) -> Result<StripSiteReading, Refused> {
+    register_site_direction_at(
+        map,
+        planes,
+        site,
+        site.offset_rad,
+        support,
+        reference_lens,
+        target_lens,
+    )
+}
+
+fn register_site_direction_at(
+    map: &Reframe,
+    planes: &[Plane],
+    site: StripSite,
+    base_offset: [f64; 2],
+    support: Support,
+    reference_lens: usize,
+    target_lens: usize,
+) -> Result<StripSiteReading, Refused> {
     let (Some(front), Some(back)) = (planes.first(), planes.get(1)) else {
         return Err(Refused::NoCompletePatch);
     };
@@ -721,7 +754,7 @@ fn register_site_direction(
         site.root.node,
         half,
         step,
-        site.offset_rad,
+        base_offset,
     )
     .map_err(|_| Refused::NoCompletePatch)?;
     let coarse = support.search_steps();
@@ -729,8 +762,8 @@ fn register_site_direction(
     for perp in -coarse..=coarse {
         for epi in -coarse..=coarse {
             let offset = [
-                site.offset_rad[0] + perp as f64 * step,
-                site.offset_rad[1] + epi as f64 * step,
+                base_offset[0] + perp as f64 * step,
+                base_offset[1] + epi as f64 * step,
             ];
             if let Ok(target) = sample(
                 map,
@@ -747,8 +780,8 @@ fn register_site_direction(
     }
     let (grid_shift, correlation) = peak(&legal, coarse)?;
     let target_offset = [
-        site.offset_rad[0] + grid_shift[0] as f64 * step,
-        site.offset_rad[1] + grid_shift[1] as f64 * step,
+        base_offset[0] + grid_shift[0] as f64 * step,
+        base_offset[1] + grid_shift[1] as f64 * step,
     ];
     let target = sample(
         map,
@@ -1004,6 +1037,16 @@ pub fn track_closure(
 
 fn displacement_norm(displacement: CameraDisplacement) -> f64 {
     displacement.epi.hypot(displacement.perp)
+}
+
+/// The `[perp, epi]` sampling offset for one temporal state.  Keep this
+/// conversion in one place: `CameraDisplacement` is deliberately exposed as
+/// `[epi, perp]`, while raw patch rows/columns remain `[perp, epi]`.
+fn track_offset(state: TrackState) -> [f64; 2] {
+    [
+        state.site.offset_rad[0] + state.accumulated_rad.perp,
+        state.site.offset_rad[1] + state.accumulated_rad.epi,
+    ]
 }
 
 /// Census fixed overlap-strip sites and every target shift independently.
@@ -2277,6 +2320,22 @@ mod tests {
             initial.site, site,
             "a refusal must not relocate the declaration"
         );
+    }
+
+    #[test]
+    fn tracked_stereo_sampling_offset_preserves_the_declared_site_and_axis_order() {
+        let site = assembled_site(5);
+        let state = TrackState {
+            accumulated_rad: CameraDisplacement {
+                epi: 0.03,
+                perp: -0.02,
+            },
+            ..TrackState::new(site, 1.0)
+        };
+        let offset = track_offset(state);
+        assert!((offset[0] - 0.03).abs() < 1e-12);
+        assert!((offset[1] + 0.07).abs() < 1e-12);
+        assert_eq!(state.site, site);
     }
 
     #[test]
