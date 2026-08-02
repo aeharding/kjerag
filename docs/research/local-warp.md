@@ -296,6 +296,45 @@ same-feature cross-view pairs. Stage 9 has produced a reusable instrument and
 an all-depth refusal, not an applied geometry change. The far-field seam
 problem remains open.
 
+## Residual-prerequisite diagnostic
+
+`local-warp` can now demonstrate the evidence state of a possible future
+source-coordinate residual map, without producing that map.  Run its temporal
+replay with one explicit stored `seam=` fit, reverse replay, and an explicit
+pre-measurement hold-out partition:
+
+```sh
+cargo run --release -p kjerag-spike --bin local-warp -- <file.insv> \
+  time=<seconds> warm=<seconds> yaw=<degrees> pitch=<degrees> fov=<degrees> \
+  seam=roll:<r>,yaw:<y>,pitch:<p>,cx:<x>,cy:<c> temporal=<frames> \
+  temporal_reverse=1 held_out=<declared-site-index,...>
+```
+
+`held_out=` names distinct indices in the immutable `overlap_strip_sites`
+declaration order, before tracking, registration, or texture measurement. It
+is not inferred from a successful track. Sites not named are explicitly
+training sites; omitting `held_out=` leaves every assignment unavailable.
+
+At the endpoint of the declared replay, the report emits one line for every
+declared site. That line retains the site identity and separately reports its
+endpoint state, forward stereo classification, same-site reciprocal
+registration result, forward/reverse temporal-closure result, predeclared
+assignment, and the resulting gate decision. `ProvenFar300` requires the
+one-sided `point + 3 sigma` lower-distance test already defined above. A site
+is merely *eligible for a future independent validation* when it is both
+`ProvenFar300` and held out and when the reciprocal and temporal controls
+completed at that same declared site. The diagnostic deliberately has no
+closure-magnitude threshold: that numeric criterion must be calibrated on a
+declared corpus, not invented while inspecting this replay.
+
+This is a terminal evidence demo, not a visual stitching demo: it does not
+fit a residual, select a winner, emit a map, bind a GPU resource, or alter the
+renderer. The present workspace has **no eligible proven-far-field capture**;
+the existing owner references may exercise tracking and closure, but cannot
+establish a held-out `ProvenFar300` result. Consequently the diagnostic is
+expected to report refusals or unavailable prerequisites, and the renderer's
+residual-map mode remains disabled.
+
 The far-field follow-up needs a stricter classification, not a calibration
 scene: `ProvenFar300` only when a predeclared one-sided maximum disparity
 still implies a distance of at least 300 m; separate `FiniteButNotFar`,
