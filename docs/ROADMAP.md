@@ -1183,6 +1183,22 @@ live, no keyframe UI ever.
   was shown able to fail before it was believed: against the stale file it
   names all four crates, ffmpeg-next 7.1.0 among them.
 
+- 2026-08-01 **Stage 9 begins by separating local geometry from pose**
+  (issue #103, docs/research/local-warp.md). The owner authorized the
+  local-warp campaign after accepting stages 5 and 6 and rejecting applied
+  photometry. Its first deliverable changes no shader: one shared five-knob
+  pose must be fitted and tested against the paired May same-instant crossings
+  and the separate April views before a local field is even proposed. The
+  controls include global and local planted displacements, cold versus warm
+  state, and leave-one-pair-out prediction. This is deliberately a test of a
+  global explanation, not a mechanism for selecting a per-view answer.
+
+  If pose is refused, a candidate is a smooth, camera-frame-local two-axis
+  displacement with explicit zero support. It is judged across that entire
+  support by the retained Weber and interior-coherence instruments as well as
+  at the seam. The arbitrary depth prototype field is not reused: its
+  nearest-neighbour fill is the already-rejected holes-in-a-field pattern.
+
 - 2026-08-01 **The seam's photometry: the measurement layer survives, the
   application does not** (issue #103, stage 8 final,
   docs/research/seam-blending.md 16). The owner tested the applied correction
