@@ -11,7 +11,7 @@ use std::time::Duration;
 use kjerag_media::Fallible;
 use kjerag_meta::CalibrationSet;
 use kjerag_render::{Camera, Cue, Horizon, Reframe, Sampling, Scene, ScenePipeline, SeamFit, Size};
-use kjerag_spike::{FORMAT, Gpu, Render, Walk, raw_register, seam_fit};
+use kjerag_spike::{FORMAT, Gpu, Render, Walk, local_warp, raw_register, seam_fit};
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
@@ -27,8 +27,8 @@ fn main() -> Fallible<()> {
     // correction walk or different band history could mimic a derivative.
     let warmed = warm_map(&gpu, &options, options.seam)?;
     let at = warmed.at;
-    let map = warmed.map;
-    let candidates = raw_register::visible_candidates(&map, options.size, options.size, baseline);
+    let candidates =
+        raw_register::visible_candidates(&warmed.map, options.size, options.size, baseline);
     println!(
         "played: {} frame(s), ending at {:.3} s; {} visible seam candidates",
         warmed.rendered,
@@ -47,7 +47,8 @@ fn main() -> Fallible<()> {
         "pts:    raw pair and warmed Scene both at {:.9} s",
         at.as_secs_f64()
     );
-    let coverage = raw_register::coverage_census(&map, &pair.lenses, options.size, options.size);
+    let coverage =
+        raw_register::coverage_census(&warmed.map, &pair.lenses, options.size, options.size);
     println!(
         "coverage: view rays {}; outside view {}",
         coverage.view_rays, coverage.outside_view
@@ -59,8 +60,15 @@ fn main() -> Fallible<()> {
         );
     }
     let supports = options.supports()?;
+    if options.fit && supports.len() != 1 {
+        return Err(
+            "fit=1 requires exactly one declared support: give one span= and one search= value"
+                .into(),
+        );
+    }
     for support in supports {
-        let row = raw_register::overlap_strip_lattice(&map, &pair.lenses, &candidates, support);
+        let row =
+            raw_register::overlap_strip_lattice(&warmed.map, &pair.lenses, &candidates, support);
         let health = row.health;
         println!(
             "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\nlattice: roots {}; sites {}; reference-complete {}; target shifts {}; target-complete {}\ncoverage: reference [projected-out {}, source-boundary {}]; target [projected-out {}, source-boundary {}]",
@@ -103,10 +111,19 @@ fn main() -> Fallible<()> {
         println!(
             "meaning: fixed raw-lens coverage only; no texture score selected a view or a warp."
         );
-        if options.observations {
-            let outcomes =
-                raw_register::register_overlap_strip(&map, &pair.lenses, &candidates, support);
-            report_observations(support, &outcomes, options.trace);
+        if options.observations || options.fit {
+            let outcomes = raw_register::register_overlap_strip(
+                &warmed.map,
+                &pair.lenses,
+                &candidates,
+                support,
+            );
+            if options.observations {
+                report_observations(support, &outcomes, options.trace);
+            }
+            if options.fit {
+                report_fit(&gpu, &options, &warmed, support, &outcomes)?;
+            }
         }
     }
     if options.responses {
@@ -188,25 +205,20 @@ fn report_responses(
     base: &Warmed,
     sites: &[raw_register::StripSite],
 ) -> Fallible<()> {
-    let Seam::Stored(fit) = options.seam else {
+    let Seam::Stored(_) = options.seam else {
         return Err("responses=1 requires seam=<stored fit>".into());
     };
     println!(
         "responses: frozen baseline roots/sites {}; central maps separately warmed",
         sites.len()
     );
-    for (index, (name, half_step)) in RESPONSE_KNOBS.into_iter().enumerate() {
-        let minus = warm_map(gpu, options, Seam::Stored(perturb(fit, index, -half_step)))?;
-        let plus = warm_map(gpu, options, Seam::Stored(perturb(fit, index, half_step)))?;
-        require_same_warm(base, &minus, name, "minus")?;
-        require_same_warm(base, &plus, name, "plus")?;
+    let responses = central_responses(gpu, options, base, sites)?;
+    for ((name, half_step), column) in RESPONSE_KNOBS.into_iter().zip(responses) {
         let mut available = 0usize;
         let mut projected_out = 0usize;
         let mut singular = 0usize;
-        for site in sites {
-            match raw_register::central_site_response(
-                &base.map, &minus.map, &plus.map, *site, half_step,
-            ) {
+        for response in column {
+            match response.result {
                 Ok(_) => available += 1,
                 Err(raw_register::ResponseRefused::ProjectedOut) => projected_out += 1,
                 Err(raw_register::ResponseRefused::Singular) => singular += 1,
@@ -223,6 +235,99 @@ fn report_responses(
             singular,
         );
     }
+    Ok(())
+}
+
+/// Independently warm all five central response pairs for these frozen sites.
+/// The returned columns retain every declared site and its refusal, so callers
+/// cannot quietly replace a weak site before assembling a fit.
+fn central_responses(
+    gpu: &Gpu,
+    options: &Options,
+    base: &Warmed,
+    sites: &[raw_register::StripSite],
+) -> Fallible<[Vec<raw_register::SiteResponse>; local_warp::KNOBS]> {
+    let Seam::Stored(fit) = options.seam else {
+        return Err("central responses require seam=<stored fit>".into());
+    };
+    let mut columns = Vec::with_capacity(local_warp::KNOBS);
+    for (index, (name, half_step)) in RESPONSE_KNOBS.into_iter().enumerate() {
+        let minus = warm_map(gpu, options, Seam::Stored(perturb(fit, index, -half_step)))?;
+        let plus = warm_map(gpu, options, Seam::Stored(perturb(fit, index, half_step)))?;
+        require_same_warm(base, &minus, name, "minus")?;
+        require_same_warm(base, &plus, name, "plus")?;
+        columns.push(
+            sites
+                .iter()
+                .map(|site| {
+                    raw_register::site_response(&base.map, &minus.map, &plus.map, *site, half_step)
+                })
+                .collect(),
+        );
+    }
+    Ok(columns
+        .try_into()
+        .expect("the five fixed calibration knobs produced five response columns"))
+}
+
+/// Report one capture and one support only.  This is an instrument readout:
+/// it prints no decision threshold and never applies its fitted knobs.
+fn report_fit(
+    gpu: &Gpu,
+    options: &Options,
+    base: &Warmed,
+    support: raw_register::Support,
+    outcomes: &[raw_register::StripSiteOutcome],
+) -> Fallible<()> {
+    let sites: Vec<_> = outcomes.iter().map(|outcome| outcome.site).collect();
+    let responses = central_responses(gpu, options, base, &sites)?;
+    let assembled = raw_register::assemble_pose_observations(outcomes, &responses)
+        .map_err(|refusal| format!("fit refused while assembling fixed sites: {refusal:?}"))?;
+    println!(
+        "fit: span {:.2} deg; raw readings {}; incomplete responses {}; complete observations {}",
+        support.span_deg,
+        assembled.raw_readings,
+        assembled.incomplete_responses,
+        assembled.observations.len(),
+    );
+    for observation in &assembled.observations {
+        println!(
+            "fit observation: {}; measured [epi {:+.5}, perp {:+.5}] deg; covariance [[{:.3e}, {:.3e}], [{:.3e}, {:.3e}]] deg^2",
+            observation.name,
+            observation.displacement.epi,
+            observation.displacement.perp,
+            observation.covariance.xx,
+            observation.covariance.xy,
+            observation.covariance.xy,
+            observation.covariance.yy,
+        );
+    }
+    let shared = local_warp::fit(&assembled.observations)
+        .map_err(|refusal| format!("fit refused for this one capture/support: {refusal:?}"))?;
+    println!(
+        "fit pose: roll {:+.6}; yaw {:+.6}; pitch {:+.6}; cx {:+.6}; cy {:+.6}; diagnostic only",
+        shared.knobs[0], shared.knobs[1], shared.knobs[2], shared.knobs[3], shared.knobs[4],
+    );
+    for ((observation, predicted), residual) in assembled
+        .observations
+        .iter()
+        .zip(&shared.predicted)
+        .zip(&shared.residuals)
+    {
+        println!(
+            "fit residual: {}; predicted [epi {:+.5}, perp {:+.5}] deg; residual [epi {:+.5}, perp {:+.5}] deg",
+            observation.name, predicted.epi, predicted.perp, residual.epi, residual.perp,
+        );
+    }
+    println!(
+        "fit summary: chi2 {:.5}; dof {}; chi2/dof {:.5}; normalized-rms {:.5}; residual-rms {:.5} deg; condition {:.3e}; no threshold or warp applied",
+        shared.chi_squared,
+        shared.degrees_of_freedom,
+        shared.chi_squared / shared.degrees_of_freedom as f64,
+        shared.normalized_rms,
+        shared.rms,
+        shared.condition,
+    );
     Ok(())
 }
 
@@ -268,6 +373,7 @@ struct Options {
     trace: bool,
     observations: bool,
     responses: bool,
+    fit: bool,
 }
 
 /// The same three seam paths that `step` and `reframe` expose.  Stage 9's
@@ -310,6 +416,7 @@ impl Options {
             trace: false,
             observations: false,
             responses: false,
+            fit: false,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -333,15 +440,16 @@ impl Options {
                 Some(("trace", value)) => out.trace = value.parse::<u32>()? != 0,
                 Some(("observations", value)) => out.observations = value.parse::<u32>()? != 0,
                 Some(("responses", value)) => out.responses = value.parse::<u32>()? != 0,
+                Some(("fit", value)) => out.fit = value.parse::<u32>()? != 0,
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
         if out.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        if (out.observations || out.responses) && !matches!(&out.seam, Seam::Stored(_)) {
+        if (out.observations || out.responses || out.fit) && !matches!(&out.seam, Seam::Stored(_)) {
             return Err(
-                "observations=1/responses=1 require seam=<stored fit>; factory/file are coverage-only controls"
+                "observations=1/responses=1/fit=1 require seam=<stored fit>; factory/file are coverage-only controls"
                     .into(),
             );
         }
@@ -401,7 +509,7 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[derive(Default)]
@@ -580,6 +688,40 @@ mod tests {
             ])
             .responses
         );
+        assert!(
+            Options::parse(
+                ["flight.insv", "fit=1", "seam=file"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            options(&[
+                "flight.insv",
+                "fit=1",
+                "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+            ])
+            .fit
+        );
+    }
+
+    #[test]
+    fn fit_requires_one_declared_support() {
+        let default = options(&[
+            "flight.insv",
+            "fit=1",
+            "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+        ]);
+        assert!(default.supports().expect("the default ladder").len() > 1);
+        let one = options(&[
+            "flight.insv",
+            "fit=1",
+            "span=1.2",
+            "search=1.0",
+            "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+        ]);
+        assert_eq!(one.supports().expect("one declared support").len(), 1);
     }
 
     #[test]
