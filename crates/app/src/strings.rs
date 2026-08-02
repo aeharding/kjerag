@@ -129,6 +129,7 @@ pub const ZOOM_OUT: &str = "Zoom out";
 pub const LOCK_HORIZON: &str = "Lock horizon";
 /// An intentionally non-persistent experiment, not a normal picture setting.
 pub const RESEARCH_DETAIL_GUIDED_FUSION: &str = "Research only: detail-guided seam fusion (A/B)";
+pub const RESEARCH_SOURCE_RESIDUAL: &str = "Research only: source residual (A/B)";
 pub const FULLSCREEN: &str = "Fullscreen";
 /// The ellipsis is on the menu item, which opens something; the page it opens
 /// is titled without one.

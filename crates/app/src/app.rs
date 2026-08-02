@@ -632,6 +632,9 @@ impl cosmic::Application for App {
             Message::ToggleResearchFusion => {
                 if let Some(open) = &self.open {
                     open.scene.set_fusion_mode(match open.scene.fusion_mode() {
+                        FusionMode::Disabled if self.research_sidecar.is_some() => {
+                            FusionMode::DenseResidual
+                        }
                         FusionMode::Disabled => FusionMode::Dominant,
                         FusionMode::Dominant | FusionMode::DenseResidual => FusionMode::Disabled,
                     });
@@ -833,9 +836,15 @@ impl cosmic::Application for App {
             &self.key_binds,
             self.open.is_some(),
             self.stored.config.horizon_lock,
-            self.open
-                .as_ref()
-                .is_some_and(|open| open.scene.fusion_mode() == FusionMode::Dominant),
+            self.open.as_ref().is_some_and(|open| {
+                open.scene.fusion_mode()
+                    == if self.research_sidecar.is_some() {
+                        FusionMode::DenseResidual
+                    } else {
+                        FusionMode::Dominant
+                    }
+            }),
+            self.research_sidecar.is_some(),
         )]
     }
 

@@ -35,6 +35,7 @@ pub fn menu_bar<'a>(
     has_file: bool,
     horizon_locked: bool,
     research_fusion: bool,
+    residual_sidecar: bool,
 ) -> Element<'a, Message> {
     responsive_menu_bar()
         .item_height(ItemHeight::Dynamic(40))
@@ -105,7 +106,11 @@ pub fn menu_bar<'a>(
                         // Keeping it beside the view controls makes the A/B
                         // state visible while inspecting the seam.
                         Item::CheckBox(
-                            strings::RESEARCH_DETAIL_GUIDED_FUSION.to_owned(),
+                            match residual_sidecar {
+                                true => strings::RESEARCH_SOURCE_RESIDUAL,
+                                false => strings::RESEARCH_DETAIL_GUIDED_FUSION,
+                            }
+                            .to_owned(),
                             None,
                             research_fusion,
                             Action::ToggleResearchFusion,
