@@ -191,15 +191,65 @@ impl Default for Probe {
 /// One lens's picture of a rectangle of the sphere, sampled on a grid of
 /// **directions** rather than of pixels: `2 * along + 1` by `2 * across + 1`,
 /// `step` radians apart, laid out along then across.
+///
+/// A direction this lens has no picture of is a **hole**: the sample sits
+/// there and means nothing, and [`Grid::whole`] is what says which patches of
+/// the grid are clear of them.
 struct Grid {
     along: isize,
     across: isize,
     luma: Vec<f64>,
+    /// How many holes lie between this grid's first sample and each sample,
+    /// with a row and a column of zeros ahead of it: a summed-area table, so
+    /// asking whether one patch has a hole in it is four reads rather than a
+    /// sweep of the patch.
+    holes: Vec<u32>,
 }
 
 impl Grid {
+    /// A grid from one lens's answers about `2 * half + 1` directions each
+    /// way, in the order [`sample`] asks for them: `None` where this lens has
+    /// no picture of that direction.
+    fn of(half: (isize, isize), taps: &[Option<f64>]) -> Self {
+        let columns = 2 * half.1 + 1;
+        let width = (columns + 1) as usize;
+        let mut holes = vec![0; ((2 * half.0 + 2) * (columns + 1)) as usize];
+        for (index, tap) in taps.iter().enumerate() {
+            let (row, column) = (index / columns as usize + 1, index % columns as usize + 1);
+            holes[row * width + column] = u32::from(tap.is_none())
+                + holes[(row - 1) * width + column]
+                + holes[row * width + column - 1]
+                - holes[(row - 1) * width + column - 1];
+        }
+        Self {
+            along: half.0,
+            across: half.1,
+            luma: taps.iter().map(|tap| tap.unwrap_or(0.0)).collect(),
+            holes,
+        }
+    }
+
     fn at(&self, i: isize, j: isize) -> f64 {
         self.luma[((i + self.along) * (2 * self.across + 1) + (j + self.across)) as usize]
+    }
+
+    /// Whether the patch of `half` extent, centred `(di, dj)` steps from this
+    /// grid's own centre, is wholly in this lens's picture.
+    ///
+    /// The two lenses have to be answering about the same directions or the
+    /// correlation means nothing, and this is what asks that of **one
+    /// candidate offset** rather than of the rectangle holding all of them.
+    /// A patch that leaves the overlap band at one offset is still in both
+    /// pictures at another, and on a camera whose factory extrinsic is degrees
+    /// out there is no offset at all where the whole search stays inside: read
+    /// as a rectangle, every candidate on such a file is refused for where
+    /// some other candidate landed (issue #130).
+    fn whole(&self, di: isize, dj: isize, half: (isize, isize)) -> bool {
+        let width = 2 * self.across + 2;
+        let sum = |row: isize, column: isize| self.holes[(row * width + column) as usize];
+        let (top, bottom) = (di - half.0 + self.along, di + half.0 + self.along + 1);
+        let (left, right) = (dj - half.1 + self.across, dj + half.1 + self.across + 1);
+        sum(bottom, right) + sum(top, left) == sum(top, right) + sum(bottom, left)
     }
 
     /// How much picture there is to correlate, in 8-bit codes.
@@ -242,9 +292,9 @@ impl Grid {
     }
 }
 
-/// One lens's picture of the sphere around `at`. `None` where any corner of
-/// the rectangle is outside this lens's picture: the two lenses have to be
-/// answering about the same directions or the correlation means nothing.
+/// One lens's picture of the sphere around `at`, holes and all. Which parts
+/// of it this lens actually has a picture of is [`Grid::whole`]'s answer, per
+/// patch, and never the whole rectangle's.
 fn sample(
     reframe: &Reframe,
     plane: &Plane,
@@ -252,8 +302,8 @@ fn sample(
     at: &Where,
     half: (isize, isize),
     step: f64,
-) -> Option<Grid> {
-    let mut luma = Vec::with_capacity(((2 * half.0 + 1) * (2 * half.1 + 1)) as usize);
+) -> Grid {
+    let mut taps = Vec::with_capacity(((2 * half.0 + 1) * (2 * half.1 + 1)) as usize);
     for i in -half.0..=half.0 {
         for j in -half.1..=half.1 {
             let (a, b) = (i as f64 * step, j as f64 * step);
@@ -261,17 +311,27 @@ fn sample(
                 at.centre[axis] + at.along[axis] * a + at.across[axis] * b
             }));
             let landing = reframe.project(lens, ray.map(|c| c as f32));
-            if !landing.inside {
-                return None;
-            }
-            luma.push(plane.at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1]))?);
+            taps.push(
+                landing
+                    .inside
+                    .then(|| plane.at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1])))
+                    .flatten(),
+            );
         }
     }
-    Some(Grid {
-        along: half.0,
-        across: half.1,
-        luma,
-    })
+    Grid::of(half, &taps)
+}
+
+/// Where one patch's correlation peaked, in grid steps, and how well it
+/// correlated there.
+struct Peak {
+    along: f64,
+    across: f64,
+    r: f64,
+    /// Whether the peak is against the edge of what could be tried, which is
+    /// the search running out or the overlap band doing so. Either way the
+    /// number is the edge's and not the content's.
+    pinned: bool,
 }
 
 /// The shift, in grid steps, that lines `back`'s picture up with `front`'s,
@@ -283,21 +343,40 @@ fn sample(
 /// step within one coarse cell of the winner; and the peak is then
 /// interpolated between whole steps, because a residual of a third of a step
 /// is exactly the size this is trying to resolve.
-fn best_shift(front: &Grid, back: &Grid, search: (isize, isize)) -> Option<(f64, f64, f64)> {
+///
+/// Each candidate offset is scored on **its own** patch of `back`, and only
+/// where `back` has a picture of the whole of that patch ([`Grid::whole`]).
+/// The rays are the same rays either way; what changes is that a candidate is
+/// refused for where **it** landed rather than for where the widest one did.
+///
+/// The along-seam half of the search runs `search.0` either side of `centre`
+/// rather than of nought, which is [`acquired`]'s answer for this ring.
+fn best_shift(
+    front: &Grid,
+    back: &Grid,
+    search: (isize, isize),
+    half: (isize, isize),
+    centre: isize,
+) -> Option<Peak> {
+    let (first, last) = (centre - search.0, centre + search.0);
     let stride = (search.0.max(search.1) / 12).max(1);
     // How far apart the shifts are tried and how far apart the samples are
     // scored are two different strides, and tying them together is how a
     // coarse pass over a wide search ends up correlating sixteen pixels
     // against sixteen pixels and finding a peak in the noise.
     let coarse = stride.min(3);
+    let usable = |di: isize, dj: isize| {
+        (first..=last).contains(&di) && dj.abs() <= search.1 && back.whole(di, dj, half)
+    };
     let score = |di, dj, stride| front.correlation(back, di, dj, stride);
     let mut best: Option<(isize, isize, f64)> = None;
-    let mut di = -search.0;
-    while di <= search.0 {
+    let mut di = first;
+    while di <= last {
         let mut dj = -search.1;
         while dj <= search.1 {
-            let r = score(di, dj, coarse);
-            if best.is_none_or(|(_, _, held)| r > held) {
+            if let Some(r) = usable(di, dj).then(|| score(di, dj, coarse))
+                && best.is_none_or(|(_, _, held)| r > held)
+            {
                 best = Some((di, dj, r));
             }
             dj += stride;
@@ -306,8 +385,11 @@ fn best_shift(front: &Grid, back: &Grid, search: (isize, isize)) -> Option<(f64,
     }
     let (coarse_i, coarse_j, _) = best?;
     let mut best: Option<(isize, isize, f64)> = None;
-    for di in (coarse_i - stride).max(-search.0)..=(coarse_i + stride).min(search.0) {
+    for di in (coarse_i - stride).max(first)..=(coarse_i + stride).min(last) {
         for dj in (coarse_j - stride).max(-search.1)..=(coarse_j + stride).min(search.1) {
+            if !usable(di, dj) {
+                continue;
+            }
             let r = score(di, dj, 1);
             if best.is_none_or(|(_, _, held)| r > held) {
                 best = Some((di, dj, r));
@@ -315,6 +397,12 @@ fn best_shift(front: &Grid, back: &Grid, search: (isize, isize)) -> Option<(f64,
         }
     }
     let (i, j, r) = best?;
+    // A winner with nothing measurable beside it has neighbours it was never
+    // compared against, so the parabola has nothing to interpolate and the
+    // reading is refused below rather than refined here.
+    let hemmed = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .any(|(a, b)| !usable(i + a, j + b));
     let peak = |minus: f64, here: f64, plus: f64| {
         let curve = minus - 2.0 * here + plus;
         match curve < 0.0 {
@@ -323,13 +411,20 @@ fn best_shift(front: &Grid, back: &Grid, search: (isize, isize)) -> Option<(f64,
         }
     };
     let (mut refined_i, mut refined_j) = (0.0, 0.0);
-    if i.abs() < search.0 {
+    if !hemmed {
         refined_i = peak(score(i - 1, j, 1), r, score(i + 1, j, 1));
-    }
-    if j.abs() < search.1 {
         refined_j = peak(score(i, j - 1, 1), r, score(i, j + 1, 1));
     }
-    Some((i as f64 + refined_i, j as f64 + refined_j, r))
+    let (along, across) = (i as f64 + refined_i, j as f64 + refined_j);
+    Some(Peak {
+        along,
+        across,
+        r,
+        pinned: hemmed
+            || along <= first as f64
+            || along >= last as f64
+            || across.abs() >= search.1 as f64,
+    })
 }
 
 /// What one patch's correlation found: where lens 1's picture of the same
@@ -346,24 +441,129 @@ pub struct Found {
 /// treeline and a blank sky is most of them and is worth saying out loud.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Refused {
-    /// One of the two lenses has no picture of the whole rectangle, which
-    /// past about 6 degrees off the seam is every patch: the overlap band is
-    /// only so wide, so near-field content that parallax has moved further
-    /// than that is not in both pictures at all and no instrument can pair it.
+    /// Lens 0 has no picture of the whole patch, or lens 1 has none of it at
+    /// any offset the search could try: the overlap band is only so wide, so
+    /// near-field content that parallax has moved further than that is not in
+    /// both pictures at all and no instrument can pair it.
     pub outside: usize,
     pub flat: usize,
     pub unlike: usize,
     pub pinned: usize,
 }
 
+/// How far along the seam the acquiring pass looks, in degrees, and how much
+/// coarser than the reading pass it looks.
+///
+/// It is answering "roughly where along the seam is lens 1's picture of this
+/// ring", to the nearest degree, so it neither needs the fine grid nor the
+/// whole of it: a quarter of the sampling rate and a third of the azimuths.
+/// Six degrees is over twice the widest gross offset measured on any camera
+/// here and under [`RUNAWAY_DEG`], and it costs what it costs only along the
+/// seam, where the overlap band does not run out.
+const ACQUIRE_DEG: f64 = 6.0;
+const ACQUIRE_COARSER: f64 = 4.0;
+const ACQUIRE_EVERY: usize = 3;
+
+/// How many azimuths have to agree before this frame is allowed to answer at
+/// all. Below it the frame says nothing and the next one is asked.
+const ACQUIRE_NEEDED: usize = 5;
+
+/// Where along the seam this ring's whole picture sits, in grid steps, so the
+/// search can be centred there rather than on nought. `None` from a frame
+/// with too little on its seam to say, which is a frame to ask again after
+/// rather than an answer of nought.
+///
+/// **Parallax cannot reach the along-seam axis at any distance**
+/// (docs/research/seam-two-axis.md 1): the baseline between the lenses is
+/// perpendicular to every direction on the seam circle. So an offset the
+/// whole ring shares along the seam is the factory extrinsic being out, and
+/// on a camera far enough out it is larger than the window the search runs
+/// in: the owner's ONE X2 reads 2.1 to 2.9 degrees along a window of 2.0, so
+/// every azimuth peaks against the limit and the few that survive report the
+/// limit rather than the camera (issue #130).
+///
+/// Across the seam the window stays where it is, because that is the axis
+/// parallax owns: a gross offset there is the scene's distances, and moving
+/// the search onto it would be searching for the near field rather than
+/// around it.
+///
+/// The answer is a median, so one azimuth's false peak cannot move it, and a
+/// ring the window already reaches is **not moved at all**: the search stays
+/// exactly where the camera's own calibration puts it, which is where every
+/// capture with a good factory extrinsic has always been read. Nothing here
+/// is a widening, so nothing here lets a peak that was refused as false
+/// through: the window keeps its width and only stops assuming the camera was
+/// right about where its own lenses point.
+pub fn acquired(
+    reframe: &Reframe,
+    planes: &[Plane],
+    ring: &[Where],
+    probe: &Probe,
+) -> Option<isize> {
+    let coarse = Probe {
+        step: probe.step * ACQUIRE_COARSER,
+        along: ACQUIRE_DEG,
+        ..*probe
+    };
+    let thinned: Vec<Where> = ring.iter().step_by(ACQUIRE_EVERY).copied().collect();
+    let along = read_ring_centred(
+        reframe,
+        planes,
+        &thinned,
+        &coarse,
+        0,
+        &mut Refused::default(),
+    )
+    .into_iter()
+    .flatten()
+    .filter(|found| found.r >= probe.keep)
+    .map(|found| found.along)
+    .collect();
+    centred_on(along, probe)
+}
+
+/// The rule [`acquired`] applies to what it read: the median in whole degrees,
+/// as grid steps, and nought for a ring the window already reaches.
+fn centred_on(mut along: Vec<f64>, probe: &Probe) -> Option<isize> {
+    if along.len() < ACQUIRE_NEEDED {
+        return None;
+    }
+    along.sort_by(f64::total_cmp);
+    let median = along[along.len() / 2];
+    Some(match median.abs() < probe.along {
+        true => 0,
+        false => (median.round() / probe.step) as isize,
+    })
+}
+
 /// Every patch round the seam of one frame, under one calibration, in patch
 /// order. `None` where a lens has no usable picture of that patch, or where
 /// there is nothing in it to correlate.
+///
+/// This one asks [`acquired`] where to centre the search on every frame it is
+/// given. A caller reading several frames of one capture wants
+/// [`read_ring_centred`] instead: what the acquiring pass measures is fixed in
+/// the camera for the life of the file, so asking once and holding the answer
+/// is both cheaper and steadier than asking per frame.
 pub fn read_ring(
     reframe: &Reframe,
     planes: &[Plane],
     ring: &[Where],
     probe: &Probe,
+    refused: &mut Refused,
+) -> Vec<Option<Found>> {
+    let centre = acquired(reframe, planes, ring, probe).unwrap_or(0);
+    read_ring_centred(reframe, planes, ring, probe, centre, refused)
+}
+
+/// The same ring, with the along-seam search centred `centre` grid steps from
+/// the calibration the camera wrote ([`acquired`]).
+pub fn read_ring_centred(
+    reframe: &Reframe,
+    planes: &[Plane],
+    ring: &[Where],
+    probe: &Probe,
+    centre: isize,
     refused: &mut Refused,
 ) -> Vec<Option<Found>> {
     let step = probe.step.to_radians();
@@ -372,43 +572,51 @@ pub fn read_ring(
         (probe.along / probe.step) as isize,
         (probe.across / probe.step) as isize,
     );
+    let patch = (half, half);
     ring.iter()
         .map(|at| {
-            let Some(front) = sample(reframe, planes.first()?, 0, at, (half, half), step) else {
+            let front = sample(reframe, planes.first()?, 0, at, patch, step);
+            if !front.whole(0, 0, patch) {
                 refused.outside += 1;
                 return None;
-            };
+            }
             if front.contrast() < probe.contrast {
                 refused.flat += 1;
                 return None;
             }
-            let Some(back) = sample(
+            // The rectangle holding the search reaches the recentred window
+            // and stays centred on the patch, so every candidate's picture is
+            // the front's own sampling shifted by whole steps and nothing is
+            // resampled to move the window.
+            let back = sample(
                 reframe,
                 planes.get(1)?,
                 1,
                 at,
-                (half + search.0, half + search.1),
+                (half + search.0 + centre.abs(), half + search.1),
                 step,
-            ) else {
+            );
+            // No candidate offset at all had lens 1's picture of the whole
+            // patch, which is the overlap band being narrower than one patch.
+            let Some(peak) = best_shift(&front, &back, search, patch, centre) else {
                 refused.outside += 1;
                 return None;
             };
-            let (along, across, r) = best_shift(&front, &back, search)?;
-            if r < probe.keep {
+            if peak.r < probe.keep {
                 refused.unlike += 1;
             }
             // A peak against the edge of the search is not a peak, it is the
             // search running out. Near-field content at this seam moves
             // further across than the overlap band is wide, and a reading
             // pinned at the limit would report the limit.
-            if along.abs() >= search.0 as f64 || across.abs() >= search.1 as f64 {
+            if peak.pinned {
                 refused.pinned += 1;
                 return None;
             }
             Some(Found {
-                along: (along * step).to_degrees(),
-                across: (across * step).to_degrees(),
-                r,
+                along: (peak.along * step).to_degrees(),
+                across: (peak.across * step).to_degrees(),
+                r: peak.r,
                 contrast: front.contrast(),
             })
         })
@@ -997,6 +1205,7 @@ pub fn measure(
     let duration = walk.duration().as_secs_f64();
     let mut sums: Vec<(usize, f64, f64)> = vec![(0, 0.0, 0.0); ring.len()];
     let mut refused = Refused::default();
+    let mut centre = None;
     for place in 0..plan.places.max(1) {
         // Spread over the middle of the file: the first and last moments of a
         // flight are a camera on the ground with a hand in front of it.
@@ -1008,9 +1217,22 @@ pub fn measure(
             let Some(pair) = walk.next_pair()? else {
                 break;
             };
-            for (found, sum) in read_ring(&base, &pair.lenses, &ring, &plan.probe, &mut refused)
-                .iter()
-                .zip(&mut sums)
+            // Where the search is centred is the camera's own answer and not
+            // this frame's ([`acquired`]), so it is asked for once and held.
+            // A frame with too little on its seam to answer is asked past.
+            if centre.is_none() {
+                centre = acquired(&base, &pair.lenses, &ring, &plan.probe);
+            }
+            for (found, sum) in read_ring_centred(
+                &base,
+                &pair.lenses,
+                &ring,
+                &plan.probe,
+                centre.unwrap_or(0),
+                &mut refused,
+            )
+            .iter()
+            .zip(&mut sums)
             {
                 let Some(found) = found.filter(|found| found.r >= plan.probe.keep) else {
                     continue;
@@ -1272,6 +1494,145 @@ mod tests {
     use super::*;
 
     use crate::projection::tests::{FRAME, fixture_lenses};
+
+    // ------------------------------------------ the patch and the search
+    //
+    // Issue #130: a camera whose factory extrinsic is degrees out could never
+    // be fitted at all. These four are the two faults that made that true,
+    // each in the smallest arrangement that shows it, with the projection and
+    // the pictures taken out: a `Grid` is a rectangle of samples and a hole is
+    // a sample a lens has no picture of, whatever the geometry that put it
+    // there.
+
+    /// One lens's rectangle: `half` steps either side of centre, filled from
+    /// `luma`, with the samples `hole` marks missing.
+    fn grid(
+        half: (isize, isize),
+        luma: impl Fn(isize, isize) -> f64,
+        hole: impl Fn(isize, isize) -> bool,
+    ) -> Grid {
+        let mut taps = Vec::new();
+        for i in -half.0..=half.0 {
+            for j in -half.1..=half.1 {
+                taps.push((!hole(i, j)).then(|| luma(i, j)));
+            }
+        }
+        Grid::of(half, &taps)
+    }
+
+    /// Something with a correlation peak in it and no periodicity to find a
+    /// second one at: two ramps and a hash, which is what a hillside and a
+    /// treeline are to a correlator.
+    fn texture(i: isize, j: isize) -> f64 {
+        let (x, y) = (i as f64, j as f64);
+        128.0
+            + 9.0 * (x * 0.7).sin()
+            + 7.0 * (y * 0.45).cos()
+            + 3.0 * ((i * 7 + j * 13) % 11) as f64
+    }
+
+    /// A patch is refused for where **it** landed, not for where the widest
+    /// candidate landed. The whole search rectangle leaves the picture here,
+    /// which is the ONE X2's every azimuth: 157 of 432 tries, against 0 on a
+    /// camera whose lenses point where it says.
+    #[test]
+    fn a_candidate_is_refused_for_its_own_landing_and_not_its_neighbours() {
+        let patch = (3, 3);
+        let search = (0, 8);
+        let half = (patch.0 + search.0, patch.1 + search.1);
+        // The overlap band runs out five steps past the patch, which no
+        // rectangle covering the whole search can stay inside.
+        let back = grid(half, texture, |_, j| j > 5);
+        assert!(
+            !back.whole(0, 0, half),
+            "the rectangle holding the search is inside the picture, so there is nothing to show"
+        );
+        assert!(
+            back.whole(0, 0, patch),
+            "the patch itself is off the picture"
+        );
+        assert!(
+            back.whole(0, 2, patch),
+            "a candidate clear of the holes is refused"
+        );
+        assert!(
+            !back.whole(0, 4, patch),
+            "a candidate over the holes is kept"
+        );
+    }
+
+    /// And the search finds the shift anyway, on a rectangle the old rule
+    /// refused outright.
+    #[test]
+    fn the_search_reads_a_patch_the_overlap_band_cuts_short() {
+        let patch = (3, 3);
+        let search = (4, 8);
+        let half = (patch.0 + search.0, patch.1 + search.1);
+        let shift = (2, -3);
+        let front = grid(patch, texture, |_, _| false);
+        let back = grid(half, |i, j| texture(i - shift.0, j - shift.1), |_, j| j > 5);
+        let peak = best_shift(&front, &back, search, patch, 0).expect("nothing was tried at all");
+        assert!(!peak.pinned, "the peak came back pinned");
+        assert!(
+            (peak.along - shift.0 as f64).abs() < 0.5 && (peak.across - shift.1 as f64).abs() < 0.5,
+            "read {:.2}, {:.2} of an injected {}, {}",
+            peak.along,
+            peak.across,
+            shift.0,
+            shift.1,
+        );
+    }
+
+    /// A shift outside the window is refused rather than reported wrong, and
+    /// the window moved onto it reads it. This is the ONE X2's other half: 2.1
+    /// to 2.9 degrees along a window of 2.0, so every azimuth peaked against
+    /// the limit.
+    #[test]
+    fn a_shift_outside_the_window_is_refused_until_the_window_moves_onto_it() {
+        let patch = (3, 3);
+        let search = (4, 4);
+        let centre = 9;
+        let half = (patch.0 + search.0 + centre, patch.1 + search.1);
+        let front = grid(patch, texture, |_, _| false);
+        let back = grid(half, |i, j| texture(i - centre, j), |_, _| false);
+        let missed = best_shift(&front, &back, search, patch, 0).expect("nothing was tried");
+        assert!(
+            missed.pinned,
+            "a shift {centre} steps out was reported as {:.2} from a window of {}",
+            missed.along, search.0,
+        );
+        let found = best_shift(&front, &back, search, patch, centre).expect("nothing was tried");
+        assert!(
+            !found.pinned && (found.along - centre as f64).abs() < 0.5,
+            "the window moved onto the shift read {:.2}, pinned {}",
+            found.along,
+            found.pinned,
+        );
+    }
+
+    /// The window moves only when it cannot reach where the ring is, and one
+    /// azimuth's false peak cannot move it: the whole point of the median.
+    #[test]
+    fn the_window_moves_only_for_a_ring_it_cannot_reach() {
+        let probe = Probe::default();
+        let steps = |deg: f64| (deg / probe.step) as isize;
+        assert_eq!(
+            centred_on(vec![0.4; 5], &probe),
+            Some(0),
+            "a ring inside the window moved"
+        );
+        assert_eq!(centred_on(vec![2.6; 5], &probe), Some(steps(3.0)));
+        assert_eq!(
+            centred_on(vec![2.6, 2.5, -5.9, 2.7, 2.4], &probe),
+            Some(steps(3.0)),
+            "one wild azimuth moved the window",
+        );
+        assert_eq!(
+            centred_on(vec![2.6; ACQUIRE_NEEDED - 1], &probe),
+            None,
+            "a frame with too little on its seam answered anyway",
+        );
+    }
 
     /// The seam as a capture with content all the way round it would read it,
     /// if the camera's calibration were wrong by `error` on lens 1.

@@ -157,6 +157,13 @@ whole seam circle (`--bin seam mode=residual`):
 | corpus X5 | fitted from the file | 0.29 | 15 |
 | corpus X3 | fitted from the file | 0.37 | 19 |
 | corpus X4 | fitted from the file | 0.67 | 34 |
+| owner's ONE X2 | factory; no fit was possible at all | **2.57** | 132 |
+| owner's ONE X2 | fitted from the file (section 11) | 0.26 | 13 |
+
+The last two rows are section 11's and were added to this table on 2026-08-01.
+They are the same measurement as the rest of it and they belong beside them,
+but the first of them is not a limit of the model: it is a camera the fitting
+procedure could not reach.
 
 Three other shooters, three other camera models, and **the best per-file fit
 still leaves 0.17 to 0.67 deg**. A better fitting procedure does not close
@@ -323,6 +330,66 @@ measurable in the probe as well (`off=` -4 to +1 walks the residual from
 `--bin step` prints both windows now, `step:` at the campaign's and `close:`
 over the two degrees just outside this frame's own crossover, with each fit's
 rms beside it.
+
+## 11. The probe assumed the camera knew where its own lenses point (issue #130)
+
+Everything above is measured on cameras whose factory extrinsic is nearly
+right. The owner's ONE X2's is not: its two lens axes are recorded **2.835
+degrees from opposed**, where his X4 Air's are 0.308, and the seam of every
+capture from it reads **2.1 to 2.9 degrees along** and up to 3.4 across.
+
+Under that, the fit refused itself on all three of his captures: 3, 2 and 2
+azimuths of 72 against the 10 it needs, so the camera could never build a pool
+entry and zero-config playback delivered the factory calibration forever. Two
+faults, and each supplies half of it.
+
+**The patch was refused for where its neighbours landed.** `read_ring` sampled
+lens 1 as one rectangle grown by the whole search extent and refused the lot if
+any corner of it left the picture. At the default that rectangle is 3.84 by
+5.85 degrees, most of the overlap band, so 157 of 432 tries were refused as
+"not in both pictures" where the X4 Air's were 0. Widening the window made it
+strictly worse rather than better: at `along=3.0 across=6.0` **every single try
+of 144** was refused for leaving the overlap, and nothing reached the
+correlation at all.
+
+**And the window was centred on a calibration that is degrees out.** The search
+runs 2.0 degrees either side of where the camera says its lenses point, and the
+X2's are 2.1 to 2.9 from there, so 60 of 432 tries peaked against the limit
+(the X4 Air: 4 of 768) and the handful that survived reported the limit rather
+than the camera. The four readings stage 6 believed - 1.10 to 1.56 along - were
+themselves clipped.
+
+The fix is one rule each. The rectangle is still one rectangle and the rays are
+the same rays; a summed-area table of the holes in it makes the refusal a
+**candidate's** rather than the rectangle's. And a coarse wide pass acquires
+where the ring actually sits before the reading pass runs - the median of a
+third of the azimuths at a quarter of the sampling rate - and the search is
+centred there. Along the seam only, because parallax cannot reach that axis at
+any distance (section 1), so a gross offset the whole ring shares there is the
+camera and nothing else; and only where the offset is outside the window the
+search already covers, so a capture with a good factory extrinsic is read
+exactly where it always was.
+
+Measured at the owner's October reference moment, whole ring, six frames:
+
+| | azimuths of 72 | not in both | pinned at the limit | along, deg | across, deg |
+|---|---|---|---|---|---|
+| factory, as it shipped | 2 | 157 | 60 | 2.570 | 2.830 |
+| factory, per candidate + acquired | 35 | **0** | 15 | 2.570 | 2.830 |
+| with the fit that then becomes possible | 39 | 0 | **2** | **0.257** | **0.267** |
+
+The three captures now fit 50, 42 and 65 azimuths and **agree with each
+other**: roll -2.44, -2.43, -2.49; yaw 1.00, 1.11, 1.23; pitch 2.87, 2.56,
+2.85. Three flights on one camera asking for the same five numbers is what
+says the answer is the camera's, and no capture from it had ever produced one
+before.
+
+Nothing here is a widening, and 10 of the 11 two-lens captures on this box -
+eight X4 Air, the corpus X3 and the corpus X5 - come back with **the same fit
+to the last digit**. The eleventh is the corpus X4, which turns out to have
+been mildly starved too: 33 azimuths become 40, and re-read off the pixels with
+each fit in place it leaves 0.591 along and 0.304 across where the fit before
+it left 0.601 and 0.318.
 
 ---
 

@@ -21,11 +21,15 @@ add new owner references here with date, category, and status.
   horizon on the other side. Owner: "not blending - this is a seam mismatch issue." The cleanest
   demonstration yet that a global field fits one crossing at the other's expense.
 
-## Calibration starved (issue #130, X2)
+## Calibration starved (issue #130, X2) - fitted on fix/130-x2-fit, owner test pending
 - 2026-08-01 `VID_20251018_191318_00_002.insv time=77.978 yaw=-13.77 pitch=-3.41 fov=70.80 lock=1`
-  October X2, mid zoom. Runs factory calibration: watch-to-calibrate matches only 2-3 of 72 azimuths
-  on every X2 file (search window smaller than the X2's residual; widening broken by rectangle
-  sampling). Fix shape: per-candidate sampling, coarse-to-fine.
+  October X2, mid zoom. Ran the factory calibration: watch-to-calibrate matched only 2-3 of 72
+  azimuths on every X2 capture (the search was centred on an extrinsic 2.8 deg out, and widening it
+  was broken by rectangle sampling). Per-candidate refusal plus an acquired search centre
+  (seam-two-axis 11) take the three captures to 50/42/65 azimuths and a pool entry. Round the ring
+  at this moment: 2.570 deg along and 2.830 across on factory, 0.257 and 0.267 fitted. Local step
+  where the horizon crosses the seam, `yaw=-21.5 pitch=3.6 fov=35`: -3.11 deg factory, -0.61 deg
+  fitted. Pictures: `scratch/x2fit/october-{factory,file}.png`.
 
 ## Photometric: brightness/color at the seam (stage 7 merged-in-draft, stage 8 in progress)
 - 2026-07-31 `VID_20260526_191025_00_004.insv time=488.855 yaw=67.24 pitch=2.56 fov=218.99 lock=1`
