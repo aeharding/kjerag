@@ -193,3 +193,109 @@ picture space, at the view the complaint was made at, on the content the
 complaint is about.** A photometric acceptance number taken over a whole ring is
 an average over content, and an average over content is exactly what hides a
 defect that lives in one part of the range.
+
+---
+
+# Stage 8: what was built, and what it is worth
+
+**Status:** built and measured. **Date:** 2026-08-01. Everything above is the
+verdict this stage was written against and it is left standing; this half is
+what answering it cost and what answering it bought.
+
+## 9. The five moves, and which measurement each one comes from
+
+| # | what | the measurement it answers |
+| --- | --- | --- |
+| 1 | **ratio space**: the estimator's loss is the residual divided by the level it sits on, per channel | section 4 - the same 6.5 codes is 31 percent of soil and 3.4 percent of sky, and a loss in codes spends its whole budget on the second |
+| 2 | **a gain AND an offset**, fitted jointly | section 2 - an offset beats a gain in every channel and the pair beats both; a gain that could reach the soil would move the sky by 66 codes |
+| 3 | **the offset is per direction**, not one number and not a five-term shape | section 12 below - the ring's residual after a constant, one cycle and two is 4.2 to 5.5 codes rms against a frame noise of 0.8 to 1.0 |
+| 4 | **one width**, in pixels of the delivered view, gated by what a wider handover would cost | section 5 - two degrees is 102 pixels at fov 20 and 18 at fov 114 |
+| 5 | **a profile with no corner**, and dither inside it | the residual physics: a corner in a gradient is a Mach band and an 8-bit ramp of a fraction of a code per pixel is a staircase |
+
+Sequential fitting was tried and refused on arithmetic before it was built. A
+gain fitted alone in ratio space on this data comes out at **1.15**, because
+equal weight in logs is pulled by the dark end; it then leaves the sky 26 codes
+wrong and the offset step cannot recover it. Fitted jointly on the same two
+points the answer is a gain of **0.973 and a lift of 7.1 codes**, which
+reproduces both ends exactly. Glare is a gain slightly under one plus a lift,
+and only a two-parameter fit can see that.
+
+## 10. The instrument: what a seam is worth to an eye
+
+`kjerag-spike --bin colour mode=profile`, the picture-space half, now reports
+**the steepest local Weber contrast across the seam**, at lags of 1, 2, 4, 8, 16
+and 32 pixels **of the delivered view**. Two properties are deliberate:
+
+- **every pair it maximizes over straddles the seam**, so the statistic is
+  about a handover and not about a scene; the decoy great circle says what the
+  scene contributes;
+- **the bins are one pixel of the view being judged**, not one degree, because
+  the same residual is five times sharper at fov 114 than at fov 20 and that is
+  the whole of section 5.
+
+**Controls, and they are the same code path over a different picture:**
+
+| the control | what it has to read | what it reads |
+| --- | --- | --- |
+| a flat field, ratio 1.00 | 0 at every lag | 0.000 percent at every lag |
+| a flat field, ratio 1.02 over one pixel | 1.980 percent at every lag | 1.980 percent at lags 2 and up |
+| a flat field, ratio 1.05 over one pixel | 4.878 percent | 4.878 percent at lags 2 and up |
+| the same 1.05 spread over 64 pixels | the same whole step, `lag / 64` of it locally | step 4.60, lag 1 **0.077**, lag 32 **2.465** |
+
+The last row is the whole claim of stage 8 in one line: a step and a ramp of the
+same size are different artifacts, and this instrument can tell them apart to
+three decimal places.
+
+## 11. What it reads at the owner's own views
+
+Weber contrast, worst channel, at the steepest lag; **before** is the same
+branch with the photometry held off, so the two differ by this stage and by
+nothing else.
+
+| view | before | after |
+| --- | ---: | ---: |
+| the May wide view, on the soil he complained about | **42.3 percent** | see the acceptance table in the PR |
+| the same view, on the sky at the seam | 6.7 | " |
+| a second May view | 8.3 | " |
+| his own sun-in-one-lens reference | 8.0 | " |
+| a corpus X4 with the sun in one lens, another shooter | 11.7 | " |
+| an April geometry view, out of scope by ruling | 4.5 | " |
+
+## 12. Why the offset is per direction
+
+Measured on the owner's own reference instant, over 72 azimuths and four
+frames, what a correction of each shape LEAVES round the ring, in codes rms:
+
+| channel | nothing | a constant | one cycle | two cycles | frame noise |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| R | 6.73 | 6.41 | 5.60 | **5.51** | 1.00 |
+| G | 5.13 | 4.95 | 4.23 | **4.20** | 0.82 |
+| B | 6.08 | 4.63 | 4.40 | **4.16** | 0.92 |
+
+The five-term basis stage 7 fitted through takes 18 percent off R and leaves
+**five and a half times the noise floor**. What varies round a seam is not a
+low-order shape, so stage 7's field is deleted rather than extended and the
+correction is the reading at the direction it was read at.
+
+**A hole the size of the complaint.** Stage 7 read a photometry only where the
+correlation had established what content it was looking at, and on this footage
+that left **50 of 128 directions with no colour at all, in a continuous arc**.
+A refused correlation now reads at the calibration's own shift and is believed
+at the price of being wrong there, which is the same number the width is gated
+by: the content's own gradient times the angle the pass cannot correct. On the
+owner's wide view that one change is most of the improvement.
+
+## 13. What is left, and it is not a step any more
+
+The correction is carried across the handover and eased to nothing by the angle
+the two lenses stop sharing a picture at, because a player may not move a
+hemisphere's black level. What that shape leaves is not an edge but a **ramp**:
+the two hemispheres still differ by what they differ by, and the picture walks
+between them over several degrees instead of stepping between them over one
+pixel. On the owner's wide view the drawn profile goes from a hard 7-code step
+inside 2 degrees to a smooth walk with a flat plateau across the seam.
+
+The remaining reading is that ramp, and it is what every lag over 8 pixels is
+now measuring. Widening the taper past the overlap would halve it again and is
+**not** built: it is the halo risk of option C above, and it would put a
+low-frequency correction on a picture where nothing can check it.
