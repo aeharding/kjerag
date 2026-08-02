@@ -36,10 +36,32 @@ add new owner references here with date, category, and status.
   Evidence: .worktrees/stage7/scratch/stage7/evidence-may-stretched.png
 - 2026-08-01 `VID_20260501_183417_00_003.insv time=99.032 yaw=-73.42 pitch=-37.28 fov=101.47 lock=1`
   "Another color/brightness/whatever" - wide, pitched down, ground-dominated. In stage 8's set.
+  STATUS after stage 8: 1 px excess over the same content elsewhere is under the JND; the long-lag
+  Weber improves and what is left is the wide-matching ramp.
+- 2026-08-01 `VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
+  The SMOKE view: the same May wide view whole-frame (no content window), which is the render the
+  owner pointed at by name ("for example smoke3-2-drawn") when he ruled stage 8's first form not
+  aggressive enough. STATUS after stage 8: the +-8 degree mismatch goes 7.55 codes to 2.93, and the
+  1 px excess over the same content elsewhere is -0.73 percent, i.e. no line the content does not
+  read everywhere. Evidence: .worktrees/stage7/scratch/stage8/evidence-smoke.png
+- 2026-08-01 `VID_20260526_191025_00_004.insv time=669.369 yaw=-60.70 pitch=-16.05 fov=30.56 lock=1`
+  Sent with no commentary straight after "to the eye, it still effectively looks like a line".
+  Same May file, pitched down, fov 30.6 - a fine view, 0.0064 deg per pixel. STATUS after stage 8:
+  1 px excess -0.82 percent and 2 px -0.69, so the line there is NOT photometric at any scale an
+  edge lives at. Evidence: .worktrees/stage7/scratch/stage8/evidence-zoom30.png
+- 2026-08-01 `VID_20260526_191025_00_004.insv time=630.763 yaw=95.00 pitch=0.00 fov=60.00 lock=0`
+  The GEOMETRIC CONTROL, chosen by the instrument rather than by the owner: the azimuth his own gear
+  crosses the seam at. It reads a 1 px excess of +5.87 percent over the same content elsewhere, and
+  the photometry moves it by 0.00 - before 5.94, after 5.94. Any view whose line survives the
+  photometry belongs to the local-vs-pose verdict above, not here.
 
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas
-  (owner, 2026-08-01). Stage 8 bar: max local Weber contrast at/below JND (~1%) on flat content.
+  (owner, 2026-08-01). Stage 8 bar, tightened by the coordinator after the owner's "still
+  effectively looks like a line": max local Weber contrast at/below JND (~1%) at the 1 and 2 pixel
+  lags on ALL content, not only flat. Measured as the EXCESS over the same statistic straddling a
+  line a few degrees away in the same window, because texture reads a few percent everywhere and a
+  raw number cannot tell a line from a scene.
 - 60fps dual-stream full resolution realtime on the owner's device; research may exceed budget,
   shipped form needs the story (owner, 2026-08-01).
