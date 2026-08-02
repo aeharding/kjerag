@@ -2086,24 +2086,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   // for both and the fade answers zero there anyway.
   var tone = tone_split();
   var lift = mat2x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0));
-  var spread = 0.0;
-  // HOW MANY RADIANS OF THE SEAM'S OWN AXIS ONE PIXEL OF THIS VIEW COVERS
-  // (issue #103, stage 8), which is what makes the handover's width a number
-  // of pixels rather than a number of degrees. It is the delivered view's own
-  // answer and not a uniform anything has to be told: the sine of the angle out
-  // of the seam plane, differentiated across the quad. Taken HERE, above every
-  // branch, because a derivative needs every lane of the quad to be running.
-  let body = reframe.view_to_body * look.xyz;
-  let off_seam = body.z / max(length(body), 1e-9);
-  let rate = length(vec2<f32>(dpdx(off_seam), dpdy(off_seam)));
+  var grain = 0.0;
   if look.w > 0.0 {
-    let at = band_bend(look.xyz, rate);
+    let at = band_bend(look.xyz);
     mix = blend(look.xyz, at);
     tone = colour_split(at);
     lift = tone_lift(at);
-    // Dithered where the two lenses are mixed and nowhere else: the ramp this
-    // hides is the one the handover draws.
-    spread = tint_fade(at);
+    // Dithered in proportion to how much is being ADDED here, and nowhere it
+    // adds nothing: the staircase this breaks up is the applied correction's
+    // own, so a picture with no correction behind it takes no noise and stays
+    // the picture it was. One code of what is applied is the whole of it.
+    grain = clamp(255.0 * max(max(abs(lift[0].r), abs(lift[0].g)), abs(lift[0].b)), 0.0, 1.0);
   }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
@@ -2114,9 +2107,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[1].pixel),
   );
   let lens = picture(mix, ratio, tone, lift);
-  let grain = dither(in.pos.xy, spread * lens.a);
+  let noise = dither(in.pos.xy, grain * lens.a);
   return vec4<f32>(
-    select(lens.rgb + grain, linearize(lens.rgb + grain), reframe.linearize > 0.5),
+    select(lens.rgb + noise, linearize(lens.rgb + noise), reframe.linearize > 0.5),
     lens.a,
   );
 }

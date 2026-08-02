@@ -224,7 +224,7 @@ impl Field {
         Self {
             size,
             past,
-            half_deg: 0.5 * f64::from(mapped.crossover_at(0.0, 0.0, 0.0).to_degrees()),
+            half_deg: 0.5 * f64::from(mapped.crossover_at(0.0, 0.0).to_degrees()),
         }
     }
 

@@ -609,7 +609,7 @@ impl Reframe {
     ///
     /// WGSL twin: `blend`.
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
-        self.blend_bent(view_ray, super::band::Reading::default(), 0.0)
+        self.blend_bent(view_ray, super::band::Reading::default())
     }
 
     /// The same with the band's own correction in it (issue #103): each lens's
@@ -636,12 +636,7 @@ impl Reframe {
     /// disparity is small, so the far field is the picture it always was.
     ///
     /// WGSL twin: `blend`, whose `band` argument is `band_bend`'s answer.
-    pub fn blend_bent(
-        &self,
-        view_ray: [f32; 3],
-        reading: super::band::Reading,
-        rate: f32,
-    ) -> Blend {
+    pub fn blend_bent(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
         let reach = norm3(view_ray);
@@ -650,7 +645,7 @@ impl Reframe {
         // is what keeps this pass costing what it cost before the crossover
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
-        let band = self.crossover_at(reading.epi, reading.open, rate);
+        let band = self.crossover_at(reading.epi, reading.open);
         let front = self.handover(axis, reach, band);
         let bend = self.bent(view_ray, reading, band);
         for lens in 0..MAX_LENSES {
@@ -732,18 +727,12 @@ impl Reframe {
     /// bear. [`super::band::width`] is where all four meet, and it is where
     /// they are argued.
     ///
-    /// `rate` is how many radians of the seam's own axis one pixel of the
-    /// delivered view covers. Zero asks for the floor, which is what every
-    /// caller with no view to speak of wants and what
-    /// [`Self::blend`] passes.
-    ///
     /// WGSL twin: `band_width`.
-    pub fn crossover_at(&self, disparity: f32, open: f32, rate: f32) -> f32 {
+    pub fn crossover_at(&self, disparity: f32, open: f32) -> f32 {
         super::band::width(
             disparity,
             open,
             CROSSOVER_DEG.to_radians(),
-            rate,
             self.half_overlap,
         )
     }
@@ -839,11 +828,11 @@ impl Reframe {
     /// bites only where the band has run out of room to open.
     ///
     /// WGSL twin: `band_bend`.
-    pub fn bend(&self, view_ray: [f32; 3], reading: super::band::Reading, rate: f32) -> Bend {
+    pub fn bend(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Bend {
         self.bent(
             view_ray,
             reading,
-            self.crossover_at(reading.epi, reading.open, rate),
+            self.crossover_at(reading.epi, reading.open),
         )
     }
 
@@ -2492,13 +2481,13 @@ pub(crate) mod tests {
         let reframe = fixture(Camera::default());
         for disparity_deg in [0.0f32, 1.8, 2.2, 2.6] {
             let disparity = disparity_deg.to_radians();
-            let wanted = reframe.crossover_at(disparity, 0.0, 0.0).to_degrees();
+            let wanted = reframe.crossover_at(disparity, 0.0).to_degrees();
             for phi in [0.0, 90.0, 180.0, 270.0] {
                 let mixed: Vec<f32> = (0..3000)
                     .map(|step| 70.0 + step as f32 * 0.01)
                     .filter(|theta| {
                         let weights = reframe
-                            .blend_bent(direction(*theta, phi), reading(disparity), 0.0)
+                            .blend_bent(direction(*theta, phi), reading(disparity))
                             .weights;
                         weights.iter().all(|weight| *weight > 0.0)
                     })
@@ -2987,7 +2976,7 @@ pub(crate) mod tests {
             norm3(ray),
             // No band and no reading, so the width is the floor, which is the
             // width this test was written against.
-            reframe.crossover_at(0.0, 0.0, 0.0),
+            reframe.crossover_at(0.0, 0.0),
         );
         let mut weights: [f32; MAX_LENSES] =
             std::array::from_fn(|lens| match lens < reframe.lens_count as usize {

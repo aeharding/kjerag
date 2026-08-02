@@ -252,27 +252,6 @@ pub const WIDEST_DEG: f32 = NEAR_DEG * SLOPE / FOLD;
 /// corner at either end to draw one.
 pub const SLOPE: f32 = 15.0 / 8.0;
 
-/// How many pixels of the **delivered view** a handover is spread over, when
-/// the content lets it (issue #103, stage 8).
-///
-/// **The one constant stage 8 adds, and it is denominated in pixels because
-/// that is the mistake it exists to fix.** The crossover was two degrees at
-/// every view, and two degrees is 102 pixels at the field of view stage 5 was
-/// judged on and **18** at the field of view the owner complained at: the same
-/// residual is five times sharper there and nothing about the correction
-/// changed (docs/research/seam-blending.md 5). A width in degrees is a width
-/// that gets sharper the more of the world you ask for.
-///
-/// It is derived from the worst thing measured. The steepest part of the
-/// profile carries `SLOPE / n` of the whole difference per pixel, the widest
-/// difference measured at a seam on the owner's own footage is **38 percent**
-/// Weber (6.5 codes on 17-code soil, 6.1), and the bar is the 1 percent
-/// just-noticeable difference: `SLOPE * 0.38 / 0.01` is 71.25, so 72 pixels is
-/// the width at which the worst seam this campaign has ever measured has no
-/// pixel in it an eye can find. Wider buys nothing and costs the room the
-/// correction fades out over.
-const SPREAD_PX: f32 = 72.0;
-
 /// One code of an 8-bit picture, which is the floor of the medium and the unit
 /// [`open`](Cell::open) trades in.
 const ONE_CODE: f32 = 1.0 / 255.0;
@@ -1386,19 +1365,23 @@ pub fn carried(disparity_rad: f32, band_rad: f32) -> f32 {
 ///   why near-field content keeps a narrow-band character: a direction reading
 ///   degrees of disparity is opened by its own arithmetic and not by an eye's
 ///   wish.
-/// - **What an eye wants**, [`SPREAD_PX`] pixels of the delivered view. This is
-///   the term that did not exist before stage 8, and the one that answers the
-///   owner's complaint: the same two degrees is 102 pixels at fov 20 and 18 at
-///   fov 114.
 /// - **What the content allows**, [`Cell::open`], which prices the ghost a
 ///   wider handover would cost in that direction. Zero leaves the floor exactly
-///   where stage 4 left it.
+///   where stage 4 left it; one asks for the whole of what the optics have.
 /// - **The floor and the ceiling.** The floor is the crossover the projection
 ///   ships, so no view ever gets a handover narrower than the two degrees the
-///   owner validated. The ceiling is passed in as half the angle the two lenses
-///   share a picture over: a handover of that width leaves exactly as much room
-///   again for the correction to fade out across, and equal room is what makes
-///   the steeper of those two gradients as shallow as it can be.
+///   owner validated. The ceiling is half the angle the two lenses share a
+///   picture over, which is all there is: past it one of them has no picture to
+///   hand over with.
+///
+/// **A count of pixels of the delivered view was built here and then measured
+/// out.** Stage 8 opened on the complaint that two degrees is 102 pixels at fov
+/// 20 and 18 at fov 114, so the first form of this asked for a fixed number of
+/// pixels. It decided nothing: at every field of view the player offers, the
+/// optics' ceiling or the content's own price is reached first, and the one
+/// place it did bite it made the handover NARROWER than the content would have
+/// borne (4.70 degrees against 5.39 at the owner's own wide view). It is
+/// deleted with its constant.
 ///
 /// **It still needs no time constant of its own**, which is stage 4's property
 /// and is kept: both readings it moves with, the disparity and the openness,
@@ -1406,23 +1389,17 @@ pub fn carried(disparity_rad: f32, band_rad: f32) -> f32 {
 /// what it is made of.
 ///
 /// WGSL twin: `band_width`.
-pub fn width(
-    disparity_rad: f32,
-    open: f32,
-    floor_rad: f32,
-    rate_rad: f32,
-    ceiling_rad: f32,
-) -> f32 {
+pub fn width(disparity_rad: f32, open: f32, floor_rad: f32, ceiling_rad: f32) -> f32 {
     let ceiling = ceiling_rad.max(floor_rad);
     // What the reading needs, or the picture folds. Stage 4's inequality
     // exactly, at the slope the profile actually has.
     let fold = (disparity_rad.abs() * SLOPE / FOLD).min(WIDEST_DEG.to_radians());
-    // What an eye wants: enough pixels of THIS view that the steepest one is
-    // under the just-noticeable difference.
-    let want = SPREAD_PX * rate_rad;
-    // What the content allows, which is the ghost the widening would cost.
-    let allowed = floor_rad + open.clamp(0.0, 1.0) * (ceiling - floor_rad);
-    want.clamp(floor_rad, allowed).max(fold).min(ceiling)
+    // As wide as the content will bear, with the optics as the other end of
+    // it. There is no third term: a count of pixels of the delivered view was
+    // built here and measured out (see above).
+    (floor_rad + open.clamp(0.0, 1.0) * (ceiling - floor_rad))
+        .max(fold)
+        .min(ceiling)
 }
 
 // ------------------------------------------------------------ the shader
@@ -1516,7 +1493,7 @@ const HUE_TAPS: usize = 7;
 pub(crate) fn lookup_wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst KEEP = {KEEP:?};\n\
-         const WIDEST = {widest:?};\nconst SLOPE = {SLOPE:?};\nconst SPREAD_PX = {SPREAD_PX:?};\n\
+         const WIDEST = {widest:?};\nconst SLOPE = {SLOPE:?};\n\
          const TAU = {tau:?};\nconst LIMIT_LN = {LIMIT_LN:?};\nconst LIMIT_OFF = {LIMIT_OFF:?};\n\
          {CELL}{RING}{LOOKUP}",
         widest = WIDEST_DEG.to_radians(),
@@ -1527,40 +1504,52 @@ pub(crate) fn lookup_wgsl() -> String {
 /// How much of the photometric correction reaches a direction whose sine out of
 /// the seam plane is `off_seam` (issue #103, stages 7 and 8).
 ///
-/// **Whole across the handover, and eased to nothing by the overlap.** Whole
-/// across it because that is what makes the step vanish rather than move: the
-/// two lenses' pictures are mixed there, and a correction that faded across the
-/// mix would leave the difference behind, spread out. Then out to where the two
-/// lenses stop sharing a picture, which the file's own calibration says, and
-/// past which "how these two differ here" is not a statement anything could
-/// check.
+/// **Whole across the handover, and eased to nothing AT THE POLE.** Whole
+/// across the handover because that is what makes the step vanish rather than
+/// move: the two lenses' pictures are mixed there, and a correction that faded
+/// across the mix would leave the difference behind, spread out.
 ///
-/// The inner end is [`width`]'s answer at this direction since stage 8, which
-/// is what makes it one region rather than a second one: stage 7 faded from
-/// [`WIDEST_DEG`], a constant that had nothing to do with how wide the handover
-/// at that direction actually was.
+/// **The outer end is the pole, and that is the owner's own ruling**
+/// (2026-08-01, on stage 8's first form: *"I dont think its aggressive enough
+/// with blending"*). That form ended at the overlap, seven degrees off the seam,
+/// on the argument that past it "how these two differ here" is not a statement
+/// anything can check. What it leaves is the whole correction ramped over four
+/// degrees, which is what he was looking at. **The symmetric split is what
+/// dissolves the objection that shape was protecting against**: each hemisphere
+/// moves HALF the mismatch towards the other, so neither is given a black level
+/// that is not its own, and that is the same argument stage 3 used to split a
+/// gain between two hemispheres.
+///
+/// The pole is the only end here that is not a taste. An azimuth is what the
+/// field is read at and a pole has none, so a field carried to one has to
+/// arrive single-valued; arriving at zero is how, and it costs no constant.
+///
+/// The inner end is [`width`]'s answer at this direction, which is what makes
+/// it one region rather than a second one: stage 7 faded from [`WIDEST_DEG`], a
+/// constant that had nothing to do with how wide the handover at that direction
+/// actually was.
 ///
 /// **A fifth-order ease and not a `smoothstep`**, so the profile has no corner
 /// AND no kink in its slope at either end. A corner in a gradient is a Mach
 /// band, which is the artifact this stage exists to remove rather than to move,
 /// and a jump in the second derivative is a fainter one.
 ///
-/// Exactly zero past the overlap, and on a camera whose lenses do not overlap
-/// at all, which includes every file with one lens stream.
+/// Exactly zero on a camera whose lenses do not overlap at all, which is every
+/// file with one lens stream, at every view: issue #39's byte-identity.
 ///
 /// WGSL twin: `tint_fade`.
 pub fn fade(off_seam: f32, half_width_rad: f32, half_overlap_rad: f32) -> f32 {
-    let outer = half_overlap_rad.sin();
-    if outer <= 0.0 {
-        // A file with one lens stream: the two never share a picture, so
-        // there is no handover to correct and nothing to correct it with.
+    if half_overlap_rad <= 0.0 {
+        // A file with one lens stream: the two never share a picture, so there
+        // is no handover to correct and nothing to correct it with. The only
+        // question the overlap is still asked.
         return 0.0;
     }
-    let inner = half_width_rad.sin().min(outer);
-    if outer <= inner {
-        return f32::from(u8::from(off_seam.abs() < outer));
+    let inner = half_width_rad.sin().min(1.0);
+    if inner >= 1.0 {
+        return f32::from(u8::from(off_seam.abs() < 1.0));
     }
-    let t = ((off_seam.abs() - inner) / (outer - inner)).clamp(0.0, 1.0);
+    let t = ((off_seam.abs() - inner) / (1.0 - inner)).clamp(0.0, 1.0);
     1.0 - t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
@@ -1786,17 +1775,21 @@ fn tone_lift(at: Band) -> mat2x3<f32> {
 //
 // Since stage 8 the inner end is the handover's own width at this direction
 // and not a constant, which is what makes the colour region and the crossover
-// ONE region instead of two.
+// ONE region instead of two; and the outer end is the pole, because the
+// correction is SPLIT between the two hemispheres and half of a mismatch is not
+// a black level a hemisphere has to be protected from.
 fn tint_fade(at: Band) -> f32 {
-  let inner = sin(0.5 * at.crossover);
-  let outer = sin(reframe.half_overlap);
-  let away = abs(at.off_seam);
-  if outer <= inner {
-    return select(0.0, 1.0, away <= inner);
+  if reframe.half_overlap <= 0.0 {
+    return 0.0;
   }
-  // The fifth-order ease and not `smoothstep`, so the slope has no kink at
-  // either end either. Rust twin: `fade`.
-  let t = clamp((away - inner) / (outer - inner), 0.0, 1.0);
+  // THE POLE, which is the one end that is not a taste: an azimuth is what the
+  // field is read at and a pole has none. Rust twin: `fade`.
+  let inner = min(sin(0.5 * at.crossover), 1.0);
+  let away = abs(at.off_seam);
+  if inner >= 1.0 {
+    return select(0.0, 1.0, away < 1.0);
+  }
+  let t = clamp((away - inner) / (1.0 - inner), 0.0, 1.0);
   return 1.0 - t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
@@ -1826,7 +1819,7 @@ fn band_rest() -> Band {
 // is the camera, they are read from one correlation at one candidate shift,
 // and each is applied at its own channel's evidence. Only the epipolar one
 // can fold and only the epipolar one opens the band: see `band_width`.
-fn band_bend(ray: vec3<f32>, rate: f32) -> Band {
+fn band_bend(ray: vec3<f32>) -> Band {
   let body = reframe.view_to_body * ray;
   let flat = vec2<f32>(body.x, body.y);
   let reach = length(flat);
@@ -1887,7 +1880,7 @@ fn band_bend(ray: vec3<f32>, rate: f32) -> Band {
   // sine out of the seam plane is what fades it (issue #103, stage 7).
   out.azimuth = flat / reach;
   out.off_seam = body.z / length(body);
-  out.crossover = band_width(applied, open, rate);
+  out.crossover = band_width(applied, open);
   out.lift = lift;
   let limit = FOLD * out.crossover / SLOPE;
   let carried = clamp(applied, -limit, limit);
@@ -1931,12 +1924,11 @@ fn carry(a: f32, wa: f32, b: f32, wb: f32, mix: f32) -> f32 {
 // The EPIPOLAR reading only, which is what keeps stage 4's fold guarantee
 // exactly where stage 4 put it: the along-seam bend does not fold and therefore
 // does not ask the band for room.
-fn band_width(disparity: f32, open: f32, rate: f32) -> f32 {
+fn band_width(disparity: f32, open: f32) -> f32 {
   let ceiling = max(reframe.half_overlap, CROSSOVER);
   let fold = min(abs(disparity) * SLOPE / FOLD, WIDEST);
-  let want = SPREAD_PX * rate;
   let allowed = CROSSOVER + clamp(open, 0.0, 1.0) * (ceiling - CROSSOVER);
-  return min(max(clamp(want, CROSSOVER, allowed), fold), ceiling);
+  return min(max(allowed, fold), ceiling);
 }
 
 fn mix2(a: f32, b: f32, t: f32) -> f32 {
@@ -3078,7 +3070,7 @@ mod tests {
         let field = Along::fit(&dead);
         assert_eq!(reframe.reading_at(ray, &dead, field), Reading::default());
         assert_eq!(
-            reframe.bend(ray, reframe.reading_at(ray, &dead, field), 0.0),
+            reframe.bend(ray, reframe.reading_at(ray, &dead, field)),
             crate::projection::Bend::default(),
         );
         // And with full confidence it is applied whole: the gate is a gate,
@@ -3169,7 +3161,7 @@ mod tests {
     /// for, at a view with no pixels to ask about. Every property stage 4
     /// measured is a property of THIS call, and it is why they still hold.
     fn shut(disparity_rad: f32, floor_rad: f32) -> f32 {
-        width(disparity_rad, 0.0, floor_rad, 0.0, CEILING_DEG.to_radians())
+        width(disparity_rad, 0.0, floor_rad, CEILING_DEG.to_radians())
     }
 
     #[test]
@@ -3336,7 +3328,7 @@ mod tests {
             crate::sampling::Sampling::default(),
         );
         assert_eq!(
-            reframe.crossover_at(0.0, 0.0, 0.0).to_bits(),
+            reframe.crossover_at(0.0, 0.0).to_bits(),
             FLOOR_DEG.to_radians().to_bits(),
         );
     }
@@ -3521,96 +3513,93 @@ mod tests {
     }
 
     #[test]
-    fn the_correction_is_whole_across_the_handover_and_gone_by_the_overlap() {
-        // What the fade has to do, in the three places it has to do it. The
-        // fixture's two lenses overlap by 14.4 degrees, 7.2 a side, and the
-        // handover at this direction is four of them.
+    fn the_correction_is_whole_across_the_handover_and_gone_at_the_pole() {
+        // What the fade has to do, in the four places it has to do it. The
+        // fixture's two lenses overlap by 14.4 degrees; the handover at this
+        // direction is four of them and the correction reaches far past both.
         let half = CEILING_DEG.to_radians();
         let band = 4.0f32.to_radians();
         let sine = |degrees: f32| degrees.to_radians().sin();
+        let at = |degrees: f32| fade(sine(degrees), 0.5 * band, half);
         // Whole across the handover's own width, so the step it removes is
-        // removed exactly and the mixed picture carries one number. That inner
-        // end is this ray's own width since stage 8 and not a constant, which
-        // is what makes the colour region and the crossover one region.
+        // removed exactly and the mixed picture carries one number.
         for degrees in [0.0, 1.0, 2.0] {
-            assert_eq!(fade(sine(degrees), 0.5 * band, half), 1.0, "at {degrees}");
+            assert_eq!(at(degrees), 1.0, "at {degrees}");
             assert_eq!(fade(-sine(degrees), 0.5 * band, half), 1.0, "at -{degrees}");
         }
-        // Gone by the overlap, and gone past it: a hemisphere away from the
-        // seam is byte-identical whatever the ring read.
-        for degrees in [7.22, 20.0, 89.0] {
-            assert_eq!(fade(sine(degrees), 0.5 * band, half), 0.0, "at {degrees}");
-        }
-        // And monotone in between, with no corner and no kink at either end.
+        // WIDE, which is the owner's ruling: past the overlap, most of the
+        // correction is still being applied, and it is still being applied at
+        // twenty and thirty degrees off the seam. Half of it goes to each
+        // hemisphere, so neither is handed a black level that is not its own.
+        assert!(at(7.22) > 0.98, "at the overlap it is {}", at(7.22));
+        assert!(
+            (0.75..0.95).contains(&at(20.0)),
+            "at 20 deg it is {}",
+            at(20.0)
+        );
+        assert!(
+            (0.40..0.75).contains(&at(30.0)),
+            "at 30 deg it is {}",
+            at(30.0)
+        );
+        assert!(at(60.0) < 0.20, "at 60 deg it is {}", at(60.0));
+        // And gone at the pole, where an azimuth does not exist and a field
+        // read at one has to arrive single-valued.
+        assert_eq!(at(90.0), 0.0);
+        // Monotone in between, with no corner and no kink at either end.
         let mut held = 1.0;
         let mut steepest: f32 = 0.0;
-        let (inner, outer) = (0.5 * 4.0, CEILING_DEG);
-        for step in 0..=400 {
-            let degrees = inner + (outer - inner) * step as f32 / 400.0;
-            let now = fade(sine(degrees), 0.5 * band, half);
+        // To 85 and not to 90: past there the sine of the angle is flat to
+        // four decimals and what moves between two steps is the float and not
+        // the fade.
+        for step in 0..=800 {
+            let degrees = 2.0 + 83.0 * step as f32 / 800.0;
+            let now = at(degrees);
             assert!(now <= held + 1e-6, "the fade rose at {degrees}");
-            steepest = steepest.max((held - now) / ((outer - inner) / 400.0));
+            steepest = steepest.max((held - now) / (83.0 / 800.0));
             held = now;
         }
-        // The steepest the fade can be, per degree, which is what a correction
-        // of a given size costs the picture in gradient: SLOPE over the width,
-        // which is this profile's own peak slope and the same number `width`
-        // solves the fold inequality with.
-        assert!(
-            (steepest - SLOPE / (outer - inner)).abs() < 0.02,
-            "the fade peaks at {steepest} per degree",
-        );
-        // A camera whose lenses do not overlap past the handover takes the
-        // correction across the handover and nothing outside it, and a file
-        // with one lens stream has no overlap at all and takes nothing
-        // anywhere.
-        assert_eq!(fade(0.0, 0.0, 0.0), 0.0);
-        assert_eq!(fade(sine(1.0), 0.0, 0.0), 0.0);
+        // The steepest it can be, per degree. Over the whole hemisphere that
+        // is a fortieth of what the overlap-wide form left, which is the whole
+        // of what the owner asked for.
+        assert!(steepest < 0.04, "the fade peaks at {steepest} per degree");
+        // A file with one lens stream has no overlap and takes nothing
+        // anywhere, at any view.
+        assert_eq!(fade(0.0, 0.5 * band, 0.0), 0.0);
+        assert_eq!(fade(sine(1.0), 0.5 * band, 0.0), 0.0);
     }
 
-    /// The one width, at the four things that decide it (issue #103, stage 8).
+    /// The one width, at the three things that decide it (issue #103, stage 8).
     #[test]
-    fn the_handover_is_as_wide_as_the_eye_asks_and_the_content_allows() {
+    fn the_handover_is_as_wide_as_the_content_allows_and_the_optics_have() {
         let floor = FLOOR_DEG.to_radians();
         let ceiling = CEILING_DEG.to_radians();
-        // A view with no pixels to speak of asks for nothing and gets the
-        // floor, however open the content is. That is stage 4's picture, and
-        // it is what every caller with no view of its own draws.
+        // Content that will not bear a wider handover gets the floor exactly,
+        // bit for bit. That is stage 4's picture and it is the ghosting guard:
+        // structural, not a taste.
         assert_eq!(
-            width(0.0, 1.0, floor, 0.0, ceiling).to_bits(),
-            floor.to_bits()
+            width(0.0, 0.0, floor, ceiling).to_bits(),
+            floor.to_bits(),
+            "closed content did not get the floor",
         );
-        // A pixel rate of a hundredth of a degree - which is fov 20 on a 2048
-        // wide window - asks for less than the floor and still gets the floor.
-        let fine = 0.01f32.to_radians();
-        assert_eq!(
-            width(0.0, 1.0, floor, fine, ceiling).to_bits(),
-            floor.to_bits()
-        );
-        // The owner's own wide view: 0.065 degrees a pixel, which is fov 114
-        // on 1024. SPREAD_PX of those is 4.7 degrees, and flat content gives
-        // all of it.
-        let wide = 0.0653f32.to_radians();
-        let open = width(0.0, 1.0, floor, wide, ceiling).to_degrees();
-        assert!((open - 4.70).abs() < 0.02, "the wide view opened to {open}");
-        // The same view over content that will not bear it stays at the floor,
-        // and that is the ghosting guard: it is structural and not a taste.
-        assert_eq!(
-            width(0.0, 0.0, floor, wide, ceiling).to_bits(),
-            floor.to_bits()
-        );
-        // Halfway open is halfway between the two, so a direction drifting
-        // from one to the other has nowhere to step.
-        let half = width(0.0, 0.5, floor, wide, ceiling).to_degrees();
+        // Content that will bear it gets the whole of what the two lenses
+        // share, which is all there is.
+        assert_eq!(width(0.0, 1.0, floor, ceiling), ceiling);
+        // Halfway between, so a direction drifting from one to the other has
+        // nowhere to step.
+        let half = width(0.0, 0.5, floor, ceiling).to_degrees();
         assert!((half - 4.61).abs() < 0.02, "half open is {half}");
-        // A view so wide that the eye asks for more than the two lenses share
-        // takes what they share, and never more: past that the fade would have
-        // no room to end in.
-        let huge = 0.5f32.to_radians();
-        assert_eq!(width(0.0, 1.0, floor, huge, ceiling), ceiling);
-        // And the fold still wins over all of it, closed content included.
+        // Monotone in the openness, and never past the ceiling.
+        let mut last = 0.0f32;
+        for step in 0..=100 {
+            let now = width(0.0, step as f32 / 100.0, floor, ceiling);
+            assert!(now >= last - 1e-9 && now <= ceiling + 1e-9);
+            last = now;
+        }
+        // And the fold wins over all of it, closed content included: a reading
+        // the handover cannot carry opens it whatever the content says.
         let near = 2.4f32.to_radians();
-        assert!((width(near, 0.0, floor, 0.0, ceiling) - near * SLOPE / FOLD).abs() < 1e-9);
+        assert!((width(near, 0.0, floor, ceiling) - near * SLOPE / FOLD).abs() < 1e-9);
     }
 
     /// What a direction opens for, and what it does not (issue #103, stage 8).
@@ -3980,7 +3969,7 @@ mod tests {
                 let (sin_t, cos_t) = theta.to_radians().sin_cos();
                 let (sin_p, cos_p) = phi.to_radians().sin_cos();
                 let ray = [sin_t * cos_p, sin_t * sin_p, cos_t];
-                let bend = base.bend(ray, base.reading_at(ray, &cells, field), 0.0);
+                let bend = base.bend(ray, base.reading_at(ray, &cells, field));
                 let bent: [f32; 3] = std::array::from_fn(|c| ray[c] + bend.along[c]);
                 let (here, there) = (rolled.project(1, ray), base.project(1, bent));
                 if !here.inside || !there.inside {
@@ -4076,11 +4065,7 @@ mod tests {
         let cells: Vec<Cell> = (0..AZIMUTHS)
             .map(|index| along_cell(index, |_| 0.5f32.to_radians()))
             .collect();
-        let bend = reframe.bend(
-            ray,
-            reframe.reading_at(ray, &cells, Along::fit(&cells)),
-            0.0,
-        );
+        let bend = reframe.bend(ray, reframe.reading_at(ray, &cells, Along::fit(&cells)));
         assert_eq!(bend.epi, [0.0; 3]);
         assert_eq!(bend.along, [0.0; 3]);
     }

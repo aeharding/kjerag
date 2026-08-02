@@ -1335,7 +1335,6 @@ impl Weighting {
         let shipped = reframe.blend_bent(
             ray32,
             reframe.reading_at(ray32, cells, kjerag_render::Along::fit(cells)),
-            0.0,
         );
         let landings = shipped.landings;
         let covered = |lens: usize| landings[lens].inside;
