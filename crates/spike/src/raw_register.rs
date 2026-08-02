@@ -1911,6 +1911,37 @@ mod tests {
         }
     }
 
+    /// Raw registration nodes stay in body coordinates even when the named
+    /// view is turned.  Sampling has to undo that view rotation before it
+    /// asks the lens projection for a pixel.  The fixture deliberately uses
+    /// a 90 degree yaw: at least one real crossover root is out of a lens if
+    /// its body ray is accidentally passed straight to `project`.
+    #[test]
+    fn raw_sampling_projects_body_nodes_through_the_named_view() {
+        let map = crossover_map(3.0);
+        let candidates = visible_candidates(&map, 320, 320, [0.0, 0.0, -0.033]);
+        let (candidate, lens) = candidates
+            .iter()
+            .flat_map(|candidate| (0..2).map(move |lens| (candidate, lens)))
+            .find(|(candidate, lens)| {
+                !map.project(*lens, candidate.node.centre.map(|axis| axis as f32))
+                    .inside
+            })
+            .expect("the turned-view fixture needs a body ray the raw projection rejects");
+        let size = kjerag_render::Size::new(3840, 3840);
+        let plane = Plane {
+            luma: vec![128; (size.width * size.height) as usize],
+            stride: size.width as usize,
+            size,
+            chroma: None,
+        };
+
+        assert!(
+            sample(&map, &plane, lens, candidate.node, 1, 0.001, [0.0; 2]).is_ok(),
+            "sampling must round-trip the body node through view space before projection"
+        );
+    }
+
     #[test]
     fn actual_crossover_follows_an_asymmetric_pose_not_body_z_zero() {
         let map = crossover_map(3.0);
