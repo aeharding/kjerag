@@ -9,6 +9,10 @@ mod camera;
 mod capture;
 pub mod dmabuf;
 mod framing;
+// The inert, CPU-side shape of a future per-source seam fusion map.  It is
+// deliberately not part of the GPU path yet: `Fusion::disabled` is an exact
+// representation of `Blend`'s existing calibrated choices.
+mod fusion;
 mod projection;
 /// How a magnified picture is sampled, and where the upgrade engages
 /// (issue #11). Public for the instrument that measures it, like
