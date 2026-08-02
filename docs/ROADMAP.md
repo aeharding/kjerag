@@ -1043,6 +1043,46 @@ live, no keyframe UI ever.
   was shown able to fail before it was believed: against the stale file it
   names all four crates, ffmpeg-next 7.1.0 among them.
 
+- 2026-08-01 **The seam's blend, in the space an eye reads it in** (issue #103,
+  stage 8, docs/research/seam-blending.md 9-13). The owner viewed stage 7's
+  branch at a wide May reference view and said *"we need to do a lot better
+  with blending"*, and the verdict written for him found three reasons no
+  amount of tuning could: the correction was multiplicative where the
+  difference is additive, the estimator weighted brightness squared so the
+  content the artifact shows on carried one percent of the weight, and the
+  loss was in codes while the eye reads ratios. **All three are one mistake -
+  the metric - and stage 8 changes the metric first.**
+
+  Acceptance is now the steepest local **Weber contrast across the seam**, at
+  lags of 1 to 32 pixels of the delivered view, with controls that read a
+  planted step back exactly and separate a step from a ramp of the same size
+  to three decimals. At the owner's own wide view it goes **42.3 percent to
+  16.6**, and the step the two sides differ by goes **+32.5 percent to -2.1**.
+  On flat content it is at the one percent just-noticeable difference at the
+  one and two pixel lags, which is where an edge lives; what is left past four
+  pixels is a ramp the correction itself makes, because a player may not move
+  a hemisphere's black level and the correction has to end somewhere.
+
+  Five moves, each from a measurement: **ratio space** (the codes-space
+  estimator deleted, not switched off); **a gain and an offset fitted
+  jointly**, because sequentially the gain comes out at 1.15 and ruins the sky;
+  **the offset per direction**, because a constant plus one cycle plus two -
+  the basis stage 7 fitted through - leaves 4.2 to 5.5 codes rms against a
+  frame noise of 0.8 to 1.0, so what varies round a seam is not a shape;
+  **one width** in pixels of the delivered view, gated per direction by what a
+  wider handover would cost in ghost, absorbing stage 4's crossover and stage
+  7's colour region; and **a handover profile with no corner** plus dither
+  inside it, which is the residual physics a photometry cannot reach. One hole
+  was most of the improvement: stage 7 read a photometry only where the
+  correlation had established what it was looking at, and that left 50 of 128
+  directions blank in a continuous arc - the arc the complaint was in.
+
+  **The debt went down.** `band::Tint` is deleted whole - its fit, its shader
+  twin, its compute entry point, its pipeline and its readback - and three
+  notions of "near the seam" became one function. Three new constants, one new
+  derived one, one whole mechanism gone. The photometry costs +0.28 ms per
+  redraw, less than stage 7's +0.38 for more work.
+
 - 2026-08-01 **The seam hands over a colour, and one number could never have
   reached it** (issue #103, stage 7,
   docs/research/insv-format.md 6.11). The owner's verdict on the merged
