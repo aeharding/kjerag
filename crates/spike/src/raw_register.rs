@@ -199,6 +199,163 @@ pub struct StripLatticeResult {
     pub health: StripLatticeHealth,
 }
 
+/// A two-axis translation expressed in the camera's physical seam axes.
+///
+/// The registration grid is stored as `[perp, epi]`, because its rows and
+/// columns follow those offsets.  Consumers fitting a pose, however, should
+/// never have to guess that convention: this type is explicitly `[epi,
+/// perp]` and carries the corresponding camera-frame axes beside it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraDisplacement {
+    pub epi: f64,
+    pub perp: f64,
+}
+
+/// Full covariance in the same `[epi, perp]` order as [`CameraDisplacement`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraCovariance {
+    pub epi_epi: f64,
+    pub epi_perp: f64,
+    pub perp_perp: f64,
+}
+
+/// One two-dimensional raw registration at a pre-declared lattice site.
+///
+/// This is deliberately not a candidate winner.  A caller receives one of
+/// these (or a concrete refusal) for *every* declared site, preserving the
+/// evidence needed to decide whether a global pose explains the crossings.
+#[derive(Clone, Copy, Debug)]
+pub struct StripSiteReading {
+    pub site: StripSite,
+    /// Unit body/camera axes for the reported components.
+    pub epi_axis: [f64; 3],
+    pub perp_axis: [f64; 3],
+    pub displacement_rad: CameraDisplacement,
+    pub covariance_rad2: CameraCovariance,
+    pub condition: f64,
+    pub correlation: f64,
+}
+
+/// Outcome at exactly one declared site.  A refusal is retained rather than
+/// silently letting another, more textured site stand in for it.
+#[derive(Clone, Copy, Debug)]
+pub struct StripSiteOutcome {
+    pub site: StripSite,
+    pub result: Result<StripSiteReading, Refused>,
+}
+
+/// Register every fixed lattice site independently, with no score-based
+/// selection between sites.
+///
+/// Reference support and every target shift are checked at the site itself.
+/// A unique peak must lie inside the declared search, then the local two-axis
+/// solve either refines it or returns the aperture refusal.  This retains the
+/// exact `StripSite` in every outcome so later cross-capture pairing cannot
+/// substitute a convenient neighbour.
+pub fn register_overlap_strip(
+    map: &Reframe,
+    planes: &[Plane],
+    candidates: &[Candidate],
+    support: Support,
+) -> Vec<StripSiteOutcome> {
+    register_strip_sites(map, planes, &overlap_strip_sites(candidates), support)
+}
+
+/// Register a caller's declared fixed sites exactly as supplied.
+///
+/// This lower-level entry point lets a cross-capture instrument pair a stable
+/// declaration without regenerating or ranking locations from its pixels.
+pub fn register_strip_sites(
+    map: &Reframe,
+    planes: &[Plane],
+    sites: &[StripSite],
+    support: Support,
+) -> Vec<StripSiteOutcome> {
+    sites
+        .iter()
+        .copied()
+        .map(|site| StripSiteOutcome {
+            result: register_site(map, planes, site, support),
+            site,
+        })
+        .collect()
+}
+
+fn register_site(
+    map: &Reframe,
+    planes: &[Plane],
+    site: StripSite,
+    support: Support,
+) -> Result<StripSiteReading, Refused> {
+    let (Some(front), Some(back)) = (planes.first(), planes.get(1)) else {
+        return Err(Refused::NoCompletePatch);
+    };
+    if !support.valid() || support.half() < 1 || support.search_steps() < 1 {
+        return Err(Refused::NoCompletePatch);
+    }
+    let step = support.step_deg.to_radians();
+    let half = support.half();
+    let reference = sample(map, front, 0, site.root.node, half, step, site.offset_rad)
+        .map_err(|_| Refused::NoCompletePatch)?;
+    let coarse = support.search_steps();
+    let mut legal = Vec::new();
+    for perp in -coarse..=coarse {
+        for epi in -coarse..=coarse {
+            let offset = [
+                site.offset_rad[0] + perp as f64 * step,
+                site.offset_rad[1] + epi as f64 * step,
+            ];
+            if let Ok(target) = sample(map, back, 1, site.root.node, half, step, offset) {
+                legal.push(([perp, epi], correlation(&reference, &target)));
+            }
+        }
+    }
+    let (grid_shift, correlation) = peak(&legal, coarse)?;
+    let target_offset = [
+        site.offset_rad[0] + grid_shift[0] as f64 * step,
+        site.offset_rad[1] + grid_shift[1] as f64 * step,
+    ];
+    let target = sample(map, back, 1, site.root.node, half, step, target_offset)
+        .map_err(|_| Refused::NoCompletePatch)?;
+    let fitted =
+        local_warp::register(&samples(&reference, &target, step)).map_err(|why| match why {
+            local_warp::RegistrationRefused::Aperture => Refused::Aperture,
+            _ => Refused::NoPeak,
+        })?;
+    Ok(camera_reading(site, grid_shift, step, correlation, fitted))
+}
+
+/// Convert a grid solve to its explicit camera-axis representation.
+///
+/// `local_warp::Registration` is ordered `[perp, epi]`; the permutation here
+/// applies to both components and all covariance terms, not just its diagonal.
+fn camera_reading(
+    site: StripSite,
+    coarse: [isize; 2],
+    step: f64,
+    correlation: f64,
+    fitted: local_warp::Registration,
+) -> StripSiteReading {
+    let grid_perp = coarse[0] as f64 * step + fitted.displacement.x * step;
+    let grid_epi = coarse[1] as f64 * step + fitted.displacement.y * step;
+    StripSiteReading {
+        site,
+        epi_axis: site.root.node.epi,
+        perp_axis: site.root.node.perp,
+        displacement_rad: CameraDisplacement {
+            epi: grid_epi,
+            perp: grid_perp,
+        },
+        covariance_rad2: CameraCovariance {
+            epi_epi: fitted.covariance.yy * step * step,
+            epi_perp: fitted.covariance.xy * step * step,
+            perp_perp: fitted.covariance.xx * step * step,
+        },
+        condition: fitted.condition,
+        correlation,
+    }
+}
+
 /// Census fixed overlap-strip sites and every target shift independently.
 ///
 /// This is the Stage 9 location/coverage instrument.  A complete reference
@@ -1019,6 +1176,64 @@ mod tests {
                 assert_eq!(site.offset_rad, declared.map(f64::to_radians));
             }
         }
+    }
+
+    #[test]
+    fn all_sites_are_reported_without_a_winner_selection() {
+        let root = Candidate {
+            node: node([0.0, 0.0, -0.033], [1.0, 0.0, 0.0]),
+            view_ray: [1.0, 0.0, 0.0],
+            view_pixel: [10.0, 20.0],
+        };
+        // Missing planes refuse each declared site separately.  In
+        // particular, this result cannot collapse to one nominal "best"
+        // candidate as `select_with_support` historically did.
+        let outcomes = register_overlap_strip(&crossover_map(0.0), &[], &[root], SUPPORT_LADDER[0]);
+        assert_eq!(outcomes.len(), OVERLAP_STRIP_OFFSETS_DEG.len());
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome.result, Err(Refused::NoCompletePatch)))
+        );
+        for (outcome, declared) in outcomes.iter().zip(OVERLAP_STRIP_OFFSETS_DEG) {
+            assert_eq!(outcome.site.offset_rad, declared.map(f64::to_radians));
+        }
+    }
+
+    #[test]
+    fn camera_reading_permutes_the_full_grid_covariance() {
+        let site = StripSite {
+            root: Candidate {
+                node: node([0.0, 0.0, -0.033], [1.0, 0.0, 0.0]),
+                view_ray: [1.0, 0.0, 0.0],
+                view_pixel: [10.0, 20.0],
+            },
+            offset_rad: [0.0, 0.0],
+        };
+        let step = 0.25;
+        let reading = camera_reading(
+            site,
+            [2, -3],
+            step,
+            0.9,
+            local_warp::Registration {
+                displacement: local_warp::PixelDisplacement { x: 0.5, y: -0.25 },
+                covariance: local_warp::Covariance {
+                    xx: 4.0,
+                    xy: 1.5,
+                    yy: 9.0,
+                },
+                condition: 7.0,
+                samples: 12,
+            },
+        );
+        assert_eq!(reading.displacement_rad.perp, 0.625);
+        assert_eq!(reading.displacement_rad.epi, -0.8125);
+        assert_eq!(reading.covariance_rad2.epi_epi, 9.0 * step * step);
+        assert_eq!(reading.covariance_rad2.epi_perp, 1.5 * step * step);
+        assert_eq!(reading.covariance_rad2.perp_perp, 4.0 * step * step);
+        assert_eq!(reading.epi_axis, site.root.node.epi);
+        assert_eq!(reading.perp_axis, site.root.node.perp);
     }
     #[test]
     fn correlation_refuses_flat_content_by_reporting_no_agreement() {
