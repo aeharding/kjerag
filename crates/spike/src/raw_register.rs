@@ -2240,6 +2240,14 @@ mod tests {
         assert_eq!(reading.state.accumulated_rad, reading.increment_rad);
         assert!(reading.condition.is_finite());
         assert_eq!(reading.samples, 12);
+
+        let next = advance_track(reading.state, &temporal_samples([-0.5, 1.25]), step)
+            .expect("the same planted site remains within its declared cap");
+        assert_eq!(next.state.site, site);
+        assert!((next.increment_rad.perp + 0.005).abs() < 1e-12);
+        assert!((next.increment_rad.epi - 0.0125).abs() < 1e-12);
+        assert!((next.state.accumulated_rad.perp - 0.01).abs() < 1e-12);
+        assert!((next.state.accumulated_rad.epi - 0.005).abs() < 1e-12);
     }
 
     #[test]
