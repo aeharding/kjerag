@@ -26,9 +26,10 @@ That question has an observability gate. Four horizon crossings are four
 cannot reject a five-knob map: their Jacobian has rank at most four and no
 residual degrees of freedom. `band::Along` also has five free harmonic terms;
 it is a smooth residual field, not a three-knob pose that can be assumed
-instead. Stage 9 needs either three or more true two-axis correspondences, or
-at least six independent, nonparallel scalar features whose five-knob
-Jacobian is well-conditioned. A horizon is acceptance evidence, never a
+instead. Stage 9 needs at least four true two-axis correspondences: eight
+scalar rows leave three residual degrees of freedom after the five-knob fit.
+Equivalently it needs at least eight independent, nonparallel scalar features
+whose five-knob Jacobian is well-conditioned. A horizon is acceptance evidence, never a
 substitute for its missing tangent measurement.
 
 ## First deliverable
