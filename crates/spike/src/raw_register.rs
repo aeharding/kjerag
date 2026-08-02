@@ -324,6 +324,92 @@ pub struct CameraCovariance {
     pub perp_perp: f64,
 }
 
+/// One immutable, body-fixed temporal-tracking declaration.
+///
+/// `site` is selected before tracking begins and is never re-traced, ranked,
+/// or replaced.  Each successful transition returns a new value with the
+/// same site and axes, an accumulated camera-frame offset, and the sum of
+/// independent transition covariances.  This makes a later temporal fit able
+/// to distinguish an unavailable declared site from a convenient neighbour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackState {
+    pub site: StripSite,
+    /// Accumulated `[epi, perp]` angular offset from the original declared
+    /// body ray to the current picture, in radians.
+    pub accumulated_rad: CameraDisplacement,
+    /// Full covariance of `accumulated_rad`, in radians squared.
+    pub covariance_rad2: CameraCovariance,
+    /// A caller-declared radial limit on `accumulated_rad`, in radians.
+    /// The tracker refuses, rather than silently reselecting a location, when
+    /// the next transition would leave this neighbourhood.
+    pub excursion_cap_rad: f64,
+}
+
+impl TrackState {
+    /// Begin tracking one already-declared physical site.
+    pub const fn new(site: StripSite, excursion_cap_rad: f64) -> Self {
+        Self {
+            site,
+            accumulated_rad: CameraDisplacement {
+                epi: 0.0,
+                perp: 0.0,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 0.0,
+                epi_perp: 0.0,
+                perp_perp: 0.0,
+            },
+            excursion_cap_rad,
+        }
+    }
+}
+
+/// A successful one-lens previous-to-next tracking transition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackReading {
+    /// The unchanged declaration and updated accumulated state.
+    pub state: TrackState,
+    /// This previous-to-next increment, in the same `[epi, perp]` axes as
+    /// `state.accumulated_rad`.
+    pub increment_rad: CameraDisplacement,
+    /// Full covariance of `increment_rad`, in radians squared.
+    pub covariance_rad2: CameraCovariance,
+    pub condition: f64,
+    pub samples: usize,
+}
+
+/// Why one fixed-site temporal transition cannot be claimed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TrackRefused {
+    InvalidStep,
+    InvalidExcursionCap,
+    NoCompletePatch,
+    NoPeak,
+    Aperture,
+    /// The attempted accumulated offset and the predeclared cap, both in
+    /// radians.  This is a refusal, not permission to relocate the site.
+    Excursion {
+        attempted_rad: CameraDisplacement,
+        cap_rad: f64,
+    },
+}
+
+/// A forward/reverse closure at the same unchanged declared site.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackClosure {
+    pub site: StripSite,
+    /// Forward plus reverse increment.  An unbiased reciprocal pair closes
+    /// at zero in the shared body-fixed axes.
+    pub closure_rad: CameraDisplacement,
+    pub covariance_rad2: CameraCovariance,
+}
+
+/// Why two temporal transitions cannot form a reciprocal control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackClosureRefused {
+    MismatchedSite,
+}
+
 /// One two-dimensional raw registration at a pre-declared lattice site.
 ///
 /// This is deliberately not a candidate winner.  A caller receives one of
@@ -682,6 +768,96 @@ fn register_site_direction(
     Ok(camera_reading(site, grid_shift, step, correlation, fitted))
 }
 
+/// Register one raw lens from a previous frame to a next frame at one frozen
+/// site, then return the next immutable tracking state.
+///
+/// Unlike seam registration this does not cross lenses: `lens` is used for
+/// both patches.  The reference patch is centred at the state's accumulated
+/// body-fixed offset; the target search is centred at that same offset.  No
+/// candidate contour is traced, and no site can be replaced when this one is
+/// unavailable or exceeds its declared excursion.
+pub fn track_one_lens(
+    previous_map: &Reframe,
+    previous_plane: &Plane,
+    next_map: &Reframe,
+    next_plane: &Plane,
+    lens: usize,
+    state: TrackState,
+    support: Support,
+) -> Result<TrackReading, TrackRefused> {
+    if !support.valid() || support.half() < 1 || support.search_steps() < 1 {
+        return Err(TrackRefused::NoCompletePatch);
+    }
+    let step = support.step_deg.to_radians();
+    let half = support.half();
+    let centre_offset = [
+        state.site.offset_rad[0] + state.accumulated_rad.perp,
+        state.site.offset_rad[1] + state.accumulated_rad.epi,
+    ];
+    let reference = sample(
+        previous_map,
+        previous_plane,
+        lens,
+        state.site.root.node,
+        half,
+        step,
+        centre_offset,
+    )
+    .map_err(|_| TrackRefused::NoCompletePatch)?;
+    let coarse = support.search_steps();
+    let mut legal = Vec::new();
+    for perp in -coarse..=coarse {
+        for epi in -coarse..=coarse {
+            let offset = [
+                centre_offset[0] + perp as f64 * step,
+                centre_offset[1] + epi as f64 * step,
+            ];
+            if let Ok(target) = sample(
+                next_map,
+                next_plane,
+                lens,
+                state.site.root.node,
+                half,
+                step,
+                offset,
+            ) {
+                legal.push(([perp, epi], correlation(&reference, &target)));
+            }
+        }
+    }
+    let (grid, _) = peak(&legal, coarse).map_err(|why| match why {
+        Refused::NoCompletePatch => TrackRefused::NoCompletePatch,
+        Refused::NoPeak | Refused::Aperture | Refused::NoVisibleSeam => TrackRefused::NoPeak,
+    })?;
+    let target_offset = [
+        centre_offset[0] + grid[0] as f64 * step,
+        centre_offset[1] + grid[1] as f64 * step,
+    ];
+    let target = sample(
+        next_map,
+        next_plane,
+        lens,
+        state.site.root.node,
+        half,
+        step,
+        target_offset,
+    )
+    .map_err(|_| TrackRefused::NoCompletePatch)?;
+    // The local solver sees the patch at the coarse winner.  Add that known
+    // grid translation into its linear residual so `advance_track` receives
+    // the full previous-to-next displacement in one explicit basis.
+    let coarse_rad = [grid[0] as f64 * step, grid[1] as f64 * step];
+    let samples = samples(&reference, &target, step)
+        .into_iter()
+        .map(|mut sample| {
+            sample.residual += sample.gradient[0] * coarse_rad[0] / step
+                + sample.gradient[1] * coarse_rad[1] / step;
+            sample
+        })
+        .collect::<Vec<_>>();
+    advance_track(state, &samples, step)
+}
+
 fn bidirectional_reading(
     site: StripSite,
     forward: StripSiteReading,
@@ -735,6 +911,99 @@ fn camera_reading(
         condition: fitted.condition,
         correlation,
     }
+}
+
+/// Advance one declared site from a previous single-lens patch to its next
+/// single-lens patch.
+///
+/// `samples` use [`RegistrationSample`]'s ordinary convention: a target
+/// minus reference residual equals its target-picture gradient dotted with a
+/// `[perp, epi]` grid displacement.  `step_rad` converts that grid result to
+/// the body-fixed angular axes stored by [`TrackState`].  The function is
+/// pure: callers which obtain the samples from raw planes cannot use it to
+/// alter a map, retrace a seam, or choose another site.
+pub fn advance_track(
+    state: TrackState,
+    samples: &[RegistrationSample],
+    step_rad: f64,
+) -> Result<TrackReading, TrackRefused> {
+    if !step_rad.is_finite() || step_rad <= 0.0 {
+        return Err(TrackRefused::InvalidStep);
+    }
+    if !state.excursion_cap_rad.is_finite() || state.excursion_cap_rad < 0.0 {
+        return Err(TrackRefused::InvalidExcursionCap);
+    }
+    let fitted = local_warp::register(samples).map_err(|why| match why {
+        local_warp::RegistrationRefused::Aperture => TrackRefused::Aperture,
+        local_warp::RegistrationRefused::TooFewSamples { .. }
+        | local_warp::RegistrationRefused::InvalidSample { .. } => TrackRefused::NoPeak,
+    })?;
+    let increment_rad = CameraDisplacement {
+        epi: fitted.displacement.y * step_rad,
+        perp: fitted.displacement.x * step_rad,
+    };
+    let attempted_rad = CameraDisplacement {
+        epi: state.accumulated_rad.epi + increment_rad.epi,
+        perp: state.accumulated_rad.perp + increment_rad.perp,
+    };
+    if !attempted_rad.epi.is_finite()
+        || !attempted_rad.perp.is_finite()
+        || displacement_norm(attempted_rad) > state.excursion_cap_rad
+    {
+        return Err(TrackRefused::Excursion {
+            attempted_rad,
+            cap_rad: state.excursion_cap_rad,
+        });
+    }
+    let covariance_rad2 = CameraCovariance {
+        epi_epi: fitted.covariance.yy * step_rad * step_rad,
+        epi_perp: fitted.covariance.xy * step_rad * step_rad,
+        perp_perp: fitted.covariance.xx * step_rad * step_rad,
+    };
+    let state = TrackState {
+        accumulated_rad: attempted_rad,
+        covariance_rad2: CameraCovariance {
+            epi_epi: state.covariance_rad2.epi_epi + covariance_rad2.epi_epi,
+            epi_perp: state.covariance_rad2.epi_perp + covariance_rad2.epi_perp,
+            perp_perp: state.covariance_rad2.perp_perp + covariance_rad2.perp_perp,
+        },
+        ..state
+    };
+    Ok(TrackReading {
+        state,
+        increment_rad,
+        covariance_rad2,
+        condition: fitted.condition,
+        samples: fitted.samples,
+    })
+}
+
+/// Compare opposite temporal transitions without converting into lens-local
+/// axes.  The exact same [`StripSite`] is required; proximity and texture are
+/// intentionally not substitutes for identity.
+pub fn track_closure(
+    forward: TrackReading,
+    reverse: TrackReading,
+) -> Result<TrackClosure, TrackClosureRefused> {
+    if forward.state.site != reverse.state.site {
+        return Err(TrackClosureRefused::MismatchedSite);
+    }
+    Ok(TrackClosure {
+        site: forward.state.site,
+        closure_rad: CameraDisplacement {
+            epi: forward.increment_rad.epi + reverse.increment_rad.epi,
+            perp: forward.increment_rad.perp + reverse.increment_rad.perp,
+        },
+        covariance_rad2: CameraCovariance {
+            epi_epi: forward.covariance_rad2.epi_epi + reverse.covariance_rad2.epi_epi,
+            epi_perp: forward.covariance_rad2.epi_perp + reverse.covariance_rad2.epi_perp,
+            perp_perp: forward.covariance_rad2.perp_perp + reverse.covariance_rad2.perp_perp,
+        },
+    })
+}
+
+fn displacement_norm(displacement: CameraDisplacement) -> f64 {
+    displacement.epi.hypot(displacement.perp)
 }
 
 /// Census fixed overlap-strip sites and every target shift independently.
