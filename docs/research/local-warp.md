@@ -43,6 +43,26 @@ evidence cannot identify their exact run-time gates or outputs, but it does
 establish that they are learned content-adaptive fusion aids, not a
 camera-agnostic calibration table.
 
+A subsequent disassembly of `Helper::SetupDynamicStitching` recovers the
+relevant gates.  Its configuration carries separate enable bytes for dynamic
+stitch, optical-flow stitch, AI stitch, and image fusion.  With all three
+stitch enables clear, it explicitly selects the fixed mode.  Otherwise it
+selects exactly one mode in priority order: dynamic, optical flow, or AI;
+they are not an always-on warp layered onto the fixed renderer.  The
+high-precision optical path has an additional configuration plus
+media/model-identity gate.  Its later dispatch is likewise media/model
+specific.
+
+The same static path exposes the output representation: left/right fusion
+maps, left UV lookup, colour adjustment, and an alpha normalization/mix of
+the two sampled colours.  It is a content-adaptive *fusion* stage after
+calibrated projection, not a camera-frame geometric displacement field.  The
+static conclusion is therefore sufficiently strong for Kjerag's design:
+do not imitate it with a local geometric warp.  A future, independently
+justified adaptive seam method would instead need to be an optional
+per-pixel source-selection/fusion stage and must still meet the far-field
+measurement and hold-out bars below.
+
 The newer locally available Studio 5.9.2 installer lists the same five
 hashed `.ins` assets byte-for-byte among its own model set.  This confirms the
 flow/fusion layer is shared Insta360 renderer infrastructure, not a
