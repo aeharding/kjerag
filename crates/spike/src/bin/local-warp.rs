@@ -5,6 +5,7 @@
 //! starts again from the synchronized decoded lens planes; no composited,
 //! blended, colour-corrected, or warped output is matched.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -822,13 +823,26 @@ fn report_reverse_closure(
     let mut health = ReverseHealth::default();
     let mut states = forward_end.to_vec();
     health.forward_unavailable = states.iter().filter(|state| state.is_none()).count();
+    let replay_total = timeline.len();
+    println!(
+        "temporal closure: replay 1/{replay_total}; reconstructing endpoint at {:.9} s",
+        timeline.last().expect("nonempty").as_secs_f64(),
+    );
+    std::io::stdout().flush()?;
     let (mut later_map, mut later_pair) = replay_temporal_frame(
         gpu,
         options,
         anchor.frame,
         *timeline.last().expect("nonempty"),
     )?;
-    for earlier_at in timeline[..timeline.len() - 1].iter().rev() {
+    for (index, earlier_at) in timeline[..timeline.len() - 1].iter().rev().enumerate() {
+        println!(
+            "temporal closure: replay {}/{}; reconstructing prior PTS {:.9} s",
+            index + 2,
+            replay_total,
+            earlier_at.as_secs_f64(),
+        );
+        std::io::stdout().flush()?;
         let (earlier_map, earlier_pair) =
             replay_temporal_frame(gpu, options, anchor.frame, *earlier_at)?;
         for state in &mut states {
