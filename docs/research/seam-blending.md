@@ -299,3 +299,92 @@ The remaining reading is that ramp, and it is what every lag over 8 pixels is
 now measuring. Widening the taper past the overlap would halve it again and is
 **not** built: it is the halo risk of option C above, and it would put a
 low-frequency correction on a picture where nothing can check it.
+
+---
+
+# Stage 8, second form: symmetric wide matching, and who draws the line
+
+**Date:** 2026-08-01, after the owner viewed the first form twice.
+
+## 14. The ruling, and why the shape it replaced was wrong
+
+His first verdict: *"I dont think its aggressive enough with blending. For
+example smoke3-2-drawn."* The first form carried the correction across the
+handover and eased it to nothing **by the overlap**, seven degrees off the seam,
+on the argument that past there "how these two lenses differ here" is not a
+statement anything can check. What that leaves is the whole correction ramped
+over four degrees, and a ramp of the whole correction is a patch difference -
+which is what he was looking at.
+
+**The symmetric split dissolves the objection the shape was protecting
+against.** The reservation was that a player may not move a hemisphere's black
+level. It does not: each hemisphere moves **half** the mismatch towards the
+other, which is precisely the argument stage 3 used to split a gain between two
+hemispheres, applied to an offset. So the correction is carried **to the pole**,
+which is the only end that is not a taste - an azimuth is what the field is read
+at, and a pole has none, so a field carried to one has to arrive single-valued.
+
+Measured at his own wide view, the drawn profile from 8 degrees one side to 8
+degrees the other:
+
+| | at -8 deg | at +8 deg | apart |
+| --- | ---: | ---: | ---: |
+| the photometry held off | 17.9 | 25.5 | **7.55 codes** |
+| the first form, eased out by the overlap | 17.9 | 25.5 | 7.55 |
+| **carried to the pole** | 19.7 | 22.6 | **2.93 codes** |
+
+**The halo did not appear.** It was the priced risk of option C and the reason
+the first form stopped at the overlap. Over the same window the long-lag Weber
+contrast goes **44.7 percent to 24.4 at 64 pixels and 49.2 to 26.8 at 128** -
+the wide matching does not add a low-frequency artifact, it removes one, and it
+removes it by 45 percent. A symmetric half-correction has half the excursion per
+hemisphere by construction, and it is spread over eighty degrees instead of
+four.
+
+**A count of pixels came out with it.** The first form asked the handover for
+`SPREAD_PX` pixels of the delivered view. It decided nothing at any field of
+view the player offers - the optics' ceiling or the content's own price is
+always reached first - and the one place it bit, it made the handover narrower
+than the content would have borne. Deleted, with its constant and with the
+screen-space derivatives that fed it.
+
+## 15. Who draws the line that is left
+
+His second verdict: *"To the eye, it still effectively looks like a line."*
+
+A line at one pixel has two possible authors and they are separable. A
+**photometric** step is a difference in LEVEL: it shows on content with no
+gradient in it at all, it is at the seam and nowhere else, and a photometry
+moves it. A **misregistration** is a difference in POSITION: it shows only where
+there is content to draw twice, at the lag its own size in pixels puts it at,
+and no photometry can touch it.
+
+The instrument runs the same statistic straddling a line a few degrees off the
+seam, in the same window and the same content. Weber contrast, worst channel,
+**excess over what that content reads anywhere**:
+
+| view | 1 px | 2 px | 8 px | 32 px | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| the owner's wide view, soil | **+0.87%** | +0.61% | -3.33% | +7.90% | under the JND at an edge's own scale |
+| the smoke view he named, whole frame | **-0.73%** | +0.94% | +0.95% | +18.17% | no line the content does not read everywhere |
+| the fov 30.6 view he sent next | **-0.82%** | -0.69% | -0.88% | +0.23% | no line at any scale |
+| the sky at the seam | -0.07% | +0.23% | +0.37% | +2.75% | no line |
+| **his own gear at the seam** | **+5.87%** | +5.73% | +6.22% | +7.91% | **a line, and the photometry moves it by 0.00** |
+
+The last row is the positive control this decomposition needs, and it is the
+answer. At that azimuth the seam reads six percent above the same content
+elsewhere at every lag, and turning the whole photometric stage on moves it from
+**5.94 to 5.94 percent**. A photometric correction cannot reach it because it is
+not photometric.
+
+**The verdict: after stage 8 the photometric author is at or under the
+just-noticeable difference at the one and two pixel lags on every reference view
+the owner has given, and what still reads as a line is GEOMETRIC.** It lives
+only where there is content to misregister, it is unmoved by any photometry, and
+the fov 30.6 view sharpens it: at 0.0064 degrees per pixel a photometric step
+would still be a step, and there is none, while a fifth of a degree of
+misregistration is thirty pixels there and shows at the lags a thirty-pixel
+feature shows at.
+
+That makes the local-warp-versus-pose decision the true blocker of "no line",
+and it is not this stage's to make. **No local warp is built here.**
