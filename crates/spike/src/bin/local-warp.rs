@@ -555,6 +555,8 @@ fn report_temporal(
         .copied()
         .map(|site| Some(raw_register::TrackState::new(site, cap)))
         .collect();
+    let origins: Vec<_> = states.iter().copied().flatten().collect();
+    let mut timeline = vec![at];
     // This is the first accepted registration per immutable declared site,
     // irrespective of whether its disparity was placeable. It is never
     // replaced by a later, more convenient depth stratum.
@@ -580,6 +582,7 @@ fn report_temporal(
             .next_pair()?
             .ok_or("raw lens pair ended during temporal track")?;
         require_same_pts(next_at, next_pair.at)?;
+        timeline.push(next_at);
         health.transitions += 1;
         for (index, state) in states.iter_mut().enumerate() {
             let Some(current) = *state else {
@@ -729,10 +732,183 @@ fn report_temporal(
     report_stratum("near <3 m", &health.near);
     report_stratum("mid 3-10 m", &health.mid);
     report_stratum("far >=10 m", &health.far);
+    if options.temporal_reverse {
+        report_reverse_closure(gpu, options, anchor, &timeline, &origins, &states, support)?;
+    } else {
+        println!(
+            "temporal closure: unavailable (temporal_reverse=0); no depth, pose fit, or warp applied"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct ReverseHealth {
+    forward_unavailable: usize,
+    reverse_refused: usize,
+    closed: usize,
+    epi_sum: f64,
+    perp_sum: f64,
+    covariance_epi_epi_sum: f64,
+    covariance_epi_perp_sum: f64,
+    covariance_perp_perp_sum: f64,
+}
+
+/// Rebuild one exact recorded frame from the original warm start. There is no
+/// reverse API for either `Scene` or `Walk`; replaying forward to every
+/// recorded PTS is the deliberately expensive but truthful reverse control.
+fn replay_temporal_frame(
+    gpu: &Gpu,
+    options: &Options,
+    frame: Size,
+    target: Duration,
+) -> Fallible<(Reframe, kjerag_media::Pair)> {
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut scene = Scene::still(&options.input, options.start())?;
+    options.seam.hold(&scene);
+    scene.set_horizon(if options.lock {
+        Horizon::Locked
+    } else {
+        Horizon::Free
+    });
+    scene.set_sampling(Sampling::default());
+    loop {
+        let (_, at) = scene.frame().ok_or("no frame during temporal replay")?;
+        let _ = Render {
+            gpu,
+            scene: &scene,
+            pipeline: &mut pipeline,
+        }
+        .frame(options.camera(), Sampling::default(), options.size())?;
+        if at == target {
+            break;
+        }
+        if at > target || !scene.advance()? {
+            return Err(format!(
+                "refused: reverse replay could not reproduce recorded Scene PTS {:.9} s",
+                target.as_secs_f64()
+            )
+            .into());
+        }
+    }
+    let (_, at) = scene.frame().ok_or("no replayed Scene frame")?;
+    let map = scene
+        .mapped(options.camera(), 1.0)
+        .ok_or("no map at replayed temporal frame")?;
+    // A fresh walk seeks and decodes forward to this frame; accepting the
+    // first pair only after exact PTS comparison prevents a keyframe-neighbour
+    // from becoming a reverse observation.
+    let mut walk = Walk::open(&options.input, target.as_secs_f64(), frame)?;
+    let pair = walk
+        .next_pair()?
+        .ok_or("no raw pair at replayed temporal frame")?;
+    require_same_pts(at, pair.at)?;
+    Ok((map, pair))
+}
+
+fn report_reverse_closure(
+    gpu: &Gpu,
+    options: &Options,
+    anchor: TemporalAnchor<'_>,
+    timeline: &[Duration],
+    origins: &[raw_register::TrackState],
+    forward_end: &[Option<raw_register::TrackState>],
+    support: raw_register::Support,
+) -> Fallible<()> {
+    if timeline.len() < 2 {
+        println!("temporal closure: unavailable (fewer than one forward transition)");
+        return Ok(());
+    }
+    let mut health = ReverseHealth::default();
+    let mut states = forward_end.to_vec();
+    health.forward_unavailable = states.iter().filter(|state| state.is_none()).count();
+    let (mut later_map, mut later_pair) = replay_temporal_frame(
+        gpu,
+        options,
+        anchor.frame,
+        *timeline.last().expect("nonempty"),
+    )?;
+    for earlier_at in timeline[..timeline.len() - 1].iter().rev() {
+        let (earlier_map, earlier_pair) =
+            replay_temporal_frame(gpu, options, anchor.frame, *earlier_at)?;
+        for state in &mut states {
+            let Some(current) = *state else {
+                continue;
+            };
+            match raw_register::track_one_lens(
+                &later_map,
+                &later_pair.lenses[0],
+                &earlier_map,
+                &earlier_pair.lenses[0],
+                0,
+                current,
+                support,
+            ) {
+                Ok(reading) => *state = Some(reading.state),
+                Err(_) => {
+                    health.reverse_refused += 1;
+                    *state = None;
+                }
+            }
+        }
+        later_map = earlier_map;
+        later_pair = earlier_pair;
+    }
+    for (origin, returned) in origins.iter().zip(states) {
+        let Some(returned) = returned else {
+            continue;
+        };
+        let closure = temporal_closure(*origin, returned)
+            .map_err(|_| "refused: reverse replay changed a declared temporal site")?;
+        health.closed += 1;
+        health.epi_sum += closure.displacement_rad.epi;
+        health.perp_sum += closure.displacement_rad.perp;
+        health.covariance_epi_epi_sum += closure.covariance_rad2.epi_epi;
+        health.covariance_epi_perp_sum += closure.covariance_rad2.epi_perp;
+        health.covariance_perp_perp_sum += closure.covariance_rad2.perp_perp;
+    }
+    if health.closed == 0 {
+        println!(
+            "temporal closure: recorded PTS {}; forward-unavailable {}; reverse-refused {}; no complete fixed-site closures",
+            timeline.len(),
+            health.forward_unavailable,
+            health.reverse_refused,
+        );
+        return Ok(());
+    }
+    let count = health.closed as f64;
     println!(
-        "temporal closure: unavailable (this opt-in is one forward lens-0 traversal; no reverse traversal was inferred); no depth, pose fit, or warp applied"
+        "temporal closure: fresh replay; recorded PTS {}; complete {}; forward-unavailable {}; reverse-refused {}; mean [epi {:+.4}, perp {:+.4}] deg; covariance of mean [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; no depth fit, pose fit, or warp applied",
+        timeline.len(),
+        health.closed,
+        health.forward_unavailable,
+        health.reverse_refused,
+        (health.epi_sum / count).to_degrees(),
+        (health.perp_sum / count).to_degrees(),
+        health.covariance_epi_epi_sum / count.powi(2),
+        health.covariance_epi_perp_sum / count.powi(2),
+        health.covariance_perp_perp_sum / count.powi(2),
     );
     Ok(())
+}
+
+/// The returned state already contains the forward and reverse independent
+/// transition covariance. The origin has no measurement covariance, so this
+/// is the complete closure covariance without a second implicit addition.
+fn temporal_closure(
+    origin: raw_register::TrackState,
+    returned: raw_register::TrackState,
+) -> Result<StereoEvolution, EvolutionRefused> {
+    if origin.site != returned.site {
+        return Err(EvolutionRefused::MismatchedSite);
+    }
+    Ok(StereoEvolution {
+        displacement_rad: raw_register::CameraDisplacement {
+            epi: returned.accumulated_rad.epi - origin.accumulated_rad.epi,
+            perp: returned.accumulated_rad.perp - origin.accumulated_rad.perp,
+        },
+        covariance_rad2: returned.covariance_rad2,
+    })
 }
 
 /// Fixed depth reporting strata. They are declared here rather than inferred
@@ -878,6 +1054,7 @@ struct Options {
     fit: bool,
     reciprocal: bool,
     temporal_frames: Option<usize>,
+    temporal_reverse: bool,
     plant: Option<[f64; local_warp::KNOBS]>,
 }
 
@@ -924,6 +1101,7 @@ impl Options {
             fit: false,
             reciprocal: false,
             temporal_frames: None,
+            temporal_reverse: false,
             plant: None,
         };
         for arg in args {
@@ -957,6 +1135,9 @@ impl Options {
                     }
                     out.temporal_frames = Some(frames);
                 }
+                Some(("temporal_reverse", value)) => {
+                    out.temporal_reverse = value.parse::<u32>()? != 0
+                }
                 Some(("plant", value)) => out.plant = Some(fit_knobs(seam_fit(value)?)),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
@@ -989,6 +1170,9 @@ impl Options {
                 "temporal=<frames> is observation-only and cannot combine with observations/responses/fit/reciprocal"
                     .into(),
             );
+        }
+        if out.temporal_reverse && out.temporal_frames.is_none() {
+            return Err("temporal_reverse=1 requires temporal=<frames>".into());
         }
         // Reject before opening media or warming a scene.  A reciprocal
         // closure is only interpretable at one pre-declared support scale.
@@ -1054,7 +1238,7 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [reciprocal=1] [temporal=frames] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [reciprocal=1] [temporal=frames] [temporal_reverse=1] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[derive(Default)]
@@ -1225,6 +1409,7 @@ mod tests {
     use kjerag_spike::local_warp::{Covariance, Displacement, Jacobian, Observation};
     use kjerag_spike::raw_register::{
         CameraCovariance, CameraDisplacement, Candidate, Node, StripSite, StripSiteReading,
+        TrackState,
     };
 
     use super::{Options, Placement, Seam};
@@ -1301,11 +1486,21 @@ mod tests {
         let temporal = options(&[
             "flight.insv",
             "temporal=12",
+            "temporal_reverse=1",
             "span=1.2",
             "search=1.0",
             "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
         ]);
         assert_eq!(temporal.temporal_frames, Some(12));
+        assert!(temporal.temporal_reverse);
+        assert!(
+            Options::parse(
+                ["flight.insv", "temporal_reverse=1"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
         assert!(
             Options::parse(
                 ["flight.insv", "temporal=0"]
@@ -1618,6 +1813,34 @@ mod tests {
         other.site.root.view_pixel = [1.0, 0.0];
         assert_eq!(
             super::stereo_evolution(first, other),
+            Err(super::EvolutionRefused::MismatchedSite)
+        );
+    }
+
+    #[test]
+    fn temporal_closure_uses_the_returned_forward_plus_reverse_covariance() {
+        let stereo = stereo_reading(0.02, 0.002);
+        let origin = TrackState::new(stereo.site, 1.0);
+        let returned = TrackState {
+            accumulated_rad: CameraDisplacement {
+                epi: 0.001,
+                perp: -0.002,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 5.0e-6,
+                epi_perp: -0.8e-6,
+                perp_perp: 9.0e-6,
+            },
+            ..origin
+        };
+        let closure = super::temporal_closure(origin, returned)
+            .expect("unchanged declared site produces a closure");
+        assert_eq!(closure.displacement_rad, returned.accumulated_rad);
+        assert_eq!(closure.covariance_rad2, returned.covariance_rad2);
+        let mut other = returned;
+        other.site.root.view_pixel = [7.0, 0.0];
+        assert_eq!(
+            super::temporal_closure(origin, other),
             Err(super::EvolutionRefused::MismatchedSite)
         );
     }
