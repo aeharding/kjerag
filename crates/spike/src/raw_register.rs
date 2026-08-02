@@ -349,6 +349,38 @@ pub struct StripSiteOutcome {
     pub result: Result<StripSiteReading, Refused>,
 }
 
+/// A reciprocal raw-lens registration at one unchanged physical site.
+///
+/// `forward` samples lens 0 as reference and lens 1 as target; `reverse`
+/// does the converse.  Both displacements use the *same* body-fixed
+/// `[epi, perp]` axes from [`StripSite`], so an unbiased reciprocal pair has
+/// a zero [`closure`], rather than requiring a lens-local sign convention.
+#[derive(Clone, Copy, Debug)]
+pub struct BidirectionalReading {
+    pub site: StripSite,
+    pub forward: StripSiteReading,
+    pub reverse: StripSiteReading,
+    pub closure: CameraDisplacement,
+    /// Sum of the two independent registration covariances, in the same
+    /// `[epi, perp]` order as `closure`.
+    pub closure_covariance_rad2: CameraCovariance,
+}
+
+/// A reciprocal measurement failure.  The failed direction is retained so a
+/// successful direction cannot be mistaken for a closure control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BidirectionalRefused {
+    pub forward: Option<Refused>,
+    pub reverse: Option<Refused>,
+}
+
+/// Outcome of one pre-declared reciprocal measurement.
+#[derive(Clone, Copy, Debug)]
+pub struct BidirectionalOutcome {
+    pub site: StripSite,
+    pub result: Result<BidirectionalReading, BidirectionalRefused>,
+}
+
 /// The response of one named calibration knob at exactly one declared site.
 ///
 /// Kept beside the site rather than as an anonymous position in a vector so
@@ -529,11 +561,62 @@ pub fn register_strip_sites(
         .collect()
 }
 
+/// Register every supplied site in both raw-lens directions.
+///
+/// This is a control, not an alternative estimator: it does not rank sites,
+/// combine captures, fit a pose, or alter a map.  Each direction is sampled
+/// against the identical declared body axes, allowing the reported sum to
+/// reveal an orientation or registration inconsistency directly.
+pub fn register_strip_sites_bidirectional(
+    map: &Reframe,
+    planes: &[Plane],
+    sites: &[StripSite],
+    support: Support,
+) -> Vec<BidirectionalOutcome> {
+    sites
+        .iter()
+        .copied()
+        .map(|site| {
+            let result = bidirectional_result(
+                site,
+                register_site_direction(map, planes, site, support, 0, 1),
+                register_site_direction(map, planes, site, support, 1, 0),
+            );
+            BidirectionalOutcome { site, result }
+        })
+        .collect()
+}
+
+fn bidirectional_result(
+    site: StripSite,
+    forward: Result<StripSiteReading, Refused>,
+    reverse: Result<StripSiteReading, Refused>,
+) -> Result<BidirectionalReading, BidirectionalRefused> {
+    match (forward, reverse) {
+        (Ok(forward), Ok(reverse)) => Ok(bidirectional_reading(site, forward, reverse)),
+        (forward, reverse) => Err(BidirectionalRefused {
+            forward: forward.err(),
+            reverse: reverse.err(),
+        }),
+    }
+}
+
 fn register_site(
     map: &Reframe,
     planes: &[Plane],
     site: StripSite,
     support: Support,
+) -> Result<StripSiteReading, Refused> {
+    register_site_direction(map, planes, site, support, 0, 1)
+}
+
+fn register_site_direction(
+    map: &Reframe,
+    planes: &[Plane],
+    site: StripSite,
+    support: Support,
+    reference_lens: usize,
+    target_lens: usize,
 ) -> Result<StripSiteReading, Refused> {
     let (Some(front), Some(back)) = (planes.first(), planes.get(1)) else {
         return Err(Refused::NoCompletePatch);
@@ -543,8 +626,18 @@ fn register_site(
     }
     let step = support.step_deg.to_radians();
     let half = support.half();
-    let reference = sample(map, front, 0, site.root.node, half, step, site.offset_rad)
-        .map_err(|_| Refused::NoCompletePatch)?;
+    let reference_plane = if reference_lens == 0 { front } else { back };
+    let target_plane = if target_lens == 0 { front } else { back };
+    let reference = sample(
+        map,
+        reference_plane,
+        reference_lens,
+        site.root.node,
+        half,
+        step,
+        site.offset_rad,
+    )
+    .map_err(|_| Refused::NoCompletePatch)?;
     let coarse = support.search_steps();
     let mut legal = Vec::new();
     for perp in -coarse..=coarse {
@@ -553,7 +646,15 @@ fn register_site(
                 site.offset_rad[0] + perp as f64 * step,
                 site.offset_rad[1] + epi as f64 * step,
             ];
-            if let Ok(target) = sample(map, back, 1, site.root.node, half, step, offset) {
+            if let Ok(target) = sample(
+                map,
+                target_plane,
+                target_lens,
+                site.root.node,
+                half,
+                step,
+                offset,
+            ) {
                 legal.push(([perp, epi], correlation(&reference, &target)));
             }
         }
@@ -563,14 +664,46 @@ fn register_site(
         site.offset_rad[0] + grid_shift[0] as f64 * step,
         site.offset_rad[1] + grid_shift[1] as f64 * step,
     ];
-    let target = sample(map, back, 1, site.root.node, half, step, target_offset)
-        .map_err(|_| Refused::NoCompletePatch)?;
+    let target = sample(
+        map,
+        target_plane,
+        target_lens,
+        site.root.node,
+        half,
+        step,
+        target_offset,
+    )
+    .map_err(|_| Refused::NoCompletePatch)?;
     let fitted =
         local_warp::register(&samples(&reference, &target, step)).map_err(|why| match why {
             local_warp::RegistrationRefused::Aperture => Refused::Aperture,
             _ => Refused::NoPeak,
         })?;
     Ok(camera_reading(site, grid_shift, step, correlation, fitted))
+}
+
+fn bidirectional_reading(
+    site: StripSite,
+    forward: StripSiteReading,
+    reverse: StripSiteReading,
+) -> BidirectionalReading {
+    // Both searches offset `site_ray` in the unmodified, body-fixed axes.
+    // Therefore the inverse relationship is addition, with no hidden lens
+    // basis rotation or sign flip.
+    BidirectionalReading {
+        site,
+        forward,
+        reverse,
+        closure: CameraDisplacement {
+            epi: forward.displacement_rad.epi + reverse.displacement_rad.epi,
+            perp: forward.displacement_rad.perp + reverse.displacement_rad.perp,
+        },
+        closure_covariance_rad2: CameraCovariance {
+            epi_epi: forward.covariance_rad2.epi_epi + reverse.covariance_rad2.epi_epi,
+            epi_perp: forward.covariance_rad2.epi_perp + reverse.covariance_rad2.epi_perp,
+            perp_perp: forward.covariance_rad2.perp_perp + reverse.covariance_rad2.perp_perp,
+        },
+    }
 }
 
 /// Convert a grid solve to its explicit camera-axis representation.
@@ -1568,6 +1701,90 @@ mod tests {
         assert_eq!(reading.covariance_rad2.perp_perp, 4.0 * step * step);
         assert_eq!(reading.epi_axis, site.root.node.epi);
         assert_eq!(reading.perp_axis, site.root.node.perp);
+    }
+
+    #[test]
+    fn reciprocal_body_axis_readings_close_and_sum_full_covariance() {
+        let site = assembled_site(3);
+        // These are planted physical camera-axis readings, not a second
+        // content search.  The reverse direction is the exact inverse in the
+        // same declared body axes, which verifies that closure is a sum (and
+        // not a lens-local sign conversion).
+        let forward = StripSiteReading {
+            site,
+            epi_axis: site.root.node.epi,
+            perp_axis: site.root.node.perp,
+            displacement_rad: CameraDisplacement {
+                epi: 0.018,
+                perp: -0.027,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 2.0,
+                epi_perp: -0.3,
+                perp_perp: 4.0,
+            },
+            condition: 2.0,
+            correlation: 0.9,
+        };
+        let reverse = StripSiteReading {
+            displacement_rad: CameraDisplacement {
+                epi: -forward.displacement_rad.epi,
+                perp: -forward.displacement_rad.perp,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 3.0,
+                epi_perp: 0.7,
+                perp_perp: 5.0,
+            },
+            ..forward
+        };
+        let paired = bidirectional_result(site, Ok(forward), Ok(reverse))
+            .expect("opposite planted directions form a reciprocal pair");
+        assert_eq!(
+            paired.closure,
+            CameraDisplacement {
+                epi: 0.0,
+                perp: 0.0,
+            }
+        );
+        assert_eq!(paired.closure_covariance_rad2.epi_epi, 5.0);
+        assert!((paired.closure_covariance_rad2.epi_perp - 0.4).abs() < 1e-12);
+        assert_eq!(paired.closure_covariance_rad2.perp_perp, 9.0);
+    }
+
+    #[test]
+    fn reciprocal_control_keeps_the_failed_direction() {
+        let site = assembled_site(0);
+        assert!(matches!(
+            bidirectional_result(site, Err(Refused::NoPeak), Err(Refused::Aperture),),
+            Err(BidirectionalRefused {
+                forward: Some(Refused::NoPeak),
+                reverse: Some(Refused::Aperture),
+            })
+        ));
+        let reading = StripSiteReading {
+            site,
+            epi_axis: site.root.node.epi,
+            perp_axis: site.root.node.perp,
+            displacement_rad: CameraDisplacement {
+                epi: 0.0,
+                perp: 0.0,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 0.0,
+                epi_perp: 0.0,
+                perp_perp: 0.0,
+            },
+            condition: 1.0,
+            correlation: 1.0,
+        };
+        assert!(matches!(
+            bidirectional_result(site, Ok(reading), Err(Refused::Aperture)),
+            Err(BidirectionalRefused {
+                forward: None,
+                reverse: Some(Refused::Aperture),
+            })
+        ));
     }
     #[test]
     fn correlation_refuses_flat_content_by_reporting_no_agreement() {
