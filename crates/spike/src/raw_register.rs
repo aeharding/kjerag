@@ -2210,4 +2210,115 @@ mod tests {
             Err(AssemblyRefused::TooFewCompleteSites { have: 3 })
         ));
     }
+
+    fn temporal_samples(shift: [f64; 2]) -> Vec<RegistrationSample> {
+        // A planted textured one-lens previous/next patch.  `shift` is in
+        // the raw solver's `[perp, epi]` grid convention.
+        (0..12)
+            .map(|index| {
+                let gradient = [1.0 + index as f64 * 0.11, 0.4 + (index % 3) as f64 * 0.17];
+                RegistrationSample {
+                    residual: gradient[0] * shift[0] + gradient[1] * shift[1],
+                    gradient,
+                    weight: 1.0,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn temporal_tracker_recovers_a_known_displacement_without_changing_site_identity() {
+        let site = assembled_site(4);
+        let initial = TrackState::new(site, 0.1);
+        let step = 0.01;
+        let reading = advance_track(initial, &temporal_samples([1.5, -0.75]), step)
+            .expect("the planted patch has two textured axes");
+        assert_eq!(reading.state.site, site);
+        assert_eq!(reading.state.site.root.view_pixel, [4.0, 0.0]);
+        assert!((reading.increment_rad.perp - 0.015).abs() < 1e-12);
+        assert!((reading.increment_rad.epi + 0.0075).abs() < 1e-12);
+        assert_eq!(reading.state.accumulated_rad, reading.increment_rad);
+        assert!(reading.condition.is_finite());
+        assert_eq!(reading.samples, 12);
+    }
+
+    #[test]
+    fn temporal_tracker_refuses_an_excursion_and_an_aperture_without_reselecting() {
+        let site = assembled_site(2);
+        let initial = TrackState::new(site, 0.01);
+        assert!(matches!(
+            advance_track(initial, &temporal_samples([1.5, 0.0]), 0.01),
+            Err(TrackRefused::Excursion {
+                attempted_rad: CameraDisplacement { perp, .. },
+                cap_rad: 0.01,
+            }) if (perp - 0.015).abs() < 1e-12
+        ));
+        let aperture = vec![
+            RegistrationSample {
+                gradient: [1.0, 0.0],
+                residual: 0.2,
+                weight: 1.0,
+            };
+            4
+        ];
+        assert_eq!(
+            advance_track(initial, &aperture, 0.01),
+            Err(TrackRefused::Aperture)
+        );
+        assert_eq!(
+            initial.site, site,
+            "a refusal must not relocate the declaration"
+        );
+    }
+
+    #[test]
+    fn temporal_closure_requires_the_same_site_and_sums_full_covariance() {
+        let site = assembled_site(1);
+        let forward = TrackReading {
+            state: TrackState::new(site, 1.0),
+            increment_rad: CameraDisplacement {
+                epi: 0.02,
+                perp: -0.03,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 2.0,
+                epi_perp: -0.4,
+                perp_perp: 4.0,
+            },
+            condition: 2.0,
+            samples: 9,
+        };
+        let reverse = TrackReading {
+            state: TrackState::new(site, 1.0),
+            increment_rad: CameraDisplacement {
+                epi: -0.02,
+                perp: 0.03,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 3.0,
+                epi_perp: 0.7,
+                perp_perp: 5.0,
+            },
+            ..forward
+        };
+        let closure = track_closure(forward, reverse).expect("same fixed site closes");
+        assert_eq!(
+            closure.closure_rad,
+            CameraDisplacement {
+                epi: 0.0,
+                perp: 0.0
+            }
+        );
+        assert_eq!(closure.covariance_rad2.epi_epi, 5.0);
+        assert!((closure.covariance_rad2.epi_perp - 0.3).abs() < 1e-12);
+        assert_eq!(closure.covariance_rad2.perp_perp, 9.0);
+        let other = TrackReading {
+            state: TrackState::new(assembled_site(3), 1.0),
+            ..reverse
+        };
+        assert_eq!(
+            track_closure(forward, other),
+            Err(TrackClosureRefused::MismatchedSite)
+        );
+    }
 }
