@@ -182,6 +182,16 @@ the door on interpreting the existing single-view pose fits as an applied
 camera-frame warp.  The next required control is the same physical feature
 tracked through time and depth/disparity strata.
 
+The first PTS-locked forward temporal run confirms that this next control is
+practical, without yet drawing a depth conclusion.  At May BAD's 50.150100000
+second anchor, with the same stored fit and four consecutive transitions,
+all 153 declared sites remained active: 612 successful lens-0 tracking steps,
+and zero missing-patch, peak, aperture, or 5-degree-excursion refusals.
+Sites were declared only at the anchor; no later frame retraced or replaced
+them.  Forward/backward closure is explicitly unavailable in this first
+forward-only traversal.  Stereo depth/disparity accounting is the next layer,
+not an inference from this trackability count.
+
 For a shared-pose comparison across captures, `seam=file` is not a valid
 baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
