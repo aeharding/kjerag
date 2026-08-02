@@ -18,10 +18,6 @@ pub struct Displacement {
 }
 
 impl Displacement {
-    fn finite_and_positive(self) -> bool {
-        self.epi.is_finite() && self.perp.is_finite() && self.epi > 0.0 && self.perp > 0.0
-    }
-
     fn squared(self) -> f64 {
         self.epi.powi(2) + self.perp.powi(2)
     }
@@ -36,14 +32,15 @@ pub struct Jacobian {
 
 /// One independently traced seam crossing.
 ///
-/// `error` is the trace's one-standard-deviation error on each axis.  The fit
-/// whitens by it: a noisy trace remains evidence, but cannot outvote a sharp
-/// one merely because its numbers are larger.
+/// `covariance` is the trace's full two-axis covariance in degrees squared.
+/// The fit whitens by it: a noisy trace remains evidence, but cannot outvote
+/// a sharp one merely because its numbers are larger.  The off-diagonal term
+/// matters when a registration's axes are correlated.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Observation {
     pub name: String,
     pub displacement: Displacement,
-    pub error: Displacement,
+    pub covariance: Covariance,
     pub jacobian: Jacobian,
 }
 
@@ -52,11 +49,11 @@ impl Observation {
     ///
     /// The instrument supplies its ordinary trace uncertainty and numerical
     /// pose response, but the measured difference is exactly zero.
-    pub fn self_pair(name: impl Into<String>, error: Displacement, jacobian: Jacobian) -> Self {
+    pub fn self_pair(name: impl Into<String>, covariance: Covariance, jacobian: Jacobian) -> Self {
         Self {
             name: name.into(),
             displacement: Displacement::default(),
-            error,
+            covariance,
             jacobian,
         }
     }
@@ -65,10 +62,13 @@ impl Observation {
 /// Why the global-pose question did not produce a numerical answer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Refused {
+    /// Fewer than four two-axis crossings leave fewer than three residual
+    /// degrees of freedom after the five-knob pose fit.
+    TooFewObservations { have: usize },
     /// Five pose knobs need more than five scalar measurements.
     TooFewAxes { have: usize },
-    /// A trace did not provide a finite positive uncertainty.
-    InvalidError { observation: usize },
+    /// A trace did not provide a finite positive-definite covariance.
+    InvalidCovariance { observation: usize },
     /// A numerical response was not finite.
     InvalidJacobian { observation: usize },
     /// The references do not constrain one independent global-pose direction.
@@ -86,11 +86,12 @@ pub struct SharedPose {
     pub residuals: Vec<Displacement>,
     /// RMS residual in physical degrees across both axes.
     pub rms: f64,
-    /// RMS residual after each axis is divided by its trace error.
+    /// Square root of chi-squared per residual degree of freedom after the
+    /// full covariance whitening.
     pub normalized_rms: f64,
     /// Sum of squared, error-normalized residuals.
     pub chi_squared: f64,
-    /// Independent scalar residuals behind the RMS diagnostic.
+    /// Independent scalar residuals after the five fitted pose knobs.
     pub degrees_of_freedom: usize,
     /// Infinity-norm condition estimate for the whitened normal matrix.
     ///
@@ -102,6 +103,11 @@ pub struct SharedPose {
 
 /// Fit one global five-knob pose to two-axis crossing observations.
 pub fn fit(observations: &[Observation]) -> Result<SharedPose, Refused> {
+    if observations.len() < 4 {
+        return Err(Refused::TooFewObservations {
+            have: observations.len(),
+        });
+    }
     let axes = observations.len() * 2;
     if axes <= KNOBS {
         return Err(Refused::TooFewAxes { have: axes });
@@ -109,26 +115,20 @@ pub fn fit(observations: &[Observation]) -> Result<SharedPose, Refused> {
 
     let mut rows = Vec::with_capacity(axes);
     for (index, observation) in observations.iter().enumerate() {
-        if !observation.error.finite_and_positive() {
-            return Err(Refused::InvalidError { observation: index });
+        if !observation.displacement.epi.is_finite()
+            || !observation.displacement.perp.is_finite()
+            || observation
+                .jacobian
+                .epi
+                .iter()
+                .chain(&observation.jacobian.perp)
+                .any(|term| !term.is_finite())
+        {
+            return Err(Refused::InvalidJacobian { observation: index });
         }
-        for (basis, value, error) in [
-            (
-                observation.jacobian.epi,
-                observation.displacement.epi,
-                observation.error.epi,
-            ),
-            (
-                observation.jacobian.perp,
-                observation.displacement.perp,
-                observation.error.perp,
-            ),
-        ] {
-            if !value.is_finite() || basis.iter().any(|term| !term.is_finite()) {
-                return Err(Refused::InvalidJacobian { observation: index });
-            }
-            rows.push((basis.map(|term| term / error), value / error));
-        }
+        let whitened =
+            whiten(observation).ok_or(Refused::InvalidCovariance { observation: index })?;
+        rows.extend(whitened);
     }
 
     let mut normal = [[0.0; KNOBS]; KNOBS];
@@ -164,10 +164,8 @@ pub fn fit(observations: &[Observation]) -> Result<SharedPose, Refused> {
     let chi_squared: f64 = residuals
         .iter()
         .zip(observations)
-        .map(|(residual, observation)| {
-            (residual.epi / observation.error.epi).powi(2)
-                + (residual.perp / observation.error.perp).powi(2)
-        })
+        .map(|(residual, observation)| whiten_displacement(*residual, observation.covariance))
+        .map(|whitened| whitened.map_or(f64::NAN, |value| value.squared()))
         .sum();
     let degrees_of_freedom = axes - KNOBS;
     Ok(SharedPose {
@@ -175,7 +173,7 @@ pub fn fit(observations: &[Observation]) -> Result<SharedPose, Refused> {
         predicted,
         residuals,
         rms: (squared / axes as f64).sqrt(),
-        normalized_rms: (chi_squared / axes as f64).sqrt(),
+        normalized_rms: (chi_squared / degrees_of_freedom as f64).sqrt(),
         chi_squared,
         degrees_of_freedom,
         condition: norm_inf(normal) * norm_inf(inverse),
@@ -220,6 +218,19 @@ pub struct Covariance {
     pub xx: f64,
     pub xy: f64,
     pub yy: f64,
+}
+
+impl Covariance {
+    /// A covariance with independent one-standard-deviation errors on each
+    /// axis.  This is a convenience for callers whose trace has measured no
+    /// correlation; real registrations should retain their full covariance.
+    pub const fn diagonal(x: f64, y: f64) -> Self {
+        Self {
+            xx: x * x,
+            xy: 0.0,
+            yy: y * y,
+        }
+    }
 }
 
 /// A two-dimensional registration reading, before the renderer maps its
@@ -328,6 +339,54 @@ fn norm_inf(matrix: [[f64; KNOBS]; KNOBS]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// Premultiply one two-axis observation by the inverse Cholesky factor of
+/// its covariance.  The two output rows have unit covariance, including when
+/// the registered epi/perp axes are correlated.
+fn whiten(observation: &Observation) -> Option<[([f64; KNOBS], f64); 2]> {
+    let (first, second) = cholesky_inverse_rows(observation.covariance)?;
+    Some([
+        (
+            std::array::from_fn(|index| first[0] * observation.jacobian.epi[index]),
+            first[0] * observation.displacement.epi,
+        ),
+        (
+            std::array::from_fn(|index| {
+                second[0] * observation.jacobian.epi[index]
+                    + second[1] * observation.jacobian.perp[index]
+            }),
+            second[0] * observation.displacement.epi + second[1] * observation.displacement.perp,
+        ),
+    ])
+}
+
+fn whiten_displacement(value: Displacement, covariance: Covariance) -> Option<Displacement> {
+    let (first, second) = cholesky_inverse_rows(covariance)?;
+    Some(Displacement {
+        epi: first[0] * value.epi,
+        perp: second[0] * value.epi + second[1] * value.perp,
+    })
+}
+
+/// Rows of the inverse of the lower Cholesky factor `L` where
+/// `covariance = L * L^T`.  Strict positive definiteness is the only
+/// covariance gate; no empirical condition cut-off is invented here.
+fn cholesky_inverse_rows(covariance: Covariance) -> Option<([f64; 2], [f64; 2])> {
+    if !covariance.xx.is_finite() || !covariance.xy.is_finite() || !covariance.yy.is_finite() {
+        return None;
+    }
+    let l00 = covariance.xx.sqrt();
+    if !l00.is_finite() || l00 <= 0.0 {
+        return None;
+    }
+    let l10 = covariance.xy / l00;
+    let l11_squared = covariance.yy - l10 * l10;
+    let l11 = l11_squared.sqrt();
+    if !l10.is_finite() || !l11.is_finite() || l11 <= 0.0 {
+        return None;
+    }
+    Some(([1.0 / l00, 0.0], [-l10 / (l00 * l11), 1.0 / l11]))
+}
+
 /// Gauss-Jordan with partial pivoting.  The fit is only five by five, and
 /// keeping it here makes its condition diagnostic describe the exact solve.
 fn invert(matrix: [[f64; KNOBS]; KNOBS]) -> Option<[[f64; KNOBS]; KNOBS]> {
@@ -342,7 +401,7 @@ fn invert(matrix: [[f64; KNOBS]; KNOBS]) -> Option<[[f64; KNOBS]; KNOBS]> {
                 .abs()
                 .total_cmp(&work[*right][column].abs())
         })?;
-        if work[pivot][column].abs() < 1e-12 {
+        if !work[pivot][column].is_finite() || work[pivot][column] == 0.0 {
             return None;
         }
         work.swap(column, pivot);
@@ -361,6 +420,9 @@ fn invert(matrix: [[f64; KNOBS]; KNOBS]) -> Option<[[f64; KNOBS]; KNOBS]> {
             }
         }
     }
+    if work.iter().flatten().any(|value| !value.is_finite()) {
+        return None;
+    }
     Some(std::array::from_fn(|row| {
         std::array::from_fn(|column| work[row][KNOBS + column])
     }))
@@ -370,10 +432,7 @@ fn invert(matrix: [[f64; KNOBS]; KNOBS]) -> Option<[[f64; KNOBS]; KNOBS]> {
 mod tests {
     use super::*;
 
-    const ERROR: Displacement = Displacement {
-        epi: 0.01,
-        perp: 0.01,
-    };
+    const COVARIANCE: Covariance = Covariance::diagonal(0.01, 0.01);
 
     fn jacobian(index: usize) -> Jacobian {
         let x = index as f64 + 1.0;
@@ -390,7 +449,7 @@ mod tests {
                 Observation {
                     name: format!("crossing-{index}"),
                     displacement: predict(jacobian, knobs),
-                    error: ERROR,
+                    covariance: COVARIANCE,
                     jacobian,
                 }
             })
@@ -405,13 +464,16 @@ mod tests {
             assert!((got - wanted).abs() < 1e-10, "{got} instead of {wanted}");
         }
         assert!(fit.rms < 1e-11, "global plant left {:.3e} degrees", fit.rms);
+        assert_eq!(fit.degrees_of_freedom, 7);
         assert!(fit.condition.is_finite() && fit.condition > 1.0);
     }
 
     #[test]
     fn a_self_pair_is_exactly_zero() {
         let observations: Vec<Observation> = (0..6)
-            .map(|index| Observation::self_pair(format!("self-{index}"), ERROR, jacobian(index)))
+            .map(|index| {
+                Observation::self_pair(format!("self-{index}"), COVARIANCE, jacobian(index))
+            })
             .collect();
         let fit = fit(&observations).expect("zero readings still constrain the model");
         assert_eq!(fit.knobs, [0.0; KNOBS]);
@@ -447,6 +509,51 @@ mod tests {
             fit.normalized_rms > 10.0,
             "a 0.01 degree trace would not reject the local residue: {:.2} sigma rms",
             fit.normalized_rms
+        );
+    }
+
+    #[test]
+    fn fewer_than_four_two_axis_crossings_refuse_before_fitting() {
+        let observations = planted([0.0; KNOBS]);
+        assert_eq!(
+            fit(&observations[..3]),
+            Err(Refused::TooFewObservations { have: 3 })
+        );
+        let fit = fit(&observations[..4]).expect("four crossings leave three residual dof");
+        assert_eq!(fit.degrees_of_freedom, 3);
+    }
+
+    #[test]
+    fn correlated_covariance_is_whitened_as_a_full_two_axis_measurement() {
+        let covariance = Covariance {
+            xx: 4.0,
+            xy: 3.0,
+            yy: 9.0,
+        };
+        let whitened = whiten_displacement(
+            Displacement {
+                epi: 2.0,
+                perp: 3.0,
+            },
+            covariance,
+        )
+        .expect("positive-definite covariance");
+        // [2, 3] C^-1 [2, 3]^T = 4/3.  Dividing axes independently would
+        // incorrectly report 2 instead and discard their correlation.
+        assert!((whitened.squared() - 4.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn non_positive_definite_covariance_refuses() {
+        let mut observations = planted([0.0; KNOBS]);
+        observations[0].covariance = Covariance {
+            xx: 1.0,
+            xy: 2.0,
+            yy: 1.0,
+        };
+        assert_eq!(
+            fit(&observations),
+            Err(Refused::InvalidCovariance { observation: 0 })
         );
     }
 

@@ -144,8 +144,12 @@ baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
 fit for every reference.  It must obtain at least four independent,
 non-aperture two-axis correspondences (eight scalar rows, three residual
-degrees of freedom after the five-knob fit), use their full 2-by-2 covariance,
-and calibrate its condition gate with planted-pose and self/repeat controls.
+degrees of freedom after the five-knob fit), use their full positive-definite
+2-by-2 covariance (including its off-diagonal term), and calibrate its
+condition gate with planted-pose and self/repeat controls. The reported
+normalized RMS is square-root chi-squared per those residual degrees of
+freedom, not per raw axis; condition is reported but has no invented
+empirical cut-off.
 
 ## Controls
 
