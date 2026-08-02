@@ -79,7 +79,7 @@ fn main() -> Fallible<()> {
     for row in raw_register::select_ladder(&map, &pair.lenses, &candidates, &supports) {
         let health = row.health;
         println!(
-            "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\\nhealth:  candidates {}; reference-complete {}; search positions {}; target-complete {}; readings {}; refusals [support {}, aperture {}, peak {}]",
+            "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\nhealth:  candidates {}; reference-complete {}; search positions {}; target-complete {}; readings {}; refusals [support {}, aperture {}, peak {}]",
             row.support.span_deg,
             row.support.search_deg,
             row.support.step_deg,

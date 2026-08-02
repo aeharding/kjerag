@@ -73,6 +73,9 @@ the support/aperture/peak refusal counts. Thus a growing support refusal is
 evidence of lens geometry, while complete patches that increasingly refuse
 for aperture are evidence of inadequate two-axis texture. Neither is silently
 promoted to a displacement, and the sweep does not choose a rung or a view.
+Target coverage is evaluated at each candidate shift, not over the enclosing
+search rectangle: unavailable offsets are omitted, while a maximum on the
+declared search rail, a tied maximum, or no complete target patch refuses.
 
 This does **not** yet make a shared pose Jacobian, establish an empirically
 calibrated condition threshold, or infer/apply a warp. Its uncertainty is the

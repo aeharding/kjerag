@@ -283,10 +283,12 @@ fn read(
         .ok_or(Refused::NoCompletePatch)?;
     health.reference_complete += 1;
     let coarse = support.search_steps();
-    let mut winner: Option<([isize; 2], f64)> = None;
+    let mut legal = Vec::new();
     // This is deliberately an unconstrained 2-D search.  A physical depth
     // hypothesis can later explain the epi term, but must not manufacture a
-    // zero perp term before the evidence has been read.
+    // zero perp term before the evidence has been read.  Coverage applies to
+    // this *one* shift's patch: an unavailable neighbouring shift is omitted,
+    // never allowed to turn the legal shifts into a rectangle-sized refusal.
     for i in -coarse..=coarse {
         for j in -coarse..=coarse {
             health.searched_offsets += 1;
@@ -295,16 +297,10 @@ fn read(
                 continue;
             };
             health.complete_target_patches += 1;
-            let r = correlation(&a, &b);
-            if winner.is_none_or(|(_, held)| r > held) {
-                winner = Some(([i, j], r));
-            }
+            legal.push(([i, j], correlation(&a, &b)));
         }
     }
-    let ([i, j], correlation) = winner.ok_or(Refused::NoCompletePatch)?;
-    if i.abs() >= coarse || j.abs() >= coarse {
-        return Err(Refused::NoPeak);
-    }
+    let ([i, j], correlation) = peak(&legal, coarse)?;
     let offset = [i as f64 * step, j as f64 * step];
     let b =
         sample(map, back, 1, candidate.node, half, step, offset).ok_or(Refused::NoCompletePatch)?;
@@ -342,6 +338,32 @@ fn read(
         correlation,
         score: correlation / (1.0 + uncertainty),
     })
+}
+
+/// Pick one maximum from the patches which were complete at their own shift.
+///
+/// A boundary maximum says the declared search did not contain the answer;
+/// tied maxima say the content did not identify one.  Both are `NoPeak`.
+/// Missing shifts are not evidence against the complete shifts that remain.
+fn peak(legal: &[([isize; 2], f64)], coarse: isize) -> Result<([isize; 2], f64), Refused> {
+    let Some((offset, correlation)) = legal
+        .iter()
+        .copied()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+    else {
+        return Err(Refused::NoCompletePatch);
+    };
+    if offset[0].abs() >= coarse
+        || offset[1].abs() >= coarse
+        || legal
+            .iter()
+            .filter(|(_, score)| *score == correlation)
+            .nth(1)
+            .is_some()
+    {
+        return Err(Refused::NoPeak);
+    }
+    Ok((offset, correlation))
 }
 
 fn node(baseline: [f64; 3], phi: f64) -> Node {
@@ -455,6 +477,25 @@ mod tests {
     #[test]
     fn correlation_refuses_flat_content_by_reporting_no_agreement() {
         assert_eq!(correlation(&[1.0; 4], &[1.0; 4]), 0.0);
+    }
+
+    #[test]
+    fn an_interior_peak_survives_missing_neighbouring_search_patches() {
+        // The omitted shifts model a patch crossing the lens boundary.  They
+        // are not entries with invented luma and must not invalidate the
+        // complete shifts left inside the aperture.
+        let legal = [([-1, 0], 0.61), ([0, 0], 0.98), ([1, 0], 0.42)];
+        assert_eq!(peak(&legal, 3), Ok(([0, 0], 0.98)));
+    }
+
+    #[test]
+    fn a_railed_or_tied_legal_peak_still_refuses() {
+        assert_eq!(peak(&[([3, 0], 0.98)], 3), Err(Refused::NoPeak));
+        assert_eq!(
+            peak(&[([0, 0], 0.98), ([1, 0], 0.98)], 3),
+            Err(Refused::NoPeak)
+        );
+        assert_eq!(peak(&[], 3), Err(Refused::NoCompletePatch));
     }
 
     fn planted_crossing(support: Support, shift: [f64; 2]) -> Vec<RegistrationSample> {
