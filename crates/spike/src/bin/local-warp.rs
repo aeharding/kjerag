@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use kjerag_media::Fallible;
 use kjerag_meta::CalibrationSet;
-use kjerag_render::{Camera, Cue, Horizon, Sampling, Scene, ScenePipeline, Size};
+use kjerag_render::{Camera, Cue, Horizon, Reframe, Sampling, Scene, ScenePipeline, SeamFit, Size};
 use kjerag_spike::{FORMAT, Gpu, Render, Walk, raw_register, seam_fit};
 
 fn main() -> Fallible<()> {
@@ -22,42 +22,16 @@ fn main() -> Fallible<()> {
         .map_or([0.0; 3], |lens| lens.pose.translation_m);
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
     let gpu = Gpu::open()?;
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
-    let mut scene = Scene::still(&options.input, options.start())?;
-    // The map drives both the warm render and the raw-lens projections below.
-    // Hold one explicitly selected calibration before either so a comparison
-    // is not silently between a file fit in one path and another baseline in
-    // the other.
-    options.seam.hold(&scene);
-    scene.set_horizon(if options.lock {
-        Horizon::Locked
-    } else {
-        Horizon::Free
-    });
-
-    // Keep this rendered traversal even though its pixels are discarded: the
-    // pipeline's media-time band state and held camera pose are exactly what
-    // makes `warm` mean the same thing here as it does in `step`.
-    let mut rendered = 0usize;
-    while let Some((_, at)) = scene.frame() {
-        let _ = Render {
-            gpu: &gpu,
-            scene: &scene,
-            pipeline: &mut pipeline,
-        }
-        .frame(options.camera(), Sampling::default(), options.size())?;
-        rendered += 1;
-        if at.as_secs_f64() >= options.time || !scene.advance()? {
-            break;
-        }
-    }
-    let (_, at) = scene.frame().ok_or("no frame decoded at that instant")?;
-    let map = scene
-        .mapped(options.camera(), 1.0)
-        .ok_or("no frame to map")?;
+    // Every response map is made by the same fresh traversal.  A perturbed
+    // fit is never landed into an already-warmed scene, where a hidden
+    // correction walk or different band history could mimic a derivative.
+    let warmed = warm_map(&gpu, &options, options.seam)?;
+    let at = warmed.at;
+    let map = warmed.map;
     let candidates = raw_register::visible_candidates(&map, options.size, options.size, baseline);
     println!(
-        "played: {rendered} frame(s), ending at {:.3} s; {} visible seam candidates",
+        "played: {} frame(s), ending at {:.3} s; {} visible seam candidates",
+        warmed.rendered,
         at.as_secs_f64(),
         candidates.len()
     );
@@ -135,7 +109,132 @@ fn main() -> Fallible<()> {
             report_observations(support, &outcomes, options.trace);
         }
     }
+    if options.responses {
+        let sites = raw_register::overlap_strip_sites(&candidates);
+        report_responses(&gpu, &options, &warmed, &sites)?;
+    }
     Ok(())
+}
+
+/// The outcome of one isolated, fully rendered traversal.  The frame count
+/// is retained so a central difference cannot quietly compare equal PTSs
+/// reached through different warm histories.
+struct Warmed {
+    map: Reframe,
+    at: Duration,
+    rendered: usize,
+}
+
+/// Rebuild and warm a scene from the same cue and explicit calibration.
+///
+/// This is intentionally the only route used for the finite-difference maps.
+/// `Scene` owns held and correction state privately, so changing a fit after
+/// a warm cannot prove the three maps saw the same traversal.
+fn warm_map(gpu: &Gpu, options: &Options, seam: Seam) -> Fallible<Warmed> {
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut scene = Scene::still(&options.input, options.start())?;
+    seam.hold(&scene);
+    scene.set_horizon(if options.lock {
+        Horizon::Locked
+    } else {
+        Horizon::Free
+    });
+    scene.set_sampling(Sampling::default());
+    let mut rendered = 0usize;
+    while let Some((_, at)) = scene.frame() {
+        let _ = Render {
+            gpu,
+            scene: &scene,
+            pipeline: &mut pipeline,
+        }
+        .frame(options.camera(), Sampling::default(), options.size())?;
+        rendered += 1;
+        if at.as_secs_f64() >= options.time || !scene.advance()? {
+            break;
+        }
+    }
+    let (_, at) = scene.frame().ok_or("no frame decoded at that instant")?;
+    let map = scene
+        .mapped(options.camera(), 1.0)
+        .ok_or("no frame to map")?;
+    Ok(Warmed { map, at, rendered })
+}
+
+/// Native-unit central-difference steps for the three angular and two pixel
+/// calibration knobs.  These are diagnostic probes, not corrections.
+const RESPONSE_KNOBS: [(&str, f64); 5] = [
+    ("roll", 0.05),
+    ("yaw", 0.05),
+    ("pitch", 0.05),
+    ("cx", 0.25),
+    ("cy", 0.25),
+];
+
+fn perturb(mut fit: SeamFit, knob: usize, amount: f64) -> SeamFit {
+    match knob {
+        0 => fit.roll_deg += amount,
+        1 => fit.yaw_deg += amount,
+        2 => fit.pitch_deg += amount,
+        3 => fit.cx_px += amount,
+        4 => fit.cy_px += amount,
+        _ => unreachable!("the response knob list has exactly five entries"),
+    }
+    fit
+}
+
+fn report_responses(
+    gpu: &Gpu,
+    options: &Options,
+    base: &Warmed,
+    sites: &[raw_register::StripSite],
+) -> Fallible<()> {
+    let Seam::Stored(fit) = options.seam else {
+        return Err("responses=1 requires seam=<stored fit>".into());
+    };
+    println!(
+        "responses: frozen baseline roots/sites {}; central maps separately warmed",
+        sites.len()
+    );
+    for (index, (name, half_step)) in RESPONSE_KNOBS.into_iter().enumerate() {
+        let minus = warm_map(gpu, options, Seam::Stored(perturb(fit, index, -half_step)))?;
+        let plus = warm_map(gpu, options, Seam::Stored(perturb(fit, index, half_step)))?;
+        require_same_warm(base, &minus, name, "minus")?;
+        require_same_warm(base, &plus, name, "plus")?;
+        let mut available = 0usize;
+        let mut projected_out = 0usize;
+        let mut singular = 0usize;
+        for site in sites {
+            match raw_register::central_site_response(
+                &base.map, &minus.map, &plus.map, *site, half_step,
+            ) {
+                Ok(_) => available += 1,
+                Err(raw_register::ResponseRefused::ProjectedOut) => projected_out += 1,
+                Err(raw_register::ResponseRefused::Singular) => singular += 1,
+                Err(raw_register::ResponseRefused::InvalidStep) => {
+                    unreachable!("constant positive step")
+                }
+            }
+        }
+        println!(
+            "response: {name}; central half-step {half_step:.3}; sites {}; available {}; projected-out {}; singular {}; no pose fit or warp applied",
+            sites.len(),
+            available,
+            projected_out,
+            singular,
+        );
+    }
+    Ok(())
+}
+
+fn require_same_warm(base: &Warmed, other: &Warmed, knob: &str, side: &str) -> Fallible<()> {
+    if base.at == other.at && base.rendered == other.rendered {
+        return Ok(());
+    }
+    Err(format!(
+        "refused: {knob} {side} map ended at {:.9} s after {} frames, baseline was {:.9} s after {} frames",
+        other.at.as_secs_f64(), other.rendered, base.at.as_secs_f64(), base.rendered,
+    )
+    .into())
 }
 
 /// `Scene` and `Walk` both report the container's media time as an exact
@@ -168,11 +267,13 @@ struct Options {
     searches: Option<Vec<f64>>,
     trace: bool,
     observations: bool,
+    responses: bool,
 }
 
 /// The same three seam paths that `step` and `reframe` expose.  Stage 9's
 /// raw pixels remain raw; this choice only fixes the camera-frame map through
 /// which both lenses are sampled.
+#[derive(Clone, Copy)]
 enum Seam {
     Factory,
     File,
@@ -208,6 +309,7 @@ impl Options {
             searches: None,
             trace: false,
             observations: false,
+            responses: false,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -230,15 +332,16 @@ impl Options {
                 Some(("search", value)) => out.searches = Some(degrees(value)?),
                 Some(("trace", value)) => out.trace = value.parse::<u32>()? != 0,
                 Some(("observations", value)) => out.observations = value.parse::<u32>()? != 0,
+                Some(("responses", value)) => out.responses = value.parse::<u32>()? != 0,
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
         if out.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        if out.observations && !matches!(&out.seam, Seam::Stored(_)) {
+        if (out.observations || out.responses) && !matches!(&out.seam, Seam::Stored(_)) {
             return Err(
-                "observations=1 requires seam=<stored fit>; factory/file are coverage-only controls"
+                "observations=1/responses=1 require seam=<stored fit>; factory/file are coverage-only controls"
                     .into(),
             );
         }
@@ -298,7 +401,7 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[derive(Default)]
@@ -461,6 +564,54 @@ mod tests {
             ])
             .observations
         );
+        assert!(
+            Options::parse(
+                ["flight.insv", "responses=1", "seam=file"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            options(&[
+                "flight.insv",
+                "responses=1",
+                "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+            ])
+            .responses
+        );
+    }
+
+    #[test]
+    fn central_difference_changes_only_the_named_knob() {
+        let original = kjerag_render::SeamFit {
+            roll_deg: 1.0,
+            yaw_deg: 2.0,
+            pitch_deg: 3.0,
+            cx_px: 4.0,
+            cy_px: 5.0,
+        };
+        for knob in 0..5 {
+            let changed = super::perturb(original, knob, 0.25);
+            let before = [
+                original.roll_deg,
+                original.yaw_deg,
+                original.pitch_deg,
+                original.cx_px,
+                original.cy_px,
+            ];
+            let after = [
+                changed.roll_deg,
+                changed.yaw_deg,
+                changed.pitch_deg,
+                changed.cx_px,
+                changed.cy_px,
+            ];
+            for axis in 0..5 {
+                let expected = if axis == knob { 0.25 } else { 0.0 };
+                assert_eq!(after[axis] - before[axis], expected);
+            }
+        }
     }
 
     #[test]

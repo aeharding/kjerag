@@ -117,6 +117,26 @@ calibrated condition threshold, or infer/apply a warp. Its uncertainty is the
 local linearized luma residual only; repeatability and raw-versus-scene PTS
 agreement remain explicit follow-up controls.
 
+## Fixed-site response control
+
+`responses=1` is available only with an explicit stored `seam=` fit.  It does
+not mutate an already-warmed scene.  Instead it independently rebuilds and
+warms the baseline plus the negative and positive central perturbation for
+each of `roll`, `yaw`, `pitch`, `cx`, and `cy`, using the same cue, camera,
+horizon, sampling, and rendered traversal.  The tool refuses a perturbation
+whose final PTS or warm-frame count differs from baseline.  Roots and 3-by-3
+sites are declared from the baseline map once; they are not re-traced on any
+perturbed map.  The report currently counts only whether each fixed site has
+a finite central response, is projected out, or is locally singular.  It does
+not fit a pose or apply a warp.
+
+On the May BAD view at 50.150100000 s with the explicit May fit and the
+1.20/1.00-degree support rung, all 153 frozen sites completed all five
+central-response controls: none projected out and none were locally singular.
+Every independently warmed map ended on the same PTS after the same 61-frame
+traversal.  This is only a Jacobian-availability result; it does not compare
+crossings, calculate the shared-pose residual, or license a warp.
+
 ## First valid coverage result
 
 The first lattice run was invalid: it handed a body-frame node directly to
