@@ -12,7 +12,7 @@ use crate::local_warp::{self, RegistrationSample};
 /// One point on the rendered crossover contour, with the axes the recorded
 /// baseline gives it. `perp` is the axis no physical disparity can reach;
 /// `epi` is the epipolar axis, in the sign used by the old depth instrument.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Node {
     pub centre: [f64; 3],
     pub perp: [f64; 3],
@@ -22,7 +22,7 @@ pub struct Node {
 
 /// A point selected from the seam contour of the rendered view.  The point is
 /// only a location; it contains no composited colour or blend reading.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {
     pub node: Node,
     /// The view-space root that produced `node`. Kept for locator controls;
@@ -126,7 +126,7 @@ pub const OVERLAP_STRIP_OFFSETS_DEG: [[f64; 2]; 9] = [
 ];
 
 /// A fixed physical location around one actual 50/50 root.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StripSite {
     pub root: Candidate,
     /// Camera-frame `[perp, epi]`, in radians, from `root`.
@@ -347,6 +347,149 @@ pub struct StripSiteReading {
 pub struct StripSiteOutcome {
     pub site: StripSite,
     pub result: Result<StripSiteReading, Refused>,
+}
+
+/// The response of one named calibration knob at exactly one declared site.
+///
+/// Kept beside the site rather than as an anonymous position in a vector so
+/// the pose assembly can refuse a reordered or re-traced response.  A site
+/// that has no response remains present as a concrete refusal; it is never
+/// replaced by a more convenient site.
+#[derive(Clone, Copy, Debug)]
+pub struct SiteResponse {
+    pub site: StripSite,
+    pub result: Result<CameraDisplacement, ResponseRefused>,
+}
+
+/// Build one site response record without changing the frozen site identity.
+pub fn site_response(
+    base: &Reframe,
+    minus: &Reframe,
+    plus: &Reframe,
+    site: StripSite,
+    half_step: f64,
+) -> SiteResponse {
+    SiteResponse {
+        site,
+        result: central_site_response(base, minus, plus, site, half_step),
+    }
+}
+
+/// Why fixed-site evidence could not be assembled into a shared-pose input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssemblyRefused {
+    /// A response column was made from a different site declaration or was
+    /// reordered.  Pairing by a score or proximity would make a different
+    /// physical observation, so the instrument refuses instead.
+    MismatchedSite { knob: usize, site: usize },
+    /// A response column omitted a declared site.
+    MismatchedLength {
+        knob: usize,
+        expected: usize,
+        got: usize,
+    },
+    /// Fewer than four sites supplied both a two-axis reading and all five
+    /// finite central responses.  This leaves fewer than three residual
+    /// degrees of freedom after the five-knob fit.
+    TooFewCompleteSites { have: usize },
+}
+
+/// Fixed-site raw evidence ready for the one-view shared-pose test.
+#[derive(Clone, Debug)]
+pub struct PoseAssembly {
+    /// Only readings whose *same declared site* also has every response.
+    /// Their order follows `outcomes`; no texture or residual winner is
+    /// selected.
+    pub observations: Vec<local_warp::Observation>,
+    /// Every site which supplied a raw two-axis reading before response gates.
+    pub raw_readings: usize,
+    /// Readings excluded because at least one response was refused or not
+    /// finite.  This is evidence health, not a reason to substitute a site.
+    pub incomplete_responses: usize,
+}
+
+/// Assemble raw registrations and central responses for one warmed view.
+///
+/// Both source units are radians: output observations are physical degrees,
+/// so each covariance entry, including the correlation term, is multiplied
+/// by `(180 / pi)^2`.  The five response columns must be the exact fixed-site
+/// order used for `outcomes`; this routine performs no cross-view pairing and
+/// no best-site selection.
+pub fn assemble_pose_observations(
+    outcomes: &[StripSiteOutcome],
+    responses: &[Vec<SiteResponse>; local_warp::KNOBS],
+) -> Result<PoseAssembly, AssemblyRefused> {
+    for (knob, column) in responses.iter().enumerate() {
+        if column.len() != outcomes.len() {
+            return Err(AssemblyRefused::MismatchedLength {
+                knob,
+                expected: outcomes.len(),
+                got: column.len(),
+            });
+        }
+        for (site, (outcome, response)) in outcomes.iter().zip(column).enumerate() {
+            if outcome.site != response.site {
+                return Err(AssemblyRefused::MismatchedSite { knob, site });
+            }
+        }
+    }
+
+    let radians_to_degrees = 180.0 / std::f64::consts::PI;
+    let covariance_scale = radians_to_degrees.powi(2);
+    let mut raw_readings = 0;
+    let mut incomplete_responses = 0;
+    let mut observations = Vec::new();
+    for (site_index, outcome) in outcomes.iter().enumerate() {
+        let Ok(reading) = outcome.result else {
+            continue;
+        };
+        raw_readings += 1;
+        let mut epi = [0.0; local_warp::KNOBS];
+        let mut perp = [0.0; local_warp::KNOBS];
+        let complete = responses.iter().enumerate().all(|(knob, column)| {
+            let Ok(response) = column[site_index].result else {
+                return false;
+            };
+            if !response.epi.is_finite() || !response.perp.is_finite() {
+                return false;
+            }
+            epi[knob] = response.epi * radians_to_degrees;
+            perp[knob] = response.perp * radians_to_degrees;
+            true
+        });
+        if !complete {
+            incomplete_responses += 1;
+            continue;
+        }
+        observations.push(local_warp::Observation {
+            name: format!(
+                "root-phi-{:.3}-perp-{:.3}-epi-{:.3}",
+                reading.site.root.node.phi.to_degrees(),
+                reading.site.offset_rad[0].to_degrees(),
+                reading.site.offset_rad[1].to_degrees(),
+            ),
+            displacement: local_warp::Displacement {
+                epi: reading.displacement_rad.epi * radians_to_degrees,
+                perp: reading.displacement_rad.perp * radians_to_degrees,
+            },
+            covariance: local_warp::Covariance {
+                xx: reading.covariance_rad2.epi_epi * covariance_scale,
+                xy: reading.covariance_rad2.epi_perp * covariance_scale,
+                yy: reading.covariance_rad2.perp_perp * covariance_scale,
+            },
+            jacobian: local_warp::Jacobian { epi, perp },
+        });
+    }
+    if observations.len() < 4 {
+        return Err(AssemblyRefused::TooFewCompleteSites {
+            have: observations.len(),
+        });
+    }
+    Ok(PoseAssembly {
+        observations,
+        raw_readings,
+        incomplete_responses,
+    })
 }
 
 /// Register every fixed lattice site independently, with no score-based
@@ -1485,5 +1628,100 @@ mod tests {
             assert!((reading.displacement.y - wanted[1]).abs() < 1e-12);
             assert!(reading.condition.is_finite());
         }
+    }
+
+    fn assembled_site(index: usize) -> StripSite {
+        StripSite {
+            root: Candidate {
+                node: Node {
+                    centre: [1.0, 0.0, 0.0],
+                    perp: [0.0, 1.0, 0.0],
+                    epi: [0.0, 0.0, 1.0],
+                    phi: index as f64 * 0.1,
+                },
+                view_ray: [1.0, 0.0, 0.0],
+                view_pixel: [index as f32, 0.0],
+            },
+            offset_rad: [index as f64 * 0.01, -(index as f64) * 0.02],
+        }
+    }
+
+    fn assembled_outcome(index: usize) -> StripSiteOutcome {
+        let site = assembled_site(index);
+        StripSiteOutcome {
+            site,
+            result: Ok(StripSiteReading {
+                site,
+                epi_axis: site.root.node.epi,
+                perp_axis: site.root.node.perp,
+                displacement_rad: CameraDisplacement {
+                    epi: 0.1 + index as f64 * 0.01,
+                    perp: -0.2,
+                },
+                covariance_rad2: CameraCovariance {
+                    epi_epi: 4.0e-6,
+                    epi_perp: -1.5e-6,
+                    perp_perp: 9.0e-6,
+                },
+                condition: 2.0,
+                correlation: 0.9,
+            }),
+        }
+    }
+
+    #[test]
+    fn pose_assembly_preserves_full_covariance_when_converting_radians_to_degrees() {
+        let outcomes: Vec<_> = (0..4).map(assembled_outcome).collect();
+        let responses = std::array::from_fn(|knob| {
+            outcomes
+                .iter()
+                .map(|outcome| SiteResponse {
+                    site: outcome.site,
+                    result: Ok(CameraDisplacement {
+                        epi: (knob + 1) as f64 * 0.01,
+                        perp: -((knob + 1) as f64) * 0.02,
+                    }),
+                })
+                .collect()
+        });
+        let assembled = assemble_pose_observations(&outcomes, &responses)
+            .expect("four complete fixed sites are enough to test a pose");
+        assert_eq!(assembled.raw_readings, 4);
+        assert_eq!(assembled.incomplete_responses, 0);
+        let first = &assembled.observations[0];
+        let scale = 180.0 / std::f64::consts::PI;
+        assert!((first.displacement.epi - 0.1 * scale).abs() < 1e-12);
+        assert!((first.displacement.perp + 0.2 * scale).abs() < 1e-12);
+        assert!((first.covariance.xx - 4.0e-6 * scale.powi(2)).abs() < 1e-15);
+        assert!((first.covariance.xy + 1.5e-6 * scale.powi(2)).abs() < 1e-15);
+        assert!((first.covariance.yy - 9.0e-6 * scale.powi(2)).abs() < 1e-15);
+        assert!((first.jacobian.epi[4] - 0.05 * scale).abs() < 1e-12);
+        assert!((first.jacobian.perp[4] + 0.10 * scale).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pose_assembly_refuses_fewer_than_four_sites_with_every_response() {
+        let outcomes: Vec<_> = (0..4).map(assembled_outcome).collect();
+        let responses = std::array::from_fn(|knob| {
+            outcomes
+                .iter()
+                .enumerate()
+                .map(|(index, outcome)| SiteResponse {
+                    site: outcome.site,
+                    result: if index == 3 && knob == 2 {
+                        Err(ResponseRefused::ProjectedOut)
+                    } else {
+                        Ok(CameraDisplacement {
+                            epi: 0.01,
+                            perp: -0.01,
+                        })
+                    },
+                })
+                .collect()
+        });
+        assert!(matches!(
+            assemble_pose_observations(&outcomes, &responses),
+            Err(AssemblyRefused::TooFewCompleteSites { have: 3 })
+        ));
     }
 }
