@@ -40,6 +40,7 @@ use kjerag_meta::{
 
 use super::band;
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
+use super::fusion::FusionMode;
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Correction, Harvest, SeamFit};
@@ -161,6 +162,9 @@ pub struct Scene {
     /// How the pass samples where the view magnifies the source (issue #11).
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
+    /// A research-only A/B for the final overlap weights. It defaults to the
+    /// shipped calibrated mix and cannot alter the projection or source UVs.
+    fusion: Cell<FusionMode>,
     /// Where the pass leaves word that it cannot draw this file any more
     /// (issue #124). It belongs to the open capture rather than to the
     /// pipeline, which outlives every file it draws.
@@ -303,6 +307,7 @@ impl Scene {
             forced: Cell::new(None),
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
+            fusion: Cell::new(FusionMode::default()),
             stalled: Stalled::default(),
             shown: Shown::default(),
         }
@@ -764,6 +769,22 @@ impl Scene {
         self.sampling.set(sampling);
     }
 
+    /// Select the research seam-fusion A/B for subsequent redraws.
+    ///
+    /// [`FusionMode::Dominant`] changes only pixels where both calibrated
+    /// sources already claim the ray and the GPU band has correlation
+    /// evidence. It does not change calibration, band bending, source UVs,
+    /// source eligibility, or tone. The shell intentionally has no control
+    /// for this experiment yet; callers can use it for before/after capture.
+    pub fn set_fusion_mode(&self, mode: FusionMode) {
+        self.fusion.set(mode);
+    }
+
+    /// The A/B mode the next redraw will upload.
+    pub fn fusion_mode(&self) -> FusionMode {
+        self.fusion.get()
+    }
+
     pub fn stats(&self) -> Option<Stats> {
         self.player(Player::stats)
     }
@@ -833,6 +854,7 @@ impl Scene {
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
             sampling: self.sampling.get(),
+            fusion: self.fusion.get(),
             shutter: self.shutter.clone(),
             stalled: self.stalled.clone(),
             shown: self.shown.clone(),
@@ -1048,6 +1070,7 @@ pub struct ScenePrimitive {
     /// How the pass samples a magnified picture, which is a property of the
     /// redraw rather than of the frame in it.
     sampling: Sampling,
+    fusion: FusionMode,
     /// A handle on the [`Scene`]'s shutter, not a copy of it: the request
     /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
     /// first, and one that never does is still armed for the next.
@@ -1391,7 +1414,8 @@ impl ScenePipeline {
                 aspect,
                 self.linearize(),
                 primitive.sampling,
-            ),
+            )
+            .with_fusion_mode(primitive.fusion),
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
@@ -2009,8 +2033,9 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 @group(0) @binding(4) var chroma1: texture_2d<f32>;
 @group(0) @binding(5) var samp: sampler;
 // Capture-owned body-sphere residual: `(du, dv, confidence, reserved)`.
-// It is intentionally declared but unread: every constructor sets
-// `reframe.fusion_map_mode` to zero, and no nonzero mode exists yet.
+// It is intentionally declared but unread. The first A/B below changes
+// weights from band evidence only; residual-map sampling remains a separate,
+// future evidence boundary.
 @group(0) @binding(6) var fusion_residual: texture_2d<f32>;
 
 // Each lens's picture at that ray, mixed by its weight, or the room where no
@@ -2031,7 +2056,22 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 // `textureSample` computes its own level from derivatives and needs uniform
 // control flow to do it, and every one of these textures has a single level
 // anyway.
-fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
+fn fusion_weights(weights: vec2<f32>, ray: vec3<f32>) -> vec2<f32> {
+  // This is strictly an overlap operation. A sole calibrated claimant stays
+  // exactly sole, including its UV, eligibility, and one-fetch fast path.
+  if reframe.fusion_map_mode != 1.0 || weights.x <= 0.0 || weights.y <= 0.0 {
+    return weights;
+  }
+  // The existing band measures whether these two source patches are the same
+  // content. At the correlator's own confidence gate, choose the source that
+  // calibration already gave the larger claim; below it, interpolate back to
+  // the shipped blend. No image value, residual map, calibration parameter,
+  // or tone value participates in this decision.
+  let dominant = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), weights.x >= weights.y);
+  return mix(weights, dominant, band_confidence(ray));
+}
+
+fn picture(mix: Blend, ratio: vec2<f32>, ray: vec3<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
   // What the two lenses' exposures have to be brought together by, split
@@ -2040,13 +2080,14 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   // weights below are the weights this pass has always used and a picture
   // with no reading behind it is the picture stage 2 drew.
   let tone = tone_split();
-  if mix.weights[0] > 0.0 {
-    rgb += (mix.weights[0] * tone.x) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
-    total += mix.weights[0];
+  let weights = fusion_weights(vec2<f32>(mix.weights[0], mix.weights[1]), ray);
+  if weights.x > 0.0 {
+    rgb += (weights.x * tone.x) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
+    total += weights.x;
   }
-  if mix.weights[1] > 0.0 {
-    rgb += (mix.weights[1] * tone.y) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
-    total += mix.weights[1];
+  if weights.y > 0.0 {
+    rgb += (weights.y * tone.y) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    total += weights.y;
   }
   // The room around the ball, written rather than painted: transparent black,
   // which through the pass's premultiplied blend leaves what is under the
@@ -2096,7 +2137,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[0].pixel),
     texel_ratio(mix.landings[1].pixel),
   );
-  let lens = picture(mix, ratio);
+  let lens = picture(mix, ratio, look.xyz);
   return vec4<f32>(
     select(lens.rgb, linearize(lens.rgb), reframe.linearize > 0.5),
     lens.a,
@@ -2194,7 +2235,20 @@ mod tests {
         assert!(sampler < map, "map follows the existing sampler");
         assert!(
             !SHADER.contains("textureSample(fusion_residual"),
-            "disabled map is not sampled by the current renderer"
+            "the dominant-source experiment does not sample a residual map"
         );
+        assert!(SHADER.contains("fn fusion_weights("));
+        assert!(SHADER.contains("band_confidence(ray)"));
+        assert!(SHADER.contains("weights.x <= 0.0 || weights.y <= 0.0"));
+    }
+
+    #[test]
+    fn fusion_ab_is_off_until_an_instrument_explicitly_turns_it_on() {
+        let scene = Scene::blank();
+        assert_eq!(scene.fusion_mode(), FusionMode::Disabled);
+        scene.set_fusion_mode(FusionMode::Dominant);
+        assert_eq!(scene.fusion_mode(), FusionMode::Dominant);
+        scene.set_fusion_mode(FusionMode::Disabled);
+        assert_eq!(scene.fusion_mode(), FusionMode::Disabled);
     }
 }

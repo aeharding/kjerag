@@ -1251,6 +1251,26 @@ fn tone_split() -> vec2<f32> {
   return vec2<f32>(exp(half), exp(-half));
 }
 
+// How much recent correlation evidence the band has at this ray's seam
+// azimuth. This intentionally returns evidence, not a displacement: a
+// fusion decision may be gated by a measurement without becoming another way
+// to bend calibrated geometry. The interpolation is the same circular cell
+// lookup as `band_bend`; its only threshold is `KEEP`, the correlator's own
+// threshold for trusting a smoothed reading.
+fn band_confidence(ray: vec3<f32>) -> f32 {
+  let body = reframe.view_to_body * ray;
+  let reach = length(vec2<f32>(body.x, body.y));
+  if reach <= 0.0 {
+    return 0.0;
+  }
+  let turn = atan2(body.y, body.x) / TAU * f32(AZIMUTHS);
+  let low = i32(floor(turn));
+  let mix = turn - f32(low);
+  let a = band.cells[u32(low + i32(AZIMUTHS)) % AZIMUTHS];
+  let b = band.cells[u32(low + 1 + i32(AZIMUTHS)) % AZIMUTHS];
+  return clamp((1.0 - mix) * a.confidence + mix * b.confidence, 0.0, KEEP) / KEEP;
+}
+
 // The band with nothing behind it: no bend, and the crossover at the width it
 // has always been. This is what a file with one lens stream takes, what a
 // direction that has never correlated takes, and what a ray straight down a

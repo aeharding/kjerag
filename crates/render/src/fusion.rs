@@ -1,20 +1,38 @@
 //! The per-source representation of a seam fusion decision.
 //!
-//! The renderer carries [`Self::DISABLED_MAP_MODE`] in its existing uniform
-//! block, but does not read a fusion map and continues to consume
-//! [`Blend`](super::Blend) directly. Thus merely constructing
-//! [`Fusion::disabled`] cannot change a sampled coordinate, a blend weight,
-//! or the output pixels. Keeping the identity case explicit gives a later,
-//! evidence-gated fusion map one typed place to add a source coordinate
+//! The renderer carries a fusion mode in its existing uniform block. Its
+//! first A/B may only redistribute an existing [`Blend`](super::Blend) in a
+//! correlated overlap; it cannot read a fusion map or change a sampled
+//! coordinate. Keeping the identity case explicit gives a later,
+//! evidence-gated fusion map one typed place to add a source-coordinate
 //! residual without turning a screen-space adjustment into part of the
 //! calibrated projection.
 
-#![allow(
-    dead_code,
-    reason = "only the disabled mode is wired; the per-pixel identity representation awaits evidence-gated map use"
-)]
-
 use super::{Blend, MAX_LENSES, Size};
+
+/// The seam-fusion experiment to apply after calibrated projection.
+///
+/// `Dominant` is deliberately a blend-only experiment: it may move weight
+/// between the two already-valid calibrated landings, but it never changes a
+/// landing, samples a residual map, or changes either source's colour.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FusionMode {
+    /// The shipped calibrated blend.
+    #[default]
+    Disabled,
+    /// In a correlated overlap, prefer the calibrated source that already
+    /// has the larger claim.
+    Dominant,
+}
+
+impl FusionMode {
+    pub(crate) const fn uniform(self) -> f32 {
+        match self {
+            Self::Disabled => 0.0,
+            Self::Dominant => 1.0,
+        }
+    }
+}
 
 /// One lens's contribution to a fused output pixel.
 ///
@@ -32,6 +50,10 @@ pub(crate) struct Source {
 }
 
 impl Source {
+    #[allow(
+        dead_code,
+        reason = "the typed identity map remains reserved for the later residual-map experiment"
+    )]
     const REFUSED: Self = Self {
         uv: [0.0; 2],
         valid: false,
@@ -57,6 +79,8 @@ impl Fusion {
     /// adds no binding and cannot make a map available by accident.
     pub(crate) const DISABLED_MAP_MODE: f32 = 0.0;
 
+    pub(crate) const DOMINANT_MODE: f32 = 1.0;
+
     /// Copy the calibrated [`Blend`] as an identity source-fusion decision.
     ///
     /// A source is active only if the existing blend claims it, its landing is
@@ -66,6 +90,10 @@ impl Fusion {
     /// active claims are normalized here so a caller cannot accidentally make
     /// a future fusion path brighten or darken a pixel by passing unnormalized
     /// confidence values.
+    #[allow(
+        dead_code,
+        reason = "the dominant-source A/B changes weights only and intentionally does not consume a map"
+    )]
     pub(crate) fn disabled(blend: Blend, frame: Size) -> Self {
         let usable_frame = frame.width > 0 && frame.height > 0;
         let claims: [bool; MAX_LENSES] = std::array::from_fn(|lens| {

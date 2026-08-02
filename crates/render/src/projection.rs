@@ -41,7 +41,7 @@ use std::f32::consts::PI;
 
 use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
 
-use super::fusion::Fusion;
+use super::fusion::{Fusion, FusionMode};
 use super::sampling::Sampling;
 use super::{Camera, Size};
 
@@ -327,9 +327,8 @@ pub struct Reframe {
     /// the names they come in.
     sharpen: [f32; 2],
     /// Fusion is represented by the pre-existing first word of this block's
-    /// trailing padding. It is always [`Fusion::DISABLED_MAP_MODE`]: the GPU
-    /// has neither a map binding nor a path that can select one. Naming the
-    /// word on both ABI sides makes that prohibition reviewable.
+    /// trailing padding. It selects only an evidence-gated change to the
+    /// existing overlap weights; it is never a coordinate or colour control.
     fusion_map_mode: f32,
     /// A uniform block's size rounds up to its own alignment, which the
     /// matrices in [`LensBlock`] make 16 bytes. WGSL does that itself;
@@ -558,17 +557,29 @@ impl Reframe {
     /// The block as the GPU reads it. Every field is an `f32` and `repr(C)`
     /// packs them, so there are no padding bytes and no invalid patterns.
     pub fn bytes(&self) -> &[u8] {
-        // Construction is private to this module, but keep the only GPU
-        // fusion mode an executable invariant as well as a convention. A
-        // future map cannot become live by writing a nonzero flag into this
-        // block without first changing this check and supplying a binding.
-        debug_assert_eq!(self.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
+        // This word is an enum ABI, not an arbitrary shader control. In
+        // particular neither value can make the bound residual texture live.
+        debug_assert!(matches!(
+            self.fusion_map_mode,
+            Fusion::DISABLED_MAP_MODE | Fusion::DOMINANT_MODE
+        ));
         unsafe {
             std::slice::from_raw_parts(
                 std::ptr::from_ref(self).cast::<u8>(),
                 std::mem::size_of::<Self>(),
             )
         }
+    }
+
+    /// Select the post-projection seam-fusion experiment for this upload.
+    ///
+    /// Kept crate-private because [`Scene`](super::Scene) owns the pilot's
+    /// setting. Geometry instruments deliberately continue to construct the
+    /// disabled form, so their `Blend` results can never depend on an A/B
+    /// display choice.
+    pub(crate) fn with_fusion_mode(mut self, mode: FusionMode) -> Self {
+        self.fusion_map_mode = mode.uniform();
+        self
     }
 
     /// The ray a point in the output looks along, in view space: x right,
@@ -1665,10 +1676,9 @@ struct Reframe {
   // `Reframe::sharpen`.
   sharpen_luma: f32,
   sharpen_chroma: f32,
-  // The only fusion-map mode the renderer can construct is zero. There is no
-  // map binding and `picture` continues to consume `Blend` directly; this
-  // named ABI word makes that disabled contract explicit. Rust twin:
-  // `Reframe::fusion_map_mode`.
+  // Mode zero is the shipped blend; mode one enables only the research
+  // dominant-source weight A/B. Neither mode can use a residual map or alter
+  // a landing. Rust twin: `Reframe::fusion_map_mode`.
   fusion_map_mode: f32,
   // WGSL rounds this block's size up to its own 16-byte alignment. Rust twin:
   // `Reframe::_pad`, which is what makes the two sizes agree.
@@ -3684,16 +3694,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn every_uploaded_reframe_explicitly_disables_fusion_maps() {
+    fn reframe_uploads_default_off_and_the_explicit_overlap_ab_mode() {
         let reframe = fixture(Camera::default());
         let blank = Reframe::blank(WIDE, false);
+        let dominant = fixture(Camera::default()).with_fusion_mode(FusionMode::Dominant);
 
         assert_eq!(reframe.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
         assert_eq!(blank.fusion_map_mode, Fusion::DISABLED_MAP_MODE);
+        assert_eq!(dominant.fusion_map_mode, Fusion::DOMINANT_MODE);
         // `bytes` is the exact slice passed to `Queue::write_buffer`; this
         // also executes the upload invariant above for both constructors.
         assert_eq!(reframe.bytes().len(), std::mem::size_of::<Reframe>());
         assert_eq!(blank.bytes().len(), std::mem::size_of::<Reframe>());
+        assert_eq!(dominant.bytes().len(), std::mem::size_of::<Reframe>());
     }
 
     #[test]
