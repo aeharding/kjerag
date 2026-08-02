@@ -745,10 +745,35 @@ fn report_temporal(
     report_stratum("UncertainOrUnplaceable", &health.uncertain_or_unplaceable);
     report_stratum("Invalid", &health.invalid);
     if options.temporal_reverse {
-        report_reverse_closure(gpu, options, anchor, &timeline, &origins, &states, support)?;
+        let closures =
+            report_reverse_closure(gpu, options, &anchor, &timeline, &origins, &states, support)?;
+        report_residual_prerequisites(
+            options,
+            anchor.baseline,
+            sites,
+            ResidualEndpoint {
+                states: &states,
+                map: &previous_map,
+                planes: &previous_pair.lenses,
+                support,
+                closures: Some(&closures),
+            },
+        );
     } else {
         println!(
             "temporal closure: unavailable (temporal_reverse=0); no depth, pose fit, or warp applied"
+        );
+        report_residual_prerequisites(
+            options,
+            anchor.baseline,
+            sites,
+            ResidualEndpoint {
+                states: &states,
+                map: &previous_map,
+                planes: &previous_pair.lenses,
+                support,
+                closures: None,
+            },
         );
     }
     Ok(())
@@ -821,15 +846,15 @@ fn replay_temporal_frame(
 fn report_reverse_closure(
     gpu: &Gpu,
     options: &Options,
-    anchor: TemporalAnchor<'_>,
+    anchor: &TemporalAnchor<'_>,
     timeline: &[Duration],
     origins: &[raw_register::TrackState],
     forward_end: &[Option<raw_register::TrackState>],
     support: raw_register::Support,
-) -> Fallible<()> {
+) -> Fallible<Vec<Option<Result<raw_register::TrackClosure, raw_register::TrackClosureRefused>>>> {
     if timeline.len() < 2 {
         println!("temporal closure: unavailable (fewer than one forward transition)");
-        return Ok(());
+        return Ok(vec![None; origins.len()]);
     }
     let mut health = ReverseHealth::default();
     let mut states = forward_end.to_vec();
@@ -879,18 +904,18 @@ fn report_reverse_closure(
         later_map = earlier_map;
         later_pair = earlier_pair;
     }
+    let mut closures = Vec::with_capacity(origins.len());
     for (origin, returned) in origins.iter().zip(states) {
-        let Some(returned) = returned else {
-            continue;
-        };
-        let closure = temporal_closure(*origin, returned)
-            .map_err(|_| "refused: reverse replay changed a declared temporal site")?;
-        health.closed += 1;
-        health.epi_sum += closure.displacement_rad.epi;
-        health.perp_sum += closure.displacement_rad.perp;
-        health.covariance_epi_epi_sum += closure.covariance_rad2.epi_epi;
-        health.covariance_epi_perp_sum += closure.covariance_rad2.epi_perp;
-        health.covariance_perp_perp_sum += closure.covariance_rad2.perp_perp;
+        let closure = returned.map(|returned| raw_register::track_state_closure(*origin, returned));
+        if let Some(Ok(closure)) = closure {
+            health.closed += 1;
+            health.epi_sum += closure.closure_rad.epi;
+            health.perp_sum += closure.closure_rad.perp;
+            health.covariance_epi_epi_sum += closure.covariance_rad2.epi_epi;
+            health.covariance_epi_perp_sum += closure.covariance_rad2.epi_perp;
+            health.covariance_perp_perp_sum += closure.covariance_rad2.perp_perp;
+        }
+        closures.push(closure);
     }
     if health.closed == 0 {
         println!(
@@ -899,7 +924,7 @@ fn report_reverse_closure(
             health.forward_unavailable,
             health.reverse_refused,
         );
-        return Ok(());
+        return Ok(closures);
     }
     let count = health.closed as f64;
     println!(
@@ -914,26 +939,81 @@ fn report_reverse_closure(
         health.covariance_epi_perp_sum / count.powi(2),
         health.covariance_perp_perp_sum / count.powi(2),
     );
-    Ok(())
+    Ok(closures)
 }
 
-/// The returned state already contains the forward and reverse independent
-/// transition covariance. The origin has no measurement covariance, so this
-/// is the complete closure covariance without a second implicit addition.
-fn temporal_closure(
-    origin: raw_register::TrackState,
-    returned: raw_register::TrackState,
-) -> Result<StereoEvolution, EvolutionRefused> {
-    if origin.site != returned.site {
-        return Err(EvolutionRefused::MismatchedSite);
+/// Report every prerequisite for a future residual-map observation at the
+/// endpoint of this one declared temporal sequence.
+///
+/// The three measurements are intentionally reconstructed here from one
+/// state: forward stereo classification, bidirectional raw registration, and
+/// forward/reverse temporal closure.  Nothing is scored, filtered, or
+/// accepted numerically; [`residual_gate::report`] only records the evidence
+/// status that a later, separately declared held-out analysis would need.
+struct ResidualEndpoint<'a> {
+    states: &'a [Option<raw_register::TrackState>],
+    map: &'a Reframe,
+    planes: &'a [kjerag_media::Plane],
+    support: raw_register::Support,
+    closures:
+        Option<&'a [Option<Result<raw_register::TrackClosure, raw_register::TrackClosureRefused>>]>,
+}
+
+fn report_residual_prerequisites(
+    options: &Options,
+    baseline: [f64; 3],
+    sites: &[raw_register::StripSite],
+    endpoint: ResidualEndpoint<'_>,
+) {
+    println!(
+        "residual prerequisites: endpoint-only, one line per declared temporal site; held_out= names declaration indices before measurement; no numeric acceptance or map application"
+    );
+    for (index, site) in sites.iter().copied().enumerate() {
+        let state = endpoint.states.get(index).copied().flatten();
+        let stereo = state.map(|state| {
+            raw_register::register_track_state(
+                endpoint.map,
+                endpoint.planes,
+                state,
+                endpoint.support,
+            )
+        });
+        let far_field = stereo
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map(|reading| {
+                far_field::classify(
+                    baseline,
+                    reading.displacement_rad.epi,
+                    reading.covariance_rad2.epi_epi,
+                )
+            });
+        let reciprocal = state.map(|state| {
+            raw_register::register_track_state_bidirectional(
+                endpoint.map,
+                endpoint.planes,
+                state,
+                endpoint.support,
+            )
+        });
+        let closure = endpoint
+            .closures
+            .and_then(|all| all.get(index))
+            .copied()
+            .flatten();
+        let assignment = options.assignment(index);
+        let report =
+            kjerag_spike::residual_gate::report(site, far_field, reciprocal, closure, assignment);
+        println!(
+            "residual site {index}: assignment {assignment:?}; endpoint-state {}; stereo {stereo:?}; far {far_field:?}; reciprocal {reciprocal:?}; temporal-closure {closure:?}; gate {:?}",
+            if state.is_some() {
+                "retained"
+            } else {
+                "unavailable"
+            },
+            report.outcome,
+        );
     }
-    Ok(StereoEvolution {
-        displacement_rad: raw_register::CameraDisplacement {
-            epi: returned.accumulated_rad.epi - origin.accumulated_rad.epi,
-            perp: returned.accumulated_rad.perp - origin.accumulated_rad.perp,
-        },
-        covariance_rad2: returned.covariance_rad2,
-    })
 }
 
 /// Predeclared conservative far-field reporting categories.  These are based
@@ -1081,6 +1161,9 @@ struct Options {
     reciprocal: bool,
     temporal_frames: Option<usize>,
     temporal_reverse: bool,
+    /// Explicit, predeclared held-out site indices in the immutable temporal
+    /// declaration order.  `None` means no assignment was made at all.
+    held_out: Option<Vec<usize>>,
     plant: Option<[f64; local_warp::KNOBS]>,
 }
 
@@ -1128,6 +1211,7 @@ impl Options {
             reciprocal: false,
             temporal_frames: None,
             temporal_reverse: false,
+            held_out: None,
             plant: None,
         };
         for arg in args {
@@ -1164,6 +1248,7 @@ impl Options {
                 Some(("temporal_reverse", value)) => {
                     out.temporal_reverse = value.parse::<u32>()? != 0
                 }
+                Some(("held_out", value)) => out.held_out = Some(site_indices(value)?),
                 Some(("plant", value)) => out.plant = Some(fit_knobs(seam_fit(value)?)),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
@@ -1199,6 +1284,9 @@ impl Options {
         }
         if out.temporal_reverse && out.temporal_frames.is_none() {
             return Err("temporal_reverse=1 requires temporal=<frames>".into());
+        }
+        if out.held_out.is_some() && out.temporal_frames.is_none() {
+            return Err("held_out=<site-index,...> requires temporal=<frames>".into());
         }
         // Reject before opening media or warming a scene.  A reciprocal
         // closure is only interpretable at one pre-declared support scale.
@@ -1249,6 +1337,16 @@ impl Options {
             }
         }
     }
+
+    fn assignment(&self, site_index: usize) -> Option<kjerag_spike::residual_gate::Assignment> {
+        self.held_out.as_ref().map(|held_out| {
+            if held_out.contains(&site_index) {
+                kjerag_spike::residual_gate::Assignment::HeldOut
+            } else {
+                kjerag_spike::residual_gate::Assignment::Training
+            }
+        })
+    }
 }
 fn degrees(value: &str) -> Fallible<Vec<f64>> {
     let values: Result<Vec<f64>, _> = value.split(',').map(str::parse).collect();
@@ -1263,8 +1361,24 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
     Ok(values)
 }
 
+/// Parse a predeclared temporal-site partition.  The indices name the stable
+/// order returned by `overlap_strip_sites`, before any tracking or texture
+/// measurement occurs; no successful site is ever selected automatically.
+fn site_indices(value: &str) -> Fallible<Vec<usize>> {
+    let indices: Result<Vec<usize>, _> = value.split(',').map(str::parse).collect();
+    let mut indices = indices?;
+    if indices.is_empty() {
+        return Err("held_out must name at least one declared temporal site index".into());
+    }
+    indices.sort_unstable();
+    if indices.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("held_out site indices must not repeat".into());
+    }
+    Ok(indices)
+}
+
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [reciprocal=1] [temporal=frames] [temporal_reverse=1] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [reciprocal=1] [temporal=frames] [temporal_reverse=1] [held_out=site-index[,site-index...]] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[derive(Default)]
@@ -1559,6 +1673,43 @@ mod tests {
     }
 
     #[test]
+    fn held_out_partition_is_explicit_and_never_inferred_from_tracking() {
+        let options = options(&[
+            "flight.insv",
+            "temporal=3",
+            "held_out=4,1",
+            "span=1.2",
+            "search=1.0",
+            "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+        ]);
+        assert_eq!(options.held_out, Some(vec![1, 4]));
+        assert_eq!(
+            options.assignment(1),
+            Some(kjerag_spike::residual_gate::Assignment::HeldOut)
+        );
+        assert_eq!(
+            options.assignment(2),
+            Some(kjerag_spike::residual_gate::Assignment::Training)
+        );
+        assert!(
+            Options::parse(
+                ["flight.insv", "held_out=1"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            Options::parse(
+                ["flight.insv", "temporal=3", "held_out=2,2"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn observations_are_opt_in_and_require_a_stored_fit() {
         assert!(!options(&["flight.insv"]).observations);
         assert!(
@@ -1842,15 +1993,15 @@ mod tests {
             },
             ..origin
         };
-        let closure = super::temporal_closure(origin, returned)
+        let closure = kjerag_spike::raw_register::track_state_closure(origin, returned)
             .expect("unchanged declared site produces a closure");
-        assert_eq!(closure.displacement_rad, returned.accumulated_rad);
+        assert_eq!(closure.closure_rad, returned.accumulated_rad);
         assert_eq!(closure.covariance_rad2, returned.covariance_rad2);
         let mut other = returned;
         other.site.root.view_pixel = [7.0, 0.0];
         assert_eq!(
-            super::temporal_closure(origin, other),
-            Err(super::EvolutionRefused::MismatchedSite)
+            kjerag_spike::raw_register::track_state_closure(origin, other),
+            Err(kjerag_spike::raw_register::TrackClosureRefused::MismatchedSite)
         );
     }
 }

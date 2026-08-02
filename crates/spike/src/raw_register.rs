@@ -660,6 +660,50 @@ pub fn register_track_state(
     register_site_direction_at(map, planes, state.site, track_offset(state), support, 0, 1)
 }
 
+/// Run the same-time reciprocal control at one tracked temporal state.
+///
+/// Unlike [`register_strip_sites_bidirectional`], this samples at the
+/// state's accumulated body-fixed offset.  The declaration and axes remain
+/// unchanged, so both directions and any same-time stereo classification
+/// describe the identical temporal state rather than the track's origin.
+pub fn register_track_state_bidirectional(
+    map: &Reframe,
+    planes: &[Plane],
+    state: TrackState,
+    support: Support,
+) -> BidirectionalOutcome {
+    let site = state.site;
+    let offset = track_offset(state);
+    let result = bidirectional_result(
+        site,
+        register_site_direction_at(map, planes, site, offset, support, 0, 1),
+        register_site_direction_at(map, planes, site, offset, support, 1, 0),
+    );
+    BidirectionalOutcome { site, result }
+}
+
+/// Close a complete forward/reverse temporal sequence at one declaration.
+///
+/// The returned state carries the summed covariance of every independent
+/// transition in the sequence.  This is separate from [`track_closure`],
+/// which closes one pair of individual transition readings.
+pub fn track_state_closure(
+    origin: TrackState,
+    returned: TrackState,
+) -> Result<TrackClosure, TrackClosureRefused> {
+    if origin.site != returned.site {
+        return Err(TrackClosureRefused::MismatchedSite);
+    }
+    Ok(TrackClosure {
+        site: origin.site,
+        closure_rad: CameraDisplacement {
+            epi: returned.accumulated_rad.epi - origin.accumulated_rad.epi,
+            perp: returned.accumulated_rad.perp - origin.accumulated_rad.perp,
+        },
+        covariance_rad2: returned.covariance_rad2,
+    })
+}
+
 /// Register every supplied site in both raw-lens directions.
 ///
 /// This is a control, not an alternative estimator: it does not rank sites,
@@ -2416,6 +2460,35 @@ mod tests {
         };
         assert_eq!(
             track_closure(forward, other),
+            Err(TrackClosureRefused::MismatchedSite)
+        );
+    }
+
+    #[test]
+    fn tracked_sequence_closure_keeps_the_final_accumulated_covariance() {
+        let origin = TrackState::new(assembled_site(1), 1.0);
+        let returned = TrackState {
+            accumulated_rad: CameraDisplacement {
+                epi: 0.004,
+                perp: -0.007,
+            },
+            covariance_rad2: CameraCovariance {
+                epi_epi: 2.0,
+                epi_perp: -0.3,
+                perp_perp: 5.0,
+            },
+            ..origin
+        };
+        let closure = track_state_closure(origin, returned).expect("same site closes");
+        assert_eq!(closure.site, origin.site);
+        assert_eq!(closure.closure_rad, returned.accumulated_rad);
+        assert_eq!(closure.covariance_rad2, returned.covariance_rad2);
+        let other = TrackState {
+            site: assembled_site(3),
+            ..returned
+        };
+        assert_eq!(
+            track_state_closure(origin, other),
             Err(TrackClosureRefused::MismatchedSite)
         );
     }
