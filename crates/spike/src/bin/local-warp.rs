@@ -66,6 +66,12 @@ fn main() -> Fallible<()> {
                 .into(),
         );
     }
+    if options.reciprocal && supports.len() != 1 {
+        return Err(
+            "reciprocal=1 requires exactly one declared support: give one span= and one search= value"
+                .into(),
+        );
+    }
     for support in supports {
         let row =
             raw_register::overlap_strip_lattice(&warmed.map, &pair.lenses, &candidates, support);
@@ -124,6 +130,19 @@ fn main() -> Fallible<()> {
             if options.fit {
                 report_fit(&gpu, &options, &warmed, support, &outcomes)?;
             }
+        }
+        if options.reciprocal {
+            // This deliberately reuses the declared lattice rather than any
+            // textured subset selected by the forward registration.  It is a
+            // reciprocal control, not a replacement observation estimator.
+            let sites = raw_register::overlap_strip_sites(&candidates);
+            let outcomes = raw_register::register_strip_sites_bidirectional(
+                &warmed.map,
+                &pair.lenses,
+                &sites,
+                support,
+            );
+            report_reciprocal(support, &outcomes, options.trace);
         }
     }
     if options.responses {
@@ -423,6 +442,7 @@ struct Options {
     observations: bool,
     responses: bool,
     fit: bool,
+    reciprocal: bool,
     plant: Option<[f64; local_warp::KNOBS]>,
 }
 
@@ -467,6 +487,7 @@ impl Options {
             observations: false,
             responses: false,
             fit: false,
+            reciprocal: false,
             plant: None,
         };
         for arg in args {
@@ -492,6 +513,7 @@ impl Options {
                 Some(("observations", value)) => out.observations = value.parse::<u32>()? != 0,
                 Some(("responses", value)) => out.responses = value.parse::<u32>()? != 0,
                 Some(("fit", value)) => out.fit = value.parse::<u32>()? != 0,
+                Some(("reciprocal", value)) => out.reciprocal = value.parse::<u32>()? != 0,
                 Some(("plant", value)) => out.plant = Some(fit_knobs(seam_fit(value)?)),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
@@ -499,15 +521,25 @@ impl Options {
         if out.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        if (out.observations || out.responses || out.fit) && !matches!(&out.seam, Seam::Stored(_)) {
+        if (out.observations || out.responses || out.fit || out.reciprocal)
+            && !matches!(&out.seam, Seam::Stored(_))
+        {
             return Err(
-                "observations=1/responses=1/fit=1 require seam=<stored fit>; factory/file are coverage-only controls"
+                "observations=1/responses=1/fit=1/reciprocal=1 require seam=<stored fit>; factory/file are coverage-only controls"
                     .into(),
             );
         }
         if out.plant.is_some() && !out.fit {
             return Err(
                 "plant=<knobs> requires fit=1; it is a pose-fit control, not a renderer option"
+                    .into(),
+            );
+        }
+        // Reject before opening media or warming a scene.  A reciprocal
+        // closure is only interpretable at one pre-declared support scale.
+        if out.reciprocal && out.supports()?.len() != 1 {
+            return Err(
+                "reciprocal=1 requires exactly one declared support: give one span= and one search= value"
                     .into(),
             );
         }
@@ -567,7 +599,7 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [reciprocal=1] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[derive(Default)]
@@ -628,6 +660,106 @@ fn report_observations(
         health.no_peak,
         health.aperture,
         health.no_complete,
+    );
+}
+
+/// Aggregate the reciprocal control without treating an unavailable direction
+/// as a zero displacement.  The covariance is the explicitly propagated sum
+/// of the two directional registrations; the covariance of the reported mean
+/// is that sum divided by the square of the number of complete pairs.
+#[derive(Default)]
+struct ReciprocalHealth {
+    both: usize,
+    forward_refused: usize,
+    reverse_refused: usize,
+    closure_epi_sum: f64,
+    closure_perp_sum: f64,
+    closure_norm_squared_sum: f64,
+    covariance_epi_epi_sum: f64,
+    covariance_epi_perp_sum: f64,
+    covariance_perp_perp_sum: f64,
+}
+
+fn report_reciprocal(
+    support: raw_register::Support,
+    outcomes: &[raw_register::BidirectionalOutcome],
+    trace: bool,
+) {
+    let mut health = ReciprocalHealth::default();
+    let radians_to_degrees = 180.0 / std::f64::consts::PI;
+    let covariance_scale = radians_to_degrees.powi(2);
+    for outcome in outcomes {
+        match outcome.result {
+            Ok(reading) => {
+                health.both += 1;
+                health.closure_epi_sum += reading.closure.epi;
+                health.closure_perp_sum += reading.closure.perp;
+                health.closure_norm_squared_sum +=
+                    reading.closure.epi.powi(2) + reading.closure.perp.powi(2);
+                health.covariance_epi_epi_sum += reading.closure_covariance_rad2.epi_epi;
+                health.covariance_epi_perp_sum += reading.closure_covariance_rad2.epi_perp;
+                health.covariance_perp_perp_sum += reading.closure_covariance_rad2.perp_perp;
+                if trace {
+                    println!(
+                        "reciprocal: root body phi {:.2} deg; offset [perp {:.2}, epi {:.2}] deg; closure [epi {:.4}, perp {:.4}] deg; summed covariance [epi² {:.6}, epi-perp {:.6}, perp² {:.6}] deg²",
+                        reading.site.root.node.phi.to_degrees(),
+                        reading.site.offset_rad[0].to_degrees(),
+                        reading.site.offset_rad[1].to_degrees(),
+                        reading.closure.epi.to_degrees(),
+                        reading.closure.perp.to_degrees(),
+                        reading.closure_covariance_rad2.epi_epi * covariance_scale,
+                        reading.closure_covariance_rad2.epi_perp * covariance_scale,
+                        reading.closure_covariance_rad2.perp_perp * covariance_scale,
+                    );
+                }
+            }
+            Err(refusal) => {
+                health.forward_refused += refusal.forward.is_some() as usize;
+                health.reverse_refused += refusal.reverse.is_some() as usize;
+                if trace {
+                    println!(
+                        "reciprocal: root body phi {:.2} deg; offset [perp {:.2}, epi {:.2}] deg; forward refused {:?}; reverse refused {:?}",
+                        outcome.site.root.node.phi.to_degrees(),
+                        outcome.site.offset_rad[0].to_degrees(),
+                        outcome.site.offset_rad[1].to_degrees(),
+                        refusal.forward,
+                        refusal.reverse,
+                    );
+                }
+            }
+        }
+    }
+    if health.both == 0 {
+        println!(
+            "reciprocal: span {:.2} deg; sites {}; both 0; forward-refused {}; reverse-refused {}; closure unavailable; no pose fit or warp applied",
+            support.span_deg,
+            outcomes.len(),
+            health.forward_refused,
+            health.reverse_refused,
+        );
+        return;
+    }
+    let count = health.both as f64;
+    let mean_epi = health.closure_epi_sum / count;
+    let mean_perp = health.closure_perp_sum / count;
+    let rms = (health.closure_norm_squared_sum / count).sqrt();
+    // Independent pair covariances add.  Dividing their total by n² is the
+    // covariance of the displayed mean, rather than an optimistic sample
+    // variance inferred from the closures themselves.
+    let mean_scale = covariance_scale / count.powi(2);
+    println!(
+        "reciprocal: span {:.2} deg; sites {}; both {}; forward-refused {}; reverse-refused {}; closure mean [epi {:.4}, perp {:.4}] deg; closure RMS {:.4} deg; summed covariance of mean [epi² {:.6}, epi-perp {:.6}, perp² {:.6}] deg²; no pose fit or warp applied",
+        support.span_deg,
+        outcomes.len(),
+        health.both,
+        health.forward_refused,
+        health.reverse_refused,
+        mean_epi.to_degrees(),
+        mean_perp.to_degrees(),
+        rms.to_degrees(),
+        health.covariance_epi_epi_sum * mean_scale,
+        health.covariance_epi_perp_sum * mean_scale,
+        health.covariance_perp_perp_sum * mean_scale,
     );
 }
 
@@ -763,6 +895,38 @@ mod tests {
                 "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
             ])
             .fit
+        );
+        assert!(
+            Options::parse(
+                ["flight.insv", "reciprocal=1", "seam=file"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            Options::parse(
+                [
+                    "flight.insv",
+                    "reciprocal=1",
+                    "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+                ]
+                .into_iter()
+                .map(str::to_string)
+            )
+            .is_err()
+        );
+        let reciprocal = options(&[
+            "flight.insv",
+            "reciprocal=1",
+            "span=1.2",
+            "search=1.0",
+            "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+        ]);
+        assert!(reciprocal.reciprocal);
+        assert_eq!(
+            reciprocal.supports().expect("one reciprocal support").len(),
+            1
         );
     }
 
