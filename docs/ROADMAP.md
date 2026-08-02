@@ -1131,6 +1131,37 @@ live, no keyframe UI ever.
   was shown able to fail before it was believed: against the stale file it
   names all four crates, ffmpeg-next 7.1.0 among them.
 
+- 2026-08-01 **Symmetric wide matching, and the measurement that names the
+  line's author** (issue #103, stage 8 second form,
+  docs/research/seam-blending.md 14-15). The owner viewed stage 8's first form
+  twice. *"I dont think its aggressive enough with blending"*, and then *"to the
+  eye, it still effectively looks like a line"*. Both are answered, and only one
+  of them by building something.
+
+  **The correction is split between both hemispheres and carried to the pole.**
+  The first form eased it to nothing seven degrees off the seam, to keep a
+  player from moving a hemisphere's black level; the symmetric split dissolves
+  that objection the way stage 3's gain split did, since each hemisphere moves
+  HALF the mismatch towards the other. At the owner's own wide view the
+  difference between eight degrees either side of the seam goes **7.55 codes to
+  2.93**, and the halo that was the priced risk of going wide did not appear:
+  the long-lag Weber contrast goes 44.7 percent to 24.4 at 64 pixels. A count of
+  pixels of the delivered view came out with the old shape - it decided nothing
+  at any field of view the player offers, and where it bit it made the handover
+  narrower than the content would bear.
+
+  **The line that is left is GEOMETRIC, and that is measured.** The same
+  statistic straddling a line a few degrees off the seam, in the same window and
+  the same content, separates a photometric step (a difference in level, present
+  on content with no gradient at all) from a misregistration (a difference in
+  position, present only where there is content to draw twice). At every
+  reference view the owner has given, the seam's excess over what that content
+  reads anywhere is **at or under the 1 percent JND at the one and two pixel
+  lags**; at the azimuth his own gear crosses the seam it is **+5.87 percent and
+  the entire photometric stage moves it from 5.94 to 5.94**. So the photometric
+  half of "no line" is done to the bar and the geometric half is the
+  local-warp-versus-pose decision already pending. No local warp is built here.
+
 - 2026-08-01 **The seam's blend, in the space an eye reads it in** (issue #103,
   stage 8, docs/research/seam-blending.md 9-13). The owner viewed stage 7's
   branch at a wide May reference view and said *"we need to do a lot better
