@@ -960,6 +960,20 @@ pub struct Watch {
     /// whole ring on the one frame that resets it costs one frame's worth of
     /// the other half and is the only place the two can be made to agree.
     pub stride: f32,
+    /// 1 to leave the photometry alone: the ring is still measured and the
+    /// bend is still applied, and neither the pooled gain nor the
+    /// per-direction offset reaches the picture.
+    ///
+    /// An instrument's, and only an instrument's
+    /// (`ScenePipeline::hold_tone`). It is what makes a before and after
+    /// differ by this stage and by nothing else, and since stage 8 it has to
+    /// reach the compute pass rather than only the dispatch list, because the
+    /// correction the picture is drawn with is written per direction by the
+    /// measurement itself.
+    pub hold: f32,
+    /// A uniform block's size rounds up to sixteen bytes. WGSL does that
+    /// itself; `repr(C)` does not, and the two sizes have to agree.
+    _pad: [f32; 3],
 }
 
 impl Watch {
@@ -971,6 +985,8 @@ impl Watch {
             reset: 1.0,
             slice: 0.0,
             stride: 1.0,
+            hold: 0.0,
+            _pad: [0.0; 3],
         }
     }
 
@@ -984,6 +1000,8 @@ impl Watch {
             reset: 0.0,
             slice: slice as f32,
             stride: SLICES as f32,
+            hold: 0.0,
+            _pad: [0.0; 3],
         }
     }
 
@@ -1983,6 +2001,12 @@ struct Watch {
   // frame, which sweeps the whole ring so that a reset reaches every
   // direction and not only the slice it landed on. Rust twin: `Watch::stride`.
   stride: f32,
+  // 1 to leave the photometry alone, which is an instrument's and only an
+  // instrument's. Rust twin: `Watch::hold`.
+  hold: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
 };
 
 // One lens's picture of the patch, and the other's picture of the patch plus
@@ -2319,6 +2343,10 @@ fn openness(disparity: f32, strength: f32, spread: f32) -> f32 {
 // unlearned. The gain it is measured against is last frame's, which is smoothed
 // over two seconds and cannot move inside one.
 fn read_offset(held: ptr<function, Cell>) {
+  if watch.hold != 0.0 {
+    (*held).offset = array<f32, 3>(0.0, 0.0, 0.0);
+    return;
+  }
   if (*held).hue_conf <= 0.0 {
     return;
   }
@@ -2493,16 +2521,22 @@ fn settle(cell: u32, at: Ring) {
     held.off_epi += (read * f32(PERP_STEP) * STEP - held.off_epi) * learn_along;
     held.off_conf += (best - held.off_conf) * learn_along;
   }
-  // Stage 3's own gate, unchanged: the photometry is read at the shift that
-  // made the two patches the same content, so a shift that did not establish
-  // that is not one to read a brightness at. Here the gate is real, because
-  // there IS picture in this patch: what a displaced window costs a photometry
-  // is the content's own gradient across it, and this patch has one.
-  if epi_pinned {
-    held.hue_conf -= held.hue_conf * ease(watch.seconds, TAU_FAR);
-  } else {
-    read_colour(&held, best);
-  }
+  // The photometry is read at the shift that made the two patches the same
+  // content, so a shift that did not establish that is worth less - but it is
+  // not worth nothing, and stage 7 threw it away (issue #103, stage 8). What a
+  // displaced window costs a photometry is the content's own gradient across
+  // it, which is exactly the number `openness` already prices, so a direction
+  // whose correlation was refused reads at the calibration's own shift and is
+  // believed at the price of being wrong there. On this footage that is 50 of
+  // 128 directions, and it was a continuous ARC of them: the ring's photometry
+  // had a hole in it the size of the owner's own complaint.
+  //
+  // It degrades into the two neighbours rather than stepping between them: at
+  // the contrast gate the flat path already reads whole, and past it this
+  // falls away as the content's own gradient rises, reaching zero on content
+  // that would cost more than a code to be wrong about.
+  let priced = openness(held.disparity, clamp(held.confidence / KEEP, 0.0, 1.0), spread);
+  read_colour(&held, select(best, priced, epi_pinned));
   read_offset(&held);
   read_open(&held, spread);
   band.cells[cell] = held;

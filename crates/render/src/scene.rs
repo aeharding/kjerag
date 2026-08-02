@@ -1272,9 +1272,13 @@ impl ScenePipeline {
         else {
             return;
         };
-        let Some(watch) = self.band.aged(view.frames.timestamp) else {
+        let Some(mut watch) = self.band.aged(view.frames.timestamp) else {
             return;
         };
+        // The photometry held off reaches the measurement and not only the
+        // dispatch list, because since stage 8 the correction the picture is
+        // drawn with is written per direction by the measurement itself.
+        watch.hold = f32::from(u8::from(self.band.tone_held));
         queue.write_buffer(&self.band.watch, 0, watch.bytes());
         let mut encoder = device.create_command_encoder(&Default::default());
         // Only ever more than one under `band_repeats`, and then each in a pass

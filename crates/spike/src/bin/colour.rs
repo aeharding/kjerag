@@ -1363,6 +1363,22 @@ fn profile(options: &Options) -> Fallible<()> {
              \t255 over {} directions; openness mean {open:.3}, most open {widest:.3}",
             held.len(),
         );
+        if std::env::var("KJERAG_CELLS").is_ok() {
+            println!("cells:  phi hue_conf open offsetR offsetG offsetB disparity_deg");
+            for (index, cell) in cells.iter().enumerate() {
+                println!(
+                    "cell {:>3} {:>7.1} {:>7.3} {:>6.3} {:>8.2} {:>8.2} {:>8.2} {:>8.3}",
+                    index,
+                    index as f32 / cells.len() as f32 * 360.0,
+                    cell.hue_conf,
+                    cell.open,
+                    255.0 * cell.offset[0],
+                    255.0 * cell.offset[1],
+                    255.0 * cell.offset[2],
+                    cell.disparity.to_degrees(),
+                );
+            }
+        }
         Ok((
             shot.ok_or("no frame decoded at that instant")?,
             mapped,
