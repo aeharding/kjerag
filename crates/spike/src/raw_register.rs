@@ -133,6 +133,111 @@ pub struct StripSite {
     pub offset_rad: [f64; 2],
 }
 
+/// Why a numerical calibration response cannot be stated for a fixed site.
+///
+/// This is separate from a raw-registration refusal: it reads no planes and
+/// has no texture or peak selection.  It only asks whether the three warmed
+/// projection maps locally describe the same physical site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseRefused {
+    /// The declared central difference was not a finite, positive half-step.
+    InvalidStep,
+    /// The frozen site, or a local probe used to express it in camera axes,
+    /// did not land in lens 1 in one of the warmed maps.
+    ProjectedOut,
+    /// Lens 1's projection is locally singular at the site, so image motion
+    /// cannot be converted to a two-axis camera displacement.
+    Singular,
+}
+
+/// The central finite-difference response of a frozen site to one seam knob.
+///
+/// `minus` and `plus` must be independently warmed maps made from the same
+/// scene instant, camera, horizon state, and sampling as `base`; their only
+/// difference is the selected [`kjerag_render::SeamFit`] knob at `-half_step`
+/// and `+half_step`.  The function deliberately receives maps rather than a
+/// `Scene`: it neither mutates calibration nor replays media, and therefore
+/// cannot turn a diagnostic probe into a visible correction.
+///
+/// The result is radians of camera-frame `[epi, perp]` displacement per unit
+/// of that knob.  It is the shift which, on the unchanged `base` map, follows
+/// the moving lens-1 picture.  The sign is consequently the same convention
+/// as raw registration: a positive result moves the *target direction*, not
+/// the projected pixel.
+pub fn central_site_response(
+    base: &Reframe,
+    minus: &Reframe,
+    plus: &Reframe,
+    site: StripSite,
+    half_step: f64,
+) -> Result<CameraDisplacement, ResponseRefused> {
+    if !half_step.is_finite() || half_step <= 0.0 {
+        return Err(ResponseRefused::InvalidStep);
+    }
+    let at = site_ray(site);
+    let landing = |map: &Reframe, ray: [f64; 3]| {
+        map.project(1, map.view_ray_from_body(ray.map(|axis| axis as f32)))
+    };
+    let (here, before, after) = (landing(base, at), landing(minus, at), landing(plus, at));
+    if !here.inside || !before.inside || !after.inside {
+        return Err(ResponseRefused::ProjectedOut);
+    }
+
+    // The local parameterization is taken only from the unchanged map.  The
+    // two perturbed maps contribute the central image derivative, so a
+    // calibration-induced change is not confused with a changing crossover
+    // or a re-traced, content-selected site.
+    let angular_probe = 0.01_f64.to_radians();
+    let column = |axis: [f64; 3]| {
+        let at_offset = |sign: f64| {
+            let ray = unit(std::array::from_fn(|index| {
+                at[index] + sign * angular_probe * axis[index]
+            }));
+            landing(base, ray)
+        };
+        let (low, high) = (at_offset(-1.0), at_offset(1.0));
+        if !low.inside || !high.inside {
+            return None;
+        }
+        Some([
+            f64::from(high.pixel[0] - low.pixel[0]) / (2.0 * angular_probe),
+            f64::from(high.pixel[1] - low.pixel[1]) / (2.0 * angular_probe),
+        ])
+    };
+    let (perp, epi) = (
+        column(site.root.node.perp).ok_or(ResponseRefused::ProjectedOut)?,
+        column(site.root.node.epi).ok_or(ResponseRefused::ProjectedOut)?,
+    );
+    let determinant = perp[0] * epi[1] - perp[1] * epi[0];
+    if !determinant.is_finite() || determinant.abs() < 1e-9 {
+        return Err(ResponseRefused::Singular);
+    }
+    let pixels_per_unit = [
+        f64::from(after.pixel[0] - before.pixel[0]) / (2.0 * half_step),
+        f64::from(after.pixel[1] - before.pixel[1]) / (2.0 * half_step),
+    ];
+    if pixels_per_unit.iter().any(|value| !value.is_finite()) {
+        return Err(ResponseRefused::ProjectedOut);
+    }
+    // `J [perp, epi] = image motion`; following the content is `-J^-1 d`.
+    let perp_response = -(epi[1] * pixels_per_unit[0] - epi[0] * pixels_per_unit[1]) / determinant;
+    let epi_response = -(perp[0] * pixels_per_unit[1] - perp[1] * pixels_per_unit[0]) / determinant;
+    Ok(CameraDisplacement {
+        epi: epi_response,
+        perp: perp_response,
+    })
+}
+
+/// A fixed site's physical body ray.  The site is deliberately not retraced
+/// on a perturbed map: a numerical response is about one declared location.
+fn site_ray(site: StripSite) -> [f64; 3] {
+    unit(std::array::from_fn(|axis| {
+        site.root.node.centre[axis]
+            + site.root.node.perp[axis] * site.offset_rad[0]
+            + site.root.node.epi[axis] * site.offset_rad[1]
+    }))
+}
+
 /// Make the same declared sites from every root.  This is intentionally pure
 /// so the declaration can be checked without decoded pixels or a renderer.
 pub fn overlap_strip_sites(candidates: &[Candidate]) -> Vec<StripSite> {
