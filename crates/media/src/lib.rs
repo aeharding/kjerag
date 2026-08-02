@@ -27,6 +27,7 @@ mod audio;
 mod decode;
 mod player;
 mod reader;
+mod residual_sidecar;
 mod sound;
 mod track;
 mod walk;
@@ -39,6 +40,7 @@ pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
 pub use player::{Player, Stats};
 pub use reader::{Accuracy, Cue, Frames, Read, Reader, Timing};
+pub use residual_sidecar::{ResidualIdentity, ResidualSidecar};
 pub use walk::{Chroma, Pair, Plane, Walk};
 
 const NANOS: u64 = 1_000_000_000;
