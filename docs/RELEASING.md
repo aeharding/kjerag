@@ -39,6 +39,19 @@ nearer twenty-five minutes end to end than ten. It needs the `GPG_PRIVATE_KEY`
 and `GPG_PASSPHRASE` repository secrets; without them that job fails and the
 Release is published anyway, which is the right way round.
 
+**A description is not a release.** What a software centre reads about the
+channel is written by `scripts/pages-site.sh`, and the `site` workflow runs it
+against the published repository on a dispatch, so a fixed summary, a new icon
+or a renamed descriptor ships in a minute with nothing rebuilt
+(docs/DISTRIBUTION.md 4.5):
+
+```sh
+gh workflow run site.yml --ref main
+```
+
+The app's own page in a Store is the exception: that data lives inside the
+built commit and moves at the next tag.
+
 Then check what shipped, which is not the same question as whether it builds:
 
 ```sh

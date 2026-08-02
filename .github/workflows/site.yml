@@ -1,0 +1,73 @@
+name: site
+# Republishes what a person reads about the repository, without a release.
+#
+# A tag rebuilds the app twice and takes twenty minutes, and none of that is
+# needed to fix a summary, an icon or a description: the OSTree objects at
+# kjerag.harding.dev are the ones the last tag published and they are fine.
+# What goes stale is the descriptors beside them, and those are one script
+# (scripts/pages-site.sh, the same one the release runs).
+#
+# It works on the published tree itself, checked out of the Pages branch,
+# because `flatpak build-update-repo` writes the repository's identity into
+# its summary and signs it. So this job deploys the whole repository back,
+# every object included, and the check before the deploy is what says the
+# tree is whole.
+#
+# One thing it cannot do: the app's own AppStream data lives inside the built
+# commit, so a changed metainfo reaches a software centre's INSTALLED page
+# only at the next tag. Here it reaches the descriptors and the summary.
+on:
+  workflow_dispatch:
+
+# The deploy's.
+permissions:
+  contents: write
+
+jobs:
+  site:
+    runs-on: ubuntu-24.04
+    # The image the pages job of release.yml builds in, so the flatpak that
+    # rewrites the summary is the one that wrote it.
+    container:
+      image: ghcr.io/andyholmes/flatter/rust:25.08
+      options: --privileged
+    steps:
+      # Two trees: the source, which holds the script and the metainfo, and
+      # the published repository, which is what gets described and deployed.
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+      # The signature is the whole reason a remote can be trusted over plain
+      # HTTP, and the summary is re-signed below. No key, no publish.
+      - uses: crazy-max/ghaction-import-gpg@v7
+        id: gpg
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+      - run: scripts/pages-site.sh site "${{ steps.gpg.outputs.fingerprint }}"
+      # The deploy replaces the branch with this directory, so a half a
+      # checkout would publish half a repository. Both arches have to resolve
+      # to a commit object that is here, and the signed summary has to answer
+      # for them, before anything is pushed.
+      - name: The repository is whole
+        env:
+          FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+        run: |
+          set -eu
+          for arch in x86_64 aarch64; do
+            commit=$(cat "site/refs/heads/app/dev.harding.Kjerag/$arch/stable")
+            test -f "site/objects/${commit:0:2}/${commit:2}.commit"
+          done
+          export FLATPAK_USER_DIR="$RUNNER_TEMP/selftest"
+          gpg --export "$FINGERPRINT" >"$RUNNER_TEMP/key.gpg"
+          flatpak remote-add --user --gpg-import="$RUNNER_TEMP/key.gpg" \
+            selftest "file://$PWD/site"
+          flatpak remotes --user --columns=name,title,comment
+          flatpak remote-ls --user --arch=x86_64 selftest
+          flatpak remote-ls --user --arch=aarch64 selftest
+      - uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: site
+          single-commit: true

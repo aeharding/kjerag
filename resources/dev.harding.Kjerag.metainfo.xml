@@ -18,8 +18,19 @@
   <project_license>AGPL-3.0-only</project_license>
 
   <name>Kjerag</name>
-  <summary>Play Insta360 360 video</summary>
+  <summary>360 video player</summary>
 
+  <!--
+    The summary and the first paragraph below are also the .flatpakref's
+    Comment and Description (scripts/pages-site.sh reads them out of here), so
+    they are what a software centre shows before the remote is trusted, when
+    this file is not reachable yet.
+
+    The camera list mirrors the README's support table, which is the truth of
+    it; the two drifting apart is a defect. Naming the cameras Kjerag does not
+    play is the other half of naming them in the keywords: somebody arriving
+    from a search for their GoPro reads what it does today in the same breath.
+  -->
   <description>
     <p>
       Kjerag plays Insta360 .insv files directly: open the file straight off
@@ -33,6 +44,16 @@
       <li>Copyable view references</li>
       <li>Zero-copy hardware decode</li>
     </ul>
+    <p>Camera support:</p>
+    <ul>
+      <li>Insta360 X4 Air and ONE X2: fully supported</li>
+      <li>Insta360 X3, X4 and X5: unverified</li>
+      <li>GoPro and DJI: not supported, refused by name</li>
+    </ul>
+    <p>
+      Requests and sample footage for more cameras are welcome on the issue
+      tracker.
+    </p>
     <p>
       The dual fisheye footage is decoded on the GPU and reprojected through
       the calibrated lens model that every .insv carries, so the horizon is
@@ -62,11 +83,35 @@
     <category>Video</category>
   </categories>
 
+  <!--
+    Cameras Kjerag does not play are in here on purpose (owner, 2026-08-01):
+    somebody with a GoPro Max or an Osmo 360 should find this app, meet the
+    refusal that names their format, and send a clip toward support. The
+    description above is what keeps that from being a bait: it says which
+    cameras work today.
+
+    The same set is the desktop entry's Keywords, which is what the launcher
+    searches.
+  -->
   <keywords>
     <keyword>360</keyword>
-    <keyword>Insta360</keyword>
+    <keyword>360 video</keyword>
+    <keyword>360 camera</keyword>
+    <keyword>insta360</keyword>
+    <keyword>insta 360</keyword>
+    <keyword>insv</keyword>
     <keyword>fisheye</keyword>
     <keyword>reframe</keyword>
+    <keyword>panorama</keyword>
+    <keyword>spherical</keyword>
+    <keyword>gopro</keyword>
+    <keyword>gopro max</keyword>
+    <keyword>max</keyword>
+    <keyword>max 360</keyword>
+    <keyword>dji</keyword>
+    <keyword>osmo</keyword>
+    <keyword>osmo 360</keyword>
+    <keyword>player</keyword>
   </keywords>
 
   <!--
