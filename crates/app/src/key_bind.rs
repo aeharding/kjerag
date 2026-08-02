@@ -58,6 +58,7 @@ pub enum Action {
     SeekBackward,
     SeekForward,
     Settings,
+    ToggleResearchFusion,
     ZoomIn,
     ZoomOut,
 }
@@ -89,6 +90,7 @@ impl MenuAction for Action {
             Self::SeekBackward => Message::SeekRelative(-JUMP),
             Self::SeekForward => Message::SeekRelative(JUMP),
             Self::Settings => Message::ToggleContextPage(ContextPage::Settings),
+            Self::ToggleResearchFusion => Message::ToggleResearchFusion,
             Self::ZoomIn => Message::Look(Nudge::ZoomIn),
             Self::ZoomOut => Message::Look(Nudge::ZoomOut),
         }
@@ -280,6 +282,22 @@ mod tests {
             Action::LockHorizon.message(),
             Message::LockHorizon
         ));
+    }
+
+    /// The seam experiment has no key binding: it is deliberately an
+    /// explicit, visible A/B control, so it cannot be enabled by accident
+    /// while navigating a video.
+    #[test]
+    fn research_fusion_is_an_explicit_menu_action() {
+        assert!(matches!(
+            Action::ToggleResearchFusion.message(),
+            Message::ToggleResearchFusion
+        ));
+        assert!(
+            !key_binds()
+                .into_values()
+                .any(|action| action == Action::ToggleResearchFusion)
+        );
     }
 
     /// `m` has to reach the speaker button's own message and not a second

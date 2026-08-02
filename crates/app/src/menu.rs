@@ -34,6 +34,7 @@ pub fn menu_bar<'a>(
     key_binds: &HashMap<KeyBind, Action>,
     has_file: bool,
     horizon_locked: bool,
+    research_fusion: bool,
 ) -> Element<'a, Message> {
     responsive_menu_bar()
         .item_height(ItemHeight::Dynamic(40))
@@ -98,6 +99,16 @@ pub fn menu_bar<'a>(
                             None,
                             horizon_locked,
                             Action::LockHorizon,
+                        ),
+                        // This is intentionally not Settings: it changes only
+                        // the current scene and is never written to config.
+                        // Keeping it beside the view controls makes the A/B
+                        // state visible while inspecting the seam.
+                        Item::CheckBox(
+                            strings::RESEARCH_DOMINANT_FUSION.to_owned(),
+                            None,
+                            research_fusion,
+                            Action::ToggleResearchFusion,
                         ),
                         Item::Divider,
                         Item::Button(strings::FULLSCREEN.to_owned(), None, Action::Fullscreen),

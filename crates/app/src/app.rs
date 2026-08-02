@@ -58,7 +58,7 @@ use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
 use kjerag_render::capture_set::{self, Missing};
-use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, Stall, Stats};
+use kjerag_render::{Accuracy, Framing, FusionMode, Horizon, Nudge, Request, Scene, Stall, Stats};
 
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -180,6 +180,8 @@ pub enum Message {
     /// Hold the picture against the world, or let it ride the camera
     /// (issue #8).
     LockHorizon,
+    /// Switch the non-persistent, research-only seam A/B for the open scene.
+    ToggleResearchFusion,
     /// A view change from the `View` menu or its keys.
     Look(Nudge),
     PlayPause,
@@ -604,6 +606,15 @@ impl cosmic::Application for App {
                 self.hold_horizon();
                 self.show_controls(now);
             }
+            Message::ToggleResearchFusion => {
+                if let Some(open) = &self.open {
+                    open.scene.set_fusion_mode(match open.scene.fusion_mode() {
+                        FusionMode::Disabled => FusionMode::Dominant,
+                        FusionMode::Dominant => FusionMode::Disabled,
+                    });
+                }
+                self.show_controls(now);
+            }
             Message::Look(nudge) => {
                 if let Some(open) = &self.open {
                     open.scene.nudge(nudge);
@@ -799,6 +810,9 @@ impl cosmic::Application for App {
             &self.key_binds,
             self.open.is_some(),
             self.stored.config.horizon_lock,
+            self.open
+                .as_ref()
+                .is_some_and(|open| open.scene.fusion_mode() == FusionMode::Dominant),
         )]
     }
 
