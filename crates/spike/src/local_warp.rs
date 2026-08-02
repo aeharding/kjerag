@@ -191,6 +191,137 @@ pub fn predict(jacobian: Jacobian, knobs: [f64; KNOBS]) -> Displacement {
     }
 }
 
+/// One pixel in a close two-dimensional crossing patch, linearized about the
+/// reference picture.
+///
+/// `gradient` is the reference luma gradient in screen x/y, `residual` is
+/// the target-minus-reference luma at that pixel, and `weight` is its inverse
+/// variance.  Thus a small translation `d` obeys
+/// `residual = gradient dot d`.  The caller owns patch selection and any
+/// robust reweighting: this deliberately does not pretend a scalar edge is a
+/// two-dimensional crossing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegistrationSample {
+    pub gradient: [f64; 2],
+    pub residual: f64,
+    pub weight: f64,
+}
+
+/// A sub-pixel screen displacement registered from a textured crossing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PixelDisplacement {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// The independent terms of a symmetric two-by-two covariance matrix.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Covariance {
+    pub xx: f64,
+    pub xy: f64,
+    pub yy: f64,
+}
+
+/// A two-dimensional registration reading, before the renderer maps its
+/// screen axes into the seam's camera-frame epi/perp axes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Registration {
+    pub displacement: PixelDisplacement,
+    /// Estimated from the residual variance.  A caller must add its own
+    /// rendering and trace uncertainty before constructing an [`Observation`].
+    pub covariance: Covariance,
+    /// Infinity-norm condition estimate of the weighted structure tensor.
+    pub condition: f64,
+    pub samples: usize,
+}
+
+/// Why a patch cannot provide a two-axis crossing measurement.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RegistrationRefused {
+    TooFewSamples {
+        have: usize,
+    },
+    InvalidSample {
+        sample: usize,
+    },
+    /// All usable gradients lie on one line: the aperture problem.  A scalar
+    /// horizon trace reaches this refusal by design, rather than fabricating
+    /// its unobserved tangent displacement.
+    Aperture,
+}
+
+/// Register a close patch's two-dimensional translation by weighted least
+/// squares.
+///
+/// This is intentionally only the local, linearized solve.  It does not pick
+/// a patch, derive gradients, warp a renderer, or turn screen pixels into
+/// camera-frame degrees; those pieces need to be recorded beside real pixels
+/// before Stage 9 may make a physical claim.
+pub fn register(samples: &[RegistrationSample]) -> Result<Registration, RegistrationRefused> {
+    if samples.len() <= 2 {
+        return Err(RegistrationRefused::TooFewSamples {
+            have: samples.len(),
+        });
+    }
+    let mut normal = [[0.0; 2]; 2];
+    let mut right = [0.0; 2];
+    for (index, sample) in samples.iter().enumerate() {
+        if !sample.weight.is_finite()
+            || sample.weight <= 0.0
+            || !sample.residual.is_finite()
+            || sample.gradient.iter().any(|value| !value.is_finite())
+        {
+            return Err(RegistrationRefused::InvalidSample { sample: index });
+        }
+        for row in 0..2 {
+            right[row] += sample.weight * sample.gradient[row] * sample.residual;
+            for column in 0..2 {
+                normal[row][column] +=
+                    sample.weight * sample.gradient[row] * sample.gradient[column];
+            }
+        }
+    }
+    let determinant = normal[0][0] * normal[1][1] - normal[0][1] * normal[1][0];
+    let scale = normal[0][0].abs().max(normal[1][1].abs()).powi(2);
+    if !determinant.is_finite() || determinant <= 1e-12 * scale {
+        return Err(RegistrationRefused::Aperture);
+    }
+    let inverse = [
+        [normal[1][1] / determinant, -normal[0][1] / determinant],
+        [-normal[1][0] / determinant, normal[0][0] / determinant],
+    ];
+    let displacement = PixelDisplacement {
+        x: inverse[0][0] * right[0] + inverse[0][1] * right[1],
+        y: inverse[1][0] * right[0] + inverse[1][1] * right[1],
+    };
+    let squared_residual: f64 = samples
+        .iter()
+        .map(|sample| {
+            let prediction =
+                sample.gradient[0] * displacement.x + sample.gradient[1] * displacement.y;
+            sample.weight * (sample.residual - prediction).powi(2)
+        })
+        .sum();
+    let variance = squared_residual / (samples.len() - 2) as f64;
+    Ok(Registration {
+        displacement,
+        covariance: Covariance {
+            xx: variance * inverse[0][0],
+            xy: variance * inverse[0][1],
+            yy: variance * inverse[1][1],
+        },
+        condition: norm2_inf(normal) * norm2_inf(inverse),
+        samples: samples.len(),
+    })
+}
+
+fn norm2_inf(matrix: [[f64; 2]; 2]) -> f64 {
+    matrix
+        .iter()
+        .map(|row| row.iter().map(|value| value.abs()).sum::<f64>())
+        .fold(0.0, f64::max)
+}
+
 fn norm_inf(matrix: [[f64; KNOBS]; KNOBS]) -> f64 {
     matrix
         .iter()
@@ -317,6 +448,58 @@ mod tests {
             fit.normalized_rms > 10.0,
             "a 0.01 degree trace would not reject the local residue: {:.2} sigma rms",
             fit.normalized_rms
+        );
+    }
+
+    fn registration_samples(shift: PixelDisplacement) -> Vec<RegistrationSample> {
+        // Several non-collinear gradients stand in for a textured crossing.
+        // A straight horizon would instead repeat one direction and must not
+        // be promoted to a two-axis measurement.
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, -1.0]]
+            .into_iter()
+            .map(|gradient| RegistrationSample {
+                residual: gradient[0] * shift.x + gradient[1] * shift.y,
+                gradient,
+                weight: 1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_textured_crossing_recovers_a_planted_two_axis_translation() {
+        let wanted = PixelDisplacement { x: 0.37, y: -0.22 };
+        let reading = register(&registration_samples(wanted)).expect("a crossing has two axes");
+        assert!((reading.displacement.x - wanted.x).abs() < 1e-12);
+        assert!((reading.displacement.y - wanted.y).abs() < 1e-12);
+        assert!(reading.covariance.xx < 1e-30);
+        assert!(reading.covariance.xy.abs() < 1e-30);
+        assert!(reading.covariance.yy < 1e-30);
+        assert!(reading.condition.is_finite() && reading.condition > 1.0);
+    }
+
+    #[test]
+    fn a_scalar_edge_refuses_the_aperture_problem() {
+        let samples: Vec<RegistrationSample> = (0..4)
+            .map(|index| RegistrationSample {
+                gradient: [1.0, 0.0],
+                residual: index as f64,
+                weight: 1.0,
+            })
+            .collect();
+        assert_eq!(register(&samples), Err(RegistrationRefused::Aperture));
+    }
+
+    #[test]
+    fn registration_refuses_invalid_or_insufficient_evidence() {
+        assert_eq!(
+            register(&registration_samples(PixelDisplacement::default())[..2]),
+            Err(RegistrationRefused::TooFewSamples { have: 2 })
+        );
+        let mut samples = registration_samples(PixelDisplacement::default());
+        samples[2].weight = 0.0;
+        assert_eq!(
+            register(&samples),
+            Err(RegistrationRefused::InvalidSample { sample: 2 })
         );
     }
 }
