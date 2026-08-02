@@ -170,6 +170,18 @@ reported ambiguity, not a reason to pick a different site.  These same-
 capture checks establish that two-dimensional raw observations are available;
 they neither pair a physical feature across views nor fit a pose.
 
+Reciprocal raw registration is now a separate control: it holds the same
+body-frame axes for lens 0-to-1 and 1-to-0, records either directional refusal,
+and reports their closure and summed covariance.  Under the stored May fit on
+the same rung, BAD yielded 147 reciprocal sites, closure mean
+`[epi -0.0090, perp +0.0033]` degrees and site RMS `0.2505` degrees; GOOD
+yielded 104, mean `[-0.0276, +0.0294]` and RMS `0.8062` degrees.  The mean is
+not a substitute for the site scatter: these RMS values show that the current
+per-site raw signal still includes large scene-dependent effects.  They close
+the door on interpreting the existing single-view pose fits as an applied
+camera-frame warp.  The next required control is the same physical feature
+tracked through time and depth/disparity strata.
+
 For a shared-pose comparison across captures, `seam=file` is not a valid
 baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
