@@ -63,6 +63,25 @@ justified adaptive seam method would instead need to be an optional
 per-pixel source-selection/fusion stage and must still meet the far-field
 measurement and hold-out bars below.
 
+The recovered interface is concrete enough to specify that stage without
+using Reframe code or model assets.  In the normalized spherical-pano domain,
+one immutable calibrated lookup is `UV(P) = (u0, v0, u1, v1)`.  It samples the
+two raw planes at those coordinates, with separate source-validity/alpha
+masks and separate colour scales.  The final blend is the normalized pair of
+source weights, `w0 = a0 / (a0 + a1)`, then `mix(colour1, colour0, w0)`.
+Its lookup's `xy` and `zw` respectively carry the two lens coordinates;
+colour adjustment is sampled at each source coordinate, not in screen space.
+
+For Kjerag this yields a deliberately camera-agnostic candidate architecture:
+keep `UV(P)` wholly determined by the existing calibrated projection; make a
+typed `validity(P)`, `colour(P)`, and `alpha(P)` layer explicit; and permit a
+separate residual *source-coordinate* map only where its exact fixed feature
+has `ProvenFar300`, reciprocal and temporal closure, and held-out prediction.
+The fallback residual map is identically zero.  The map must never use a
+screen/view coordinate, must never alter the calibrated lookup wholesale, and
+must refuse uncertain-depth and horizon-sky texture.  A horizon may only
+supply its edge-normal acceptance measurement.
+
 The newer locally available Studio 5.9.2 installer lists the same five
 hashed `.ins` assets byte-for-byte among its own model set.  This confirms the
 flow/fusion layer is shared Insta360 renderer infrastructure, not a
