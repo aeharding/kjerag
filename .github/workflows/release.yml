@@ -156,45 +156,15 @@ jobs:
           flatpak-builder-args: |
             --install-deps-from=flathub
       # What turns a directory of OSTree objects into something a person can
-      # click. The two descriptor files are written here and not committed
-      # because they carry the public half of the signing key: rotate the
-      # secret and the next tag rewrites them, rather than leaving a file in
-      # the tree that quietly names a key nobody signs with any more.
+      # click: the repository's title, the two descriptor files, the landing
+      # page and the icon. The script is the whole of that story and
+      # .github/workflows/site.yml runs the same one against the published
+      # repository, so a republish and a release describe the app alike.
       - name: Describe the repository
-        env:
-          REPO: ${{ steps.build.outputs.repository }}
-          FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
-        run: |
-          set -eu
-          # CNAME, .nojekyll and the landing page. .nojekyll is load-bearing:
-          # a branch-source Pages site is a Jekyll build by default, and
-          # Jekyll drops paths beginning with an underscore, which an OSTree
-          # static delta name can (its checksums are base64 with `_` in the
-          # alphabet).
-          cp -r flatpak/pages/. "$REPO"/
-          url="https://$(cat flatpak/pages/CNAME)/"
-          key=$(gpg --export "$FINGERPRINT" | base64 -w0)
-          cat > "$REPO/kjerag.flatpakrepo" <<EOF
-          [Flatpak Repo]
-          Title=Kjerag
-          Url=$url
-          GPGKey=$key
-          EOF
-          # One click installs the app and adds the remote it came from, so
-          # the next release arrives on its own. RuntimeRepo is what lets it
-          # work on a machine that has never had Flathub configured: the app
-          # is ours, the runtime under it is not.
-          cat > "$REPO/dev.harding.Kjerag.flatpakref" <<EOF
-          [Flatpak Ref]
-          Title=Kjerag
-          Name=dev.harding.Kjerag
-          Branch=stable
-          Url=$url
-          SuggestRemoteName=kjerag
-          GPGKey=$key
-          RuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo
-          IsRuntime=false
-          EOF
+        run: >
+          scripts/pages-site.sh
+          "${{ steps.build.outputs.repository }}"
+          "${{ steps.gpg.outputs.fingerprint }}"
       # The repository is the site, at the root of it, so the remote URL is
       # the bare domain. single-commit because the branch is an artifact and
       # not a history: every deploy replaces it whole.

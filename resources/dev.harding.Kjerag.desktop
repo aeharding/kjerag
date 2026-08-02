@@ -1,12 +1,18 @@
 [Desktop Entry]
 Type=Application
 Name=Kjerag
-GenericName=360 Video Player
-Comment=Play Insta360 dual fisheye video
+# One string with the metainfo's <summary>, which is the same line in the
+# other file a software centre reads. It replaced a GenericName that said the
+# same words: desktop-file-validate calls two identical keys out, and
+# cosmic-files, cosmic-edit and cosmic-player all ship Name and Comment and
+# no GenericName at all.
+Comment=360 video player
 Exec=kjerag %f
 Icon=dev.harding.Kjerag
 Terminal=false
 StartupNotify=true
 Categories=COSMIC;AudioVideo;Player;Video;
-Keywords=360;Insta360;Fisheye;Reframe;Video;Player;
+# The metainfo's <keywords>, cameras Kjerag refuses included, and why is
+# written there. This is the set a launcher searches.
+Keywords=360;360 video;360 camera;Insta360;Insta 360;INSV;Fisheye;Reframe;Panorama;Spherical;GoPro;GoPro Max;Max;Max 360;DJI;Osmo;Osmo 360;Player;
 MimeType=video/x-insta360-insv;

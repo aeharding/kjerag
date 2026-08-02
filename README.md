@@ -24,7 +24,7 @@ the camera and press play. Zero configuration.
 
 ## Install
 
-[**Install Kjerag**](https://kjerag.harding.dev/dev.harding.Kjerag.flatpakref)
+[**Install Kjerag**](https://kjerag.harding.dev/stable.flatpakref)
 in COSMIC Store, GNOME Software or Discover. One click, and updates arrive
 with everything else.
 
