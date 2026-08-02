@@ -192,6 +192,14 @@ them.  Forward/backward closure is explicitly unavailable in this first
 forward-only traversal.  Stereo depth/disparity accounting is the next layer,
 not an inference from this trackability count.
 
+That layer's first run also shows why the depth control must remain explicit.
+At the same 612 tracked site-times, 571 produced a stereo reading, but only
+60 had a conservatively positive epipolar disparity and hence a reported
+far-depth proxy; 511 were recorded as **Unplaceable** rather than being
+assigned a made-up depth.  No depth-invariance claim is possible from this
+count alone.  The next report uses predeclared near (under 3 m), mid (3--10
+m), and far (at least 10 m) strata and retains the unplaceable population.
+
 For a shared-pose comparison across captures, `seam=file` is not a valid
 baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
