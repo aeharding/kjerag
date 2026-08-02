@@ -67,25 +67,29 @@ cargo run --release -p kjerag-spike --bin local-warp -- <file.insv> \
 It runs the same warmed `Scene`/render traversal as `step` to locate the
 visible `body.z = 0` seam contour, then discards the rendered pixels. One
 candidate per camera-frame seam azimuth bin is tested against the synchronized
-raw lens planes. A candidate must have a complete angular patch in both lenses
-at the candidate offset; no rectangle is zero-filled. The selected patch is
-the strongest two-axis raw-lens registration in the baseline-derived
-`[perp, epi]` frame, and reports its covariance and structure-tensor condition.
-A rank-deficient edge is refused for the aperture problem.
+raw lens planes. Every actual 50/50 root receives the same globally declared
+3-by-3 overlap-strip lattice in the baseline-derived `[perp, epi]` frame.
+Each site must have a complete angular reference patch; no rectangle is
+zero-filled. Target coverage is then recorded independently at every declared
+shift, including unavailable shifts. This bounded probe reports roots, sites,
+site offsets, shifts, and coverage only: it does not pick a view, patch, or
+warp based on texture or score. A later two-axis registration must continue to
+refuse a rank-deficient edge for the aperture problem.
 
 The probe sweeps one declared, global angular support ladder (1.20/1.00,
 2.00/1.60, 2.80/2.40, and 3.68/3.00 degrees of span/search at 0.08-degree
 sampling). `span=` and `search=` may replace that ladder only for the whole
 invocation; comma-separated lists are paired, with a single value broadcast
-over the other list. Each rung reports candidate count, reference-complete
-patches, attempted offsets, complete target patches, accepted readings, and
-the support/aperture/peak refusal counts. Thus a growing support refusal is
-evidence of lens geometry, while complete patches that increasingly refuse
-for aperture are evidence of inadequate two-axis texture. Neither is silently
-promoted to a displacement, and the sweep does not choose a rung or a view.
-Target coverage is evaluated at each candidate shift, not over the enclosing
-search rectangle: unavailable offsets are omitted, while a maximum on the
-declared search rail, a tied maximum, or no complete target patch refuses.
+over the other list. Each rung reports roots, fixed sites, reference-complete
+patches, attempted target shifts, and each coverage outcome. Thus a growing
+support refusal is evidence of lens geometry, while complete patches that
+increasingly refuse for aperture are evidence of inadequate two-axis texture.
+Neither is silently promoted to a displacement, and the sweep does not choose
+a rung or a view. Target coverage is evaluated at each site and candidate
+shift, not over an enclosing search rectangle: unavailable offsets are retained
+as coverage diagnostics and do not erase legal neighbouring shifts. When
+registration is reintroduced, a maximum on the declared search rail, a tied
+maximum, or no complete target patch refuses.
 
 Raw coverage is itself a result. Shrinking an angular patch does not create
 overlap, and a lens-separated *rendered* image would be contaminated by the

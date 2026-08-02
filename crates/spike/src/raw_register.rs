@@ -107,6 +107,194 @@ pub const SUPPORT_LADDER: [Support; 4] = [
     },
 ];
 
+/// Fixed camera-frame locations at which every traced 50/50 root is probed.
+///
+/// These are deliberately declared once, in angular `[perp, epi]` offsets
+/// from the actual root.  They describe a small overlap strip, not pixels in
+/// a named view and not locations chosen because their content looks useful.
+/// Changing this list changes every view together.
+pub const OVERLAP_STRIP_OFFSETS_DEG: [[f64; 2]; 9] = [
+    [-0.40, -0.40],
+    [-0.40, 0.00],
+    [-0.40, 0.40],
+    [0.00, -0.40],
+    [0.00, 0.00],
+    [0.00, 0.40],
+    [0.40, -0.40],
+    [0.40, 0.00],
+    [0.40, 0.40],
+];
+
+/// A fixed physical location around one actual 50/50 root.
+#[derive(Clone, Copy, Debug)]
+pub struct StripSite {
+    pub root: Candidate,
+    /// Camera-frame `[perp, epi]`, in radians, from `root`.
+    pub offset_rad: [f64; 2],
+}
+
+/// Make the same declared sites from every root.  This is intentionally pure
+/// so the declaration can be checked without decoded pixels or a renderer.
+pub fn overlap_strip_sites(candidates: &[Candidate]) -> Vec<StripSite> {
+    candidates
+        .iter()
+        .copied()
+        .flat_map(|root| {
+            OVERLAP_STRIP_OFFSETS_DEG
+                .into_iter()
+                .map(move |offset| StripSite {
+                    root,
+                    offset_rad: offset.map(f64::to_radians),
+                })
+        })
+        .collect()
+}
+
+/// Whether one complete raw patch exists at a declared site or shift.  It is
+/// coverage evidence only; neither luma nor a correlation score is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatchCoverage {
+    Complete,
+    ProjectedOut,
+    SourceBoundary,
+}
+
+/// Target availability at one globally declared registration shift.
+#[derive(Clone, Copy, Debug)]
+pub struct ShiftCoverage {
+    /// Integer `[perp, epi]` shift in this support's global step.
+    pub steps: [isize; 2],
+    pub offset_rad: [f64; 2],
+    pub coverage: PatchCoverage,
+}
+
+/// Coverage record for one fixed site.  `target` is empty only when its own
+/// reference patch is incomplete: no target result is allowed to stand in for
+/// a missing reference at that site.
+#[derive(Clone, Debug)]
+pub struct StripSiteCoverage {
+    pub site: StripSite,
+    pub reference: PatchCoverage,
+    pub target: Vec<ShiftCoverage>,
+}
+
+/// Geometry-only accounting for a declared overlap strip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StripLatticeHealth {
+    pub roots: usize,
+    pub sites: usize,
+    pub reference_complete: usize,
+    pub reference_projected_out: usize,
+    pub reference_source_boundary: usize,
+    pub searched_offsets: usize,
+    pub target_complete: usize,
+    pub target_projected_out: usize,
+    pub target_source_boundary: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct StripLatticeResult {
+    pub support: Support,
+    pub sites: Vec<StripSiteCoverage>,
+    pub health: StripLatticeHealth,
+}
+
+/// Census fixed overlap-strip sites and every target shift independently.
+///
+/// This is the Stage 9 location/coverage instrument.  A complete reference
+/// patch is required at every site.  Once it exists, every target shift is
+/// retained with its own coverage outcome: there is no enclosing search
+/// rectangle and no texture, correlation, or per-view winner selection.
+pub fn overlap_strip_lattice(
+    map: &Reframe,
+    planes: &[Plane],
+    candidates: &[Candidate],
+    support: Support,
+) -> StripLatticeResult {
+    let mut health = StripLatticeHealth {
+        roots: candidates.len(),
+        ..StripLatticeHealth::default()
+    };
+    let sites = overlap_strip_sites(candidates);
+    health.sites = sites.len();
+    let (Some(front), Some(back)) = (planes.first(), planes.get(1)) else {
+        return StripLatticeResult {
+            support,
+            sites: sites
+                .into_iter()
+                .map(|site| StripSiteCoverage {
+                    site,
+                    reference: PatchCoverage::ProjectedOut,
+                    target: Vec::new(),
+                })
+                .collect(),
+            health,
+        };
+    };
+    if !support.valid() || support.half() < 1 || support.search_steps() < 1 {
+        return StripLatticeResult {
+            support,
+            sites: sites
+                .into_iter()
+                .map(|site| StripSiteCoverage {
+                    site,
+                    reference: PatchCoverage::ProjectedOut,
+                    target: Vec::new(),
+                })
+                .collect(),
+            health,
+        };
+    }
+    let step = support.step_deg.to_radians();
+    let half = support.half();
+    let coarse = support.search_steps();
+    let sites = sites
+        .into_iter()
+        .map(|site| {
+            let reference = coverage(map, front, 0, site.root.node, half, step, site.offset_rad);
+            match reference {
+                PatchCoverage::Complete => health.reference_complete += 1,
+                PatchCoverage::ProjectedOut => health.reference_projected_out += 1,
+                PatchCoverage::SourceBoundary => health.reference_source_boundary += 1,
+            }
+            let mut target = Vec::new();
+            if reference == PatchCoverage::Complete {
+                for perp in -coarse..=coarse {
+                    for epi in -coarse..=coarse {
+                        health.searched_offsets += 1;
+                        let offset_rad = [
+                            site.offset_rad[0] + perp as f64 * step,
+                            site.offset_rad[1] + epi as f64 * step,
+                        ];
+                        let coverage =
+                            coverage(map, back, 1, site.root.node, half, step, offset_rad);
+                        match coverage {
+                            PatchCoverage::Complete => health.target_complete += 1,
+                            PatchCoverage::ProjectedOut => health.target_projected_out += 1,
+                            PatchCoverage::SourceBoundary => health.target_source_boundary += 1,
+                        }
+                        target.push(ShiftCoverage {
+                            steps: [perp, epi],
+                            offset_rad,
+                            coverage,
+                        });
+                    }
+                }
+            }
+            StripSiteCoverage {
+                site,
+                reference,
+                target,
+            }
+        })
+        .collect();
+    StripLatticeResult {
+        support,
+        sites,
+        health,
+    }
+}
+
 /// Accounting behind one support result.  In particular, `reference_complete`
 /// and `complete_target_patches` separate loss of geometric support from a
 /// complete but rank-deficient (aperture) patch.
@@ -571,6 +759,22 @@ enum PatchRefusal {
     SourceBoundary,
 }
 
+fn coverage(
+    map: &Reframe,
+    plane: &Plane,
+    lens: usize,
+    node: Node,
+    half: isize,
+    step: f64,
+    offset: [f64; 2],
+) -> PatchCoverage {
+    match sample(map, plane, lens, node, half, step, offset) {
+        Ok(_) => PatchCoverage::Complete,
+        Err(PatchRefusal::ProjectedOut) => PatchCoverage::ProjectedOut,
+        Err(PatchRefusal::SourceBoundary) => PatchCoverage::SourceBoundary,
+    }
+}
+
 fn sample(
     map: &Reframe,
     plane: &Plane,
@@ -760,13 +964,45 @@ mod tests {
             "the asymmetric lens pose should move its actual crossover off nominal body.z=0; got {displaced}"
         );
     }
+
+    #[test]
+    fn overlap_strip_sites_are_fixed_for_every_actual_root() {
+        let first = Candidate {
+            node: node([0.0, 0.0, -0.033], [1.0, 0.0, 0.0]),
+            view_ray: [1.0, 0.0, 0.0],
+            view_pixel: [10.0, 20.0],
+        };
+        let second = Candidate {
+            node: node([0.0, 0.0, -0.033], [0.0, 1.0, 0.0]),
+            view_ray: [0.0, 1.0, 0.0],
+            view_pixel: [30.0, 40.0],
+        };
+        let sites = overlap_strip_sites(&[first, second]);
+        assert_eq!(sites.len(), 2 * OVERLAP_STRIP_OFFSETS_DEG.len());
+        for (root, group) in sites
+            .chunks_exact(OVERLAP_STRIP_OFFSETS_DEG.len())
+            .enumerate()
+        {
+            assert_eq!(
+                group[0].root.view_pixel,
+                if root == 0 {
+                    [10.0, 20.0]
+                } else {
+                    [30.0, 40.0]
+                }
+            );
+            for (site, declared) in group.iter().zip(OVERLAP_STRIP_OFFSETS_DEG) {
+                assert_eq!(site.offset_rad, declared.map(f64::to_radians));
+            }
+        }
+    }
     #[test]
     fn correlation_refuses_flat_content_by_reporting_no_agreement() {
         assert_eq!(correlation(&[1.0; 4], &[1.0; 4]), 0.0);
     }
 
     #[test]
-    fn an_interior_peak_survives_missing_neighbouring_search_patches() {
+    fn legal_interior_peak_survives_unavailable_neighbouring_shifts() {
         // The omitted shifts model a patch crossing the lens boundary.  They
         // are not entries with invented luma and must not invalidate the
         // complete shifts left inside the aperture.
