@@ -97,6 +97,16 @@ Plane::at(...).is_some()`; renderer cap pretests and blend weights are not
 part of it. The raw pair's PTS must equal the warmed frame for a geometric
 reading; a loose warning cannot promote it to evidence.
 
+The locator is also part of the measurement. `body.z = 0` is only a nominal
+great circle and can be outside one calibrated lens while the rendered seam
+is plainly visible. Stage 9 therefore traces the **actual** calibrated 50/50
+handover contour: `Blend.weights[0] == Blend.weights[1]`, with both weights
+positive and both raw projections valid. Its camera-frame node is built from
+that root ray, not from an azimuth placed back on the nominal circle. This is
+location evidence only; the raw planes remain the source of registration
+pixels. Each root must prove weight equality and two-lens projection before a
+patch is considered.
+
 This does **not** yet make a shared pose Jacobian, establish an empirically
 calibrated condition threshold, or infer/apply a warp. Its uncertainty is the
 local linearized luma residual only; repeatability and raw-versus-scene PTS
