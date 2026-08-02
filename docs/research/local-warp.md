@@ -116,6 +116,37 @@ calibrated condition threshold, or infer/apply a warp. Its uncertainty is the
 local linearized luma residual only; repeatability and raw-versus-scene PTS
 agreement remain explicit follow-up controls.
 
+## First valid coverage result
+
+The first lattice run was invalid: it handed a body-frame node directly to
+`Reframe::project`, whose input is a view-frame ray.  The resulting universal
+`ProjectedOut` result was a coordinate error, not evidence about raw overlap.
+The instrument now explicitly transforms body back to view before projection,
+and a regression test proves that every traced root round-trips to its view ray
+and reproduces both `Blend` landings.
+
+On the May 1 same-instant pair, warmed to 50.150100000 s with exact matching
+raw PTS and the same file-local fit, the corrected 1.20-degree span / 1.00-
+degree search rung has complete support everywhere it declares:
+
+| view | roots | fixed sites | complete reference sites | complete target shifts |
+| --- | ---: | ---: | ---: | ---: |
+| GOOD (`yaw=-74.43`) | 15 | 135 | 135 | 84,375 / 84,375 |
+| BAD (`yaw=106.98`) | 17 | 153 | 153 | 95,625 / 95,625 |
+
+Those counts are a location-and-coverage result only.  They do not select a
+texture, calculate a correspondence, identify an error as calibration rather
+than parallax, or authorize a warp.  They merely clear the former raw-overlap
+blocker for a predeclared 2-D registration experiment.
+
+For a shared-pose comparison across captures, `seam=file` is not a valid
+baseline: it fits each flight from its own scene and can absorb parallax.  The
+future multi-capture invocation must receive one explicit stored/pooled seam
+fit for every reference.  It must obtain at least four independent,
+non-aperture two-axis correspondences (eight scalar rows, three residual
+degrees of freedom after the five-knob fit), use their full 2-by-2 covariance,
+and calibrate its condition gate with planted-pose and self/repeat controls.
+
 ## Controls
 
 - A self-pair runs the whole tracer and is statistically zero.
