@@ -21,6 +21,35 @@ five-knob pose explain all of those crossings within the tracing error? If it
 cannot, is the residue a smooth, camera-frame-local geometric displacement
 with finite support rather than a view-specific adjustment?
 
+## Reframe reference audit
+
+The locally available Insta360 Reframe 5.8.4 installer was unpacked
+*statically* in a disposable directory; neither its installer nor its Windows
+plug-ins were executed.  This is an interoperability reference, not source to
+copy.  Its small Adobe `.aex`/`.prm` hosts load a 79.5 MiB `Insta360CoreMedia`
+renderer.  That renderer retains diagnostics and type names for
+`FisheyeModel`, `CameraOffsetCalib`, `DynamicStitcher`, `StitchFusion`, and
+`StitchAlphaMapFrom`.  It reads camera-offset metadata including per-camera
+and refined dual-offset forms, constructs a fisheye model from it, and has a
+custom-template blend angle.  Its fixed calibrated projection is therefore
+the baseline, rather than a universal image-space warp.
+
+The same payload has explicitly optional dynamic modes: `OPTFLOW1/2`,
+`DISFLOW`, `BLOCKFLOW`, `AIFLOW`, and `DYNAMICSTITCH`; it reports that dynamic
+stitch is ignored in POV mode.  The shipped opaque `.ins` model assets contain
+flow-network graph labels and are used through MNN; nearby plaintext XML
+assets are OpenCV SVM models selected in camera/configuration code.  Static
+evidence cannot identify their exact run-time gates or outputs, but it does
+establish that they are learned content-adaptive fusion aids, not a
+camera-agnostic calibration table.
+
+The engineering consequence is deliberately limited: Kjerag already consumes
+the per-unit `offset_v3` calibration, which is the appropriate first layer.
+Any later adaptive seam method must be independently measured, optional, and
+gated on a fixed far-field correspondence/hold-out protocol.  Reframe's
+existence does not license an always-on local warp, and its flow machinery is
+especially not evidence that an infinity residual is parallax.
+
 That question has an observability gate. Four horizon crossings are four
 **scalar edge-normal** constraints, not four two-axis observations. They
 cannot reject a five-knob map: their Jacobian has rank at most four and no
