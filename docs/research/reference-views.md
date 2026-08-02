@@ -59,6 +59,18 @@ add new owner references here with date, category, and status.
   the photometry moves it by 0.00 - before 5.94, after 5.94. Any view whose line survives the
   photometry belongs to the local-vs-pose verdict above, not here.
 
+## ANTI-ACCEPTANCE: the artifact the acceptance layer was blind to
+- 2026-08-01 `VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
+  The owner's own screenshots at this area (his ~/Pictures/Screenshots/Screenshot_2026-08-01_20-24-45.png
+  raw, _20-25-26.png with his red annotations) show dark STREAKS across the soil running away from the
+  seam. Stage 8's per-direction offset over wide support painted each direction's own noise along that
+  direction's sweep. **Every acceptance statistic in this campaign straddles the seam and could not see
+  it.** Any photometric work must now also pass the FIELD-INTERIOR COHERENCE metric
+  (`--bin colour`, the interior block): the applied correction sampled 4-60 deg OFF the seam on dark
+  content, binned by azimuth, reported as the rms of what a five-term harmonic cannot describe.
+  Rejected build reads ROUGH 1.01%; nulls 0.000%; planted 0.5 and 2.0 code ripples read 2.07% and 8.27%.
+  A correction that is smooth round the ring reads zero however large it is.
+
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas
