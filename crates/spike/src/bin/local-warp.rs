@@ -104,25 +104,27 @@ fn main() -> Fallible<()> {
             health.target_projected_out,
             health.target_source_boundary,
         );
-        for site in row.sites {
-            println!(
-                "site: root view ({:.2}, {:.2}), body phi {:.2} deg; offset [perp {:.2}, epi {:.2}] deg; reference {:?}",
-                site.site.root.view_pixel[0],
-                site.site.root.view_pixel[1],
-                site.site.root.node.phi.to_degrees(),
-                site.site.offset_rad[0].to_degrees(),
-                site.site.offset_rad[1].to_degrees(),
-                site.reference,
-            );
-            for target in site.target {
+        if options.trace {
+            for site in row.sites {
                 println!(
-                    "  shift: steps [perp {}, epi {}]; target offset [perp {:.2}, epi {:.2}] deg; {:?}",
-                    target.steps[0],
-                    target.steps[1],
-                    target.offset_rad[0].to_degrees(),
-                    target.offset_rad[1].to_degrees(),
-                    target.coverage,
+                    "site: root view ({:.2}, {:.2}), body phi {:.2} deg; offset [perp {:.2}, epi {:.2}] deg; reference {:?}",
+                    site.site.root.view_pixel[0],
+                    site.site.root.view_pixel[1],
+                    site.site.root.node.phi.to_degrees(),
+                    site.site.offset_rad[0].to_degrees(),
+                    site.site.offset_rad[1].to_degrees(),
+                    site.reference,
                 );
+                for target in site.target {
+                    println!(
+                        "  shift: steps [perp {}, epi {}]; target offset [perp {:.2}, epi {:.2}] deg; {:?}",
+                        target.steps[0],
+                        target.steps[1],
+                        target.offset_rad[0].to_degrees(),
+                        target.offset_rad[1].to_degrees(),
+                        target.coverage,
+                    );
+                }
             }
         }
         println!(
@@ -160,6 +162,7 @@ struct Options {
     seam: Seam,
     spans: Option<Vec<f64>>,
     searches: Option<Vec<f64>>,
+    trace: bool,
 }
 
 /// The same three seam paths that `step` and `reframe` expose.  Stage 9's
@@ -198,6 +201,7 @@ impl Options {
             seam: Seam::File,
             spans: None,
             searches: None,
+            trace: false,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -218,6 +222,7 @@ impl Options {
                 }
                 Some(("span", value)) => out.spans = Some(degrees(value)?),
                 Some(("search", value)) => out.searches = Some(degrees(value)?),
+                Some(("trace", value)) => out.trace = value.parse::<u32>()? != 0,
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
@@ -280,7 +285,7 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[cfg(test)]
@@ -346,6 +351,13 @@ mod tests {
             .supports()
             .expect("one span broadcasts");
         assert!(broadcast.iter().all(|support| support.span_deg == 2.0));
+    }
+
+    #[test]
+    fn trace_is_opt_in() {
+        assert!(!options(&["flight.insv"]).trace);
+        assert!(options(&["flight.insv", "trace=1"]).trace);
+        assert!(!options(&["flight.insv", "trace=0"]).trace);
     }
 
     #[test]
