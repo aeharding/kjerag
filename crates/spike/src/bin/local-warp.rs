@@ -60,6 +60,17 @@ fn main() -> Fallible<()> {
         );
     }
     let supports = options.supports()?;
+    if let Some(frames) = options.temporal_frames {
+        let [support] = supports.as_slice() else {
+            return Err(
+                "temporal=<frames> requires exactly one declared support: give one span= and one search= value"
+                    .into(),
+            );
+        };
+        let sites = raw_register::overlap_strip_sites(&candidates);
+        report_temporal(&gpu, &options, &warmed, frame, &sites, *support, frames)?;
+        return Ok(());
+    }
     if options.fit && supports.len() != 1 {
         return Err(
             "fit=1 requires exactly one declared support: give one span= and one search= value"
@@ -426,6 +437,154 @@ fn require_same_pts(scene: Duration, raw: Duration) -> Fallible<()> {
     .into())
 }
 
+/// The body-fixed radius allowed for the entire opt-in temporal sequence.
+/// This is deliberately distinct from one frame's local `search=` window:
+/// exceeding it ends that declared track rather than moving it to a new root.
+const TEMPORAL_EXCURSION_CAP_DEG: f64 = 5.0;
+
+#[derive(Default)]
+struct TemporalHealth {
+    transitions: usize,
+    tracked: usize,
+    no_complete: usize,
+    no_peak: usize,
+    aperture: usize,
+    excursion: usize,
+    ended: usize,
+}
+
+/// Sequential, one-lens raw tracking after the same rendered warm-up used to
+/// declare the anchor sites.  It intentionally owns neither a depth model nor
+/// a pose fit: this is only temporal observability evidence.
+fn report_temporal(
+    gpu: &Gpu,
+    options: &Options,
+    anchor: &Warmed,
+    frame: Size,
+    sites: &[raw_register::StripSite],
+    support: raw_register::Support,
+    frames: usize,
+) -> Fallible<()> {
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut scene = Scene::still(&options.input, options.start())?;
+    options.seam.hold(&scene);
+    scene.set_horizon(if options.lock {
+        Horizon::Locked
+    } else {
+        Horizon::Free
+    });
+    scene.set_sampling(Sampling::default());
+    let mut rendered = 0usize;
+    while let Some((_, at)) = scene.frame() {
+        let _ = Render {
+            gpu,
+            scene: &scene,
+            pipeline: &mut pipeline,
+        }
+        .frame(options.camera(), Sampling::default(), options.size())?;
+        rendered += 1;
+        if at.as_secs_f64() >= options.time || !scene.advance()? {
+            break;
+        }
+    }
+    let (_, at) = scene.frame().ok_or("no frame decoded at temporal anchor")?;
+    if at != anchor.at || rendered != anchor.rendered {
+        return Err(
+            "refused: temporal anchor did not reproduce the declared warm traversal".into(),
+        );
+    }
+    let mut previous_map = scene
+        .mapped(options.camera(), 1.0)
+        .ok_or("no map at temporal anchor")?;
+    let mut walk = Walk::open(&options.input, at.as_secs_f64(), frame)?;
+    let mut previous_pair = walk
+        .next_pair()?
+        .ok_or("no synchronized raw lens pair at temporal anchor")?;
+    require_same_pts(at, previous_pair.at)?;
+    let cap = TEMPORAL_EXCURSION_CAP_DEG.to_radians();
+    let mut states: Vec<Option<raw_register::TrackState>> = sites
+        .iter()
+        .copied()
+        .map(|site| Some(raw_register::TrackState::new(site, cap)))
+        .collect();
+    let mut health = TemporalHealth::default();
+    for _ in 0..frames {
+        if !scene.advance()? {
+            break;
+        }
+        let (_, next_at) = scene
+            .frame()
+            .ok_or("no frame decoded during temporal track")?;
+        let _ = Render {
+            gpu,
+            scene: &scene,
+            pipeline: &mut pipeline,
+        }
+        .frame(options.camera(), Sampling::default(), options.size())?;
+        let next_map = scene
+            .mapped(options.camera(), 1.0)
+            .ok_or("no map during temporal track")?;
+        let next_pair = walk
+            .next_pair()?
+            .ok_or("raw lens pair ended during temporal track")?;
+        require_same_pts(next_at, next_pair.at)?;
+        health.transitions += 1;
+        for state in &mut states {
+            let Some(current) = *state else {
+                continue;
+            };
+            match raw_register::track_one_lens(
+                &previous_map,
+                &previous_pair.lenses[0],
+                &next_map,
+                &next_pair.lenses[0],
+                0,
+                current,
+                support,
+            ) {
+                Ok(reading) => {
+                    health.tracked += 1;
+                    *state = Some(reading.state);
+                }
+                Err(refusal) => {
+                    match refusal {
+                        raw_register::TrackRefused::NoCompletePatch => health.no_complete += 1,
+                        raw_register::TrackRefused::NoPeak
+                        | raw_register::TrackRefused::InvalidStep
+                        | raw_register::TrackRefused::InvalidExcursionCap => health.no_peak += 1,
+                        raw_register::TrackRefused::Aperture => health.aperture += 1,
+                        raw_register::TrackRefused::Excursion { .. } => health.excursion += 1,
+                    }
+                    health.ended += 1;
+                    *state = None;
+                }
+            }
+        }
+        previous_map = next_map;
+        previous_pair = next_pair;
+    }
+    let active = states.iter().filter(|state| state.is_some()).count();
+    println!(
+        "temporal: lens 0; anchor {:.9} s; requested frames {}; transitions {}; declared sites {}; active {}; ended {}; successful steps {}; no-complete {}; no-peak {}; aperture {}; excursion {}; cap {:.2} deg",
+        anchor.at.as_secs_f64(),
+        frames,
+        health.transitions,
+        sites.len(),
+        active,
+        health.ended,
+        health.tracked,
+        health.no_complete,
+        health.no_peak,
+        health.aperture,
+        health.excursion,
+        TEMPORAL_EXCURSION_CAP_DEG,
+    );
+    println!(
+        "temporal closure: unavailable (this opt-in is one forward lens-0 traversal; no reverse traversal was inferred); no depth, pose fit, or warp applied"
+    );
+    Ok(())
+}
+
 struct Options {
     input: PathBuf,
     time: f64,
@@ -443,6 +602,7 @@ struct Options {
     responses: bool,
     fit: bool,
     reciprocal: bool,
+    temporal_frames: Option<usize>,
     plant: Option<[f64; local_warp::KNOBS]>,
 }
 
@@ -488,6 +648,7 @@ impl Options {
             responses: false,
             fit: false,
             reciprocal: false,
+            temporal_frames: None,
             plant: None,
         };
         for arg in args {
@@ -514,6 +675,13 @@ impl Options {
                 Some(("responses", value)) => out.responses = value.parse::<u32>()? != 0,
                 Some(("fit", value)) => out.fit = value.parse::<u32>()? != 0,
                 Some(("reciprocal", value)) => out.reciprocal = value.parse::<u32>()? != 0,
+                Some(("temporal", value)) => {
+                    let frames: usize = value.parse()?;
+                    if frames == 0 {
+                        return Err("temporal must be a positive frame count".into());
+                    }
+                    out.temporal_frames = Some(frames);
+                }
                 Some(("plant", value)) => out.plant = Some(fit_knobs(seam_fit(value)?)),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
@@ -521,7 +689,11 @@ impl Options {
         if out.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        if (out.observations || out.responses || out.fit || out.reciprocal)
+        if (out.observations
+            || out.responses
+            || out.fit
+            || out.reciprocal
+            || out.temporal_frames.is_some())
             && !matches!(&out.seam, Seam::Stored(_))
         {
             return Err(
@@ -532,6 +704,14 @@ impl Options {
         if out.plant.is_some() && !out.fit {
             return Err(
                 "plant=<knobs> requires fit=1; it is a pose-fit control, not a renderer option"
+                    .into(),
+            );
+        }
+        if out.temporal_frames.is_some()
+            && (out.observations || out.responses || out.fit || out.reciprocal)
+        {
+            return Err(
+                "temporal=<frames> is observation-only and cannot combine with observations/responses/fit/reciprocal"
                     .into(),
             );
         }
@@ -599,7 +779,7 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [reciprocal=1] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [reciprocal=1] [temporal=frames] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[derive(Default)]
@@ -835,6 +1015,48 @@ mod tests {
         assert!(!options(&["flight.insv"]).trace);
         assert!(options(&["flight.insv", "trace=1"]).trace);
         assert!(!options(&["flight.insv", "trace=0"]).trace);
+    }
+
+    #[test]
+    fn temporal_frames_are_opt_in_and_observation_only() {
+        assert_eq!(options(&["flight.insv"]).temporal_frames, None);
+        let temporal = options(&[
+            "flight.insv",
+            "temporal=12",
+            "span=1.2",
+            "search=1.0",
+            "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+        ]);
+        assert_eq!(temporal.temporal_frames, Some(12));
+        assert!(
+            Options::parse(
+                ["flight.insv", "temporal=0"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            Options::parse(
+                ["flight.insv", "temporal=3", "seam=file"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            Options::parse(
+                [
+                    "flight.insv",
+                    "temporal=3",
+                    "observations=1",
+                    "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+                ]
+                .into_iter()
+                .map(str::to_string)
+            )
+            .is_err()
+        );
     }
 
     #[test]
