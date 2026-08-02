@@ -115,6 +115,75 @@ pub struct RegistrationHealth {
     pub no_complete_patch: usize,
     pub aperture: usize,
     pub no_peak: usize,
+    /// Reference patches which left lens 0's calibrated projection.
+    pub reference_projected_out: usize,
+    /// Reference patches whose projection was legal but the delivered raw
+    /// plane had no bilinear sample (normally its source boundary).
+    pub reference_source_boundary: usize,
+    /// Candidate/search patches which left lens 1's calibrated projection.
+    pub target_projected_out: usize,
+    /// Candidate/search patches whose projection was legal but the delivered
+    /// raw plane had no bilinear sample.
+    pub target_source_boundary: usize,
+}
+
+/// CPU census of the named view's raw-lens validity mask.  `projected` is
+/// solely `Reframe::project(...).inside`; `readable` additionally proves a
+/// direct [`Plane::at`] read.  No blend weight, renderer pixel, or coverage
+/// pre-test contributes to either number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LensCoverage {
+    pub projected: usize,
+    pub readable: usize,
+    pub source_boundary: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoverageCensus {
+    pub view_rays: usize,
+    pub outside_view: usize,
+    pub lenses: Vec<LensCoverage>,
+}
+
+/// Count every camera-frame pixel in a named view against each raw lens.
+/// This is deliberately a separate diagnostic from registration: it says
+/// whether a missing patch is already explained by the source plane boundary
+/// before texture or peak selection gets to make a claim.
+pub fn coverage_census(map: &Reframe, planes: &[Plane], width: u32, height: u32) -> CoverageCensus {
+    let mut census = CoverageCensus {
+        lenses: vec![LensCoverage::default(); planes.len()],
+        ..CoverageCensus::default()
+    };
+    for y in 0..height {
+        for x in 0..width {
+            let uv = [
+                (x as f32 + 0.5) / width as f32,
+                (y as f32 + 0.5) / height as f32,
+            ];
+            let Some(ray) = map.view_ray(uv) else {
+                census.outside_view += 1;
+                continue;
+            };
+            census.view_rays += 1;
+            for (lens, plane) in planes.iter().enumerate() {
+                let landing = map.project(lens, ray);
+                if !landing.inside {
+                    continue;
+                }
+                let coverage = &mut census.lenses[lens];
+                coverage.projected += 1;
+                if plane
+                    .at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1]))
+                    .is_some()
+                {
+                    coverage.readable += 1;
+                } else {
+                    coverage.source_boundary += 1;
+                }
+            }
+        }
+    }
+    census
 }
 
 /// One row of a support ladder.  A refusal is evidence, not an omitted row.
@@ -279,8 +348,13 @@ fn read(
 ) -> Result<Reading, Refused> {
     let step = support.step_deg.to_radians();
     let half = support.half();
-    let a = sample(map, front, 0, candidate.node, half, step, [0.0, 0.0])
-        .ok_or(Refused::NoCompletePatch)?;
+    let a = sample(map, front, 0, candidate.node, half, step, [0.0, 0.0]).map_err(|why| {
+        match why {
+            PatchRefusal::ProjectedOut => health.reference_projected_out += 1,
+            PatchRefusal::SourceBoundary => health.reference_source_boundary += 1,
+        }
+        Refused::NoCompletePatch
+    })?;
     health.reference_complete += 1;
     let coarse = support.search_steps();
     let mut legal = Vec::new();
@@ -293,8 +367,16 @@ fn read(
         for j in -coarse..=coarse {
             health.searched_offsets += 1;
             let offset = [i as f64 * step, j as f64 * step];
-            let Some(b) = sample(map, back, 1, candidate.node, half, step, offset) else {
-                continue;
+            let b = match sample(map, back, 1, candidate.node, half, step, offset) {
+                Ok(b) => b,
+                Err(PatchRefusal::ProjectedOut) => {
+                    health.target_projected_out += 1;
+                    continue;
+                }
+                Err(PatchRefusal::SourceBoundary) => {
+                    health.target_source_boundary += 1;
+                    continue;
+                }
             };
             health.complete_target_patches += 1;
             legal.push(([i, j], correlation(&a, &b)));
@@ -302,8 +384,8 @@ fn read(
     }
     let ([i, j], correlation) = peak(&legal, coarse)?;
     let offset = [i as f64 * step, j as f64 * step];
-    let b =
-        sample(map, back, 1, candidate.node, half, step, offset).ok_or(Refused::NoCompletePatch)?;
+    let b = sample(map, back, 1, candidate.node, half, step, offset)
+        .map_err(|_| Refused::NoCompletePatch)?;
     let samples = samples(&a, &b, step);
     let fitted = local_warp::register(&samples).map_err(|why| match why {
         local_warp::RegistrationRefused::Aperture => Refused::Aperture,
@@ -382,6 +464,12 @@ fn node(baseline: [f64; 3], phi: f64) -> Node {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PatchRefusal {
+    ProjectedOut,
+    SourceBoundary,
+}
+
 fn sample(
     map: &Reframe,
     plane: &Plane,
@@ -390,7 +478,7 @@ fn sample(
     half: isize,
     step: f64,
     offset: [f64; 2],
-) -> Option<Vec<f64>> {
+) -> Result<Vec<f64>, PatchRefusal> {
     let mut out = Vec::with_capacity(((2 * half + 1).pow(2)) as usize);
     for i in -half..=half {
         for j in -half..=half {
@@ -401,12 +489,15 @@ fn sample(
             }));
             let landing = map.project(lens, ray.map(|v| v as f32));
             if !landing.inside {
-                return None;
+                return Err(PatchRefusal::ProjectedOut);
             }
-            out.push(plane.at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1]))?);
+            let luma = plane
+                .at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1]))
+                .ok_or(PatchRefusal::SourceBoundary)?;
+            out.push(luma);
         }
     }
-    Some(out)
+    Ok(out)
 }
 
 fn correlation(a: &[f64], b: &[f64]) -> f64 {
