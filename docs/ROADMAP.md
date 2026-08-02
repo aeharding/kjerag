@@ -1183,6 +1183,155 @@ live, no keyframe UI ever.
   was shown able to fail before it was believed: against the stale file it
   names all four crates, ffmpeg-next 7.1.0 among them.
 
+- 2026-08-01 **The seam's photometry: the measurement layer survives, the
+  application does not** (issue #103, stage 8 final,
+  docs/research/seam-blending.md 16). The owner tested the applied correction
+  twice and rejected it twice, the second time on dark STREAKS across his soil:
+  *"I don't think this approach is valid."* PR #138 ends as measurement
+  infrastructure - the shipped crates are main's byte for byte, and the whole
+  branch is one instrument file and the record.
+
+  **The process finding is the durable part.** Every acceptance statistic this
+  campaign has ever used STRADDLES THE SEAM. Stage 8 found the statistic was in
+  the wrong units and fixed that; the replacement straddled the seam too. So
+  nothing ever measured what an applied correction does to the picture it is
+  painted OVER, and two builds were rejected on an artifact class the whole
+  acceptance layer was structurally unable to see - a per-direction field over
+  wide support painting each direction's own noise along its whole sweep, which
+  is stage 5's scalloping on the photometric axis. **The rule: a field applied
+  over an area is accepted on the area, not on the boundary.**
+
+  **What ships is three instruments and their plants.** A perceptual lag ladder
+  in Weber contrast at 1 to 128 pixels of the delivered view (a planted step
+  reads back exactly at every lag; the same step spread over 64 pixels reads a
+  64th of it locally). An excess-over-the-same-content statistic that names a
+  line's author. And the field-interior coherence metric that was missing, which
+  reads main at 0.03 percent, the rejected build at 1.01, and its own nulls at
+  0.000. It is registered as the anti-acceptance for photometric work.
+
+  **And one finding no rejection touches:** at every reference view the owner
+  has given, the residual line's excess over what the same content reads a few
+  degrees away is at or under the JND at the one and two pixel lags, while at
+  the azimuth his own gear crosses the seam it is +5.87 percent and the entire
+  photometric stage moved it from 5.94 to 5.94. **What still reads as a line is
+  geometric**, which makes the local-warp-versus-pose verdict the campaign's
+  next question.
+
+- 2026-08-01 **Symmetric wide matching, and the measurement that names the
+  line's author** (issue #103, stage 8 second form,
+  docs/research/seam-blending.md 14-15). The owner viewed stage 8's first form
+  twice. *"I dont think its aggressive enough with blending"*, and then *"to the
+  eye, it still effectively looks like a line"*. Both are answered, and only one
+  of them by building something.
+
+  **The correction is split between both hemispheres and carried to the pole.**
+  The first form eased it to nothing seven degrees off the seam, to keep a
+  player from moving a hemisphere's black level; the symmetric split dissolves
+  that objection the way stage 3's gain split did, since each hemisphere moves
+  HALF the mismatch towards the other. At the owner's own wide view the
+  difference between eight degrees either side of the seam goes **7.55 codes to
+  2.93**, and the halo that was the priced risk of going wide did not appear:
+  the long-lag Weber contrast goes 44.7 percent to 24.4 at 64 pixels. A count of
+  pixels of the delivered view came out with the old shape - it decided nothing
+  at any field of view the player offers, and where it bit it made the handover
+  narrower than the content would bear.
+
+  **The line that is left is GEOMETRIC, and that is measured.** The same
+  statistic straddling a line a few degrees off the seam, in the same window and
+  the same content, separates a photometric step (a difference in level, present
+  on content with no gradient at all) from a misregistration (a difference in
+  position, present only where there is content to draw twice). At every
+  reference view the owner has given, the seam's excess over what that content
+  reads anywhere is **at or under the 1 percent JND at the one and two pixel
+  lags**; at the azimuth his own gear crosses the seam it is **+5.87 percent and
+  the entire photometric stage moves it from 5.94 to 5.94**. So the photometric
+  half of "no line" is done to the bar and the geometric half is the
+  local-warp-versus-pose decision already pending. No local warp is built here.
+
+- 2026-08-01 **The seam's blend, in the space an eye reads it in** (issue #103,
+  stage 8, docs/research/seam-blending.md 9-13). The owner viewed stage 7's
+  branch at a wide May reference view and said *"we need to do a lot better
+  with blending"*, and the verdict written for him found three reasons no
+  amount of tuning could: the correction was multiplicative where the
+  difference is additive, the estimator weighted brightness squared so the
+  content the artifact shows on carried one percent of the weight, and the
+  loss was in codes while the eye reads ratios. **All three are one mistake -
+  the metric - and stage 8 changes the metric first.**
+
+  Acceptance is now the steepest local **Weber contrast across the seam**, at
+  lags of 1 to 32 pixels of the delivered view, with controls that read a
+  planted step back exactly and separate a step from a ramp of the same size
+  to three decimals. At the owner's own wide view it goes **42.3 percent to
+  16.6**, and the step the two sides differ by goes **+32.5 percent to -2.1**.
+  On flat content it is at the one percent just-noticeable difference at the
+  one and two pixel lags, which is where an edge lives; what is left past four
+  pixels is a ramp the correction itself makes, because a player may not move
+  a hemisphere's black level and the correction has to end somewhere.
+
+  Five moves, each from a measurement: **ratio space** (the codes-space
+  estimator deleted, not switched off); **a gain and an offset fitted
+  jointly**, because sequentially the gain comes out at 1.15 and ruins the sky;
+  **the offset per direction**, because a constant plus one cycle plus two -
+  the basis stage 7 fitted through - leaves 4.2 to 5.5 codes rms against a
+  frame noise of 0.8 to 1.0, so what varies round a seam is not a shape;
+  **one width** in pixels of the delivered view, gated per direction by what a
+  wider handover would cost in ghost, absorbing stage 4's crossover and stage
+  7's colour region; and **a handover profile with no corner** plus dither
+  inside it, which is the residual physics a photometry cannot reach. One hole
+  was most of the improvement: stage 7 read a photometry only where the
+  correlation had established what it was looking at, and that left 50 of 128
+  directions blank in a continuous arc - the arc the complaint was in.
+
+  **The debt went down.** `band::Tint` is deleted whole - its fit, its shader
+  twin, its compute entry point, its pipeline and its readback - and three
+  notions of "near the seam" became one function. Three new constants, one new
+  derived one, one whole mechanism gone. The photometry costs +0.28 ms per
+  redraw, less than stage 7's +0.38 for more work.
+
+- 2026-08-01 **The seam hands over a colour, and one number could never have
+  reached it** (issue #103, stage 7,
+  docs/research/insv-format.md 6.11). The owner's verdict on the merged
+  geometry work: *"the worst part now is the change in colour at the seam,
+  especially on the sky or when the sun is in one of the lenses."* Stage 3
+  corrects one gain for all three channels, so the SPREAD between the channels
+  survives it exactly however well it is fitted, and that spread is 3.4 to 5.6
+  codes on the owner's own six captures and 1.5 to 31 across four camera
+  models - over the one code an 8-bit picture can carry on every one. On a
+  corpus X4 it is **10.29 codes with the sun in one lens and 0.47 with the sun
+  in neither**, which is the owner's own sentence measured in somebody else's
+  footage. So `Tone` carries three gains in the same sixteen bytes.
+
+  Two findings changed the design. **The pass had never read the content the
+  complaint is about**: the band refuses a patch under its contrast gate, so
+  20 to 64 percent of a real seam - the sky - carried no reading at all, and
+  the gain was measured on the ground and applied to the sky. A flat patch has
+  no geometry and the best colour on the ring, because what a displaced window
+  costs a photometry is the content's own gradient across it: measured at 0.33
+  to 0.76 codes rms at the residual the pass leaves, against differences of 2
+  to 33. And **the difference is not one number round the ring**: a
+  per-channel constant leaves 1.0 to 6.2 codes rms on the owner's captures
+  against a frame-noise floor of 0.4 to 3.2, and the same five-term basis
+  stage 5 fits the geometry through takes another third to a half off it. The
+  null says that shape is not a window that moved: 0.15 to 0.25 codes of
+  one-cycle amplitude against the measurement's 1.4 to 4.1.
+
+  The cycles are applied as a FIELD near the seam, whole across every
+  crossover the band can open and faded out by `Reframe::overlap` - the one
+  angle in the problem that is a property of the cameras. Carrying it over the
+  whole hemisphere the way stage 5 carries its rotation was measured and
+  refused: lens shading would read the same on every scene of one file and
+  this moves by 3 to 27 codes between five places in one capture, so it is
+  glare, and glare has no business being painted over half a sphere. The
+  glare OFFSET stage 3 priced is answered by measurement rather than by a
+  build: on the content that can tell a gain from an offset the two are
+  indistinguishable and the pair together buys under a tenth of a code, so no
+  black level is moved.
+
+  Eight narrow views round the seam at the owner's own reference instant:
+  hue step 8.48 codes mean before, 5.22 after, seven of eight improved. It is
+  not under one code and does not claim to be; what is left is the part of the
+  ring that is not a constant, one cycle or two.
+
 - 2026-08-01 **The band's cost was the fetch, not the solve** (issue #103,
   stage 2). The obvious optimisation was to score each candidate shift on a
   quarter of the patch's samples, which is what `seam::best_shift` does. It
