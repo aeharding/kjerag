@@ -25,26 +25,34 @@ with finite support rather than a view-specific adjustment?
 
 `kjerag-spike --bin local-warp` is an instruments-only deliverable. It takes
 the paired owner references from `reference-views.md`, renders each through
-the shipped path, and reports a close-window edge displacement at the visible
-seam crossing. It then perturbs the five existing calibration knobs to build
+the shipped path, locates the visible seam crossing, and registers a local
+two-dimensional patch there in the seam's camera-frame axes. It then perturbs
+the five existing calibration knobs through that same rendered path to build
 one shared pose Jacobian across the observations and reports:
 
-- the observed displacement and each trace's fit error;
+- the observed two-axis displacement, covariance, peak ambiguity and each
+  trace's fit error;
 - the correction a single global pose predicts at every crossing;
 - residuals after the shared fit and leave-one-pair-out prediction;
 - the live-band versus held-off control; and
 - the conditioning and refusals behind every conclusion.
 
-The verdict is not a large absolute `step` number. Terrain makes the old wide
-window non-absolute. The close window and the *difference* between the same
-view under a controlled perturbation are the acceptance reading.
+The horizon `step` instrument remains a picture-space acceptance check, not
+the input to this fit. A single edge only observes displacement normal to
+it: treating it as both camera-frame axes would manufacture evidence from the
+aperture problem. A rank-deficient patch is refused, not promoted to a
+two-axis reading. Terrain also makes the old wide `step` window non-absolute;
+the close window and the *difference* between the same view under a controlled
+perturbation are the horizon acceptance reading.
 
 ## Controls
 
-- A self-pair is exactly zero.
-- A planted global five-knob change to lens 1 is recovered at all references.
+- A self-pair runs the whole tracer and is statistically zero.
+- A planted global five-knob change to lens 1 is recovered through the
+  delivered warm path at all references.
 - A planted seam-local two-axis displacement is rejected by the global pose
-  fit, including outside its support where it is exactly zero.
+  fit through the same tracer, including outside its support where it is
+  exactly zero.
 - The May same-instant GOOD/BAD pair prevents time and content drift from
   standing in for a local result. The April pair is reported independently,
   never averaged into it.

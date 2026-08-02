@@ -1188,10 +1188,13 @@ live, no keyframe UI ever.
   local-warp campaign after accepting stages 5 and 6 and rejecting applied
   photometry. Its first deliverable changes no shader: one shared five-knob
   pose must be fitted and tested against the paired May same-instant crossings
-  and the separate April views before a local field is even proposed. The
-  controls include global and local planted displacements, cold versus warm
-  state, and leave-one-pair-out prediction. This is deliberately a test of a
-  global explanation, not a mechanism for selecting a per-view answer.
+  and the separate April views before a local field is even proposed. Its
+  tracer is explicitly two-axis and uncertainty-aware: a horizon edge reads
+  only its normal, so `step` is acceptance evidence and cannot be misused as a
+  two-axis observation. The controls include global and local planted
+  displacements through the delivered warm path, cold versus warm state, and
+  leave-one-pair-out prediction. This is deliberately a test of a global
+  explanation, not a mechanism for selecting a per-view answer.
 
   If pose is refused, a candidate is a smooth, camera-frame-local two-axis
   displacement with explicit zero support. It is judged across that entire
