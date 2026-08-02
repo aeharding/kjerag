@@ -85,9 +85,8 @@ fn main() -> Fallible<()> {
         );
     }
     let supports = options.supports()?;
-    for row in supports.into_iter().map(|support| {
-        raw_register::overlap_strip_lattice(&map, &pair.lenses, &candidates, support)
-    }) {
+    for support in supports {
+        let row = raw_register::overlap_strip_lattice(&map, &pair.lenses, &candidates, support);
         let health = row.health;
         println!(
             "support: span {:.2} deg, search {:.2} deg, step {:.2} deg\nlattice: roots {}; sites {}; reference-complete {}; target shifts {}; target-complete {}\ncoverage: reference [projected-out {}, source-boundary {}]; target [projected-out {}, source-boundary {}]",
@@ -130,6 +129,11 @@ fn main() -> Fallible<()> {
         println!(
             "meaning: fixed raw-lens coverage only; no texture score selected a view or a warp."
         );
+        if options.observations {
+            let outcomes =
+                raw_register::register_overlap_strip(&map, &pair.lenses, &candidates, support);
+            report_observations(support, &outcomes, options.trace);
+        }
     }
     Ok(())
 }
@@ -163,6 +167,7 @@ struct Options {
     spans: Option<Vec<f64>>,
     searches: Option<Vec<f64>>,
     trace: bool,
+    observations: bool,
 }
 
 /// The same three seam paths that `step` and `reframe` expose.  Stage 9's
@@ -202,6 +207,7 @@ impl Options {
             spans: None,
             searches: None,
             trace: false,
+            observations: false,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -223,11 +229,18 @@ impl Options {
                 Some(("span", value)) => out.spans = Some(degrees(value)?),
                 Some(("search", value)) => out.searches = Some(degrees(value)?),
                 Some(("trace", value)) => out.trace = value.parse::<u32>()? != 0,
+                Some(("observations", value)) => out.observations = value.parse::<u32>()? != 0,
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
         if out.input.as_os_str().is_empty() {
             return Err(USAGE.into());
+        }
+        if out.observations && !matches!(&out.seam, Seam::Stored(_)) {
+            return Err(
+                "observations=1 requires seam=<stored fit>; factory/file are coverage-only controls"
+                    .into(),
+            );
         }
         Ok(out)
     }
@@ -285,8 +298,69 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
+
+#[derive(Default)]
+struct ObservationHealth {
+    readings: usize,
+    no_peak: usize,
+    aperture: usize,
+    no_complete: usize,
+}
+
+fn report_observations(
+    support: raw_register::Support,
+    outcomes: &[raw_register::StripSiteOutcome],
+    trace: bool,
+) {
+    let mut health = ObservationHealth::default();
+    for outcome in outcomes {
+        match outcome.result {
+            Ok(reading) => {
+                health.readings += 1;
+                if trace {
+                    println!(
+                        "observation: root body phi {:.2} deg; offset [perp {:.2}, epi {:.2}] deg; shift [epi {:.4}, perp {:.4}] deg; correlation {:.4}; condition {:.2}",
+                        reading.site.root.node.phi.to_degrees(),
+                        reading.site.offset_rad[0].to_degrees(),
+                        reading.site.offset_rad[1].to_degrees(),
+                        reading.displacement_rad.epi.to_degrees(),
+                        reading.displacement_rad.perp.to_degrees(),
+                        reading.correlation,
+                        reading.condition,
+                    );
+                }
+            }
+            Err(refusal) => {
+                match refusal {
+                    raw_register::Refused::NoPeak => health.no_peak += 1,
+                    raw_register::Refused::Aperture => health.aperture += 1,
+                    raw_register::Refused::NoCompletePatch => health.no_complete += 1,
+                    raw_register::Refused::NoVisibleSeam => health.no_complete += 1,
+                }
+                if trace {
+                    println!(
+                        "observation: root body phi {:.2} deg; offset [perp {:.2}, epi {:.2}] deg; refused {:?}",
+                        outcome.site.root.node.phi.to_degrees(),
+                        outcome.site.offset_rad[0].to_degrees(),
+                        outcome.site.offset_rad[1].to_degrees(),
+                        refusal,
+                    );
+                }
+            }
+        }
+    }
+    println!(
+        "observations: span {:.2} deg; sites {}; readings {}; no-peak {}; aperture {}; no-complete {}; no pose fit or warp applied",
+        support.span_deg,
+        outcomes.len(),
+        health.readings,
+        health.no_peak,
+        health.aperture,
+        health.no_complete,
+    );
+}
 
 #[cfg(test)]
 mod tests {
@@ -358,6 +432,35 @@ mod tests {
         assert!(!options(&["flight.insv"]).trace);
         assert!(options(&["flight.insv", "trace=1"]).trace);
         assert!(!options(&["flight.insv", "trace=0"]).trace);
+    }
+
+    #[test]
+    fn observations_are_opt_in_and_require_a_stored_fit() {
+        assert!(!options(&["flight.insv"]).observations);
+        assert!(
+            Options::parse(
+                ["flight.insv", "observations=1"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            Options::parse(
+                ["flight.insv", "observations=1", "seam=factory"]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .is_err()
+        );
+        assert!(
+            options(&[
+                "flight.insv",
+                "observations=1",
+                "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+            ])
+            .observations
+        );
     }
 
     #[test]
