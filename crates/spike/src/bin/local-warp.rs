@@ -290,8 +290,25 @@ fn report_fit(
         assembled.incomplete_responses,
         assembled.observations.len(),
     );
+    // A raw-lens pair cannot be physically perturbed by changing only its
+    // projection map: its delivered pixels were captured with one fixed lens
+    // pose.  `plant=` consequently does not pretend to be a second raw
+    // capture.  It replaces only the assembled displacement by this same
+    // independently-warmed map Jacobian's prediction, retaining the actual
+    // fixed-site identity and full measured covariance.  It is an end-to-end
+    // assembly/linear-solve control, not a registration or linearity claim.
+    let observations = options.plant.map_or_else(
+        || assembled.observations.clone(),
+        |knobs| planted_observations(&assembled.observations, knobs),
+    );
+    if let Some(knobs) = options.plant {
+        println!(
+            "fit plant: synthetic map-Jacobian displacement; knobs roll {:+.6}; yaw {:+.6}; pitch {:+.6}; cx {:+.6}; cy {:+.6}; raw pixels were not re-captured or re-registered",
+            knobs[0], knobs[1], knobs[2], knobs[3], knobs[4],
+        );
+    }
     if options.trace {
-        for observation in &assembled.observations {
+        for observation in &observations {
             println!(
                 "fit observation: {}; measured [epi {:+.5}, perp {:+.5}] deg; covariance [[{:.3e}, {:.3e}], [{:.3e}, {:.3e}]] deg^2",
                 observation.name,
@@ -304,7 +321,7 @@ fn report_fit(
             );
         }
     }
-    let shared = local_warp::fit(&assembled.observations)
+    let shared = local_warp::fit(&observations)
         .map_err(|refusal| format!("fit refused for this one capture/support: {refusal:?}"))?;
     println!(
         "fit pose: roll {:+.6}; yaw {:+.6}; pitch {:+.6}; cx {:+.6}; cy {:+.6}; diagnostic only",
@@ -333,6 +350,34 @@ fn report_fit(
         shared.condition,
     );
     Ok(())
+}
+
+/// Make a known shared-pose reading through the exact observations which the
+/// real `fit=1` path assembled.  This is kept here rather than in the pure
+/// solver because its value is precisely that it exercises the raw-register
+/// covariance/unit conversion and fixed-site response assembly first.
+fn planted_observations(
+    observations: &[local_warp::Observation],
+    knobs: [f64; local_warp::KNOBS],
+) -> Vec<local_warp::Observation> {
+    observations
+        .iter()
+        .cloned()
+        .map(|mut observation| {
+            observation.displacement = local_warp::predict(observation.jacobian, knobs);
+            observation
+        })
+        .collect()
+}
+
+fn fit_knobs(fit: kjerag_render::SeamFit) -> [f64; local_warp::KNOBS] {
+    [
+        fit.roll_deg,
+        fit.yaw_deg,
+        fit.pitch_deg,
+        fit.cx_px,
+        fit.cy_px,
+    ]
 }
 
 fn require_same_warm(base: &Warmed, other: &Warmed, knob: &str, side: &str) -> Fallible<()> {
@@ -378,6 +423,7 @@ struct Options {
     observations: bool,
     responses: bool,
     fit: bool,
+    plant: Option<[f64; local_warp::KNOBS]>,
 }
 
 /// The same three seam paths that `step` and `reframe` expose.  Stage 9's
@@ -421,6 +467,7 @@ impl Options {
             observations: false,
             responses: false,
             fit: false,
+            plant: None,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -445,6 +492,7 @@ impl Options {
                 Some(("observations", value)) => out.observations = value.parse::<u32>()? != 0,
                 Some(("responses", value)) => out.responses = value.parse::<u32>()? != 0,
                 Some(("fit", value)) => out.fit = value.parse::<u32>()? != 0,
+                Some(("plant", value)) => out.plant = Some(fit_knobs(seam_fit(value)?)),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
@@ -454,6 +502,12 @@ impl Options {
         if (out.observations || out.responses || out.fit) && !matches!(&out.seam, Seam::Stored(_)) {
             return Err(
                 "observations=1/responses=1/fit=1 require seam=<stored fit>; factory/file are coverage-only controls"
+                    .into(),
+            );
+        }
+        if out.plant.is_some() && !out.fit {
+            return Err(
+                "plant=<knobs> requires fit=1; it is a pose-fit control, not a renderer option"
                     .into(),
             );
         }
@@ -513,7 +567,7 @@ fn degrees(value: &str) -> Fallible<Vec<f64>> {
 }
 
 const USAGE: &str = "usage: local-warp <file.insv> time=seconds warm=seconds yaw=deg pitch=deg fov=deg \\
-     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] \\
+     [size=px] [lock=0] [span=deg[,deg...]] [search=deg[,deg...]] [trace=1] [observations=1] [responses=1] [fit=1] [plant=roll:0.1,yaw:0,pitch:0,cx:0,cy:0] \\
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[derive(Default)]
@@ -580,6 +634,8 @@ fn report_observations(
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use kjerag_spike::local_warp::{Covariance, Displacement, Jacobian, Observation};
 
     use super::{Options, Seam};
 
@@ -726,6 +782,59 @@ mod tests {
             "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
         ]);
         assert_eq!(one.supports().expect("one declared support").len(), 1);
+    }
+
+    #[test]
+    fn plant_requires_fit_and_preserves_the_declared_knob_units() {
+        assert!(
+            Options::parse(
+                [
+                    "flight.insv",
+                    "plant=roll:0.1,yaw:-0.2,pitch:0.3,cx:4,cy:-5"
+                ]
+                .into_iter()
+                .map(str::to_string)
+            )
+            .is_err()
+        );
+        let planted = options(&[
+            "flight.insv",
+            "fit=1",
+            "span=1.2",
+            "search=1.0",
+            "seam=roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9",
+            "plant=roll:0.1,yaw:-0.2,pitch:0.3,cx:4,cy:-5",
+        ]);
+        assert_eq!(planted.plant, Some([0.1, -0.2, 0.3, 4.0, -5.0]));
+    }
+
+    #[test]
+    fn plant_recovers_through_the_same_observation_shape_as_fit() {
+        let wanted = [0.31, -0.17, 0.08, 0.43, -0.29];
+        let observations: Vec<_> = (0..6)
+            .map(|index| {
+                let x = index as f64 + 1.0;
+                Observation {
+                    name: format!("fixed-site-{index}"),
+                    displacement: Displacement::default(),
+                    covariance: Covariance::diagonal(0.01, 0.01),
+                    jacobian: Jacobian {
+                        epi: [1.0, x, x * x, (0.7 * x).sin(), (0.3 * x).cos()],
+                        perp: [x * x, 1.0, (0.5 * x).cos(), x, (0.9 * x).sin()],
+                    },
+                }
+            })
+            .collect();
+        let planted = super::planted_observations(&observations, wanted);
+        let solved = kjerag_spike::local_warp::fit(&planted)
+            .expect("well-spread sites constrain five knobs");
+        for (got, expected) in solved.knobs.into_iter().zip(wanted) {
+            assert!(
+                (got - expected).abs() < 1e-10,
+                "{got} instead of {expected}"
+            );
+        }
+        assert!(solved.rms < 1e-11);
     }
 
     #[test]

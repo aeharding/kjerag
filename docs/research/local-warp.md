@@ -185,8 +185,22 @@ empirical cut-off.
 ## Controls
 
 - A self-pair runs the whole tracer and is statistically zero.
-- A planted global five-knob change to lens 1 is recovered through the
-  delivered warm path at all references.
+- `fit=1 plant=roll:...,yaw:...,pitch:...,cx:...,cy:...` is the current
+  planted global-pose sanity control.  It first builds the five central
+  responses through independently warmed maps, then uses their prediction as
+  synthetic displacement at the exact fixed sites that passed raw
+  registration, retaining each measured full covariance.  The normal
+  assembly and shared-pose solver must recover the declared five native-unit
+  knobs.  This checks map-response/assembly/unit/covariance/fit plumbing and
+  reports the same condition number as the real fit.
+- It is deliberately **not** described as a raw-pixel pose recovery.  The
+  delivered lens planes are one physical capture, so changing a projection
+  map does not create a second capture with a perturbed lens pose.  Comparing
+  a perturbed map's resampling with baseline raw pixels would test a different
+  registration problem and could hide interpolation or content effects.
+  Thus `plant=` cannot validate raw registration, finite-difference
+  linearity, a condition threshold, or an applied warp; independently
+  captured/calibrated controls remain required for those claims.
 - A planted seam-local two-axis displacement is rejected by the global pose
   fit through the same tracer, including outside its support where it is
   exactly zero.
