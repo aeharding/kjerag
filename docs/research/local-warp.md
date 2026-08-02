@@ -140,6 +140,16 @@ texture, calculate a correspondence, identify an error as calibration rather
 than parallax, or authorize a warp.  They merely clear the former raw-overlap
 blocker for a predeclared 2-D registration experiment.
 
+The next opt-in raw observation check used the explicit May fit
+`roll:0.789,yaw:-2.171,pitch:-1.299,cx:-1.71,cy:-14.08` (rather than
+`seam=file`) and the same 1.20/1.00-degree rung.  The May BAD view retained
+149 two-axis readings of 153 declared sites, with 4 `NoPeak`, no aperture
+refusals, and no missing support.  The May GOOD view retained 117 of 135, with
+18 `NoPeak`, again no aperture or support refusals.  A no-peak site remains a
+reported ambiguity, not a reason to pick a different site.  These same-
+capture checks establish that two-dimensional raw observations are available;
+they neither pair a physical feature across views nor fit a pose.
+
 For a shared-pose comparison across captures, `seam=file` is not a valid
 baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
