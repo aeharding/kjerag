@@ -138,7 +138,7 @@ fn play(
         }
         .frame(options.camera(), Sampling::default(), options.size())?;
         each(&picture, reads.len())?;
-        let (along, _, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        let (along, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
         reads.push(Read {
             at,
             cells,
@@ -214,7 +214,7 @@ fn table(last: &Read) {
         }
         let degrees = f64::from(cell.disparity.to_degrees());
         let applied = applied(cell);
-        let floor = last.mapped.crossover_at(0.0, 0.0);
+        let floor = last.mapped.crossover_at(0.0);
         let cut = applied - kjerag_render::band::carried(applied, floor);
         println!(
             "{:>6.0} {:>9.3}d {:>10.2} {:>10} {:>9.3}d {:>10.2} {:>11.3} {:>9.3}d",
@@ -223,7 +223,7 @@ fn table(last: &Read) {
             degrees * VIEW_PX_PER_DEG,
             cell.metres()
                 .map_or_else(|| "-".to_owned(), |m| format!("{m:.1}")),
-            f64::from(last.mapped.crossover_at(applied, 0.0).to_degrees()),
+            f64::from(last.mapped.crossover_at(applied).to_degrees()),
             f64::from(cut.to_degrees()) * VIEW_PX_PER_DEG,
             cell.confidence,
             f64::from(cell.off_epi.to_degrees()),
@@ -241,7 +241,7 @@ fn table(last: &Read) {
 /// a doubled edge that much wide, on content that near.
 fn crossover(reads: &[Read]) {
     let last = reads.last().expect("play returns at least one frame");
-    let floor = last.mapped.crossover_at(0.0, 0.0);
+    let floor = last.mapped.crossover_at(0.0);
     // Over the whole run and not over the settled state, because a direction
     // is near field for the second or two its own gear is crossing the seam
     // and far field on either side of that. A table of where the circle ended
@@ -261,12 +261,12 @@ fn crossover(reads: &[Read]) {
     };
     let open = seen
         .iter()
-        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied, 0.0) > floor)
+        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied) > floor)
         .count();
     let frames = reads.len();
     let widest = seen
         .iter()
-        .map(|(_, _, applied)| last.mapped.crossover_at(*applied, 0.0))
+        .map(|(_, _, applied)| last.mapped.crossover_at(*applied))
         .fold(floor, f32::max);
     let worst = seen
         .iter()
@@ -302,7 +302,7 @@ fn crossover(reads: &[Read]) {
     // for: the widest few, with the frame and the azimuth each was read at.
     let mut widest_first: Vec<&(usize, usize, f32)> = seen
         .iter()
-        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied, 0.0) > floor)
+        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied) > floor)
         .collect();
     widest_first.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
     if !widest_first.is_empty() {
@@ -328,7 +328,7 @@ fn crossover(reads: &[Read]) {
                  yaw {yaw:.0} pitch {pitch:.0}",
                 reads[*frame].at.as_secs_f64(),
                 f64::from(applied.to_degrees()),
-                f64::from(last.mapped.crossover_at(*applied, 0.0).to_degrees()),
+                f64::from(last.mapped.crossover_at(*applied).to_degrees()),
                 cut(*applied) * VIEW_PX_PER_DEG,
             );
         }
@@ -540,8 +540,7 @@ fn flicker(reads: &[Read], options: &Options) {
     let open = (0..WATCHED)
         .filter(|direction| {
             let last = reads.last().expect("play returns at least one frame");
-            last.mapped.crossover_at(held(last, *direction) as f32, 0.0)
-                > last.mapped.crossover_at(0.0, 0.0)
+            last.mapped.crossover_at(held(last, *direction) as f32) > last.mapped.crossover_at(0.0)
         })
         .count();
     println!(
@@ -664,7 +663,7 @@ fn stepped_along(reads: &[Read], shake: f64) -> (f64, f64) {
 /// own tests for that).
 fn stepped_width(reads: &[Read], shake: f64) -> (f64, f64) {
     stepped_by(reads, |read, frame, direction| {
-        let opened = read.mapped.crossover_at(held(read, direction) as f32, 0.0);
+        let opened = read.mapped.crossover_at(held(read, direction) as f32);
         f64::from(opened) + shaken(frame, shake)
     })
 }

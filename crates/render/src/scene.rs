@@ -1136,9 +1136,6 @@ struct Band {
     /// The along-seam field fitted over the whole ring, dispatched beside the
     /// exposure pooling and over the same cells (issue #103, stage 5).
     pool_along: wgpu::ComputePipeline,
-    /// The additive term round the ring, as the smooth shape the picture is
-    /// actually drawn with (issue #103, stage 8).
-    pool_glare: wgpu::ComputePipeline,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1275,13 +1272,9 @@ impl ScenePipeline {
         else {
             return;
         };
-        let Some(mut watch) = self.band.aged(view.frames.timestamp) else {
+        let Some(watch) = self.band.aged(view.frames.timestamp) else {
             return;
         };
-        // The photometry held off reaches the measurement and not only the
-        // dispatch list, because since stage 8 the correction the picture is
-        // drawn with is written per direction by the measurement itself.
-        watch.hold = f32::from(u8::from(self.band.tone_held));
         queue.write_buffer(&self.band.watch, 0, watch.bytes());
         let mut encoder = device.create_command_encoder(&Default::default());
         // Only ever more than one under `band_repeats`, and then each in a pass
@@ -1314,11 +1307,8 @@ impl ScenePipeline {
             if !self.band.tone_held {
                 pass.set_pipeline(&self.band.pool);
                 pass.dispatch_workgroups(1, 1, 1);
-                pass.dispatch_workgroups(1, 1, 1);
             }
             pass.set_pipeline(&self.band.pool_along);
-            pass.dispatch_workgroups(1, 1, 1);
-            pass.set_pipeline(&self.band.pool_glare);
             pass.dispatch_workgroups(1, 1, 1);
         }
         queue.submit([encoder.finish()]);
@@ -1558,9 +1548,9 @@ impl ScenePipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Along, band::Glare, Vec<band::Cell>)> {
-        let (_, along, glare, cells) = self.band.read(device, queue)?;
-        Ok((along, glare, cells))
+    ) -> Fallible<(band::Along, Vec<band::Cell>)> {
+        let (_, along, cells) = self.band.read(device, queue)?;
+        Ok((along, cells))
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1656,7 +1646,6 @@ impl Band {
         let pipeline = compute("measure");
         let pool = compute("pool");
         let pool_along = compute("pool_along");
-        let pool_glare = compute("pool_glare");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1697,7 +1686,6 @@ impl Band {
             pipeline,
             pool,
             pool_along,
-            pool_glare,
             state,
             watch,
             group,
@@ -1745,7 +1733,7 @@ impl Band {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, band::Along, band::Glare, Vec<band::Cell>)> {
+    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1765,14 +1753,10 @@ impl Band {
         let float = |at: usize| {
             f32::from_ne_bytes([mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
         };
-        let tone = band::Tone::read(std::array::from_fn(|channel| float(4 * channel)), float(12));
+        let tone = band::Tone::read(float(0), float(4));
         let along = band::Along::read(
             std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
             float(band::ALONG_AT + 20),
-        );
-        let glare = band::Glare::read(
-            std::array::from_fn(|term| float(band::GLARE_AT + 4 * term)),
-            float(band::GLARE_AT + 60),
         );
         let cells = (0..band::AZIMUTHS)
             .map(|index| {
@@ -1785,16 +1769,12 @@ impl Band {
                     off_conf: float(at + 16),
                     tone: float(at + 20),
                     lit: float(at + 24),
-                    chroma: std::array::from_fn(|channel| float(at + 28 + 4 * channel)),
-                    hue_conf: float(at + 44),
-                    open: float(at + 48),
-                    offset: std::array::from_fn(|channel| float(at + 52 + 4 * channel)),
                 }
             })
             .collect();
         drop(mapped);
         readback.unmap();
-        Ok((tone, along, glare, cells))
+        Ok((tone, along, cells))
     }
 }
 
@@ -1996,29 +1976,21 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 // `textureSample` computes its own level from derivatives and needs uniform
 // control flow to do it, and every one of these textures has a single level
 // anyway.
-fn picture(mix: Blend, ratio: vec2<f32>, tone: mat2x3<f32>, lift: mat2x3<f32>) -> vec4<f32> {
+fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
-  // What the two lenses' colours have to be brought together by, per channel,
-  // split between them: a gain each (stages 3 and 7) and an offset each
-  // (stage 8). Exactly 1.0 and exactly 0.0 on every channel of both sides
-  // until something has been measured, so a picture with no reading behind it
-  // is the picture stage 2 drew. Both multiply and add to the RGB the two
-  // planes decode to rather than to the luma alone, which is what lets three
-  // numbers reach a hue at all.
-  //
-  // A gain cannot lift a black and an offset cannot scale a highlight, and the
-  // seam holds both: the difference between two lenses is 6.5 codes on 17-code
-  // soil and the same 6.5 codes is a different phenomenon on 190-code sky
-  // (issue #103, stage 8, docs/research/seam-blending.md).
+  // What the two lenses' exposures have to be brought together by, split
+  // between them (issue #103, stage 3). One uniform read for the whole draw,
+  // and exactly 1.0 on both sides until something has been measured, so the
+  // weights below are the weights this pass has always used and a picture
+  // with no reading behind it is the picture stage 2 drew.
+  let tone = tone_split();
   if mix.weights[0] > 0.0 {
-    rgb += mix.weights[0]
-      * (tone[0] * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x) + lift[0]);
+    rgb += (mix.weights[0] * tone.x) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += mix.weights[1]
-      * (tone[1] * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y) + lift[1]);
+    rgb += (mix.weights[1] * tone.y) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
     total += mix.weights[1];
   }
   // The room around the ball, written rather than painted: transparent black,
@@ -2045,40 +2017,6 @@ fn nv12(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f3
   );
 }
 
-// A pixel's own dither, in codes of 1, triangular and spatially decorrelated
-// (issue #103, stage 8).
-//
-// What is left after a difference is spread over sixty pixels is a ramp of a
-// fraction of a code per pixel, and an 8-bit picture cannot draw that: it draws
-// a staircase, whose treads are wide flat bands with hard edges between them.
-// That is the same artifact by another route, and the answer to it is the one
-// the recording industry settled on - put a little noise in before the
-// quantizer and the bands become grain.
-//
-// TRIANGULAR, from two independent samples, because uniform dither leaves the
-// quantization noise correlated with the signal and the banding faintly
-// visible; the sum of two uniforms does not. Both are the interleaved gradient
-// hash, which is the cheapest thing that looks like blue noise: its energy sits
-// at high spatial frequency, where an eye has the least of its own sensitivity,
-// where a flat random dither would put a third of its energy in the low
-// frequencies the banding is in.
-//
-// It is a function of the PIXEL and not of time, so it does not shimmer between
-// frames, and it is applied only across the blend region, so nothing outside
-// the handover is touched at all.
-fn ign(at: vec2<f32>) -> f32 {
-  return fract(52.9829189 * fract(0.06711056 * at.x + 0.00583715 * at.y));
-}
-
-fn dither(at: vec2<f32>, amount: f32) -> vec3<f32> {
-  if amount <= 0.0 {
-    return vec3<f32>(0.0);
-  }
-  // One code of 255 peak to peak, which is the size of the step being hidden.
-  let tri = ign(at) - ign(at + vec2<f32>(97.0, 71.0));
-  return vec3<f32>(amount * tri / 255.0);
-}
-
 fn linearize(c: vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92;
   let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
@@ -2092,22 +2030,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   // of the zoom (issue #47) is a fragment no lens has, and `picture` already
   // paints that. Nothing is sampled for it and no model is run.
   var mix: Blend;
-  // The constant alone until a ray has an azimuth to read the field at, which
-  // is the room around the ball and the two lens poles: `band_rest` answers
-  // for both and the fade answers zero there anyway.
-  var tone = tone_split();
-  var lift = mat2x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0));
-  var grain = 0.0;
   if look.w > 0.0 {
-    let at = band_bend(look.xyz);
-    mix = blend(look.xyz, at);
-    tone = colour_split(at);
-    lift = tone_lift(at);
-    // Dithered in proportion to how much is being ADDED here, and nowhere it
-    // adds nothing: the staircase this breaks up is the applied correction's
-    // own, so a picture with no correction behind it takes no noise and stays
-    // the picture it was. One code of what is applied is the whole of it.
-    grain = clamp(255.0 * max(max(abs(lift[0].r), abs(lift[0].g)), abs(lift[0].b)), 0.0, 1.0);
+    mix = blend(look.xyz, band_bend(look.xyz));
   }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What
@@ -2117,10 +2041,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[0].pixel),
     texel_ratio(mix.landings[1].pixel),
   );
-  let lens = picture(mix, ratio, tone, lift);
-  let noise = dither(in.pos.xy, grain * lens.a);
+  let lens = picture(mix, ratio);
   return vec4<f32>(
-    select(lens.rgb + noise, linearize(lens.rgb + noise), reframe.linearize > 0.5),
+    select(lens.rgb, linearize(lens.rgb), reframe.linearize > 0.5),
     lens.a,
   );
 }

@@ -23,8 +23,7 @@ mod stall;
 mod widget;
 
 pub use band::{
-    AZIMUTHS, Along, Cell, KEEP, PERP_DEG, Reading, Ring, Tone, depth_leak, ease, solve,
-    time_constant,
+    AZIMUTHS, Along, Cell, KEEP, PERP_DEG, Reading, Ring, Tone, depth_leak, ease, time_constant,
 };
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
@@ -34,7 +33,7 @@ pub use kjerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
 /// not collide with this crate's own `capture`, which is the screenshot one.
 pub use kjerag_meta::capture as capture_set;
 pub use kjerag_meta::{Foreign, Quat, Readout, Sweep};
-pub use projection::{Bend, Blend, CROSSOVER_DEG, Held, Landing, MAX_LENSES, Reframe, Rolling};
+pub use projection::{Bend, Blend, Held, Landing, MAX_LENSES, Reframe, Rolling};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, Harvest, SeamFit};

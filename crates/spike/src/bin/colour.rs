@@ -959,7 +959,7 @@ fn steps(field: &Field, options: &Options) {
          \twhat that is worth end to end over the {:.1} degree crossover the pass draws. a \n\
          \tstep that is one number everywhere across the overlap is reachable by one \n\
          \tcorrection; one that slopes is not, and needs a wider handover or a field.\n",
-        2.0 * f64::from(kjerag_render::CROSSOVER_DEG),
+        2.0 * CROSSOVER_DEG,
     );
     println!(
         "  {:<40} {:>10} {:>10} {:>10} {:>12}",
@@ -976,7 +976,7 @@ fn steps(field: &Field, options: &Options) {
             read[0].mean,
             read[1].mean,
             read[2].mean,
-            read[2].mean * 2.0 * f64::from(kjerag_render::CROSSOVER_DEG),
+            read[2].mean * 2.0 * CROSSOVER_DEG,
         );
     }
     if options.verbose {
@@ -1040,8 +1040,8 @@ fn rings(field: &Field, class: Class) {
             leaves(5),
             field.repeatability(class, channel),
             terms[0],
-            f64::from(terms[1]).hypot(f64::from(terms[2])),
-            f64::from(terms[3]).hypot(f64::from(terms[4])),
+            terms[1].hypot(terms[2]),
+            terms[3].hypot(terms[4]),
         );
     }
 }
@@ -1059,18 +1059,18 @@ fn basis(phi: f64) -> [f64; 5] {
 /// `terms` of 0 is no correction at all, which is what the readings themselves
 /// are worth. The solver is [`kjerag_render::band::solve`], the shipped pass's
 /// own, so what this scores is a fit the pass can actually make.
-fn ring_fit(by_azimuth: &[(f64, f64, f64)], terms: usize) -> ([f32; 5], f64) {
-    let mut normal = [[0.0f32; 5]; 5];
-    let mut right = [0.0f32; 5];
+fn ring_fit(by_azimuth: &[(f64, f64, f64)], terms: usize) -> ([f64; 5], f64) {
+    let mut normal = [[0.0f64; 5]; 5];
+    let mut right = [0.0f64; 5];
     for (phi, value, weight) in by_azimuth {
         let held = basis(*phi);
         for row in 0..5 {
             for column in 0..5 {
                 let inside = row < terms && column < terms;
                 normal[row][column] +=
-                    (f64::from(u8::from(inside)) * weight * held[row] * held[column]) as f32;
+                    f64::from(u8::from(inside)) * weight * held[row] * held[column];
             }
-            right[row] += (f64::from(u8::from(row < terms)) * weight * held[row] * value) as f32;
+            right[row] += f64::from(u8::from(row < terms)) * weight * held[row] * value;
         }
     }
     // The ridge keeps the untouched rows invertible and shrinks a term nothing
@@ -1078,14 +1078,14 @@ fn ring_fit(by_azimuth: &[(f64, f64, f64)], terms: usize) -> ([f32; 5], f64) {
     for (term, row) in normal.iter_mut().enumerate() {
         row[term] += 1.0;
     }
-    let fitted = kjerag_render::band::solve(normal, right);
+    let fitted = solve5(normal, right);
     let mut error = 0.0;
     let mut weight = 0.0;
     for (phi, value, held) in by_azimuth {
         let at: f64 = basis(*phi)
             .iter()
             .zip(fitted)
-            .map(|(term, coefficient)| term * f64::from(coefficient))
+            .map(|(term, coefficient)| term * coefficient)
             .sum();
         error += held * (value - at).powi(2);
         weight += held;
@@ -1243,8 +1243,8 @@ fn controls(fields: &[Field]) {
                 ring_fit(&by_azimuth, 1).1,
                 ring_fit(&by_azimuth, 3).1,
                 ring_fit(&by_azimuth, 5).1,
-                f64::from(terms[1]).hypot(f64::from(terms[2])),
-                f64::from(terms[3]).hypot(f64::from(terms[4])),
+                terms[1].hypot(terms[2]),
+                terms[3].hypot(terms[4]),
             );
         }
     }
@@ -1307,7 +1307,7 @@ fn profile(options: &Options) -> Fallible<()> {
     std::fs::create_dir_all(&out)?;
     let size = Size::new(options.size, options.size);
 
-    let draw = |held: bool| -> Fallible<(Picture, Reframe, kjerag_render::Tone, f32)> {
+    let draw = |held: bool| -> Fallible<(Picture, Reframe, kjerag_render::Tone)> {
         let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
         pipeline.hold_tone(held);
         let mut scene = Scene::still(
@@ -1337,72 +1337,29 @@ fn profile(options: &Options) -> Fallible<()> {
             .mapped(options.camera(), 1.0)
             .ok_or("no frame to map")?;
         let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
-        let (_, glare, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
-        // How much of the ring answered about COLOUR, which is not how much
-        // answered about geometry: the two are separate channels since stage 7
-        // and most of a sky seam is only ever the first.
-        let colours =
-            cells.iter().filter(|cell| cell.hue_conf > 0.0).count() as f32 / cells.len() as f32;
-        let open: f32 = cells.iter().map(|cell| cell.open).sum::<f32>() / cells.len() as f32;
-        let widest = cells.iter().map(|cell| cell.open).fold(0.0f32, f32::max);
-        // What the per-direction offsets look like round the ring, which is
-        // what stage 8 draws the seam with: the mean, the widest, and how many
-        // directions carry one at all.
-        let held: Vec<f32> = cells
-            .iter()
-            .filter(|cell| cell.hue_conf > 0.0)
-            .map(|cell| 255.0 * cell.offset[1])
-            .collect();
-        let mean = match held.is_empty() {
-            true => 0.0,
-            false => held.iter().sum::<f32>() / held.len() as f32,
-        };
-        let worst = held.iter().fold(0.0f32, |held, now| held.max(now.abs()));
-        // What is DRAWN is the five-term fit, not the per-direction reading:
-        // the per-direction form striped and the owner rejected it. Both are
-        // printed, so the fit can be checked against what it was fitted from.
-        let ring: Vec<f32> = (0..8)
-            .map(|turn| {
-                let phi = turn as f32 / 8.0 * std::f32::consts::TAU;
-                255.0 * glare.at(phi.cos(), phi.sin())[1]
-            })
-            .collect();
+        let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        // What the shipped state holds, which since this PR re-scoped is main's:
+        // one gain over the whole ring, and how much of the ring is behind it.
+        // The instrument reports it so a picture can be read beside the number
+        // that drew it; it no longer reports a per-direction anything, because
+        // the pass no longer has one.
+        let seen =
+            cells.iter().filter(|cell| cell.confidence > 0.0).count() as f32 / cells.len() as f32;
         println!(
-            "band:   measured per direction in G: mean {mean:+.2}, widest {worst:.2} codes over \n\
-             \t{} directions. DRAWN, the five-term fit at eight azimuths: {}\n\
-             \topenness mean {open:.3}, most open {widest:.3}, evidence {:.1} directions",
-            held.len(),
-            ring.iter()
-                .map(|v| format!("{v:+.2}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-            glare.evidence,
+            "band:   the shipped gain is {:+.5} ln, evidence {:.3}, {:.0} percent of the ring \n\
+             \tis correlating.",
+            tone.log_gain,
+            tone.evidence,
+            100.0 * seen,
         );
-        if std::env::var("KJERAG_CELLS").is_ok() {
-            println!("cells:  phi hue_conf open offsetR offsetG offsetB disparity_deg");
-            for (index, cell) in cells.iter().enumerate() {
-                println!(
-                    "cell {:>3} {:>7.1} {:>7.3} {:>6.3} {:>8.2} {:>8.2} {:>8.2} {:>8.3}",
-                    index,
-                    index as f32 / cells.len() as f32 * 360.0,
-                    cell.hue_conf,
-                    cell.open,
-                    255.0 * cell.offset[0],
-                    255.0 * cell.offset[1],
-                    255.0 * cell.offset[2],
-                    cell.disparity.to_degrees(),
-                );
-            }
-        }
         Ok((
             shot.ok_or("no frame decoded at that instant")?,
             mapped,
             tone,
-            colours,
         ))
     };
-    let (before, mapped, _, _) = draw(true)?;
-    let (after, _, tone, colours) = draw(false)?;
+    let (before, mapped, _) = draw(true)?;
+    let (after, _, tone) = draw(false)?;
 
     let stem = format!("{}-{}", options.stem(), options.tag);
     before.save(&gpu, &out.join(format!("{stem}-1-held.png")))?;
@@ -1413,27 +1370,17 @@ fn profile(options: &Options) -> Fallible<()> {
     marked(&after, &mapped, size).save(&gpu, &out.join(format!("{stem}-4-marked.png")))?;
     let split = tone.split();
     println!(
-        "\nwrote three pictures into {} at yaw {:.2}, pitch {:.2}, fov {:.2}, {} frames in.\n\
-         {}\ngain:   R {:+.5} G {:+.5} B {:+.5} ln, evidence {:.3}, {:.0} percent of the ring \n\
-         \thad a colour to read. lens 0 is multiplied by {:.5} {:.5} {:.5} and lens 1 by \n\
-         \t{:.5} {:.5} {:.5}.",
+        "\nwrote four pictures into {} at yaw {:.2}, pitch {:.2}, fov {:.2}, {} frames in.\n\
+         {}\ngain:   {:+.5} ln; lens 0 is multiplied by {:.5} and lens 1 by {:.5}.",
         out.display(),
         options.yaw,
         options.pitch,
         options.fov,
         options.count.max(1),
         after.against(&before).report(),
-        tone.log_gain[0],
-        tone.log_gain[1],
-        tone.log_gain[2],
-        tone.evidence,
-        100.0 * colours,
-        split[0][0],
-        split[0][1],
-        split[0][2],
-        split[1][0],
-        split[1][1],
-        split[1][2],
+        tone.log_gain,
+        split[0],
+        split[1],
     );
     // THE FIELD'S OWN INTERIOR, which is what the owner rejected the branch
     // over and what nothing here could see (issue #103, stage 8).
@@ -1480,8 +1427,7 @@ fn profile(options: &Options) -> Fallible<()> {
 /// is the scene's.
 fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
     let seam = distances(reframe, size, 2, (0.0, 0.0, 1.0, 1.0));
-    let crossover = f64::from(kjerag_render::CROSSOVER_DEG) / 2.0;
-    let widest = f64::from(kjerag_render::band::WIDEST_DEG);
+    let crossover = CROSSOVER_DEG / 2.0;
     let overlap = 7.22;
     let rgba = picture
         .rgba
@@ -1503,7 +1449,7 @@ fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
             if at(crossover) {
                 return [60, 220, 255, 255];
             }
-            if at(widest) || at(overlap) {
+            if at(overlap) {
                 return [255, 230, 60, 255];
             }
             [pixel[0], pixel[1], pixel[2], 255]
@@ -1901,6 +1847,41 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
 /// very spacing it is looking for.
 const SWEEP: usize = 256;
 
+/// The crossover the projection ships, in degrees.
+///
+/// Mirrored here rather than imported: it is private to its own module, and an
+/// instrument that reaches into a shipped crate's internals is one that cannot
+/// be run against a second build of that crate - which is exactly what this
+/// instrument is for. `the_crossover_is_the_width_it_says_it_is` is what keeps
+/// the two honest.
+const CROSSOVER_DEG: f64 = 2.0;
+
+/// A small symmetric positive definite system, by Gaussian elimination with no
+/// pivoting.
+///
+/// The instrument's own, for the same reason.
+fn solve5(mut normal: [[f64; 5]; 5], mut right: [f64; 5]) -> [f64; 5] {
+    for pivot in 0..5 {
+        let leading = normal[pivot];
+        for row in (pivot + 1)..5 {
+            let factor = normal[row][pivot] / leading[pivot];
+            for (column, above) in leading.iter().enumerate().skip(pivot) {
+                normal[row][column] -= factor * above;
+            }
+            right[row] -= factor * right[pivot];
+        }
+    }
+    let mut out = [0.0f64; 5];
+    for row in (0..5).rev() {
+        let mut total = right[row];
+        for column in (row + 1)..5 {
+            total -= normal[row][column] * out[column];
+        }
+        out[row] = total / normal[row][row];
+    }
+    out
+}
+
 /// How far off the seam the interior is sampled, in degrees: away from the
 /// handover itself, out where a wide correction is the only thing that can be
 /// changing the picture.
@@ -2060,10 +2041,7 @@ fn interior(
             right[row] += basis[row] * codes;
         }
     }
-    let fitted = kjerag_render::solve(
-        normal.map(|row| row.map(|v| v as f32)),
-        right.map(|v| v as f32),
-    );
+    let fitted = solve5(normal, right);
     let smooth_at = |phi: f64| -> f64 {
         let basis = [
             1.0,
@@ -2072,9 +2050,7 @@ fn interior(
             (2.0 * phi).cos(),
             (2.0 * phi).sin(),
         ];
-        (0..5)
-            .map(|term| f64::from(fitted[term]) * basis[term])
-            .sum()
+        (0..5).map(|term| fitted[term] * basis[term]).sum()
     };
     let count = seen.len() as f64;
     let mut applied = 0.0;
@@ -2285,29 +2261,11 @@ fn trace(options: &Options) -> Fallible<()> {
         }
         .frame(options.camera(), Sampling::default(), size)?;
         let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
-        let (_, _, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        // The shipped gain, which since this PR re-scoped is the only
+        // photometric state the pass has. The columns that watched a
+        // per-direction field went with the field.
         let mut row = [0.0f64; 16];
-        for (channel, gain) in tone.log_gain.iter().enumerate() {
-            row[channel] = f64::from(*gain);
-        }
-        // The per-direction offsets at four azimuths a quarter turn apart,
-        // which is what a view sees one of, AS A RATIO against the brightness
-        // they sit on: a state applied in codes has to be watched in the space
-        // an eye reads it in, which is the whole of stage 8's method (issue
-        // #103, stage 8).
-        for turn in 0..4 {
-            let cell = &cells[turn * cells.len() / 4];
-            let [low, _] = cell.decoded();
-            for channel in 0..3 {
-                row[3 + 3 * turn + channel] = match low[channel] > 0.0 {
-                    true => f64::from(cell.offset[channel] / low[channel]),
-                    false => 0.0,
-                };
-            }
-        }
-        // And how wide the handover is at one of them, in degrees, which is
-        // the other per-direction state stage 8 adds.
-        row[15] = f64::from(cells[0].open);
+        row[0] = f64::from(tone.log_gain);
         held.push(row);
         if held.len() >= options.count || !scene.advance()? {
             break;

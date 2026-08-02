@@ -163,7 +163,7 @@ fn main() -> Fallible<()> {
     let mapped = scene
         .mapped(options.camera(), 1.0)
         .ok_or("no frame to map")?;
-    let (along, _, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+    let (along, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
     let (_, at) = scene.frame().ok_or("no frame")?;
     println!(
         "played: {frames} frame(s), ending at {:.3} s, band {}",
@@ -224,7 +224,7 @@ impl Field {
         Self {
             size,
             past,
-            half_deg: 0.5 * f64::from(mapped.crossover_at(0.0, 0.0).to_degrees()),
+            half_deg: 0.5 * f64::from(mapped.crossover_at(0.0).to_degrees()),
         }
     }
 

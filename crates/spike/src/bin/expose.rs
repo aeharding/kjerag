@@ -1182,11 +1182,11 @@ fn render(options: &Options) -> Fallible<()> {
         options.pitch,
         options.fov,
         options.count.max(1),
-        tone.luma_gain(),
-        100.0 * (f64::from(tone.luma_gain()).exp() - 1.0),
+        tone.log_gain,
+        100.0 * (f64::from(tone.log_gain).exp() - 1.0),
         tone.evidence,
-        tone.split()[0][1],
-        tone.split()[1][1],
+        tone.split()[0],
+        tone.split()[1],
         after.against(&before).report(),
     );
     for (name, picture) in [("before", &before), ("after", &after)] {
@@ -1419,7 +1419,7 @@ fn trace(options: &Options) -> Fallible<()> {
         let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
         held.push((
             at.as_secs_f64(),
-            f64::from(tone.luma_gain()),
+            f64::from(tone.log_gain),
             f64::from(tone.evidence),
         ));
         if held.len() >= options.count || !scene.advance()? {
