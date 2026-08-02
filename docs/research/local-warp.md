@@ -45,6 +45,29 @@ two-axis reading. Terrain also makes the old wide `step` window non-absolute;
 the close window and the *difference* between the same view under a controlled
 perturbation are the horizon acceptance reading.
 
+## Current bounded probe
+
+The first binary is deliberately narrower than the eventual paired-view fit:
+
+```sh
+cargo run --release -p kjerag-spike --bin local-warp -- <file.insv> \
+  time=50.117 warm=2.0 yaw=106.98 pitch=0.75 fov=62.79 lock=1
+```
+
+It runs the same warmed `Scene`/render traversal as `step` to locate the
+visible `body.z = 0` seam contour, then discards the rendered pixels. One
+candidate per camera-frame seam azimuth bin is tested against the synchronized
+raw lens planes. A candidate must have a complete angular patch in both lenses
+at the candidate offset; no rectangle is zero-filled. The selected patch is
+the strongest two-axis raw-lens registration in the baseline-derived
+`[perp, epi]` frame, and reports its covariance and structure-tensor condition.
+A rank-deficient edge is refused for the aperture problem.
+
+This does **not** yet make a shared pose Jacobian, establish an empirically
+calibrated condition threshold, or infer/apply a warp. Its uncertainty is the
+local linearized luma residual only; repeatability and raw-versus-scene PTS
+agreement remain explicit follow-up controls.
+
 ## Controls
 
 - A self-pair runs the whole tracer and is statistically zero.
