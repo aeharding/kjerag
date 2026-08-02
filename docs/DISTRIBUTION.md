@@ -1111,14 +1111,8 @@ the OSTree objects:
 - `index.html`, because the root of the domain is otherwise a 404 and the
   domain is the thing people are given.
 
-**And two are generated**, because they carry the public half of the signing
-key and a committed copy would go stale the day it rotates:
-`kjerag.flatpakrepo` (`Title`, `Url`, `GPGKey`) adds the remote, and
-`dev.harding.Kjerag.flatpakref` (the same plus `Name`, `Branch=stable`,
-`SuggestRemoteName=kjerag`, `RuntimeRepo=flathub`, `IsRuntime=false`) installs
-the app and adds the remote in one click. `RuntimeRepo` is what lets that work
-on a machine that has never had Flathub configured: the app is ours, the
-runtime under it is not.
+**And the rest is `scripts/pages-site.sh`**, which §4.5 is about: the icon, the
+two descriptor files, and the repository's own title.
 
 Three things to know before touching this.
 
@@ -1183,6 +1177,9 @@ $ flatpak remotes | grep kjerag
 kjerag   user   https://kjerag.harding.dev/
 ```
 
+That file is `stable.flatpakref` since 2026-08-01 (§4.5); the transcript is
+what was run then.
+
 One thing to expect: **GitHub Pages answered one pull with HTTP 503** and the
 same command succeeded on retry a minute later. It is a static host with a
 free tier, not a CDN anyone is paying for.
@@ -1230,6 +1227,76 @@ from.
 point of naming it in the manifest rather than on a command line: a machine
 that took a bundle and later adds the remote has one Kjerag on it, and
 `flatpak update` reaches it.
+
+### 4.5 What a software centre reads, and when
+
+The owner opened the downloaded `.flatpakref` in COSMIC Store on 2026-08-01
+and got a page that reads as sketchy: a generic placeholder icon, no summary,
+no description, and the developer given as "Kjerag Developers". Then he
+installed it and the source read `kjerag-origin`. Both are the same fact from
+two sides, and the fact is that **a Store reads a different file before and
+after the remote is trusted**, and until this change we filled in neither.
+
+**Before**, it has the `.flatpakref` and nothing else. No appstream branch, no
+metainfo, no icon: the remote does not exist yet, so nothing in the repository
+is reachable. `flatpakref(5)` documents four keys for exactly that moment,
+`Comment`, `Description`, `Icon` and `Homepage`, and we sent none of them.
+COSMIC Store 1.5.0 parses `Url`, `Branch`, `Title`, `Comment` and
+`Description` out of the group (strings in the shipped binary), and
+"Kjerag Developers" is its own fallback, `app-developers = {$app} Developers`
+in its translations, for a page with no developer to name.
+
+**After**, the app's page comes from the repository's `appstream2` ref, and
+that half was already right. Measured against the live repository into a
+scratch `FLATPAK_USER_DIR` on 2026-08-01: cached icons at 48, 64 and 128 with
+their scale-2 variants, both screenshots with the dimensions `appstreamcli`
+read off them, the whole description, and
+`<developer_name>Alex Harding</developer_name>` written beside the AppStream
+1.0 `<developer>` element by the compose step, which is what a client reading
+the legacy tag needs. Nothing in the metainfo had to change for it.
+
+**The source line is the repository's own**, and it comes from the summary.
+Two clients name the remote differently and both were measured against
+scratch installations: `flatpak install --from` takes `SuggestRemoteName` as
+it stands and calls it `kjerag`, while `flatpak_transaction_add_install_flatpakref`,
+which is the call COSMIC Store makes, appends `-origin` and marks the remote
+`xa.noenumerate`. Neither sets a title. So the name is the client's business
+and the title is ours: `flatpak build-update-repo --title "Kjerag (stable)"`
+writes it into the summary, a client copies it into the remote's config at its
+next metadata refresh, and the Store shows that instead. Measured end to end,
+including on a remote created the way the owner's was:
+
+```
+$ flatpak remote-modify --user --update-metadata kjerag-origin
+$ flatpak remotes --user --columns=name,title,comment
+kjerag-origin   Kjerag (stable)   360 video player
+```
+
+**`scripts/pages-site.sh` is all of it**, run by the pages job against the
+repository flatter just built. It reads the summary and the first description
+paragraph out of `resources/dev.harding.Kjerag.metainfo.xml`, so the app is
+described once and the descriptors, the repository title and the app page
+cannot disagree. It writes `icon.png` from the 256px raster, the repository
+file `kjerag.flatpakrepo`, and the ref file, which is named after the channel
+rather than the app: `stable.flatpakref`, because the domain already says
+which app this is and a second channel would want a name of its own (owner,
+2026-08-01).
+
+**And `.github/workflows/site.yml` republishes all of it without a release.**
+A tag builds the app twice for twenty minutes, and none of that is needed to
+fix a description: the OSTree objects are the ones the last tag published and
+they are fine. The workflow checks out the Pages branch, runs the same script
+against it, and deploys it back. `flatpak build-update-repo` rewrites the
+summary in place and leaves the appstream branch byte-identical, measured by
+diffing what a client pulls from a modified clone against what it pulls from
+the live site. Before it deploys, it resolves both arches' refs to commit
+objects that are present and lists the repository through a `file://` remote
+using the imported key, because the deploy replaces the branch and half a
+checkout would publish half a repository.
+
+One thing it cannot do: **the app's own AppStream data lives inside the built
+commit**. A changed metainfo reaches the descriptors and the summary on a
+dispatch, and the installed app's page only at the next tag.
 
 ---
 

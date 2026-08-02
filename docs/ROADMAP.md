@@ -557,6 +557,28 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-01 **The descriptors describe the app, and the channel is named**
+  (owner, from a screenshot of COSMIC Store). The `.flatpakref` carried
+  plumbing keys only, so the page a Store draws before the remote is trusted
+  had a placeholder icon, no summary and "Kjerag Developers" on it, and the
+  repository summary carried no title, so an installed copy said its source
+  was `kjerag-origin`. Both are filled in now from the metainfo by
+  `scripts/pages-site.sh`, the repository calls itself `Kjerag (stable)`, and
+  the ref file is named for the channel: `stable.flatpakref`. The half that
+  was already right is the appstream branch, which had the icons, the
+  screenshots and the developer name all along and was simply not reachable
+  yet at the moment the owner was looking (docs/DISTRIBUTION.md 4.5).
+
+  **And a dispatch republishes it without a tag**
+  (`.github/workflows/site.yml`): the objects the last release published are
+  fine, and rebuilding the app twice to fix a sentence is twenty minutes
+  spent on nothing.
+
+  **The summary is "360 video player"** and the keywords name cameras Kjerag
+  refuses (GoPro, Osmo 360, Max) on purpose: somebody with one should find
+  the app, meet the refusal that names their format, and send a clip toward
+  support. The description says which cameras work today, mirroring the
+  README's table, so that is an invitation rather than a bait.
 - 2026-08-01 **The seam probe stops assuming the camera knows where its own
   lenses point** (issue #130, branch `fix/130-x2-fit`,
   docs/research/seam-two-axis.md 11). The owner's ONE X2 could never be
@@ -591,7 +613,7 @@ live, no keyframe UI ever.
   `kjerag.harding.dev`** (issue #137, owner). The same version tag that
   attaches two bundles to a GitHub Release now also builds, signs and
   publishes an OSTree repository on GitHub Pages, so installing is one click
-  on `dev.harding.Kjerag.flatpakref` and every release after it arrives
+  on `stable.flatpakref` and every release after it arrives
   through `flatpak update`. A bundle is a copy of a build; a remote is a
   subscription, and only one of those keeps a machine current.
 

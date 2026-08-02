@@ -3,6 +3,10 @@
   The page a browser gets at the root of the Flatpak repository, which is
   otherwise a directory of OSTree objects and a 404. Everything a person needs
   is the one link; the two commands are for anyone who would rather type.
+
+  icon.png is written beside this file by scripts/pages-site.sh, which is also
+  what points the descriptors' Icon key at it: one icon, one URL, served from
+  the domain the install comes from.
 -->
 <html lang="en">
   <head>
@@ -19,6 +23,7 @@
         padding: 0 1.5rem;
       }
       img { width: 96px; height: 96px; }
+      p.summary { font-size: 1.2rem; margin-top: -0.5rem; opacity: 0.8; }
       a.install {
         background: #4a90d9;
         border-radius: 6px;
@@ -38,11 +43,12 @@
     </style>
   </head>
   <body>
-    <img src="https://raw.githubusercontent.com/aeharding/kjerag/main/resources/icons/hicolor/256x256/apps/dev.harding.Kjerag.png" alt="">
+    <img src="icon.png" alt="">
     <h1>Kjerag</h1>
+    <p class="summary">360 video player</p>
     <p>Native 360&deg; video player for the COSMIC desktop. Open an Insta360
       <code>.insv</code> straight off the camera and press play.</p>
-    <p><a class="install" href="dev.harding.Kjerag.flatpakref">Install Kjerag</a></p>
+    <p><a class="install" href="stable.flatpakref">Install Kjerag</a></p>
     <p>Or add the repository and install by name:</p>
     <pre><code>flatpak remote-add --if-not-exists kjerag https://kjerag.harding.dev/kjerag.flatpakrepo
 flatpak install kjerag dev.harding.Kjerag</code></pre>
