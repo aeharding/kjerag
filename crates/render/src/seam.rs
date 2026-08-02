@@ -207,6 +207,28 @@ struct Grid {
 }
 
 impl Grid {
+    /// A grid from one lens's answers about `2 * half + 1` directions each
+    /// way, in the order [`sample`] asks for them: `None` where this lens has
+    /// no picture of that direction.
+    fn of(half: (isize, isize), taps: &[Option<f64>]) -> Self {
+        let columns = 2 * half.1 + 1;
+        let width = (columns + 1) as usize;
+        let mut holes = vec![0; ((2 * half.0 + 2) * (columns + 1)) as usize];
+        for (index, tap) in taps.iter().enumerate() {
+            let (row, column) = (index / columns as usize + 1, index % columns as usize + 1);
+            holes[row * width + column] = u32::from(tap.is_none())
+                + holes[(row - 1) * width + column]
+                + holes[row * width + column - 1]
+                - holes[(row - 1) * width + column - 1];
+        }
+        Self {
+            along: half.0,
+            across: half.1,
+            luma: taps.iter().map(|tap| tap.unwrap_or(0.0)).collect(),
+            holes,
+        }
+    }
+
     fn at(&self, i: isize, j: isize) -> f64 {
         self.luma[((i + self.along) * (2 * self.across + 1) + (j + self.across)) as usize]
     }
@@ -281,10 +303,7 @@ fn sample(
     half: (isize, isize),
     step: f64,
 ) -> Grid {
-    let (rows, columns) = (2 * half.0 + 1, 2 * half.1 + 1);
-    let mut luma = Vec::with_capacity((rows * columns) as usize);
-    let mut holes = vec![0; ((rows + 1) * (columns + 1)) as usize];
-    let width = (columns + 1) as usize;
+    let mut taps = Vec::with_capacity(((2 * half.0 + 1) * (2 * half.1 + 1)) as usize);
     for i in -half.0..=half.0 {
         for j in -half.1..=half.1 {
             let (a, b) = (i as f64 * step, j as f64 * step);
@@ -292,24 +311,15 @@ fn sample(
                 at.centre[axis] + at.along[axis] * a + at.across[axis] * b
             }));
             let landing = reframe.project(lens, ray.map(|c| c as f32));
-            let seen = landing
-                .inside
-                .then(|| plane.at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1])))
-                .flatten();
-            luma.push(seen.unwrap_or(0.0));
-            let (row, column) = ((i + half.0 + 1) as usize, (j + half.1 + 1) as usize);
-            holes[row * width + column] = u32::from(seen.is_none())
-                + holes[(row - 1) * width + column]
-                + holes[row * width + column - 1]
-                - holes[(row - 1) * width + column - 1];
+            taps.push(
+                landing
+                    .inside
+                    .then(|| plane.at(f64::from(landing.pixel[0]), f64::from(landing.pixel[1])))
+                    .flatten(),
+            );
         }
     }
-    Grid {
-        along: half.0,
-        across: half.1,
-        luma,
-        holes,
-    }
+    Grid::of(half, &taps)
 }
 
 /// Where one patch's correlation peaked, in grid steps, and how well it
@@ -496,7 +506,7 @@ pub fn acquired(
         ..*probe
     };
     let thinned: Vec<Where> = ring.iter().step_by(ACQUIRE_EVERY).copied().collect();
-    let mut along: Vec<f64> = read_ring_centred(
+    let along = read_ring_centred(
         reframe,
         planes,
         &thinned,
@@ -509,6 +519,12 @@ pub fn acquired(
     .filter(|found| found.r >= probe.keep)
     .map(|found| found.along)
     .collect();
+    centred_on(along, probe)
+}
+
+/// The rule [`acquired`] applies to what it read: the median in whole degrees,
+/// as grid steps, and nought for a ring the window already reaches.
+fn centred_on(mut along: Vec<f64>, probe: &Probe) -> Option<isize> {
     if along.len() < ACQUIRE_NEEDED {
         return None;
     }
@@ -1478,6 +1494,145 @@ mod tests {
     use super::*;
 
     use crate::projection::tests::{FRAME, fixture_lenses};
+
+    // ------------------------------------------ the patch and the search
+    //
+    // Issue #130: a camera whose factory extrinsic is degrees out could never
+    // be fitted at all. These four are the two faults that made that true,
+    // each in the smallest arrangement that shows it, with the projection and
+    // the pictures taken out: a `Grid` is a rectangle of samples and a hole is
+    // a sample a lens has no picture of, whatever the geometry that put it
+    // there.
+
+    /// One lens's rectangle: `half` steps either side of centre, filled from
+    /// `luma`, with the samples `hole` marks missing.
+    fn grid(
+        half: (isize, isize),
+        luma: impl Fn(isize, isize) -> f64,
+        hole: impl Fn(isize, isize) -> bool,
+    ) -> Grid {
+        let mut taps = Vec::new();
+        for i in -half.0..=half.0 {
+            for j in -half.1..=half.1 {
+                taps.push((!hole(i, j)).then(|| luma(i, j)));
+            }
+        }
+        Grid::of(half, &taps)
+    }
+
+    /// Something with a correlation peak in it and no periodicity to find a
+    /// second one at: two ramps and a hash, which is what a hillside and a
+    /// treeline are to a correlator.
+    fn texture(i: isize, j: isize) -> f64 {
+        let (x, y) = (i as f64, j as f64);
+        128.0
+            + 9.0 * (x * 0.7).sin()
+            + 7.0 * (y * 0.45).cos()
+            + 3.0 * ((i * 7 + j * 13) % 11) as f64
+    }
+
+    /// A patch is refused for where **it** landed, not for where the widest
+    /// candidate landed. The whole search rectangle leaves the picture here,
+    /// which is the ONE X2's every azimuth: 157 of 432 tries, against 0 on a
+    /// camera whose lenses point where it says.
+    #[test]
+    fn a_candidate_is_refused_for_its_own_landing_and_not_its_neighbours() {
+        let patch = (3, 3);
+        let search = (0, 8);
+        let half = (patch.0 + search.0, patch.1 + search.1);
+        // The overlap band runs out five steps past the patch, which no
+        // rectangle covering the whole search can stay inside.
+        let back = grid(half, texture, |_, j| j > 5);
+        assert!(
+            !back.whole(0, 0, half),
+            "the rectangle holding the search is inside the picture, so there is nothing to show"
+        );
+        assert!(
+            back.whole(0, 0, patch),
+            "the patch itself is off the picture"
+        );
+        assert!(
+            back.whole(0, 2, patch),
+            "a candidate clear of the holes is refused"
+        );
+        assert!(
+            !back.whole(0, 4, patch),
+            "a candidate over the holes is kept"
+        );
+    }
+
+    /// And the search finds the shift anyway, on a rectangle the old rule
+    /// refused outright.
+    #[test]
+    fn the_search_reads_a_patch_the_overlap_band_cuts_short() {
+        let patch = (3, 3);
+        let search = (4, 8);
+        let half = (patch.0 + search.0, patch.1 + search.1);
+        let shift = (2, -3);
+        let front = grid(patch, texture, |_, _| false);
+        let back = grid(half, |i, j| texture(i - shift.0, j - shift.1), |_, j| j > 5);
+        let peak = best_shift(&front, &back, search, patch, 0).expect("nothing was tried at all");
+        assert!(!peak.pinned, "the peak came back pinned");
+        assert!(
+            (peak.along - shift.0 as f64).abs() < 0.5 && (peak.across - shift.1 as f64).abs() < 0.5,
+            "read {:.2}, {:.2} of an injected {}, {}",
+            peak.along,
+            peak.across,
+            shift.0,
+            shift.1,
+        );
+    }
+
+    /// A shift outside the window is refused rather than reported wrong, and
+    /// the window moved onto it reads it. This is the ONE X2's other half: 2.1
+    /// to 2.9 degrees along a window of 2.0, so every azimuth peaked against
+    /// the limit.
+    #[test]
+    fn a_shift_outside_the_window_is_refused_until_the_window_moves_onto_it() {
+        let patch = (3, 3);
+        let search = (4, 4);
+        let centre = 9;
+        let half = (patch.0 + search.0 + centre, patch.1 + search.1);
+        let front = grid(patch, texture, |_, _| false);
+        let back = grid(half, |i, j| texture(i - centre, j), |_, _| false);
+        let missed = best_shift(&front, &back, search, patch, 0).expect("nothing was tried");
+        assert!(
+            missed.pinned,
+            "a shift {centre} steps out was reported as {:.2} from a window of {}",
+            missed.along, search.0,
+        );
+        let found = best_shift(&front, &back, search, patch, centre).expect("nothing was tried");
+        assert!(
+            !found.pinned && (found.along - centre as f64).abs() < 0.5,
+            "the window moved onto the shift read {:.2}, pinned {}",
+            found.along,
+            found.pinned,
+        );
+    }
+
+    /// The window moves only when it cannot reach where the ring is, and one
+    /// azimuth's false peak cannot move it: the whole point of the median.
+    #[test]
+    fn the_window_moves_only_for_a_ring_it_cannot_reach() {
+        let probe = Probe::default();
+        let steps = |deg: f64| (deg / probe.step) as isize;
+        assert_eq!(
+            centred_on(vec![0.4; 5], &probe),
+            Some(0),
+            "a ring inside the window moved"
+        );
+        assert_eq!(centred_on(vec![2.6; 5], &probe), Some(steps(3.0)));
+        assert_eq!(
+            centred_on(vec![2.6, 2.5, -5.9, 2.7, 2.4], &probe),
+            Some(steps(3.0)),
+            "one wild azimuth moved the window",
+        );
+        assert_eq!(
+            centred_on(vec![2.6; ACQUIRE_NEEDED - 1], &probe),
+            None,
+            "a frame with too little on its seam answered anyway",
+        );
+    }
 
     /// The seam as a capture with content all the way round it would read it,
     /// if the camera's calibration were wrong by `error` on lens 1.
