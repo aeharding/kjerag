@@ -200,6 +200,16 @@ assigned a made-up depth.  No depth-invariance claim is possible from this
 count alone.  The next report uses predeclared near (under 3 m), mid (3--10
 m), and far (at least 10 m) strata and retains the unplaceable population.
 
+The fixed-stratum evolution result is adverse to a static local warp on both
+May sides.  BAD's four-transition means were near `+0.3872`, mid `+0.2712`,
+and far `-0.0119` degrees on the epipolar axis (4, 7, and 3 anchor tracks).
+GOOD independently gave `+0.3417`, `+0.2779`, and `+0.0532` degrees (9, 18,
+and 10 anchors).  The populations are small and the forward temporal closure
+control remains outstanding, so this is not a final physical measurement;
+it is already sufficient to **refuse** deriving an applied camera-frame warp
+from the current raw residual.  A static calibrated displacement may not be
+fitted to an effect that changes with the proxy for scene depth.
+
 For a shared-pose comparison across captures, `seam=file` is not a valid
 baseline: it fits each flight from its own scene and can absorb parallax.  The
 future multi-capture invocation must receive one explicit stored/pooled seam
