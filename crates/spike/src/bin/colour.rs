@@ -1420,6 +1420,31 @@ fn profile(options: &Options) -> Fallible<()> {
         split[1][1],
         split[1][2],
     );
+    // THE FIELD'S OWN INTERIOR, which is what the owner rejected the branch
+    // over and what nothing here could see (issue #103, stage 8).
+    println!(
+        "\n=== the applied field, {} to {} degrees off the seam ===",
+        INTERIOR.0, INTERIOR.1,
+    );
+    match interior(&before, &after, &mapped, size, 0.0) {
+        Some(read) => println!("  what is drawn        {}", read.report()),
+        None => println!("  not enough of the interior is in this view"),
+    }
+    println!("  controls:");
+    if let Some(read) = interior(&before, &before, &mapped, size, 0.0) {
+        println!(
+            "    nothing applied at all                {}",
+            read.report()
+        );
+    }
+    for planted in [0.5f64, 2.0] {
+        if let Some(read) = interior(&before, &before, &mapped, size, planted) {
+            println!(
+                "    a {planted:.1} code ripple, 8 cycles round the ring   {}",
+                read.report(),
+            );
+        }
+    }
     for (name, picture) in [("the band held off", &before), ("as it draws", &after)] {
         println!("\n=== {name} ===");
         across_seam(&mapped, picture, size, options.window);
@@ -1849,6 +1874,210 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
             100.0 * want,
         );
     }
+}
+
+// -------------------------------------------------- the field's own interior
+
+/// How many azimuth bins the applied correction is read over, round the seam
+/// circle.
+///
+/// Twice the [`kjerag_render::AZIMUTHS`] the field is measured at, so a stripe
+/// one cell wide has two bins to be seen in and the statistic cannot alias the
+/// very spacing it is looking for.
+const SWEEP: usize = 256;
+
+/// How far off the seam the interior is sampled, in degrees: away from the
+/// handover itself, out where a wide correction is the only thing that can be
+/// changing the picture.
+const INTERIOR: (f64, f64) = (4.0, 60.0);
+
+/// How dark "dark content" is, in codes of 255.
+///
+/// An ADDITIVE correction is a ratio of whatever it is added to, so a code on
+/// 18-code soil is five percent and the same code on 190-code sky is a half of
+/// one. The owner's streaks are on ploughed soil at sunset and every one of his
+/// rejections has been on dark content; a statistic that averages the two
+/// together is the same mistake stage 3 made in the other direction.
+const DARK: f64 = 64.0;
+
+/// **What the whole acceptance layer was blind to, by construction** (issue
+/// #103, stage 8, after the owner rejected the branch).
+///
+/// Every statistic in this file straddles the seam. That measures the handover
+/// and says nothing at all about what the correction does to the picture it is
+/// painted over, and the owner's rejection was exactly that: *"there's weird
+/// artifacts extending down and up"* - dark streaks across the soil, running
+/// away from the seam. A per-direction field applied over a wide support paints
+/// each direction's own value along the whole sweep of that direction, so a
+/// difference between neighbouring directions that is noise becomes a STRIPE.
+/// It is stage 5's scalloping, reborn on the photometric axis, and nothing here
+/// could see it.
+///
+/// This reads the applied correction itself - the drawn picture minus the same
+/// picture with the photometry held off, which is the field and nothing else -
+/// at a band of angles AWAY from the handover, binned by the azimuth the field
+/// is indexed by. What it reports is how much of that field is **not** smooth
+/// round the ring: the rms of what a five-term harmonic cannot describe,
+/// divided by the brightness it sits on, in Weber percent.
+///
+/// A smooth field reads zero however large it is. A striped one reads its
+/// stripes.
+#[derive(Clone, Copy, Debug, Default)]
+struct Interior {
+    /// The applied correction's mean size over the band, in codes.
+    applied: f64,
+    /// What is smooth round the ring, as Weber percent: the five-term fit.
+    smooth: f64,
+    /// What is NOT, as Weber percent. **The number.**
+    rough: f64,
+    /// The largest single step between neighbouring azimuth bins, Weber.
+    step: f64,
+    /// How many azimuth bins had any picture in them.
+    bins: usize,
+}
+
+impl Interior {
+    fn report(&self) -> String {
+        format!(
+            "applied {:.2} codes; smooth {:.2}%, ROUGH {:.2}%, worst neighbour step {:.2}%              ({} bins)",
+            self.applied,
+            100.0 * self.smooth,
+            100.0 * self.rough,
+            100.0 * self.step,
+            self.bins,
+        )
+    }
+}
+
+/// The interior statistic over one pair of pictures.
+///
+/// `ripple` plants a known azimuthal ripple of that amplitude in codes into the
+/// applied field before it is measured, which is the positive control: a
+/// correction that is smooth round the ring plus a ripple has to read the
+/// ripple back, and a run with no ripple and no correction has to read zero.
+fn interior(
+    before: &Picture,
+    after: &Picture,
+    reframe: &Reframe,
+    size: Size,
+    ripple: f64,
+) -> Option<Interior> {
+    let width = size.width as usize;
+    // Sums per azimuth bin: the applied correction, the level it sits on, and
+    // how many pixels answered.
+    let mut held = vec![(0.0f64, 0.0f64, 0.0f64); SWEEP];
+    for index in 0..(size.width * size.height) as usize {
+        let uv = [
+            (index % width) as f32 / size.width as f32,
+            (index / width) as f32 / size.height as f32,
+        ];
+        let Some(ray) = reframe.view_ray(uv) else {
+            continue;
+        };
+        let body = reframe.body_ray(ray);
+        let length = (body[0] * body[0] + body[1] * body[1] + body[2] * body[2]).sqrt();
+        if length <= 0.0 {
+            continue;
+        }
+        let off = f64::from((body[2] / length).asin().to_degrees()).abs();
+        if !(INTERIOR.0..=INTERIOR.1).contains(&off) {
+            continue;
+        }
+        let phi = f64::from(body[1].atan2(body[0]));
+        let bin = ((phi / std::f64::consts::TAU + 1.0) * SWEEP as f64) as usize % SWEEP;
+        // Luma of what was applied, and of what it was applied to. Dark content
+        // is where an additive correction is a large ratio and where the owner
+        // is looking, and the level in the denominator is what makes this a
+        // Weber number rather than a count of codes.
+        let (mut lift, mut level) = (0.0, 0.0);
+        for channel in 0..3 {
+            let a = f64::from(before.rgba[4 * index + channel]);
+            let b = f64::from(after.rgba[4 * index + channel]);
+            lift += LUMA[channel] * (b - a);
+            level += LUMA[channel] * a;
+        }
+        if level <= 0.0 || level > DARK {
+            continue;
+        }
+        let planted = ripple * (8.0 * phi).cos();
+        // PER PIXEL and then averaged, not two averages divided: what an eye
+        // reads is the contrast each pixel carries, and averaging a lift over
+        // dark and bright content together dilutes the only place it is large.
+        held[bin].0 += (lift + planted) / level;
+        held[bin].1 += lift + planted;
+        held[bin].2 += 1.0;
+    }
+    let seen: Vec<(f64, f64, f64)> = held
+        .iter()
+        .enumerate()
+        .filter(|(_, bin)| bin.2 > 16.0)
+        .map(|(index, bin)| {
+            (
+                index as f64 / SWEEP as f64 * std::f64::consts::TAU,
+                bin.0 / bin.2,
+                bin.1 / bin.2,
+            )
+        })
+        .collect();
+    if seen.len() < 16 {
+        return None;
+    }
+    // The five terms a field CAN have and stay smooth: a constant, one cycle
+    // and two. The same basis the geometry is fitted through, and the same one
+    // stage 7's colour field used. Anything outside it is a stripe.
+    let mut normal = [[0.0f64; 5]; 5];
+    let mut right = [0.0f64; 5];
+    for (phi, weber, _) in &seen {
+        let basis = [
+            1.0,
+            phi.cos(),
+            phi.sin(),
+            (2.0 * phi).cos(),
+            (2.0 * phi).sin(),
+        ];
+        for row in 0..5 {
+            for column in 0..5 {
+                normal[row][column] += basis[row] * basis[column];
+            }
+            right[row] += basis[row] * weber;
+        }
+    }
+    let fitted = kjerag_render::solve(
+        normal.map(|row| row.map(|v| v as f32)),
+        right.map(|v| v as f32),
+    );
+    let smooth_at = |phi: f64| -> f64 {
+        let basis = [
+            1.0,
+            phi.cos(),
+            phi.sin(),
+            (2.0 * phi).cos(),
+            (2.0 * phi).sin(),
+        ];
+        (0..5)
+            .map(|term| f64::from(fitted[term]) * basis[term])
+            .sum()
+    };
+    let count = seen.len() as f64;
+    let mut applied = 0.0;
+    let mut smooth = 0.0;
+    let mut rough = 0.0;
+    for (phi, weber, codes) in &seen {
+        applied += codes.abs();
+        smooth += smooth_at(*phi).powi(2);
+        rough += (weber - smooth_at(*phi)).powi(2);
+    }
+    let mut step: f64 = 0.0;
+    for pair in seen.windows(2) {
+        step = step.max((pair[1].1 - pair[0].1).abs());
+    }
+    Some(Interior {
+        applied: applied / count,
+        smooth: (smooth / count).sqrt(),
+        rough: (rough / count).sqrt(),
+        step,
+        bins: seen.len(),
+    })
 }
 
 /// Each channel's step across the seam, and the same at the decoy.
