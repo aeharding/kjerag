@@ -1183,6 +1183,40 @@ live, no keyframe UI ever.
   was shown able to fail before it was believed: against the stale file it
   names all four crates, ffmpeg-next 7.1.0 among them.
 
+- 2026-08-01 **The seam's photometry: the measurement layer survives, the
+  application does not** (issue #103, stage 8 final,
+  docs/research/seam-blending.md 16). The owner tested the applied correction
+  twice and rejected it twice, the second time on dark STREAKS across his soil:
+  *"I don't think this approach is valid."* PR #138 ends as measurement
+  infrastructure - the shipped crates are main's byte for byte, and the whole
+  branch is one instrument file and the record.
+
+  **The process finding is the durable part.** Every acceptance statistic this
+  campaign has ever used STRADDLES THE SEAM. Stage 8 found the statistic was in
+  the wrong units and fixed that; the replacement straddled the seam too. So
+  nothing ever measured what an applied correction does to the picture it is
+  painted OVER, and two builds were rejected on an artifact class the whole
+  acceptance layer was structurally unable to see - a per-direction field over
+  wide support painting each direction's own noise along its whole sweep, which
+  is stage 5's scalloping on the photometric axis. **The rule: a field applied
+  over an area is accepted on the area, not on the boundary.**
+
+  **What ships is three instruments and their plants.** A perceptual lag ladder
+  in Weber contrast at 1 to 128 pixels of the delivered view (a planted step
+  reads back exactly at every lag; the same step spread over 64 pixels reads a
+  64th of it locally). An excess-over-the-same-content statistic that names a
+  line's author. And the field-interior coherence metric that was missing, which
+  reads main at 0.03 percent, the rejected build at 1.01, and its own nulls at
+  0.000. It is registered as the anti-acceptance for photometric work.
+
+  **And one finding no rejection touches:** at every reference view the owner
+  has given, the residual line's excess over what the same content reads a few
+  degrees away is at or under the JND at the one and two pixel lags, while at
+  the azimuth his own gear crosses the seam it is +5.87 percent and the entire
+  photometric stage moved it from 5.94 to 5.94. **What still reads as a line is
+  geometric**, which makes the local-warp-versus-pose verdict the campaign's
+  next question.
+
 - 2026-08-01 **Symmetric wide matching, and the measurement that names the
   line's author** (issue #103, stage 8 second form,
   docs/research/seam-blending.md 14-15). The owner viewed stage 8's first form
