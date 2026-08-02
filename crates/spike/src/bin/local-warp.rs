@@ -12,7 +12,7 @@ use std::time::Duration;
 use kjerag_media::Fallible;
 use kjerag_meta::CalibrationSet;
 use kjerag_render::{Camera, Cue, Horizon, Reframe, Sampling, Scene, ScenePipeline, SeamFit, Size};
-use kjerag_spike::{FORMAT, Gpu, Render, Walk, local_warp, raw_register, seam_fit};
+use kjerag_spike::{FORMAT, Gpu, Render, Walk, far_field, local_warp, raw_register, seam_fit};
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
@@ -461,11 +461,10 @@ struct TemporalHealth {
     stereo_no_complete: usize,
     stereo_no_peak: usize,
     stereo_aperture: usize,
-    placeable: usize,
-    unplaceable: usize,
-    near: StratumHealth,
-    mid: StratumHealth,
-    far: StratumHealth,
+    proven_far300: StratumHealth,
+    finite_but_not_far: StratumHealth,
+    uncertain_or_unplaceable: StratumHealth,
+    invalid: StratumHealth,
 }
 
 #[derive(Default)]
@@ -559,8 +558,8 @@ fn report_temporal(
     let origins: Vec<_> = states.iter().copied().flatten().collect();
     let mut timeline = vec![at];
     // This is the first accepted registration per immutable declared site,
-    // irrespective of whether its disparity was placeable. It is never
-    // replaced by a later, more convenient depth stratum.
+    // irrespective of its far-field classification. It is never replaced by
+    // a later, more convenient category.
     let mut first_stereo: Vec<Option<raw_register::StripSiteReading>> = vec![None; sites.len()];
     let mut health = TemporalHealth::default();
     for _ in 0..frames {
@@ -616,20 +615,21 @@ fn report_temporal(
                             if first.is_none() {
                                 first_stereo[index] = Some(stereo);
                             }
-                            match depth_proxy(anchor.baseline, stereo) {
-                                Placement::Depth {
-                                    metres,
-                                    conservative_far_metres,
-                                } => {
-                                    health.placeable += 1;
-                                    let stratum = depth_stratum(metres);
+                            match far_field::classify(
+                                anchor.baseline,
+                                stereo.displacement_rad.epi,
+                                stereo.covariance_rad2.epi_epi,
+                            ) {
+                                classification @ (far_field::Classification::ProvenFar300 { .. }
+                                | far_field::Classification::FiniteButNotFar { .. }) => {
+                                    let stratum = far_stratum(classification);
                                     if let Some(first) = first {
                                         let evolution = stereo_evolution(first, stereo)
                                             .expect("one immutable track cannot change its site");
                                         stratum_health(&mut health, stratum).evolution(evolution);
                                         if options.trace {
                                             println!(
-                                                "temporal evolution: {:?}; delta from this track's first stereo [epi {:+.4}, perp {:+.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²",
+                                                "temporal evolution: {}; delta from this track's first stereo [epi {:+.4}, perp {:+.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²",
                                                 stratum,
                                                 evolution.displacement_rad.epi.to_degrees(),
                                                 evolution.displacement_rad.perp.to_degrees(),
@@ -642,14 +642,14 @@ fn report_temporal(
                                         stratum_health(&mut health, stratum).reference();
                                         if options.trace {
                                             println!(
-                                                "temporal evolution: {:?}; first accepted stereo reference retained",
+                                                "temporal evolution: {}; first accepted stereo reference retained",
                                                 stratum,
                                             );
                                         }
                                     }
                                     if options.trace {
                                         println!(
-                                            "temporal stereo: phi {:.2} deg; tracked offset [epi {:.4}, perp {:.4}] deg; displacement [epi {:.4}, perp {:.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; depth proxy {:.2} m (one-sigma far {:.2} m)",
+                                            "temporal stereo: phi {:.2} deg; tracked offset [epi {:.4}, perp {:.4}] deg; displacement [epi {:.4}, perp {:.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; {}",
                                             reading.state.site.root.node.phi.to_degrees(),
                                             reading.state.accumulated_rad.epi.to_degrees(),
                                             reading.state.accumulated_rad.perp.to_degrees(),
@@ -658,16 +658,23 @@ fn report_temporal(
                                             stereo.covariance_rad2.epi_epi,
                                             stereo.covariance_rad2.epi_perp,
                                             stereo.covariance_rad2.perp_perp,
-                                            metres,
-                                            conservative_far_metres,
+                                            far_label(classification),
                                         );
                                     }
                                 }
-                                Placement::Unplaceable => {
-                                    health.unplaceable += 1;
+                                classification @ (far_field::Classification::UncertainOrUnplaceable
+                                | far_field::Classification::Invalid) => {
+                                    let stratum = far_stratum(classification);
+                                    if let Some(first) = first {
+                                        let evolution = stereo_evolution(first, stereo)
+                                            .expect("one immutable track cannot change its site");
+                                        stratum_health(&mut health, stratum).evolution(evolution);
+                                    } else {
+                                        stratum_health(&mut health, stratum).reference();
+                                    }
                                     if options.trace {
                                         println!(
-                                            "temporal stereo: phi {:.2} deg; tracked offset [epi {:.4}, perp {:.4}] deg; displacement [epi {:.4}, perp {:.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; Unplaceable",
+                                            "temporal stereo: phi {:.2} deg; tracked offset [epi {:.4}, perp {:.4}] deg; displacement [epi {:.4}, perp {:.4}] deg; covariance [epi² {:.3e}, epi-perp {:.3e}, perp² {:.3e}] rad²; {}",
                                             reading.state.site.root.node.phi.to_degrees(),
                                             reading.state.accumulated_rad.epi.to_degrees(),
                                             reading.state.accumulated_rad.perp.to_degrees(),
@@ -676,6 +683,7 @@ fn report_temporal(
                                             stereo.covariance_rad2.epi_epi,
                                             stereo.covariance_rad2.epi_perp,
                                             stereo.covariance_rad2.perp_perp,
+                                            far_label(classification),
                                         );
                                     }
                                 }
@@ -710,7 +718,7 @@ fn report_temporal(
     }
     let active = states.iter().filter(|state| state.is_some()).count();
     println!(
-        "temporal: lens 0; anchor {:.9} s; requested frames {}; transitions {}; declared sites {}; active {}; ended {}; successful steps {}; no-complete {}; no-peak {}; aperture {}; excursion {}; cap {:.2} deg\ntemporal stereo: readings {}; no-complete {}; no-peak {}; aperture {}; positive-epi depth proxies {}; Unplaceable {}",
+        "temporal: lens 0; anchor {:.9} s; requested frames {}; transitions {}; declared sites {}; active {}; ended {}; successful steps {}; no-complete {}; no-peak {}; aperture {}; excursion {}; cap {:.2} deg\ntemporal stereo: readings {}; no-complete {}; no-peak {}; aperture {}; classifications use maximum plausible positive epi = point + 3 sigma; ProvenFar300 {}; FiniteButNotFar {}; UncertainOrUnplaceable {}; Invalid {}",
         anchor.warmed.at.as_secs_f64(),
         frames,
         health.transitions,
@@ -727,12 +735,15 @@ fn report_temporal(
         health.stereo_no_complete,
         health.stereo_no_peak,
         health.stereo_aperture,
-        health.placeable,
-        health.unplaceable,
+        health.proven_far300.readings,
+        health.finite_but_not_far.readings,
+        health.uncertain_or_unplaceable.readings,
+        health.invalid.readings,
     );
-    report_stratum("near <3 m", &health.near);
-    report_stratum("mid 3-10 m", &health.mid);
-    report_stratum("far >=10 m", &health.far);
+    report_stratum("ProvenFar300", &health.proven_far300);
+    report_stratum("FiniteButNotFar", &health.finite_but_not_far);
+    report_stratum("UncertainOrUnplaceable", &health.uncertain_or_unplaceable);
+    report_stratum("Invalid", &health.invalid);
     if options.temporal_reverse {
         report_reverse_closure(gpu, options, anchor, &timeline, &origins, &states, support)?;
     } else {
@@ -925,30 +936,69 @@ fn temporal_closure(
     })
 }
 
-/// Fixed depth reporting strata. They are declared here rather than inferred
-/// from the capture, texture, or distribution of successful tracks.
+/// Predeclared conservative far-field reporting categories.  These are based
+/// only on baseline and epipolar uncertainty, never texture or a fitted warp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DepthStratum {
-    Near,
-    Mid,
-    Far,
+enum FarStratum {
+    ProvenFar300,
+    FiniteButNotFar,
+    UncertainOrUnplaceable,
+    Invalid,
 }
 
-fn depth_stratum(metres: f64) -> DepthStratum {
-    if metres < 3.0 {
-        DepthStratum::Near
-    } else if metres < 10.0 {
-        DepthStratum::Mid
-    } else {
-        DepthStratum::Far
+impl std::fmt::Display for FarStratum {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ProvenFar300 => "ProvenFar300",
+            Self::FiniteButNotFar => "FiniteButNotFar",
+            Self::UncertainOrUnplaceable => "UncertainOrUnplaceable",
+            Self::Invalid => "Invalid",
+        })
     }
 }
 
-fn stratum_health(health: &mut TemporalHealth, stratum: DepthStratum) -> &mut StratumHealth {
+fn far_stratum(classification: far_field::Classification) -> FarStratum {
+    match classification {
+        far_field::Classification::ProvenFar300 { .. } => FarStratum::ProvenFar300,
+        far_field::Classification::FiniteButNotFar { .. } => FarStratum::FiniteButNotFar,
+        far_field::Classification::UncertainOrUnplaceable => FarStratum::UncertainOrUnplaceable,
+        far_field::Classification::Invalid => FarStratum::Invalid,
+    }
+}
+
+fn far_label(classification: far_field::Classification) -> String {
+    match classification {
+        far_field::Classification::ProvenFar300 {
+            distance_lower_bound_metres,
+            ..
+        } => format!(
+            "ProvenFar300 (distance lower bound {:.1} m)",
+            distance_lower_bound_metres
+        ),
+        far_field::Classification::FiniteButNotFar {
+            point_distance_metres,
+            distance_lower_bound_metres,
+        } => match distance_lower_bound_metres {
+            Some(lower_bound) => format!(
+                "FiniteButNotFar (point {:.1} m; distance lower bound {:.1} m)",
+                point_distance_metres, lower_bound
+            ),
+            None => format!(
+                "FiniteButNotFar (point {:.1} m; 3-sigma bound outside physical angular domain)",
+                point_distance_metres
+            ),
+        },
+        far_field::Classification::UncertainOrUnplaceable => "UncertainOrUnplaceable".to_owned(),
+        far_field::Classification::Invalid => "Invalid".to_owned(),
+    }
+}
+
+fn stratum_health(health: &mut TemporalHealth, stratum: FarStratum) -> &mut StratumHealth {
     match stratum {
-        DepthStratum::Near => &mut health.near,
-        DepthStratum::Mid => &mut health.mid,
-        DepthStratum::Far => &mut health.far,
+        FarStratum::ProvenFar300 => &mut health.proven_far300,
+        FarStratum::FiniteButNotFar => &mut health.finite_but_not_far,
+        FarStratum::UncertainOrUnplaceable => &mut health.uncertain_or_unplaceable,
+        FarStratum::Invalid => &mut health.invalid,
     }
 }
 
@@ -1010,44 +1060,6 @@ fn stereo_evolution(
             perp_perp: current.covariance_rad2.perp_perp + first.covariance_rad2.perp_perp,
         },
     })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Placement {
-    /// The ordinary triangulation proxy, plus a one-standard-deviation
-    /// far-distance value which uses the smaller still-positive disparity.
-    Depth {
-        metres: f64,
-        conservative_far_metres: f64,
-    },
-    /// Non-positive/uncertain epipolar disparity, or an invalid baseline, is
-    /// intentionally not made into a signed or infinite depth claim.
-    Unplaceable,
-}
-
-fn depth_proxy(baseline: [f64; 3], reading: raw_register::StripSiteReading) -> Placement {
-    let baseline_m = baseline.iter().map(|axis| axis.powi(2)).sum::<f64>().sqrt();
-    let sigma = reading.covariance_rad2.epi_epi.sqrt();
-    let lower = reading.displacement_rad.epi - sigma;
-    if !baseline_m.is_finite()
-        || baseline_m <= 0.0
-        || !reading.displacement_rad.epi.is_finite()
-        || !sigma.is_finite()
-        || lower <= 0.0
-        || lower >= std::f64::consts::FRAC_PI_2
-    {
-        return Placement::Unplaceable;
-    }
-    let metres = baseline_m / reading.displacement_rad.epi.tan();
-    let conservative_far_metres = baseline_m / lower.tan();
-    if metres.is_finite() && metres > 0.0 && conservative_far_metres.is_finite() {
-        Placement::Depth {
-            metres,
-            conservative_far_metres,
-        }
-    } else {
-        Placement::Unplaceable
-    }
 }
 
 struct Options {
@@ -1426,7 +1438,7 @@ mod tests {
         TrackState,
     };
 
-    use super::{Options, Placement, Seam};
+    use super::{Options, Seam};
 
     fn options(args: &[&str]) -> Options {
         Options::parse(args.iter().map(|arg| arg.to_string())).expect("valid local-warp options")
@@ -1783,32 +1795,15 @@ mod tests {
     }
 
     #[test]
-    fn temporal_depth_proxy_requires_a_conservatively_positive_epi_disparity() {
-        let Placement::Depth {
-            metres,
-            conservative_far_metres,
-        } = super::depth_proxy([0.033, 0.0, 0.0], stereo_reading(0.02, 0.002))
-        else {
-            panic!("positive disparity beyond one sigma is placeable")
-        };
-        assert!(metres > 0.0);
-        assert!(conservative_far_metres > metres);
+    fn far_categories_and_stereo_evolution_keep_full_covariance() {
         assert_eq!(
-            super::depth_proxy([0.033, 0.0, 0.0], stereo_reading(0.002, 0.003)),
-            super::Placement::Unplaceable
+            super::far_stratum(kjerag_spike::far_field::Classification::UncertainOrUnplaceable),
+            super::FarStratum::UncertainOrUnplaceable
         );
         assert_eq!(
-            super::depth_proxy([0.0; 3], stereo_reading(0.02, 0.002)),
-            super::Placement::Unplaceable
+            super::far_stratum(kjerag_spike::far_field::Classification::Invalid),
+            super::FarStratum::Invalid
         );
-    }
-
-    #[test]
-    fn fixed_depth_strata_and_stereo_evolution_keep_full_covariance() {
-        assert_eq!(super::depth_stratum(2.999), super::DepthStratum::Near);
-        assert_eq!(super::depth_stratum(3.0), super::DepthStratum::Mid);
-        assert_eq!(super::depth_stratum(9.999), super::DepthStratum::Mid);
-        assert_eq!(super::depth_stratum(10.0), super::DepthStratum::Far);
 
         let first = stereo_reading(0.02, 0.002);
         let mut current = stereo_reading(0.026, 0.003);

@@ -16,6 +16,8 @@ mod offscreen;
 mod picture;
 mod skyline;
 
+/// Pure conservative far-field classification for Stage 9 temporal stereo.
+pub mod far_field;
 pub mod local_warp;
 /// Raw-lens, camera-frame registration used by Stage 9's observation-only
 /// instrument.  It deliberately has no renderer output pixels or warp code.

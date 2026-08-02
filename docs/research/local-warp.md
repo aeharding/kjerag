@@ -192,45 +192,35 @@ them.  Forward/backward closure is explicitly unavailable in this first
 forward-only traversal.  Stereo depth/disparity accounting is the next layer,
 not an inference from this trackability count.
 
-That layer's first run also shows why the depth control must remain explicit.
-At the same 612 tracked site-times, 571 produced a stereo reading, but only
-60 had a conservatively positive epipolar disparity and hence a reported
-far-depth proxy; 511 were recorded as **Unplaceable** rather than being
-assigned a made-up depth.  No depth-invariance claim is possible from this
-count alone.  The next report uses predeclared near (under 3 m), mid (3--10
-m), and far (at least 10 m) strata and retains the unplaceable population.
+The original temporal report classified a positive epipolar disparity using
+`point - sigma`. That produces an **upper** distance bound, so its old
+near/mid/`far >=10 m` summaries are not evidence about infinity and are now
+retired. The instrument instead has four predeclared categories:
+`ProvenFar300`, `FiniteButNotFar`, `UncertainOrUnplaceable`, and `Invalid`.
+`ProvenFar300` is strict: the physical baseline and one-sided maximum
+plausible positive disparity `point + 3 sigma` must still give
+`baseline / tan(point + 3 sigma) >= 300 m`. This is a lower distance bound.
+A zero or sign-uncertain disparity is compatible with infinity but does not
+prove it, so it stays `UncertainOrUnplaceable`.
 
-The fixed-stratum evolution result rules out fitting one warp to **all** raw
-depths: BAD's four-transition means were near `+0.3872`, mid `+0.2712`, and
-the instrument's current `far >=10 m` bucket `-0.0119` degrees on the
-epipolar axis (4, 7, and 3 anchor tracks); GOOD independently gave `+0.3417`,
-`+0.2779`, and `+0.0532` degrees (9, 18, and 10 anchors).  It does **not**
-settle the infinity-only question.  Ten metres is terrain, not the horizon;
-the present far proxy is an upper distance bound rather than proof a feature
-is beyond 300 m, and `Unplaceable` includes the zero/uncertain disparity that
-infinity can produce.  These numbers therefore refuse an all-depth warp, not
-a far-field-only candidate.
+This narrows Stage 9 to the actual problem: the horizon and terrain at
+hundreds of metres. It makes no claim from the existing all-depth corpus and
+does not authorize a warp.
 
 ## Stage 9 decision on the available all-depth corpus
 
-**No all-depth local warp is authorized from the current four owner
-references.**  The
-same depth-linked evolution appeared at both April references under the same
-explicit May fit: at 43.143 the near/mid/far epipolar means were `+0.7812`,
-`+0.2005`, and `-0.1725` degrees; at 45.145 they were `+0.2369`, `+0.2638`,
-and `+0.0884` degrees.  Each run retained its own sites and refusals and was
-reported separately.  The May one-step temporal replay closure also passed:
-BAD closed all 153 fixed sites at mean `[epi -0.0007, perp +0.0081]` degrees;
-GOOD closed 131, with two unavailable forward tracks and two reverse refusals,
-at `[+0.0051, -0.0386]`.  This establishes that the tracker itself is not
-merely drifting while the depth strata move.
+**No local warp is authorized from the current four owner references.** The
+previous all-depth temporal categories cannot establish an infinity-only
+result and have been retired. The May one-step temporal replay closure did
+pass: BAD closed all 153 fixed sites at mean `[epi -0.0007, perp +0.0081]`
+degrees; GOOD closed 131, with two unavailable forward tracks and two reverse
+refusals, at `[+0.0051, -0.0386]`. This establishes that the tracker itself
+is not merely drifting, but it is not a far-field geometric claim.
 
 The owner views face roughly opposite seam azimuths, so they are not
-same-feature cross-view pairs.  The all-depth raw effect is parallax-linked,
-so turning it into a deterministic camera-frame residual would bake terrain
-parallax into the seam.  Stage 9 has produced a reusable instrument and an
-all-depth refusal, not an applied geometry change.  The far-field seam problem
-remains open.
+same-feature cross-view pairs. Stage 9 has produced a reusable instrument and
+an all-depth refusal, not an applied geometry change. The far-field seam
+problem remains open.
 
 The far-field follow-up needs a stricter classification, not a calibration
 scene: `ProvenFar300` only when a predeclared one-sided maximum disparity
@@ -257,11 +247,11 @@ fit is supplied to every view and every replay; `seam=file` is prohibited.
    before fitting.  Each is one two-axis correspondence with its full 2-by-2
    covariance; multiple samples of an edge, or of one object patch, are not
    independent features.
-2. Declare the depth bins before registration: near under 3 m, mid 3--10 m,
-   far at least 10 m, plus **Unplaceable**.  Retain every refusal and
-   unplaceable feature in the report.  A depth-independent claim needs
-   accepted features in every stratum it claims to cover; absent strata narrow
-   the claim rather than being pooled away.
+2. Classify every registration before analysis. Only `ProvenFar300` sites may
+   support an infinity claim: `point + 3 sigma` must triangulate to a lower
+   distance bound of at least 300 m. Retain `FiniteButNotFar`,
+   `UncertainOrUnplaceable`, invalid, and registration-refusal populations;
+   they may not be pooled into the far result.
 3. Track those same declared features over the predeclared contiguous replay
    frames.  Do not re-trace, replace, or texture-select a feature after the
    anchor.  Run both forward and reverse tracking, report per-feature
