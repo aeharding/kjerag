@@ -290,17 +290,19 @@ fn report_fit(
         assembled.incomplete_responses,
         assembled.observations.len(),
     );
-    for observation in &assembled.observations {
-        println!(
-            "fit observation: {}; measured [epi {:+.5}, perp {:+.5}] deg; covariance [[{:.3e}, {:.3e}], [{:.3e}, {:.3e}]] deg^2",
-            observation.name,
-            observation.displacement.epi,
-            observation.displacement.perp,
-            observation.covariance.xx,
-            observation.covariance.xy,
-            observation.covariance.xy,
-            observation.covariance.yy,
-        );
+    if options.trace {
+        for observation in &assembled.observations {
+            println!(
+                "fit observation: {}; measured [epi {:+.5}, perp {:+.5}] deg; covariance [[{:.3e}, {:.3e}], [{:.3e}, {:.3e}]] deg^2",
+                observation.name,
+                observation.displacement.epi,
+                observation.displacement.perp,
+                observation.covariance.xx,
+                observation.covariance.xy,
+                observation.covariance.xy,
+                observation.covariance.yy,
+            );
+        }
     }
     let shared = local_warp::fit(&assembled.observations)
         .map_err(|refusal| format!("fit refused for this one capture/support: {refusal:?}"))?;
@@ -308,16 +310,18 @@ fn report_fit(
         "fit pose: roll {:+.6}; yaw {:+.6}; pitch {:+.6}; cx {:+.6}; cy {:+.6}; diagnostic only",
         shared.knobs[0], shared.knobs[1], shared.knobs[2], shared.knobs[3], shared.knobs[4],
     );
-    for ((observation, predicted), residual) in assembled
-        .observations
-        .iter()
-        .zip(&shared.predicted)
-        .zip(&shared.residuals)
-    {
-        println!(
-            "fit residual: {}; predicted [epi {:+.5}, perp {:+.5}] deg; residual [epi {:+.5}, perp {:+.5}] deg",
-            observation.name, predicted.epi, predicted.perp, residual.epi, residual.perp,
-        );
+    if options.trace {
+        for ((observation, predicted), residual) in assembled
+            .observations
+            .iter()
+            .zip(&shared.predicted)
+            .zip(&shared.residuals)
+        {
+            println!(
+                "fit residual: {}; predicted [epi {:+.5}, perp {:+.5}] deg; residual [epi {:+.5}, perp {:+.5}] deg",
+                observation.name, predicted.epi, predicted.perp, residual.epi, residual.perp,
+            );
+        }
     }
     println!(
         "fit summary: chi2 {:.5}; dof {}; chi2/dof {:.5}; normalized-rms {:.5}; residual-rms {:.5} deg; condition {:.3e}; no threshold or warp applied",
