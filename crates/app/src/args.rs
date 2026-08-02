@@ -60,7 +60,8 @@ pub fn help() -> String {
          Usage: kjerag [options] [file.insv] [view]\n\n\
          Options:\n  \
          -h, --help     Show this message\n  \
-         -V, --version  Show the version\n\n\
+         -V, --version  Show the version\n  \
+         --research-residual=FILE  Load one factory-calibration research sidecar\n\n\
          A view is the line `i` copies in the window, which is the same line\n\
          the window prints beside every capture. Paste one after `kjerag` and\n\
          it opens the file at that frame, pointing that way:\n\n  \
@@ -81,9 +82,9 @@ mod tests {
         parse(line.split_whitespace().map(str::to_owned))
     }
 
-    fn played(line: &str) -> (Option<PathBuf>, Option<Framing>) {
+    fn played(line: &str) -> (Option<PathBuf>, Option<Framing>, Option<PathBuf>) {
         match parse_words(line) {
-            Ok(Args::Play(input, at)) => (input, at),
+            Ok(Args::Play(input, at, sidecar)) => (input, at, sidecar),
             other => panic!("{line:?} did not play: {other:?}"),
         }
     }
@@ -92,9 +93,13 @@ mod tests {
     fn a_bare_path_is_the_file_to_play() {
         assert_eq!(
             parse_words("/home/pilot/a.insv"),
-            Ok(Args::Play(Some(PathBuf::from("/home/pilot/a.insv")), None))
+            Ok(Args::Play(
+                Some(PathBuf::from("/home/pilot/a.insv")),
+                None,
+                None
+            ))
         );
-        assert_eq!(parse_words(""), Ok(Args::Play(None, None)));
+        assert_eq!(parse_words(""), Ok(Args::Play(None, None, None)));
     }
 
     #[test]
@@ -115,7 +120,7 @@ mod tests {
     /// command that opens the file at that view.
     #[test]
     fn the_printed_line_is_a_launch_command() {
-        let (input, at) =
+        let (input, at, _) =
             played("/home/pilot/a.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1");
         assert_eq!(input, Some(PathBuf::from("/home/pilot/a.insv")));
         let at = at.expect("a view");
@@ -128,7 +133,7 @@ mod tests {
     /// path last still gets what he asked for.
     #[test]
     fn the_terms_are_not_the_file_wherever_they_sit() {
-        let (input, at) = played("time=1.000 yaw=0.00 pitch=0.00 fov=90.00 lock=1 a.insv");
+        let (input, at, _) = played("time=1.000 yaw=0.00 pitch=0.00 fov=90.00 lock=1 a.insv");
         assert_eq!(input, Some(PathBuf::from("a.insv")));
         assert!(at.is_some());
     }
@@ -137,9 +142,17 @@ mod tests {
     /// terms, so nothing else is taken out of the file's place.
     #[test]
     fn a_file_named_with_an_equals_is_still_the_file() {
-        let (input, at) = played("/home/pilot/a=b.insv");
+        let (input, at, _) = played("/home/pilot/a=b.insv");
         assert_eq!(input, Some(PathBuf::from("/home/pilot/a=b.insv")));
         assert_eq!(at, None);
+    }
+
+    #[test]
+    fn research_residual_is_an_explicit_non_view_argument() {
+        let (input, view, sidecar) = played("--research-residual=/tmp/frame.kjrmap clip.insv");
+        assert_eq!(input, Some(PathBuf::from("clip.insv")));
+        assert_eq!(view, None);
+        assert_eq!(sidecar, Some(PathBuf::from("/tmp/frame.kjrmap")));
     }
 
     /// Loud, per the existing rule for anything the command line does not
