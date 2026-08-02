@@ -22,6 +22,8 @@ pub mod local_warp;
 /// Raw-lens, camera-frame registration used by Stage 9's observation-only
 /// instrument.  It deliberately has no renderer output pixels or warp code.
 pub mod raw_register;
+/// Non-rendering evidence gate for any future source-coordinate residual map.
+pub mod residual_gate;
 
 pub use kjerag_media::{Chroma, Pair, Plane, Walk};
 pub use offscreen::{Gpu, Offscreen};
