@@ -2015,11 +2015,14 @@ fn interior(
             continue;
         }
         let planted = ripple * (8.0 * phi).cos();
-        // PER PIXEL and then averaged, not two averages divided: what an eye
-        // reads is the contrast each pixel carries, and averaging a lift over
-        // dark and bright content together dilutes the only place it is large.
-        held[bin].0 += (lift + planted) / level;
-        held[bin].1 += lift + planted;
+        // The FIELD in the numerator and the content in the denominator, each
+        // averaged over the bin before they are divided. Dividing per pixel
+        // instead puts the content's own roughness into the numerator, and the
+        // statistic then reads the soil rather than the correction painted over
+        // it - measured: it reported 0.89 percent of roughness for a field that
+        // is smooth by construction.
+        held[bin].0 += lift + planted;
+        held[bin].1 += level;
         held[bin].2 += 1.0;
     }
     let seen: Vec<(f64, f64, f64)> = held
@@ -2042,7 +2045,7 @@ fn interior(
     // stage 7's colour field used. Anything outside it is a stripe.
     let mut normal = [[0.0f64; 5]; 5];
     let mut right = [0.0f64; 5];
-    for (phi, weber, _) in &seen {
+    for (phi, codes, _) in &seen {
         let basis = [
             1.0,
             phi.cos(),
@@ -2054,7 +2057,7 @@ fn interior(
             for column in 0..5 {
                 normal[row][column] += basis[row] * basis[column];
             }
-            right[row] += basis[row] * weber;
+            right[row] += basis[row] * codes;
         }
     }
     let fitted = kjerag_render::solve(
@@ -2077,14 +2080,17 @@ fn interior(
     let mut applied = 0.0;
     let mut smooth = 0.0;
     let mut rough = 0.0;
-    for (phi, weber, codes) in &seen {
+    for (phi, codes, level) in &seen {
         applied += codes.abs();
-        smooth += smooth_at(*phi).powi(2);
-        rough += (weber - smooth_at(*phi)).powi(2);
+        smooth += (smooth_at(*phi) / level).powi(2);
+        rough += ((codes - smooth_at(*phi)) / level).powi(2);
     }
     let mut step: f64 = 0.0;
     for pair in seen.windows(2) {
-        step = step.max((pair[1].1 - pair[0].1).abs());
+        let level = 0.5 * (pair[0].2 + pair[1].2);
+        if level > 0.0 {
+            step = step.max((pair[1].1 - pair[0].1).abs() / level);
+        }
     }
     Some(Interior {
         applied: applied / count,

@@ -1636,14 +1636,14 @@ pub(crate) fn lookup_wgsl() -> String {
 /// file with one lens stream, at every view: issue #39's byte-identity.
 ///
 /// WGSL twin: `tint_fade`.
-pub fn fade(off_seam: f32, half_width_rad: f32, half_overlap_rad: f32) -> f32 {
+pub fn fade(off_seam: f32, half_floor_rad: f32, half_overlap_rad: f32) -> f32 {
     if half_overlap_rad <= 0.0 {
         // A file with one lens stream: the two never share a picture, so there
         // is no handover to correct and nothing to correct it with. The only
         // question the overlap is still asked.
         return 0.0;
     }
-    let inner = half_width_rad.sin().min(1.0);
+    let inner = half_floor_rad.sin().min(1.0);
     if inner >= 1.0 {
         return f32::from(u8::from(off_seam.abs() < 1.0));
     }
@@ -1908,7 +1908,15 @@ fn tint_fade(at: Band) -> f32 {
   }
   // THE POLE, which is the one end that is not a taste: an azimuth is what the
   // field is read at and a pole has none. Rust twin: `fade`.
-  let inner = min(sin(0.5 * at.crossover), 1.0);
+  //
+  // The inner end is the SHIPPED crossover and not this direction's own width,
+  // and that is the second half of the anti-striping rule (issue #103, stage 8,
+  // after the rejection). The width is a per-direction quantity; multiplying a
+  // smooth field by a per-direction shape puts the per-direction shape straight
+  // back into the picture, which is what the first salvage still measured at
+  // 0.90 percent of interior roughness. It costs nothing to give up: at the
+  // widest handover the two lenses can share, this fade is still 0.999.
+  let inner = min(sin(0.5 * CROSSOVER), 1.0);
   let away = abs(at.off_seam);
   if inner >= 1.0 {
     return select(0.0, 1.0, away < 1.0);
