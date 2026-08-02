@@ -282,6 +282,41 @@ mod tests {
     }
 
     #[test]
+    fn report_keeps_each_reverse_tracking_refusal_as_collected_negative_evidence() {
+        use crate::raw_register::{CameraDisplacement, TrackClosureRefused, TrackRefused};
+
+        let input = evidence();
+        let reasons = [
+            TrackRefused::InvalidStep,
+            TrackRefused::InvalidExcursionCap,
+            TrackRefused::NoCompletePatch,
+            TrackRefused::NoPeak,
+            TrackRefused::Aperture,
+            TrackRefused::Excursion {
+                attempted_rad: CameraDisplacement {
+                    epi: 0.1,
+                    perp: -0.2,
+                },
+                cap_rad: 0.05,
+            },
+        ];
+        for reason in reasons {
+            let diagnostic = report(
+                input.site,
+                Some(input.far_field),
+                Some(input.reciprocal),
+                Some(Err(TrackClosureRefused::ReverseTrack(reason))),
+                Some(input.assignment),
+            );
+            assert_eq!(
+                diagnostic.outcome,
+                Ok(Decision::Refused(Refusal::ForwardReverseClosureUnavailable)),
+                "reverse refusal must not be downgraded to temporal unavailability: {reason:?}",
+            );
+        }
+    }
+
+    #[test]
     fn report_preserves_the_declared_site_when_runtime_evidence_is_incomplete() {
         let input = evidence();
         let diagnostic = report(

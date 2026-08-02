@@ -379,7 +379,7 @@ pub struct TrackReading {
 }
 
 /// Why one fixed-site temporal transition cannot be claimed.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrackRefused {
     InvalidStep,
     InvalidExcursionCap,
@@ -405,9 +405,13 @@ pub struct TrackClosure {
 }
 
 /// Why two temporal transitions cannot form a reciprocal control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrackClosureRefused {
     MismatchedSite,
+    /// The reverse replay failed at the declared site.  Keep the underlying
+    /// tracker refusal so diagnostics do not misrepresent collected negative
+    /// evidence as an uncollected temporal control.
+    ReverseTrack(TrackRefused),
 }
 
 /// One two-dimensional raw registration at a pre-declared lattice site.

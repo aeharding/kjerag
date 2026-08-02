@@ -858,6 +858,10 @@ fn report_reverse_closure(
     }
     let mut health = ReverseHealth::default();
     let mut states = forward_end.to_vec();
+    // A missing state predates the reverse replay.  A concrete reverse
+    // refusal is kept separately so the endpoint report can distinguish the
+    // two; neither condition authorizes moving to another site.
+    let mut reverse_refusals = vec![None; origins.len()];
     health.forward_unavailable = states.iter().filter(|state| state.is_none()).count();
     let replay_total = timeline.len();
     println!(
@@ -881,7 +885,7 @@ fn report_reverse_closure(
         std::io::stdout().flush()?;
         let (earlier_map, earlier_pair) =
             replay_temporal_frame(gpu, options, anchor.frame, *earlier_at)?;
-        for state in &mut states {
+        for (site, state) in states.iter_mut().enumerate() {
             let Some(current) = *state else {
                 continue;
             };
@@ -895,8 +899,9 @@ fn report_reverse_closure(
                 support,
             ) {
                 Ok(reading) => *state = Some(reading.state),
-                Err(_) => {
+                Err(refusal) => {
                     health.reverse_refused += 1;
+                    reverse_refusals[site] = Some(refusal);
                     *state = None;
                 }
             }
@@ -905,8 +910,17 @@ fn report_reverse_closure(
         later_pair = earlier_pair;
     }
     let mut closures = Vec::with_capacity(origins.len());
-    for (origin, returned) in origins.iter().zip(states) {
-        let closure = returned.map(|returned| raw_register::track_state_closure(*origin, returned));
+    for ((origin, returned), reverse_refusal) in origins.iter().zip(states).zip(reverse_refusals) {
+        let closure = match (returned, reverse_refusal) {
+            (Some(returned), None) => Some(raw_register::track_state_closure(*origin, returned)),
+            (None, Some(refusal)) => Some(Err(raw_register::TrackClosureRefused::ReverseTrack(
+                refusal,
+            ))),
+            // The forward sequence ended before reverse replay began, so no
+            // closure control was collected for this declared site.
+            (None, None) => None,
+            (Some(_), Some(_)) => unreachable!("a reverse refusal clears its track state"),
+        };
         if let Some(Ok(closure)) = closure {
             health.closed += 1;
             health.epi_sum += closure.closure_rad.epi;
