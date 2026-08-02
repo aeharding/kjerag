@@ -22,18 +22,23 @@ use kjerag_render::Framing;
 #[derive(Debug, PartialEq)]
 pub enum Args {
     /// The file to open, and where in it to land.
-    Play(Option<PathBuf>, Option<Framing>),
+    Play(Option<PathBuf>, Option<Framing>, Option<PathBuf>),
     Help,
     Version,
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut input = None;
+    let mut sidecar = None;
     let mut view = Vec::new();
     for arg in args {
         match arg.as_str() {
+            "--research-residual" => return Err("--research-residual needs a path".to_owned()),
             "-h" | "--help" => return Ok(Args::Help),
             "-V" | "--version" => return Ok(Args::Version),
+            flag if flag.starts_with("--research-residual=") => {
+                sidecar = Some(PathBuf::from(&flag[20..]));
+            }
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
             // One of the view's five keys, and nothing else with an `=` in
             // it: a file whose name has one is still a file.
@@ -46,7 +51,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     if at.is_some() && input.is_none() {
         return Err("a view needs the file it is a view of".to_owned());
     }
-    Ok(Args::Play(input, at))
+    Ok(Args::Play(input, at, sidecar))
 }
 
 pub fn help() -> String {

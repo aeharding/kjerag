@@ -39,6 +39,7 @@ ffmpeg-next = "7.1"
 # libcosmic vendors iced as a submodule pinned to wgpu 28, and wgpu types
 # only unify across one major: this pin IS libcosmic's pin, not a choice.
 wgpu = "28.0"
+half = "2"
 # The dmabuf import is hand-rolled against raw Vulkan on wgpu 28, so the
 # ash major must be the one wgpu-hal 28 links.
 ash = "0.38"

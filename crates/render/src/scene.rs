@@ -26,6 +26,7 @@
 //! draw, or the picture is always one refresh behind the clock. The cell is
 //! touched from the UI thread only; the decode thread never sees it.
 
+use half::f16;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
@@ -33,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kjerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
+use kjerag_media::{Accuracy, Cue, Frames, Player, Reader, ResidualSidecar, Stats};
 use kjerag_meta::{
     CalibrationSet, ExposureTrack, Filter, Format, Lens, OrientationTrack, Quat, Readout,
 };
@@ -165,6 +166,8 @@ pub struct Scene {
     /// A research-only A/B for the final overlap weights. It defaults to the
     /// shipped calibrated mix and cannot alter the projection or source UVs.
     fusion: Cell<FusionMode>,
+    /// Explicit nonpersistent research input, never a normal playback setting.
+    residual_sidecar: RefCell<Option<Arc<ResidualSidecar>>>,
     /// Where the pass leaves word that it cannot draw this file any more
     /// (issue #124). It belongs to the open capture rather than to the
     /// pipeline, which outlives every file it draws.
@@ -308,6 +311,7 @@ impl Scene {
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
             fusion: Cell::new(FusionMode::default()),
+            residual_sidecar: RefCell::new(None),
             stalled: Stalled::default(),
             shown: Shown::default(),
         }
@@ -780,6 +784,12 @@ impl Scene {
         self.fusion.set(mode);
     }
 
+    /// Attach a previously parsed research sidecar for this open scene only.
+    pub fn set_residual_sidecar(&self, sidecar: Arc<ResidualSidecar>) {
+        *self.residual_sidecar.borrow_mut() = Some(sidecar);
+        self.fusion.set(FusionMode::DenseResidual);
+    }
+
     /// The A/B mode the next redraw will upload.
     pub fn fusion_mode(&self) -> FusionMode {
         self.fusion.get()
@@ -855,6 +865,7 @@ impl Scene {
             view: self.show.as_ref().and_then(|show| show.view(held)),
             sampling: self.sampling.get(),
             fusion: self.fusion.get(),
+            residual_sidecar: self.residual_sidecar.borrow().clone(),
             shutter: self.shutter.clone(),
             stalled: self.stalled.clone(),
             shown: self.shown.clone(),
@@ -893,6 +904,7 @@ impl Show {
         let at = self.held.instant(&frames, held.clock);
         let world_from_body = held.forced.unwrap_or_else(|| self.held.orientation.at(at));
         Some(View {
+            camera: self.camera,
             held: Held {
                 body_from_world: match held.horizon {
                     Horizon::Locked => world_from_body.conjugate(),
@@ -1071,6 +1083,7 @@ pub struct ScenePrimitive {
     /// redraw rather than of the frame in it.
     sampling: Sampling,
     fusion: FusionMode,
+    residual_sidecar: Option<Arc<ResidualSidecar>>,
     /// A handle on the [`Scene`]'s shutter, not a copy of it: the request
     /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
     /// first, and one that never does is still armed for the next.
@@ -1089,6 +1102,7 @@ pub struct ScenePrimitive {
 /// two atomic increments.
 #[derive(Clone, Debug)]
 struct View {
+    camera: u64,
     lenses: Arc<[Lens]>,
     frames: Arc<Frames>,
     /// Where the body was when these frames were taken, already inverted for
@@ -1130,6 +1144,7 @@ pub struct ScenePipeline {
     /// map mode remains zero, so a future, explicitly enabled map cannot
     /// accidentally inherit a previous capture's texture.
     fusion_identity: wgpu::Texture,
+    fusion_sidecar: Option<wgpu::Texture>,
     uniforms: wgpu::Buffer,
     /// The seam band, measured on the frame the draw is about to sample and
     /// dispatched from `prepare` (issue #103).
@@ -1288,6 +1303,7 @@ impl ScenePipeline {
             layout,
             sampler,
             fusion_identity,
+            fusion_sidecar: None,
             uniforms,
             band,
             blank,
@@ -1380,7 +1396,10 @@ impl ScenePipeline {
             self.reported = true;
             println!("device: {}", dmabuf::device_report(device));
         }
+        self.band.held = primitive.residual_sidecar.is_some();
+        self.band.tone_held = primitive.residual_sidecar.is_some();
         if let Some(view) = &primitive.view {
+            self.install_sidecar(device, queue, primitive, view);
             self.show(device, view, primitive);
         }
 
@@ -1433,6 +1452,82 @@ impl ScenePipeline {
         if let Some(request) = primitive.shutter.take() {
             self.shoot(device, queue, request, aspect, showing.as_ref());
         }
+    }
+
+    fn install_sidecar(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        primitive: &ScenePrimitive,
+        view: &View,
+    ) {
+        let Some(sidecar) = primitive.residual_sidecar.as_ref() else {
+            if self.fusion_sidecar.take().is_some() {
+                self.live.clear();
+            }
+            return;
+        };
+        let id = sidecar.identity;
+        let exact = id.calibration == [0.0; 5]
+            && id.camera_key == view.camera
+            && id.pts_ns
+                == view
+                    .frames
+                    .timestamp
+                    .as_nanos()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
+            && id.camera
+                == [
+                    primitive.camera.yaw,
+                    primitive.camera.pitch,
+                    primitive.camera.fov,
+                ];
+        if !exact {
+            if self.fusion_sidecar.take().is_some() {
+                self.live.clear();
+            }
+            return;
+        }
+        if self.fusion_sidecar.is_some() {
+            return;
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("research residual sidecar"),
+            size: wgpu::Extent3d {
+                width: sidecar.width,
+                height: sidecar.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FUSION_MAP_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let bytes: Vec<u8> = sidecar
+            .texels
+            .iter()
+            .flatten()
+            .flat_map(|v| f16::from_f32(*v).to_le_bytes())
+            .collect();
+        queue.write_texture(
+            texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(sidecar.width * 8),
+                rows_per_image: Some(sidecar.height),
+            },
+            wgpu::Extent3d {
+                width: sidecar.width,
+                height: sidecar.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.fusion_sidecar = Some(texture);
+        self.live.clear();
     }
 
     /// Draws the view a second time, offscreen, at the size the capture
@@ -1635,7 +1730,9 @@ impl ScenePipeline {
                     // for every binding the layout declares.
                     std::array::from_fn(|lens| planes.get(lens).unwrap_or(&self.blank)),
                     &self.sampler,
-                    &self.fusion_identity,
+                    self.fusion_sidecar
+                        .as_ref()
+                        .unwrap_or(&self.fusion_identity),
                 );
                 self.live.push_front(Live {
                     frames: view.frames.clone(),

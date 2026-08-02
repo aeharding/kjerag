@@ -2839,6 +2839,7 @@ version = "0.1.2"
 dependencies = [
  "dirs",
  "jpeg-encoder",
+ "kjerag-media",
  "kjerag-render",
  "libcosmic",
  "open",
@@ -2872,6 +2873,7 @@ version = "0.1.2"
 dependencies = [
  "ash",
  "ffmpeg-next",
+ "half",
  "kjerag-media",
  "kjerag-meta",
  "libc",

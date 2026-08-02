@@ -34,9 +34,11 @@
 //! the controls are up: no message is sent per frame, so nothing else would
 //! rebuild the view.
 
+use kjerag_media::ResidualSidecar;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cosmic::app::{Core, Settings, Task, context_drawer};
@@ -58,7 +60,9 @@ use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
 use kjerag_render::capture_set::{self, Missing};
-use kjerag_render::{Accuracy, Framing, FusionMode, Horizon, Nudge, Request, Scene, Stall, Stats};
+use kjerag_render::{
+    Accuracy, Framing, FusionMode, Horizon, Nudge, Request, Scene, SeamFit, Stall, Stats,
+};
 
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -119,14 +123,30 @@ const TOASTS: usize = 5;
 const VOLUME_POPUP: f32 = 240.0;
 
 /// Runs the shell.
-pub fn run(input: Option<PathBuf>, at: Option<Framing>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    input: Option<PathBuf>,
+    at: Option<Framing>,
+    sidecar: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let stored = Stored::load(App::APP_ID);
     let settings = Settings::default()
         .size_limits(Limits::NONE.min_width(360.0).min_height(240.0))
         // The window opens in the configured theme rather than flashing the
         // default one first (cosmic-player `src/main.rs:154-155`).
         .theme(stored.config.app_theme.theme());
-    cosmic::app::run::<App>(settings, Flags { stored, input, at })?;
+    let sidecar = sidecar
+        .map(|path| ResidualSidecar::read(std::fs::File::open(path)?))
+        .transpose()?
+        .map(Arc::new);
+    cosmic::app::run::<App>(
+        settings,
+        Flags {
+            stored,
+            input,
+            at,
+            sidecar,
+        },
+    )?;
     Ok(())
 }
 
@@ -135,6 +155,7 @@ pub struct Flags {
     input: Option<PathBuf>,
     /// Where to land, when the command line named a view as well as a file.
     at: Option<Framing>,
+    sidecar: Option<Arc<ResidualSidecar>>,
 }
 
 #[derive(Clone, Debug)]
@@ -259,6 +280,7 @@ pub struct App {
     core: Core,
     /// The file on screen, if there is one.
     open: Option<Open>,
+    research_sidecar: Option<Arc<ResidualSidecar>>,
     /// What the window is saying about a failure, and the only way anything in
     /// this app says one (`crate::fail`, issue #124).
     alert: Alert,
@@ -443,6 +465,7 @@ impl cosmic::Application for App {
         let mut app = App {
             core,
             open: None,
+            research_sidecar: flags.sidecar,
             alert: Alert::default(),
             stored: flags.stored,
             key_binds: key_binds(),
@@ -610,7 +633,7 @@ impl cosmic::Application for App {
                 if let Some(open) = &self.open {
                     open.scene.set_fusion_mode(match open.scene.fusion_mode() {
                         FusionMode::Disabled => FusionMode::Dominant,
-                        FusionMode::Dominant => FusionMode::Disabled,
+                        FusionMode::Dominant | FusionMode::DenseResidual => FusionMode::Disabled,
                     });
                 }
                 self.show_controls(now);
@@ -998,7 +1021,17 @@ impl App {
         match Scene::open_with(path, alongside) {
             Ok(scene) => {
                 self.alert.close();
-                self.hold_seam(&scene);
+                if let Some(sidecar) = &self.research_sidecar {
+                    // Version 1 sidecars bind factory geometry only.  Never
+                    // let a pooled correction make their coordinates lie.
+                    scene.use_seam(SeamFit::default());
+                    scene.set_residual_sidecar(sidecar.clone());
+                    println!(
+                        "research residual: factory seam only; awaiting exact frame/view match"
+                    );
+                } else {
+                    self.hold_seam(&scene);
+                }
                 self.open = Some(Open {
                     path: path.to_path_buf(),
                     duration: scene.duration(),

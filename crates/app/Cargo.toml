@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 kjerag-render = { workspace = true }
+kjerag-media = { workspace = true }
 # `xdg-portal` is the portal file chooser and `about` is the About page.
 # Neither is in libcosmic's default set, and features are additive with the
 # workspace entry's `wgpu` (docs/UI.md).

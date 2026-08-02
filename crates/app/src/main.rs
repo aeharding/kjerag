@@ -27,7 +27,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     match args::parse(std::env::args().skip(1)) {
-        Ok(args::Args::Play(input, at)) => match app::run(input, at) {
+        Ok(args::Args::Play(input, at, sidecar)) => match app::run(input, at, sidecar) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("kjerag: {e}");
