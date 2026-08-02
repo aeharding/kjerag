@@ -2318,30 +2318,34 @@ fn openness(disparity: f32, strength: f32, spread: f32) -> f32 {
   return 1.0 - t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
-// One step of the openness: what this frame's patch says, eased into what the
-// direction was holding, SLOWLY OPEN and QUICKLY SHUT.
-//
-// The asymmetry is the safety argument written as arithmetic and it uses the
-// two constants this file already has. Opening late costs a seam that stays
-// sharp for a moment longer; shutting late costs a wing drawn twice. A
-// direction with nothing behind it yet takes its answer whole, which is the
-// rule every other channel here takes.
 // One step of this direction's own additive term: what the two lenses still
 // differ by here after the pooled gain, eased into what the direction was
-// holding (issue #103, stage 8). Rust twin: `Cell::offset`'s own docstring and
-// `read_offset`.
+// holding (issue #103, stage 8). Rust twin: `Cell::offset`'s own docstring.
 //
 // AT TAU_GAIN, which is what this file smooths things that do not move by. It
 // needs one, and stage 7 measured why: one frame's reading of one direction
 // carries about a code of its own noise, and a colour that breathes is motion
 // where the scene has none.
 //
-// WHAT DECAYS WHERE NOTHING IS CONFIRMING IT IS THE EVIDENCE AND NOT THE VALUE,
-// which is this file's rule on every other channel and is why it holds here:
-// `hue_conf` is what weighs this in `band_bend`, so a direction that stops
-// being read fades out of the picture on its own and does not have to be
-// unlearned. The gain it is measured against is last frame's, which is smoothed
-// over two seconds and cannot move inside one.
+// ALWAYS eased, with no first-reading-whole path, which is where this channel
+// differs from every geometry channel in this file and it is `pool`'s own rule
+// for `pool`'s own reason: a bend that arrives late leaves a doubled edge for a
+// second and a photometry that arrives instantly is a picture changing
+// brightness in one frame. A reset empties the cell, so a seek walks the
+// correction in from nothing rather than carrying somewhere else's.
+//
+// Measured before it was chosen: taking the first reading whole made this
+// column pump at 0.044 to 0.057 ln rms per frame at the azimuths where the
+// correlation comes and goes, which is seven times a code, because a reading
+// that passes through zero is not the same thing as a direction that has never
+// been read.
+//
+// WHAT DECAYS WHERE NOTHING CONFIRMS IT IS THE EVIDENCE AND NOT THE VALUE,
+// which is this file's rule on every other channel: `hue_conf` is what weighs
+// this in `band_bend`, so a direction that stops being read fades out of the
+// picture on its own and does not have to be unlearned. The gain it is measured
+// against is last frame's, which is smoothed over two seconds and cannot move
+// inside one.
 fn read_offset(held: ptr<function, Cell>) {
   if watch.hold != 0.0 {
     (*held).offset = array<f32, 3>(0.0, 0.0, 0.0);
@@ -2357,22 +2361,38 @@ fn read_offset(held: ptr<function, Cell>) {
     vec3<f32>(-LIMIT_OFF),
     vec3<f32>(LIMIT_OFF),
   );
-  let unread = (*held).offset[0] == 0.0 && (*held).offset[1] == 0.0 && (*held).offset[2] == 0.0;
-  let learn = select(ease(watch.seconds, TAU_GAIN), 1.0, watch.reset != 0.0 || unread);
+  let learn = ease(watch.seconds, TAU_GAIN);
   for (var channel = 0u; channel < 3u; channel += 1u) {
     (*held).offset[channel] += (want[channel] - (*held).offset[channel]) * learn;
   }
 }
 
+// One step of the openness: what this frame's patch says, eased into what the
+// direction was holding, AT THE CONSTANT THE DISPARITY DRIVING IT IS SMOOTHED
+// AT.
+//
+// `time_constant` and not a rule of its own, which is stage 4's property kept:
+// a width cannot flicker faster than the reading it is made of. It gives the
+// safety argument for free rather than by an asymmetry - a near-field direction
+// answers in a tenth of a second, which is where a wing crossing the seam is,
+// and a far-field one takes two seconds, which is where nothing moves - and a
+// near-field direction is the one that needs it least, because the fold opens
+// its band whatever this says.
+//
+// An asymmetric rule was tried first and measured worse: shutting at TAU_NEAR
+// everywhere moved the width by 5 percent of its range between frames on
+// footage panning at 197 deg/s, which is four times the bend's own flicker.
 fn read_open(held: ptr<function, Cell>, spread: f32) {
   if spread < 0.0 {
     return;
   }
   let strength = clamp((*held).confidence / KEEP, 0.0, 1.0);
   let want = openness((*held).disparity, strength, spread);
-  let unread = (*held).hue_conf <= 0.0;
-  let tau = select(TAU_NEAR, TAU_FAR, want > (*held).open);
-  let learn = select(ease(watch.seconds, tau), 1.0, watch.reset != 0.0 || unread);
+  let learn = select(
+    ease(watch.seconds, time_constant((*held).disparity)),
+    1.0,
+    watch.reset != 0.0,
+  );
   (*held).open += (want - (*held).open) * learn;
 }
 
