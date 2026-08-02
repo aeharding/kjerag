@@ -721,6 +721,21 @@ impl Reframe {
         })
     }
 
+    /// The inverse of [`Self::body_ray`]: a camera-body direction expressed
+    /// in the named view's frame.
+    ///
+    /// `view_to_body` is a rotation, so its transpose is its inverse. Raw
+    /// registration keeps its seam nodes in body space, but [`Self::project`]
+    /// (like the renderer) always takes a view-space ray; this makes that
+    /// boundary explicit instead of relying on callers to transpose it.
+    pub fn view_ray_from_body(&self, body_ray: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|row| {
+            (0..3)
+                .map(|c| self.view_to_body[row][c] * body_ray[c])
+                .sum()
+        })
+    }
+
     /// Which azimuth of the seam circle a ray is over, in radians from the
     /// body's +x, and the geometry of the band there.
     ///
