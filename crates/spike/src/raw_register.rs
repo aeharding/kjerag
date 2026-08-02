@@ -792,7 +792,13 @@ fn sample(
                     + node.perp[k] * (i as f64 * step + offset[0])
                     + node.epi[k] * (j as f64 * step + offset[1])
             }));
-            let landing = map.project(lens, ray.map(|v| v as f32));
+            // `Node` is deliberately camera-body based so its epipolar axes
+            // remain fixed while the named view turns. `project`, however,
+            // takes the renderer's view-space ray. Passing `ray` directly
+            // mixed those frames and could report an actual crossover root
+            // as projected out merely because the view was rotated.
+            let view = map.view_ray_from_body(ray.map(|v| v as f32));
+            let landing = map.project(lens, view);
             if !landing.inside {
                 return Err(PatchRefusal::ProjectedOut);
             }
@@ -948,6 +954,24 @@ mod tests {
                 "root weighs {:?}",
                 blend.weights
             );
+            let recovered = map.view_ray_from_body(candidate.node.centre.map(|v| v as f32));
+            for axis in 0..3 {
+                assert!(
+                    (recovered[axis] - candidate.view_ray[axis]).abs() < 1e-5,
+                    "body-to-view inverse changed axis {axis}: {recovered:?} vs {:?}",
+                    candidate.view_ray,
+                );
+            }
+            for lens in 0..2 {
+                let from_node = map.project(lens, recovered);
+                assert!(from_node.inside);
+                for axis in 0..2 {
+                    assert!(
+                        (from_node.pixel[axis] - blend.landings[lens].pixel[axis]).abs() < 1e-3,
+                        "lens {lens} landing differs after body-to-view round-trip"
+                    );
+                }
+            }
         }
     }
 
