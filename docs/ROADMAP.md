@@ -579,6 +579,166 @@ live, no keyframe UI ever.
   by which file was watched first. The pooling, the quality gate, the
   per-camera cache and the walk are untouched. Awaiting the owner's own test.
 
+- 2026-08-05 **The seam can be measured where there is no horizon to measure**
+  (`--bin crossing`, branch `research/crossing-instrument`). `step` needs a
+  horizon and fits scenery at 51 to 86 px rms on the owner's 2026-05-01 views,
+  so a seam-fix candidate could not be screened at the two crossings he
+  actually looked at. This traces the pass's own 50/50 handover contour and,
+  at fixed sites along it, registers the two **raw** lens pictures against
+  each other on the seam's own axes. It reads the calibration's unbent
+  geometry, so a reading carries no warm history.
+
+  **It states its own floor, because the first version of it did not and was
+  quoted to a precision it did not have.** Every run re-measures with the
+  three angle knobs moved a thousandth of a degree each way and prints how far
+  its medians travel, and how many sites each dithered run accepted: 0.00 view
+  px over 36 and 36 sites on the null, 0.01 to 0.09 over equal counts on the
+  four 2026-05-01 views. Nothing it says is worth more digits than that line,
+  and a table taken at one `bins=` does not compare with one taken at another.
+
+  The counts are on that line because a band is set two ways. Equal counts
+  mean the dither moved the readings and the band measures that. Unequal
+  counts mean it moved a site in or out of the accepted set, and then the band
+  is a median stepping over a different population and is not a reproducible
+  digit at all. The sun view under the pool member is the one recorded run
+  like that, 12 sites against 13, and its band should be read as *at least*
+  half a view pixel on the epipolar axis and not as a number. It is also an
+  **angle** floor: the dither never moves `cx` or `cy`.
+
+  That line exists because of the defect it now guards. The ported tracer
+  kept, per azimuth bin, the root with the largest `min(blend.weights)`, on
+  the argument that it was the one furthest inside both lenses. It is not:
+  `Reframe::blend` normalizes the pair to sum 1, so at a 50/50 root that score
+  is **exactly 0.5 at every candidate** and the twenty-odd candidates a bin
+  holds were separated by the last bit of the bisection's `f32`. A
+  ten-thousandth of a degree of calibration moved the reported medians by
+  about a view pixel and a rerun of the same command did not reproduce its own
+  table. A bin now keeps the root nearest its own centre, azimuth being what
+  every comparison this instrument makes is keyed on, and three consecutive
+  runs are identical to the last printed digit.
+
+  **Null**: lens 0 against its own picture reads exactly `0.0000` on both axes
+  at every accepted site, 36 of 37, 41 of 41 and 78 of 78 across the three
+  views. **Plant**: a known calibration delta read back per site against what
+  the perturbed map predicts, two sizes each - yaw 0.10/0.20 deg, roll
+  0.10/0.20, cy 2/4 px. Median error 0.0006 to 0.0113 deg, which is 0.02 to
+  0.36 source px, and it does not grow with the plant.
+
+  **The owner's frame**, at `bins=180`, in view px at 1024 across. The two
+  calibrations are his own pool of five resolved the two ways: the knobwise
+  median that shipped until the entry above, and the member #154 now answers
+  with.
+
+  | crossing | calibration | epi | perp | accepted |
+  | --- | --- | ---: | ---: | ---: |
+  | the one he called good | knobwise median (was shipping) | 4.5 | 3.8 | 19/37 |
+  | good | pool member (#154, ships now) | 6.1 | 1.2 | 19/37 |
+  | the one he called bad | knobwise median | 12.0 | 3.3 | 38/41 |
+  | bad | pool member (#154) | 10.1 | 1.4 | 38/42 |
+
+  The two crossings differ 2.7x on the epipolar axis and are the same on the
+  along-seam one. The change #154 landed cuts the along-seam error at both,
+  3.8 to 1.2 and 3.3 to 1.4 view px, and moves the epipolar term by about a
+  pixel, which is what "the bad one barely moved" looks like here. This is an
+  independent read of that change: the entry above measured it as along-seam
+  residual round the whole circle, and this measures it at the two crossings
+  the owner actually looked at.
+
+  **The bad crossing's excess is not parallax, and the first reading of this
+  table said it was.** Epipolar is the axis a subject's distance displaces
+  content along, so 12 view px was read off as content 2.4 m away. That
+  inferred a distance from a magnitude without asking what the sites were
+  looking at, and they were looking at a town, an estuary and a ridge line
+  kilometres off, where a 33 mm baseline produces 0.015 view px. The excess is
+  geometry.
+
+  **Held at matched body azimuth over the whole 30-minute clip**, eight
+  instants, every run's reference healthy (scatter 0.011 to 0.093 deg):
+
+  | body azimuth | axis | across 30 min | swing |
+  | --- | --- | --- | ---: |
+  | +30 to +60 (the bad one) | epi | -14.5 to -13.5 view px | 0.99 px |
+  | +30 to +60 | perp | -3.1 to -2.2 view px | 0.93 px |
+  | -160 to -120 (the good one) | epi | -3.0 to -1.5 view px | 1.53 px |
+  | -160 to -120 | perp | -4.8 to -3.7 view px | 1.11 px |
+
+  The scenery behind those azimuths changes completely across those instants,
+  from an industrial town and estuary to open farmland to clear sky, and the
+  reading does not. The horizon lock is world-referenced, so a fixed view line
+  looks at a **drifting** arc of the body-fixed seam; a per-time median taken
+  without matching azimuth swings by 19 view px for that reason alone.
+
+  **Three of those four rows are steady and one is not.** The good crossing's
+  epipolar row swings 1.53 px on a signal of about 2, so at that crossing the
+  epipolar term is **not established as constant** and nothing may be built on
+  its being so. And the bad crossing's steadiness is one azimuth of one
+  flight, not a property of the axis: the 2026-04-10 flight moves 7 source px
+  on that same axis within itself at a different azimuth, and is the standing
+  counterexample to reading that row round the whole circle.
+
+  **Along the seam reproduces across flights and across the seam does not,
+  and that is the split a residual map has to be designed around.** At matched
+  body azimuth, over the runs whose reference stands and which have at least
+  ten sites in the window, in source px: 2026-05-01 reads perp -10.7 to -8.8
+  over 3 runs and 2026-04-10 reads -11.5 to -6.6 over 7, the medians 1.1 px
+  apart, inside either flight's own spread. Epi over the same runs reads -11.6
+  to -11.3 on 05-01 and -9.0 to -2.1 on 04-10, a 9 px gap between flights and
+  a 7 px spread **within** the April one. A static per-azimuth map is enough
+  for along the seam; across it needs a per-session channel and probably the
+  per-frame one the band already is.
+
+  What did **not** survive is the claim that the epipolar term shifted late in
+  the May flight, from -9 to -3 source px. Every late-May run behind it is
+  either reference-withheld or has three to six sites in the window; the three
+  usable May runs are all early and all read -11.3 to -11.6. The shift was an
+  artifact of contaminated and thin runs.
+
+  **Perp is the honest broker, and it is a gate** (`perp-implausible`). No
+  depth can reach the along-seam axis at any distance and a file's calibration
+  does not change while it plays, so a reading far from its crossing's own
+  along-seam value is a correlation that locked onto the wrong feature. It is
+  refused whatever its agreement, and it catches what the agreement floor
+  passes at 0.92.
+
+  The reference is the crossing's own median over at least five readings, or
+  one the caller declares, and it is **withheld** when the crossing's own
+  scatter exceeds two fifths of the tolerance: sorted, 33 recorded runs scatter
+  0.03 ... 0.35 then 0.53, 0.57, 1.03 of it, and the three past the gap are
+  the ones whose middle meant nothing. It fires on the two runs that had put
+  the honest core near refusal while keeping the junk.
+
+  The tolerance is 0.40 deg, 12.6 source px, and it is a **chosen operating
+  point in a populated continuum**, not a line between two populations: over
+  750 accepted readings the departure from a crossing's own value runs p50
+  1.85 px, p75 5.13, p90 22.13, and 11.9% sit in the 8-to-25 px stretch the
+  cut is in. An earlier version of this entry called that stretch empty, which
+  was false. What the data does say is that the choice barely matters: put the
+  cut anywhere from 8 to 20 px and 4.0 to 5.7% of readings change side.
+
+  **What the gate is not is validated.** The two-view control that was
+  reported as validating it does not: `measure` builds its patches on
+  body-fixed axes, so the view rotation cancels exactly and two views of one
+  body direction agree to 0.0005 px whether the reading is any good or not.
+  It validated the tracer's frame handling and nothing else. What stands
+  behind the gate is the physical argument, a planted-site mechanism test, and
+  one consequence it cannot have engineered: removing sites on the along-seam
+  axis improves the **epipolar** axis's across-time reproducibility, a channel
+  the gate never inspects (MAD 0.73 to 0.61 view px at one crossing, 0.65 to
+  0.45 at the other). It cannot catch a mismatch that moved only across the
+  seam, and the epipolar across-time range barely moves for that reason.
+
+  **Glare refuses rather than guessing.** On the sun view, 78 sites trace and
+  14 to 17 are accepted; the rest are `weak`, peaking at 0.11 to 0.48. The
+  null run over the same 78 accepts every one at exactly zero, so the refusals
+  are the two lenses genuinely disagreeing under flare rather than sites the
+  sampler could not reach. Under the pooled fit that view's own scatter is too
+  wide for a reference and the gate withholds one.
+
+  **The search window is not a knob to widen.** At 2.60 deg the same frame
+  reads a median magnitude of 18.7 source px with a spread of 19.8, because
+  content two degrees away is allowed to win. A railed site is the honest
+  answer. Patch, step and correlation floor are not like that: over their
+  whole swept range the medians move under a pixel.
 - 2026-08-01 **The descriptors describe the app, and the channel is named**
   (owner, from a screenshot of COSMIC Store). The `.flatpakref` carried
   plumbing keys only, so the page a Store draws before the remote is trusted
