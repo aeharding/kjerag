@@ -581,7 +581,7 @@ live, no keyframe UI ever.
   `hold_band` from its first frame, so the two pictures carry the same content
   by construction and what separates them is the applied field. Patches are
   placed against the seam's own row, walked onto out of the shipped map, because
-  the seam sweeps 350 px down the picture over the reference window and a row
+  the seam sweeps 330 px down the picture over the reference window and a row
   pinned to the picture would be measuring that sweep.
 
   **Two modes, a null and a plant.** `mode=probe` reads four bands across the
@@ -600,8 +600,9 @@ live, no keyframe UI ever.
   step rms on the seam with a 0.42 deg single frame, and 0.0003 deg on lens 0's
   side, which is the floor. Those four are stated against a main and the
   registry line says which: the view is held by the horizon lock, so #158's
-  reseeded orientation track moved the seam 45 px down this window and took the
-  first of them from 0.3641 to 0.3663 with no change to the instrument. The
+  reseeded orientation track moved the seam 23 to 45 px down this window, a
+  mean of about 35, and took the first of them from 0.3641 to 0.3663 with no
+  change to the instrument. The
   band's own state moved by 0.000002 across the same merge, which is the shape
   of the distinction: the band is fitted in the body's frame and these bands are
   read in the view's. It is reported beside them, at
@@ -628,7 +629,7 @@ live, no keyframe UI ever.
   record no file identity at all, so a number copied out of one cannot be
   attributed to a video, a view or a calibration afterwards. That the
   calibration belongs in the stamp is not a guess: the same view fitted from
-  the file reads 0.025 deg where the stored calibration reads 0.364, because
+  the file reads 0.027 deg where the stored calibration reads 0.366, because
   what the band applies is what the calibration left it.
 
 - 2026-08-05 **The seed is a mean of the opening minute, not a reading from

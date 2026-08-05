@@ -13,10 +13,10 @@ add new owner references here with date, category, and status.
 ## Motion: what the band applies, and how much of it moves (`--bin shear`)
 - 2026-08-05 `VID_20260714_193252_00_006.insv time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1`
   The shimmer view, and the acceptance instrument for the seam epic's motion work. Under the
-  lock the seam sweeps 350 px down the picture over three seconds, so everything here is
+  lock the seam sweeps 330 px down the picture over three seconds, so everything here is
   measured against the seam's own row rather than the picture's. The acceptance command is that
   line plus `frames=90 warm=6.0 seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
-  and the `seam=` is not optional: fitted from the file instead, the same view reads 0.025 deg
+  and the `seam=` is not optional: fitted from the file instead, the same view reads 0.027 deg
   at -150 px rather than 0.366, because what the band applies is what the calibration left it.
   Live arm against the same frames with the band held off, 90 frames, READ AGAINST MAIN AT #158
   (see the horizon caveat below): `-150` px 0.3663 deg applied at 0.0047 deg step rms over 89
@@ -30,9 +30,9 @@ add new owner references here with date, category, and status.
   ratio 1.9920 to 1.9963.
   CAVEAT, THE HORIZON: everything above except the null, the plant and the band's own state is a
   reading about where the seam lands in THIS view, and under `lock=1` that is decided by the
-  orientation track. #158 reseeded it and moved the seam 45 px down this window, which took
-  `-150` from 0.3641 deg to 0.3663 and `+60` from 0.0417 to 0.0578 with its readings from 43 to
-  30, on an instrument that did not change. The band's own state moved by 0.000002 across the
+  orientation track. #158 reseeded it and moved the seam 23 to 45 px down this window, a mean of
+  about 35, which took `-150` from 0.3641 deg to 0.3663 and `+60` from 0.0417 to 0.0578 with its
+  readings from 43 to 30, on an instrument that did not change. The band's own state moved by 0.000002 across the
   same merge, because it is fitted in the body's frame and these bands are read in the view's.
   Re-read this line after any horizon-seed or lock change before treating a move as the band's.
   CAVEAT, the `+60` band is the fragile one and only it: 30 of 90 readings correlate and 23 of

@@ -33,7 +33,7 @@
 //! only two readings in the set whose right answer is known before the run.
 //!
 //! **Seam-relative and not picture-relative.** Under a locked horizon the body
-//! turns beneath the view, so the seam walks across the picture: 350 px over
+//! turns beneath the view, so the seam walks across the picture: 330 px over
 //! the three seconds this was written for. A row pinned to the picture would be
 //! measuring that sweep. Every patch here is placed against the seam's own row,
 //! read out of the shipped map (`Reframe`) by walking down the gradient of the
@@ -88,14 +88,14 @@
 //! `lock=1` the view is held against the orientation track, so a change to how
 //! that track is seeded moves which part of the sphere the view is pointed at
 //! and therefore where the seam lands in the picture. Merging #158 moved the
-//! seam's row 45 px down this window and took `-150` from 0.3641 deg to 0.3663,
-//! `+60` from 0.0417 to 0.0578 and its readings from 43 to 30, while the band's
-//! own state moved by 0.000002: the band works in the body's frame and the
-//! bands work in the view's. A reading here that has moved is a question about
+//! seam's row 23 to 45 px down this window, a mean of about 35, and took
+//! `-150` from 0.3641 deg to 0.3663, `+60` from 0.0417 to 0.0578 and its
+//! readings from 43 to 30, while the band's own state moved by 0.000002: the
+//! band works in the body's frame and the bands work in the view's. A reading here that has moved is a question about
 //! what the view is now looking at before it is a question about the band.
 //!
 //! The `seam=` in that command is not decoration either: fitted from the file
-//! instead, the same view reads 0.025 deg at `-150` rather than 0.366, because
+//! instead, the same view reads 0.027 deg at `-150` rather than 0.366, because
 //! what the band applies is what the calibration left it.
 //!
 //! CSVs land in gitignored `scratch/`, stamped with the file they were read off
