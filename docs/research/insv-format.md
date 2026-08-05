@@ -2323,6 +2323,236 @@ degrees above its own axis, so the views thin out exactly where the defect
 is worst. That is the second reason to read the count of views next to
 every number.
 
+### 8.8 A magnitude is not a direction: the seed that weighed right and pointed wrong (issue #152)
+
+**Confidence: HIGH, measured 2026-08-05 on six X4 Air flights, through the
+render path and against a backward pass over the same files.** This is the
+sequel to 8.7 and it replaces the rule that section prescribes.
+
+8.7's seed searched forward for the first `accel_seconds` of accelerometer
+whose mean the running filter would believe **completely**, and 1 g is the
+whole of that test. On the August 2 capture the search stops 1.92 s in,
+inside the launch, where a second of accelerometer weighs **1.039 g** and
+points **21 degrees** off vertical. The horizon opened 20.9 degrees off
+level, panning a circle swung it 40 degrees peak to peak, and it was still
+17 degrees off forty seconds later, because under power the accelerometer is
+believed at only 28 of 88 instants and the correction has little to work
+with.
+
+#### Why the test could not see it
+
+An aircraft accelerating along the ground feels gravity plus its own
+acceleration. A horizontal acceleration of `tan e` g tilts the specific force
+by `e` and weighs it `1 / cos e`, so:
+
+| tilt of the reading | what it weighs | inside `trust_g.0` = 0.05 g? |
+| ---: | ---: | :--- |
+| 5 deg | 1.004 g | yes |
+| 10 deg | 1.015 g | yes |
+| 18 deg | 1.051 g | just outside |
+| 21 deg | 1.071 g | no, but 1.039 g was what this file read |
+
+The window is 0.05 g wide and 18 degrees of tilt costs 0.05 g. **Testing the
+magnitude of one reading cannot tell a launch from gravity**, and no
+threshold on that test can, because the quantity it measures is nearly flat
+in the quantity that matters. The 1.039 g measured is the same geometry with
+the wing unloading slightly as well.
+
+Two other hypotheses were tested first and both are refuted, each with a
+positive control that was shown to fire: **centripetal contamination**
+(`lean centripetal=`, which manufactures the specific force of a coordinated
+turn at a given airspeed) changes nothing, and **clock skew** (`lean skew=`
+with the `shifts=` sweep, which does find an injected skew) puts the minimum
+at zero shift. The cancellation control fires: injecting the equal and
+opposite tilt at t=0 collapses the measured tilt from 20.944 to 0.215
+degrees, so the whole defect is one constant rotation applied at the start.
+
+#### The rule that replaced it
+
+The whole opening **minute** of accelerometer, every sample rotated into the
+frame of the track's first sample by the gyroscope, averaged. No search, no
+window, no test of any reading against anything.
+
+What makes a mean answerable where a reading is not: the mean specific force
+over `T` is gravity plus the aircraft's own mean acceleration, and that is
+its change in speed over `T`. A minute of a paramotor's whole speed range,
+15 m/s, is 0.025 g, or one and a half degrees; a manoeuvre inside the minute
+is pointing somewhere else a few seconds later and cancels. Against that the
+gyroscope has to carry the answer back to the first sample, and it drifts at
+0.05 deg/s (8.5), which over a minute is 3 degrees. A minute is where the two
+meet.
+
+#### What it is worth
+
+Two instruments, because the one a pilot meets is not the one that can tell
+two good answers apart.
+
+**The render path** (`kjerag-spike --bin lean`, 36 yaws a circle, every 15
+frames, and a circle is read only where at least 8 of those 36 views found a
+horizon) is what he sees, and it measures the whole error including whatever
+the picture itself is off by. **The arbiter** (`--bin hindsight`) is a
+backward pass: the same complementary filter run from two minutes in back to
+the first sample with the gyroscope's rates negated, so it meets the launch
+last instead of first and whatever it started from has decayed at
+`tilt_seconds` long before it arrives. It moves 0.02 to 0.83 degrees when its
+span is doubled from 120 to 240 seconds, and it reproduces the defect it was
+built to arbitrate: on the August 2 capture it puts the old seed 24.18
+degrees off, against the 20.944 the render path measured.
+
+Two things about it, so it is not read for more than it is. Its own start is
+this section's rule applied to the *end* of the span, which makes it
+independent of how the opening was seeded and not independent of the rule
+itself; what it is independent of is the launch, which is the thing under
+test. And a backward pass that had converged would not move at all when its
+span grew, so **the `back moved` column is the measurement of how much any of
+its numbers are worth**, not a footnote to them.
+
+Seed error at the first sample against the arbiter, degrees:
+
+| flight | old rule | this rule |
+| --- | ---: | ---: |
+| April 10 | 5.27 | **1.21** |
+| May 1 | 6.52 | **0.71** |
+| May 26 | 11.96 | **0.29** |
+| July 14 | 3.06 | **2.66** |
+| July 25 | 3.89 | **1.48** |
+| August 2 | 24.18 | **3.03** |
+
+Better on all six, worst case 3.03 against 24.18. And the answer weighs what
+gravity weighs on every one of them: 0.991, 1.010, 0.998, 1.000, 0.999 and
+1.000 g, where the old rule's window read 0.960 to 1.049.
+
+Six flights is six sessions, and the sessions have siblings: the chapters and
+second cards beside them read the same way, on the same arbiter, except for
+one that was already right and gives up a quarter of a degree.
+
+| sibling file | old rule | this rule |
+| --- | ---: | ---: |
+| 05-01 `_003` | 3.58 | **1.21** |
+| 07-25 `_002` | 12.94 | **2.77** |
+| 05-01 `_002` | **0.29** | 0.56 |
+
+So "better on all six" is a statement about the six sessions and not about
+every file this camera has written.
+
+Through the render path, over the first forty seconds, mean tilt in degrees
+(and at the first frame), reading only circles where at least 8 of 36 views
+found a horizon:
+
+| flight | before | after | first frame, before | after |
+| --- | ---: | ---: | ---: | ---: |
+| April 10 | 2.83 | 4.68 | 10.66 | **4.36** |
+| May 1 | 3.97 | **1.99** | 3.07 | **3.00** |
+| May 26 | 7.29 | **1.80** | 10.97 | **0.64** |
+| July 14 | 6.49 | **5.15** | 3.50 | **1.48** |
+| July 25 | too few views to fit | | | |
+| August 2 | 18.86 | **3.75** | 20.97 | **3.33** |
+
+**April 10 is where the two instruments contradict each other, and it is not
+resolved.** Its first frame improves 6.3 degrees, 10.66 to 4.36. Its 4 to 20
+second stretch is 3.5 degrees **worse**, 1.33 against 4.82, at a steady
+bearing and a constant tilt. The sinusoid fits over that stretch are clean,
+0.24 to 1.00 degrees of residual on both arms, so what is being measured
+there is a vertical that is genuinely off and not a horizon the finder is
+struggling with.
+
+**The two arms do not converge inside the forty second walk.** The gap
+between their tilts is 1.53 degrees at 24 seconds, first dips under a degree
+at 27.0, and is back at 1.16 by 38. The angle between the two measured
+verticals, which is the stricter reading of the same thing, is 4.25 degrees
+at 24 seconds, 3.47 at 38, and never below 3.28 anywhere in the walk. What is
+verified is that at 240 seconds the two are identical to three decimal
+places.
+
+So the arbiter says the new seed is 4 degrees closer than the old on that
+file, and the render path says the opposite over that stretch, and nothing
+here settles which. One candidate for it is the 157 deg/s spin in that file's
+opening, which both instruments carry the same gyroscope's integration
+through. What is **not** the explanation is crooked scenery: rendered at 10
+seconds at four yaws, the file is over flat farmland at altitude with a
+distant true horizon, and a skyline crooked enough to manufacture 4.7 degrees
+would not fit as cleanly as those fits do.
+
+July 25 has a horizon the finder can see in at most 8 of 36 views at any
+instant, so the render path says nothing about it either way.
+
+#### Selecting readings, and what is and is not settled about it
+
+The rule that covers every other sample is `Filter::trust`, and using it here
+sounds obvious. On the file the owner reported it is worse, and it gets worse
+the harder it selects. August 2, mean tilt over the first forty seconds
+through the render path:
+
+| rule | tilt |
+| --- | ---: |
+| every sample counted once (shipped) | **3.75** |
+| each second weighted by `Filter::trust` | 6.73 |
+| only the seconds inside the trust window, counted whole | 9.32 |
+| one window, chosen by weight (the old rule) | 18.86 |
+
+The mechanism that would explain that ladder is that what a magnitude selects
+for in a manoeuvring flight is the unloaded and transitional moments, which is
+a sample of the flying rather than the whole of it, and a sample of manoeuvres
+leans.
+
+**It is one file on one instrument, and the other instrument disagrees about
+the middle of it.** Against the backward pass, over the six flights, the
+trust-weighted mean is the better of the two: worst case 1.61 against 3.03 and
+mean 1.13 against 1.56, and on the August 2 capture itself it reads 1.61 where
+the plain mean reads 3.03, which is the opposite ordering to the render path's
+on the same file. Per flight it is not so one-sided: the plain mean is the
+closer of the two on four of the six, by 0.04 to 0.09 degrees, which is inside
+what an instrument that moves 0.02 to 0.83 on its own span can resolve, and
+the two the weighted mean wins it wins by 1.42 and 1.46. The aggregate is
+those two wins. So what the numbers settle is narrower than the mechanism
+sounds:
+
+- **Settled**, on both instruments and on every one of the six flights: the
+  shipped rule beats the rule it replaces.
+- **Settled**, on the render path, on the reported file: the ladder above,
+  where the shipped rule is the best of the four.
+- **Not settled**: whether counting every sample or weighting each second by
+  trust is better in general. The two instruments order those two differently,
+  the render path cannot measure July 25 at all, and April 10 is contradictory
+  on its own.
+
+The plain mean ships because the reported defect is on August 2 and the
+instrument that measures what the owner sees puts it 3 degrees better there,
+and because it is the rule with nothing in it to tune.
+
+**Picking a window is worse on both instruments.** A window that weighs 1 g
+can be two things that are not gravity pointing in different directions: the
+April 10 capture has a twenty seconds straddling a manoeuvre whose mean weighs
+0.999 g and sits 8 degrees from the quiet stretch either side of it, and a
+rule that picks the window closest to 1 g takes it. Scoring windows by how
+steady they are instead rejects that one and takes a worse one somewhere else.
+Worst case against the arbiter over the six: **7.03** for the closest 20 s
+window inside the minute and **7.84** for the steadiest, against **3.03** for
+the plain mean of the same minute.
+
+**The span is not free either.** Against the arbiter, 40 seconds is worse than
+60 on four of the six flights and 90 is worse on five, by about what the drift
+and speed-change arithmetic above predicts. A finer sweep run in review, over
+more spans than `hindsight` prints, put the minimum at 60 seconds on both the
+worst case (2.89) and the mean (1.68).
+
+#### What is left
+
+A minute that holds one steady thing which is not gravity reads exactly like
+a minute of gravity, and only the weight of the answer gives it away. That
+needs a sustained acceleration, which is bounded by what an aircraft can do,
+and `Seed::trusted` reports it.
+
+And no one reading can be refused any more. A reading the running filter
+throws out reaches this mean, worth its own share of the minute: two seconds
+of a 63 degree lean inside a thirty second track is 4.7 degrees of seed,
+where the same two seconds taken alone was the whole of issue #45. On a real
+file a launch is a few seconds of sixty.
+
+What the August 2 capture has left at its first frame is 3.33 degrees against
+the 4.05 it settles at four minutes in, so the opening is now inside the
+file's own steady state rather than five times it.
+
 ## 9. Prior art worth reading
 
 - **`BenjaminHenriksson/insv-stitch`** (MIT, Python, X5) is by far the

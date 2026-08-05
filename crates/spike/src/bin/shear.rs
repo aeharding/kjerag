@@ -75,18 +75,28 @@
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! ```
 //!
-//! Lens 1's interior (`-150`) reads 0.3641 deg applied at 0.0048 deg step rms
-//! over 89 pairs; the seam itself (`+0`) 0.3584 at 0.0605 with a worst single
-//! step of 0.41; the far side of the handover (`+60`) 0.0417 at 0.1134, over 31
-//! pairs of 43 readings, which is the one band here whose statistic is fragile;
+//! Lens 1's interior (`-150`) reads 0.3663 deg applied at 0.0047 deg step rms
+//! over 89 pairs; the seam itself (`+0`) 0.3623 at 0.0619 with a worst single
+//! step of 0.42; the far side of the handover (`+60`) 0.0578 at 0.1350, over 23
+//! pairs of 30 readings, which is the one band here whose statistic is fragile;
 //! and lens 0's picture (`+150`), which the band never bends, 0.0003 at 0.0003,
 //! which is this instrument's floor on a live arm. The band's own state moves
 //! 0.0449 deg rms between frames on the bend and 0.0008 on the along-seam
 //! field.
 //!
-//! The `seam=` in that command is not decoration: fitted from the file instead,
-//! the same view reads 0.025 deg at `-150` rather than 0.364, because what the
-//! band applies is what the calibration left it.
+//! **Those readings are stated against a main, and the horizon is why.** Under
+//! `lock=1` the view is held against the orientation track, so a change to how
+//! that track is seeded moves which part of the sphere the view is pointed at
+//! and therefore where the seam lands in the picture. Merging #158 moved the
+//! seam's row 45 px down this window and took `-150` from 0.3641 deg to 0.3663,
+//! `+60` from 0.0417 to 0.0578 and its readings from 43 to 30, while the band's
+//! own state moved by 0.000002: the band works in the body's frame and the
+//! bands work in the view's. A reading here that has moved is a question about
+//! what the view is now looking at before it is a question about the band.
+//!
+//! The `seam=` in that command is not decoration either: fitted from the file
+//! instead, the same view reads 0.025 deg at `-150` rather than 0.366, because
+//! what the band applies is what the calibration left it.
 //!
 //! CSVs land in gitignored `scratch/`, stamped with the file they were read off
 //! and the whole command line that read them: a table of numbers with no source
@@ -117,8 +127,15 @@ const REACH_COLS: usize = 48;
 /// the noise rather than a displacement.
 const KEEP_PEAK: f64 = 0.8;
 
-/// How many frames a band needs before its statistics are printed instead of
-/// its frame count. A step rms over a handful of frames is not a step rms.
+/// How much a band needs before its statistics are printed instead of its
+/// counts, applied twice: this many readings that correlated, and this many
+/// pairs of them on neighbouring frames.
+///
+/// Both, because they are not the same number and the second is what the step
+/// columns are over. A step rms over a handful of steps is not a step rms, and
+/// a band can keep plenty of readings while keeping almost no neighbours: at
+/// the handover of the reference view, 30 readings carry 23 pairs and 36 carry
+/// 24, and one band of the profile is refused on the pairs alone.
 const MIN_FRAMES: usize = 20;
 
 /// What counts as a step, in degrees: the size at which a single frame's change
