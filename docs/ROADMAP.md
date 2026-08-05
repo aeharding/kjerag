@@ -622,14 +622,33 @@ live, no keyframe UI ever.
   well as its static one. A static per-azimuth map is enough for along the
   seam; across it needs the per-frame channel the band already is.
 
-  **Perp is the honest broker, and it should be a gate.** No depth can reach
-  it and the calibration is fixed for a file, so a reading whose perp leaves
-  the file's own stable per-azimuth value is a mismatch whatever its
-  correlation. It catches mismatches at 0.92 correlation that the agreement
-  floor passes: at two instants the same sites read perp of +17.7 to +39.5
-  source px where that azimuth's value is -7. Two different views of the
-  same body direction in the same frame agree to 0.06 and 0.34 source px
-  where perp is sane and disagree by 5 to 35 px where it is not.
+  **Perp is the honest broker, and it is now a gate** (`perp-implausible`).
+  No depth can reach it and the calibration is fixed for a file, so a reading
+  whose perp leaves its crossing's own value is a mismatch whatever its
+  correlation, and it is refused whatever its correlation. It catches what
+  the agreement floor passes at 0.92: at two instants the same sites read
+  perp of +17.7 to +39.5 source px where that azimuth's value is -7. Two
+  different views of the same body direction in the same frame agree to 0.06
+  and 0.34 source px where perp is sane and disagree by 5 to 35 px where it
+  is not.
+
+  The reference is the crossing's own median over at least five readings,
+  reported with its own spread beside it, or one the caller declares
+  (`perpref=`). The tolerance is 0.40 deg, 12.6 source px at the seam: over
+  1008 accepted readings from two flights, half sit within 1.7 px of their
+  crossing's value and three quarters within 4.1, the cleanest whole runs
+  reach 4 to 8 at their worst site, and the positively identified mismatches
+  sit 25 to 46 out.
+
+  It changes no null (all three keep every site and read exactly zero) and no
+  median (all hold within 0.16 view px). It tightens the spreads, hardest
+  where the evidence is worst: the sun view's epipolar spread falls from 4.31
+  to 1.01 view px. Over the eight-instant series it takes 47 of 396 accepted
+  readings, and the across-time range at fixed azimuth those were inflating
+  falls from 20.2 to 4.9 view px at one crossing and 30.9 to 7.7 at the
+  other. It cannot catch a mismatch that moved only across the seam, and the
+  epipolar across-time range barely moves: that is the ambiguity depth lives
+  in and it is not this gate's to close.
 
   **Glare refuses rather than guessing.** On the hard-mode sun view, 78 sites
   trace and 14 to 18 are accepted: the rest are `weak`, peaking at 0.11 to
