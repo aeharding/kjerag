@@ -721,6 +721,23 @@ impl Reframe {
         })
     }
 
+    /// The inverse of [`Self::body_ray`]: a camera-body direction expressed
+    /// in the named view's frame.
+    ///
+    /// `view_to_body` is a rotation, so its transpose is its inverse. A seam
+    /// instrument holds its measurement sites in body coordinates, because
+    /// that is where the seam circle and the baseline stand still, while
+    /// [`Self::project`] takes the renderer's view-space ray like the shader
+    /// does. This is that boundary, rather than each caller transposing the
+    /// matrix again.
+    pub fn view_ray_from_body(&self, body_ray: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|row| {
+            (0..3)
+                .map(|c| self.view_to_body[row][c] * body_ray[c])
+                .sum()
+        })
+    }
+
     /// Which azimuth of the seam circle a ray is over, in radians from the
     /// body's +x, and the geometry of the band there.
     ///
@@ -2014,6 +2031,29 @@ pub(crate) mod tests {
             (actual - expected).abs() <= tolerance,
             "{actual} is not within {tolerance} of {expected}"
         );
+    }
+
+    /// The two directions of the body/view boundary are one rotation, so a
+    /// ray that goes out one side comes back unchanged through the other.
+    /// The fixture is deliberately turned: at yaw 0 a transpose and a wrong
+    /// copy of the matrix are the same numbers.
+    #[test]
+    fn a_body_ray_and_a_view_ray_are_each_other_inverted() {
+        let reframe = fixture(Camera {
+            yaw: 74.0_f32.to_radians(),
+            pitch: -31.0_f32.to_radians(),
+            fov: 55.0_f32.to_radians(),
+        });
+        for ray in [
+            direction(90.0, 12.0),
+            direction(70.0, 200.0),
+            [0.0, 0.0, 1.0],
+        ] {
+            let round_trip = reframe.body_ray(reframe.view_ray_from_body(ray));
+            for axis in 0..3 {
+                near(round_trip[axis], ray[axis], 1e-6);
+            }
+        }
     }
 
     /// A direction in the body frame, `theta` degrees off the front lens's

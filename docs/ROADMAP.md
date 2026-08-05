@@ -557,6 +557,54 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-05 **The seam can be measured where there is no horizon to measure**
+  (`--bin crossing`, branch `research/crossing-instrument`). `step` needs a
+  horizon and fits scenery at 51 to 86 px rms on the owner's 2026-05-01 views,
+  so a seam-fix candidate could not be screened at the two crossings he
+  actually looked at. The new instrument traces the pass's own 50/50 handover
+  contour and, at fixed sites along it, registers the two **raw** lens
+  pictures against each other on the seam's own axes. It reads the
+  calibration's unbent geometry, so a reading carries no warm history.
+
+  It is proven before it is believed. **Null**: lens 0 against its own
+  picture reads exactly `0.0000` on both axes at every accepted site, 35 of
+  37 and 41 of 41 and 78 of 78 across the three views tried. **Plant**: a
+  known calibration delta, read back per site against what the perturbed map
+  predicts, over two sizes each - yaw 0.10/0.20 deg, roll 0.10/0.20 deg,
+  cy 2/4 px. The median error is 0.005 to 0.012 deg, which is 0.1 to 0.4
+  source px, and it does not grow with the plant, so the response is linear
+  and the error is the instrument's floor.
+
+  **What it says about the owner's frame.** At his two crossings of one
+  2026-05-01 frame, under the pooled calibration that ships, in view px at
+  1024 across:
+
+  | crossing | epi (depth + camera) | perp (camera only) | accepted |
+  | --- | ---: | ---: | ---: |
+  | the one he called good | 3.7 | 3.6 | 21/37 |
+  | the one he called bad | 12.3 | 3.3 | 40/41 |
+
+  The two crossings differ 3.4x on the epipolar axis and are the same on the
+  along-seam one. Epipolar is the axis a subject's **distance** displaces
+  content along and the along-seam axis is the one no distance can reach
+  (docs/research/seam-two-axis.md 1), so what separates his good crossing
+  from his bad one is not calibration, and no five-knob candidate can move
+  it. Issue #154's joint pool answer halves the along-seam error at both
+  (3.6 to 1.3 and 3.3 to 1.5 view px) and moves the epipolar term by a
+  pixel, which is what "the bad one barely moved" looks like from here.
+
+  **Glare refuses rather than guessing.** On the hard-mode sun view, 78 sites
+  trace and 14 to 18 are accepted: the rest are `weak`, peaking at 0.11 to
+  0.48 correlation. The null run on the same 78 sites accepts every one at
+  exactly zero, so the refusals are the two lenses genuinely disagreeing
+  under flare rather than sites the sampler could not reach.
+
+  **The search window is not a knob to widen.** At 2.60 deg of search the
+  same frame reads a median magnitude of 18.7 source px with a spread of
+  19.8, because content two degrees away is allowed to win. A railed site is
+  the honest answer. Patch, step and correlation floor are not like that:
+  from 1.10 to 3.00 deg of patch, 0.035 to 0.070 of step and 0.3 to 0.5 of
+  floor, the medians move under a pixel and only the accepted count changes.
 - 2026-08-01 **The descriptors describe the app, and the channel is named**
   (owner, from a screenshot of COSMIC Store). The `.flatpakref` carried
   plumbing keys only, so the page a Store draws before the remote is trusted

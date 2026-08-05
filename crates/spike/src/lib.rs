@@ -12,8 +12,10 @@
 //! rendered one all reach for it: it moved into `media` when the seam fit
 //! started running at open in the app as well (issue #48).
 
+pub mod crossing;
 mod offscreen;
 mod picture;
+pub mod registration;
 mod skyline;
 
 pub use kjerag_media::{Chroma, Pair, Plane, Walk};
