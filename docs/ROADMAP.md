@@ -604,21 +604,28 @@ live, no keyframe UI ever.
   degrees counting every sample, 6.73 weighting each second by
   `Filter::trust`, 9.32 keeping only the seconds inside the trust window,
   18.86 for the old rule's one chosen window. The backward pass does **not**
-  agree about the middle of that ladder, and by its reckoning the
-  trust-weighted mean is the better of the two on five of the six flights, so
-  what is settled is the render path's ordering on the reported file plus the
-  shipped rule against the old one, which both instruments call better on
-  every file. Picking the best window inside the minute is worse on both (a
-  window can weigh 1 g by holding two things that are not gravity, which is
-  what April 10 does).
+  agree about the middle of that ladder. In aggregate it prefers the
+  trust-weighted mean, 1.61 degrees of worst case against 3.03; per flight the
+  plain mean is the closer of the two on four of the six, by 0.04 to 0.09
+  degrees, which is inside that instrument's own resolution, and the two the
+  weighted mean wins it wins by 1.42 and 1.46. So what is settled is the
+  render path's ordering on the reported file plus the shipped rule against
+  the old one, which both instruments call better on every file. Picking the
+  best window inside the minute is worse on both (a window can weigh 1 g by
+  holding two things that are not gravity, which is what April 10 does).
 
   What it costs: a reading the running filter would refuse is no longer
   refused, only diluted to its share of the minute. And April 10 is not a
-  clean win: its first frame improves 6.3 degrees, its 4 to 20 second stretch
-  reads about 3.5 degrees worse, the two arms converge to within a degree by
-  24 seconds and to three decimal places by 240, and which instrument is
-  lying there is unresolved. Nothing in the running correction changed; its
-  gating under power is correct, and is why a bad seed survives so long.
+  clean win: its first frame improves 6.3 degrees while its 4 to 20 second
+  stretch reads 3.5 degrees worse, and the two arms **do not converge inside
+  the forty second walk**. The gap between their tilts is 1.53 degrees at 24
+  seconds, first dips under a degree at 27.0, and is back at 1.16 by 38; the
+  angle between the two measured verticals, which is the stricter reading, is
+  4.25 degrees at 24 seconds, 3.47 at 38, and never below 3.28 anywhere in the
+  walk. What is verified is that they are identical to three decimal places at
+  240 seconds. Which instrument is lying over that stretch is unresolved.
+  Nothing in the running correction changed; its gating under power is
+  correct, and is why a bad seed survives so long.
 
 - 2026-08-05 **The pool answers with a fit some capture actually took**
   (issue #103, docs/research/seam-two-axis.md 4). `SeamPool::answer` took the

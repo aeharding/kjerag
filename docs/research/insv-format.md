@@ -2450,16 +2450,31 @@ found a horizon:
 
 **April 10 is where the two instruments contradict each other, and it is not
 resolved.** Its first frame improves 6.3 degrees, 10.66 to 4.36. Its 4 to 20
-second stretch is about 3.5 degrees **worse**, at a steady bearing and a
-constant tilt, which is the shape of a wrong vertical rather than of noise.
-The two arms converge to within a degree by 24 seconds and to three decimal
-places by 240. The arbiter says the new seed is 4 degrees closer than the old
-on that file; the render path says the opposite over those sixteen seconds.
-Which is lying is open: the file's opening holds a 157 deg/s spin, its
-scenery is a river valley whose skyline is not level, and both instruments
-carry the same gyroscope's integration through that spin. July 25 has a
-horizon the finder can see in at most 8 of 36 views at any instant, so the
-render path says nothing about it either way.
+second stretch is 3.5 degrees **worse**, 1.33 against 4.82, at a steady
+bearing and a constant tilt. The sinusoid fits over that stretch are clean,
+0.24 to 1.00 degrees of residual on both arms, so what is being measured
+there is a vertical that is genuinely off and not a horizon the finder is
+struggling with.
+
+**The two arms do not converge inside the forty second walk.** The gap
+between their tilts is 1.53 degrees at 24 seconds, first dips under a degree
+at 27.0, and is back at 1.16 by 38. The angle between the two measured
+verticals, which is the stricter reading of the same thing, is 4.25 degrees
+at 24 seconds, 3.47 at 38, and never below 3.28 anywhere in the walk. What is
+verified is that at 240 seconds the two are identical to three decimal
+places.
+
+So the arbiter says the new seed is 4 degrees closer than the old on that
+file, and the render path says the opposite over that stretch, and nothing
+here settles which. One candidate for it is the 157 deg/s spin in that file's
+opening, which both instruments carry the same gyroscope's integration
+through. What is **not** the explanation is crooked scenery: rendered at 10
+seconds at four yaws, the file is over flat farmland at altitude with a
+distant true horizon, and a skyline crooked enough to manufacture 4.7 degrees
+would not fit as cleanly as those fits do.
+
+July 25 has a horizon the finder can see in at most 8 of 36 views at any
+instant, so the render path says nothing about it either way.
 
 #### Selecting readings, and what is and is not settled about it
 
@@ -2485,9 +2500,12 @@ the middle of it.** Against the backward pass, over the six flights, the
 trust-weighted mean is the better of the two: worst case 1.61 against 3.03 and
 mean 1.13 against 1.56, and on the August 2 capture itself it reads 1.61 where
 the plain mean reads 3.03, which is the opposite ordering to the render path's
-on the same file. Per flight the plain mean is closer on four of the six and
-the weighted one on two. So what the numbers settle is narrower than the
-mechanism sounds:
+on the same file. Per flight it is not so one-sided: the plain mean is the
+closer of the two on four of the six, by 0.04 to 0.09 degrees, which is inside
+what an instrument that moves 0.02 to 0.83 on its own span can resolve, and
+the two the weighted mean wins it wins by 1.42 and 1.46. The aggregate is
+those two wins. So what the numbers settle is narrower than the mechanism
+sounds:
 
 - **Settled**, on both instruments and on every one of the six flights: the
   shipped rule beats the rule it replaces.
