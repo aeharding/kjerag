@@ -145,6 +145,38 @@ instead is a requirement on the band: **calibration only has to land inside
 the band's capture range.** A stage that captures the corpus range makes the
 pool's mixing survivable rather than fatal.
 
+**Fixed 2026-08-05**, which reverses the deferral above; the owner tests it
+before it merges, as he does every fix. `SeamPool::answer` chooses a member of
+the pool, the one the rest of it agrees with most in probe steps, so the answer is
+a combination some capture endorsed. The selection rule is still
+underdetermined by one camera, which is why it is the pool's own middle and
+not a quality ranking: the same sum-of-distances argument the median rested
+on, taken over whole fits instead of one knob at a time. Re-measured with the
+probe as it stands after issue #130, which reads differently from the table
+above, over six of the owner's flights and three places in each: the median
+leaves 0.382 deg along the seam on average and the chosen member 0.273, better
+on all six flights.
+
+Two limits of that answer, both measured:
+
+- **The choice is metric-dependent.** Which member wins is decided by
+  `seam::distance`, which weighs the knobs by the fit's own probe steps, and
+  that weighting is not derived from anything the pixels say. On the owner's
+  pool the same member wins under raw units, angles alone, principal point
+  alone, ten times dearer or cheaper on the centre or on pitch, with pitch or
+  yaw dropped entirely, and under a sum of squares instead of a sum of
+  distances; it loses to another member when roll or yaw alone is made ten
+  times dearer. The residual table is what settles the choice on this camera.
+  The metric decides it on the next one, with nothing behind it yet.
+- **A pool split evenly has no member to choose**, so it answers with the
+  middle of the fits it is split between, which is the knobwise median again
+  over those fits. Every pool of two is such a pool, and the app draws with
+  the answer from the first capture on, so this is the ordinary state of a
+  camera the box has just met rather than a corner case. Over the three pairs
+  this pool can make, the middle leaves 0.402, 0.338 and 0.315 deg where the
+  members leave 0.382, 0.493 and 0.273: never the worse of the two, and better
+  than a coin flip between them on two pairs of the three.
+
 ## 5. Generality: the 5-knob model cannot reach it
 
 Along-seam residual left by the app's own best available correction, round the

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use cosmic::cosmic_config::cosmic_config_derive::CosmicConfigEntry;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::theme;
+use kjerag_render::seam::distance;
 use kjerag_render::{Harvest, SeamFit};
 use serde::{Deserialize, Serialize};
 
@@ -90,11 +91,11 @@ const POOLED: usize = 16;
 
 /// How many fits a camera's pool wants before it stops asking for more.
 ///
-/// Odd, so the median is a sample rather than a midpoint between two, and
-/// small enough to be reached in a few sittings: five tolerates two
-/// contaminated fits, which is one more than the record's seven captures
-/// contain (04-10, and the deck capture that never gets pooled at all). Past
-/// this a file is drawn with the pooled answer and costs no fit.
+/// Small enough to be reached in a few sittings, and enough of a majority to
+/// choose between: five tolerates two contaminated fits, which is one more
+/// than the record's seven captures contain (04-10, and the deck capture that
+/// never gets pooled at all). Past this a file is drawn with the pooled answer
+/// and costs no fit.
 pub const POOL_ENOUGH: usize = 5;
 
 /// The widest residual a fit may leave and still be pooled, in degrees.
@@ -126,6 +127,19 @@ pub struct SeamSample {
     /// off fifty far-field patches from one off seven near-field ones.
     pub patches: usize,
     pub residual_deg: f64,
+}
+
+impl SeamSample {
+    /// The five knobs alone, which is what a pooled answer is made of.
+    fn fit(&self) -> SeamFit {
+        SeamFit {
+            roll_deg: self.roll_deg,
+            yaw_deg: self.yaw_deg,
+            pitch_deg: self.pitch_deg,
+            cx_px: self.cx_px,
+            cy_px: self.cy_px,
+        }
+    }
 }
 
 impl From<Harvest> for SeamSample {
@@ -166,40 +180,74 @@ pub struct SeamPool {
 }
 
 impl SeamPool {
-    /// The pooled answer: the median of each knob over the samples.
+    /// The pooled answer: the one fit the rest of the pool agrees with most.
     ///
-    /// A median rather than a mean, weighted or not, because the failure this
-    /// has to survive is one bad fit rather than noise on every fit. 04-10 is
-    /// that file in the record: its content is 2.6 m away and it asks for a
-    /// yaw 0.9 degrees from what the same camera asks for elsewhere. A mean
-    /// carries a sixteenth of that into the answer; a median carries none of
-    /// it until such files are half the pool.
+    /// A whole fit and not a median of each knob separately, which is what
+    /// shipped and what was measured wrong
+    /// (docs/research/seam-two-axis.md 4). The five knobs trade against each
+    /// other inside one fit, a relative roll and a principal-point shift
+    /// leaving overlapping signatures round the seam, so a knob-by-knob middle
+    /// ships a combination no capture ever asked for: roll from one fit, yaw
+    /// from a second, pitch and cy from a third. On the owner's camera that
+    /// combination was beaten by a member of its own pool on all six flights
+    /// it was re-read against.
+    ///
+    /// Choosing a member keeps the median's own argument, which is that the
+    /// failure to survive is one bad fit rather than noise on every fit.
+    /// 04-10 is that file in the record: its content is 2.6 m away and it asks
+    /// for a yaw 0.9 degrees from what the same camera asks for elsewhere. The
+    /// score is a sum of distances rather than of squares, so such a fit sits
+    /// far from every other and cannot win. It can still tip the choice from
+    /// one clean fit to its neighbour, and that is a step the width of the
+    /// pool's own scatter rather than of the contamination: 0.04 degrees of
+    /// yaw against the bad fit's 0.9
+    /// (`one_contaminated_fit_does_not_move_the_pooled_answer`).
+    ///
+    /// **A pool that is split evenly answers with the middle of what it is
+    /// split between**, which is a fit nobody took and is this rule's own
+    /// point given up. There is nothing else to answer with: two fits are the
+    /// same distance from each other, so a two-entry pool has no member the
+    /// rest of it agrees with more, and choosing one would be choosing by
+    /// which file was watched first. That is the old rule's answer for two and
+    /// it is a live path rather than a corner, because `App::hold_seam` draws
+    /// with the answer from the first capture on, before `POOL_ENOUGH` is
+    /// anywhere near.
+    ///
+    /// The equality is exact and can be: a split of this kind is one distance
+    /// added to zeros in a different order, and `f64` addition of a zero and
+    /// of a number to itself are both exact.
     pub fn answer(&self) -> Option<SeamFit> {
-        if self.samples.is_empty() {
-            return None;
-        }
-        let median = |of: fn(&SeamSample) -> f64| {
-            let mut values: Vec<f64> = self.samples.iter().map(of).collect();
-            values.sort_by(f64::total_cmp);
-            let middle = values.len() / 2;
-            match values.len() % 2 {
-                0 => (values[middle - 1] + values[middle]) / 2.0,
-                _ => values[middle],
-            }
-        };
-        Some(SeamFit {
-            roll_deg: median(|s| s.roll_deg),
-            yaw_deg: median(|s| s.yaw_deg),
-            pitch_deg: median(|s| s.pitch_deg),
-            cx_px: median(|s| s.cx_px),
-            cy_px: median(|s| s.cy_px),
-        })
+        let fits: Vec<SeamFit> = self.samples.iter().map(SeamSample::fit).collect();
+        let apart: Vec<f64> = fits.iter().map(|fit| apart_from_all(*fit, &fits)).collect();
+        let least = apart.iter().copied().reduce(f64::min)?;
+        let agreed: Vec<SeamFit> = fits
+            .into_iter()
+            .zip(apart)
+            .filter(|(_, apart)| *apart == least)
+            .map(|(fit, _)| fit)
+            .collect();
+        middle_of(&agreed)
     }
 
     /// Take one fit if it is worth keeping. `false` for one that is not, which
     /// is not an error: most captures have something near the seam.
     fn keep(&mut self, sample: SeamSample) -> bool {
-        if !sample.residual_deg.is_finite() || sample.residual_deg > POOL_RESIDUAL_DEG {
+        // A knob that came out NaN is a broken fit rather than a bad one, and
+        // one of them in a pool makes every distance in it NaN: `answer` finds
+        // no least sum, and the camera it belongs to is drawn uncalibrated
+        // from then on, because the sample is on disk.
+        let numbers = [
+            sample.roll_deg,
+            sample.yaw_deg,
+            sample.pitch_deg,
+            sample.cx_px,
+            sample.cy_px,
+            sample.residual_deg,
+        ];
+        if !numbers.iter().all(|number| number.is_finite()) {
+            return false;
+        }
+        if sample.residual_deg > POOL_RESIDUAL_DEG {
             return false;
         }
         self.samples.push(sample);
@@ -216,6 +264,38 @@ impl SeamPool {
         }
         true
     }
+}
+
+/// How far one fit sits from a whole pool, summed, in probe steps.
+///
+/// The distance is the render layer's own ([`kjerag_render::seam::distance`]),
+/// because the five knobs are not commensurable and the probe is the scale the
+/// fit already compares them on. A fit's distance to itself is in the sum and
+/// is zero, so counting it changes no ordering and leaving it out would only
+/// be a line of arithmetic to get wrong.
+fn apart_from_all(fit: SeamFit, fits: &[SeamFit]) -> f64 {
+    fits.iter().map(|other| distance(fit, *other)).sum()
+}
+
+/// The middle of some fits, knob by knob, or `None` for none of them.
+///
+/// The knob-by-knob middle is what [`SeamPool::answer`] exists to stop
+/// shipping, and this is the one place it is still the answer: fits that are
+/// tied for the pool's agreement are fits nothing in the pool can choose
+/// between, and their middle is at least not chosen by storage order.
+fn middle_of(fits: &[SeamFit]) -> Option<SeamFit> {
+    let count = fits.len();
+    if count == 0 {
+        return None;
+    }
+    let middle = |of: fn(&SeamFit) -> f64| fits.iter().map(of).sum::<f64>() / count as f64;
+    Some(SeamFit {
+        roll_deg: middle(|fit| fit.roll_deg),
+        yaw_deg: middle(|fit| fit.yaw_deg),
+        pitch_deg: middle(|fit| fit.pitch_deg),
+        cx_px: middle(|fit| fit.cx_px),
+        cy_px: middle(|fit| fit.cy_px),
+    })
 }
 
 /// Things the app remembers.
@@ -404,13 +484,15 @@ mod tests {
         assert!(state.harvest(0x0fed_cba9_8765_4321, harvest(-1.10, 30, 0.6)));
 
         assert_eq!(state.seam_pooled(0x1234_5678_9abc_def0), 2);
+        let two = state.seam(0x1234_5678_9abc_def0).unwrap().yaw_deg;
+        assert!((two - -2.40).abs() < 1e-9, "{two} is not the middle of two");
         assert_eq!(state.seam(0x0fed_cba9_8765_4321).unwrap().yaw_deg, -1.10);
         assert_eq!(state.seam(0), None);
         assert_eq!(state.seam_pool.len(), 2);
         assert!(state.seam_pool.contains_key("123456789abcdef0"));
     }
 
-    /// The point of a median: one file whose seam is full of near content asks
+    /// The point of pooling: one file whose seam is full of near content asks
     /// for an answer of its own, and the pool must not follow it. 04-10 is
     /// that file in the record, 0.9 degrees of yaw away from what the same
     /// camera asks for on every other capture (6.8).
@@ -428,6 +510,179 @@ mod tests {
             (polluted - clean).abs() < 0.06,
             "one bad fit moved the answer from {clean:.3} to {polluted:.3}"
         );
+    }
+
+    /// A pool of two is split evenly whichever order its files were watched
+    /// in, so the answer may not depend on that order. It is the middle of the
+    /// two, which is what the knobwise median answered here as well.
+    ///
+    /// Half of a bad fit is in that answer and nothing in a pool of two can
+    /// say which half: this pins the order, not the quality. The pool being
+    /// asked at all before it is deep is `App::hold_seam`'s doing and is the
+    /// point of it (zero-config playback).
+    #[test]
+    fn a_pool_of_two_answers_the_same_whichever_file_was_watched_first() {
+        let contaminated = -1.69;
+        let clean = -2.45;
+        let answer = |first: f64, then: f64| {
+            let mut state = ConfigState::default();
+            state.harvest(1, harvest(first, 30, 0.6));
+            state.harvest(1, harvest(then, 30, 0.6));
+            state.seam(1).unwrap().yaw_deg
+        };
+        let bad_first = answer(contaminated, clean);
+        assert!(
+            (bad_first - answer(clean, contaminated)).abs() < 1e-12,
+            "{bad_first} is the fit that was stored first, not the pool's answer"
+        );
+        assert!((bad_first - (contaminated + clean) / 2.0).abs() < 1e-12);
+    }
+
+    /// An evenly split pool is not only the pool of two: the owner's own has
+    /// two of its captures stored twice (issue #156), and a pool of two such
+    /// pairs is split as squarely as a pool of two.
+    #[test]
+    fn an_evenly_split_pool_answers_between_the_fits_it_is_split_between() {
+        let mut state = ConfigState::default();
+        for yaw in [-2.45, -2.45, -2.25, -2.25] {
+            state.harvest(1, harvest(yaw, 30, 0.6));
+        }
+        let answer = state.seam(1).unwrap().yaw_deg;
+        assert!(
+            (answer - -2.35).abs() < 1e-9,
+            "{answer} is one of the tied pairs rather than the middle of them"
+        );
+    }
+
+    /// The score sums distances and not squares, which is what makes it
+    /// survive a bad fit rather than average one in. Four fits a tenth of a
+    /// degree apart and one two degrees out: summing squares moves the answer
+    /// one fit towards the far one, because squaring is what makes a distant
+    /// point worth pulling towards.
+    #[test]
+    fn the_pooled_answer_sums_distances_rather_than_their_squares() {
+        let mut state = ConfigState::default();
+        for yaw in [-2.40, -2.30, -2.20, -2.10, -0.40] {
+            state.harvest(1, harvest(yaw, 30, 0.6));
+        }
+        let answer = state.seam(1).unwrap().yaw_deg;
+        assert!(
+            (answer - -2.20).abs() < 1e-9,
+            "{answer} is what a sum of squares answers, not a sum of distances"
+        );
+    }
+
+    /// A fit that came out of the arithmetic as NaN is refused at the door.
+    /// One in a pool makes every distance in that pool NaN, and a pool with no
+    /// least sum has no answer at all: the camera would be drawn uncalibrated
+    /// for as long as the sample sat in the file.
+    #[test]
+    fn a_fit_with_a_knob_that_is_not_a_number_is_not_kept() {
+        let mut state = ConfigState::default();
+        let mut broken = harvest(-2.4, 30, 0.5);
+        broken.fit.roll_deg = f64::NAN;
+        assert!(!state.harvest(1, broken));
+        let mut runaway = harvest(-2.4, 30, 0.5);
+        runaway.fit.cx_px = f64::INFINITY;
+        assert!(!state.harvest(1, runaway));
+
+        assert!(state.harvest(1, harvest(-2.4, 30, 0.5)));
+        assert_eq!(state.seam_pooled(1), 1);
+        assert_eq!(state.seam(1).unwrap().yaw_deg, -2.4);
+    }
+
+    /// What the shipped answer used to be: the middle of each knob taken on
+    /// its own. Here so that the fixture below shows the combination that rule
+    /// produces rather than asserting one written out by hand.
+    fn knobwise_median(pool: &SeamPool) -> SeamFit {
+        let median = |of: fn(&SeamSample) -> f64| {
+            let mut values: Vec<f64> = pool.samples.iter().map(of).collect();
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        };
+        SeamFit {
+            roll_deg: median(|s| s.roll_deg),
+            yaw_deg: median(|s| s.yaw_deg),
+            pitch_deg: median(|s| s.pitch_deg),
+            cx_px: median(|s| s.cx_px),
+            cy_px: median(|s| s.cy_px),
+        }
+    }
+
+    /// The five knobs are correlated inside one fit, so a middle taken knob by
+    /// knob is a fit nobody measured: these are the three distinct fits in the
+    /// owner's own camera's pool, and the median of them takes roll and cx
+    /// from the first, yaw from the second, and pitch and cy from the third.
+    ///
+    /// His pool holds five samples of these three, because two captures are
+    /// each stored twice (issue #156), so the fixture is grown to that shape
+    /// at the end: the duplicates weight the sums and the answer is the same
+    /// fit either way.
+    ///
+    /// Re-read off the pixels of six of his flights, at the three places in
+    /// each file the app's own fit reads, that combination leaves 0.28 to 0.49
+    /// deg along the seam where the third fit leaves 0.20 to 0.41, and it is
+    /// beaten by a member of its own pool on every flight (the PR's table).
+    #[test]
+    fn the_pooled_answer_is_a_fit_some_capture_actually_took() {
+        let mut state = ConfigState::default();
+        let camera = 0xd8a3_9338_9b7b_8639;
+        let fits = [
+            SeamFit {
+                roll_deg: 0.577,
+                yaw_deg: -1.694,
+                pitch_deg: -0.796,
+                cx_px: -9.53,
+                cy_px: -5.41,
+            },
+            SeamFit {
+                roll_deg: 0.459,
+                yaw_deg: -2.077,
+                pitch_deg: -2.219,
+                cx_px: -14.79,
+                cy_px: -20.66,
+            },
+            SeamFit {
+                roll_deg: 0.795,
+                yaw_deg: -2.310,
+                pitch_deg: -0.936,
+                cx_px: -3.28,
+                cy_px: -11.91,
+            },
+        ];
+        for fit in fits {
+            assert!(state.harvest(
+                camera,
+                Harvest {
+                    fit,
+                    patches: 30,
+                    residual_deg: 0.6,
+                },
+            ));
+        }
+        let pool = &state.seam_pool[&camera_name(camera)];
+
+        let median = knobwise_median(pool);
+        assert!(
+            !fits.contains(&median),
+            "the fixture is not correlated: {median:?} is a fit somebody took"
+        );
+        let answer = pool.answer().unwrap();
+        assert!(fits.contains(&answer), "{answer:?} is nobody's fit");
+        assert_eq!(answer, fits[2], "the pool agrees with the third fit most");
+
+        for fit in [fits[0], fits[2]] {
+            assert!(state.harvest(
+                camera,
+                Harvest {
+                    fit,
+                    patches: 30,
+                    residual_deg: 0.6,
+                },
+            ));
+        }
+        assert_eq!(state.seam_pooled(camera), 5);
+        assert_eq!(state.seam(camera), Some(fits[2]), "the owner's own pool");
     }
 
     /// A capture the fit cannot help is not pooled at all. The deck capture is

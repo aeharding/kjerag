@@ -593,6 +593,28 @@ live, no keyframe UI ever.
   the file reads 0.025 deg where the stored calibration reads 0.364, because
   what the band applies is what the calibration left it.
 
+- 2026-08-05 **The pool answers with a fit some capture actually took**
+  (issue #103, docs/research/seam-two-axis.md 4). `SeamPool::answer` took the
+  median of each knob separately, and the five knobs trade against each other
+  inside one fit, so what shipped was a combination nobody had measured: roll
+  and cx off one capture, yaw off a second, pitch and cy off a third. It
+  answers with one of the pooled fits now, the one the rest of the pool agrees
+  with most, scored as a sum of distances in probe steps
+  (`seam::distance`, which was already the walk's yardstick). Re-read off the
+  pixels of six of the owner's flights, at the three places in each file the
+  app's own fit reads, that combination leaves **0.382 deg** along the seam on
+  average where the fit now chosen leaves **0.273**, better on all six flights
+  and on 15 of the 17 individual readings. In picture space, over every
+  registry view (docs/research/reference-views.md) and both of `--bin step`'s
+  windows, it is better on 15 of the 21 readings whose line fits describe their
+  own points and worse on 6, the worst of those being 04-10 at 45.112 s, where
+  the wide window's cold step goes 1.04 to 3.81 view px. A pool that is split
+  evenly answers with the middle of what it is split between, which is the old
+  rule's answer and is what a pool of two always is: no member of such a pool
+  has the rest of it agreeing with it more, and choosing one would be choosing
+  by which file was watched first. The pooling, the quality gate, the
+  per-camera cache and the walk are untouched. Awaiting the owner's own test.
+
 - 2026-08-01 **The descriptors describe the app, and the channel is named**
   (owner, from a screenshot of COSMIC Store). The `.flatpakref` carried
   plumbing keys only, so the page a Store draws before the remote is trusted
