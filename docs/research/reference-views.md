@@ -2,7 +2,9 @@
 
 The acceptance registry for seam work. Lines are runnable as CLI args and Ctrl+V targets.
 Footage lives on the owner's test box under ~/Videos (owner ruling 2026-08-01: footage filenames
-are fine in the repo). Agents: read this at the start of any seam task;
+are fine in the repo). A bare filename is in ~/Videos or ~/Videos/Insta; a file that has moved out
+of those carries its whole path on the line, quoted where a directory name has a space in it, so
+the line stays runnable. Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
@@ -32,9 +34,9 @@ add new owner references here with date, category, and status.
   fitted. Pictures: `scratch/x2fit/october-{factory,file}.png`.
 
 ## Photometric: brightness/color at the seam (stage 7 merged-in-draft, stage 8 in progress)
-- 2026-07-31 `VID_20260526_191025_00_004.insv time=488.855 yaw=67.24 pitch=2.56 fov=218.99 lock=1`
+- 2026-07-31 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=488.855 yaw=67.24 pitch=2.56 fov=218.99 lock=1`
   Stage 3's soil reference (sun lighting one lens). Step 2.265 -> 1.424 codes under stage 3.
-- 2026-08-01 `VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
+- 2026-08-01 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
   The May wide "do a lot better with blending" view: ADDITIVE 6.5-code step on 17-24 code soil
   (28-38% perceptual), channel-uniform. Stage 7 moves 0.7 of 6.5; stage 8's primary target.
   Evidence: .worktrees/stage7/scratch/stage7/evidence-may-stretched.png
@@ -42,25 +44,25 @@ add new owner references here with date, category, and status.
   "Another color/brightness/whatever" - wide, pitched down, ground-dominated. In stage 8's set.
   STATUS after stage 8: 1 px excess over the same content elsewhere is under the JND; the long-lag
   Weber improves and what is left is the wide-matching ramp.
-- 2026-08-01 `VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
+- 2026-08-01 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
   The SMOKE view: the same May wide view whole-frame (no content window), which is the render the
   owner pointed at by name ("for example smoke3-2-drawn") when he ruled stage 8's first form not
   aggressive enough. STATUS after stage 8: the +-8 degree mismatch goes 7.55 codes to 2.93, and the
   1 px excess over the same content elsewhere is -0.73 percent, i.e. no line the content does not
   read everywhere. Evidence: .worktrees/stage7/scratch/stage8/evidence-smoke.png
-- 2026-08-01 `VID_20260526_191025_00_004.insv time=669.369 yaw=-60.70 pitch=-16.05 fov=30.56 lock=1`
+- 2026-08-01 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=669.369 yaw=-60.70 pitch=-16.05 fov=30.56 lock=1`
   Sent with no commentary straight after "to the eye, it still effectively looks like a line".
   Same May file, pitched down, fov 30.6 - a fine view, 0.0064 deg per pixel. STATUS after stage 8:
   1 px excess -0.82 percent and 2 px -0.69, so the line there is NOT photometric at any scale an
   edge lives at. Evidence: .worktrees/stage7/scratch/stage8/evidence-zoom30.png
-- 2026-08-01 `VID_20260526_191025_00_004.insv time=630.763 yaw=95.00 pitch=0.00 fov=60.00 lock=0`
+- 2026-08-01 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=630.763 yaw=95.00 pitch=0.00 fov=60.00 lock=0`
   The GEOMETRIC CONTROL, chosen by the instrument rather than by the owner: the azimuth his own gear
   crosses the seam at. It reads a 1 px excess of +5.87 percent over the same content elsewhere, and
   the photometry moves it by 0.00 - before 5.94, after 5.94. Any view whose line survives the
   photometry belongs to the local-vs-pose verdict above, not here.
 
 ## ANTI-ACCEPTANCE: the artifact the acceptance layer was blind to
-- 2026-08-01 `VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
+- 2026-08-01 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=630.763 yaw=-72.20 pitch=-17.08 fov=114.41 lock=1`
   The owner's own screenshots at this area (his ~/Pictures/Screenshots/Screenshot_2026-08-01_20-24-45.png
   raw, _20-25-26.png with his red annotations) show dark STREAKS across the soil running away from the
   seam. Stage 8's per-direction offset over wide support painted each direction's own noise along that
@@ -71,30 +73,40 @@ add new owner references here with date, category, and status.
   Rejected build reads ROUGH 1.01%; nulls 0.000%; planted 0.5 and 2.0 code ripples read 2.07% and 8.27%.
   A correction that is smooth round the ring reads zero however large it is.
 
-## Photometric: CHROMATIC (owner 2026-08-02, OPEN - stage 10 gate)
+## Photometric: a green cast on the sun-facing lens (owner 2026-08-02, OPEN - stage 10 gate)
 - 2026-08-02 `VID_20260410_185407_00_004.insv time=594.027 yaw=-129.09 pitch=-62.95 fov=41.19 lock=1`
   and `VID_20260410_185407_00_004.insv time=602.368 yaw=-132.22 pitch=-37.74 fov=71.04 lock=1`
-  The first CHROMATIC defect on record: a green cast on the sun-facing lens only, not on the other.
-  Every photometric reading before this one was brightness, and the steps quoted above are
-  channel-uniform codes; a per-channel defect has never been in an acceptance number. Both views are
-  steeply pitched down onto dark ground, which is where an additive chromatic cast (veiling glare,
-  internal reflection) shows most. The second is the same defect eight seconds later in a wider
-  frame, 41.19 deg against 71.04, so the pair tests view-independence and temporal stability of a
-  correction rather than one framing of it. Owner: "needs correction and/or blending."
+  A green cast on the lens facing the sun and not on the other, owner-reported on the April file and
+  raised as an acceptance blocker. Colour at the seam is not new and this entry claims no novelty:
+  insv-format.md 6.11 measured the per-channel step on 2026-08-01, including the sun isolated on a
+  corpus X4 at +6.08/+10.39/+16.37 codes R/G/B with the sun in one lens against +7.23/+7.67/+7.70
+  with it in neither, and the owner had already named "the change in colour at the seam, especially
+  on the sky or when the sun is in one of the lenses" as the worst part left. Per-channel numbers
+  have been inside acceptance decisions since then (seam-blending.md 6: the hue step 3.4-5.6 codes
+  to under a code on his captures, which is why that view's line was ruled not colour). What is new
+  is the cast being CONFINED to the sun-facing lens, named as a hue, on the owner's own capture, and
+  arriving after stage 8's applied photometry was rejected: the measurement layer survived the
+  rejection and nothing corrects this in the picture today. The first view is steeply pitched down at
+  -62.95, the second moderately at -37.74, both onto dark ground, which is where an additive cast
+  would show most. Veiling glare or an internal reflection is the hypothesis and not a reading: 6.11
+  could not separate a gain from an offset on the owner's own sun-in-one-lens content. Eight seconds
+  apart at 41.19 and 71.04 deg, so the pair asks a correction to hold across framing and across time
+  rather than at one instant. Owner: "needs correction and/or blending."
   STATUS: OPEN, no evidence renders yet. Gates stage 10.
 
 ## Hard mode: geometry and photometry at once (owner 2026-08-02, OPEN - stages 9 and 10)
-- 2026-08-02 `ab_testing/clip 1/VID_20260802_191029_00_002.insv time=31.064 yaw=-144.04 pitch=-31.44 fov=142.89 lock=1`
-  A same-day capture from outside every pool this campaign has fitted on, held out on purpose: it is
-  evidence about a correction rather than about the corpus the correction was tuned to. At fov 142.89
-  the frame should hold both seam crossings and the sun at once, which would put glare, the chromatic
-  cast above and azimuth-varying alignment in one picture; that has not been measured on a render
-  yet. Held-out hard-mode gate for stage 9 and stage 10 alike. The file is clip 1 of the Studio
-  corpus below and lives only there: the path is relative to ~/Videos/Insta and wants quoting,
-  because the directory name has a space in it.
+- 2026-08-02 `~/Videos/Insta/ab_testing/"clip 1"/VID_20260802_191029_00_002.insv time=31.064 yaw=-144.04 pitch=-31.44 fov=142.89 lock=1`
+  A same-day capture that is outside the pool as it stands, which is what makes it evidence about a
+  correction rather than about the corpus the correction was tuned to. Nothing enforces that: a
+  `SeamSample` is five angles, a patch count and a residual, the pool is keyed by camera and stores
+  no file identity (`crates/app/src/config.rs`), so playing this file folds it in like any other and
+  the hold-out is a habit, not a mechanism. At fov 142.89 the frame should hold both seam crossings
+  and the sun at once, which would put glare, the colour cast above and azimuth-varying alignment in
+  one picture; that has not been measured on a render yet. Hard-mode gate for stage 9 and stage 10
+  alike. The file is clip 1 of the Studio corpus below, and ~/Videos holds no other copy of it.
   STATUS: OPEN, unmeasured.
 
-## The owner's Studio oracle corpus (~/Videos/Insta/ab_testing, never committed)
+## The owner's Studio oracle corpus (built 2026-08-02, ~/Videos/Insta/ab_testing, never committed)
 Owner-built A/B material: Insta360 Studio's own render of a named position beside kjerag's, so a
 defect can be scored against a stitcher that ships. Layout is `clip N/` holding the .insv, with
 `snap N/` folders inside it, one per position, each holding `studio_config.png` (Studio's pan, tilt,
@@ -102,8 +114,8 @@ roll, field of view, distortion and timecode for that exact position), `studio_s
 `kjerag_rough_screenshot.jpg`. Paths only in this repo; no image out of it is committed.
 - clip 1 `VID_20260802_191029_00_002.insv`, the hard-mode capture above. snap 1 puts the sun directly
   in one lens. Owner findings: Studio struggles in the glare, but its glared-to-sheltered edge is
-  smooth and its seam is invisible outside the glare; kjerag's seam is abrupt and extends well past
-  the glare.
+  smooth and its seam is invisible outside the immediate glare; kjerag's seam is abrupt and extends
+  well past the worst of the glare.
 - clip 2 `VID_20260526_191025_00_004.insv`, the May file most of the photometric entries above are
   measured on, and now the only copy of it under ~/Videos. snap 1 is the dirt reference. Owner
   finding: Studio renders the seam invisible to the eye.
@@ -111,6 +123,7 @@ roll, field of view, distortion and timecode for that exact position), `studio_s
 Purpose (owner ruling 2026-08-02): Studio is the comparative bar for mitigation-shaped defects, which
 is stage 10 and near-field alignment. Far-field alignment answers to the absolute zero-defect bar and
 not to Studio.
+STATUS: two clips, one snap each, no measurement taken off either yet.
 
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
@@ -124,6 +137,16 @@ not to Studio.
   shipped form needs the story (owner, 2026-08-01).
 
 ## Off the seam: other owner-reported defects
-- 2026-08-02 horizon lock dips about +-45 deg at 0 and 180 deg azimuth while circling, in the first
-  30 s of `ab_testing/clip 1/VID_20260802_191029_00_002.insv`; reproduction in progress, tracked
-  separately from seam work.
+- 2026-08-02 the locked horizon leans while circling (issue #152, branch
+  `research/horizon-lock-repro`). The owner reported it in the opening 30 s of
+  `~/Videos/Insta/ab_testing/"clip 1"/VID_20260802_191029_00_002.insv`, and his "+-45" is the total
+  swing rather than the amplitude: the repro fits a once-round sinusoid averaging 18.9 deg of
+  amplitude over 90 instants, 16.3 to 35.5, which is about 40 deg peak to peak and about +-19 either
+  side. Its azimuth walks round with the aircraft's heading rather than sitting at 0 and 180 deg.
+  The fits are the branch's walk over a capture's opening, 0 to 45 s at half-second steps; which
+  capture is not recoverable from the CSV, which carries no file identity, and every capture on the
+  box is 1799.8 s long. #152's own line names `VID_20260729_191815_00_005.insv`, which is not under
+  ~/Videos on the test box, so the defect is on more than one capture.
+  Evidence: .worktrees/horizon-repro/scratch/base-instants.csv
+  STATUS: reproduction confirmed by the owner 2026-08-05, cause open. Tracked separately from seam
+  work; it is not a seam defect and no seam bar applies to it.
