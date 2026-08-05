@@ -37,10 +37,22 @@
 //! vertical, **whatever that tenth of a second read**: on the April 10 X4 Air
 //! capture it reads 1.281 g, which is a reading the running filter refuses
 //! outright, and the horizon came out 49 degrees off level and took tens of
-//! seconds to walk back. [`Filter::seed`] puts the starting reading through the
-//! running filter's own trust window, and past the whole of it: a seed is
-//! applied at full weight, so it has to be a reading the filter would apply at
-//! full weight.
+//! seconds to walk back.
+//!
+//! Putting the seed through the running filter's trust window fixed the
+//! magnitudes and left the rest, because **a magnitude is not a direction**.
+//! An aircraft accelerating along the ground tilts the specific force it feels
+//! by `e` and weighs it `1 / cos e`, so the whole 0.05 g of the full-trust
+//! window is spent by 18 degrees of tilt: the test cannot see the one error it
+//! is standing in front of. The August 2 capture starts from a second of
+//! accelerometer 1.9 s in that weighs 1.039 g, is therefore believed
+//! completely, and points 21 degrees off vertical.
+//!
+//! So [`Filter::seed`] reads a mean rather than a reading. A minute of
+//! accelerometer carried into one frame averages to gravity plus the
+//! aircraft's own change in speed over that minute, and that is bounded by
+//! flying rather than by luck: the manoeuvre that tilts one second of it is
+//! pointing somewhere else in the next.
 
 use super::calibration::Pose;
 use super::gyro::GyroTrack;
@@ -130,17 +142,20 @@ impl Default for Filter {
 pub struct Seed {
     /// The attitude to start integrating from, at the track's first sample.
     pub world_from_body: Quat,
-    /// The middle of the window it was read from, on the track's own clock.
-    /// Later than the start of the track by however far the search had to go
-    /// to find a reading worth having.
+    /// The middle of what was averaged, on the track's own clock. Half a
+    /// minute in on any file long enough to fill [`SEED_MINUTE_US`], and
+    /// earlier only on one that ends before it does, so what this reports is
+    /// how much of the minute the file had.
     pub at_us: i64,
-    /// What that window's mean reading weighed, in g.
+    /// What that mean reading weighed, in g.
     pub magnitude_g: f64,
-    /// Whether the running filter would have believed that reading completely.
+    /// Whether the running filter would believe that mean completely.
     ///
-    /// False is the documented fallback: no window inside the search read
-    /// gravity, so the closest one to it was taken. A file with the motor
-    /// running from the first frame is what reaches it.
+    /// Not a selector: the seed is this mean whatever this says. It is the
+    /// warning. A minute of accelerometer that averages to something which
+    /// does not weigh what gravity weighs is a minute that never settled on
+    /// gravity, and the horizon it starts on is the least bad answer rather
+    /// than a good one.
     pub trusted: bool,
 }
 
@@ -294,70 +309,90 @@ pub fn axis_map(orientation: &str) -> Mat3 {
     Mat3::new(rows)
 }
 
-/// How far into the track a seed may be looked for, in microseconds.
+/// How much of the opening of the track the seed is averaged over, in
+/// microseconds.
 ///
-/// The default `tilt_seconds`, and that is the argument for it: a reading
-/// fetched from further away than the filter's own settling time is worth less
-/// than letting the filter settle, and the gyroscope has to carry it back over
-/// more of its own drift. At the 0.05 deg/s an X4 Air measures at rest
-/// (docs/research/insv-format.md 8.5), 20 seconds of carrying is 1 degree.
-const SEED_SEARCH_US: i64 = 20_000_000;
+/// The mean specific force over a stretch is gravity plus the aircraft's own
+/// mean acceleration, and that is however much its speed changed divided by the
+/// stretch: a minute of a paramotor's whole speed range, 15 m/s, is 0.025 g, or
+/// one and a half degrees, and a manoeuvre inside the minute cancels itself
+/// because it points somewhere different in the next one. One second of the
+/// same signal is bounded by nothing of the kind. Against that, the gyroscope
+/// has to carry the answer back to the start of the track, and at the 0.05
+/// deg/s an X4 Air measures at rest (docs/research/insv-format.md 8.5) a minute
+/// of carrying is 3 degrees.
+///
+/// A minute is where those two meet, and the six flights say the same: against
+/// a backward pass over the same files, 40 seconds is worse than 60 on four of
+/// them and 90 is worse on five. A finer sweep in review, over more spans than
+/// `kjerag-spike --bin hindsight` prints, put the minimum at 60 on both its
+/// worst case and its mean.
+const SEED_MINUTE_US: i64 = 60_000_000;
 
 impl Filter {
-    /// The attitude to start the estimate from: the first stretch of
-    /// accelerometer the running filter would believe completely, carried back
-    /// to the start of the track by the gyroscope.
+    /// The attitude to start the estimate from: the whole opening minute of
+    /// accelerometer, carried back to the start of the track by the gyroscope
+    /// and averaged.
     ///
-    /// **Issue #45 is what the previous seed cost.** It took the first tenth
-    /// of a second whatever it read, and on the April 10 capture that tenth of
-    /// a second weighs 1.281 g, which [`Filter::trust`] refuses outright. The
-    /// horizon started 49 degrees off level and walked back over tens of
-    /// seconds, because the correction that has to undo a bad seed is the same
-    /// slow one that exists to ignore turns.
+    /// **Issue #45 is what the first version of this cost, and the August 2
+    /// capture is what the second one cost.** The first took the opening tenth
+    /// of a second whatever it read, which on the April 10 capture weighs
+    /// 1.281 g. The second took the first second the running filter believed
+    /// completely, which on the August 2 capture is a second of the launch
+    /// weighing 1.039 g and pointing 21 degrees off vertical: it tested the
+    /// magnitude of a reading and called that testing the reading. Both left a
+    /// tilt every frame after them inherited, because the correction that has
+    /// to undo a bad seed is the same slow one that exists to ignore turns.
     ///
-    /// Four choices in here, and each has a cost.
+    /// Three choices in here, and each is measured rather than assumed.
     ///
-    /// - **Search forward rather than burn in.** A burn-in pass would use
-    ///   every trusted sample in the opening stretch instead of the first
-    ///   window's worth, but it converges at `tilt_seconds` from whatever it
-    ///   started at, so it needs a second time constant of its own to be worth
-    ///   anything. This is one extra walk over at most [`SEED_SEARCH_US`] of
-    ///   samples and no new number to justify.
-    /// - **A window as long as `accel_seconds`.** The running filter reads its
-    ///   trust off the accelerometer smoothed over that constant, so this is
-    ///   the same test on the same kind of signal. A shorter window would let
-    ///   a magnitude that is only passing through 1 g on its way somewhere
-    ///   else be taken for stillness: the raw signal on this footage runs 0.69
-    ///   to 1.63 g between the 10th and 90th percentile and crosses 1 g
-    ///   constantly.
-    /// - **Believed completely, not believed at all.** The running filter
-    ///   applies a fraction of a correction to a reading it half believes; a
-    ///   seed is applied whole, so what it asks for is the whole of
-    ///   [`Filter::trust`] rather than any of it. That is worth the difference
-    ///   between a horizon 13.8 degrees off level at 6 seconds and one 1.8
-    ///   degrees off, measured on the April 10 capture through the render path
-    ///   (`kjerag-spike --bin dip`), because the window it settles for
-    ///   otherwise is one taken during the launch.
-    /// - **Every reading carried back before it is averaged.** The window may
-    ///   sit seconds after the start of the track, and the body will have
-    ///   turned in between, so each sample is rotated into the frame of the
+    /// - **A mean over [`SEED_MINUTE_US`], not a reading inside it.** A
+    ///   magnitude test cannot see a horizontal acceleration, which is the one
+    ///   that tilts the answer, so no test of one second can tell a launch
+    ///   from gravity. What bounds a mean is flying: see [`SEED_MINUTE_US`].
+    /// - **Every sample counted once.** Selecting by [`Filter::trust`] sounds
+    ///   like the rule that covers every other sample. On the file the defect
+    ///   was reported on it is worse, and worse the harder it selects: over
+    ///   the August 2 capture's first forty seconds through the render path,
+    ///   **3.75** degrees for counting every sample, 6.73 for weighting each
+    ///   second by trust, 9.32 for keeping only the seconds inside the trust
+    ///   window, 18.86 for the one window the old rule chose. The reading of
+    ///   that which would explain it is that the moments of a manoeuvring
+    ///   flight which weigh 1 g are the unloaded and transitional ones, and a
+    ///   sample of manoeuvres leans. It is one file on one instrument, and the
+    ///   backward pass of `kjerag-spike --bin hindsight` orders the first two
+    ///   the other way round on the same file: what is settled across both
+    ///   instruments and all six flights is this rule against the one it
+    ///   replaced, not counting against weighting
+    ///   (docs/research/insv-format.md 8.8).
+    /// - **Every reading carried back before it is averaged.** The body turns
+    ///   during the minute, so each sample is rotated into the frame of the
     ///   track's first sample by the gyroscope before it goes into the mean.
     ///   That makes the answer an attitude at the start of the track directly,
     ///   with no separate back-rotation and no assumption that the body held
-    ///   still inside the window.
+    ///   still, and it is why a manoeuvre cancels: the force that leans one
+    ///   second of it points somewhere else in this frame a second later.
+    ///
+    /// What it cannot do: a minute that holds one steady thing which is not
+    /// gravity reads exactly like a minute of gravity, and only the weight of
+    /// the answer gives it away. Sustained acceleration is what makes one, a
+    /// minute is how much of it a flight can hold, and [`Seed::trusted`] is
+    /// the warning. Nor can any one reading be refused any more: a reading the
+    /// running filter would throw out reaches this mean, worth its own share
+    /// of the minute and nothing more.
     ///
     /// `None` only for a track with no samples in it.
     pub fn seed(&self, track: &GyroTrack, body_from_imu: Mat3) -> Option<Seed> {
         let samples = track.samples();
         let first = samples.first()?;
-        let window_us = (self.accel_seconds * 1e6).max(0.0) as i64;
         let mut turned = Quat::IDENTITY;
         let mut previous = first.offset_us;
-        let mut opened = first.offset_us;
-        let mut mean = Mean::default();
-        let mut best = None;
+        let mut opening = Mean::default();
 
         for sample in samples {
+            if sample.offset_us - first.offset_us > SEED_MINUTE_US {
+                break;
+            }
             let dt = (sample.offset_us - previous).max(0) as f64 * 1e-6;
             previous = sample.offset_us;
             let rate = body_from_imu.mul_vec(sample.rate_dps);
@@ -366,33 +401,15 @@ impl Filter {
                     rate.map(|axis| axis.to_radians() * dt),
                 ))
                 .normalized();
-            mean.add(turned.rotate(body_from_imu.mul_vec(sample.accel_g)));
-
-            if sample.offset_us - opened < window_us {
-                continue;
-            }
-            let at_us = (opened + sample.offset_us) / 2;
-            opened = sample.offset_us;
-            match mean.take().and_then(|mean| self.reading(mean, at_us)) {
-                Some(candidate) if candidate.trusted => return Some(candidate),
-                Some(candidate) => best = closer_to_gravity(best, candidate),
-                None => (),
-            }
-            if sample.offset_us - first.offset_us >= SEED_SEARCH_US {
-                break;
-            }
+            opening.add(turned.rotate(body_from_imu.mul_vec(sample.accel_g)));
         }
-        // Whatever the last window did not fill. A track shorter than one
-        // window is still a track, and it is the only way this arm is reached.
-        let at_us = (opened + previous) / 2;
-        match mean.take().and_then(|mean| self.reading(mean, at_us)) {
-            Some(candidate) => closer_to_gravity(best, candidate),
-            None => best,
-        }
+        // The middle of what was averaged, which for a sample rate that does
+        // not change is where the weight of the answer sits.
+        self.reading(opening.mean()?, (first.offset_us + previous) / 2)
     }
 
-    /// One window's mean reading as a candidate to start from, or `None` where
-    /// the readings cancelled and there is no direction in them at all.
+    /// One mean reading as something to start from, or `None` where the
+    /// readings cancelled and there is no direction in them at all.
     fn reading(&self, mean: [f64; 3], at_us: i64) -> Option<Seed> {
         let magnitude_g = norm(mean);
         if magnitude_g <= 0.0 {
@@ -524,7 +541,7 @@ fn upright(up: [f64; 3]) -> Quat {
 }
 
 /// A running mean of readings.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Mean {
     sum: [f64; 3],
     count: f64,
@@ -536,24 +553,13 @@ impl Mean {
         self.count += 1.0;
     }
 
-    /// The mean so far, and the accumulator emptied. `None` where nothing was
-    /// added, which is the window a track shorter than one leaves behind.
-    fn take(&mut self) -> Option<[f64; 3]> {
-        let mean = match self.count > 0.0 {
+    /// The mean of what went in. `None` where nothing did, which is a track
+    /// with no samples in it.
+    fn mean(self) -> Option<[f64; 3]> {
+        match self.count > 0.0 {
             true => Some(self.sum.map(|axis| axis / self.count)),
             false => None,
-        };
-        *self = Self::default();
-        mean
-    }
-}
-
-/// Of two readings neither of which is gravity, the one closer to it.
-fn closer_to_gravity(held: Option<Seed>, candidate: Seed) -> Option<Seed> {
-    let off = |seed: &Seed| (seed.magnitude_g - 1.0).abs();
-    match held {
-        Some(held) if off(&held) <= off(&candidate) => Some(held),
-        _ => Some(candidate),
+        }
     }
 }
 
@@ -667,7 +673,15 @@ mod tests {
 
         let last =
             |solved: &OrientationTrack| tilt_deg(solved.samples().last().unwrap().world_from_body);
-        assert!(last(&adrift) > 29.0, "{} degrees adrift", last(&adrift));
+        // Ten minutes at 0.05 deg/s is 30 degrees, and the seed answers for
+        // the middle of the minute it averaged rather than for the first
+        // sample of it, so half a minute of the same drift, 1.5 degrees, is
+        // already inside the answer it starts from.
+        assert!(
+            (last(&adrift) - 28.5).abs() < 0.5,
+            "{} degrees adrift, against 28.5 predicted",
+            last(&adrift)
+        );
         let settled = Filter::default().tilt_seconds * 0.05;
         assert!(
             (last(&held) - settled).abs() < 0.1,
@@ -676,188 +690,239 @@ mod tests {
         );
     }
 
-    /// And it settles rather than oscillating: an estimate started a long way
-    /// off level comes back and stays back.
+    /// And it settles rather than oscillating: a camera that really is rolled
+    /// at the first frame is drawn rolled, and the estimate follows it level
+    /// and stays there.
     ///
-    /// The camera really is tilted for the first two seconds here, at a
-    /// magnitude the filter believes. A start that is wrong because the
-    /// *reading* was wrong is issue #45 and no longer reaches the estimate at
-    /// all, so it cannot be what this test starts from.
+    /// Everything the accelerometer says here is something the gyroscope also
+    /// says, which is what makes the answer checkable: the seed is read from
+    /// the still stretch and carried back over the recorded roll, so the first
+    /// frame has to come out at the 30 degrees the camera was really at.
     #[test]
-    fn a_level_camera_that_starts_wrong_is_pulled_level() {
+    fn a_camera_that_starts_rolled_is_drawn_rolled_and_settles_level() {
         let filter = Filter {
             tilt_seconds: 1.0,
             ..Filter::default()
         };
-        // A 30 degree tilt at 1 g, held long enough to fill the seed's window,
-        // and then the camera is level and still.
+        // Rolled 30 degrees and still, then rolled level at 60 deg/s over half
+        // a second, then still. A positive rate about the forward axis takes
+        // the roll off, which is why the accelerometer reads it counting down.
+        let rolled = |degrees: f64| {
+            let angle = degrees.to_radians();
+            ([0.0; 3], [angle.sin(), -angle.cos(), 0.0])
+        };
         let solved = filter.solve(
-            &track(20.0, |t| match t < 2.0 {
-                true => ([0.0; 3], [0.5, -0.866, 0.0]),
-                false => resting(t),
+            &track(30.0, |t| match t {
+                t if t < 2.0 => rolled(30.0),
+                t if t < 2.5 => ([0.0, 0.0, 60.0], rolled(30.0 - 60.0 * (t - 2.0)).1),
+                _ => resting(t),
             }),
             Mat3::IDENTITY,
         );
 
         let at = |seconds: f64| tilt_deg(solved.at((seconds * 1e6) as i64));
-        assert!(at(0.0) > 25.0, "{} degrees", at(0.0));
+        assert!((at(0.0) - 30.0).abs() < 1.0, "{} degrees", at(0.0));
         assert!(at(10.0) < 0.5, "{} degrees", at(10.0));
-        assert!(at(19.0) < 0.5, "{} degrees", at(19.0));
+        assert!(at(29.0) < 0.5, "{} degrees", at(29.0));
     }
 
-    /// **Issue #45.** The estimate may not start from a reading the running
-    /// filter would refuse, because the correction that has to undo a bad
-    /// start is the same slow one that exists to ignore turns: on the April 10
-    /// capture that was 49 degrees of horizon at 6 seconds and tens of seconds
-    /// of walking back.
+    /// **Issue #45, and what a mean can and cannot promise about it.** No one
+    /// reading can set the estimate any more, because the estimate starts from
+    /// a mean of a minute; what a reading the running filter would refuse can
+    /// still do is add its own share of that minute.
     ///
-    /// The opening two seconds here weigh 1.34 g, which is the shape of that
-    /// file's first tenth of a second at 1.281 g, and they point 63 degrees
-    /// off the body's own vertical. Believing them is the defect; the horizon
-    /// has to be level from the first frame.
+    /// The opening two seconds here weigh 1.34 g, which is the shape of the
+    /// April 10 capture's first tenth of a second at 1.281 g, and they point
+    /// 63 degrees off the body's own vertical. Two seconds of thirty is a
+    /// fifteenth, and a fifteenth of 63 degrees is the 4.7 this comes out at,
+    /// against the 48.9 the seed of issue #45 gave that file at 6 seconds. A
+    /// launch of two seconds inside a whole minute, which is what a file has,
+    /// is worth a degree and a half.
     #[test]
-    fn a_reading_the_filter_refuses_does_not_start_the_estimate() {
+    fn a_reading_the_filter_refuses_is_worth_its_share_and_no_more() {
         let refused = [1.2, -0.6, 0.0];
+        let filter = Filter::default();
+        assert_eq!(
+            filter.trust(norm(refused)),
+            0.0,
+            "{refused:?} has to be a reading the running filter refuses outright"
+        );
+        // What starting from that reading alone would have been worth, so the
+        // test says what it is defending against rather than only that it
+        // holds.
+        let refuses = upright(refused.map(|axis| axis / norm(refused)))
+            .angle_to(Quat::IDENTITY)
+            .to_degrees();
+        assert!(
+            (refuses - 63.0).abs() < 0.5,
+            "{refuses} degrees off vertical"
+        );
+
         let track = track(30.0, |t| match t < 2.0 {
             true => ([0.0; 3], refused),
             false => resting(t),
         });
-
-        let seed = Filter::default().seed(&track, Mat3::IDENTITY).unwrap();
+        let seed = filter.seed(&track, Mat3::IDENTITY).unwrap();
         assert!(seed.trusted, "{seed:?}");
-        assert!(seed.at_us > 2_000_000, "{seed:?}");
-        // What believing that opening would have been worth, so the test says
-        // what it is defending against rather than only that it holds.
-        assert!(
-            (upright(refused.map(|axis| axis / norm(refused))).angle_to(Quat::IDENTITY)
-                - 63f64.to_radians())
-            .abs()
-                < 0.02
-        );
 
-        let solved = Filter::default().solve(&track, Mat3::IDENTITY);
+        let solved = filter.solve(&track, Mat3::IDENTITY);
         let at = |seconds: f64| tilt_deg(solved.at((seconds * 1e6) as i64));
-        assert!(at(0.0) < 0.5, "{} degrees at the first frame", at(0.0));
-        // Two degrees survive at 6 s: the smoothed accelerometer crosses the
-        // trust window as it converges on the step this track makes at 2 s,
-        // and it is believed on the way through. Against that, the seed this
-        // replaced put the April 10 capture 48.9 degrees off at 6 s, measured
-        // through the render path by `kjerag-spike --bin dip`.
-        assert!(at(6.0) < 3.0, "{} degrees at 6 s", at(6.0));
-        // And that much decays at `tilt_seconds` like anything else the
-        // correction has to undo.
-        assert!(at(30.0) < 1.0 && at(30.0) < at(6.0), "{} at 30 s", at(30.0));
+        assert!(
+            (at(0.0) - 4.7).abs() < 0.5,
+            "{} degrees at the first frame",
+            at(0.0)
+        );
+        // It grows to 6.3 degrees by four seconds before it decays, because
+        // the smoothed accelerometer crosses the trust window on its way from
+        // that opening reading to gravity and is believed as it passes
+        // through. That is the running filter and not the seed. What is left
+        // then decays at `tilt_seconds` like anything else the correction has
+        // to undo, where 49 degrees took a minute and a half of the April 10
+        // capture.
+        assert!(at(6.0) < 7.0, "{} degrees at 6 s", at(6.0));
+        assert!(at(30.0) < 2.0 && at(30.0) < at(6.0), "{} at 30 s", at(30.0));
     }
 
-    /// And the reading is carried back over whatever the body did before it.
+    /// And every reading is carried back over whatever the body did before it.
     ///
-    /// The window this seed comes from sits two seconds into the track, and
-    /// the body rolls a quarter turn to reach it. Reading the attitude there
-    /// and starting the track on it would have every frame of those two
-    /// seconds a quarter turn out.
+    /// The body rolls a quarter turn over the first two seconds of this track
+    /// and is still for the rest, and the accelerometer reads gravity
+    /// throughout, so everything that goes into the mean has to be rotated
+    /// into the frame the track started in before it can be averaged with
+    /// anything else. Averaging the readings where they were taken would put
+    /// the seed somewhere between the two attitudes and the first frame a long
+    /// way from either.
     #[test]
     fn the_seed_is_carried_back_over_whatever_the_body_did_first() {
-        // Rolling at 45 deg/s for two seconds, then still, so the accelerometer
-        // reads gravity in the frame the quarter turn left the body in.
+        // A positive rate about the forward axis takes the reading's roll
+        // angle down, so two seconds at 45 deg/s from level ends at -90, which
+        // is gravity along the body's own x axis.
+        let rolled = |degrees: f64| {
+            let angle = degrees.to_radians();
+            [angle.sin(), -angle.cos(), 0.0]
+        };
         let solved = Filter::default().solve(
             &track(30.0, |t| match t < 2.0 {
-                true => ([0.0, 0.0, 45.0], [1.2, -0.6, 0.0]),
+                true => ([0.0, 0.0, 45.0], rolled(-45.0 * t)),
                 false => ([0.0; 3], [-1.0, 0.0, 0.0]),
             }),
             Mat3::IDENTITY,
         );
 
-        // The body was level when the track started, whatever it did next.
-        let start = solved.at(0).angle_to(Quat::IDENTITY).to_degrees();
-        assert!(start < 1.0, "{start} degrees at the first frame");
-        // And a quarter turn on by the time the reading was taken.
-        let rolled = solved
-            .at(3_000_000)
-            .angle_to(Quat::from_rotation_vector([0.0, 0.0, PI / 2.0]))
-            .to_degrees();
-        assert!(rolled < 1.0, "{rolled} degrees off the quarter turn");
+        // The body was level when the track started, whatever it did next, and
+        // a quarter turn from level by the time it stopped rolling. Read as
+        // tilt rather than as a whole rotation because the heading half of the
+        // filter has its own opinion about a body this far over and it is not
+        // what this test is about.
+        let at = |seconds: f64| tilt_deg(solved.at((seconds * 1e6) as i64));
+        assert!(at(0.0) < 1.0, "{} degrees at the first frame", at(0.0));
+        // Two degrees of the quarter turn go missing because the smoothed
+        // accelerometer cannot follow a body rolling at 45 deg/s: it lags, the
+        // lagged reading still weighs 1 g, and the correction leans on it.
+        // That is the running filter meeting a manoeuvre no paraglider makes,
+        // and it decays afterwards like everything else.
+        assert!((at(3.0) - 90.0).abs() < 3.0, "{} degrees at 3 s", at(3.0));
+        assert!(
+            (at(29.0) - 90.0).abs() < 1.0,
+            "{} degrees at 29 s",
+            at(29.0)
+        );
     }
 
-    /// Half believed is not good enough to start from.
+    /// **The August 2 capture.** A launch weighs what gravity weighs and does
+    /// not point where gravity points, and the seed may not start from it.
     ///
-    /// The running filter would apply part of a correction to a 1.1 g reading.
-    /// A seed is applied whole, so it waits for a reading worth applying
-    /// whole: on the April 10 capture the difference is a window taken during
-    /// the launch against one taken after it, and 13.8 degrees of horizon at
-    /// 6 seconds against 1.8.
+    /// The opening here is that file's own numbers: an aircraft accelerating
+    /// along the ground reads 1.038 g, which the running filter believes
+    /// completely, 21 degrees off its own vertical. The rule this replaced
+    /// took the first second it believed, and that is the second, so the whole
+    /// 21 degrees reached the estimate. Averaging cannot do that: four seconds
+    /// of launch in forty is a tenth of the mean, and a tenth of 21 degrees is
+    /// the 2.1 this comes out at.
     #[test]
-    fn a_half_believed_reading_is_not_good_enough_to_start_from() {
+    fn a_launch_that_weighs_a_gravity_it_is_not_does_not_start_the_estimate() {
         let filter = Filter::default();
-        let leaning = [0.71, -0.84, 0.0];
-        assert!(
-            filter.trust(norm(leaning)) > 0.0 && filter.trust(norm(leaning)) < 1.0,
-            "{} g has to be the half believed case",
-            norm(leaning)
+        // Accelerating forward at 0.37 g, and unloaded enough to weigh 1.038.
+        let launching = [0.0, -0.97, 0.37];
+        assert_eq!(
+            filter.trust(norm(launching)),
+            1.0,
+            "{} g has to be a magnitude the filter believes completely, or this \
+             test is not about the defect",
+            norm(launching)
         );
+        let leans = upright(launching.map(|axis| axis / norm(launching)))
+            .angle_to(Quat::IDENTITY)
+            .to_degrees();
+        assert!((leans - 21.0).abs() < 0.5, "{leans} degrees off vertical");
 
-        let seed = filter
-            .seed(
-                &track(30.0, |t| match t < 5.0 {
-                    true => ([0.0; 3], leaning),
-                    false => resting(t),
-                }),
-                Mat3::IDENTITY,
-            )
-            .unwrap();
+        let track = track(40.0, |t| match t < 4.0 {
+            true => ([0.0; 3], launching),
+            false => resting(t),
+        });
+        let seed = filter.seed(&track, Mat3::IDENTITY).unwrap();
 
         assert!(seed.trusted, "{seed:?}");
-        assert!(seed.at_us > 5_000_000, "{seed:?}");
         assert!(
-            seed.world_from_body.angle_to(Quat::IDENTITY).to_degrees() < 0.5,
+            (seed.world_from_body.angle_to(Quat::IDENTITY).to_degrees() - 2.1).abs() < 0.5,
             "{seed:?}"
         );
+        let solved = filter.solve(&track, Mat3::IDENTITY);
+        let at = |seconds: f64| tilt_deg(solved.at((seconds * 1e6) as i64));
+        assert!(at(0.0) < 3.0, "{} degrees at the first frame", at(0.0));
+        // And it is inside a degree and a half by the end, where the 21 the old
+        // rule started from outlived the whole opening of the file. It is not
+        // zero because the running filter believes 1.038 g as well and leans
+        // towards the launch for as long as the launch lasts, which is the
+        // correction working as designed and bounded by `tilt_seconds`.
+        assert!(at(40.0) < 1.5, "{} degrees at 40 s", at(40.0));
     }
 
-    /// A file that never reads gravity gets the closest thing to it, not the
-    /// first thing, and not a panic.
+    /// A file that never reads gravity gets the mean of what there is, said
+    /// out loud, and not a panic.
     ///
-    /// A motor running from the first frame is the case: nothing in the search
-    /// is inside the trust window, so there is no right answer, only a least
-    /// bad one. Taking the closest reading to 1 g makes the fallback at worst
-    /// equal to the opening window this used to take unconditionally, because
-    /// that window is one of the candidates.
+    /// The mean is always taken, so what makes this case a case is that the
+    /// answer does not weigh what gravity weighs, and [`Seed::trusted`] is the
+    /// only thing that can say so. A sensor reading a scale it was not
+    /// calibrated for is what gets here. A flight is not, because the mean of
+    /// a minute of flying is gravity plus however much the aircraft's speed
+    /// changed.
     #[test]
-    fn a_file_that_never_reads_gravity_takes_the_closest_thing_to_it() {
+    fn a_file_that_never_reads_gravity_takes_the_mean_of_what_there_is() {
         let filter = Filter::default();
-        // The opening reading is the furthest from gravity and points 40
-        // degrees off; the one at 5 seconds is the closest and points along
-        // the body's own vertical.
-        let track = track(30.0, |t| {
-            let accel = match t {
-                t if t < 5.0 => [1.29, -1.53, 0.0],
-                t if t < 7.0 => [0.0, -1.25, 0.0],
-                _ => [0.0, -1.4, 0.0],
-            };
-            ([0.0; 3], accel)
+        // Everything weighs too much: 25 seconds at 1.6 g along the body's own
+        // vertical, then 35 at 1.26 g pointing 19 degrees off it.
+        let track = track(60.0, |t| match t < 25.0 {
+            true => ([0.0; 3], [0.0, -1.6, 0.0]),
+            false => ([0.0; 3], [0.42, -1.19, 0.0]),
         });
 
         let seed = filter.seed(&track, Mat3::IDENTITY).unwrap();
         assert!(!seed.trusted, "{seed:?}");
-        assert!((seed.magnitude_g - 1.25).abs() < 0.01, "{seed:?}");
-        assert!((5_000_000..7_000_000).contains(&seed.at_us), "{seed:?}");
+        // The mean of the two stretches by their lengths, which is what taking
+        // everything equally means, rather than either of them.
+        assert!((seed.magnitude_g - 1.383).abs() < 0.01, "{seed:?}");
+        assert!((25_000_000..35_000_000).contains(&seed.at_us), "{seed:?}");
         assert!(
-            seed.world_from_body.angle_to(Quat::IDENTITY).to_degrees() < 0.5,
+            (seed.world_from_body.angle_to(Quat::IDENTITY).to_degrees() - 10.2).abs() < 0.5,
             "{seed:?}"
         );
         assert!(!filter.solve(&track, Mat3::IDENTITY).is_empty());
     }
 
-    /// The search gives up rather than reaching across the file for a reading.
+    /// Nothing past the first minute reaches the seed.
     ///
-    /// A seed fetched from further away than the filter's own settling time is
-    /// worth less than letting the filter settle, and the gyroscope has to
-    /// carry it back over more of its own drift. This track only reads gravity
-    /// at 25 seconds and the search stops before it.
+    /// The gyroscope carries the answer back to the start of the track, and a
+    /// reading fetched from further than [`SEED_MINUTE_US`] costs more of its
+    /// drift than a nearer one costs in accuracy. This track only reads
+    /// gravity at 90 seconds and the average stops long before it, so what the
+    /// seed comes out at is what the first minute weighed and not what the
+    /// file has later.
     #[test]
-    fn the_search_for_a_seed_stops_at_the_filters_own_settling_time() {
+    fn nothing_past_the_first_minute_reaches_the_seed() {
         let seed = Filter::default()
             .seed(
-                &track(40.0, |t| match t < 25.0 {
+                &track(120.0, |t| match t < 90.0 {
                     true => ([0.0; 3], [0.0, -1.4, 0.0]),
                     false => resting(t),
                 }),
@@ -866,7 +931,8 @@ mod tests {
             .unwrap();
 
         assert!(!seed.trusted, "{seed:?}");
-        assert!(seed.at_us < SEED_SEARCH_US + 1_000_000, "{seed:?}");
+        assert!((seed.magnitude_g - 1.4).abs() < 0.01, "{seed:?}");
+        assert!(seed.at_us < SEED_MINUTE_US, "{seed:?}");
     }
 
     /// A turn is not gravity. In a 45 degree banked turn the specific force is
