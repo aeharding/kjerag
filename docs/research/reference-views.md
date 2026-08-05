@@ -5,6 +5,21 @@ Footage lives on the owner's test box under ~/Videos (owner ruling 2026-08-01: f
 are fine in the repo). Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 
+## Motion: what the band applies, and how much of it moves (`--bin shear`)
+- 2026-08-05 `VID_20260714_193252_00_006.insv time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1`
+  The shimmer view, and the acceptance instrument for the seam epic's motion work. Under the
+  lock the seam sweeps 350 px down the picture over three seconds, so everything here is
+  measured against the seam's own row rather than the picture's. The acceptance command is that
+  line plus `frames=90 warm=6.0 seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
+  and the `seam=` is not optional: fitted from the file instead, the same view reads 0.025 deg
+  at -150 px rather than 0.364, because what the band applies is what the calibration left it.
+  Live arm against the same frames with the band held off, 90 frames: `-150` px 0.3641 deg
+  applied at 0.0048 deg step rms; `+0` 0.3584 at 0.0605 with a worst single frame of 0.41;
+  `+60` 0.0417 at 0.1132; `+150`, which is lens 0's picture and is never bent, 0.0003 at 0.0003,
+  the instrument's floor. `mode=profile` puts the along-seam plateau at 18.56 px (0.3624 deg)
+  with the handover bracketed inside +12 to +60 px, 0.94 degrees of view. `null=1` holds both
+  arms and reads exactly zero at every probe on all 90 frames.
+
 ## Geometry: along-seam axis (stages 5+6, merged)
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=93.99 pitch=4.12 fov=20.00 lock=1`
   The original horizon-offset report. main 32.8px -> stages 5+6 9.4 cold / 15.4 warm (wide window).

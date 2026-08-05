@@ -557,6 +557,42 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-05 **What the band applies to a moving picture is an instrument now,
+  and it says where its numbers came from** (`--bin shear`, issue #103's motion
+  half). The shimmer campaign measured it out of tree, with two rendered frame
+  directories and four Python scripts; this is the same method in one binary
+  that renders both arms itself. A frame is decoded once and drawn twice
+  through two `ScenePipeline`s, the delivered one and one held off by
+  `hold_band` from its first frame, so the two pictures carry the same content
+  by construction and what separates them is the applied field. Patches are
+  placed against the seam's own row, walked onto out of the shipped map, because
+  the seam sweeps 350 px down the picture over the reference window and a row
+  pinned to the picture would be measuring that sweep.
+
+  **Two modes and a null.** `mode=probe` reads four bands across the seam per
+  frame with the step statistics under them; `mode=profile` walks a thin patch
+  across it and brackets the handover; `null=1` holds both arms, which makes
+  the two pictures one picture and every reading exactly zero. The null is not
+  a formality: it is the only reading in the set whose right answer is known
+  before the run.
+
+  **Against the reference view** (docs/research/reference-views.md, the shimmer
+  line): 0.3641 deg applied inside lens 1 at 0.0048 deg step rms, 0.0605 deg
+  step rms on the seam with a 0.41 deg single frame, and 0.0003 deg on lens 0's
+  side, which is the floor. The band's own state is reported beside them, at
+  360 directions, and under `KJERAG_FREEZE_DYNAMICS=0` (research/freeze-dynamics)
+  it reads exactly 0.000000 while the bands still read the field the state is
+  holding: the instrument tells a correction that stands still apart from one
+  moving under the picture.
+
+  **Every CSV carries its source path and the whole command line that wrote
+  it.** The instruments' tables outlive their terminals, and the older ones
+  record no file identity at all, so a number copied out of one cannot be
+  attributed to a video, a view or a calibration afterwards. That the
+  calibration belongs in the stamp is not a guess: the same view fitted from
+  the file reads 0.025 deg where the stored calibration reads 0.364, because
+  what the band applies is what the calibration left it.
+
 - 2026-08-01 **The descriptors describe the app, and the channel is named**
   (owner, from a screenshot of COSMIC Store). The `.flatpakref` carried
   plumbing keys only, so the page a Store draws before the remote is trusted
