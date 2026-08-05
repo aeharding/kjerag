@@ -3,8 +3,11 @@
 The acceptance registry for seam work. Lines are runnable as CLI args and Ctrl+V targets.
 Footage lives on the owner's test box under ~/Videos (owner ruling 2026-08-01: footage filenames
 are fine in the repo). A bare filename is in ~/Videos or ~/Videos/Insta; a file that has moved out
-of those carries its whole path on the line, quoted where a directory name has a space in it, so
-the line stays runnable. Agents: read this at the start of any seam task;
+of those carries its whole path on the line, quoted where a directory name has a space in it. A line
+carrying a path like that is a CLI argument only, and is NOT a Ctrl+V target: `Framing::read_line`
+takes the first whitespace word as the path, so a quoted directory splits mid-quote, and nothing
+expands a tilde, which makes such a paste a silent no-op (issue #157).
+Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
@@ -144,9 +147,13 @@ STATUS: two clips, one snap each, no measurement taken off either yet.
   amplitude over 90 instants, 16.3 to 35.5, which is about 40 deg peak to peak and about +-19 either
   side. Its azimuth walks round with the aircraft's heading rather than sitting at 0 and 180 deg.
   The fits are the branch's walk over a capture's opening, 0 to 45 s at half-second steps; which
-  capture is not recoverable from the CSV, which carries no file identity, and every capture on the
-  box is 1799.8 s long. #152's own line names `VID_20260729_191815_00_005.insv`, which is not under
-  ~/Videos on the test box, so the defect is on more than one capture.
+  capture is not recoverable from the CSV, which carries no file identity. #152's own line names
+  `VID_20260729_191815_00_005.insv`, which is not under ~/Videos on the test box, so the defect is on
+  more than one capture.
   Evidence: .worktrees/horizon-repro/scratch/base-instants.csv
-  STATUS: reproduction confirmed by the owner 2026-08-05, cause open. Tracked separately from seam
-  work; it is not a seam defect and no seam bar applies to it.
+  STATUS: reproduction confirmed by the owner 2026-08-05; cause identified (the seed trusts the
+  accelerometer's magnitude and not its direction, which is issue #45's second half:
+  `closer_to_gravity` in crates/meta/src/orientation.rs scores a candidate window by
+  `(magnitude_g - 1.0).abs()` alone, and a coordinated turn reads 1 g while pointing away from
+  vertical); fix in progress, not yet merged. Tracked separately from seam work; it is not a seam
+  defect and no seam bar applies to it.
