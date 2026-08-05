@@ -142,10 +142,10 @@ impl Default for Filter {
 pub struct Seed {
     /// The attitude to start integrating from, at the track's first sample.
     pub world_from_body: Quat,
-    /// Where the weight of the answer sits, on the track's own clock: the mean
-    /// of when it read, weighted the same way as what it read. A file that
-    /// launches into its first frame has this well into the flight, because
-    /// the launch is the part the filter does not believe.
+    /// The middle of what was averaged, on the track's own clock. Half a
+    /// minute in on any file long enough to fill [`SEED_MINUTE_US`], and
+    /// earlier only on one that ends before it does, so what this reports is
+    /// how much of the minute the file had.
     pub at_us: i64,
     /// What that mean reading weighed, in g.
     pub magnitude_g: f64,
@@ -323,9 +323,11 @@ pub fn axis_map(orientation: &str) -> Mat3 {
 /// of carrying is 3 degrees.
 ///
 /// A minute is where those two meet, and the six flights say the same: against
-/// a backward pass over the same files, 40 seconds is worse on three of them
-/// and 90 on four.
-const SEED_SEARCH_US: i64 = 60_000_000;
+/// a backward pass over the same files, 40 seconds is worse than 60 on four of
+/// them and 90 is worse on five. A finer sweep in review, over more spans than
+/// `kjerag-spike --bin hindsight` prints, put the minimum at 60 on both its
+/// worst case and its mean.
+const SEED_MINUTE_US: i64 = 60_000_000;
 
 impl Filter {
     /// The attitude to start the estimate from: the whole opening minute of
@@ -344,21 +346,25 @@ impl Filter {
     ///
     /// Three choices in here, and each is measured rather than assumed.
     ///
-    /// - **A mean over [`SEED_SEARCH_US`], not a reading inside it.** A
+    /// - **A mean over [`SEED_MINUTE_US`], not a reading inside it.** A
     ///   magnitude test cannot see a horizontal acceleration, which is the one
     ///   that tilts the answer, so no test of one second can tell a launch
-    ///   from gravity. What bounds a mean is flying: see [`SEED_SEARCH_US`].
+    ///   from gravity. What bounds a mean is flying: see [`SEED_MINUTE_US`].
     /// - **Every sample counted once.** Selecting by [`Filter::trust`] sounds
-    ///   like the rule that covers every other sample, and it is worse,
-    ///   because what a magnitude selects for is not what it claims: the
-    ///   moments of a manoeuvring flight that weigh 1 g are the unloaded and
-    ///   transitional ones, which is a sample of the flying rather than the
-    ///   whole of it. Measured on the August 2 capture through the render
-    ///   path, over its first forty seconds: **3.75** degrees for counting
-    ///   every sample, 6.73 for weighting each second by trust, 9.32 for
-    ///   keeping only the seconds inside the trust window, and 18.86 for the
-    ///   one window the old rule selected. The tilt grows with how hard the
-    ///   rule selects, and averaging does not select at all.
+    ///   like the rule that covers every other sample. On the file the defect
+    ///   was reported on it is worse, and worse the harder it selects: over
+    ///   the August 2 capture's first forty seconds through the render path,
+    ///   **3.75** degrees for counting every sample, 6.73 for weighting each
+    ///   second by trust, 9.32 for keeping only the seconds inside the trust
+    ///   window, 18.86 for the one window the old rule chose. The reading of
+    ///   that which would explain it is that the moments of a manoeuvring
+    ///   flight which weigh 1 g are the unloaded and transitional ones, and a
+    ///   sample of manoeuvres leans. It is one file on one instrument, and the
+    ///   backward pass of `kjerag-spike --bin hindsight` orders the first two
+    ///   the other way round on the same file: what is settled across both
+    ///   instruments and all six flights is this rule against the one it
+    ///   replaced, not counting against weighting
+    ///   (docs/research/insv-format.md 8.8).
     /// - **Every reading carried back before it is averaged.** The body turns
     ///   during the minute, so each sample is rotated into the frame of the
     ///   track's first sample by the gyroscope before it goes into the mean.
@@ -384,7 +390,7 @@ impl Filter {
         let mut opening = Mean::default();
 
         for sample in samples {
-            if sample.offset_us - first.offset_us > SEED_SEARCH_US {
+            if sample.offset_us - first.offset_us > SEED_MINUTE_US {
                 break;
             }
             let dt = (sample.offset_us - previous).max(0) as f64 * 1e-6;
@@ -904,14 +910,16 @@ mod tests {
         assert!(!filter.solve(&track, Mat3::IDENTITY).is_empty());
     }
 
-    /// The search gives up rather than reaching across the file for a reading.
+    /// Nothing past the first minute reaches the seed.
     ///
     /// The gyroscope carries the answer back to the start of the track, and a
-    /// reading fetched from further than [`SEED_SEARCH_US`] costs more of its
+    /// reading fetched from further than [`SEED_MINUTE_US`] costs more of its
     /// drift than a nearer one costs in accuracy. This track only reads
-    /// gravity at 90 seconds and the search stops long before it.
+    /// gravity at 90 seconds and the average stops long before it, so what the
+    /// seed comes out at is what the first minute weighed and not what the
+    /// file has later.
     #[test]
-    fn the_search_for_a_seed_stops_after_a_minute() {
+    fn nothing_past_the_first_minute_reaches_the_seed() {
         let seed = Filter::default()
             .seed(
                 &track(120.0, |t| match t < 90.0 {
@@ -924,7 +932,7 @@ mod tests {
 
         assert!(!seed.trusted, "{seed:?}");
         assert!((seed.magnitude_g - 1.4).abs() < 0.01, "{seed:?}");
-        assert!(seed.at_us < SEED_SEARCH_US, "{seed:?}");
+        assert!(seed.at_us < SEED_MINUTE_US, "{seed:?}");
     }
 
     /// A turn is not gravity. In a 45 degree banked turn the specific force is

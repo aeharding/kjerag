@@ -2388,15 +2388,24 @@ Two instruments, because the one a pilot meets is not the one that can tell
 two good answers apart.
 
 **The render path** (`kjerag-spike --bin lean`, 36 yaws a circle, every 15
-frames) is what he sees, and it measures the whole error including whatever
-the picture itself is off by. **The arbiter** is a backward pass: the same
-complementary filter run from two minutes in back to the first sample with
-the gyroscope's rates negated, so it meets the launch last instead of first
-and whatever it started from has decayed at `tilt_seconds` long before it
-arrives. Its answer owes nothing to any seed rule, it moves 0.02 to 0.83
-degrees when its span is doubled from 120 to 240 seconds, and it reproduces
-the defect it was built to arbitrate: on the August 2 capture it puts the old
-seed 24.18 degrees off, against the 20.944 the render path measured.
+frames, and a circle is read only where at least 8 of those 36 views found a
+horizon) is what he sees, and it measures the whole error including whatever
+the picture itself is off by. **The arbiter** (`--bin hindsight`) is a
+backward pass: the same complementary filter run from two minutes in back to
+the first sample with the gyroscope's rates negated, so it meets the launch
+last instead of first and whatever it started from has decayed at
+`tilt_seconds` long before it arrives. It moves 0.02 to 0.83 degrees when its
+span is doubled from 120 to 240 seconds, and it reproduces the defect it was
+built to arbitrate: on the August 2 capture it puts the old seed 24.18
+degrees off, against the 20.944 the render path measured.
+
+Two things about it, so it is not read for more than it is. Its own start is
+this section's rule applied to the *end* of the span, which makes it
+independent of how the opening was seeded and not independent of the rule
+itself; what it is independent of is the launch, which is the thing under
+test. And a backward pass that had converged would not move at all when its
+span grew, so **the `back moved` column is the measurement of how much any of
+its numbers are worth**, not a footnote to them.
 
 Seed error at the first sample against the arbiter, degrees:
 
@@ -2413,8 +2422,22 @@ Better on all six, worst case 3.03 against 24.18. And the answer weighs what
 gravity weighs on every one of them: 0.991, 1.010, 0.998, 1.000, 0.999 and
 1.000 g, where the old rule's window read 0.960 to 1.049.
 
+Six flights is six sessions, and the sessions have siblings: the chapters and
+second cards beside them read the same way, on the same arbiter, except for
+one that was already right and gives up a quarter of a degree.
+
+| sibling file | old rule | this rule |
+| --- | ---: | ---: |
+| 05-01 `_003` | 3.58 | **1.21** |
+| 07-25 `_002` | 12.94 | **2.77** |
+| 05-01 `_002` | **0.29** | 0.56 |
+
+So "better on all six" is a statement about the six sessions and not about
+every file this camera has written.
+
 Through the render path, over the first forty seconds, mean tilt in degrees
-(and at the first frame):
+(and at the first frame), reading only circles where at least 8 of 36 views
+found a horizon:
 
 | flight | before | after | first frame, before | after |
 | --- | ---: | ---: | ---: | ---: |
@@ -2425,21 +2448,25 @@ Through the render path, over the first forty seconds, mean tilt in degrees
 | July 25 | too few views to fit | | | |
 | August 2 | 18.86 | **3.75** | 20.97 | **3.33** |
 
-April 10 is the one file where the two instruments disagree, and it is the
-one whose opening holds a 157 deg/s spin: its first frames improve by 6
-degrees while its forty second mean is 1.9 degrees worse, and the arbiter
-puts the new seed 4 degrees closer than the old. July 25 has a horizon the
-finder can see in at most 8 of 36 views at any instant, so the render path
-says nothing about it either way.
+**April 10 is where the two instruments contradict each other, and it is not
+resolved.** Its first frame improves 6.3 degrees, 10.66 to 4.36. Its 4 to 20
+second stretch is about 3.5 degrees **worse**, at a steady bearing and a
+constant tilt, which is the shape of a wrong vertical rather than of noise.
+The two arms converge to within a degree by 24 seconds and to three decimal
+places by 240. The arbiter says the new seed is 4 degrees closer than the old
+on that file; the render path says the opposite over those sixteen seconds.
+Which is lying is open: the file's opening holds a 157 deg/s spin, its
+scenery is a river valley whose skyline is not level, and both instruments
+carry the same gyroscope's integration through that spin. July 25 has a
+horizon the finder can see in at most 8 of 36 views at any instant, so the
+render path says nothing about it either way.
 
-#### The trap: every test of a reading is a selection, and selections lean
+#### Selecting readings, and what is and is not settled about it
 
 The rule that covers every other sample is `Filter::trust`, and using it here
-sounds obvious. It is worse, and monotonically so. What a magnitude selects
-for in a manoeuvring flight is the unloaded and transitional moments, which
-is a sample of the flying rather than the whole of it, and that sample leans.
-On the August 2 capture, mean tilt over the first forty seconds through the
-render path:
+sounds obvious. On the file the owner reported it is worse, and it gets worse
+the harder it selects. August 2, mean tilt over the first forty seconds
+through the render path:
 
 | rule | tilt |
 | --- | ---: |
@@ -2448,21 +2475,48 @@ render path:
 | only the seconds inside the trust window, counted whole | 9.32 |
 | one window, chosen by weight (the old rule) | 18.86 |
 
-The harder the rule selects, the further it leans. Averaging does not select
-at all.
+The mechanism that would explain that ladder is that what a magnitude selects
+for in a manoeuvring flight is the unloaded and transitional moments, which is
+a sample of the flying rather than the whole of it, and a sample of manoeuvres
+leans.
 
-**Picking a window is the same trap.** A window that weighs 1 g can be two
-things that are not gravity pointing in different directions: the April 10
-capture has a twenty seconds straddling a manoeuvre whose mean weighs 0.999 g
-and sits 8 degrees from the quiet stretch either side of it, and a rule that
-picks the window closest to 1 g takes it. Scoring windows by how steady they
-are instead rejects that one and takes a worse one somewhere else: 7.02 and
-7.36 degrees of worst case against the arbiter, against 2.62 for the plain
-mean of the same minute.
+**It is one file on one instrument, and the other instrument disagrees about
+the middle of it.** Against the backward pass, over the six flights, the
+trust-weighted mean is the better of the two: worst case 1.61 against 3.03 and
+mean 1.13 against 1.56, and on the August 2 capture itself it reads 1.61 where
+the plain mean reads 3.03, which is the opposite ordering to the render path's
+on the same file. Per flight the plain mean is closer on four of the six and
+the weighted one on two. So what the numbers settle is narrower than the
+mechanism sounds:
 
-**The span is not free either.** Against the arbiter, 40 seconds is worse on
-three flights and 90 on four, by about what the drift and speed-change
-arithmetic above predicts.
+- **Settled**, on both instruments and on every one of the six flights: the
+  shipped rule beats the rule it replaces.
+- **Settled**, on the render path, on the reported file: the ladder above,
+  where the shipped rule is the best of the four.
+- **Not settled**: whether counting every sample or weighting each second by
+  trust is better in general. The two instruments order those two differently,
+  the render path cannot measure July 25 at all, and April 10 is contradictory
+  on its own.
+
+The plain mean ships because the reported defect is on August 2 and the
+instrument that measures what the owner sees puts it 3 degrees better there,
+and because it is the rule with nothing in it to tune.
+
+**Picking a window is worse on both instruments.** A window that weighs 1 g
+can be two things that are not gravity pointing in different directions: the
+April 10 capture has a twenty seconds straddling a manoeuvre whose mean weighs
+0.999 g and sits 8 degrees from the quiet stretch either side of it, and a
+rule that picks the window closest to 1 g takes it. Scoring windows by how
+steady they are instead rejects that one and takes a worse one somewhere else.
+Worst case against the arbiter over the six: **7.03** for the closest 20 s
+window inside the minute and **7.84** for the steadiest, against **3.03** for
+the plain mean of the same minute.
+
+**The span is not free either.** Against the arbiter, 40 seconds is worse than
+60 on four of the six flights and 90 is worse on five, by about what the drift
+and speed-change arithmetic above predicts. A finer sweep run in review, over
+more spans than `hindsight` prints, put the minimum at 60 seconds on both the
+worst case (2.89) and the mean (1.68).
 
 #### What is left
 
