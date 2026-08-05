@@ -11,6 +11,9 @@
 //! # the null, which has to read exactly zero everywhere
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
 //!   time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1 frames=90 null=1
+//! # the plant, which has to read back a displacement it was given
+//! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
+//!   time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1 frames=90 mode=plant
 //! ```
 //!
 //! **Two arms of one frame, and not two runs of one file.** Every frame is
@@ -19,16 +22,33 @@
 //! which leaves the band at the zero that bends nothing. The two pictures hold
 //! the same content by construction, so what separates them is the applied
 //! field and nothing else, and there is no motion estimate anywhere in here to
-//! be wrong about that. `null=1` holds both arms, and then the two pictures are
-//! the same picture and every reading is exactly zero: the instrument's own
-//! floor, measured rather than assumed.
+//! be wrong about that.
+//!
+//! **A zero and a known answer, both measured.** `null=1` holds both arms, and
+//! then the two pictures are the same picture and every reading is exactly
+//! zero: the instrument's own floor. `mode=plant` holds both arms too and draws
+//! the second at a camera yawed by a known angle, so every band has a
+//! displacement it must read back, at two sizes, and a chain that reads a zero
+//! is shown able to read a number as well. Neither is a formality: they are the
+//! only two readings in the set whose right answer is known before the run.
 //!
 //! **Seam-relative and not picture-relative.** Under a locked horizon the body
 //! turns beneath the view, so the seam walks across the picture: 350 px over
 //! the three seconds this was written for. A row pinned to the picture would be
 //! measuring that sweep. Every patch here is placed against the seam's own row,
 //! read out of the shipped map (`Reframe`) by walking down the gradient of the
-//! angle off the seam plane, which is the same walk `--bin corridor` reports.
+//! angle off the seam plane, so the walk lands on the seam whichever way it
+//! runs.
+//!
+//! **What the patch does not follow is the seam's other two freedoms.** The
+//! patch is centred on the picture's own column and lies along its rows. On the
+//! reference view the seam's nearest point wanders up to 38.5 px off that
+//! column, and at the widest lean the seam rises 54 rows over half the probe
+//! patch's 384, so a band's reading is one translation fitted over a strip the
+//! seam is not parallel to. That is the summary the corridor bands are, and it
+//! is why `mode=profile` exists; a frame whose seam has swung past
+//! [`TILT_LIMIT`] is not read at all, and a run where every frame has is
+//! refused.
 //!
 //! **The band is a filter, so a measurement starts warm.** Its state carries
 //! frame to frame, so a run that begins at the frame it wants to measure is
@@ -37,12 +57,13 @@
 //! frame whose own timestamp reaches `time=`, so the window is the same window
 //! however the warm-up seek rounded.
 //!
-//! **Whether it repeats is measured and not designed.** Six runs of the
-//! reference command below, across three builds, wrote identical readings on
-//! one box, the live arm included. That is a reading rather than a guarantee:
-//! the band's state is an IIR filled by a GPU pass, and the campaign this came
-//! out of saw two live renders of one view differ in the third decimal of a
-//! pixel. Run a comparison twice before believing a difference that small.
+//! **Whether it repeats is measured and not designed.** Three runs of the
+//! reference command below wrote byte-identical CSVs on one box, the live arm
+//! included, and two of `null=1` did too. That is a reading rather than a
+//! guarantee: the band's state is an IIR filled by a GPU pass, and the campaign
+//! this came out of saw two live renders of one view differ in the third
+//! decimal of a pixel. Run a comparison twice before believing a difference
+//! that small.
 //!
 //! The reference reading, on the shimmer view
 //! (docs/research/reference-views.md), on one AMD Radeon 760M:
@@ -54,14 +75,18 @@
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! ```
 //!
-//! Lens 1's interior (`-150`) reads 0.3641 deg applied at 0.0048 deg step rms;
-//! the seam itself (`+0`) 0.3584 at 0.0605 with a worst single step of 0.41;
-//! the far side of the handover (`+60`) 0.0417 at 0.1132; and lens 0's picture
-//! (`+150`), which the band never bends, 0.0003 at 0.0003, which is this
-//! instrument's floor on a live arm. The `seam=` in that command is not
-//! decoration: fitted from the file instead, the same view reads 0.025 deg at
-//! `-150` rather than 0.364, because what the band applies is what the
-//! calibration left it.
+//! Lens 1's interior (`-150`) reads 0.3641 deg applied at 0.0048 deg step rms
+//! over 89 pairs; the seam itself (`+0`) 0.3584 at 0.0605 with a worst single
+//! step of 0.41; the far side of the handover (`+60`) 0.0417 at 0.1134, over 31
+//! pairs of 43 readings, which is the one band here whose statistic is fragile;
+//! and lens 0's picture (`+150`), which the band never bends, 0.0003 at 0.0003,
+//! which is this instrument's floor on a live arm. The band's own state moves
+//! 0.0449 deg rms between frames on the bend and 0.0008 on the along-seam
+//! field.
+//!
+//! The `seam=` in that command is not decoration: fitted from the file instead,
+//! the same view reads 0.025 deg at `-150` rather than 0.364, because what the
+//! band applies is what the calibration left it.
 //!
 //! CSVs land in gitignored `scratch/`, stamped with the file they were read off
 //! and the whole command line that read them: a table of numbers with no source
@@ -73,8 +98,8 @@ use std::time::Duration;
 
 use kjerag_media::Fallible;
 use kjerag_render::{
-    AZIMUTHS, Along, Camera, Cell, Cue, Framing, Horizon, Reframe, Sampling, Scene, ScenePipeline,
-    SeamFit, Size,
+    Along, Camera, Cell, Cue, Framing, Horizon, Reframe, Sampling, Scene, ScenePipeline, SeamFit,
+    Size,
 };
 use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
 
@@ -101,15 +126,20 @@ const MIN_FRAMES: usize = 20;
 const STEP_DEG: f64 = 0.1;
 
 /// How far the seam may lean off the rows before a row offset stops meaning a
-/// distance across it, in degrees. The instrument refuses rather than quoting
-/// an across-seam profile that is partly along one.
+/// distance across it, in degrees.
+///
+/// Per frame and not per run: the lean changes while a capture circles, and on
+/// the October X2 view 2 frames of 30 pass this while the other 28 sit between
+/// 16 and 30. Those 2 are not read, which leaves a hole the step statistics
+/// already refuse to step across, rather than costing the other 28.
 const TILT_LIMIT: f64 = 30.0;
 
 /// How many directions the band's own state is watched at.
 ///
-/// Deliberately not [`AZIMUTHS`], and for `--bin band`'s reason: the bend is
-/// applied everywhere and read at [`AZIMUTHS`] places, so watching the cells
-/// alone would report the readings' steadiness and call it the field's.
+/// Deliberately not [`kjerag_render::AZIMUTHS`], and for `--bin band`'s reason:
+/// the bend is applied everywhere and read at `AZIMUTHS` places, so watching
+/// the cells alone would report the readings' steadiness and call it the
+/// field's.
 const WATCHED: usize = 360;
 
 /// How many Newton steps the walk from the picture's centre onto the seam
@@ -129,8 +159,13 @@ fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args())?;
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let taken = walk(&gpu, &options)?;
-    report(&options, &taken)
+    match options.mode {
+        Mode::Plant => planted(&gpu, &options),
+        _ => {
+            let taken = walk(&gpu, &options)?;
+            report(&options, &taken)
+        }
+    }
 }
 
 // ------------------------------------------------------------ the two arms
@@ -145,6 +180,10 @@ struct Sample {
     fits: Vec<Option<Fit>>,
     cells: Vec<Cell>,
     along: Along,
+    /// The map this frame was drawn through. Kept because the lock turns the
+    /// body under the view, so which ray looks along a direction of the seam
+    /// circle is a question about one frame and not about the run.
+    mapped: Reframe,
     /// Whether the two arms' pictures came back byte for byte the same.
     same: bool,
 }
@@ -173,7 +212,7 @@ fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
     let mut live = ScenePipeline::new(&gpu.device, FORMAT);
     let mut plain = ScenePipeline::new(&gpu.device, FORMAT);
     plain.hold_band(true);
-    live.hold_band(options.null);
+    live.hold_band(options.held());
     let mut scene = Scene::still(&options.input, options.start())?;
     scene.set_horizon(options.view.horizon);
     options.seam.hold(&scene);
@@ -185,9 +224,9 @@ fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
     while let Some((_, at)) = scene.frame() {
         // Drawn on every frame, warm-up included: the band's state is filled by
         // the pass, so a frame not drawn is a frame not measured.
-        let banded = draw(gpu, &scene, &mut live, options)?;
+        let banded = draw(gpu, &scene, &mut live, options, options.second())?;
         if at + NAMED >= options.view.at {
-            let held = draw(gpu, &scene, &mut plain, options)?;
+            let held = draw(gpu, &scene, &mut plain, options, options.view.camera)?;
             let mapped = scene
                 .mapped(options.view.camera, 1.0)
                 .ok_or("no frame to map")?;
@@ -196,9 +235,18 @@ fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
             taken.push(Sample {
                 at,
                 seam,
-                fits: read(&held, &banded, seam.y, &offsets, patch),
+                // A frame whose seam has swung past the limit is not read, and
+                // the rest of the run still is: the lean is a property of one
+                // frame rather than of the view, and a capture that circles
+                // passes through it. What that leaves behind is a hole in the
+                // readings, which the step statistics already refuse to cross.
+                fits: match seam.tilt_deg > TILT_LIMIT {
+                    true => vec![None; offsets.len()],
+                    false => read(&held, &banded, seam.y, &offsets, patch),
+                },
                 cells,
                 along,
+                mapped,
                 same: held.against(&banded).is_identical(),
             });
         }
@@ -209,15 +257,11 @@ fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
     if taken.is_empty() {
         return Err("no frame decoded in that window".into());
     }
-    let leaning = taken
-        .iter()
-        .filter(|s| s.seam.tilt_deg > TILT_LIMIT)
-        .count();
-    if leaning > 0 {
+    if taken.iter().all(|sample| sample.seam.tilt_deg > TILT_LIMIT) {
         return Err(format!(
-            "the seam leans more than {TILT_LIMIT:.0} degrees off the rows on {leaning} of \
-             {} frames, so an offset in rows is not a distance across it. this view is not \
-             one this instrument can read.",
+            "the seam leans more than {TILT_LIMIT:.0} degrees off the rows on every one of {} \
+             frames, so an offset in rows is nowhere a distance across it. this view is not one \
+             this instrument can read.",
             taken.len(),
         )
         .into());
@@ -225,18 +269,28 @@ fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
     Ok(taken)
 }
 
+/// How many frames of a run had their seam past [`TILT_LIMIT`] and were not
+/// read.
+fn leaning(samples: &[Sample]) -> usize {
+    samples
+        .iter()
+        .filter(|sample| sample.seam.tilt_deg > TILT_LIMIT)
+        .count()
+}
+
 fn draw(
     gpu: &Gpu,
     scene: &Scene,
     pipeline: &mut ScenePipeline,
     options: &Options,
+    camera: Camera,
 ) -> Fallible<Picture> {
     Render {
         gpu,
         scene,
         pipeline,
     }
-    .frame(options.view.camera, Sampling::default(), options.size())
+    .frame(camera, Sampling::default(), options.size())
 }
 
 /// Every band of one frame: the same rectangle out of both arms, matched.
@@ -480,10 +534,22 @@ fn line(mapped: &Reframe, size: Size) -> Option<Line> {
     Some(Line {
         x: at[0],
         y: at[1],
-        // The seam runs across its own gradient, so a gradient straight down
-        // the columns is a seam lying along the rows.
-        tilt_deg: gradient[0].atan2(gradient[1]).to_degrees().abs(),
+        tilt_deg: lean(gradient),
     })
+}
+
+/// How far the seam leans off the rows, in degrees, 0 to 90.
+///
+/// The seam runs across its own gradient, so a gradient straight down the
+/// columns is a seam lying along the rows. Both components are taken absolute
+/// first, and that is the whole of this function's history: `atan2` on the
+/// signed pair answers over the half turn, and the sign of the column gradient
+/// is which lens the camera has at the bottom of the picture rather than
+/// anything about the lean. A capture mounted the other way up read every flat
+/// seam as 180 degrees off the rows, so [`TILT_LIMIT`] refused the views this
+/// instrument is for and passed the ones it happened to be tried on.
+fn lean(gradient: [f64; 2]) -> f64 {
+    gradient[0].abs().atan2(gradient[1].abs()).to_degrees()
 }
 
 // ------------------------------------------------------------ the statistics
@@ -510,39 +576,59 @@ struct Band {
     steps: usize,
     peak: f64,
     pinned: usize,
+    /// How many of the readings sit on frames next to each other in the film,
+    /// which is the count every step statistic above is over. Printed beside
+    /// them because it is not `frames`: a band that drops readings has fewer
+    /// steps than it has readings, and at the handover it has far fewer.
+    pairs: usize,
+    /// How many times the readings break, and the longest run of frames a
+    /// break covers.
+    breaks: usize,
+    gap: usize,
 }
 
 impl Band {
-    /// `None` where too few frames correlated to say anything.
+    /// `None` where too few frames correlated, or too few of them landed next
+    /// to each other, to say anything.
     fn of(samples: &[Sample], column: usize, offset: i32, scale: f64) -> Option<Self> {
-        let kept: Vec<Fit> = samples
+        let kept: Vec<(usize, Fit)> = samples
             .iter()
-            .filter_map(|sample| sample.fits[column])
-            .filter(|fit| fit.peak > KEEP_PEAK)
+            .enumerate()
+            .filter_map(|(frame, sample)| Some((frame, sample.fits[column]?)))
+            .filter(|(_, fit)| fit.peak > KEEP_PEAK)
             .collect();
         if kept.len() < MIN_FRAMES {
             return None;
         }
         let mean = |of: &[f64]| of.iter().sum::<f64>() / of.len() as f64;
         let rms = |of: &[f64]| mean(&of.iter().map(|v| v * v).collect::<Vec<f64>>()).sqrt();
-        let each = |at: fn(&Fit) -> f64| kept.iter().map(at).collect::<Vec<f64>>();
+        let each = |at: fn(&Fit) -> f64| kept.iter().map(|(_, fit)| at(fit)).collect::<Vec<f64>>();
         let sizes = each(|fit| fit.across.hypot(fit.along));
         let size_px = mean(&sizes);
-        // Over the readings that correlated and not over the frames of the run:
-        // a frame nothing was measured on has no step to it, and a gap crossed
-        // as though it were one frame would be counted as a jump.
+        // Between frames that are next to each other in the film, and no
+        // others. A band that lost the frames in between still has readings
+        // either side of the gap, and differencing across one would report the
+        // field's whole excursion over that gap as a single frame's step.
         let steps: Vec<f64> = kept
             .windows(2)
-            .map(|pair| (pair[1].across - pair[0].across).hypot(pair[1].along - pair[0].along))
+            .filter(|pair| pair[1].0 == pair[0].0 + 1)
+            .map(|pair| {
+                (pair[1].1.across - pair[0].1.across).hypot(pair[1].1.along - pair[0].1.along)
+            })
             .collect();
+        if steps.len() < MIN_FRAMES {
+            return None;
+        }
         let bends: Vec<f64> = kept
             .windows(3)
+            .filter(|three| three[2].0 == three[0].0 + 2)
             .map(|three| {
                 let second =
-                    |at: fn(&Fit) -> f64| at(&three[2]) - 2.0 * at(&three[1]) + at(&three[0]);
+                    |at: fn(&Fit) -> f64| at(&three[2].1) - 2.0 * at(&three[1].1) + at(&three[0].1);
                 second(|fit| fit.across).hypot(second(|fit| fit.along))
             })
             .collect();
+        let jumps: Vec<usize> = kept.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
         Some(Self {
             offset,
             frames: kept.len(),
@@ -558,7 +644,10 @@ impl Band {
                 .filter(|step| **step / scale > STEP_DEG)
                 .count(),
             peak: mean(&each(|fit| fit.peak)),
-            pinned: kept.iter().filter(|fit| fit.pinned).count(),
+            pinned: kept.iter().filter(|(_, fit)| fit.pinned).count(),
+            pairs: steps.len(),
+            breaks: jumps.iter().filter(|jump| **jump > 1).count(),
+            gap: jumps.iter().copied().max().unwrap_or(1),
         })
     }
 }
@@ -588,22 +677,36 @@ fn stepped(samples: &[Sample], at: impl Fn(&Sample, usize) -> f64) -> (f64, f64)
     }
 }
 
-/// What the band bends by at one of the [`WATCHED`] directions, in radians: the
-/// same lookup the fragment shader does, between two cells, linearly, wrapping.
-fn bend(sample: &Sample, direction: usize) -> f64 {
-    let turn = direction as f64 / WATCHED as f64 * AZIMUTHS as f64;
-    let low = turn.floor() as usize;
-    let mix = turn - low as f64;
-    let cell = |index: usize| f64::from(sample.cells[index % AZIMUTHS].disparity);
-    cell(low) + (cell(low + 1) - cell(low)) * mix
+/// What the band applies at one of the [`WATCHED`] directions, in radians, on
+/// both of its axes.
+///
+/// [`Reframe::reading_at`] and not a lookup of our own: what a pixel is bent by
+/// is the pair of cells it lands between weighted by the evidence in each and
+/// taxed by how much of that reaches [`kjerag_render::KEEP`], and on the
+/// reference view 119 of the 128 cells sit under `KEEP`, so the applied
+/// strength moves where the raw disparity does not. A straight interpolation of
+/// the disparities under-reads this column by 1.75x there.
+fn applied(sample: &Sample, direction: usize) -> kjerag_render::Reading {
+    sample.mapped.reading_at(
+        towards(&sample.mapped, direction),
+        &sample.cells,
+        sample.along,
+    )
 }
 
-/// The along-seam field's own answer at one direction, in radians. Read off the
-/// fitted field rather than off the readings behind it, because the field is
-/// what a pixel there is bent by.
-fn slide(sample: &Sample, direction: usize) -> f64 {
+/// A view ray looking along one direction of the seam circle.
+///
+/// [`Reframe::reading_at`] asks a ray which azimuth it is over, and what is
+/// watched here is the azimuth, so the ray has to be built backwards from it.
+/// `body_ray` is a rotation, so its inverse is its transpose, and its columns
+/// are what it answers on the three basis rays.
+fn towards(mapped: &Reframe, direction: usize) -> [f32; 3] {
     let (sin, cos) = (direction as f32 / WATCHED as f32 * std::f32::consts::TAU).sin_cos();
-    f64::from(sample.along.at(cos, sin))
+    let body = [cos, sin, 0.0];
+    std::array::from_fn(|axis| {
+        let column = mapped.body_ray(std::array::from_fn(|k| f32::from(k == axis)));
+        (0..3).map(|row| column[row] * body[row]).sum()
+    })
 }
 
 // ------------------------------------------------------------ the report
@@ -617,17 +720,109 @@ fn report(options: &Options, samples: &[Sample]) -> Fallible<()> {
         .collect();
     heading(options, samples);
     match options.mode {
-        Mode::Probe => {
-            frames(samples, &offsets);
-            table(options, &bands);
-        }
         Mode::Profile => {
             table(options, &bands);
             handover(options, &bands);
         }
+        _ => {
+            frames(samples, &offsets);
+            table(options, &bands);
+        }
     }
     updates(samples);
     written(options, samples, &offsets, &bands)
+}
+
+/// The instrument's own positive control: the same picture twice, the second
+/// drawn at a camera yawed by a known angle, so every band has a displacement
+/// it must read back.
+///
+/// Both arms are held, so the band contributes nothing and what is left is the
+/// chain this instrument is: the correlation, the parabola under it, and the
+/// pixels-per-degree the tables are quoted in. Twice, at one angle and at
+/// double it, because a chain that reads one number can be reading a constant.
+///
+/// The expected displacement is the rectilinear one and not the nominal scale
+/// the tables use: a yaw of `d` takes on-axis content `f * tan(d)` columns,
+/// where `f` is the half width over the tangent of the half field. Across a
+/// probe patch that varies by 0.4 percent, which is under a hundredth of a
+/// pixel at these sizes.
+fn planted(gpu: &Gpu, options: &Options) -> Fallible<()> {
+    let mut lines = String::new();
+    let mut passes: Vec<Vec<(i32, f64)>> = Vec::new();
+    let mut rows = String::new();
+    let mut header = String::new();
+    for step in [options.plant, 2.0 * options.plant] {
+        let asked = Options {
+            plant: step,
+            ..options.clone()
+        };
+        let expected = asked.expected_px();
+        let taken = walk(gpu, &asked)?;
+        header = stamp(&asked, &taken);
+        let mut pass = Vec::new();
+        for (column, offset) in options.mode.offsets().iter().enumerate() {
+            let Some(band) = Band::of(&taken, column, *offset, options.scale()) else {
+                let _ = writeln!(
+                    lines,
+                    "{offset:>9}{step:>12.3}   too few readings correlate"
+                );
+                continue;
+            };
+            let _ = writeln!(
+                lines,
+                "{offset:>9}{step:>12.3}{expected:>13.4}{:>13.4}{:>12.4}{:>12.6}{:>9}",
+                band.along_px,
+                band.along_px - expected,
+                (band.along_px - expected) / options.scale(),
+                band.frames,
+            );
+            writeln!(
+                rows,
+                "{offset},{step},{expected:.6},{:.6},{:.6},{:.8},{}",
+                band.along_px,
+                band.along_px - expected,
+                (band.along_px - expected) / options.scale(),
+                band.frames,
+            )?;
+            pass.push((*offset, band.along_px));
+        }
+        passes.push(pass);
+    }
+    println!(
+        "\nplant:  both arms held off and the second drawn at a known yaw, so every band has \
+         a\n        displacement it has to read back. what is under test is the correlation, \
+         the\n        parabola and the scale, and nothing of the band at all.\n"
+    );
+    println!(
+        "{:>9}{:>12}{:>13}{:>13}{:>12}{:>12}{:>9}",
+        "offset px", "yaw deg", "expected px", "read px", "error px", "error deg", "frames",
+    );
+    print!("{lines}");
+    let ratios: Vec<f64> = passes[0]
+        .iter()
+        .filter_map(|(offset, small)| {
+            let (_, big) = passes[1].iter().find(|(band, _)| band == offset)?;
+            Some(big / small)
+        })
+        .collect();
+    println!(
+        "\n        doubling the yaw doubles the reading: {} bands read a ratio between {:.4} \
+         and {:.4},\n        where a chain answering with a constant would not move at all.",
+        ratios.len(),
+        ratios.iter().copied().fold(f64::INFINITY, f64::min),
+        ratios.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    );
+    std::fs::create_dir_all(&options.out)?;
+    let path = options
+        .out
+        .join(format!("{}-plant-bands.csv", options.stem()));
+    std::fs::write(
+        &path,
+        format!("{header}offset_px,yaw_deg,expected_px,read_px,error_px,error_deg,frames\n{rows}"),
+    )?;
+    println!("wrote:  {}", path.display());
+    Ok(())
 }
 
 fn heading(options: &Options, samples: &[Sample]) {
@@ -638,10 +833,7 @@ fn heading(options: &Options, samples: &[Sample]) {
         "\nview:   {}\nband:   {}, {} frames from {:.3} s to {:.3} s, {} px square at {:.3} \
          px per degree",
         options.view.printed(&options.input),
-        match options.null {
-            true => "BOTH ARMS HELD OFF, which is the null: the two pictures are one picture",
-            false => "the delivered arm against the same frames with the band held off",
-        },
+        options.arms(),
         samples.len(),
         first.at.as_secs_f64(),
         last.at.as_secs_f64(),
@@ -669,6 +861,14 @@ fn heading(options: &Options, samples: &[Sample]) {
             .fold(f64::NEG_INFINITY, f64::max),
         samples.len(),
     );
+    let past = leaning(samples);
+    if past > 0 {
+        println!(
+            "lean:   {past} of {} frames had the seam past {TILT_LIMIT:.0} degrees off the rows \
+             and were not read.",
+            samples.len(),
+        );
+    }
 }
 
 /// The per-frame displacements, which is what a step statistic is a summary of.
@@ -718,10 +918,11 @@ fn table(options: &Options, bands: &[Option<Band>]) {
          smoothly\nacross the picture has none of.\n"
     );
     println!(
-        "{:>9}{:>11}{:>8}{:>10}{:>10}{:>10}{:>10}{:>11}{:>11}{:>11}{:>11}{:>11}{:>7}{:>7}",
+        "{:>9}{:>11}{:>8}{:>7}{:>10}{:>10}{:>10}{:>10}{:>11}{:>11}{:>11}{:>11}{:>11}{:>7}{:>7}",
         "offset px",
         "offset deg",
         "frames",
+        "pairs",
         "size px",
         "size deg",
         "along px",
@@ -737,11 +938,12 @@ fn table(options: &Options, bands: &[Option<Band>]) {
     let scale = options.scale();
     for band in bands.iter().flatten() {
         println!(
-            "{:>9}{:>11.2}{:>8}{:>10.3}{:>10.4}{:>10.3}{:>10.4}{:>11.3}{:>11.3}{:>11.4}\
+            "{:>9}{:>11.2}{:>8}{:>7}{:>10.3}{:>10.4}{:>10.3}{:>10.4}{:>11.3}{:>11.3}{:>11.4}\
              {:>11.4}{:>11.4}{:>7}{:>7.2}",
             band.offset,
             f64::from(band.offset) / scale,
             band.frames,
+            band.pairs,
             band.size_px,
             band.size_px / scale,
             band.along_px,
@@ -758,14 +960,16 @@ fn table(options: &Options, bands: &[Option<Band>]) {
     refused(bands);
 }
 
-/// The bands that read nothing, and the readings that hit the wall. Both are
-/// what a table of numbers alone would not say.
+/// The bands that read nothing, the readings that hit the wall, and where the
+/// readings a step statistic is made of have holes in them. None of the three
+/// is something a table of numbers alone would say.
 fn refused(bands: &[Option<Band>]) {
     let quiet = bands.iter().filter(|band| band.is_none()).count();
     if quiet > 0 {
         println!(
-            "\n{quiet} of {} bands had fewer than {MIN_FRAMES} readings correlate and are not \
-             printed.",
+            "\n{quiet} of {} bands are not printed: fewer than {MIN_FRAMES} readings correlated, \
+             or fewer\nthan {MIN_FRAMES} of them landed on frames next to each other, which is \
+             what a step is between.",
             bands.len(),
         );
     }
@@ -774,6 +978,29 @@ fn refused(bands: &[Option<Band>]) {
         println!(
             "{pinned} readings sat against the edge of the search, so their displacement is at \
              least what is printed and possibly more."
+        );
+    }
+    let broken: Vec<&Band> = bands
+        .iter()
+        .flatten()
+        .filter(|band| band.breaks > 0)
+        .collect();
+    if broken.is_empty() {
+        return;
+    }
+    println!(
+        "\nwhere the readings have holes in them. a step is only ever taken between frames next \
+         to\neach other, so a band's step statistics are over `pairs` and not over `frames`, and \
+         a\nband that drops readings tells less about the run than its frame count suggests.\n"
+    );
+    println!(
+        "{:>9}{:>9}{:>8}{:>9}{:>11}",
+        "offset px", "frames", "pairs", "breaks", "worst gap"
+    );
+    for band in broken {
+        println!(
+            "{:>9}{:>9}{:>8}{:>9}{:>11}",
+            band.offset, band.frames, band.pairs, band.breaks, band.gap,
         );
     }
 }
@@ -821,8 +1048,8 @@ fn handover(options: &Options, bands: &[Option<Band>]) {
 }
 
 fn updates(samples: &[Sample]) {
-    let bend = stepped(samples, bend);
-    let slide = stepped(samples, slide);
+    let bend = stepped(samples, |sample, at| f64::from(applied(sample, at).epi));
+    let slide = stepped(samples, |sample, at| f64::from(applied(sample, at).along));
     println!(
         "\nupdate: the band's own state, frame to frame at {WATCHED} directions. {:.6} deg rms \
          on the\n        bend and {:.6} deg rms on the along-seam field, worst single steps \
@@ -870,13 +1097,14 @@ fn written(
     let mut summary = format!(
         "{stamp}offset_px,offset_deg,frames,size_px,size_deg,along_px,along_deg,across_px,\
          spread_px,step_rms_px,step_rms_deg,worst_step_deg,bend_rms_deg,steps_over_{STEP_DEG}deg,\
-         mean_peak,pinned\n"
+         mean_peak,pinned,step_pairs,breaks,worst_gap\n"
     );
     for band in bands.iter().flatten() {
         let scale = options.scale();
         writeln!(
             summary,
-            "{},{:.4},{},{:.4},{:.6},{:.4},{:.6},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{},{:.4},{}",
+            "{},{:.4},{},{:.4},{:.6},{:.4},{:.6},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{},{:.4},\
+             {},{},{},{}",
             band.offset,
             f64::from(band.offset) / scale,
             band.frames,
@@ -893,6 +1121,9 @@ fn written(
             band.steps,
             band.peak,
             band.pinned,
+            band.pairs,
+            band.breaks,
+            band.gap,
         )?;
     }
     let stem = options.stem();
@@ -913,8 +1144,8 @@ fn written(
 /// output outlives their runs.
 fn stamp(options: &Options, samples: &[Sample]) -> String {
     let source = std::fs::canonicalize(&options.input).unwrap_or_else(|_| options.input.clone());
-    let bend = stepped(samples, bend);
-    let slide = stepped(samples, slide);
+    let bend = stepped(samples, |sample, at| f64::from(applied(sample, at).epi));
+    let slide = stepped(samples, |sample, at| f64::from(applied(sample, at).along));
     format!(
         "# instrument: kjerag-spike --bin shear\n\
          # source: {}\n\
@@ -932,10 +1163,7 @@ fn stamp(options: &Options, samples: &[Sample]) -> String {
         samples.len(),
         options.size,
         options.scale(),
-        match options.null {
-            true => "both held off (the null)",
-            false => "delivered against held off",
-        },
+        options.arms(),
         bend.0,
         slide.0,
     )
@@ -949,6 +1177,8 @@ enum Mode {
     Probe,
     /// A thin patch walked across the seam: the applied field's own shape.
     Profile,
+    /// The probe's bands over a displacement the instrument was given.
+    Plant,
 }
 
 impl Mode {
@@ -956,6 +1186,7 @@ impl Mode {
         match self {
             Self::Probe => "probe",
             Self::Profile => "profile",
+            Self::Plant => "plant",
         }
     }
 
@@ -967,8 +1198,8 @@ impl Mode {
     /// resolves the same field into a shape.
     fn patch(self) -> (usize, usize) {
         match self {
-            Self::Probe => (128, 384),
             Self::Profile => (48, 512),
+            _ => (128, 384),
         }
     }
 
@@ -977,14 +1208,15 @@ impl Mode {
         match self {
             // Lens 1's interior, the seam itself, the far side of the
             // handover, and lens 0's picture, which the band never bends.
-            Self::Probe => vec![-150, 0, 60, 150],
             Self::Profile => (-240..=240).step_by(12).collect(),
+            _ => vec![-150, 0, 60, 150],
         }
     }
 }
 
 /// Which seam correction the map is built with, exactly as `reframe` and `band`
 /// take it, so a run here is read through the calibration those two draw.
+#[derive(Clone)]
 enum Seam {
     Factory,
     File,
@@ -1001,6 +1233,7 @@ impl Seam {
     }
 }
 
+#[derive(Clone)]
 struct Options {
     input: PathBuf,
     view: Framing,
@@ -1012,6 +1245,8 @@ struct Options {
     size: u32,
     /// Hold the band on BOTH arms, which makes the two pictures one picture.
     null: bool,
+    /// The yaw the second arm is drawn at, in degrees, under `mode=plant`.
+    plant: f64,
     out: PathBuf,
     seam: Seam,
     /// The whole command line, for the CSV header.
@@ -1037,6 +1272,7 @@ impl Options {
             warm: 6.0,
             size: 1024,
             null: false,
+            plant: 0.05,
             out: PathBuf::from("scratch/shear"),
             seam: Seam::File,
             args: args.iter().skip(1).cloned().collect::<Vec<_>>().join(" "),
@@ -1053,6 +1289,7 @@ impl Options {
                     options.mode = match value {
                         "probe" => Mode::Probe,
                         "profile" => Mode::Profile,
+                        "plant" => Mode::Plant,
                         _ => return Err(format!("no mode called {value}. {USAGE}").into()),
                     }
                 }
@@ -1060,6 +1297,7 @@ impl Options {
                 Some(("warm", value)) => options.warm = value.parse()?,
                 Some(("size", value)) => options.size = value.parse()?,
                 Some(("null", value)) => options.null = value.parse::<u32>()? != 0,
+                Some(("plant", value)) => options.plant = value.parse()?,
                 Some(("out", value)) => options.out = PathBuf::from(value),
                 Some(("seam", value)) => {
                     options.seam = match value {
@@ -1097,6 +1335,50 @@ impl Options {
         Size::new(self.size, self.size)
     }
 
+    /// Whether the second arm's band is held too, which is what makes a run a
+    /// reading with an answer known before it.
+    fn held(&self) -> bool {
+        self.null || self.mode == Mode::Plant
+    }
+
+    /// What the two arms are, for the heading and for every CSV that carries
+    /// numbers taken off them.
+    fn arms(&self) -> String {
+        match (self.mode, self.null) {
+            (Mode::Plant, _) => format!("both held off, the second yawed {:+.3} deg", self.plant),
+            (_, true) => {
+                "both held off, which is the null: the two pictures are one picture".to_owned()
+            }
+            (_, false) => {
+                "the delivered arm against the same frames with the band held off".to_owned()
+            }
+        }
+    }
+
+    /// The camera the second arm is drawn at. The first is always the view as
+    /// asked for, and so is this one outside `mode=plant`: `plant` carries a
+    /// default so the control has a size to use, and a default that reached
+    /// the other modes would put a yaw into every reading they take.
+    fn second(&self) -> Camera {
+        match self.mode {
+            Mode::Plant => Camera {
+                yaw: self.view.camera.yaw + (self.plant as f32).to_radians(),
+                ..self.view.camera
+            },
+            _ => self.view.camera,
+        }
+    }
+
+    /// What a plant of this size displaces on-axis content by, in columns.
+    ///
+    /// Rectilinear and not the nominal scale: the half width over the tangent
+    /// of the half field, times the tangent of the yaw. Negative because a
+    /// camera turned one way takes the picture the other.
+    fn expected_px(&self) -> f64 {
+        let half = f64::from(self.view.camera.fov.to_degrees()) / 2.0;
+        -f64::from(self.size) / 2.0 / half.to_radians().tan() * self.plant.to_radians().tan()
+    }
+
     /// View pixels per degree: the picture's width over its field of view.
     ///
     /// The nominal scale of the view and not the rectilinear centre one, which
@@ -1116,5 +1398,47 @@ impl Options {
 }
 
 const USAGE: &str = "usage: shear <file.insv> time=seconds yaw=deg pitch=deg fov=deg lock=0|1 \
-     [mode=probe|profile] [frames=90] [warm=seconds] [size=px] [null=1] [out=dir] \
+     [mode=probe|profile|plant] [frames=90] [warm=seconds] [size=px] [null=1] [plant=deg] \
+     [out=dir] \
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A seam lying along the rows leans by nothing, whichever lens the camera
+    /// has at the bottom of the picture.
+    ///
+    /// The sign of the column gradient is the mounting and not the lean, and
+    /// `atan2` on the signed pair answers over the half turn, so the flipped
+    /// mounting used to read 180 degrees here and be refused by
+    /// [`TILT_LIMIT`]. Both signs, because a test of one is what let it ship.
+    #[test]
+    fn a_flat_seam_is_flat_whichever_way_up_the_camera_is() {
+        assert!(lean([0.0, 1.0]).abs() < 1e-9);
+        assert!(lean([0.0, -1.0]).abs() < 1e-9);
+    }
+
+    /// And the lean itself is the same both ways up, and is the angle off the
+    /// rows rather than its supplement.
+    #[test]
+    fn the_lean_is_the_angle_off_the_rows() {
+        let expect = |gradient: [f64; 2], degrees: f64| {
+            assert!(
+                (lean(gradient) - degrees).abs() < 1e-9,
+                "{gradient:?} read {} and not {degrees}",
+                lean(gradient),
+            );
+        };
+        for column in [1.0, -1.0] {
+            for row in [1.0, -1.0] {
+                expect([row, column], 45.0);
+                expect([row * 3.0_f64.sqrt(), column], 60.0);
+            }
+        }
+        // Straight up the columns is a seam standing on end, which is the far
+        // end of the range and the one TILT_LIMIT is measured towards.
+        expect([1.0, 0.0], 90.0);
+        expect([-1.0, 0.0], 90.0);
+    }
+}
