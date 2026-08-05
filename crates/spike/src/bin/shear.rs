@@ -37,12 +37,12 @@
 //! frame whose own timestamp reaches `time=`, so the window is the same window
 //! however the warm-up seek rounded.
 //!
-//! **Whether it repeats is measured and not designed.** Three runs of the
-//! reference command below wrote byte-identical CSVs on one box, the live arm
-//! included. That is a reading rather than a guarantee: the band's state is an
-//! IIR filled by a GPU pass, and the campaign this came out of saw two live
-//! renders of one view differ in the third decimal of a pixel. Run a comparison
-//! twice before believing a difference that small.
+//! **Whether it repeats is measured and not designed.** Six runs of the
+//! reference command below, across three builds, wrote identical readings on
+//! one box, the live arm included. That is a reading rather than a guarantee:
+//! the band's state is an IIR filled by a GPU pass, and the campaign this came
+//! out of saw two live renders of one view differ in the third decimal of a
+//! pixel. Run a comparison twice before believing a difference that small.
 //!
 //! The reference reading, on the shimmer view
 //! (docs/research/reference-views.md), on one AMD Radeon 760M:
