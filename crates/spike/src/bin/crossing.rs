@@ -103,8 +103,8 @@ fn main() -> Fallible<()> {
         .plant
         .map(|(knob, amount)| plant(&options, knob, amount))
         .transpose()?;
-    let rows = read_all(&base, &options, front, back, &sites, planted.as_ref());
-    report(&options, &sites, &rows)?;
+    let mut rows = read_all(&base, &options, front, back, &sites, planted.as_ref());
+    report(&options, &sites, &mut rows)?;
     Ok(())
 }
 
@@ -320,21 +320,73 @@ fn crossings(sites: &[Site], bins: usize) -> Vec<Vec<usize>> {
     out
 }
 
-fn report(options: &Options, sites: &[Site], rows: &[Row]) -> Fallible<()> {
+/// Judge one crossing's readings against its own along-seam value.
+///
+/// Per crossing and not per run, because a principal-point error is one cycle
+/// round the azimuth: the far side of the seam circle is a different number.
+fn apply_gate(options: &Options, rows: &mut [Row], run: &[usize]) {
+    let Some(tolerance) = options.perp_gate else {
+        println!("gate:   along-seam plausibility off");
+        return;
+    };
+    let readings: Vec<crossing::Reading> = run
+        .iter()
+        .filter_map(|at| rows[*at].reading.as_ref().ok().copied())
+        .collect();
+    let plausible = match options.perp_reference {
+        Some(reference) => Some(crossing::Plausible::declared(reference, tolerance)),
+        None => crossing::Plausible::measured(&readings, tolerance),
+    };
+    let Some(plausible) = plausible else {
+        println!(
+            "gate:   along-seam plausibility withheld: {} readings is under the {} a reference needs",
+            readings.len(),
+            crossing::Plausible::ENOUGH,
+        );
+        return;
+    };
+    let mut results: Vec<Result<crossing::Reading, crossing::Refused>> =
+        run.iter().map(|at| rows[*at].reading).collect();
+    let taken = crossing::gate(&mut results, plausible);
+    for (at, result) in run.iter().zip(results) {
+        rows[*at].reading = result;
+    }
+    let source = run
+        .iter()
+        .find_map(|at| rows[*at].source.ok())
+        .map_or(1.0, |scale| scale.perp);
+    println!(
+        "gate:   along-seam {}{:+.3} deg ({:+.1} src px); tolerance {:.2} deg ({:.1} src px); refused {taken}",
+        match plausible.from {
+            0 => "declared ".to_owned(),
+            n => format!(
+                "from this crossing, {n} readings, spread {:.3} deg, ",
+                plausible.spread_rad.to_degrees()
+            ),
+        },
+        plausible.reference_rad.to_degrees(),
+        plausible.reference_rad * source,
+        plausible.tolerance_rad.to_degrees(),
+        plausible.tolerance_rad * source,
+    );
+}
+
+fn report(options: &Options, sites: &[Site], rows: &mut [Row]) -> Fallible<()> {
     let mut csv = String::from(
         "crossing,arc_deg,view_x,view_y,epi_src_px,perp_src_px,epi_view_px,perp_view_px,\
          sigma_epi_src_px,sigma_perp_src_px,ncc,status\n",
     );
     let runs = crossings(sites, options.bins);
-    for (index, run) in runs.iter().enumerate() {
-        let run: Vec<&Row> = run.iter().map(|at| &rows[*at]).collect();
+    for (index, indices) in runs.iter().enumerate() {
         println!(
             "\ncrossing {}: arc {:.1} to {:.1} deg, {} sites",
             index + 1,
-            run[0].site.node.phi.to_degrees(),
-            run[run.len() - 1].site.node.phi.to_degrees(),
-            run.len(),
+            rows[indices[0]].site.node.phi.to_degrees(),
+            rows[indices[indices.len() - 1]].site.node.phi.to_degrees(),
+            indices.len(),
         );
+        apply_gate(options, rows, indices);
+        let run: Vec<&Row> = indices.iter().map(|at| &rows[*at]).collect();
         println!(
             "   arc     view px       epi src  perp src   epi view perp view    sig epi sig perp    ncc  status"
         );
@@ -389,8 +441,15 @@ fn line(row: &Row) -> String {
         row.site.view_pixel[1],
     );
     let Some(pixels) = pixels(row) else {
+        let departure = match row.reading {
+            Err(crossing::Refused::PerpImplausible(off)) => {
+                let scale = row.source.map_or(1.0, |source| source.perp);
+                format!(" by {:.1} src px along the seam", off * scale)
+            }
+            _ => String::new(),
+        };
         return format!(
-            "{head}          -         -          -         -          -       - {:>6}  {}",
+            "{head}          -         -          -         -          -       - {:>6}  {}{departure}",
             correlation(row).map_or("-".to_owned(), |peak| format!("{peak:.3}")),
             status(row),
         );
@@ -510,7 +569,13 @@ fn summarize(rows: &[&Row]) {
             median(&view.iter().map(|v| v.abs()).collect::<Vec<_>>()),
         );
     }
-    let planted: Vec<(Axes, Axes)> = rows.iter().filter_map(|row| row.plant).collect();
+    // A site the along-seam gate took is not a site the plant may keep: the
+    // deltas were computed before the gate ran.
+    let planted: Vec<(Axes, Axes)> = rows
+        .iter()
+        .filter(|row| row.reading.is_ok())
+        .filter_map(|row| row.plant)
+        .collect();
     if !planted.is_empty() {
         report_plant(&planted);
     }
@@ -600,6 +665,12 @@ struct Options {
     step: f64,
     contrast: f64,
     agreement: f64,
+    /// How far a reading's along-seam term may sit from its crossing's own,
+    /// in radians. `None` switches the gate off.
+    perp_gate: Option<f64>,
+    /// An along-seam reference the caller brings, in radians, instead of the
+    /// crossing's own middle.
+    perp_reference: Option<f64>,
     null: bool,
     plant: Option<(usize, f64)>,
     seam: Seam,
@@ -635,6 +706,19 @@ impl Options {
             step: 0.07,
             contrast: 2.0,
             agreement: 0.5,
+            // 0.40 degrees is 12.6 source px along the seam on this camera
+            // family. Measured on the owner's 2026-05-01 and 2026-04-10
+            // flights, over 1008 accepted readings: half of them sit within
+            // 1.7 source px of their own crossing's along-seam value and
+            // three quarters within 4.1, the cleanest whole runs reach 4 to 8
+            // at their worst site, and the along-seam trend across one view's
+            // whole arc is 2 to 4. The mismatches the two-view control
+            // positively identified sit 25 to 46 px out. So this is about
+            // twice the worst honest departure and a third of the nearest
+            // dishonest one, and it stays under a third of the search window
+            // so it can never be what decides a railed site.
+            perp_gate: Some(0.40_f64.to_radians()),
+            perp_reference: None,
             null: false,
             plant: None,
             seam: Seam::File,
@@ -655,6 +739,13 @@ impl Options {
                 Some(("step", value)) => out.step = value.parse()?,
                 Some(("contrast", value)) => out.contrast = value.parse()?,
                 Some(("ncc", value)) => out.agreement = value.parse()?,
+                Some(("perpgate", value)) => {
+                    let degrees: f64 = value.parse()?;
+                    out.perp_gate = (degrees > 0.0).then_some(degrees.to_radians());
+                }
+                Some(("perpref", value)) => {
+                    out.perp_reference = Some(value.parse::<f64>()?.to_radians())
+                }
                 Some(("null", value)) => out.null = value.parse::<u32>()? != 0,
                 Some(("plant", value)) => out.plant = Some(knob(value)?),
                 Some(("out", value)) => out.out = Some(value.to_owned()),
@@ -683,6 +774,9 @@ impl Options {
         }
         if out.null && out.plant.is_some() {
             return Err("null=1 and plant= are two controls, and each is a run of its own".into());
+        }
+        if out.perp_reference.is_some() && out.perp_gate.is_none() {
+            return Err("perpref= is the value perpgate= judges against, and that is off".into());
         }
         Ok(out)
     }
@@ -750,7 +844,7 @@ fn knob(value: &str) -> Fallible<(usize, f64)> {
 
 const USAGE: &str = "usage: crossing <file.insv> [time=seconds] [yaw=deg] [pitch=deg] [fov=deg] \
      [lock=1] [size=px] [bins=n] [span=deg] [search=deg] [step=deg] [contrast=codes] [ncc=score] \
-     [null=1] [plant=knob:amount] \
+     [perpgate=deg | perpgate=0] [perpref=deg] [null=1] [plant=knob:amount] \
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] [out=name.csv]";
 
 /// The view line the app copies is this instrument's command line too, which
@@ -805,12 +899,30 @@ mod tests {
             "f.insv bins=0",
             "f.insv null=1 plant=yaw:0.1",
             "f.insv plant=twist:0.1",
+            // A reference with nothing to judge against it
+            "f.insv perpgate=0 perpref=-0.2",
         ] {
             assert!(
                 Options::parse(line.split_whitespace().map(str::to_owned)).is_err(),
                 "{line} should not have parsed"
             );
         }
+    }
+
+    /// The along-seam gate is on by default, switched off by a zero, and
+    /// carries whatever reference the caller declares.
+    #[test]
+    fn the_along_seam_gate_is_on_unless_it_is_turned_off() {
+        let on = parse("f.insv");
+        assert!(
+            (on.perp_gate.expect("on by default").to_degrees() - 0.40).abs() < 1e-9,
+            "{:?}",
+            on.perp_gate
+        );
+        assert_eq!(on.perp_reference, None);
+        assert_eq!(parse("f.insv perpgate=0").perp_gate, None);
+        let declared = parse("f.insv perpref=-0.205");
+        assert!((declared.perp_reference.expect("declared").to_degrees() + 0.205).abs() < 1e-9);
     }
 
     /// The two crossings of one view are two answers, and the split between

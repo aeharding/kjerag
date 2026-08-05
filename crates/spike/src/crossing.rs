@@ -161,6 +161,11 @@ pub enum Refused {
     Aperture,
     /// The solve had too few or malformed samples.
     NoSolve,
+    /// The along-seam reading is not something a camera can do: it sits
+    /// further from this crossing's own along-seam value than [`Plausible`]
+    /// allows. Carries the departure in radians. See [`Plausible`] for why
+    /// this outranks the correlation.
+    PerpImplausible(f64),
 }
 
 impl Refused {
@@ -174,6 +179,7 @@ impl Refused {
             Self::Weak(_) => "weak",
             Self::Aperture => "aperture",
             Self::NoSolve => "no-solve",
+            Self::PerpImplausible(_) => "perp-implausible",
         }
     }
 
@@ -183,6 +189,106 @@ impl Refused {
             Self::Weak(peak) => Some(peak),
             _ => None,
         }
+    }
+}
+
+/// What a reading's along-seam term is judged against, and how far from it a
+/// reading may sit.
+///
+/// The along-seam axis is the one **no depth can reach** at any distance
+/// (docs/research/seam-two-axis.md 1), and a file's calibration does not
+/// change while it plays. So one crossing's along-seam term is one number
+/// plus a slow trend along its arc, and a reading far from it is a
+/// correlation that locked onto the wrong feature rather than a camera doing
+/// something. That makes this a stronger test than the correlation, and it
+/// **outranks** it: measured on the owner's 2026-05-01 flight, sites passing
+/// at up to 0.92 agreement read along-seam values 25 to 46 source px from
+/// their own crossing's, and two different views of those same body
+/// directions disagreed by 5 to 35 source px where they agree to 0.06 and
+/// 0.34 px everywhere else.
+///
+/// It cannot help a run that is more than half wrong: the reference is a
+/// median, so it survives contamination up to half and no further.
+/// [`Self::spread_rad`] is reported beside it so a reader can see when that
+/// is in doubt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Plausible {
+    /// The along-seam value of this crossing, in radians.
+    pub reference_rad: f64,
+    /// The median absolute deviation behind it, or zero for a declared one.
+    pub spread_rad: f64,
+    /// How far a reading may sit from the reference, in radians.
+    pub tolerance_rad: f64,
+    /// How many readings the reference was taken over. Zero when declared.
+    pub from: usize,
+}
+
+impl Plausible {
+    /// Below this many readings a crossing cannot say what its own along-seam
+    /// value is, and the honest answer is to gate nothing rather than to gate
+    /// against two numbers.
+    pub const ENOUGH: usize = 5;
+
+    /// This crossing's own middle, which is where a reference comes from when
+    /// the caller does not bring one.
+    pub fn measured(readings: &[Reading], tolerance_rad: f64) -> Option<Self> {
+        let perp: Vec<f64> = readings.iter().map(|r| r.shift_rad.perp).collect();
+        if perp.len() < Self::ENOUGH {
+            return None;
+        }
+        let reference_rad = middle(&perp);
+        Some(Self {
+            reference_rad,
+            spread_rad: middle(
+                &perp
+                    .iter()
+                    .map(|v| (v - reference_rad).abs())
+                    .collect::<Vec<_>>(),
+            ),
+            tolerance_rad,
+            from: perp.len(),
+        })
+    }
+
+    /// A reference the caller brings, from another run or another file. It is
+    /// per crossing and not per camera: a principal-point error is one cycle
+    /// round the azimuth, so the far side of the seam circle is a different
+    /// number and not this one.
+    pub fn declared(reference_rad: f64, tolerance_rad: f64) -> Self {
+        Self {
+            reference_rad,
+            spread_rad: 0.0,
+            tolerance_rad,
+            from: 0,
+        }
+    }
+
+    pub fn departure_rad(self, reading: &Reading) -> f64 {
+        (reading.shift_rad.perp - self.reference_rad).abs()
+    }
+}
+
+/// Refuse the readings of one crossing that its own along-seam value says are
+/// not readings. Answers how many it took.
+pub fn gate(results: &mut [Result<Reading, Refused>], plausible: Plausible) -> usize {
+    let mut taken = 0;
+    for result in results {
+        let Ok(reading) = result else { continue };
+        let departure = plausible.departure_rad(reading);
+        if departure > plausible.tolerance_rad {
+            *result = Err(Refused::PerpImplausible(departure));
+            taken += 1;
+        }
+    }
+    taken
+}
+
+fn middle(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    match sorted.len() % 2 {
+        0 => (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0,
+        _ => sorted[sorted.len() / 2],
     }
 }
 
@@ -865,6 +971,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One reading, on the seam's two axes, in degrees. The site is a bare
+    /// one: what the gate weighs is the along-seam number, and tracing a real
+    /// contour to get one would be measuring the tracer instead.
+    fn reading(perp_deg: f64, epi_deg: f64, correlation: f64) -> Reading {
+        Reading {
+            site: Site {
+                node: node(BASELINE, [1.0, 0.0, 0.0]),
+                view_ray: [0.0, 0.0, 1.0],
+                view_pixel: [0.0, 0.0],
+            },
+            shift_rad: Axes {
+                perp: perp_deg.to_radians(),
+                epi: epi_deg.to_radians(),
+            },
+            sigma_rad: Axes::default(),
+            correlation,
+            condition: 1.0,
+        }
+    }
+
+    /// A crossing whose along-seam readings sit round a fifth of a degree,
+    /// with one planted site that says something a camera cannot do.
+    fn planted() -> Vec<Result<Reading, Refused>> {
+        let mut out: Vec<Result<Reading, Refused>> = [-0.22, -0.19, -0.24, -0.20, -0.18, -0.21]
+            .into_iter()
+            .map(|perp| Ok(reading(perp, -0.40, 0.75)))
+            .collect();
+        // Along-seam by 1.2 degrees, at a correlation that clears every floor
+        // the instrument has. Measured mismatches look exactly like this.
+        out.insert(3, Ok(reading(1.20, -0.40, 0.92)));
+        out
+    }
+
+    /// 0.40 degrees is 12.6 source px at the seam on this camera family.
+    const TOLERANCE: f64 = 0.40;
+
+    #[test]
+    fn an_implausible_along_seam_reading_refuses_however_well_it_correlated() {
+        let mut results = planted();
+        let readings: Vec<Reading> = results.iter().copied().filter_map(Result::ok).collect();
+        let plausible = Plausible::measured(&readings, TOLERANCE.to_radians())
+            .expect("seven readings is enough for a reference");
+        // The median is the point of it: one planted site 1.2 degrees out
+        // does not drag the reference off the other six.
+        assert!(
+            (plausible.reference_rad.to_degrees() + 0.205).abs() < 0.02,
+            "reference is {} deg",
+            plausible.reference_rad.to_degrees()
+        );
+        assert_eq!(gate(&mut results, plausible), 1);
+        match results[3] {
+            Err(Refused::PerpImplausible(departure)) => {
+                assert!((departure.to_degrees() - 1.405).abs() < 0.02);
+            }
+            ref other => panic!("the planted site was not refused: {other:?}"),
+        }
+        assert!(
+            results
+                .iter()
+                .enumerate()
+                .all(|(at, r)| at == 3 || r.is_ok()),
+            "the gate took a site it had no business taking"
+        );
+        assert_eq!(
+            results[3].as_ref().err().map(|why| why.label()),
+            Some("perp-implausible")
+        );
+    }
+
+    /// A crossing with too few readings cannot say what its own along-seam
+    /// value is, and then the honest answer is to gate nothing.
+    #[test]
+    fn too_few_readings_state_no_reference_at_all() {
+        let readings: Vec<Reading> = (0..Plausible::ENOUGH - 1)
+            .map(|_| reading(-0.20, -0.40, 0.9))
+            .collect();
+        assert_eq!(Plausible::measured(&readings, TOLERANCE.to_radians()), None);
+        assert!(Plausible::measured(&planted_readings(), TOLERANCE.to_radians()).is_some());
+    }
+
+    /// A caller may bring the reference instead, from another run or another
+    /// file, and then it is the caller's number and not this crossing's.
+    #[test]
+    fn a_declared_reference_replaces_the_crossings_own() {
+        let mut results = planted();
+        // Declared a degree and a half away: now it is the six that are
+        // implausible and the planted one that is not.
+        let declared = Plausible::declared(1.20_f64.to_radians(), TOLERANCE.to_radians());
+        assert_eq!(declared.from, 0);
+        assert_eq!(gate(&mut results, declared), 6);
+        assert!(results[3].is_ok());
+    }
+
+    /// The null control reads exactly zero everywhere, so the gate has
+    /// nothing to say about it and must not invent something.
+    #[test]
+    fn a_run_that_reads_zero_everywhere_survives_the_gate() {
+        let mut results: Vec<Result<Reading, Refused>> =
+            (0..8).map(|_| Ok(reading(0.0, 0.0, 1.0))).collect();
+        let readings: Vec<Reading> = results.iter().copied().filter_map(Result::ok).collect();
+        let plausible = Plausible::measured(&readings, TOLERANCE.to_radians()).expect("eight");
+        assert_eq!(plausible.reference_rad, 0.0);
+        assert_eq!(plausible.spread_rad, 0.0);
+        assert_eq!(gate(&mut results, plausible), 0);
+    }
+
+    fn planted_readings() -> Vec<Reading> {
+        planted().into_iter().filter_map(Result::ok).collect()
     }
 
     /// The traced contour is the pass's own handover, which an asymmetric lens
