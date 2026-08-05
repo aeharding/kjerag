@@ -1038,10 +1038,11 @@ impl App {
             );
             scene.use_seam(fit);
         }
-        // The pool keeps growing until it has enough to median over, and this
-        // is the whole of "calibrate by watching": a camera with one fit in it
-        // is drawn with that fit and still learns from the next file, because
-        // one fit is one flight's parallax and the median over several is not.
+        // The pool keeps growing until it has enough fits to choose between,
+        // and this is the whole of "calibrate by watching": a camera with one
+        // fit in it is drawn with that fit and still learns from the next
+        // file, because one fit is one flight's parallax and nothing beside it
+        // can say so.
         if pooled < config::POOL_ENOUGH {
             scene.fit_seam(pooled == 0);
         }
@@ -1072,8 +1073,9 @@ impl App {
             harvest.patches, harvest.residual_deg,
         );
         self.stored.write_state();
-        // The median moved, so the picture follows it. Walked, not landed:
-        // there has been a picture on screen for seconds by now.
+        // The pooled answer may have moved to another fit, so the picture
+        // follows it. Walked, not landed: there has been a picture on screen
+        // for seconds by now.
         if let Some(fit) = self.stored.state.seam(camera) {
             open.scene.aim_seam(fit);
         }

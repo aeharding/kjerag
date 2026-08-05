@@ -175,7 +175,10 @@ speed can change in a minute rather than by what one second happened to read.
 That capture now opens **3.33 degrees off level against 20.97**, inside the
 4.05 it settles at four minutes in, and against a backward pass over each
 file the seed error is better on all six owner flights, worst case **3.03
-degrees against 24.18**.
+degrees against 24.18**. Not a clean sweep of everything: one sibling file
+that was already right by a third of a degree gives up a quarter of one, and
+April 10's opening reads better at the first frame and worse from 4 to 20
+seconds, with the two instruments disagreeing about which.
 
 **The instrument that missed it is repaired.** `dip` gated out any line more
 than 20 degrees off level, so it never measured a defect that is 40 to 50,
@@ -586,22 +589,58 @@ live, no keyframe UI ever.
   a minute is gravity plus the aircraft's change in speed over that minute,
   0.025 g for a paramotor, against 3 degrees of gyroscope drift over the same
   minute. Measured against a backward pass over each file (the filter run from
-  two minutes in back to the first sample with its rates negated, which owes
-  nothing to any seed rule and moves under a degree when its span is doubled),
-  the seed error falls on all six owner flights: 24.18 degrees to 3.03 on
-  August 2, 11.96 to 0.29 on May 26, 6.52 to 0.71 on May 1, 5.27 to 1.21 on
-  April 10, 3.89 to 1.48 on July 25, 3.06 to 2.66 on July 14. Through the
-  render path the August 2 capture opens at **3.33 degrees against 20.97**,
-  and its first forty seconds average 3.75 against 18.86. **Every test of a
-  reading is a selection, and selections lean**: weighting each second by
-  `Filter::trust` reads 6.73 on that file, keeping only the seconds inside the
-  window reads 9.32, and the old rule's one chosen window reads 18.86, so the
-  tilt grows with how hard the rule selects. Picking the best window inside
-  the minute fails the same way (a window can weigh 1 g by holding two things
-  that are not gravity, which is what April 10 does). What it costs: a reading
-  the running filter would refuse is no longer refused, only diluted to its
-  share of the minute. Nothing in the running correction changed; its gating
-  under power is correct, and is why a bad seed survives so long.
+  two minutes in back to the first sample with its rates negated, which moves
+  0.02 to 0.83 degrees when its span goes from 120 to 240 seconds), the seed
+  error falls on all six owner flights: 24.18 degrees to 3.03 on August 2,
+  11.96 to 0.29 on May 26, 6.52 to 0.71 on May 1, 5.27 to 1.21 on April 10,
+  3.89 to 1.48 on July 25, 3.06 to 2.66 on July 14, and on two of the three
+  sibling files beside them (3.58 to 1.21 and 12.94 to 2.77, against 0.29 to
+  0.56 on one that was already right). Through the render path the August 2
+  capture opens at **3.33 degrees against 20.97**, and its first forty seconds
+  average 3.75 against 18.86.
+
+  **What selecting readings costs, as far as it is measured.** On that file,
+  through the render path, the tilt grows with how hard the rule selects: 3.75
+  degrees counting every sample, 6.73 weighting each second by
+  `Filter::trust`, 9.32 keeping only the seconds inside the trust window,
+  18.86 for the old rule's one chosen window. The backward pass does **not**
+  agree about the middle of that ladder, and by its reckoning the
+  trust-weighted mean is the better of the two on five of the six flights, so
+  what is settled is the render path's ordering on the reported file plus the
+  shipped rule against the old one, which both instruments call better on
+  every file. Picking the best window inside the minute is worse on both (a
+  window can weigh 1 g by holding two things that are not gravity, which is
+  what April 10 does).
+
+  What it costs: a reading the running filter would refuse is no longer
+  refused, only diluted to its share of the minute. And April 10 is not a
+  clean win: its first frame improves 6.3 degrees, its 4 to 20 second stretch
+  reads about 3.5 degrees worse, the two arms converge to within a degree by
+  24 seconds and to three decimal places by 240, and which instrument is
+  lying there is unresolved. Nothing in the running correction changed; its
+  gating under power is correct, and is why a bad seed survives so long.
+
+- 2026-08-05 **The pool answers with a fit some capture actually took**
+  (issue #103, docs/research/seam-two-axis.md 4). `SeamPool::answer` took the
+  median of each knob separately, and the five knobs trade against each other
+  inside one fit, so what shipped was a combination nobody had measured: roll
+  and cx off one capture, yaw off a second, pitch and cy off a third. It
+  answers with one of the pooled fits now, the one the rest of the pool agrees
+  with most, scored as a sum of distances in probe steps
+  (`seam::distance`, which was already the walk's yardstick). Re-read off the
+  pixels of six of the owner's flights, at the three places in each file the
+  app's own fit reads, that combination leaves **0.382 deg** along the seam on
+  average where the fit now chosen leaves **0.273**, better on all six flights
+  and on 15 of the 17 individual readings. In picture space, over every
+  registry view (docs/research/reference-views.md) and both of `--bin step`'s
+  windows, it is better on 15 of the 21 readings whose line fits describe their
+  own points and worse on 6, the worst of those being 04-10 at 45.112 s, where
+  the wide window's cold step goes 1.04 to 3.81 view px. A pool that is split
+  evenly answers with the middle of what it is split between, which is the old
+  rule's answer and is what a pool of two always is: no member of such a pool
+  has the rest of it agreeing with it more, and choosing one would be choosing
+  by which file was watched first. The pooling, the quality gate, the
+  per-camera cache and the walk are untouched. Awaiting the owner's own test.
 
 - 2026-08-01 **The descriptors describe the app, and the channel is named**
   (owner, from a screenshot of COSMIC Store). The `.flatpakref` carried

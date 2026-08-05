@@ -1453,11 +1453,11 @@ impl Correction {
 /// commensurable: a degree of yaw and a pixel of principal point are different
 /// things, and the probe is the scale the fit itself already compares them on.
 ///
-/// The tests' yardstick and nothing else's. The walk itself stopped needing it
-/// when it stopped being a rate: a fixed-duration ease does not care how far it
-/// is going, which is the point of it.
-#[cfg(test)]
-fn distance(from: SeamFit, to: SeamFit) -> f64 {
+/// What the pool's answer is chosen by (`SeamPool::answer`) and what the tests
+/// measure a walk with. The walk itself stopped needing it when it stopped
+/// being a rate: a fixed-duration ease does not care how far it is going, which
+/// is the point of it.
+pub fn distance(from: SeamFit, to: SeamFit) -> f64 {
     let steps = [
         (to.roll_deg - from.roll_deg) / Knob::Roll.probe(),
         (to.yaw_deg - from.yaw_deg) / Knob::Yaw.probe(),
