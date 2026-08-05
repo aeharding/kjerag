@@ -19,11 +19,20 @@ add new owner references here with date, category, and status.
   and the `seam=` is not optional: fitted from the file instead, the same view reads 0.025 deg
   at -150 px rather than 0.364, because what the band applies is what the calibration left it.
   Live arm against the same frames with the band held off, 90 frames: `-150` px 0.3641 deg
-  applied at 0.0048 deg step rms; `+0` 0.3584 at 0.0605 with a worst single frame of 0.41;
-  `+60` 0.0417 at 0.1132; `+150`, which is lens 0's picture and is never bent, 0.0003 at 0.0003,
-  the instrument's floor. `mode=profile` puts the along-seam plateau at 18.56 px (0.3624 deg)
-  with the handover bracketed inside +12 to +60 px, 0.94 degrees of view. `null=1` holds both
-  arms and reads exactly zero at every probe on all 90 frames.
+  applied at 0.0048 deg step rms over 89 pairs; `+0` 0.3584 at 0.0605 with a worst single frame
+  of 0.41; `+60` 0.0417 at 0.1134; `+150`, which is lens 0's picture and is never bent, 0.0003
+  at 0.0003, the instrument's floor. The band's own state moves 0.0449 deg rms between frames on
+  the bend and 0.0008 on the along-seam field. `mode=profile` puts the along-seam plateau at
+  18.56 px (0.3624 deg) with the handover bracketed inside +12 to +60 px, 0.94 degrees of view.
+  `null=1` holds both arms and reads exactly zero at every probe on all 90 frames; `mode=plant`
+  yaws the second arm 0.05 and 0.10 deg and reads the expected -2.534 and -5.068 px back to
+  within 0.034 px, every band, ratio 1.9925 to 1.9968.
+  CAVEAT, the `+60` band is the fragile one and only it: 43 of 90 readings correlate and 31 of
+  them are on neighbouring frames, so its step rms rests on a third of the run. Sweeping
+  `KEEP_PEAK` 0.78 / 0.80 / 0.82 moves it 0.1170 / 0.1134 / 0.0980 deg, a 19 percent span, and
+  the worst single reading left out moves it 0.046. The other three bands do not move at all
+  over the same sweep (unchanged to four decimals). Read `+60` as a band that steps by about a
+  tenth of a degree, not as a number. `mode=profile`'s `+24` to `+48` are the same species.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=93.99 pitch=4.12 fov=20.00 lock=1`
