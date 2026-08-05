@@ -572,6 +572,66 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-05 **What the band applies to a moving picture is an instrument now,
+  and it says where its numbers came from** (`--bin shear`, issue #103's motion
+  half). The shimmer campaign measured it out of tree, with two rendered frame
+  directories and four Python scripts; this is the same method in one binary
+  that renders both arms itself. A frame is decoded once and drawn twice
+  through two `ScenePipeline`s, the delivered one and one held off by
+  `hold_band` from its first frame, so the two pictures carry the same content
+  by construction and what separates them is the applied field. Patches are
+  placed against the seam's own row, walked onto out of the shipped map, because
+  the seam sweeps 330 px down the picture over the reference window and a row
+  pinned to the picture would be measuring that sweep.
+
+  **Two modes, a null and a plant.** `mode=probe` reads four bands across the
+  seam per frame with the step statistics under them; `mode=profile` walks a
+  thin patch across it and brackets the handover; `null=1` holds both arms,
+  which makes the two pictures one picture and every reading exactly zero; and
+  `mode=plant` holds both arms and draws the second at a known yaw, so every
+  band has a displacement it has to read back. Those last two are the only
+  readings in the set whose right answer is known before the run, which is why
+  there are two of them: 0.05 and 0.10 degrees of yaw are expected to displace
+  -2.534 and -5.068 px, read back inside 0.029 px at every band, and double by
+  1.9920 to 1.9963.
+
+  **Against the reference view** (docs/research/reference-views.md, the shimmer
+  line): 0.3663 deg applied inside lens 1 at 0.0047 deg step rms, 0.0619 deg
+  step rms on the seam with a 0.42 deg single frame, and 0.0003 deg on lens 0's
+  side, which is the floor. Those four are stated against a main and the
+  registry line says which: the view is held by the horizon lock, so #158's
+  reseeded orientation track moved the seam 23 to 45 px down this window, a
+  mean of about 35, and took the first of them from 0.3641 to 0.3663 with no
+  change to the instrument. The
+  band's own state moved by 0.000002 across the same merge, which is the shape
+  of the distinction: the band is fitted in the body's frame and these bands are
+  read in the view's. It is reported beside them, at
+  360 directions and through the shader's own `Reframe::reading_at` rather than
+  a second lookup of ours, and it moves 0.0449 deg rms between frames.
+  `research/freeze-dynamics` is an unmerged research branch; merged locally,
+  its `KJERAG_FREEZE_DYNAMICS=0` takes that column to exactly 0.000000 while
+  the bands still read the field the state is holding, which is the instrument
+  telling a correction that stands still apart from one moving under the
+  picture. What does **not** fall to zero under the freeze is the corridor's
+  own step statistic, 0.07 and 0.12 deg rms with single frames at 0.38: the
+  seam sweeps a standing field across the picture, so a band at a fixed
+  distance from it reads a different part of that field every frame.
+
+  **A step is between neighbouring frames and nothing else.** A band that drops
+  readings has fewer steps than it has readings, and differencing across a gap
+  reports the field's whole excursion over that gap as one frame's step, which
+  on this view inflated the handover bands by 12 to 25 percent. The pair count,
+  the breaks and the longest gap are printed beside every step statistic, and a
+  band with fewer than twenty neighbouring pairs is refused rather than quoted.
+
+  **Every CSV carries its source path and the whole command line that wrote
+  it.** The instruments' tables outlive their terminals, and the older ones
+  record no file identity at all, so a number copied out of one cannot be
+  attributed to a video, a view or a calibration afterwards. That the
+  calibration belongs in the stamp is not a guess: the same view fitted from
+  the file reads 0.027 deg where the stored calibration reads 0.366, because
+  what the band applies is what the calibration left it.
+
 - 2026-08-05 **The seed is a mean of the opening minute, not a reading from
   inside it** (issue #152, docs/research/insv-format.md 8.8). The rule #45
   left behind tested the **magnitude** of one second of accelerometer and
