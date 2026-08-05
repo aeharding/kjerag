@@ -9,6 +9,11 @@ add new owner references here with date, category, and status.
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=93.99 pitch=4.12 fov=20.00 lock=1`
   The original horizon-offset report. main 32.8px -> stages 5+6 9.4 cold / 15.4 warm (wide window).
   Owner verdict: "def looks better, albeit not perfect". Residual is distance-dependent (local, not pose).
+  READ THE rms COLUMNS BEFORE QUOTING A STEP FROM HERE (2026-08-05, PR #154). `--bin step` prints each
+  fitted line's own rms beside the step, and at this view in the WARM state one side of one window
+  follows scenery instead of the horizon and reads 13 to 14 px where a line that describes its own
+  points reads 0.5 to 2.1. It still prints a step, and that step is not the seam's. Two builds are
+  comparable only where both their fits are clean, which at this view is the cold pair.
 
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=127.56 pitch=-2.43 fov=33.95 lock=1`
