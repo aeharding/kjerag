@@ -557,6 +557,28 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-05 **The pool answers with a fit some capture actually took**
+  (issue #103, docs/research/seam-two-axis.md 4). `SeamPool::answer` took the
+  median of each knob separately, and the five knobs trade against each other
+  inside one fit, so what shipped was a combination nobody had measured: roll
+  and cx off one capture, yaw off a second, pitch and cy off a third. It
+  answers with one of the pooled fits now, the one the rest of the pool agrees
+  with most, scored as a sum of distances in probe steps
+  (`seam::distance`, which was already the walk's yardstick). Re-read off the
+  pixels of six of the owner's flights, at the three places in each file the
+  app's own fit reads, that combination leaves **0.382 deg** along the seam on
+  average where the fit now chosen leaves **0.273**, better on all six flights
+  and on 15 of the 17 individual readings. In picture space, over every
+  registry view (docs/research/reference-views.md) and both of `--bin step`'s
+  windows, it is better on 15 of the 21 readings whose line fits describe their
+  own points and worse on 6, the worst of those being 04-10 at 45.112 s, where
+  the wide window's cold step goes 1.04 to 3.81 view px. A pool that is split
+  evenly answers with the middle of what it is split between, which is the old
+  rule's answer and is what a pool of two always is: no member of such a pool
+  has the rest of it agreeing with it more, and choosing one would be choosing
+  by which file was watched first. The pooling, the quality gate, the
+  per-camera cache and the walk are untouched. Awaiting the owner's own test.
+
 - 2026-08-05 **The seam can be measured where there is no horizon to measure**
   (`--bin crossing`, branch `research/crossing-instrument`). `step` needs a
   horizon and fits scenery at 51 to 86 px rms on the owner's 2026-05-01 views,
@@ -593,19 +615,25 @@ live, no keyframe UI ever.
   0.10/0.20, cy 2/4 px. Median error 0.0006 to 0.0113 deg, which is 0.02 to
   0.36 source px, and it does not grow with the plant.
 
-  **The owner's frame**, at `bins=180`, in view px at 1024 across:
+  **The owner's frame**, at `bins=180`, in view px at 1024 across. The two
+  calibrations are his own pool of five resolved the two ways: the knobwise
+  median that shipped until the entry above, and the member #154 now answers
+  with.
 
   | crossing | calibration | epi | perp | accepted |
   | --- | --- | ---: | ---: | ---: |
-  | the one he called good | pooled median, ships | 4.5 | 3.8 | 19/37 |
-  | good | joint member (#154) | 6.1 | 1.2 | 19/37 |
-  | the one he called bad | pooled median, ships | 12.0 | 3.3 | 38/41 |
-  | bad | joint member (#154) | 10.1 | 1.4 | 38/42 |
+  | the one he called good | knobwise median (was shipping) | 4.5 | 3.8 | 19/37 |
+  | good | pool member (#154, ships now) | 6.1 | 1.2 | 19/37 |
+  | the one he called bad | knobwise median | 12.0 | 3.3 | 38/41 |
+  | bad | pool member (#154) | 10.1 | 1.4 | 38/42 |
 
   The two crossings differ 2.7x on the epipolar axis and are the same on the
-  along-seam one. Issue #154's joint pool answer cuts the along-seam error at
-  both, 3.8 to 1.2 and 3.3 to 1.4 view px, and moves the epipolar term by
-  about a pixel, which is what "the bad one barely moved" looks like here.
+  along-seam one. The change #154 landed cuts the along-seam error at both,
+  3.8 to 1.2 and 3.3 to 1.4 view px, and moves the epipolar term by about a
+  pixel, which is what "the bad one barely moved" looks like here. This is an
+  independent read of that change: the entry above measured it as along-seam
+  residual round the whole circle, and this measures it at the two crossings
+  the owner actually looked at.
 
   **The bad crossing's excess is not parallax, and the first reading of this
   table said it was.** Epipolar is the axis a subject's distance displaces

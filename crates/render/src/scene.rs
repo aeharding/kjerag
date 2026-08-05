@@ -441,9 +441,9 @@ impl Scene {
     /// then there is a picture to jump.
     /// `drive` puts the answer into the picture as well as into the pool,
     /// which is what a camera with nothing pooled needs. A camera that already
-    /// has a pooled answer is drawing with it, and this file's own fit is
-    /// evidence for the next median rather than a picture of its own: the
-    /// shell folds it in and asks for the median that comes out.
+    /// has a pooled answer is drawing with it, and this file's own fit is a
+    /// candidate for the next pooled answer rather than a picture of its own:
+    /// the shell folds it in and asks for whatever the pool then answers.
     pub fn fit_seam(&self, drive: bool) {
         let Some(show) = &self.show else {
             return;
