@@ -590,11 +590,20 @@ live, no keyframe UI ever.
 
   **It states its own floor, because the first version of it did not and was
   quoted to a precision it did not have.** Every run re-measures with the
-  calibration moved a thousandth of a degree each way and prints how far its
-  medians travel: 0.00 view px on the null runs, 0.01 to 0.09 on the
-  2026-05-01 views, 0.53 on the sun view's epipolar axis. Nothing it says is
-  worth more digits than that line, and a table taken at one `bins=` does not
-  compare with one taken at another.
+  three angle knobs moved a thousandth of a degree each way and prints how far
+  its medians travel, and how many sites each dithered run accepted: 0.00 view
+  px over 36 and 36 sites on the null, 0.01 to 0.09 over equal counts on the
+  four 2026-05-01 views. Nothing it says is worth more digits than that line,
+  and a table taken at one `bins=` does not compare with one taken at another.
+
+  The counts are on that line because a band is set two ways. Equal counts
+  mean the dither moved the readings and the band measures that. Unequal
+  counts mean it moved a site in or out of the accepted set, and then the band
+  is a median stepping over a different population and is not a reproducible
+  digit at all. The sun view under the pool member is the one recorded run
+  like that, 12 sites against 13, and its band should be read as *at least*
+  half a view pixel on the epipolar axis and not as a number. It is also an
+  **angle** floor: the dither never moves `cx` or `cy`.
 
   That line exists because of the defect it now guards. The ported tracer
   kept, per azimuth bin, the root with the largest `min(blend.weights)`, on
@@ -658,6 +667,14 @@ live, no keyframe UI ever.
   reading does not. The horizon lock is world-referenced, so a fixed view line
   looks at a **drifting** arc of the body-fixed seam; a per-time median taken
   without matching azimuth swings by 19 view px for that reason alone.
+
+  **Three of those four rows are steady and one is not.** The good crossing's
+  epipolar row swings 1.53 px on a signal of about 2, so at that crossing the
+  epipolar term is **not established as constant** and nothing may be built on
+  its being so. And the bad crossing's steadiness is one azimuth of one
+  flight, not a property of the axis: the 2026-04-10 flight moves 7 source px
+  on that same axis within itself at a different azimuth, and is the standing
+  counterexample to reading that row round the whole circle.
 
   **Along the seam reproduces across flights and across the seam does not,
   and that is the split a residual map has to be designed around.** At matched

@@ -206,9 +206,7 @@ impl Refused {
 /// something. That makes this a stronger test than the correlation, and it
 /// **outranks** it: measured on the owner's 2026-05-01 flight, sites passing
 /// at up to 0.92 agreement read along-seam values 25 to 46 source px from
-/// their own crossing's, and two different views of those same body
-/// directions disagreed by 5 to 35 source px where they agree to 0.06 and
-/// 0.34 px everywhere else.
+/// their own crossing's.
 ///
 /// **What it is not.** It is a tolerance filter on a physical argument, not a
 /// validated classifier. There is no measured population of known-wrong
@@ -256,10 +254,13 @@ impl Plausible {
     ///
     /// Two fifths, from 33 recorded runs. Sorted, their scatters run 0.03,
     /// 0.05 ... 0.31, 0.32, 0.34, 0.35, then **0.53, 0.57, 1.03** of the
-    /// tolerance. The widest relative gap in that list is 0.35 to 0.53, so
-    /// unlike the per-reading cut in [`Self::tolerance_rad`] this one does
-    /// sit in a gap in the evidence, and it withholds exactly the three runs
-    /// whose own scatter is more than half of what they would be judging by.
+    /// tolerance. **0.35 to 0.53 is the longest stretch of that list with
+    /// nothing in it below 1.0**, and the three runs above it are the ones
+    /// whose middle meant nothing. So unlike the per-reading cut in
+    /// [`Self::tolerance_rad`], which sits in a populated continuum, this one
+    /// does sit in a gap in the evidence. (The one wider stretch, 0.57 to
+    /// 1.03, is bounded above by a run whose scatter exceeds the whole
+    /// tolerance, which is not a place to put a cut.)
     pub const STEADY: f64 = 0.40;
 
     /// This crossing's own middle, which is where a reference comes from when

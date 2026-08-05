@@ -131,8 +131,17 @@ fn main() -> Fallible<()> {
 /// bit of an `f32` and did not survive a rerun. This is that number now, and
 /// it is a floor under the instrument, not an uncertainty on the seam.
 ///
-/// The dither turns all three angle knobs together, `+d` and `-d`, and the
-/// band is the distance between what the two runs answer.
+/// The dither turns the three **angle** knobs together, `+d` and `-d`, and
+/// the band is the distance between what the two runs answer. It never moves
+/// `cx` or `cy`, so this is an **angle** floor: a principal-point wobble of
+/// the same physical size is not covered by the number it prints.
+///
+/// Each dithered run's accepted count goes on the line beside the band,
+/// because a band can be set two ways. Equal counts mean the same sites, and
+/// then the band is how far their readings moved. Different counts mean the
+/// dither moved a site in or out of the accepted set, and then the band is a
+/// median stepping over a different population, which is what a thin run in
+/// glare does and is worth seeing rather than folded into one digit.
 fn sensitivity(options: &Options, baseline: [f64; 3], front: &Plane, back: &Plane) -> Fallible<()> {
     let Some(dither) = options.dither else {
         return Ok(());
@@ -153,9 +162,9 @@ fn sensitivity(options: &Options, baseline: [f64; 3], front: &Plane, back: &Plan
     }
     let (low, high) = (swing[0], swing[1]);
     match (low, high) {
-        (Some(low), Some(high)) => println!(
-            "sensitivity: at a +/-{dither} deg calibration dither the medians move \
-             {:.2} view px on epi and {:.2} on perp",
+        (Some((low, under)), Some((high, over))) => println!(
+            "sensitivity: at a +/-{dither} deg dither of the angle knobs the medians move \
+             {:.2} view px on epi and {:.2} on perp, over {under} and {over} accepted sites",
             (low.epi - high.epi).abs(),
             (low.perp - high.perp).abs(),
         ),
@@ -165,14 +174,14 @@ fn sensitivity(options: &Options, baseline: [f64; 3], front: &Plane, back: &Plan
 }
 
 /// One run's whole answer in view px, with nothing printed: the medians over
-/// its accepted sites, after the along-seam gate.
+/// its accepted sites after the along-seam gate, and how many there were.
 fn answer(
     options: &Options,
     seam: Seam,
     baseline: [f64; 3],
     front: &Plane,
     back: &Plane,
-) -> Fallible<Option<Axes>> {
+) -> Fallible<Option<(Axes, usize)>> {
     let base = map(options, seam)?;
     let sites = crossing::trace(&base.map, options.raster(), baseline, options.bins);
     let mut rows = read_all(&base, options, front, back, &sites, None);
@@ -180,9 +189,12 @@ fn answer(
         gate_run(options, &mut rows, &run);
     }
     let read: Vec<Pixels> = rows.iter().filter_map(pixels).collect();
-    Ok((!read.is_empty()).then(|| Axes {
-        epi: median(&read.iter().map(|p| p.view.epi).collect::<Vec<_>>()),
-        perp: median(&read.iter().map(|p| p.view.perp).collect::<Vec<_>>()),
+    Ok((!read.is_empty()).then(|| {
+        let axes = Axes {
+            epi: median(&read.iter().map(|p| p.view.epi).collect::<Vec<_>>()),
+            perp: median(&read.iter().map(|p| p.view.perp).collect::<Vec<_>>()),
+        };
+        (axes, read.len())
     }))
 }
 
@@ -498,7 +510,7 @@ fn report(options: &Options, sites: &[Site], rows: &mut [Row]) -> Fallible<()> {
             println!("{}", line(row));
             writeln!(csv, "{},{}", index + 1, comma(row))?;
         }
-        summarize(&run);
+        summarize(&run, !matches!(gated, Gated::Judged(..)));
     }
     // No pooled line over the crossings. A view can show the seam twice and
     // the two are different azimuths of it; averaging them gives an answer
@@ -631,7 +643,10 @@ fn status(row: &Row) -> &'static str {
 ///
 /// A median and a spread, and nothing that assumes these sites are
 /// independent: they are a fraction of a degree apart and they are not.
-fn summarize(rows: &[&Row]) {
+/// `ungated` goes on every median line, not only on the gate's own notice.
+/// A reader quoting one line has to see that nothing judged these readings:
+/// the notice is four lines up and gets scrolled past.
+fn summarize(rows: &[&Row], ungated: bool) {
     let read: Vec<Pixels> = rows.iter().filter_map(|row| pixels(row)).collect();
     let mut refusals: Vec<(&str, usize)> = Vec::new();
     for row in rows {
@@ -669,8 +684,12 @@ fn summarize(rows: &[&Row]) {
         ),
     ] {
         println!(
-            "  {name}: median {:+.2} src px (spread {:.2}), {:+.2} view px (spread {:.2}); \
+            "  {name}:{} median {:+.2} src px (spread {:.2}), {:+.2} view px (spread {:.2}); \
              median magnitude {:.2} src px, {:.2} view px",
+            match ungated {
+                true => " UNGATED,",
+                false => "",
+            },
             median(&source),
             deviation(&source),
             median(&view),
