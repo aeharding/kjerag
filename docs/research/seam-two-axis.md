@@ -145,6 +145,16 @@ instead is a requirement on the band: **calibration only has to land inside
 the band's capture range.** A stage that captures the corpus range makes the
 pool's mixing survivable rather than fatal.
 
+**Fixed 2026-08-05.** `SeamPool::answer` chooses a member of the pool, the one
+the rest of it agrees with most in probe steps, so the answer is a combination
+some capture endorsed. The selection rule is still underdetermined by one
+camera, which is why it is the pool's own middle and not a quality ranking:
+the same sum-of-distances argument the median rested on, taken over whole fits
+instead of one knob at a time. Re-measured with the probe as it stands after
+issue #130, which reads differently from the table above, over six of the
+owner's flights and three places in each: the median leaves 0.382 deg along
+the seam on average and the chosen member 0.273, better on all six flights.
+
 ## 5. Generality: the 5-knob model cannot reach it
 
 Along-seam residual left by the app's own best available correction, round the
