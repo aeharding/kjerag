@@ -887,23 +887,21 @@ fn numbers<const N: usize>(value: &str) -> Fallible<[f64; N]> {
 /// What the filter started the estimate from, read out of the filter itself.
 ///
 /// The first line of any horizon question about the opening of a file: a seed
-/// is applied whole, so a window that weighed near 1 g without pointing at
+/// is applied whole, so an opening that averages to something which is not
 /// gravity is a tilt every frame after it inherits (issue #45).
 fn report_seed(imu: &GyroTrack, to_body: Mat3) {
-    let filter = Filter::default();
-    let Some(seed) = filter.seed(imu, to_body) else {
+    let Some(seed) = Filter::default().seed(imu, to_body) else {
         println!("seed:   no IMU samples, so there is nothing to start from");
         return;
     };
     println!(
-        "seed:   from {:.2} s in, where {:.1} s of accelerometer weighs {:.3} g, which the \
+        "seed:   the opening averages to {:.3} g, weighted towards {:.2} s in, which the \
          filter {}",
-        seed.at_us as f64 * 1e-6,
-        filter.accel_seconds,
         seed.magnitude_g,
+        seed.at_us as f64 * 1e-6,
         match seed.trusted {
             true => "believes completely",
-            false => "would refuse, and nothing in the search read closer to gravity",
+            false => "would not believe completely, and starts from anyway",
         },
     );
 }

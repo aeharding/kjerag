@@ -165,6 +165,18 @@ left is the accelerometer's own disagreement with gravity inside the seed
 window, 2.8 degrees on one capture and 9.8 on the other, and that is the
 residual issue #57 is about.
 
+**And the window was the residual** (issue #152, 8.8). That fix tested the
+magnitude of one second of accelerometer, which is nearly blind to the
+horizontal acceleration that tilts it: the August 2 capture's launch weighs
+1.039 g at 21 degrees off vertical and was believed completely, and the
+horizon stayed 17 to 21 degrees off level for over a minute. The seed is now
+the whole opening minute averaged, which is bounded by how much an aircraft's
+speed can change in a minute rather than by what one second happened to read.
+That capture now opens **3.33 degrees off level against 20.97**, inside the
+4.05 it settles at four minutes in, and against a backward pass over each
+file the seed error is better on all six owner flights, worst case **3.03
+degrees against 24.18**.
+
 **The instrument that missed it is repaired.** `dip` gated out any line more
 than 20 degrees off level, so it never measured a defect that is 40 to 50,
 and the 1.9 to 8.5 degree apparent-gravity attribution PR #51 reported was
@@ -556,6 +568,40 @@ no commitment: export that follows the view the pilot actually flies
 live, no keyframe UI ever.
 
 ## Decisions log
+
+- 2026-08-05 **The seed is a mean of the opening minute, not a reading from
+  inside it** (issue #152, docs/research/insv-format.md 8.8). The rule #45
+  left behind tested the **magnitude** of one second of accelerometer and
+  called that testing the reading, and a magnitude is nearly blind to the
+  error that matters: a horizontal acceleration tilts the specific force by
+  `e` and weighs it `1 / cos e`, so the whole 0.05 g of the full-trust window
+  is spent by 18 degrees of tilt. The August 2 capture opens with a launch
+  weighing 1.039 g at 21 degrees off vertical, which that rule believed
+  completely, and the horizon stayed 17 to 21 degrees off level for over a
+  minute; panning a circle swung it 40 degrees peak to peak. The seed is now
+  the whole opening minute of accelerometer, every sample carried into the
+  frame of the track's first sample by the gyroscope and averaged, with no
+  test of any reading against anything. What makes a mean answerable where a
+  reading is not is that it is bounded by flying: the mean specific force over
+  a minute is gravity plus the aircraft's change in speed over that minute,
+  0.025 g for a paramotor, against 3 degrees of gyroscope drift over the same
+  minute. Measured against a backward pass over each file (the filter run from
+  two minutes in back to the first sample with its rates negated, which owes
+  nothing to any seed rule and moves under a degree when its span is doubled),
+  the seed error falls on all six owner flights: 24.18 degrees to 3.03 on
+  August 2, 11.96 to 0.29 on May 26, 6.52 to 0.71 on May 1, 5.27 to 1.21 on
+  April 10, 3.89 to 1.48 on July 25, 3.06 to 2.66 on July 14. Through the
+  render path the August 2 capture opens at **3.33 degrees against 20.97**,
+  and its first forty seconds average 3.75 against 18.86. **Every test of a
+  reading is a selection, and selections lean**: weighting each second by
+  `Filter::trust` reads 6.73 on that file, keeping only the seconds inside the
+  window reads 9.32, and the old rule's one chosen window reads 18.86, so the
+  tilt grows with how hard the rule selects. Picking the best window inside
+  the minute fails the same way (a window can weigh 1 g by holding two things
+  that are not gravity, which is what April 10 does). What it costs: a reading
+  the running filter would refuse is no longer refused, only diluted to its
+  share of the minute. Nothing in the running correction changed; its gating
+  under power is correct, and is why a bad seed survives so long.
 
 - 2026-08-01 **The descriptors describe the app, and the channel is named**
   (owner, from a screenshot of COSMIC Store). The `.flatpakref` carried

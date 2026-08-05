@@ -755,11 +755,11 @@ fn numbers<const N: usize>(value: &str) -> Fallible<[f64; N]> {
 /// window there is.
 ///
 /// The first line is the whole of the initialisation, read out of the filter
-/// itself rather than worked out again here: [`Filter::seed`] says where it
-/// started the estimate, what that window weighed, and whether it is a reading
-/// the running filter believes at all. Before the fix for issue #45 it was
-/// always the first tenth of a second whatever it read, which on the April 10
-/// capture is 1.281 g.
+/// itself rather than worked out again here: [`Filter::seed`] says what the
+/// opening minute averaged to, where the weight of that average sits, and
+/// whether it is a reading the running filter believes at all. Before the fix
+/// for issue #45 it was always the first tenth of a second whatever it read,
+/// which on the April 10 capture is 1.281 g.
 fn settling(calibration: &CalibrationSet) -> Fallible<()> {
     let filter = Filter::default();
     let track = calibration.orientation(filter);
@@ -769,17 +769,19 @@ fn settling(calibration: &CalibrationSet) -> Fallible<()> {
 
     match filter.seed(&calibration.imu, to_body) {
         Some(seed) => println!(
-            "init:   the estimate starts from {:.1} s in, where {:.1} s of accelerometer \n\
-             \tweighs {:.3} g. The running filter believes a reading completely only inside \n\
-             \t{:.2} g of 1 g and not at all outside {:.2}, so this is a seed it {}.",
-            seed.at_us as f64 * 1e-6,
-            filter.accel_seconds,
+            "init:   the estimate starts from the opening minute averaged, which weighs \n\
+             \t{:.3} g with its weight around {:.1} s in. The running filter believes a \n\
+             \treading completely only inside {:.2} g of 1 g and not at all outside {:.2}, \n\
+             \tso this is a seed it {}.",
             seed.magnitude_g,
+            seed.at_us as f64 * 1e-6,
             filter.trust_g.0,
             filter.trust_g.1,
             match seed.trusted {
                 true => "believes",
-                false => "would refuse, and no window in the search read any closer to gravity",
+                false =>
+                    "would not apply whole, and applies whole because there was \
+                          nothing better in the minute",
             },
         ),
         None => println!("init:   no IMU samples, so there is nothing to start from"),
