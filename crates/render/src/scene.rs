@@ -1161,6 +1161,94 @@ struct Band {
     /// how much media time the state has aged by, and whether what happened
     /// in between was play or a seek.
     at: Option<Duration>,
+    /// Research only ([`FREEZE_DYNAMICS`]): when to stop measuring and draw the
+    /// rest of the stretch on what has been read so far.
+    warmup: Warmup,
+}
+
+/// Research only: how much of a stretch of film the seam band measures before
+/// it holds what it read, from `KJERAG_FREEZE_DYNAMICS`.
+///
+/// Unset, which is every shipped run and every run that does not name it, is
+/// the player: the band measures every frame for as long as the file plays.
+/// Set to a number of seconds, the band measures that much of each stretch and
+/// then stops, so the correction it arrived at stays applied to every later
+/// frame and stops changing under them.
+///
+/// That is the one question a held band answers and no still can. The seam of
+/// a playing file shimmers where the same frame paused does not, and two
+/// different faults both explain that: content streaming through a distortion
+/// that is not itself moving, or a measurement moving under content that is
+/// not. Holding the measurement tells them apart, because only the second has
+/// anything to lose.
+///
+/// A held band is not a band turned off, and the difference is the whole
+/// instrument. [`ScenePipeline::hold_band`] from a pipeline that never
+/// measured leaves the state at the zero that bends nothing, which is the
+/// picture with no correction in it at all; held after a warm-up it leaves the
+/// state at what the warm-up read, which is the same correction as the live
+/// run, standing still. Only the second is the same picture held still, and
+/// only the same picture held still answers the question.
+///
+/// Not a setting, not a key and not a menu item (AGENTS.md, zero-config
+/// playback): an environment variable, read once at startup, written nowhere.
+/// It writes neither [`Band::held`] nor [`Band::tone_held`], so an instrument's
+/// own holds mean what they always meant.
+const FREEZE_DYNAMICS: &str = "KJERAG_FREEZE_DYNAMICS";
+
+/// How much of this stretch of film the band has measured, and whether that is
+/// enough for the research freeze to hold it there.
+#[derive(Debug, Default)]
+struct Warmup {
+    /// Seconds of film to measure before holding. `None` is the player.
+    after: Option<f32>,
+    /// Seconds of film measured since the state was last thrown away.
+    measured: f32,
+}
+
+impl Warmup {
+    /// Whether this frame's measurement is held back.
+    ///
+    /// Counted per stretch of film rather than per file: a `reset` frame is one
+    /// that threw the state away, so a seek warms up again instead of drawing
+    /// the answer from wherever the file was before it. [`band::Watch::track`]
+    /// states the age of a DIRECTION, which is `stride` frames' worth, so the
+    /// frame's own step is the one divided by the other.
+    fn holds(&mut self, watch: &band::Watch) -> bool {
+        let Some(after) = self.after else {
+            return false;
+        };
+        self.measured = match watch.reset == 1.0 {
+            true => 0.0,
+            false => self.measured + watch.seconds / watch.stride.max(1.0),
+        };
+        self.measured > after
+    }
+}
+
+/// The seconds `KJERAG_FREEZE_DYNAMICS` asks for, and a line saying so, because
+/// a run that corrects differently from the player has to say which one it is.
+fn freeze_after() -> Option<f32> {
+    let asked = std::env::var(FREEZE_DYNAMICS).ok()?;
+    let seconds = match asked.parse::<f32>() {
+        Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => seconds,
+        Ok(_) => {
+            eprintln!(
+                "kjerag: {FREEZE_DYNAMICS}={asked} is not a length of film, so the seam band \
+                 keeps measuring"
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!("kjerag: {FREEZE_DYNAMICS}={asked}: {e}, so the seam band keeps measuring");
+            return None;
+        }
+    };
+    println!(
+        "band:   research freeze on, {FREEZE_DYNAMICS}={seconds} s: the seam band measures the \
+         first {seconds} s of each stretch of film and then holds what it read"
+    );
+    Some(seconds)
 }
 
 impl ScenePipeline {
@@ -1275,6 +1363,14 @@ impl ScenePipeline {
         let Some(watch) = self.band.aged(view.frames.timestamp) else {
             return;
         };
+        // Held once its warm-up is up, and nothing else changes: the state
+        // buffer keeps what the last measured frame wrote and the draw keeps
+        // reading it, so the seam is corrected by that answer for the rest of
+        // the stretch. The aging above still runs, which is what lets a seek
+        // notice it is somewhere else and warm up again.
+        if self.band.warmup.holds(&watch) {
+            return;
+        }
         queue.write_buffer(&self.band.watch, 0, watch.bytes());
         let mut encoder = device.create_command_encoder(&Default::default());
         // Only ever more than one under `band_repeats`, and then each in a pass
@@ -1695,6 +1791,10 @@ impl Band {
             repeats: 1,
             slice: 0,
             at: None,
+            warmup: Warmup {
+                after: freeze_after(),
+                measured: 0.0,
+            },
         }
     }
 
@@ -2053,6 +2153,58 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 mod tests {
     use super::*;
     use kjerag_meta::{Filter, GyroSample, GyroTrack, Sweep};
+
+    /// One frame of 30 fps film, which is the step both [`band::Watch`]
+    /// constructors are given for a file playing forward.
+    const FRAME: f32 = 1.0 / 30.0;
+
+    fn warming(after: f32) -> Warmup {
+        Warmup {
+            after: Some(after),
+            measured: 0.0,
+        }
+    }
+
+    /// The player is every run that does not ask for the freeze, and it stays
+    /// the player however long the file is.
+    #[test]
+    fn an_unasked_band_measures_every_frame_for_ever() {
+        let mut warmup = Warmup::default();
+        assert!(!warmup.holds(&band::Watch::start(FRAME)));
+        for _ in 0..10_000 {
+            assert!(!warmup.holds(&band::Watch::track(FRAME, 0)));
+        }
+    }
+
+    /// The correction is held, not withheld: the frames of the warm-up are
+    /// measured, and only the ones after it are not. A freeze that held from
+    /// the first frame would leave the state at the zero that bends nothing,
+    /// which is the band turned off and a different picture rather than the
+    /// same one standing still.
+    #[test]
+    fn the_freeze_measures_its_warm_up_and_then_holds() {
+        let mut warmup = warming(1.0);
+        assert!(!warmup.holds(&band::Watch::start(FRAME)));
+        let mut measured = 0;
+        while !warmup.holds(&band::Watch::track(FRAME, 0)) {
+            measured += 1;
+            assert!(measured < 1_000, "the freeze never took hold");
+        }
+        assert!((measured as f32 * FRAME - 1.0).abs() < 2.0 * FRAME);
+        assert!(warmup.holds(&band::Watch::track(FRAME, 0)));
+    }
+
+    /// A seek lands where the held answer was never measured, and the band
+    /// throws its state away there ([`band::Watch::start`]). A freeze that did
+    /// not warm up again would draw the old place's correction over the new
+    /// one for the rest of the file.
+    #[test]
+    fn a_seek_warms_the_freeze_up_again() {
+        let mut warmup = warming(1.0);
+        while !warmup.holds(&band::Watch::track(FRAME, 0)) {}
+        assert!(!warmup.holds(&band::Watch::start(FRAME)));
+        assert!(!warmup.holds(&band::Watch::track(FRAME, 0)));
+    }
 
     /// A camera rolling at a constant rate, as an orientation track: enough
     /// for the one question this module owns, which is whether a frame's
