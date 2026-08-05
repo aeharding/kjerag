@@ -572,6 +572,68 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-05 **The along-seam correction cannot be faded over a support of its
+  own, and the handover it does ride is twice as wide as the instrument reads**
+  (`KJERAG_HANDOVER_DEG`, research only, off by default).
+
+  The shimmer epic asked for a wider fade on the along-seam correction, on the
+  reading that `--bin shear mode=profile` brackets the handover inside 0.70
+  degrees of view while the correction itself is 0.3646 degrees, which would be
+  a 52 percent shear dragged through streaming content. Two things came back.
+
+  **There is only one support, and it is the crossover's.** The along-seam term
+  goes to lens 1 whole and lens 0 takes none of it, and that is not a choice
+  about width: it is the difference the fit measured, so it is what makes the
+  two lenses draw one piece of content in one place. Wherever both lenses are
+  in the picture that difference is pinned at one whole correction, so what the
+  picture shows walks from none of it to all of it exactly as the weights do,
+  and a ramp spread wider than the weights is a ramp that un-corrects the seam
+  over the width it spread. Splitting the correction across both lenses near
+  the seam, which was the other candidate, is that same un-correction written
+  differently: it displaces lens 0's near-seam content by up to half the
+  correction, which today is exactly zero, and leaves the crossover's own
+  excursion where it was. So the knob is the crossover width, and this is that
+  knob with a name.
+
+  **The 0.70 degrees is the instrument's readout and not the map's ramp.** What
+  the picture carries of the along-seam correction at one distance from the
+  seam is lens 1's weight, which the Rust twin reports with no correlation in
+  the way: on the X4 Air fixture it is a smooth ramp over the whole 2.00 degree
+  crossover, nine tenths of the correction at +0.86 degrees and one tenth at
+  -0.76, so the applied shear is 0.182 degrees per degree and not 0.52
+  (`the_along_seam_correction_hands_over_across_the_whole_crossover`). The
+  instrument reads a step because its held arm carries the two lenses' whole
+  18.7 px disagreement as a double image across that same corridor: its match
+  has two peaks and reports whichever leads. Doubling the map's ramp to 4
+  degrees leaves the printed bracket at +24 to +60 px, exactly where 2 degrees
+  put it; only 8 degrees moves it, to +12 to +72, which is 1.17 degrees of a
+  ramp that is 8. **`mode=profile`'s bracket is a lower bound on the handover
+  and not a measurement of it.**
+
+  What widening does do is measured and is a trade with no free side. At 4 and
+  8 degrees the plateau is unmoved (18.67 px, 18.68), the null still reads
+  exactly zero at every probe on all 90 frames, and the plant still reads its
+  known displacements back inside 0.03 px. The corridor's step statistics get
+  **worse**, not better, and over a wider corridor: 0.062 to 0.067 to 0.077 deg
+  rms at the seam band, and the bands that read 0.005 on the plateau read 0.065
+  once the widened corridor reaches them. Lens 0's floor stops being a floor:
+  the band the correction never touched reads 0.0003 deg at 2 degrees, 0.0027
+  at 4 and 0.0080 at 8, because the blend carries the correction further into
+  lens 0's picture. Against the May-01 crossings under the pooled answer, the
+  along-seam median at the contour is unchanged inside the printed sensitivity
+  at both views, which is what says the fade does not move where the lenses
+  meet; the 50/50 contour itself moves half a view pixel, because the depth
+  term in the weights is not symmetric and the width scales it.
+
+  The recorded cost is `insv-format.md` 6.8's own table: 2 degrees scores 0.687
+  of the front lens's sharpness over the overlap, 4 scores 0.658 and 8 scores
+  0.596, against 0.538 for the whole-overlap weights that shipped before issue
+  #48. What a wider handover buys is on the other column of that table: shear,
+  the disparity divided by the width, which at the corrected calibration is
+  0.52 at 2 degrees and 0.13 at 8. That one is a real warp of the delivered
+  picture and it sweeps with the corridor, which is the reason to put this in
+  front of the owner rather than to settle it here.
+
 - 2026-08-05 **What the band applies to a moving picture is an instrument now,
   and it says where its numbers came from** (`--bin shear`, issue #103's motion
   half). The shimmer campaign measured it out of tree, with two rendered frame
