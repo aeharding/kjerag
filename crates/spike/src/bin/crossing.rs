@@ -8,15 +8,20 @@
 //! hands the picture over is traced, and at fixed points along it the two raw
 //! lens pictures are asked how far apart they draw the same content.
 //!
+//! **`bins=` is part of a reading and every command here states it.** It sets
+//! how many arc bins the crossing is cut into, and two runs at different
+//! `bins` are two different sets of sites whose tables do not compare. The
+//! recorded tables in this branch's PR were taken at `bins=180`.
+//!
 //! ```sh
 //! # the owner's own view line, with a stored per-camera calibration
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> \
-//!   time=50.117 yaw=-74.43 pitch=0.06 fov=55.69 lock=1 \
+//!   time=50.117 yaw=-74.43 pitch=0.06 fov=55.69 lock=1 bins=180 \
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! # the null control: lens 0 against its own picture, which must read zero
-//! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... null=1
+//! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 null=1
 //! # the plant control: a known calibration delta, read back at every site
-//! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... plant=yaw:0.10
+//! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 plant=yaw:0.10
 //! ```
 //!
 //! **What is measured, and what is not.** Only the decoded raw lens frames,
@@ -26,10 +31,18 @@
 //! this instrument screens calibration candidates, and a reading of it does
 //! not depend on how many frames of film ran into the one being measured.
 //!
+//! **Every run states its own floor.** `sensitivity:` re-runs the whole
+//! measurement with the calibration moved by a thousandth of a degree each
+//! way and prints how far the medians travel. Nothing this instrument says
+//! is worth more digits than that line. It exists because the first version
+//! of this file did not have it and its tables were quoted to a precision
+//! they did not have.
+//!
 //! **Per site, and no further.** Sites a fraction of a degree apart share
 //! their content and their calibration error, so they are not independent
-//! observations of anything. Each is reported on its own, and the only
-//! summary is a median and a spread. No pooled significance is claimed.
+//! observations of anything. Each is reported on its own, the only summary is
+//! a median and a spread, and a view that shows the seam twice gets two
+//! summaries and no combined one.
 //!
 //! A table goes to the terminal and a CSV of the same rows to gitignored
 //! `scratch/`, because a row of it locates content in somebody's real flight.
@@ -105,7 +118,72 @@ fn main() -> Fallible<()> {
         .transpose()?;
     let mut rows = read_all(&base, &options, front, back, &sites, planted.as_ref());
     report(&options, &sites, &mut rows)?;
+    sensitivity(&options, baseline, front, back)?;
     Ok(())
+}
+
+/// How far this run's own answer moves when the calibration is dithered by
+/// less than any calibration is known to.
+///
+/// Printed with every reading, because an instrument that does not state its
+/// own reproducibility gets quoted to a precision it does not have, and this
+/// one was: its first tables were selected among tied candidates by the last
+/// bit of an `f32` and did not survive a rerun. This is that number now, and
+/// it is a floor under the instrument, not an uncertainty on the seam.
+///
+/// The dither turns all three angle knobs together, `+d` and `-d`, and the
+/// band is the distance between what the two runs answer.
+fn sensitivity(options: &Options, baseline: [f64; 3], front: &Plane, back: &Plane) -> Fallible<()> {
+    let Some(dither) = options.dither else {
+        return Ok(());
+    };
+    let Seam::Stored(fit) = options.seam else {
+        println!("sensitivity: withheld; a dither needs seam=<stored fit> to move");
+        return Ok(());
+    };
+    let mut swing = Vec::new();
+    for sign in [-1.0, 1.0] {
+        let moved = SeamFit {
+            roll_deg: fit.roll_deg + sign * dither,
+            yaw_deg: fit.yaw_deg + sign * dither,
+            pitch_deg: fit.pitch_deg + sign * dither,
+            ..fit
+        };
+        swing.push(answer(options, Seam::Stored(moved), baseline, front, back)?);
+    }
+    let (low, high) = (swing[0], swing[1]);
+    match (low, high) {
+        (Some(low), Some(high)) => println!(
+            "sensitivity: at a +/-{dither} deg calibration dither the medians move \
+             {:.2} view px on epi and {:.2} on perp",
+            (low.epi - high.epi).abs(),
+            (low.perp - high.perp).abs(),
+        ),
+        _ => println!("sensitivity: withheld; a dithered run had no accepted site to compare"),
+    }
+    Ok(())
+}
+
+/// One run's whole answer in view px, with nothing printed: the medians over
+/// its accepted sites, after the along-seam gate.
+fn answer(
+    options: &Options,
+    seam: Seam,
+    baseline: [f64; 3],
+    front: &Plane,
+    back: &Plane,
+) -> Fallible<Option<Axes>> {
+    let base = map(options, seam)?;
+    let sites = crossing::trace(&base.map, options.raster(), baseline, options.bins);
+    let mut rows = read_all(&base, options, front, back, &sites, None);
+    for run in crossings(&sites, options.bins) {
+        gate_run(options, &mut rows, &run);
+    }
+    let read: Vec<Pixels> = rows.iter().filter_map(pixels).collect();
+    Ok((!read.is_empty()).then(|| Axes {
+        epi: median(&read.iter().map(|p| p.view.epi).collect::<Vec<_>>()),
+        perp: median(&read.iter().map(|p| p.view.perp).collect::<Vec<_>>()),
+    }))
 }
 
 /// One site's whole answer: what was measured, what it is worth in pixels,
@@ -320,14 +398,22 @@ fn crossings(sites: &[Site], bins: usize) -> Vec<Vec<usize>> {
     out
 }
 
+/// What the along-seam gate did to one crossing, or why it did nothing.
+enum Gated {
+    Off,
+    /// Too few readings, or a scatter too wide to have a middle. Carries the
+    /// count and the scatter, so the reason is on the page.
+    Withheld(usize, Option<f64>),
+    Judged(crossing::Plausible, usize),
+}
+
 /// Judge one crossing's readings against its own along-seam value.
 ///
 /// Per crossing and not per run, because a principal-point error is one cycle
 /// round the azimuth: the far side of the seam circle is a different number.
-fn apply_gate(options: &Options, rows: &mut [Row], run: &[usize]) {
+fn gate_run(options: &Options, rows: &mut [Row], run: &[usize]) -> Gated {
     let Some(tolerance) = options.perp_gate else {
-        println!("gate:   along-seam plausibility off");
-        return;
+        return Gated::Off;
     };
     let readings: Vec<crossing::Reading> = run
         .iter()
@@ -338,12 +424,7 @@ fn apply_gate(options: &Options, rows: &mut [Row], run: &[usize]) {
         None => crossing::Plausible::measured(&readings, tolerance),
     };
     let Some(plausible) = plausible else {
-        println!(
-            "gate:   along-seam plausibility withheld: {} readings is under the {} a reference needs",
-            readings.len(),
-            crossing::Plausible::ENOUGH,
-        );
-        return;
+        return Gated::Withheld(readings.len(), crossing::Plausible::scatter(&readings));
     };
     let mut results: Vec<Result<crossing::Reading, crossing::Refused>> =
         run.iter().map(|at| rows[*at].reading).collect();
@@ -351,24 +432,42 @@ fn apply_gate(options: &Options, rows: &mut [Row], run: &[usize]) {
     for (at, result) in run.iter().zip(results) {
         rows[*at].reading = result;
     }
-    let source = run
-        .iter()
-        .find_map(|at| rows[*at].source.ok())
-        .map_or(1.0, |scale| scale.perp);
-    println!(
-        "gate:   along-seam {}{:+.3} deg ({:+.1} src px); tolerance {:.2} deg ({:.1} src px); refused {taken}",
-        match plausible.from {
-            0 => "declared ".to_owned(),
-            n => format!(
-                "from this crossing, {n} readings, spread {:.3} deg, ",
-                plausible.spread_rad.to_degrees()
-            ),
-        },
-        plausible.reference_rad.to_degrees(),
-        plausible.reference_rad * source,
-        plausible.tolerance_rad.to_degrees(),
-        plausible.tolerance_rad * source,
-    );
+    Gated::Judged(plausible, taken)
+}
+
+fn say_gate(gated: &Gated, source: f64) {
+    match gated {
+        Gated::Off => println!("gate:   along-seam plausibility off"),
+        Gated::Withheld(have, scatter) => println!(
+            "gate:   along-seam plausibility WITHHELD, nothing refused: {have} readings{}",
+            match scatter {
+                None => format!(
+                    ", under the {} a reference needs",
+                    crossing::Plausible::ENOUGH
+                ),
+                Some(scatter) => format!(
+                    " scatter {:.3} deg ({:.1} src px), over the {:.0}% of tolerance a middle has to sit inside",
+                    scatter.to_degrees(),
+                    scatter * source,
+                    crossing::Plausible::STEADY * 100.0,
+                ),
+            }
+        ),
+        Gated::Judged(plausible, taken) => println!(
+            "gate:   along-seam {}{:+.3} deg ({:+.1} src px); tolerance {:.2} deg ({:.1} src px); refused {taken}",
+            match plausible.from {
+                0 => "declared ".to_owned(),
+                n => format!(
+                    "from this crossing, {n} readings, scatter {:.3} deg, ",
+                    plausible.spread_rad.to_degrees()
+                ),
+            },
+            plausible.reference_rad.to_degrees(),
+            plausible.reference_rad * source,
+            plausible.tolerance_rad.to_degrees(),
+            plausible.tolerance_rad * source,
+        ),
+    }
 }
 
 fn report(options: &Options, sites: &[Site], rows: &mut [Row]) -> Fallible<()> {
@@ -385,7 +484,12 @@ fn report(options: &Options, sites: &[Site], rows: &mut [Row]) -> Fallible<()> {
             rows[indices[indices.len() - 1]].site.node.phi.to_degrees(),
             indices.len(),
         );
-        apply_gate(options, rows, indices);
+        let gated = gate_run(options, rows, indices);
+        let source = indices
+            .iter()
+            .find_map(|at| rows[*at].source.ok())
+            .map_or(1.0, |scale| scale.perp);
+        say_gate(&gated, source);
         let run: Vec<&Row> = indices.iter().map(|at| &rows[*at]).collect();
         println!(
             "   arc     view px       epi src  perp src   epi view perp view    sig epi sig perp    ncc  status"
@@ -396,9 +500,15 @@ fn report(options: &Options, sites: &[Site], rows: &mut [Row]) -> Fallible<()> {
         }
         summarize(&run);
     }
+    // No pooled line over the crossings. A view can show the seam twice and
+    // the two are different azimuths of it; averaging them gives an answer
+    // that describes neither, which is the thing this module's own header
+    // says not to do. One printed it anyway until 2026-08-05.
     if runs.len() > 1 {
-        println!("\nall crossings together:");
-        summarize(&rows.iter().collect::<Vec<_>>());
+        println!(
+            "\n{} crossings, reported apart. There is no combined answer: they are different azimuths of the seam.",
+            runs.len()
+        );
     }
     let out = options.out();
     std::fs::create_dir_all(out.parent().unwrap_or(Path::new(".")))?;
@@ -570,7 +680,10 @@ fn summarize(rows: &[&Row]) {
         );
     }
     // A site the along-seam gate took is not a site the plant may keep: the
-    // deltas were computed before the gate ran.
+    // deltas were computed before the gate ran. The reading on the PERTURBED
+    // map is not gated at all, and cannot be: it has a different along-seam
+    // value by construction, which is the thing the plant is measuring. So a
+    // plant row survives on its base reading's plausibility alone.
     let planted: Vec<(Axes, Axes)> = rows
         .iter()
         .filter(|row| row.reading.is_ok())
@@ -671,6 +784,9 @@ struct Options {
     /// An along-seam reference the caller brings, in radians, instead of the
     /// crossing's own middle.
     perp_reference: Option<f64>,
+    /// How far to move the calibration, in degrees, to state how far the
+    /// answer moves with it. `None` skips the two extra runs.
+    dither: Option<f64>,
     null: bool,
     plant: Option<(usize, f64)>,
     seam: Seam,
@@ -706,19 +822,27 @@ impl Options {
             step: 0.07,
             contrast: 2.0,
             agreement: 0.5,
-            // 0.40 degrees is 12.6 source px along the seam on this camera
-            // family. Measured on the owner's 2026-05-01 and 2026-04-10
-            // flights, over 1008 accepted readings: half of them sit within
-            // 1.7 source px of their own crossing's along-seam value and
-            // three quarters within 4.1, the cleanest whole runs reach 4 to 8
-            // at their worst site, and the along-seam trend across one view's
-            // whole arc is 2 to 4. The mismatches the two-view control
-            // positively identified sit 25 to 46 px out. So this is about
-            // twice the worst honest departure and a third of the nearest
-            // dishonest one, and it stays under a third of the search window
-            // so it can never be what decides a railed site.
+            // 0.40 degrees, which is 12.6 source px along the seam on this
+            // camera family. It is a chosen operating point and not a line
+            // between two populations: over 750 accepted readings from three
+            // flights, |perp - its crossing's own value| runs p50 1.85 src
+            // px, p75 5.13, p90 22.13, and **11.9% of readings sit in the 8
+            // to 25 px stretch this cut is in**. An earlier version of this
+            // comment called that stretch empty and derived the number from
+            // it, which was wrong.
+            //
+            // What the recorded data does say is that the choice inside that
+            // stretch barely matters: put the cut anywhere from 8 to 20 src
+            // px and 4.0 to 5.7% of readings change side. So a reading near
+            // the cut is a reading whose acceptance is arbitrary, and about
+            // one in twenty is. No conclusion should rest on them, and the
+            // reproducibility work in the PR is what checks that none does.
             perp_gate: Some(0.40_f64.to_radians()),
             perp_reference: None,
+            // A thousandth of a degree: far under anything a calibration is
+            // known to, so what comes back is the instrument's own floor
+            // rather than a real response. `dither=0` skips the two runs.
+            dither: Some(0.001),
             null: false,
             plant: None,
             seam: Seam::File,
@@ -734,17 +858,33 @@ impl Options {
                 Some(("lock", value)) => out.lock = value.parse::<u32>()? != 0,
                 Some(("size", value)) => out.size = value.parse()?,
                 Some(("bins", value)) => out.bins = value.parse()?,
-                Some(("span", value)) => out.span = value.parse()?,
-                Some(("search", value)) => out.search = value.parse()?,
-                Some(("step", value)) => out.step = value.parse()?,
-                Some(("contrast", value)) => out.contrast = value.parse()?,
-                Some(("ncc", value)) => out.agreement = value.parse()?,
+                Some(("span", value)) => out.span = number("span", value)?,
+                Some(("search", value)) => out.search = number("search", value)?,
+                Some(("step", value)) => out.step = number("step", value)?,
+                Some(("contrast", value)) => out.contrast = number("contrast", value)?,
+                Some(("ncc", value)) => out.agreement = number("ncc", value)?,
                 Some(("perpgate", value)) => {
-                    let degrees: f64 = value.parse()?;
+                    let degrees = number("perpgate", value)?;
+                    if degrees < 0.0 {
+                        return Err(
+                            "perpgate= is a tolerance in degrees, or 0 to switch it off; \
+                                    a negative one would refuse every site"
+                                .into(),
+                        );
+                    }
                     out.perp_gate = (degrees > 0.0).then_some(degrees.to_radians());
                 }
                 Some(("perpref", value)) => {
-                    out.perp_reference = Some(value.parse::<f64>()?.to_radians())
+                    out.perp_reference = Some(number("perpref", value)?.to_radians())
+                }
+                Some(("dither", value)) => {
+                    let degrees = number("dither", value)?;
+                    if degrees < 0.0 {
+                        return Err("dither= is how far the calibration is moved, in degrees, \
+                                    or 0 to skip the two extra runs"
+                            .into());
+                    }
+                    out.dither = (degrees > 0.0).then_some(degrees);
                 }
                 Some(("null", value)) => out.null = value.parse::<u32>()? != 0,
                 Some(("plant", value)) => out.plant = Some(knob(value)?),
@@ -831,6 +971,19 @@ impl Options {
     }
 }
 
+/// A number a threshold can be made of.
+///
+/// `"nan"` parses as an `f64` and every comparison against it is false, so a
+/// floor set to one lets everything through and a gate set to one refuses
+/// nothing, silently. Refuse it here, where it is still a command line.
+fn number(name: &str, value: &str) -> Fallible<f64> {
+    let parsed: f64 = value.parse()?;
+    if !parsed.is_finite() {
+        return Err(format!("{name}= must be a finite number, not {value}").into());
+    }
+    Ok(parsed)
+}
+
 fn knob(value: &str) -> Fallible<(usize, f64)> {
     let (name, amount) = value
         .split_once(':')
@@ -844,7 +997,7 @@ fn knob(value: &str) -> Fallible<(usize, f64)> {
 
 const USAGE: &str = "usage: crossing <file.insv> [time=seconds] [yaw=deg] [pitch=deg] [fov=deg] \
      [lock=1] [size=px] [bins=n] [span=deg] [search=deg] [step=deg] [contrast=codes] [ncc=score] \
-     [perpgate=deg | perpgate=0] [perpref=deg] [null=1] [plant=knob:amount] \
+     [perpgate=deg | perpgate=0] [perpref=deg] [dither=deg] [null=1] [plant=knob:amount] \
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] [out=name.csv]";
 
 /// The view line the app copies is this instrument's command line too, which
@@ -901,6 +1054,16 @@ mod tests {
             "f.insv plant=twist:0.1",
             // A reference with nothing to judge against it
             "f.insv perpgate=0 perpref=-0.2",
+            // Every comparison against a NaN threshold is false, so one that
+            // parsed would switch a floor or a gate off without saying so.
+            "f.insv ncc=nan",
+            "f.insv contrast=nan",
+            "f.insv perpgate=nan",
+            "f.insv perpref=nan",
+            "f.insv dither=nan",
+            "f.insv span=inf",
+            "f.insv perpgate=-1",
+            "f.insv dither=-1",
         ] {
             assert!(
                 Options::parse(line.split_whitespace().map(str::to_owned)).is_err(),

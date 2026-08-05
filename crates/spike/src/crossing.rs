@@ -144,7 +144,10 @@ pub enum Refused {
     NoPatch,
     /// The reference patch has no contrast to match: blank sky, or glare.
     Flat,
-    /// No search offset produced a complete target patch with contrast in it.
+    /// No search offset produced a target patch that was both complete and
+    /// not perfectly uniform. Perfectly uniform is all this tests: a patch
+    /// with a hundredth of a code in it correlates and is judged on the
+    /// correlation, not here.
     NoTarget,
     /// The best offset sits on the search boundary, so the declared search did
     /// not contain the answer. Widening the search is not the fix: it lets
@@ -207,10 +210,23 @@ impl Refused {
 /// directions disagreed by 5 to 35 source px where they agree to 0.06 and
 /// 0.34 px everywhere else.
 ///
+/// **What it is not.** It is a tolerance filter on a physical argument, not a
+/// validated classifier. There is no measured population of known-wrong
+/// readings to draw a cut against: what exists is the physical argument
+/// above, a mechanism test ([`gate`]'s planted site), and one consequence the
+/// gate cannot have engineered, which is that removing sites on the
+/// **along-seam** axis improves the **epipolar** axis's reproducibility
+/// across time, a channel this never inspects. An earlier version of this
+/// comment claimed a two-view control as validation. It is not one:
+/// [`measure`] builds its patches on body-fixed axes, so the view rotation
+/// cancels exactly and two views of the same body direction agree to
+/// 0.0005 px whether or not the reading is any good.
+///
 /// It cannot help a run that is more than half wrong: the reference is a
-/// median, so it survives contamination up to half and no further.
-/// [`Self::spread_rad`] is reported beside it so a reader can see when that
-/// is in doubt.
+/// median, so it survives contamination up to half and no further. Nor can it
+/// help a run whose own scatter is the size of the tolerance, and there
+/// [`Self::measured`] withholds a reference rather than judging against a
+/// number it does not have.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plausible {
     /// The along-seam value of this crossing, in radians.
@@ -229,24 +245,58 @@ impl Plausible {
     /// against two numbers.
     pub const ENOUGH: usize = 5;
 
+    /// How much of the tolerance a crossing's own scatter may occupy before
+    /// its middle stops meaning anything.
+    ///
+    /// A reference is only a reference if the readings behind it agree with
+    /// each other more closely than the tolerance it is about to judge them
+    /// by. Without this a run whose own scatter was the size of the tolerance
+    /// still produced a number, and gating against it kept the junk and put
+    /// the honest core near refusal; one recorded run did exactly that.
+    ///
+    /// Two fifths, from 33 recorded runs. Sorted, their scatters run 0.03,
+    /// 0.05 ... 0.31, 0.32, 0.34, 0.35, then **0.53, 0.57, 1.03** of the
+    /// tolerance. The widest relative gap in that list is 0.35 to 0.53, so
+    /// unlike the per-reading cut in [`Self::tolerance_rad`] this one does
+    /// sit in a gap in the evidence, and it withholds exactly the three runs
+    /// whose own scatter is more than half of what they would be judging by.
+    pub const STEADY: f64 = 0.40;
+
     /// This crossing's own middle, which is where a reference comes from when
-    /// the caller does not bring one.
+    /// the caller does not bring one. `None` where the crossing cannot state
+    /// one: too few readings, or a scatter too wide to have a middle.
     pub fn measured(readings: &[Reading], tolerance_rad: f64) -> Option<Self> {
         let perp: Vec<f64> = readings.iter().map(|r| r.shift_rad.perp).collect();
         if perp.len() < Self::ENOUGH {
             return None;
         }
         let reference_rad = middle(&perp);
-        Some(Self {
+        let spread_rad = middle(
+            &perp
+                .iter()
+                .map(|v| (v - reference_rad).abs())
+                .collect::<Vec<_>>(),
+        );
+        (spread_rad <= Self::STEADY * tolerance_rad).then_some(Self {
             reference_rad,
-            spread_rad: middle(
-                &perp
-                    .iter()
-                    .map(|v| (v - reference_rad).abs())
-                    .collect::<Vec<_>>(),
-            ),
+            spread_rad,
             tolerance_rad,
             from: perp.len(),
+        })
+    }
+
+    /// The scatter a crossing reported, whether or not it was steady enough
+    /// to become a reference. For saying why one was withheld.
+    pub fn scatter(readings: &[Reading]) -> Option<f64> {
+        let perp: Vec<f64> = readings.iter().map(|r| r.shift_rad.perp).collect();
+        (perp.len() >= Self::ENOUGH).then(|| {
+            let middle_of = middle(&perp);
+            middle(
+                &perp
+                    .iter()
+                    .map(|v| (v - middle_of).abs())
+                    .collect::<Vec<_>>(),
+            )
         })
     }
 
@@ -313,10 +363,24 @@ pub struct Source<'a> {
 /// `bins` is the arc resolution: the ported tracer had 72 of them fixed, which
 /// is 5 degrees of azimuth and about a dozen sites in a 55 degree view. The
 /// structure this instrument has to resolve is a few pixels wide, so the count
-/// is the caller's.
+/// is the caller's. It is part of a reading: two runs at different `bins` are
+/// two different sets of sites and their tables do not compare.
+///
+/// **A bin keeps the root nearest its own centre**, which is the fix for the
+/// worst defect this instrument has had. The ported tracer kept the root with
+/// the largest `min(blend.weights)`, on the argument that it was the one
+/// furthest inside both lenses. It is not: `Reframe::blend` normalizes the
+/// pair to sum 1 and a 50/50 root is where the two are equal, so that score is
+/// **exactly 0.5 at every candidate** and the twenty-odd candidates a bin
+/// holds were separated by the last bit of the bisection's `f32`. A
+/// calibration change of a ten-thousandth of a degree then moved the reported
+/// medians by about a view pixel, and a rerun of the same command did not
+/// reproduce its own table. Azimuth is what every comparison this instrument
+/// makes is keyed on, so azimuth is what a site is placed by.
 pub fn trace(map: &Reframe, size: Size, baseline: [f64; 3], bins: usize) -> Vec<Site> {
     let (width, height) = (size.width, size.height);
-    let mut picked: Vec<Option<(f32, Site)>> = vec![None; bins];
+    // Smaller is better: how far this root sits from its bin's centre.
+    let mut picked: Vec<Option<(f64, Site)>> = vec![None; bins];
     let mut samples = vec![None; (width * height) as usize];
     for y in 0..height {
         for x in 0..width {
@@ -340,18 +404,18 @@ pub fn trace(map: &Reframe, size: Size, baseline: [f64; 3], bins: usize) -> Vec<
                 let Some(next) = samples[(next_y * width + next_x) as usize] else {
                     continue;
                 };
-                let Some((view, weight)) = root(map, here, next) else {
+                let Some(view) = root(map, here, next) else {
                     continue;
                 };
                 let body = unit(map.body_ray(view).map(f64::from));
                 if norm(body) == 0.0 {
                     continue;
                 }
-                let phi = body[1].atan2(body[0]);
-                let bin = ((phi.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU
-                    * bins as f64)
-                    .floor() as usize)
-                    % bins;
+                let turn = body[1].atan2(body[0]).rem_euclid(std::f64::consts::TAU)
+                    / std::f64::consts::TAU
+                    * bins as f64;
+                let bin = (turn.floor() as usize) % bins;
+                let off_centre = (turn - turn.floor() - 0.5).abs();
                 let site = Site {
                     node: node(baseline, body),
                     view_ray: view,
@@ -360,11 +424,8 @@ pub fn trace(map: &Reframe, size: Size, baseline: [f64; 3], bins: usize) -> Vec<
                         y as f32 + 0.5 + dy as f32 * 0.5,
                     ],
                 };
-                // Prefer the root whose two lens claims are furthest from an
-                // edge. This only chooses among already-valid 50/50 roots; it
-                // never promotes a rendered pixel to measurement data.
-                if picked[bin].is_none_or(|(held, _)| weight > held) {
-                    picked[bin] = Some((weight, site));
+                if picked[bin].is_none_or(|(held, _)| off_centre < held) {
+                    picked[bin] = Some((off_centre, site));
                 }
             }
         }
@@ -407,12 +468,12 @@ fn two_lens(map: &Reframe, view: [f32; 3]) -> bool {
 /// A zero of the final rendered weights along one raster edge. The bisection
 /// is in view-ray space, which is enough for a subpixel contour root and lets
 /// the runtime `Blend` remain the sole definition of the crossover.
-fn root(map: &Reframe, left: Crossover, right: Crossover) -> Option<([f32; 3], f32)> {
+fn root(map: &Reframe, left: Crossover, right: Crossover) -> Option<[f32; 3]> {
     if left.difference == 0.0 {
-        return Some((left.view, claim(map, left.view)?));
+        return two_lens(map, left.view).then_some(left.view);
     }
     if right.difference == 0.0 {
-        return Some((right.view, claim(map, right.view)?));
+        return two_lens(map, right.view).then_some(right.view);
     }
     if left.difference.signum() == right.difference.signum() {
         return None;
@@ -428,14 +489,7 @@ fn root(map: &Reframe, left: Crossover, right: Crossover) -> Option<([f32; 3], f
         }
     }
     let found = unit_f32(std::array::from_fn(|axis| 0.5 * (low[axis] + high[axis])));
-    Some((found, claim(map, found)?))
-}
-
-/// How far inside both lenses a root sits: the smaller of the two weights,
-/// which at a 50/50 root is half of whatever the pair between them claim.
-fn claim(map: &Reframe, view: [f32; 3]) -> Option<f32> {
-    let blend = map.blend(view);
-    two_lens(map, view).then_some(blend.weights[0].min(blend.weights[1]))
+    two_lens(map, found).then_some(found)
 }
 
 /// The seam's axes at one direction, from the recorded baseline.
@@ -1053,6 +1107,32 @@ mod tests {
         assert!(Plausible::measured(&planted_readings(), TOLERANCE.to_radians()).is_some());
     }
 
+    /// Nor can a crossing whose readings scatter as far as the tolerance is
+    /// about to judge them by: its middle is not a value, and gating against
+    /// it keeps the junk and refuses the honest core. One recorded run did
+    /// exactly that.
+    #[test]
+    fn a_crossing_that_scatters_as_wide_as_the_tolerance_withholds_its_reference() {
+        let tolerance = TOLERANCE.to_radians();
+        let scattered: Vec<Reading> = [-0.40, -0.15, 0.05, 0.30, -0.05, 0.55, -0.60]
+            .into_iter()
+            .map(|perp| reading(perp, -0.40, 0.9))
+            .collect();
+        let scatter = Plausible::scatter(&scattered).expect("seven readings have a scatter");
+        assert!(
+            scatter > Plausible::STEADY * tolerance,
+            "the fixture is not scattered: {} deg",
+            scatter.to_degrees()
+        );
+        assert_eq!(Plausible::measured(&scattered, tolerance), None);
+        // And a steady crossing still states one, with its scatter on it.
+        let steady = Plausible::measured(&planted_readings(), tolerance).expect("steady");
+        assert!(steady.spread_rad <= Plausible::STEADY * tolerance);
+        assert!(
+            (steady.spread_rad - Plausible::scatter(&planted_readings()).unwrap()).abs() < 1e-15
+        );
+    }
+
     /// A caller may bring the reference instead, from another run or another
     /// file, and then it is the caller's number and not this crossing's.
     #[test]
@@ -1103,6 +1183,50 @@ mod tests {
         let coarse = trace(&map, RASTER, BASELINE, 72).len();
         let fine = trace(&map, RASTER, BASELINE, 720).len();
         assert!(fine > coarse, "{fine} sites is not finer than {coarse}");
+    }
+
+    /// A bin keeps the root nearest its own centre. The score it replaced was
+    /// `min(blend.weights)`, which this asserts is the constant it was: the
+    /// weights are normalized to sum 1 and a root is where they are equal, so
+    /// every candidate scored exactly a half and the winner was whichever the
+    /// bisection's last `f32` bit happened to favour.
+    #[test]
+    fn a_bin_keeps_the_root_nearest_its_centre_and_not_a_tied_one() {
+        let map = map(3.0);
+        let bins = 180;
+        let width = std::f64::consts::TAU / bins as f64;
+        for site in trace(&map, RASTER, BASELINE, bins) {
+            let turn = site.node.phi.rem_euclid(std::f64::consts::TAU) / width;
+            let off_centre = (turn - turn.floor() - 0.5).abs();
+            // Half a bin is the whole of a bin, so anything under a quarter of
+            // one says a centre was aimed at rather than landed on by chance.
+            assert!(off_centre < 0.25, "site sits {off_centre} bins off centre");
+            let weights = map.blend(site.view_ray).weights;
+            assert!(
+                (weights[0].min(weights[1]) - 0.5).abs() < 1e-6,
+                "the replaced score was not constant after all: {weights:?}"
+            );
+        }
+    }
+
+    /// And the sites a run reports do not move when the calibration moves by
+    /// less than the arithmetic can see. This is what the old selector failed:
+    /// a ten-thousandth of a degree re-ordered its ties and moved the reported
+    /// medians by about a view pixel.
+    #[test]
+    fn a_calibration_dither_too_small_to_be_physical_does_not_move_the_sites() {
+        let held = trace(&map(0.0), RASTER, BASELINE, 180);
+        let dithered = trace(&map(0.0001), RASTER, BASELINE, 180);
+        assert_eq!(held.len(), dithered.len());
+        let worst = held
+            .iter()
+            .zip(&dithered)
+            .map(|(a, b)| (a.node.phi - b.node.phi).abs().to_degrees())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            worst < 0.01,
+            "a site moved {worst} deg on a 0.0001 deg dither"
+        );
     }
 
     /// Sites stay in body coordinates while the named view turns, so sampling
