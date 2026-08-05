@@ -71,6 +71,47 @@ add new owner references here with date, category, and status.
   Rejected build reads ROUGH 1.01%; nulls 0.000%; planted 0.5 and 2.0 code ripples read 2.07% and 8.27%.
   A correction that is smooth round the ring reads zero however large it is.
 
+## Photometric: CHROMATIC (owner 2026-08-02, OPEN - stage 10 gate)
+- 2026-08-02 `VID_20260410_185407_00_004.insv time=594.027 yaw=-129.09 pitch=-62.95 fov=41.19 lock=1`
+  and `VID_20260410_185407_00_004.insv time=602.368 yaw=-132.22 pitch=-37.74 fov=71.04 lock=1`
+  The first CHROMATIC defect on record: a green cast on the sun-facing lens only, not on the other.
+  Every photometric reading before this one was brightness, and the steps quoted above are
+  channel-uniform codes; a per-channel defect has never been in an acceptance number. Both views are
+  steeply pitched down onto dark ground, which is where an additive chromatic cast (veiling glare,
+  internal reflection) shows most. The second is the same defect eight seconds later in a wider
+  frame, 41.19 deg against 71.04, so the pair tests view-independence and temporal stability of a
+  correction rather than one framing of it. Owner: "needs correction and/or blending."
+  STATUS: OPEN, no evidence renders yet. Gates stage 10.
+
+## Hard mode: geometry and photometry at once (owner 2026-08-02, OPEN - stages 9 and 10)
+- 2026-08-02 `ab_testing/clip 1/VID_20260802_191029_00_002.insv time=31.064 yaw=-144.04 pitch=-31.44 fov=142.89 lock=1`
+  A same-day capture from outside every pool this campaign has fitted on, held out on purpose: it is
+  evidence about a correction rather than about the corpus the correction was tuned to. At fov 142.89
+  the frame should hold both seam crossings and the sun at once, which would put glare, the chromatic
+  cast above and azimuth-varying alignment in one picture; that has not been measured on a render
+  yet. Held-out hard-mode gate for stage 9 and stage 10 alike. The file is clip 1 of the Studio
+  corpus below and lives only there: the path is relative to ~/Videos/Insta and wants quoting,
+  because the directory name has a space in it.
+  STATUS: OPEN, unmeasured.
+
+## The owner's Studio oracle corpus (~/Videos/Insta/ab_testing, never committed)
+Owner-built A/B material: Insta360 Studio's own render of a named position beside kjerag's, so a
+defect can be scored against a stitcher that ships. Layout is `clip N/` holding the .insv, with
+`snap N/` folders inside it, one per position, each holding `studio_config.png` (Studio's pan, tilt,
+roll, field of view, distortion and timecode for that exact position), `studio_screenshot.jpg` and
+`kjerag_rough_screenshot.jpg`. Paths only in this repo; no image out of it is committed.
+- clip 1 `VID_20260802_191029_00_002.insv`, the hard-mode capture above. snap 1 puts the sun directly
+  in one lens. Owner findings: Studio struggles in the glare, but its glared-to-sheltered edge is
+  smooth and its seam is invisible outside the glare; kjerag's seam is abrupt and extends well past
+  the glare.
+- clip 2 `VID_20260526_191025_00_004.insv`, the May file most of the photometric entries above are
+  measured on, and now the only copy of it under ~/Videos. snap 1 is the dirt reference. Owner
+  finding: Studio renders the seam invisible to the eye.
+
+Purpose (owner ruling 2026-08-02): Studio is the comparative bar for mitigation-shaped defects, which
+is stage 10 and near-field alignment. Far-field alignment answers to the absolute zero-defect bar and
+not to Studio.
+
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas
@@ -81,3 +122,8 @@ add new owner references here with date, category, and status.
   raw number cannot tell a line from a scene.
 - 60fps dual-stream full resolution realtime on the owner's device; research may exceed budget,
   shipped form needs the story (owner, 2026-08-01).
+
+## Off the seam: other owner-reported defects
+- 2026-08-02 horizon lock dips about +-45 deg at 0 and 180 deg azimuth while circling, in the first
+  30 s of `ab_testing/clip 1/VID_20260802_191029_00_002.insv`; reproduction in progress, tracked
+  separately from seam work.
