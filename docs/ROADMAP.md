@@ -585,13 +585,51 @@ live, no keyframe UI ever.
   | the one he called bad | 12.3 | 3.3 | 40/41 |
 
   The two crossings differ 3.4x on the epipolar axis and are the same on the
-  along-seam one. Epipolar is the axis a subject's **distance** displaces
-  content along and the along-seam axis is the one no distance can reach
-  (docs/research/seam-two-axis.md 1), so what separates his good crossing
-  from his bad one is not calibration, and no five-knob candidate can move
-  it. Issue #154's joint pool answer halves the along-seam error at both
-  (3.6 to 1.3 and 3.3 to 1.5 view px) and moves the epipolar term by a
-  pixel, which is what "the bad one barely moved" looks like from here.
+  along-seam one. Issue #154's joint pool answer halves the along-seam error
+  at both (3.6 to 1.3 and 3.3 to 1.5 view px) and moves the epipolar term by
+  a pixel, which is what "the bad one barely moved" looks like from here.
+
+  **The bad crossing's excess is not parallax, and the first reading of this
+  table said it was.** Epipolar is the axis a subject's distance displaces
+  content along, so 12.3 view px was read off as content 2.4 m away. That
+  inferred a distance from a magnitude without asking what the sites were
+  looking at, and they were looking at a town, an estuary and a ridge line
+  kilometres off, where a 33 mm baseline produces 0.015 view px. Three
+  orders of magnitude. The excess is geometry.
+
+  Run at eight instants across the whole 30-minute clip, at matched **body**
+  azimuth (the horizon lock is world-referenced, so one view line looks at a
+  drifting arc of the body-fixed seam and a per-time median taken without
+  matching azimuth is comparing different places):
+
+  | body azimuth | axis | across 30 min | across-time MAD |
+  | --- | --- | --- | ---: |
+  | +30 to +60 (the bad one) | epi | -14.0 to -12.7 view px | 0.75 px |
+  | +30 to +60 | perp | -3.3 to -2.2 view px | 0.54 px |
+  | -160 to -120 (the good one) | epi | -2.6 to -1.2 view px | 0.65 px |
+  | -160 to -120 | perp | -4.8 to -3.8 view px | 0.47 px |
+
+  The scenery behind those azimuths changes completely over the flight, from
+  an industrial town and estuary to open farmland to clear sky, and the
+  reading does not.
+
+  **The along-seam axis is static and the epipolar one is not, and that is
+  the split a residual map has to be designed around.** At matched body
+  azimuth on a **second flight** of the same camera, weeks earlier, perp
+  reads -13.3 to -14.8 source px where 05-01 reads -11.6 to -13.9: the same
+  number. Epi at the same azimuths reads +0.1 to +1.0 against 05-01's -8.8
+  to -9.1 early and -2.5 to -3.4 late, so it carries a real content term as
+  well as its static one. A static per-azimuth map is enough for along the
+  seam; across it needs the per-frame channel the band already is.
+
+  **Perp is the honest broker, and it should be a gate.** No depth can reach
+  it and the calibration is fixed for a file, so a reading whose perp leaves
+  the file's own stable per-azimuth value is a mismatch whatever its
+  correlation. It catches mismatches at 0.92 correlation that the agreement
+  floor passes: at two instants the same sites read perp of +17.7 to +39.5
+  source px where that azimuth's value is -7. Two different views of the
+  same body direction in the same frame agree to 0.06 and 0.34 source px
+  where perp is sane and disagree by 5 to 35 px where it is not.
 
   **Glare refuses rather than guessing.** On the hard-mode sun view, 78 sites
   trace and 14 to 18 are accepted: the rest are `weak`, peaking at 0.11 to
