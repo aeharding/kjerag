@@ -42,6 +42,17 @@ add new owner references here with date, category, and status.
   over the same sweep (unchanged to four decimals). Read `+60` as a band that steps by about an
   eighth of a degree, not as a number. `mode=profile`'s `+24` to `+48` are the same species, and
   at #158 one of them is refused outright on its pair count.
+  CAVEAT, THE BRACKET IS A LOWER BOUND (2026-08-05, `research/handover-fade`): the 0.70 degrees
+  above is the width the instrument resolves the handover to, not the width the map hands over
+  across. The held arm carries the two lenses' whole 18.7 px disagreement as a double image over
+  the same corridor, so the match has two peaks and reports whichever leads, which turns a ramp
+  into a step. What the picture actually carries of the along-seam correction is lens 1's weight,
+  and the Rust twin reads it with no correlation in the way: a smooth ramp over the whole 2.00
+  degree crossover, nine tenths of it at +0.86 deg and one tenth at -0.76, so the applied shear is
+  0.182 deg per degree of view and not 0.52. Widening the map's own handover to 4 degrees leaves
+  this printed bracket at +24 to +60 px, unmoved; 8 degrees moves it only to +12 to +72, which is
+  1.17 degrees of a ramp that is 8. Do not quote the bracket as the handover's width, and do not
+  read a change in it as proportional to a change in the map.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=93.99 pitch=4.12 fov=20.00 lock=1`

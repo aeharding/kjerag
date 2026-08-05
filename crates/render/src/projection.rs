@@ -38,6 +38,7 @@
 //! until the whole sphere is a ball with room around it (issue #47).
 
 use std::f32::consts::PI;
+use std::sync::OnceLock;
 
 use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
 
@@ -116,6 +117,86 @@ const CAP_AZIMUTHS: usize = 8;
 /// direction that has never correlated, and every file with one lens stream
 /// ([`super::band::width`]).
 const CROSSOVER_DEG: f32 = 2.0;
+
+/// Research only: how wide this run opens the handover, from
+/// `KJERAG_HANDOVER_DEG`, in degrees.
+///
+/// Unset, which is every shipped run and every run that does not name it, is
+/// [`CROSSOVER_DEG`] and the picture is the one on `main`, bit for bit. Set to
+/// a width, the whole handover opens to it: the weights cross over across that
+/// many degrees instead of two, and so does everything the weights carry - the
+/// epipolar bend, which is split by them, and the along-seam correction, which
+/// lens 1 takes whole and the weights hand over.
+///
+/// **One knob and not two, because there can only be one.** The along-seam
+/// term is applied over a whole lens rather than across the band
+/// ([`Reframe::bent`]), so what ramps it from nothing to all of it in the
+/// picture is the handover itself, and it cannot be given a wider support of
+/// its own. The two lenses draw one piece of content in one place only while
+/// the share lens 1 takes and the share lens 0 takes differ by exactly the
+/// disagreement the fit measured, so wherever both lenses are in the picture
+/// that difference is pinned at one whole correction, and what the picture
+/// shows walks from none of it to all of it exactly as the weights do. A ramp
+/// spread wider than the weights is a ramp that un-corrects the seam over the
+/// width it spread. So the support of the along-seam handover **is** the
+/// crossover, and this widens the crossover.
+///
+/// Not a setting, not a key and not a menu item (AGENTS.md, zero-config
+/// playback): an environment variable, read once, written nowhere.
+const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
+
+/// The widest the research handover may be asked to open, in degrees: the
+/// overlap the two lenses have.
+///
+/// Past it the crossover would be asking for a share of a lens outside its own
+/// picture, which the coverage test already refuses, so the picture would stop
+/// answering the width it was given.
+const OVERLAP_DEG: f32 = 14.0;
+
+/// How wide the handover is on this run, in degrees, which is
+/// [`CROSSOVER_DEG`] unless [`HANDOVER_DEG`] asked for another width.
+///
+/// Read once. The shader takes its copy as a constant written into the source
+/// ([`wgsl`]) and this side takes it here, so the two halves of the map cannot
+/// disagree about it.
+fn crossover_deg() -> f32 {
+    static WIDTH: OnceLock<f32> = OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        let Ok(asked) = std::env::var(HANDOVER_DEG) else {
+            return CROSSOVER_DEG;
+        };
+        match handover(&asked) {
+            Ok(width) => {
+                println!(
+                    "blend:  research handover on, {HANDOVER_DEG}={width} deg: the two lenses \
+                     cross over across {width} degrees of world angle instead of {CROSSOVER_DEG}"
+                );
+                width
+            }
+            Err(said) => {
+                eprintln!(
+                    "kjerag: {said}, so the handover stays at the {CROSSOVER_DEG} degrees it ships \
+                     with"
+                );
+                CROSSOVER_DEG
+            }
+        }
+    })
+}
+
+/// The width [`HANDOVER_DEG`] asked for, or what is wrong with the ask.
+fn handover(asked: &str) -> Result<f32, String> {
+    let width = asked
+        .parse::<f32>()
+        .map_err(|e| format!("{HANDOVER_DEG}={asked}: {e}"))?;
+    match width.is_finite() && width > 0.0 && width <= OVERLAP_DEG {
+        true => Ok(width),
+        false => Err(format!(
+            "{HANDOVER_DEG}={asked} is not a width between 0 and the {OVERLAP_DEG} degrees the two \
+             lenses overlap by"
+        )),
+    }
+}
 
 /// How many lenses one pass can sample.
 ///
@@ -706,7 +787,7 @@ impl Reframe {
     ///
     /// WGSL twin: `band_width`.
     pub fn crossover_at(&self, disparity: f32) -> f32 {
-        super::band::width(disparity, CROSSOVER_DEG.to_radians())
+        super::band::width(disparity, crossover_deg().to_radians())
     }
 
     /// A view-space ray in the camera body's own frame, which is where the
@@ -1591,7 +1672,7 @@ pub(crate) fn wgsl() -> String {
     format!(
         "const MAX_LENSES = {MAX_LENSES}u;\n\
          const READOUT_STEPS = {READOUT_STEPS}u;\nconst CROSSOVER = {:?};\n{WGSL}",
-        CROSSOVER_DEG.to_radians(),
+        crossover_deg().to_radians(),
     )
 }
 
@@ -2239,6 +2320,83 @@ pub(crate) mod tests {
                     "{offset} degrees past the seam at {phi} leads with lens {leader}",
                 );
             }
+        }
+    }
+
+    /// What the picture carries of the along-seam correction at one offset
+    /// from the seam, in units of the correction itself.
+    ///
+    /// Lens 1 takes the along-seam term whole and lens 0 takes none of it
+    /// ([`Reframe::blend_bent`]), so the share of it the picture shows **is**
+    /// lens 1's weight. Nothing else in the pass carries that axis.
+    fn along_carried(reframe: &Reframe, offset: f32, phi: f32) -> f32 {
+        let reading = super::super::band::Reading {
+            epi: 0.0,
+            along: 0.006,
+        };
+        reframe
+            .blend_bent(direction(90.0 + offset, phi), reading)
+            .weights[1]
+    }
+
+    /// The map hands the along-seam correction over across the whole handover
+    /// and not at a line inside it.
+    ///
+    /// This is the property `kjerag-spike --bin shear mode=profile` cannot
+    /// state. That instrument reads the delivered arm against an arm with the
+    /// band held off, and the held arm carries the two lenses' whole
+    /// disagreement as a double image over this same corridor, so its match
+    /// has two peaks in it and reports whichever leads: a step where the map
+    /// has a ramp. What the map applies is here, where a weight can be read
+    /// rather than fitted, and it is [`crossover_deg`] wide.
+    #[test]
+    fn the_along_seam_correction_hands_over_across_the_whole_crossover() {
+        let reframe = fixture(Camera::default());
+        let width = crossover_deg();
+
+        for phi in (0..360).step_by(15) {
+            let phi = phi as f32;
+            // Positive offsets are lens 1's side, which is the side that takes
+            // the correction ([`the_seam_is_a_mix_of_two_pictures_and_not_a_gap`]).
+            let carried = |offset: f32| along_carried(&reframe, offset, phi);
+            near(carried(width), 1.0, 1e-6);
+            near(carried(-width), 0.0, 1e-6);
+            // Where the picture still holds nine tenths of the correction, and
+            // where it is down to a tenth, walking out of lens 1. A step at the
+            // halfway line would put the two within a grid step of each other.
+            let steps = 400;
+            let at = |share: f32| {
+                (0..=steps)
+                    .map(|step| width - 2.0 * width * step as f32 / steps as f32)
+                    .find(|offset| carried(*offset) < share)
+                    .unwrap_or(-width)
+            };
+            let (most, least) = (at(0.9), at(0.1));
+            assert!(
+                most > least,
+                "the handover runs backwards at {phi}: 0.9 at {most}, 0.1 at {least}"
+            );
+            assert!(
+                most - least > 0.6 * width,
+                "the handover at {phi} spends {} degrees of the {width} it opened going from \
+                 nine tenths of the correction to one tenth",
+                most - least,
+            );
+        }
+    }
+
+    /// A run that does not ask draws the width the owner validated, and an ask
+    /// the width cannot be read out of leaves it there too.
+    #[test]
+    fn the_handover_is_the_shipped_crossover_unless_a_width_is_asked_for() {
+        assert_eq!(handover("4"), Ok(4.0));
+        assert_eq!(handover("0.5"), Ok(0.5));
+        assert_eq!(handover(&OVERLAP_DEG.to_string()), Ok(OVERLAP_DEG));
+        for refused in ["0", "-2", "wide", "", "nan", "inf", "14.5", "90"] {
+            assert!(
+                handover(refused).is_err(),
+                "{HANDOVER_DEG}={refused} was taken as a handover width"
+            );
         }
     }
 
