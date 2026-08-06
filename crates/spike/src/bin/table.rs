@@ -613,7 +613,7 @@ fn planted(value: &str) -> Fallible<Mode> {
     })
 }
 
-const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] seam=roll:0.8,yaw:-2.3,pitch:-0.9,\
+const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] [seam=roll:0.8,yaw:-2.3,pitch:-0.9,\
 cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [places=n] [frames=n] [patches=n] [out=path] [dump=path.csv] \
 | read=path | plant=size_deg:cycles [out=path]";
 
