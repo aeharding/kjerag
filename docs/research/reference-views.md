@@ -21,7 +21,9 @@ add new owner references here with date, category, and status.
   Live arm against the same frames with the band held off, 90 frames, READ AGAINST MAIN AT #158
   (see the horizon caveat below): `-150` px 0.3663 deg applied at 0.0047 deg step rms over 89
   pairs; `+0` 0.3623 at 0.0619 with a worst single frame of 0.42; `+60` 0.0578 at 0.1350;
-  `+150`, which is lens 0's picture and is never bent, 0.0003 at 0.0003, the instrument's floor.
+  `+150` 0.0003 at 0.0003, the instrument's floor. All four of those rows were read at a 2 degree
+  handover, when `+60` and `+150` were outside it; at the 8 the pass draws now they are 1.17 and
+  2.93 degrees off the seam and both are INSIDE it, and `+150` reads 0.0243 deg applied.
   The band's own state moves 0.0449 deg rms between frames on the bend and 0.0008 on the
   along-seam field. `mode=profile` puts the along-seam plateau at 18.67 px (0.3646 deg) with the
   handover bracketed inside +24 to +60 px, 0.70 degrees of view. `null=1` holds both arms and
@@ -42,6 +44,50 @@ add new owner references here with date, category, and status.
   over the same sweep (unchanged to four decimals). Read `+60` as a band that steps by about an
   eighth of a degree, not as a number. `mode=profile`'s `+24` to `+48` are the same species, and
   at #158 one of them is refused outright on its pair count.
+  CAVEAT, THE BRACKET IS A LOWER BOUND (2026-08-05, `research/handover-fade`): the 0.70 degrees
+  above is the width the instrument resolves the handover to, not the width the map hands over
+  across. The held arm carries the two lenses' whole 18.7 px disagreement as a double image over
+  the same corridor, so the match has two peaks and reports whichever leads, which turns a ramp
+  into a step. What the picture actually carries of the along-seam correction is lens 1's weight,
+  and the Rust twin reads it with no correlation in the way: a smooth ramp over the whole 2.00
+  degree crossover, nine tenths of it at +0.86 deg and one tenth at -0.76, so the applied shear is
+  0.182 deg per degree of view and not 0.52. Widening the map's own handover to 4 degrees leaves
+  this printed bracket at +24 to +60 px, unmoved; 8 degrees moves it only to +12 to +72, which is
+  1.17 degrees of a ramp that is 8. Do not quote the bracket as the handover's width, and do not
+  read a change in it as proportional to a change in the map.
+  OWNER VERDICT, THE WIDTH (2026-08-05, `fade-ab.sh`, LABEL-BLIND): two arms of one binary, arm 1
+  the shipped 2 degree handover, arm 2 an 8 he was not told about. **"2 is way better. Def not
+  perfect but way better"** - said of arm 2, the 8. Shipped as the default on
+  `feat/handover-width`.
+  READ THIS BEFORE QUOTING A WIDTH NUMBER: every instrument that has an opinion on the handover's
+  width is MONOTONE in it and not one of them picks 8 or anything else. Sharpness over the overlap
+  falls with width at all five reference views, the doubled band grows, the corridor's own step
+  statistics get worse, and only the epipolar shear improves. The width is a perceptual call and
+  the numbers price it rather than make it.
+  READ THIS BEFORE QUOTING A `mode=blend` NUMBER (2026-08-06): that instrument's `bands=` rows are
+  a SYNTHETIC linear crossover it builds itself, so their doubled band is `0.8 * width` by
+  construction and grows exactly linearly. The map's own is the `shipped` row, swept with
+  `KJERAG_HANDOVER_DEG`, and it is not linear: at this view (`yaw 90 fov 60 fit=1`) the doubled
+  band reads 1.50 / 2.79 / 3.89 / 4.78 / 5.41 and the sharpness 1.309 / 1.247 / 1.194 / 1.150 /
+  1.120 at 2 / 4 / 6 / 8 / 12 asked for, so four times the width doubles 3.2 times as much picture
+  and costs 12 percent of the sharpness, and the 12 column is really the 9.69 this file affords.
+  AND EVERY ROW OF THAT MODE, `shipped` INCLUDED, IS DRAWN WITH THE PER-FRAME BEND OFF (empty
+  cells, `Weighting::at`). Far field that is the picture to within the bend's own size, which is
+  why the numbers above stand; near field it is not the picture at all, because the bend IS the
+  near-field mechanism. Score a view with somebody's gear on the seam with `--bin band
+  mode=render`, whose `share` column comes off the real pass with the band pass live: at the
+  May-26 gear (0.99 m) it falls 1.387 -> 1.182 across 2 to 8 and at the May-01 under-pilot view
+  (0.84 m) 0.725 -> 0.613, about 15 percent, against 9 to 10 percent at a far-field azimuth of the
+  same two frames.
+  What the numbers do settle is the ceiling: the handover reaches `width/2` off the seam plus the
+  bend it carries, and past the two lenses' shared ring the crossover stops deciding the blend -
+  the coverage depth takes the weight over and steps it to zero at the rim, and a bent ray that
+  lands off a lens's picture is weighed zero and never sampled (this line said "a sample from off
+  the end of a fisheye circle" until 2026-08-06, which is not what the code does). Measured per
+  file with `--bin band`: six X4 Air files afford 9.36 to 9.82 degrees and the ONE X2 affords 3.99,
+  so the width is clamped per camera and 12 is refused everywhere.
+  What the owner still sees at 8 ("def not perfect") is the un-shrunk 0.36 deg disagreement, which
+  stage 9's estimator owns and a width cannot reach.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=93.99 pitch=4.12 fov=20.00 lock=1`

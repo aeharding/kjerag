@@ -1335,7 +1335,19 @@ enum Weighting {
 }
 
 impl Weighting {
-    /// The two lenses' shares of one ray, and where each of them reads it.
+    /// The two lenses' shares of one ray, and where each of them reads it,
+    /// with **no per-frame bend at all**.
+    ///
+    /// Empty cells, and that is the whole of what `mode=blend` measures - for
+    /// [`Self::Shipped`] as much as for the synthetic [`Self::Band`]. It is the
+    /// right picture for what that mode compares, which is one weighting
+    /// against another over the same content, and it is the wrong instrument
+    /// for anything near field: past 10 m the bend is a fraction of a degree,
+    /// but the pilot's own gear on the seam reads 1.9 to 2.3 degrees of
+    /// disparity and the bend is the mechanism that carries it. Score a
+    /// near-field view with `--bin band mode=render`, which draws the real
+    /// pass with the band pass live (2026-08-06, after a near-field
+    /// measurement taken here understated the width's cost).
     fn at(self, reframe: &Reframe, ray: [f64; 3]) -> ([f64; 2], [Landing; 2]) {
         self.bent(reframe, ray, &[])
     }
@@ -1633,6 +1645,12 @@ fn render(options: &Options) -> Fallible<()> {
 /// number is not measured but arithmetic: a disparity of `d` degrees crossed
 /// in a band `w` degrees wide shears the picture by `d / w`, and at `d / w`
 /// above 1 the band is folded rather than blended.
+///
+/// **Every row here is drawn with the per-frame bend off** ([`Weighting::at`]),
+/// the `shipped` row included, so this mode prices a weighting and not the
+/// picture the pass draws near field. Far field that is the same thing to
+/// within the bend's own size; near field it is not, and `--bin band
+/// mode=render` is the instrument there.
 fn blend(options: &Options) -> Fallible<()> {
     let (calibration, pair) = frame_at(options, &options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
@@ -1878,6 +1896,13 @@ fn parity(options: &Options) -> Fallible<()> {
     // of our pictures are drawn at it: the band moves a strip a couple of
     // degrees wide, and a fit free to follow it would score the strip it
     // chose.
+    //
+    // The two windows below, (0, 5) and (9, 25) degrees off the seam, were
+    // drawn around a 2 degree handover. At the 8 the pass draws now, the band
+    // plus its bend reaches 6.60, so the inner window stops short of the
+    // corridor's outer 1.6 degrees while the outer window still starts clear
+    // of it. The bias is one way: this understates a wide handover's cost
+    // rather than inventing one.
     let stage1 = looked(&lenses, frame, look, &ours, export.shape, &[]);
     let banded_picture = looked(&lenses, frame, look, &ours, export.shape, &options.band);
     let seam = seam_map(&lenses, frame, look, export.shape);

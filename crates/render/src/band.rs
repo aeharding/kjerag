@@ -208,7 +208,7 @@ const TAU_NEAR_S: f32 = 0.10;
 /// first.
 const FOLD: f32 = 0.9;
 
-/// The widest the crossover may open, in degrees.
+/// The widest the **adaptive term** may ask for, in degrees.
 ///
 /// It is not a taste and not a margin: it is the widest width the inequality
 /// above can ever **ask for**. The search reports at most [`NEAR_DEG`] and
@@ -218,15 +218,23 @@ const FOLD: f32 = 0.9;
 /// inert for every disparity this pass can measure, and widening the search
 /// window widens the band with it, with no second number to keep in step.
 ///
-/// What bounds it from the other side is the optics, and that bound is not
-/// close. The widest band plus the whole bend it carries reaches **4.04
-/// degrees** off the seam; the two lenses of the calibration fixture overlap
-/// by 14.44, which is 7.22 a side
+/// **It is not the widest the crossover opens, and has not been since
+/// 2026-08-05.** [`width`] applies the floor last and the floor is the
+/// camera's - 8.00 degrees on an X4 Air, 3.99 on the ONE X2 - so on every
+/// camera in the corpus the floor is what comes back and this ceiling is never
+/// reached (`the_adaptive_width_is_inert_under_the_shipped_floor`). What it
+/// still is, is the widest a camera whose overlap forced its floor under 2.89
+/// can open to.
+///
+/// What bounds the crossover from the other side is the optics, and that bound
+/// is no longer far away. This ceiling plus the bend it carries reaches 4.04
+/// degrees off the seam, which inside the calibration fixture's 7.22 a side
+/// left 3.18 to spare; the shipped 8 reaches **6.60** and leaves **0.62**, and
+/// the ONE X2's 3.99 reaches 4.60 into its own 4.60 a side and leaves nothing
 /// (`the_widest_band_and_its_bend_stay_inside_the_overlap`, which measures it
 /// off the file's own calibration rather than quoting the format study).
-/// `kjerag-spike --bin band` reports the same two numbers for whatever file it
-/// is given, because the overlap is a property of the camera and this ceiling
-/// is not.
+/// `kjerag-spike --bin band` prints that pair **per file** and not one pair for
+/// every file, because both numbers are the camera's now.
 pub const WIDEST_DEG: f32 = NEAR_DEG / FOLD;
 
 /// Threads per workgroup. One workgroup reads one direction, and every thread
@@ -993,15 +1001,21 @@ pub fn carried(disparity_rad: f32, band_rad: f32) -> f32 {
 /// a choice:
 ///
 /// - **The far field is untouched.** Every direction reading under
-///   `FOLD * floor` - 1.8 degrees, which is everything past 1.06 m - already
-///   satisfies the inequality at the floor, so the floor is what comes back,
-///   bit for bit, and the crossover there is the 2 degrees the owner
-///   validated. A file with one lens stream and a direction that has never
-///   correlated both read zero and both get the floor.
+///   `FOLD * floor` already satisfies the inequality at the floor, so the
+///   floor is what comes back, bit for bit. A file with one lens stream and a
+///   direction that has never correlated both read zero and both get the
+///   floor.
 /// - **It never opens further than it has to.** A wider handover draws more
-///   of the picture twice, which is what the 2 degrees was narrowed to stop
-///   (`super::projection::CROSSOVER_DEG`), so the narrowest width that does
-///   not fold is also the sharpest one available.
+///   of the picture twice, so the narrowest width that does not fold is also
+///   the sharpest one available.
+/// - **It is inert at the width that ships today.** This term cannot exceed
+///   [`WIDEST_DEG`], 2.89 degrees, and `super::projection::CROSSOVER_DEG` is
+///   8, so on every camera whose overlap affords that floor the floor is the
+///   answer at every disparity the search can report and this function is a
+///   constant (`the_adaptive_width_is_inert_under_the_shipped_floor`). It is
+///   kept rather than deleted because the floor is not a constant of the
+///   picture any more but of the camera ([`affordable`]), and a camera whose
+///   overlap forces it under 2.89 gets stage 4 back.
 /// - **It needs no time constant of its own.** The disparity handed in is the
 ///   smoothed, evidence-weighted one the bend itself uses, so the width
 ///   inherits that direction's own constant exactly: a far-field width cannot
@@ -1021,6 +1035,64 @@ pub fn width(disparity_rad: f32, floor_rad: f32) -> f32 {
     (disparity_rad.abs() / FOLD)
         .min(WIDEST_DEG.to_radians())
         .max(floor_rad)
+}
+
+/// How far off the seam a handover of this width reaches, in radians: half the
+/// band, plus the widest bend that band can carry.
+///
+/// The bend is bounded twice and the tighter bound is the answer. [`carried`]
+/// clamps it to [`FOLD`] of the width, and the search cannot report more than
+/// [`NEAR_DEG`] however wide the band is, so past [`WIDEST_DEG`] a band that
+/// widens reaches further by only half of what it widened by.
+pub fn reach(width_rad: f32) -> f32 {
+    0.5 * width_rad + (FOLD * width_rad).min(NEAR_DEG.to_radians())
+}
+
+/// The widest handover a camera whose two lenses overlap by `overlap_rad` can
+/// carry, in radians: the width whose [`reach`] lands exactly on the edge of
+/// the picture both lenses have.
+///
+/// **The optics bound the handover and the camera is not always the one the
+/// width was chosen on.** Past this bound the crossover stops being what hands
+/// the picture over, and the way it stops is not a bad fetch. The coverage
+/// test is taken on the unbent ray (`super::projection::Reframe::covers`) and
+/// the bend then moves the sample, but a bent ray that lands outside that
+/// lens's own boundary comes back `inside == false`,
+/// `super::projection::claim` returns exactly zero for it, and the fragment
+/// shader reads a lens only where its weight is positive (`super::scene`,
+/// `picture`). So what a ray past this edge gets is the other lens alone,
+/// taken there by the **coverage depth** - a distance transform that reaches
+/// zero at the rim - instead of by the ramp the width was chosen as, and where
+/// both lenses miss the pixel is transparent. The price of crossing this bound
+/// is a handover cut short by the optics on one side while it is still open on
+/// the other; the bound is what keeps the crossover's own ramp the thing that
+/// decides the blend.
+///
+/// Measured off the owner's own captures with `kjerag-spike --bin band`
+/// (2026-08-05): six X4 Air files overlap by 14.56 to 15.02 degrees and afford
+/// **9.36 to 9.82**, and the calibration fixture overlaps by 14.44 and affords
+/// 9.24. The ONE X2 overlaps by 9.19 and affords **3.99**, which is under the
+/// 8 the picture asks for, so that camera hands over across 3.99
+/// (`the_narrow_overlap_camera_gets_the_width_it_can_pay`).
+///
+/// **Every one of those is under the file's own seam correction**, which is
+/// what the pass draws with, and it is not the same answer as the factory
+/// calibration's: a fit moves the principal point, which moves each lens's
+/// coverage boundary, which moves the overlap. On the X2 the factory
+/// calibration affords 4.91 and its own pooled fit affords 3.99, so the width
+/// follows the calibration in and the app reports it after the fit lands
+/// rather than before.
+///
+/// Two regimes because [`reach`] has two. A camera with room to spare pays
+/// half a degree of overlap per degree of width, because the bend it carries
+/// has stopped growing at [`NEAR_DEG`]; one without pays `0.5 + FOLD`, because
+/// there the fold clamp is still what bounds the bend.
+pub fn affordable(overlap_rad: f32) -> f32 {
+    let half = 0.5 * overlap_rad;
+    match half >= reach(WIDEST_DEG.to_radians()) {
+        true => 2.0 * (half - NEAR_DEG.to_radians()),
+        false => half / (0.5 + FOLD),
+    }
 }
 
 // ------------------------------------------------------------ the shader
@@ -1259,7 +1331,7 @@ fn band_rest() -> Band {
   var out: Band;
   out.offset = vec3<f32>(0.0);
   out.along = vec3<f32>(0.0);
-  out.crossover = CROSSOVER;
+  out.crossover = reframe.crossover;
   return out;
 }
 
@@ -1358,7 +1430,7 @@ fn carry(a: f32, wa: f32, b: f32, wb: f32, mix: f32) -> f32 {
 // does not ask the band for room, so this function is called with the same
 // argument it was called with before stage 5 and answers the same width.
 fn band_width(disparity: f32) -> f32 {
-  return max(min(abs(disparity) / FOLD, WIDEST), CROSSOVER);
+  return max(min(abs(disparity) / FOLD, WIDEST), reframe.crossover);
 }
 
 fn mix2(a: f32, b: f32, t: f32) -> f32 {
@@ -2265,10 +2337,15 @@ mod tests {
         assert!((settle(30.0) - settle(60.0)).abs() < 0.01);
     }
 
-    /// The floor the shipped pass hands [`width`], which is the projection's
-    /// own crossover. Written here rather than imported because that constant
-    /// is private to its own module, and `the_floor_is_the_shipped_crossover`
-    /// is what keeps the two honest.
+    /// A floor narrow enough for [`width`]'s adaptive term to have something
+    /// to do, which is what the tests below are about.
+    ///
+    /// It was the shipped crossover until 2026-08-05 and is not one any more:
+    /// the projection now asks for 8 degrees and the narrowest camera in the
+    /// corpus affords 3.99, both of them over [`WIDEST_DEG`], so on real
+    /// footage this function is a constant
+    /// (`the_adaptive_width_is_inert_under_the_shipped_floor`). What is tested
+    /// here is the function and not the picture, and its floor is an argument.
     const FLOOR_DEG: f32 = 2.0;
 
     #[test]
@@ -2418,13 +2495,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_floor_is_the_shipped_crossover() {
-        // `FLOOR_DEG` above is a copy of a constant this module cannot see,
-        // and a copy that drifts would make every test above test nothing.
-        // The shipped pass is what is asked, rather than the constant.
+    /// One direction of the calibration fixture's own map, so this module can
+    /// ask the shipped pass what it hands over rather than asking its own copy
+    /// of a constant.
+    fn shipped() -> crate::projection::Reframe {
         use crate::projection::tests::{FRAME, fixture_lenses};
-        let reframe = crate::projection::Reframe::new(
+        crate::projection::Reframe::new(
             &fixture_lenses(),
             FRAME,
             crate::Camera::default(),
@@ -2432,11 +2508,86 @@ mod tests {
             1.0,
             false,
             crate::sampling::Sampling::default(),
+        )
+    }
+
+    /// Stage 4 answers the floor and nothing but the floor at the width the
+    /// picture ships with, at every disparity the search can report.
+    ///
+    /// Not a regression: the reason stage 4 opened the band was to carry a
+    /// near-field reading without folding, and a floor of 8 degrees carries
+    /// every one of them with 4.6 to spare - `carried` clamps at `FOLD * 8`,
+    /// 7.2 degrees, and the search cannot report past [`NEAR_DEG`]. What stage
+    /// 4 recovered is still recovered; it is the floor doing it now. What is
+    /// lost is the other half of stage 4's design, that the band never opens
+    /// further than it has to: near-field content is now drawn twice across
+    /// the same 8 degrees as everything else, where stage 4 would have given
+    /// it at most 2.89.
+    #[test]
+    fn the_adaptive_width_is_inert_under_the_shipped_floor() {
+        let reframe = shipped();
+        let floor = reframe.crossover_at(0.0);
+        assert!(
+            floor > WIDEST_DEG.to_radians(),
+            "the floor is not above the widest reading"
         );
-        assert_eq!(
-            reframe.crossover_at(0.0).to_bits(),
-            FLOOR_DEG.to_radians().to_bits(),
-        );
+        for step in 0..=200 {
+            let degrees = FAR_DEG + (NEAR_DEG - FAR_DEG) * step as f32 / 200.0;
+            let opened = reframe.crossover_at(degrees.to_radians());
+            assert_eq!(
+                opened.to_bits(),
+                floor.to_bits(),
+                "{degrees:.2} deg opened the band to {:.4} deg",
+                opened.to_degrees(),
+            );
+            // And the clamp is inert with it: nothing the search can report is
+            // cut, which is the property stage 4 shipped.
+            let radians = degrees.to_radians();
+            assert!((carried(radians, opened) - radians).abs() < 1e-9);
+        }
+    }
+
+    /// A camera whose lenses do not overlap enough for the width the picture
+    /// asks for gets the width it can pay for, and stage 4 with it.
+    ///
+    /// The ONE X2 is that camera: 9.19 degrees of overlap, which affords 3.99
+    /// against the 8 asked for. The X4 Air files are the other end and they
+    /// are **not one number**: the overlap is read off each file's own
+    /// calibration and the corpus spreads over half a degree of it, so every
+    /// row here names the file it was measured on rather than quoting a family
+    /// (`kjerag-spike --bin band`, the owner's own captures, 2026-08-05).
+    #[test]
+    fn the_narrow_overlap_camera_gets_the_width_it_can_pay() {
+        for (file, overlap, affords) in [
+            ("VID_20251018_191318_00_002 (ONE X2)", 9.19f32, 3.99f32),
+            ("VID_20260501_183417_00_002", 14.56, 9.36),
+            ("VID_20260725_194424_00_002", 14.60, 9.40),
+            ("VID_20260802_191029_00_002", 14.61, 9.41),
+            ("VID_20260526_191025_00_004", 14.68, 9.48),
+            ("VID_20260714_193252_00_006", 14.89, 9.69),
+            ("VID_20260725_194424_00_001", 15.02, 9.82),
+        ] {
+            let width = affordable(overlap.to_radians()).to_degrees();
+            assert!(
+                (width - affords).abs() < 0.005,
+                "{file} overlaps by {overlap} deg, which affords {width:.2} and not {affords}",
+            );
+        }
+        // And what it affords is what fits, at any overlap either regime of
+        // `reach` can be in, the seam between them included.
+        for step in 0..=400 {
+            let overlap = (1.0 + step as f32 * 0.05).to_radians();
+            let width = affordable(overlap);
+            assert!(width > 0.0, "{overlap:?} affords nothing");
+            assert!(
+                reach(width) <= 0.5 * overlap + 1e-6,
+                "an overlap of {:.2} deg affords {:.2}, which reaches {:.2} into {:.2} a side",
+                overlap.to_degrees(),
+                width.to_degrees(),
+                reach(width).to_degrees(),
+                0.5 * overlap.to_degrees(),
+            );
+        }
     }
 
     /// One direction of the ring, made rather than measured, so the pooling

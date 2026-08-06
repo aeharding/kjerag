@@ -67,8 +67,9 @@ a yaw 28 degrees away so the seam crosses a different part of the field:
 | the reference instant, yaw -100 | +6.33 | +5.36 | +6.82 |
 
 A scene edge moves with the film and turns with the view. This does neither, it
-sits at zero degrees every time, and its width is the two degrees the pass mixes
-the lenses over.
+sits at zero degrees every time, and its width is the width the pass mixes the
+lenses over, which was two degrees when this was measured and is eight since
+2026-08-05.
 
 In the picture, stretched sixteen times about the soil's own level with the
 seam plane and the crossover drawn on: `scratch/stage7/evidence-may-stretched.png`.
@@ -134,18 +135,22 @@ including stage 7's - inherits that.
 
 ## 5. What sharpens it: the handover is fixed in angle, not in pixels
 
-The crossover is two degrees whatever the view. On a 1024 wide render:
+The crossover is a fixed angle whatever the view: two degrees when this was
+written and eight since 2026-08-05, when the owner chose the wider handover
+label-blind (docs/ROADMAP.md). On a 1024 wide render, both:
 
-| field of view | two degrees is | 6.5 codes across it is |
-| ---: | ---: | ---: |
-| 20 | 102 px | 0.06 codes/px |
-| 60 | 34 px | 0.19 codes/px |
-| **114** | **18 px** | **0.36 codes/px** |
+| field of view | 2 deg was | 6.5 codes across it was | 8 deg is | 6.5 codes across it is |
+| ---: | ---: | ---: | ---: | ---: |
+| 20 | 102 px | 0.06 codes/px | 410 px | 0.016 codes/px |
+| 60 | 34 px | 0.19 codes/px | 137 px | 0.047 codes/px |
+| **114** | **18 px** | **0.36 codes/px** | **72 px** | **0.090 codes/px** |
 
 The owner's complaint arrived at 114 degrees. The same residual difference is
 five times sharper there than at the view stage 5 was judged on, because the
 handover's width in pixels shrinks as the view widens. Nothing about the
-correction changed; the regime did.
+correction changed; the regime did. Widening the crossover to 8 divides every
+codes-per-pixel entry by four without changing that shape, so section 9's move
+4 below is chosen against the left-hand pair and priced against the right.
 
 ## 6. What is not the problem here
 
@@ -219,7 +224,7 @@ what answering it cost and what answering it bought.
 | 1 | **ratio space**: the estimator's loss is the residual divided by the level it sits on, per channel | section 4 - the same 6.5 codes is 31 percent of soil and 3.4 percent of sky, and a loss in codes spends its whole budget on the second |
 | 2 | **a gain AND an offset**, fitted jointly | section 2 - an offset beats a gain in every channel and the pair beats both; a gain that could reach the soil would move the sky by 66 codes |
 | 3 | **the offset is per direction**, not one number and not a five-term shape | section 12 below - the ring's residual after a constant, one cycle and two is 4.2 to 5.5 codes rms against a frame noise of 0.8 to 1.0 |
-| 4 | **one width**, in pixels of the delivered view, gated by what a wider handover would cost | section 5 - two degrees is 102 pixels at fov 20 and 18 at fov 114 |
+| 4 | **one width**, in pixels of the delivered view, gated by what a wider handover would cost | section 5 - the crossover was two degrees when this was chosen, 102 pixels at fov 20 and 18 at fov 114; at the 8 it is now, 410 and 72 |
 | 5 | **a profile with no corner**, and dither inside it | the residual physics: a corner in a gradient is a Mach band and an 8-bit ramp of a fraction of a code per pixel is a staircase |
 
 Sequential fitting was tried and refused on arithmetic before it was built. A

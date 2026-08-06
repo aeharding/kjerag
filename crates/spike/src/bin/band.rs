@@ -201,9 +201,10 @@ fn table(last: &Read) {
         "\nwhat the band settled on. `view px` is the disagreement a 1920-wide 90 degree view \n\
          would show, at {VIEW_PX_PER_DEG} px per degree; `metres` is the distance the disparity \n\
          stands for; `band` is how wide the crossover opened to carry the reading; `cut` is what \n\
-         the fixed 2 degree band of stage 2 would have thrown away, in view px, which is the \n\
-         width of the doubled edge it left; `off epi` is the axis a distance CANNOT displace \n\
-         content along, which is measured and never applied.\n"
+         a band held at this camera's own floor would have thrown away, in view px, which is \n\
+         the width of the doubled edge it would leave (the floor is 8 deg on an X4 Air and \n\
+         3.99 on a ONE X2, not the fixed 2 of stage 2); `off epi` is the axis a distance \n\
+         CANNOT displace content along, which is measured and never applied.\n"
     );
     println!(
         "   phi  disparity    view px     metres       band        cut  confidence    off epi"
@@ -231,14 +232,22 @@ fn table(last: &Read) {
     }
 }
 
-/// How far the crossover opened, and what the fixed band was throwing away
-/// (issue #103, stage 4).
+/// How far the crossover opened, and what a band held at this camera's floor
+/// would be throwing away (issue #103, stage 4).
 ///
 /// The two columns are the same measurement read two ways: the width solves
 /// `|disparity| <= FOLD * width` for the width, and the clamp solves it for
 /// the disparity. Everything `cut` reports is alignment the pass had measured,
 /// believed, and then declined to apply because the band could not carry it -
 /// a doubled edge that much wide, on content that near.
+///
+/// **The floor is the camera's and not stage 2's fixed 2 degrees**, so what
+/// this recovers depends on the width the run is drawing: at 8 degrees the
+/// floor carries every reading the search can report and both columns are zero
+/// on every file in the corpus, and at `KJERAG_HANDOVER_DEG=2` the same file
+/// and stretch open the band - 2 direction-frames of 40 x 128 to 2.531 deg,
+/// recovering 8.0 view px on content at 0.84 m, on the owner's May-01 file at
+/// `from=550` (2026-08-06).
 fn crossover(reads: &[Read]) {
     let last = reads.last().expect("play returns at least one frame");
     let floor = last.mapped.crossover_at(0.0);
@@ -281,9 +290,9 @@ fn crossover(reads: &[Read]) {
     println!(
         "\ncrossover: over {frames} frames of {AZIMUTHS} directions, {open} direction-frames \n\
          asked for more than the {:.2} deg floor, which is {:.2} percent of them, and the widest \n\
-         band any of them asked for is {:.3} deg. what stage 2's fixed band cut from those: \n\
-         {:.3} deg at worst, which is {:.1} view px of doubled edge on content at {}. this stage \n\
-         cuts nothing the search can report, so that is what it recovers.",
+         band any of them asked for is {:.3} deg. what a band held at that floor would have cut \n\
+         from those: {:.3} deg at worst, which is {:.1} view px of doubled edge on content at \n\
+         {}. this stage cuts nothing the search can report, so that is what it recovers.",
         f64::from(floor.to_degrees()),
         100.0 * open as f64 / seen.len() as f64,
         f64::from(widest.to_degrees()),
@@ -339,16 +348,24 @@ fn crossover(reads: &[Read]) {
     };
     // The ceiling's own safety, measured on this camera rather than assumed
     // from the fixture: the widest band plus the whole bend it carries has to
-    // sit inside the ring both lenses have a picture of.
-    let ceiling = kjerag_render::band::WIDEST_DEG;
-    let reach = 0.5 * ceiling + 0.9 * ceiling;
+    // sit inside the ring both lenses have a picture of. The width is the
+    // camera's since 2026-08-05, so it is asked of the map rather than quoted
+    // from `WIDEST_DEG`, which stopped being the widest the band opens the
+    // moment the floor went above it.
+    let widest = last
+        .mapped
+        .crossover_at(kjerag_render::band::WIDEST_DEG.to_radians());
+    let reach = f64::from(kjerag_render::band::reach(widest).to_degrees());
+    let half = f64::from(overlap.to_degrees()) * 0.5;
     println!(
-        "           these two lenses overlap by {:.2} deg, {:.2} a side. the widest the band may \n\
-         open is {ceiling:.2} deg, and that band plus the whole bend it carries reaches {reach:.2} \n\
-         deg off the seam, so the handover stays inside the overlap with {:.2} deg to spare.",
+        "           these two lenses overlap by {:.2} deg, {half:.2} a side, which affords a \n\
+         handover of {:.2}. the widest this camera's band opens is {:.2} deg, and that band plus \n\
+         the whole bend it carries reaches {reach:.2} deg off the seam, so the handover stays \n\
+         inside the overlap with {:.2} deg to spare.",
         f64::from(overlap.to_degrees()),
-        f64::from(overlap.to_degrees()) * 0.5,
-        f64::from(overlap.to_degrees()) * 0.5 - f64::from(reach),
+        f64::from(kjerag_render::band::affordable(overlap).to_degrees()),
+        f64::from(widest.to_degrees()),
+        half - reach,
     );
 }
 
@@ -1006,6 +1023,15 @@ fn render(options: &Options) -> Fallible<()> {
 /// maker's export, and that is the whole point of doing it here: each picture
 /// is its own control, no projection has to be fitted, and there is no view
 /// for a fit to get wrong. What it cannot say is how we compare to them.
+///
+/// **Both windows were drawn around a 2 degree handover and neither has
+/// moved.** At the 8 the pass hands over across, the band plus the bend it
+/// carries reaches 6.60 degrees off the seam, so the inner window stops 1.6
+/// degrees short of it while the outer one still starts clear of it. That
+/// biases one way only: a share read at two widths **understates** the wider
+/// one's cost, because the part of its corridor past 5 degrees is scored in
+/// neither window. Read a fall between two widths as a floor under the effect
+/// rather than as its size.
 fn share(options: &Options, reframe: &Reframe, plain: &Picture, banded: &Picture) -> Fallible<()> {
     let size = options.size();
     let width = size.width as usize;

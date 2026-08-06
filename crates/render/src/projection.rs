@@ -38,6 +38,7 @@
 //! until the whole sphere is a ball with room around it (issue #47).
 
 use std::f32::consts::PI;
+use std::sync::OnceLock;
 
 use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
 
@@ -89,33 +90,148 @@ const CAP_MARGIN_DEG: f32 = 0.5;
 /// [`CAP_MARGIN_DEG`] is what covers the rest.
 const CAP_AZIMUTHS: usize = 8;
 
-/// How wide the handover between the two lenses is, in degrees of world
-/// angle, centred on the seam (issue #48).
+/// How wide the handover between the two lenses asks to be, in degrees of
+/// world angle, centred on the seam (issues #48 and #103).
 ///
-/// The overlap is 14 degrees and until this it was the band: the weights
+/// The overlap is 14 degrees and before issue #48 it was the band: the weights
 /// crossed over across the whole of it, so anything the two lenses disagree
-/// about was drawn twice across 10 degrees of picture. Two degrees is what
-/// the owner validated, and it is a trade with a number on each side
-/// (docs/research/insv-format.md 6.8): scored against the front lens alone,
-/// a 2 degree band keeps 0.687 of that sharpness where the shipped weights
-/// keep 0.518 and a hard cut would keep 0.721, so it takes 80 percent of what
-/// a cut would give while staying a blend.
+/// about was drawn twice across 10 degrees of picture. Issue #48 cut that to
+/// **2**, which is what the recorded blend table
+/// (docs/research/insv-format.md 6.8) says the sharpest handover is: scored
+/// against the front lens alone, 2 degrees keeps 0.687 of that sharpness where
+/// the whole-overlap weights keep 0.518 and a hard cut would keep 0.721.
+///
+/// **8 is what the owner's eye chose, against those numbers rather than with
+/// them** (2026-08-05, label-blind, two arms of one binary). He ran both arms
+/// without being told which was which and said *"2 is way better. Def not
+/// perfect but way better"* of the 8, while the corridor's own step statistics
+/// got worse rather than better. Every instrument in the sweep behind that call
+/// is **monotone** in this number - sharpness falls, the doubled band grows,
+/// the shear falls, all smoothly and with no knee at any of 2, 4, 6, 8 and 12 -
+/// so no instrument could have picked a width and none was asked to.
+///
+/// What widening costs, measured through **this map** rather than through the
+/// instrument's own linear ramp (`--bin seam mode=blend`, the `shipped` row, at
+/// the July-14 anchor moment, yaw 90, fov 60, the file's own fit): the band
+/// where both lenses are over a tenth of the picture goes from 1.50 degrees at
+/// 2 to 4.78 at 8, and that band's gradient energy against the front lens alone
+/// falls 12 percent over the same pixels, 1.309 to 1.150. What the sweep did
+/// settle is the other end: 12 is refused by the optics on every camera in the
+/// corpus ([`super::band::affordable`]).
 ///
 /// What bounds it from below is **shear**, the two lenses' disagreement
 /// divided by the band: above 1 the crossover folds the picture rather than
-/// blending it. That is why this constant could not ship before the
-/// calibration fit above it. At the 1.7 degrees the factory calibration
-/// leaves, a 2 degree band sits at 1.07, on the fold; at the 0.5 to 0.8 the
-/// fitted correction leaves it sits near 0.4, and a 1 degree band would be
-/// the next thing to measure rather than the next thing to assume.
+/// blending it. That is why 2 could not ship before the calibration fit above
+/// it, and it is the axis widening buys on - but not as `1 / width`, which is
+/// what issue #161 assumed. The weights are cosines of the two lens axes and
+/// not a distance, so the walk from nine tenths of the correction to one tenth
+/// spends 0.75 of a 2 degree crossover and 0.61 of an 8
+/// (`the_along_seam_correction_hands_over_across_the_whole_crossover`): four
+/// times the width spreads the disagreement over 3.2 times as much picture,
+/// and the shear falls by that rather than by four.
 ///
-/// Since issue #103's stage 4 this is the **floor** rather than the width.
-/// The shear that bounds it is measured per direction on every frame instead
-/// of quoted, so the band opens where a reading would otherwise fold it and
-/// stays at exactly this everywhere else, which is the whole far field, every
-/// direction that has never correlated, and every file with one lens stream
-/// ([`super::band::width`]).
-const CROSSOVER_DEG: f32 = 2.0;
+/// This is what the picture **asks for** and not always what it draws. Two
+/// things sit between: the camera's own overlap, which clamps it per file
+/// ([`Reframe::crossover`]), and since issue #103's stage 4 it is a **floor**
+/// rather than a width, so a near-field reading could open the band past it.
+/// At 8 that second one never happens, because the widest stage 4 can ask for
+/// is 2.89 ([`super::band::WIDEST_DEG`]).
+const CROSSOVER_DEG: f32 = 8.0;
+
+/// Research only: what this run asks the handover for instead of
+/// [`CROSSOVER_DEG`], from `KJERAG_HANDOVER_DEG`, in degrees.
+///
+/// Unset, which is every shipped run and every run that does not name it, is
+/// [`CROSSOVER_DEG`]. Set to a width, the whole handover opens to it: the
+/// weights cross over across that many degrees, and so does everything the
+/// weights carry - the epipolar bend, which is split by them, and the
+/// along-seam correction, which lens 1 takes whole and the weights hand over.
+/// Either way the camera's own overlap still has the last word
+/// ([`Reframe::crossover`]).
+///
+/// **One knob and not two, because there can only be one.** The along-seam
+/// term is applied over a whole lens rather than across the band
+/// ([`Reframe::bent`]), so what ramps it from nothing to all of it in the
+/// picture is the handover itself, and it cannot be given a wider support of
+/// its own. The two lenses draw one piece of content in one place only while
+/// the share lens 1 takes and the share lens 0 takes differ by exactly the
+/// disagreement the fit measured, so wherever both lenses are in the picture
+/// that difference is pinned at one whole correction, and what the picture
+/// shows walks from none of it to all of it exactly as the weights do. A ramp
+/// spread wider than the weights is a ramp that un-corrects the seam over the
+/// width it spread. So the support of the along-seam handover **is** the
+/// crossover, and this widens the crossover.
+///
+/// **It stays because it is how this width was chosen.** The 8 above is one
+/// label-blind verdict at one pair of widths, staged as two arms of one binary
+/// through this variable; the next question about the width will be asked the
+/// same way, and a rebuild per arm is what makes a session take a day instead
+/// of an evening. Not a setting, not a key and not a menu item (AGENTS.md,
+/// zero-config playback): an environment variable, read once, written nowhere.
+const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
+
+/// The widest width the research switch will take, in degrees: the whole
+/// overlap of the camera family it was written for.
+///
+/// A guard against a typo and not the bound that matters. What actually caps
+/// the handover is the file's own calibration, which is a smaller number on
+/// every camera in the corpus ([`super::band::affordable`]): 9.36 to 9.82
+/// degrees over six X4 Air files and 3.99 on the ONE X2.
+const OVERLAP_DEG: f32 = 14.0;
+
+/// How wide the handover asks to be on this run, in degrees, which is
+/// [`CROSSOVER_DEG`] unless [`HANDOVER_DEG`] asked for another width.
+///
+/// Read once, and read only by [`Reframe::crossover`], which is where the
+/// camera clamps it and where both halves of the map take it from.
+///
+/// **The line it prints is about the ask and says nothing about the width.**
+/// No file is open when this runs, so the width drawn is not known here and
+/// cannot be: at `KJERAG_HANDOVER_DEG=12` on a file that affords 9.69 the ask
+/// and the width differ by more than the whole change this switch was built to
+/// stage. What is drawn is said per file by the shell, off the lenses the pass
+/// will draw with (`Scene::handover_deg`, printed by the app's `say_handover`
+/// after the stored calibration lands, and again by `fit_into` if a fallback
+/// fit moves it).
+fn crossover_deg() -> f32 {
+    static WIDTH: OnceLock<f32> = OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        let Ok(asked) = std::env::var(HANDOVER_DEG) else {
+            return CROSSOVER_DEG;
+        };
+        match handover(&asked) {
+            Ok(width) => {
+                println!(
+                    "blend:  research handover on, {HANDOVER_DEG}={width}: the handover asks for \
+                     {width} degrees of world angle instead of {CROSSOVER_DEG}. what each file \
+                     draws is that clamped by its own two lenses, on its own blend line at open"
+                );
+                width
+            }
+            Err(said) => {
+                eprintln!(
+                    "kjerag: {said}, so the handover stays at the {CROSSOVER_DEG} degrees it ships \
+                     with"
+                );
+                CROSSOVER_DEG
+            }
+        }
+    })
+}
+
+/// The width [`HANDOVER_DEG`] asked for, or what is wrong with the ask.
+fn handover(asked: &str) -> Result<f32, String> {
+    let width = asked
+        .parse::<f32>()
+        .map_err(|e| format!("{HANDOVER_DEG}={asked}: {e}"))?;
+    match width.is_finite() && width > 0.0 && width <= OVERLAP_DEG {
+        true => Ok(width),
+        false => Err(format!(
+            "{HANDOVER_DEG}={asked} is not a width between 0 and the {OVERLAP_DEG} degrees the two \
+             lenses overlap by"
+        )),
+    }
+}
 
 /// How many lenses one pass can sample.
 ///
@@ -325,11 +441,21 @@ pub struct Reframe {
     /// are two grids and reach 1:1 an octave of zoom apart. [`Sampling`] is
     /// the names they come in.
     sharpen: [f32; 2],
+    /// How wide this camera hands the picture over, in **radians**: what
+    /// [`CROSSOVER_DEG`] asks for, or what these two lenses' overlap can carry
+    /// if that is less ([`super::band::affordable`]).
+    ///
+    /// In the block rather than written into the shader source, because it is
+    /// a property of the file and the shader is compiled once before any file
+    /// is open (`ScenePipeline::new`). Both halves of the map read it from
+    /// here - [`Reframe::crossover_at`] on this side and `band_width` on the
+    /// shader's - so the two cannot disagree about it.
+    crossover: f32,
     /// A uniform block's size rounds up to its own alignment, which the
     /// matrices in [`LensBlock`] make 16 bytes. WGSL does that itself;
     /// `repr(C)` does not, and the two sizes have to agree or
     /// `min_binding_size` rejects the pipeline.
-    _pad: [f32; 4],
+    _pad: [f32; 3],
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -496,7 +622,7 @@ impl Reframe {
         linearize: bool,
         sampling: Sampling,
     ) -> Self {
-        Self {
+        let mut block = Self {
             lenses: std::array::from_fn(|index| match lenses.get(index) {
                 Some(lens) => LensBlock::new(lens, index, frame, camera, held),
                 None => LensBlock::EMPTY,
@@ -513,7 +639,28 @@ impl Reframe {
                 .rolling
                 .map_or([0.0; 2], |rolling| rolling.axis.map(|c| c as f32)),
             sharpen: sampling.limits(),
-            _pad: [0.0; 4],
+            // Filled below, because it is read off the lenses this block has
+            // just laid out and there is nowhere earlier to read them from.
+            crossover: 0.0,
+            _pad: [0.0; 3],
+        };
+        block.crossover = block.afforded();
+        block
+    }
+
+    /// How wide this camera can hand the picture over, in radians: what
+    /// [`CROSSOVER_DEG`] asks for, or what its own two lenses overlap by if
+    /// that is less.
+    ///
+    /// A file with one lens stream has no overlap and no seam, and takes the
+    /// ask untouched: nothing is ever handed over, so the number is never used
+    /// and a clamp would be inventing a bound out of a camera that is not
+    /// there.
+    fn afforded(&self) -> f32 {
+        let asked = crossover_deg().to_radians();
+        match self.overlap() {
+            Some(overlap) => asked.min(super::band::affordable(overlap)),
+            None => asked,
         }
     }
 
@@ -543,7 +690,10 @@ impl Reframe {
             row_axis: [0.0; 2],
             // Every ray misses every lens, so no plane is ever sampled.
             sharpen: Sampling::default().limits(),
-            _pad: [0.0; 4],
+            // One lens and no overlap, so nothing is ever handed over: the ask
+            // itself, which is what a camera with room for it would get.
+            crossover: crossover_deg().to_radians(),
+            _pad: [0.0; 3],
         }
     }
 
@@ -698,15 +848,18 @@ impl Reframe {
     /// How wide the crossover opens at a ray whose measured disparity is
     /// `disparity`, in radians (issue #103, stage 4).
     ///
-    /// [`CROSSOVER_DEG`] wherever that already carries the reading without
-    /// folding, which is every direction under 1.8 degrees of disparity, so
-    /// the far field's handover is the one it has always had. Wider exactly
-    /// where the reading would otherwise be clamped, and only by as much as
-    /// the reading needs.
+    /// [`Self::crossover`] wherever that already carries the reading without
+    /// folding, and wider exactly where the reading would otherwise be
+    /// clamped. At the 8 degrees this camera family hands over across, the
+    /// second half never happens: the widest stage 4 can ask for is 2.89
+    /// ([`super::band::WIDEST_DEG`]) and the floor is above it, so this is a
+    /// constant on every X4-class file. What keeps it here is that the floor
+    /// is the camera's and not the picture's, and a camera whose overlap
+    /// forces it under 2.89 puts the reading back in charge.
     ///
     /// WGSL twin: `band_width`.
     pub fn crossover_at(&self, disparity: f32) -> f32 {
-        super::band::width(disparity, CROSSOVER_DEG.to_radians())
+        super::band::width(disparity, self.crossover)
     }
 
     /// A view-space ray in the camera body's own frame, which is where the
@@ -1588,11 +1741,10 @@ impl Mat3 {
 pub(crate) fn wgsl() -> String {
     // `{:?}` rather than `{}`: Rust's Display drops the decimal point on a
     // whole number, and `vec3<f32>(1)` is a type error in WGSL.
-    format!(
-        "const MAX_LENSES = {MAX_LENSES}u;\n\
-         const READOUT_STEPS = {READOUT_STEPS}u;\nconst CROSSOVER = {:?};\n{WGSL}",
-        CROSSOVER_DEG.to_radians(),
-    )
+    // The crossover is NOT here. It was a constant while it was the picture's;
+    // it is the camera's now, and the shader is compiled once before any file
+    // is open, so it travels in the block instead (`Reframe::crossover`).
+    format!("const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n{WGSL}")
 }
 
 const WGSL: &str = r#"
@@ -1654,12 +1806,14 @@ struct Reframe {
   // `Reframe::sharpen`.
   sharpen_luma: f32,
   sharpen_chroma: f32,
+  // How wide this camera hands the picture over, in radians. Rust twin:
+  // `Reframe::crossover`. Read by `band_width` and `band_rest`.
+  crossover: f32,
   // WGSL rounds this block's size up to its own 16-byte alignment. Rust twin:
   // `Reframe::_pad`, which is what makes the two sizes agree.
   pad0: f32,
   pad1: f32,
   pad2: f32,
-  pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -2201,12 +2355,18 @@ pub(crate) mod tests {
     /// carries the ray alone, and either way something has it.
     ///
     /// The handover used to run the whole 14-degree overlap; since issue #48
-    /// it runs [`CROSSOVER_DEG`], so the offsets that are mixed and the
-    /// offsets that are not have swapped places. What has not changed is that
-    /// the lens the ray leans toward is the one that leads.
+    /// it runs the crossover, so the offsets that are mixed and the offsets
+    /// that are not have swapped places. What has not changed is that the lens
+    /// the ray leans toward is the one that leads.
+    ///
+    /// The offsets are taken off the width the fixture hands over across
+    /// rather than written out, because that width is the camera's since
+    /// 2026-08-05 and a fixture with a different overlap would silently make
+    /// this test about nothing.
     #[test]
     fn the_seam_is_a_mix_of_two_pictures_and_not_a_gap() {
         let reframe = fixture(Camera::default());
+        let half = 0.5 * reframe.crossover_at(0.0).to_degrees();
 
         for phi in 0..360 {
             let phi = phi as f32;
@@ -2214,14 +2374,15 @@ pub(crate) mod tests {
             // themselves are half a degree of lens tilt away, which is what
             // `the_crossover_is_the_width_it_says_it_is` measures rather than
             // asserts.
-            for offset in [-5.0, -1.5, -0.3, 0.0, 0.3, 1.5, 5.0] {
+            for share in [-2.0, -0.75, -0.15, 0.0, 0.15, 0.75, 2.0] {
+                let offset = share * half;
                 let ray = direction(90.0 + offset, phi);
                 let blend = reframe.blend(ray);
                 let mixed = blend.weights.iter().all(|weight| *weight > 0.0);
                 assert!(blend.is_covered(), "nothing has {offset} degrees at {phi}");
                 assert_eq!(
                     mixed,
-                    offset.abs() < 1.0,
+                    share.abs() < 1.0,
                     "{offset} degrees from the seam at {phi} weighs {:?}",
                     blend.weights,
                 );
@@ -2229,28 +2390,126 @@ pub(crate) mod tests {
                 // away from it: the two axes are 0.3 degrees off exactly
                 // opposed, so on the halfway line itself either lens is a
                 // fair answer.
-                if offset == 0.0 {
+                if share == 0.0 {
                     continue;
                 }
                 let leader = usize::from(blend.weights[1] > blend.weights[0]);
                 assert_eq!(
                     leader,
-                    usize::from(offset > 0.0),
+                    usize::from(share > 0.0),
                     "{offset} degrees past the seam at {phi} leads with lens {leader}",
                 );
             }
         }
     }
 
+    /// What the picture carries of the along-seam correction at one offset
+    /// from the seam, in units of the correction itself.
+    ///
+    /// Lens 1 takes the along-seam term whole and lens 0 takes none of it
+    /// ([`Reframe::blend_bent`]), so the share of it the picture shows **is**
+    /// lens 1's weight. Nothing else in the pass carries that axis.
+    fn along_carried(reframe: &Reframe, offset: f32, phi: f32) -> f32 {
+        let reading = super::super::band::Reading {
+            epi: 0.0,
+            along: 0.006,
+        };
+        reframe
+            .blend_bent(direction(90.0 + offset, phi), reading)
+            .weights[1]
+    }
+
+    /// The map hands the along-seam correction over across the whole handover
+    /// and not at a line inside it.
+    ///
+    /// This is the property `kjerag-spike --bin shear mode=profile` cannot
+    /// state. That instrument reads the delivered arm against an arm with the
+    /// band held off, and the held arm carries the two lenses' whole
+    /// disagreement as a double image over this same corridor, so its match
+    /// has two peaks in it and reports whichever leads: a step where the map
+    /// has a ramp. What the map applies is here, where a weight can be read
+    /// rather than fitted, and it is the whole crossover wide.
+    ///
+    /// **The ramp's shape is not the same at every width**, which is why the
+    /// bar below is half the width rather than the three quarters a narrow
+    /// handover spends. The weights are cosines of the two lens axes and not a
+    /// distance, so a corridor four times as wide is a different slice of them.
+    /// Measured on this fixture over 24 azimuths 2026-08-05, walking from nine
+    /// tenths of the correction to one tenth:
+    ///
+    /// | crossover, deg | 2 | 4 | 6 | 8 | 12 |
+    /// | --- | ---: | ---: | ---: | ---: | ---: |
+    /// | span, deg | 1.51 | 2.81 | 3.92 | 4.85 | 6.23 |
+    /// | share of the width | 0.75 | 0.70 | 0.65 | 0.61 | 0.52 |
+    ///
+    /// So a handover four times as wide spreads the correction over 3.2 times
+    /// as much picture and not four times as much. It is a ramp over the whole
+    /// crossover at every one of them and never a step, which is what this
+    /// asserts.
+    #[test]
+    fn the_along_seam_correction_hands_over_across_the_whole_crossover() {
+        let reframe = fixture(Camera::default());
+        let width = reframe.crossover_at(0.0).to_degrees();
+
+        for phi in (0..360).step_by(15) {
+            let phi = phi as f32;
+            // Positive offsets are lens 1's side, which is the side that takes
+            // the correction ([`the_seam_is_a_mix_of_two_pictures_and_not_a_gap`]).
+            let carried = |offset: f32| along_carried(&reframe, offset, phi);
+            near(carried(width), 1.0, 1e-6);
+            near(carried(-width), 0.0, 1e-6);
+            // Where the picture still holds nine tenths of the correction, and
+            // where it is down to a tenth, walking out of lens 1. A step at the
+            // halfway line would put the two within a grid step of each other.
+            let steps = 400;
+            let at = |share: f32| {
+                (0..=steps)
+                    .map(|step| width - 2.0 * width * step as f32 / steps as f32)
+                    .find(|offset| carried(*offset) < share)
+                    .unwrap_or(-width)
+            };
+            let (most, least) = (at(0.9), at(0.1));
+            assert!(
+                most > least,
+                "the handover runs backwards at {phi}: 0.9 at {most}, 0.1 at {least}"
+            );
+            assert!(
+                most - least > 0.5 * width,
+                "the handover at {phi} spends {} degrees of the {width} it opened going from \
+                 nine tenths of the correction to one tenth",
+                most - least,
+            );
+        }
+    }
+
+    /// A run that does not ask draws the width the owner validated, and an ask
+    /// the width cannot be read out of leaves it there too.
+    #[test]
+    fn the_handover_is_the_shipped_crossover_unless_a_width_is_asked_for() {
+        assert_eq!(handover("4"), Ok(4.0));
+        assert_eq!(handover("0.5"), Ok(0.5));
+        assert_eq!(handover(&OVERLAP_DEG.to_string()), Ok(OVERLAP_DEG));
+        for refused in ["0", "-2", "wide", "", "nan", "inf", "14.5", "90"] {
+            assert!(
+                handover(refused).is_err(),
+                "{HANDOVER_DEG}={refused} was taken as a handover width"
+            );
+        }
+    }
+
     /// The two halves of issue #48 against each other: with this file's own
-    /// seam correction on lens 1, the narrow crossover still hands the picture
-    /// over and still leaves nothing grey.
+    /// seam correction on lens 1, the crossover still hands the picture over
+    /// and still leaves nothing grey.
     ///
     /// The correction turns one lens by a couple of degrees, so the seam and
-    /// the crossover on it turn with it. What has to survive is the margin:
-    /// the band is 2 degrees wide inside an overlap of 14, so the lens the
-    /// crossover hands to has 6 degrees of its own picture in hand. This is
-    /// the check that the fit cannot eat that margin at the size it comes in.
+    /// the crossover on it turn with it. What has to survive is the margin, and
+    /// the margin is not what this was written against: at 2 degrees the lens
+    /// the crossover hands to had 6 degrees of its own picture in hand, and at
+    /// the 8 the fixture draws, the band plus the bend it carries reaches 6.60
+    /// into 7.22 a side and the margin is **0.62**
+    /// (`the_widest_band_and_its_bend_stay_inside_the_overlap`). This is the
+    /// check that the fit cannot eat that margin at the size it comes in, and
+    /// there is far less of it to eat.
     #[test]
     fn a_fitted_lens_still_hands_the_picture_over() {
         let correction = crate::seam::SeamFit {
@@ -2331,21 +2590,30 @@ pub(crate) mod tests {
     /// lenses' own angles buys: without that it would cross wherever the two
     /// image circles happen to end.
     ///
-    /// Not exactly half, and further off than it was before issue #48: this
-    /// fixture's two axes are 0.3 degrees from opposed, so a direction 90
-    /// degrees off lens 0 is up to 0.3 degrees off the line where the two
-    /// lenses are equally far off theirs. A 2-degree crossover turns that into
-    /// 0.06 of weight where the 14-degree one turned it into 0.008. The
-    /// picture is centred on the lenses either way; what moved is how quickly
-    /// weight answers an angle.
+    /// Not exactly half: this fixture's two axes are 0.3 degrees from opposed,
+    /// so a direction 90 degrees off lens 0 is up to 0.3 degrees off the line
+    /// where the two lenses are equally far off theirs. What that is worth in
+    /// weight is the width's business, and the width has moved twice. Measured
+    /// on this fixture: **0.008** across the 14-degree overlap, **0.06** at the
+    /// 2 issue #48 shipped, and **0.0264** at the 8 the picture draws since
+    /// 2026-08-05. It is centred on the lenses at every one of them; what moves
+    /// is how quickly weight answers an angle, and it answers 2.3 times less
+    /// quickly at 8 than at 2 rather than four times, which is the same
+    /// non-linearity
+    /// `the_along_seam_correction_hands_over_across_the_whole_crossover` reads
+    /// on the ramp.
+    ///
+    /// The bar is 0.04 because the effect is 0.0264. It was 0.08 when the
+    /// effect was 0.06, and a bar three times what it watches is a test that
+    /// has stopped watching.
     #[test]
     fn the_crossover_sits_on_the_seam() {
         let reframe = fixture(Camera::default());
 
         for phi in 0..36 {
             let blend = reframe.blend(direction(90.0, phi as f32 * 10.0));
-            near(blend.weights[0], 0.5, 0.08);
-            near(blend.weights[1], 0.5, 0.08);
+            near(blend.weights[0], 0.5, 0.04);
+            near(blend.weights[1], 0.5, 0.04);
         }
     }
 
@@ -2411,15 +2679,25 @@ pub(crate) mod tests {
         }
     }
 
-    /// And it opens to the width a near-field reading asks for, still centred
-    /// on the seam (issue #103, stage 4).
+    /// And a camera whose overlap forces a narrow floor still opens the
+    /// crossover to the width a near-field reading asks for, still centred on
+    /// the seam (issue #103, stage 4).
     ///
     /// The same sweep as above, drawn through the bent blend, so what is
     /// measured is the band the shipped pass actually hands over across and
     /// not the arithmetic that decided it.
+    ///
+    /// The floor is set here rather than taken from the fixture because the
+    /// fixture affords the 8 degrees the picture asks for, and above 2.89 no
+    /// reading the search can return opens anything
+    /// (`band::tests::the_adaptive_width_is_inert_under_the_shipped_floor`).
+    /// Two degrees is what this camera family handed over across until
+    /// 2026-08-05 and what a camera with 5.6 degrees of overlap would get now,
+    /// and stage 4 has to still work there.
     #[test]
     fn a_near_reading_opens_the_crossover_to_what_it_needs() {
-        let reframe = fixture(Camera::default());
+        let mut reframe = fixture(Camera::default());
+        reframe.crossover = 2.0f32.to_radians();
         for disparity_deg in [0.0f32, 1.8, 2.2, 2.6] {
             let disparity = disparity_deg.to_radians();
             let wanted = reframe.crossover_at(disparity).to_degrees();
@@ -2443,15 +2721,30 @@ pub(crate) mod tests {
         }
     }
 
-    /// The bound the widest band is not allowed to cross, measured off the
+    /// The bound the band is not allowed to cross, measured off the
     /// calibration fixture rather than quoted from the format study.
     ///
     /// A band that opened past the overlap would hand over to a lens that has
-    /// no picture there, and a lens with no picture is a weight that steps to
-    /// zero rather than fading, which is a seam of its own. What has to fit is
-    /// half the widest band **plus the whole bend it carries**: at the edge of
-    /// the band one lens's weight is 1, so the other lens is sampled a whole
+    /// no picture there. What that costs is **not** a sample from off the end
+    /// of the fisheye circle: the coverage test is taken on the **unbent** ray
+    /// ([`Reframe::covers`]) and the bend then moves the sample, but a bent ray
+    /// that lands outside the lens's own boundary comes back
+    /// `inside == false`, [`claim`] returns zero for it, and the fragment
+    /// shader reads a lens only where its weight is positive. What it costs is
+    /// the handover itself: past that edge the coverage depth takes the weight
+    /// over from the crossover's ramp and steps it to zero at the rim, so the
+    /// picture is handed over by the optics rather than by the width that was
+    /// chosen, and where both lenses miss it is transparent. What has to fit is
+    /// half the band **plus the whole bend it carries**: at the edge of the
+    /// band one lens's weight is 1, so the other lens is sampled a whole
     /// disparity away from where the ray points.
+    ///
+    /// This is the bound the width the picture asks for is clamped by since
+    /// 2026-08-05 ([`super::band::affordable`]), so it is asserted against the
+    /// width the fixture actually hands over across rather than against the
+    /// widest [`super::band::width`] could ever return. The margin used to be
+    /// three degrees a side and it is not any more, which is the point of
+    /// measuring it.
     #[test]
     fn the_widest_band_and_its_bend_stay_inside_the_overlap() {
         let reframe = fixture(Camera::default());
@@ -2459,14 +2752,18 @@ pub(crate) mod tests {
             .overlap()
             .expect("the fixture has two lenses")
             .to_degrees();
-        let widest = crate::band::WIDEST_DEG;
-        let reach = 0.5 * widest + widest * 0.9;
-        // Measured on the fixture 2026-08-01: 14.44 degrees of overlap, 7.22
-        // a side, against a reach of 4.04.
+        // The widest this camera's band gets: its floor, or a near-field
+        // reading past it on a camera whose overlap forced the floor down.
+        let widest = reframe.crossover_at(crate::band::WIDEST_DEG.to_radians());
+        let reach = crate::band::reach(widest).to_degrees();
+        // Measured on the fixture 2026-08-05: 14.44 degrees of overlap, 7.22 a
+        // side, a band of 8.00 and a reach of 6.60, so 0.62 to spare where 2
+        // degrees left 3.18.
         assert!(
             reach < 0.5 * overlap,
-            "the widest band reaches {reach:.2} deg off the seam into an overlap of \
+            "a band of {:.2} deg reaches {reach:.2} deg off the seam into an overlap of \
              {overlap:.2} deg, which is {:.2} deg a side",
+            widest.to_degrees(),
             0.5 * overlap,
         );
     }

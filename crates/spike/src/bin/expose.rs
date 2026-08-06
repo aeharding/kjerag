@@ -86,6 +86,15 @@ const ALONG_STEP_DEG: f64 = 0.1;
 /// overlap by 14.4 degrees, 7.2 a side, and a column further out than that is
 /// a column one lens has no picture of. 4 degrees leaves room for the
 /// alignment shift on top, which is added to lens 1's sampling direction.
+///
+/// **What these columns sit inside has changed under them** (2026-08-06). At
+/// the 2 degree crossover this was written against, all but the innermost
+/// columns were outside the handover; at the 8 the pass draws, the crossover is
+/// 4 degrees a side and **every column is inside it**, which is what the radial
+/// line means by "across the band" now. No column reaches the 6.6 degrees the
+/// band plus its bend covers ([`kjerag_render::band::reach`]), and widening to
+/// there would spend the room the alignment shift needs, so the slope is read
+/// over the crossover and converted end to end over the file's own width.
 const ACROSS_DEG: f64 = 4.0;
 
 /// How far apart the columns are, in degrees.
@@ -291,6 +300,14 @@ struct Field {
     shifts: Vec<f64>,
     frames: usize,
     refused: usize,
+    /// How wide this file's own camera hands the picture over, in degrees,
+    /// read off the map the columns were sampled through.
+    ///
+    /// Carried rather than quoted because the width is the **camera's** since
+    /// 2026-08-05 (`kjerag_render::band::affordable`): an X4 Air draws 8
+    /// degrees and a ONE X2 draws 3.99, and the radial line below turns codes
+    /// per degree into codes end to end over exactly this.
+    crossover_deg: f64,
 }
 
 impl Field {
@@ -680,6 +697,7 @@ fn harvest(
     field: &mut Field,
 ) {
     field.frames += 1;
+    field.crossover_deg = f64::from(reframe.crossover_at(0.0).to_degrees());
     for (index, at) in ring.iter().enumerate() {
         let Some(hit) = found[index].filter(|hit| hit.r >= options.keep) else {
             field.refused += 1;
@@ -773,16 +791,16 @@ fn field(options: &Options) -> Fallible<()> {
     let radial = truth.radial();
     println!(
         "\nradial: {:+.5} ln per degree across the band, spread {:.5} over {} azimuth-frames, \n\
-         \t{:.1} standard errors from zero. over the {:.0} degrees the crossover can ever \n\
-         \treach that is {:+.2} percent end to end, against the {:+.2} percent step above. \n\
-         \tvignetting is radial and the two lenses see the band from opposite sides, so it \n\
-         \tCANNOT hide in the gain and the gain cannot hide in it.",
+         \t{:.1} standard errors from zero. over the {:.2} degrees this camera hands the \n\
+         \tpicture over across that is {:+.2} percent end to end, against the {:+.2} percent \n\
+         \tstep above. vignetting is radial and the two lenses see the band from opposite \n\
+         \tsides, so it CANNOT hide in the gain and the gain cannot hide in it.",
         radial.mean,
         radial.spread,
         radial.count,
         radial.signal(),
-        2.0 * kjerag_render::band::WIDEST_DEG,
-        100.0 * ((radial.mean * 2.0 * f64::from(kjerag_render::band::WIDEST_DEG)).exp() - 1.0),
+        truth.crossover_deg,
+        100.0 * ((radial.mean * truth.crossover_deg).exp() - 1.0),
         100.0 * (gain.mean.exp() - 1.0),
     );
 

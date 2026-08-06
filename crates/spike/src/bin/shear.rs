@@ -75,14 +75,18 @@
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! ```
 //!
-//! Lens 1's interior (`-150`) reads 0.3663 deg applied at 0.0047 deg step rms
-//! over 89 pairs; the seam itself (`+0`) 0.3623 at 0.0619 with a worst single
-//! step of 0.42; the far side of the handover (`+60`) 0.0578 at 0.1350, over 23
-//! pairs of 30 readings, which is the one band here whose statistic is fragile;
-//! and lens 0's picture (`+150`), which the band never bends, 0.0003 at 0.0003,
-//! which is this instrument's floor on a live arm. The band's own state moves
-//! 0.0449 deg rms between frames on the bend and 0.0008 on the along-seam
-//! field.
+//! `-150` reads 0.3663 deg applied at 0.0047 deg step rms over 89 pairs; the
+//! seam itself (`+0`) 0.3623 at 0.0619 with a worst single step of 0.42; `+60`
+//! 0.0578 at 0.1350, over 23 pairs of 30 readings, which is the one band here
+//! whose statistic is fragile; and `+150` 0.0003 at 0.0003, which is this
+//! instrument's floor on a live arm. The band's own state moves 0.0449 deg rms
+//! between frames on the bend and 0.0008 on the along-seam field.
+//!
+//! **Those four rows were read at a 2 degree handover and they are not where
+//! they were.** At the 8 the pass hands over across since 2026-08-05, all four
+//! sit inside it (`Mode::offsets`), so `+150` is no longer an unbent floor:
+//! at width 8 it reads 0.0243 deg applied. Take the four as distances from the
+//! seam and not as places in the handover.
 //!
 //! **Those readings are stated against a main, and the horizon is why.** Under
 //! `lock=1` the view is held against the orientation track, so a change to how
@@ -1221,10 +1225,18 @@ impl Mode {
     }
 
     /// Where the patches sit, in rows from the seam.
+    ///
+    /// The four fixed rows are the same rows they always were and the handover
+    /// has moved out past them. At the view this instrument is quoted at (fov
+    /// 20 over 1024 px, 51.2 px per degree) they are **-2.93, 0, +1.17 and
+    /// +2.93 degrees** off the seam, so at the 8 degrees the pass hands over
+    /// across - 4 either side - every one of them is INSIDE the handover;
+    /// positive is lens 0's side. They were named for a 2 degree crossover, and
+    /// the names said the last two were past the handover and unbent. Neither
+    /// is true any more, and the `+150` column moving with the width is the
+    /// measurement that says so.
     fn offsets(self) -> Vec<i32> {
         match self {
-            // Lens 1's interior, the seam itself, the far side of the
-            // handover, and lens 0's picture, which the band never bends.
             Self::Profile => (-240..=240).step_by(12).collect(),
             _ => vec![-150, 0, 60, 150],
         }

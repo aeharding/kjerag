@@ -406,6 +406,26 @@ impl Scene {
             .is_some_and(|show| show.lenses.len() >= 2)
     }
 
+    /// How wide this file hands the picture over, in degrees, or `None` for a
+    /// capture with one lens stream, which has no seam to hand over at.
+    ///
+    /// **The width is the camera's and not the build's** since 2026-08-05: the
+    /// projection asks for one number and this file's own overlap clamps it
+    /// ([`Reframe::crossover_at`], `band::affordable`). An X4 Air takes the 8
+    /// asked for; the owner's ONE X2 draws 3.99, and nothing else the app says
+    /// would ever mention it.
+    ///
+    /// Read off the lenses the pass will draw with **now**, correction and all,
+    /// because a seam fit moves the principal point, which moves each lens's
+    /// coverage boundary, which moves the overlap: on that X2 the factory
+    /// calibration affords 4.91 and its own pooled fit affords 3.99. So this is
+    /// a reading and not a property of the file, and a fit landing later moves
+    /// it - which is why [`fit_into`] says it again when one does.
+    pub fn handover_deg(&self) -> Option<f32> {
+        let show = self.show.as_ref()?;
+        handover_deg(&show.lenses(), show.frame)
+    }
+
     /// Draw this file with what the pool knows about its camera. Applied here
     /// and now, with no walk, so it is in the first frame.
     pub fn use_seam(&self, fit: SeamFit) {
@@ -911,6 +931,26 @@ fn fit_into(
             true => into.land(fitted.fit),
             false => into.ask(fitted.fit),
         }
+        // A fit moves the principal point, which moves each lens's coverage
+        // boundary, which moves how much the two of them overlap - and the
+        // handover is clamped by that overlap (`band::affordable`). So a
+        // fallback fit can change how wide this file hands over, seconds after
+        // the shell already said how wide it was: on the owner's ONE X2 the
+        // factory calibration affords 4.91 and this fit affords 3.99. Said only
+        // when it moves, because it usually does not, and a line that repeats
+        // itself is a line nobody reads.
+        //
+        // Off the fit APPLIED and not off the correction's own lenses: a fit
+        // that is asked rather than landed walks in over a second, so the
+        // correction is still showing the old calibration at this instant and
+        // the width the picture is heading for is the one worth saying.
+        let was = handover_deg(lenses, frame);
+        let goes = handover_deg(&fitted.fit.applied(lenses), frame);
+        if let (Some(was), Some(goes)) = (was, goes)
+            && (goes - was).abs() >= 0.01
+        {
+            println!("blend:  that fit moves the handover: {was:.2} -> {goes:.2} deg");
+        }
     }
     let harvest = Harvest {
         fit: fitted.fit,
@@ -921,6 +961,29 @@ fn fit_into(
         *slot = Some(harvest);
     }
     Some(harvest)
+}
+
+/// How wide a camera with these lenses hands the picture over, in degrees, or
+/// `None` where there is no seam to hand over at.
+///
+/// One place, because two callers need it at two moments: the shell at open,
+/// and [`fit_into`] when a fit moves it. It reads the same
+/// [`Reframe::crossover_at`] the pass reads, off the lenses it is handed, and
+/// the aspect and the camera it builds the map with do not reach the answer.
+fn handover_deg(lenses: &[Lens], frame: Size) -> Option<f32> {
+    if lenses.len() < 2 {
+        return None;
+    }
+    let mapped = Reframe::new(
+        lenses,
+        frame,
+        Camera::default(),
+        Held::default(),
+        1.0,
+        false,
+        Sampling::default(),
+    );
+    Some(mapped.crossover_at(0.0).to_degrees())
 }
 
 /// Where a fallback fit leaves its answer for the shell to pool. Shared,
