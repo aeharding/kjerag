@@ -3,6 +3,14 @@
 # not wired into a gate. Every number it writes carries its own source stamp.
 """How much the picture's content slides sideways in each arm, degree by degree.
 
+READ slide.py INSTEAD, AND THIS ONE ONLY TO SEE WHY. Its chain is ORB per pair and
+it silently UNDER-REPORTS: a pair it cannot match does not advance the total, and
+the pairs it cannot match are the fast ones, so the arm that moves most loses most.
+On the July window it read kjerag at 4.1 deg where the two chain-free instruments
+(wide.py and slide.py) both read 20, and 115 of its 900 kjerag pairs were refused
+against 52 of Studio's. A refusal that leaves the running total alone is not a gap
+in the answer, it is a wrong answer.
+
 SOURCES
   kjerag  /home/aeharding/kjerag/.worktrees/oracle-probe/scratch/oracle/kjerag-window/
           `band mode=sequence from=24.0 count=1080 yaw=3.78 pitch=5.44 fov=20.00
