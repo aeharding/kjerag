@@ -668,7 +668,8 @@ finite constants are measured and the tables are in
 docs/research/insv-format.md 8.5; the yaw one is infinite and is a ruling
 rather than a measurement. What the lock cannot hold is the gyroscope's own
 yaw drift, about 3 degrees a minute on this footage, because gravity does not
-observe heading and these cameras record no magnetometer.
+observe heading and no capture here carries a byte of the trailer's magnetic
+record.
 
 Verification without a Studio export: physics in the footage itself.
 `kjerag-spike --bin horizon` renders runs of frames through the app's own

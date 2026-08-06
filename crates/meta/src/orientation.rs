@@ -24,9 +24,10 @@
 //! the gyroscope's bias: about 0.05 deg/s on this footage
 //! (docs/research/insv-format.md 8.5), or 3 degrees of slow yaw a minute, which
 //! accumulates over a flight and is never corrected. A magnetometer is what
-//! would bound it and these cameras record none. Studio's own drift is the same
-//! order, so this is the floor of the technique rather than a shortfall against
-//! it.
+//! would bound it; the trailer has a record type for one (13, `Magnetic`,
+//! contents unknown) and none of the X4 Air or ONE X2 captures here carries a
+//! single byte of it. Studio's own drift is the same order, so this is the
+//! floor of the technique rather than a shortfall against it.
 //!
 //! ## Why a complementary filter and not something cleverer
 //!
@@ -1034,7 +1035,7 @@ mod tests {
         const SWING: f64 = 15.0;
         let yawing = |period: f64| {
             move |t: f64| {
-                let rate = 2.0 * SWING * (t * 2.0 * PI / period).cos() * (2.0 * PI / period) / 2.0;
+                let rate = SWING * (t * 2.0 * PI / period).cos() * (2.0 * PI / period);
                 ([0.0, rate, 0.0], [0.0, -1.0, 0.0])
             }
         };

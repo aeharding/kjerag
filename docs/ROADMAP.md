@@ -591,8 +591,9 @@ live, no keyframe UI ever.
 
   **The accepted price is gyroscope drift, and it is the technique's floor
   rather than a shortfall.** Nothing observes heading: gravity cannot see it
-  and these cameras record no magnetometer, so a locked yaw inherits the
-  gyroscope's bias, about 0.05 deg/s or 3 degrees a minute
+  and no capture on the test box carries a byte of the trailer's magnetic
+  record, so a locked yaw inherits the gyroscope's bias, about 0.05 deg/s or
+  3 degrees a minute
   (docs/research/insv-format.md 8.5). Studio's own export drifts the same
   order, 2.2 deg/min on the probe's window. What the pilot loses with it is
   the fly-forward feel: the view used to settle back onto the nose within a
