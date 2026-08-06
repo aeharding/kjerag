@@ -8,16 +8,16 @@ decides is +1.25 percent. The refusal carries an amplitude: what is excluded is
 a static per-azimuth field of order 3 and up above 0.02 to 0.06 degrees, and
 nothing smaller. **Issue:** #103.
 
-**Scope, added 2026-08-06 after the layer-2 preflight probes.** Everything in 4
-is measured under the reduction the shipped path uses, which takes the **mean**
-of each azimuth's frames. That reduction is what makes the leftover look like it
-does not reproduce across flights at all; under per-reading outlier rejection
-the **five-term** part reproduces across three months and predicts a held-out
-flight. That is layer 2's finding and it does not touch this stage's verdict -
-the table is refused under both reductions, and under the clean one by a
-pipeline that is shown recovering a planted field. Section 4.5 is the record of
-it, and it is the correction to read before quoting any "does not reproduce"
-sentence from here.
+**Read 4.5 before quoting any cross-flight sentence from 4.** Everything in 4 is
+measured through an estimator that takes the **mean** of each azimuth's frames
+over a heavy-tailed population, sampled about two readings deep. Under that
+estimator the leftover appears not to reproduce across flights at all, and two
+sentences in 4 said so; both are **withdrawn** in 4.5. Reduced properly and
+sampled densely, the same nine captures reproduce on 18 of 18 pairs, and the
+**five-term** field predicts a held-out flight to two hundredths of a degree.
+The table is refused under both reductions and by more under the clean one, so
+this stage's verdict is unchanged - but the layer it went looking for turned out
+to exist one harmonic order below where it looked, and that is 4.5's subject.
 
 This supersedes the stage 9 charter that lived on the unmerged `feat/warp`
 branch (`docs/research/local-warp.md`). What that document established is
@@ -111,11 +111,12 @@ frames, 72 azimuths, one pose for every capture, and the readings are gated by
 the along-seam plausibility test described in 5.
 
 **The readings themselves are committed**, at `docs/research/stage9/along-seam-
-leftovers.csv`: 299 rows of capture, azimuth and what the pose left, in degrees.
-It is a derived table with no frame of anybody's footage in it and no capture
-time, and it is here so that the verdict below can be re-checked without a
-six-flight decode. The captures are named by date and clock only, which is how
-this repo's registry already names them.
+leftovers.csv`: 299 rows of capture, azimuth and what the pose left, in degrees,
+under a header that names the plan, the pose and the reduction. It is a derived
+table with no frame of anybody's footage in it and no capture time, and it is
+here so the table verdict can be re-checked without a six-flight decode. **It is
+mean-reduced**, so it cannot answer whether the field reproduces; the nine
+per-reading dumps on `research/layer2-preflight` are what that needs (4.5).
 
 ### The owner's X4 Air, six flights from April to August
 
@@ -159,20 +160,20 @@ and the pooled standard deviation of the two captures' own readings there.
 | spread, deg | 0.064 to 0.123 | 0.048 to 0.107 |
 | correlation, all pairs pooled | **+0.194** | **-0.014** |
 
-**Taking each flight's own five terms off costs `spread` 6 to 31 percent and
-costs `apart` 1 to 7.** What a flight varies by round the ring is a sixth
-low-order; how far two flights sit apart at one azimuth is not. Pooled over
-every pair, the two captures' readings correlate at **+0.194** as they stand and
-**-0.014** once each flight's own five terms are gone: the agreement between
-flights that this reduction can see lives in the orders `band::Along` already
-applies, and nothing above them is shared between flights at all.
+**Both columns of that table are estimator artifacts and 4.5 withdraws them.**
+Pooled over every pair the two captures' readings correlate at +0.194 as they
+stand and -0.014 once each flight's own five terms are gone. Neither number is
+evidence about the camera: under a proper reduction at proper density the same
+captures agree on 18 of 18 pairs and the five-term field predicts a held-out
+flight. What survives from this paragraph is only the shape of the second
+number - that whatever agreement a reduction can find between flights lives in
+the orders `band::Along` already applies, and not above them - and 4.5 measures
+that properly.
 
-**Read the first of those two numbers with 4.5 in hand.** The +0.194 is small
-because the reduction is a mean over a heavy-tailed population, not because the
-flights agree that badly; cleanly reduced, the same recordings agree far better
-at the pose order. The **-0.014** is the one this stage turns on, and it does
-not move: it is the premise failing for the quantity a table would actually be
-built out of.
+*An earlier draft said "two flights disagree at one azimuth by more than either
+varies round its whole ring", and a draft before that compared a difference's
+magnitude against a root mean square about zero. Both are withdrawn: the first
+for the statistic, the second for the estimator underneath it.*
 
 *An earlier draft said "two flights disagree at one azimuth by more than either
 varies round its whole ring". That compared a difference's magnitude against one
@@ -272,74 +273,125 @@ gate.** Ungated it reads no table 0.2986 and best held out 0.2985 at a
 
 **The verdict: no table is fitted, for either camera.** `Table::REST` ships.
 
-### 4.5 What the reduction is doing, and what it is not
+### 4.5 The reduction was the finding, and the layer was one order down
 
-**Added after the layer-2 preflight probes** (`research/layer2-preflight`,
-`--bin settle` and `--bin converge`, its evidence under that branch's
-`scratch/layer2/`). It corrects the scope of everything above it and leaves the
-verdict where it was.
+**This section is settled and it overrides every cross-flight claim above it.**
+Evidence: the layer-2 preflight branch `research/layer2-preflight`, its
+`scratch/layer2/CORPUS.txt` and the nine stamped per-reading dumps under
+`scratch/layer2/corpus/`, from `kjerag-spike --bin corpus` over the same nine
+captures, the same pose and the same gate as 4.
 
-`seam::measure` reduces each azimuth's frames with a **mean**, and the GPU
-band's exponential average does the same thing over time. The population it
-means over is heavy-tailed by about thirty to one: between two frames 33 ms
-apart at one azimuth, the reading moves with a median absolute deviation of
-0.008 to 0.014 degrees and an **rms of 0.22 to 0.36**; between two moments,
-0.026 to 0.053 against 0.29 to 0.48. A mean over that is a statistic about its
-outliers, which is the same argument this document already makes for the gate in
-5, one level further in - the gate refuses an outlying *azimuth* and nothing
-refuses an outlying *frame*.
+#### What was wrong with the estimator
 
-**Reduced cleanly, the five-term structure reproduces across three months.** The
-same recordings, the same azimuths, a median instead of a mean:
+`seam::measure` reduces each azimuth's frames with a **mean**, and the band's
+`off_epi` exponential average does the same thing over time. The population is
+heavy-tailed: at one azimuth the reading moves between two frames 33 ms apart
+with a median absolute deviation of **0.008 to 0.05 degrees and an rms of 0.22
+to 0.48**. A mean over that is a statistic about its outliers - the same
+argument this document makes for the gate in 5, one level further in. The gate
+refuses an outlying *azimuth*; nothing refuses an outlying *frame*.
 
-| May-01 against Jul-14, at the 71 azimuths both reach | apart | May's own | July's own |
+Reduce the same recordings with `seam::left`'s own rule applied per reading
+instead - 4 median absolute deviations, floor 0.10 degrees - and the same
+corpus, the same pose and the same gate say the opposite thing:
+
+| X4 Air, six flights, all 15 pairs | apart | spread | pairs with apart under spread |
 | --- | ---: | ---: | ---: |
-| median reduction | **0.0203** | 0.0553 | 0.0460 |
-| mean reduction, this document's recipe | **0.1034** | 0.0817 | 0.1070 |
+| mean, this document's recipe | 0.1296 | 0.0933 | **2 of 15** |
+| trimmed | **0.0293** | **0.0542** | **15 of 15** |
 
-A field that is the camera has `apart` under `own`, and under the mean it does
-not and under the median it plainly does. Fitted across flights, five terms from
-one flight predict the other to **0.0215 and 0.0188 degrees** against pose-only
-readings of 0.0553 and 0.0460; under the mean the same fit predicts **worse than
-the pose alone** (0.0995 against 0.0816). And in picture space, at the registered
-May-01 GOOD view with July's field held out, `--bin crossing bins=180` reads the
-along-seam median magnitude **1.30 -> 0.07 view px** with the epipolar median
-unmoved (-5.97 -> -6.04). At May-01 BAD it reads 1.43 -> 1.06, and at the July
-view under May's field 4.00 -> 2.86.
+and on the ONE X2, 3 of 3 (0.0319 against 0.0628). A field that is a camera has
+`apart` under `spread`. Under the mean it does not; under the trim it does, on
+every pair of every capture of both cameras.
 
-**None of that is this stage's table, and the table is refused under both
-reductions.** What reproduces is the pose order - the five terms `band::Along`
-already applies per session, which layer 2 is about pooling per camera instead.
-Above them, cleanly reduced:
+**So two claims made above are withdrawn.** "Two flights disagree at the same
+azimuth by more than either varies round the whole ring" and "the signal is
+under its own noise" were properties of a mean over a heavy-tailed population
+sampled about five deep. They are not properties of the camera. The correlation
+figures in 4 (+0.194 raw, -0.014 levelled) are the same artifact and may not be
+read as evidence about reproduction either; the second of them survives only as
+a statement about a table, which is what the next part is.
 
-| a table on top of the five terms | 5 terms | 5 + table |
-| --- | ---: | ---: |
-| cross-session, July's field on May | 0.0215 | 0.0199 |
-| within May-01, both halves, 12 deg | 0.0242 | 0.0249 |
-| within Jul-14, both halves, 12 deg | 0.0153 | 0.0144 |
+#### What the table is worth under a clean reduction
 
-It gains a thousandth of a degree on one flight, loses one on another, and its
-sign is not stable. The 128-entry table adds about 0.04 source px at the
-sensitivity floor and does so with opposite signs on the two flights. **And the
-clean pipeline is not blind**: a planted 0.05-degree six-cycle field is
-recovered by exactly this test, 0.0374 -> 0.0191 on Jul-14 and 0.0431 -> 0.0366
-on May-01.
+Refused, and by more than before. Every arm below is held out - each capture
+predicted by a field fitted on the others, nothing measured on its own data:
 
-**What this does to the numbers above.** Everything in 4 is under the mean, so:
-the per-capture leftovers, the +1.25 percent bound and the order-by-order power
-bound are all measured through an estimator with three times more scatter than
-it needs. The bound is therefore **conservative in the safe direction** - a
-cleanly reduced corpus would exclude a *smaller* static field than 0.02 to 0.06
-degrees, not a larger one - and the refusal is not at risk from it. A
-full-corpus re-run under the trimmed reduction is in flight with a peer agent;
-when it lands it belongs in this section, and until it does the two flights
-above are what this claim rests on.
+| trimmed, held out | pose only | 5 terms | 5 + table |
+| --- | ---: | ---: | ---: |
+| X4 Air, 405 readings | 0.0536 | **0.0211** | 0.0216 (**+2.4 %**) |
+| ONE X2, 176 readings | 0.0606 | **0.0249** | 0.0263 (**+5.6 %**) |
 
-**So the sentence to quote from this document is not "the leftover does not
-reproduce across flights".** It is: *under the shipped mean reduction the
-leftover does not reproduce; with per-reading outlier rejection the five-term
-structure reproduces across flights and predicts held-out flights; the
-above-five-term table remains refused either way.*
+The kernel sweep is flat from 4 to 36 degrees on both cameras (X4 0.0540 to
+0.0534 against a 0.0536 no-table baseline). And what actually survives the five
+terms is **0.0004 degrees** - the harmonic ladder under a refitted pose reads
+0.0199 at order 2 and 0.0195 at order 7 - which at 31.49 source px per degree is
+**one hundredth of a source pixel**, thirty times below what `--bin crossing`
+can resolve. There is nothing there to put in a table.
+
+**And the clean pipeline is not blind**: a planted 0.05-degree six-cycle field
+is recovered held out, with a clear optimum at a 10 to 12 degree kernel, by
+exactly this test.
+
+#### What does reproduce, and it is one order down
+
+The **five-term** along-seam field, on every capture of both cameras, fitted on
+other flights only:
+
+| trimmed, held out | pose only | five terms fitted elsewhere | improved |
+| --- | ---: | ---: | ---: |
+| X4 Air, six flights | 0.0536 deg (1.69 src px) | **0.0211 deg (0.66 src px)** | 6 of 6 |
+| ONE X2, three captures | 0.0606 deg | **0.0249 deg** | 3 of 3 |
+
+Nine of nine. That is the layer stage 9 went looking for, sitting one harmonic
+order below where it looked: not a per-azimuth table but the **pose-order field
+pooled per camera**, which `band::Along` already computes per session and which
+nothing yet carries between sessions. It is layer 2's, and it is worth about a
+source pixel.
+
+A pose refit on trimmed readings also moves the pooled answer materially -
+`cy` -11.91 to -13.18, `pitch` -0.936 to -1.096, per-capture leftovers 0.049 to
+0.062 down to 0.028 to 0.039 - but it does **not stack** with the five-term
+field: held out, 0.0208 with the refitted pose against 0.0211 with the stored
+one. They are two removals of the same thing.
+
+#### Why this stage's own instrument could not see it
+
+**Density.** The reproduction needs roughly ten readings per azimuth. Below
+that neither reduction reproduces. `--bin table`'s plan is 12 places by 4
+frames, which lands about two readings on an azimuth, and its `dump=` writes the
+ring **after** `seam::measure` has already meaned it, so the artifact is baked
+into the recorded rows rather than visible in them.
+
+Reproduced here from the peer's per-reading dumps, subsampling the same
+recordings to each depth and running this document's own trimmed reduction and
+gate:
+
+| moments kept | readings per azimuth | apart | spread | pairs passing |
+| ---: | ---: | ---: | ---: | ---: |
+| 12, this stage's sampling | 2.0 | 0.0938 | 0.0780 | 2 of 15 |
+| 24 | 3.0 | 0.0706 | 0.0679 | 9 of 15 |
+| 60 | 6.5 | 0.0638 | 0.0647 | 10 of 15 |
+| 120 | 13.5 | 0.0409 | 0.0531 | 15 of 15 |
+| 1200, all of them | 132.5 | 0.0254 | 0.0483 | 15 of 15 |
+
+(The peer's own figures for the two ends are 0.1077/0.0801 and 0.0293/0.0542;
+the small differences are two re-implementations of the trim and of the
+subsampling, and the conclusion and the threshold are the same in both.)
+
+**So `docs/research/stage9/along-seam-leftovers.csv`, committed with this PR, is
+mean-reduced and says so in its own header.** It is enough to re-check what a
+table is worth on top of five terms. It is **not** enough to ask whether the
+field reproduces, and the nine dumps on the peer branch are what that question
+needs.
+
+#### The one-line consequence for the shipped code
+
+`seam::measure` and the band's `off_epi` update average a population they should
+be filtering. On the GPU that is one comparison against `held.off_epi` before
+the exponential average takes the new reading. Neither is this PR's to change -
+both belong to whichever stage pools the five-term field - but the measurement
+above is what says they are worth changing.
 
 ## 5. Why this is a refusal and not a blind spot
 
@@ -413,19 +465,24 @@ per capture. It is a tolerance filter on a physical argument, not a classifier.
   `cos(elevation)` scaling is a relative roll's own factor, not a measurement,
   and nothing in this stage tests it away from the circle.
 - **The across-seam axis.** Untouched, by design and by measurement: it carries
-  parallax, it does not reproduce across flights (9 source px apart between May
-  and April against 1.1 along the seam, #155), and the band answers it per
-  frame.
-- **A small static field.** The refusal has a size on it and not more: this
-  corpus excludes a static per-azimuth field of order 3 and up above about 0.02
-  to 0.06 degrees of amplitude, and says nothing at all below 0.02, which at the
-  owner's May-01 GOOD view is 0.37 view px. "Not a static function of azimuth"
-  means "not one this corpus could have found **above the five terms the pass
-  already applies**", and what it could have found is in 4. It does **not** mean
-  the along-seam field is not a camera: cleanly reduced, its five-term part
-  reproduces across three months and predicts a held-out flight to two
-  hundredths of a degree (4.5). That part is layer 2's, and it is already
-  applied per session.
+  parallax, it did not reproduce across flights when #155 measured it (9 source
+  px apart between May and April against 1.1 along the seam), and the band
+  answers it per frame. That reading is `--bin crossing`'s and not
+  `seam::measure`'s, so it is not the estimator 4.5 caught - but nobody has
+  looked at what **its** per-frame population does either, and after 4.5 that is
+  a question rather than a settled no.
+- **A small static field.** The refusal has a size on it and not more: above the
+  five terms the pass already applies, what is left under a clean reduction is
+  0.0004 degrees, a hundredth of a source pixel, and a table on top of the five
+  terms costs 2.4 percent on the X4 and 5.6 on the X2 (4.5). It does **not** mean
+  the along-seam field is not a camera: its five-term part reproduces on 18 of 18
+  pairs across both cameras and predicts a held-out flight to 0.021 degrees. That
+  part is layer 2's.
+- **Anything at fewer than about ten readings per azimuth.** That is the density
+  the reproduction needs, this stage's own instrument sampled about two, and the
+  amplitude bound in 4 was measured at that density through the mean. Both are
+  therefore bounds on what a thin, badly reduced corpus could see, not on what
+  the camera has.
 - **Whether the remaining 0.07 degrees is reachable at all.** What is left after
   the pose and the five terms may be per-session, may be elevation-dependent, may
   be a static field under the bound above, or may be the correlation's floor.

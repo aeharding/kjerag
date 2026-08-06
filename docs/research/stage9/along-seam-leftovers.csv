@@ -1,3 +1,10 @@
+# kjerag-spike --bin table, 12 places x 4 frames, 72 azimuths, gate 4.0 scatters
+# pose: roll:0.795 yaw:-2.31 pitch:-0.936 cx:-3.28 cy:-11.91
+# REDUCTION: mean. `seam::measure` averages each azimuth's frames, and that
+# population is heavy tailed, so these rows carry the reduction's scatter and
+# not only the camera's field. They are enough to re-check what a table is
+# worth on top of five terms; they are NOT enough to ask whether the field
+# reproduces across flights (docs/research/stage9.md 4.5).
 capture,phi_deg,left_deg
 20260410_185407,0.0000,-0.107664
 20260410_185407,5.0000,-0.036144

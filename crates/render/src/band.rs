@@ -553,22 +553,22 @@ pub struct Leftover {
 /// into it.
 ///
 /// **Nothing in the app builds one, and that is a measurement** (stage 9,
-/// docs/research/stage9.md). On the owner's six X4 Air flights the part of the
-/// leftover that survives the five terms is 3.7 percent of it; two flights'
-/// readings at the azimuths they share correlate at **-0.014** once each
-/// flight's own five terms are off, so nothing above those terms is shared
-/// between flights; and held out, a table costs the flight it was not fitted on
-/// at every kernel width that resolves anything. What the corpus can exclude has
-/// a size on it: a static field of order 3 and up above 0.02 to 0.06 degrees,
-/// and nothing below 0.02.
+/// docs/research/stage9.md). Over nine captures of two cameras, reduced with
+/// per-reading outlier rejection and held out on every arm, a table on top of
+/// the five terms **costs** 2.4 percent on the X4 Air and 5.6 on the ONE X2;
+/// the kernel sweep is flat from 4 to 36 degrees on both; and what survives the
+/// five terms is **0.0004 degrees**, a hundredth of a source pixel and thirty
+/// times under what `--bin crossing` can resolve. The same test recovers a
+/// planted six-cycle field, so that is a refusal and not a blind spot.
 ///
-/// **Above those terms**, and the qualifier is load-bearing. The five terms
-/// themselves are a camera and do reproduce across flights: cleanly reduced,
-/// May-01's field and Jul-14's sit 0.0203 degrees apart against their own 0.055
-/// and 0.046, and one predicts the other in picture space to 0.07 view px
-/// (stage9.md 4.5). That is [`Along`]'s territory and it is applied per session
-/// already. What this type would carry is what is left over that, and that does
-/// not reproduce under either reduction.
+/// **Above those terms**, and the qualifier is the whole finding. The five
+/// terms themselves are a camera and do reproduce: at full density they agree
+/// on 18 of 18 pairs of captures, and fitted on other flights only they take
+/// the pooled leftover from 0.0536 to 0.0211 degrees on the X4 and 0.0606 to
+/// 0.0249 on the X2, nine captures of nine improved. That is [`Along`]'s
+/// territory, computed per session already and pooled per camera by nobody yet.
+/// What this type would carry is what is left over it, and there is a
+/// hundredth of a pixel of that.
 ///
 /// The mechanism is here because the refusal had to be checkable and because a
 /// camera that needs one may still turn up; `Table::REST` is what ships.

@@ -637,25 +637,54 @@ live, no keyframe UI ever.
   does. Its **per-azimuth structure above what the pass already applies** does
   not, and the median is what `band::Along`'s constant term is already for.
 
-  **And the "does not reproduce" half of this entry is scoped, by the layer-2
-  preflight probes on `research/layer2-preflight`.** It is a property of the
-  reduction, not of the camera. `seam::measure` means over each azimuth's frames
-  and the band's EMA does the same, over a population heavy-tailed about thirty
-  to one - between two frames 33 ms apart one azimuth moves with a median
-  absolute deviation of 0.008 to 0.014 deg against an **rms of 0.22 to 0.36**.
-  Reduced with per-reading outlier rejection, the same recordings' **five-term**
-  field reproduces across three months: May-01 against Jul-14 the two fields sit
-  **0.0203 deg apart** against their own 0.0553 and 0.0460, five terms from one
-  predict the other to 0.019-0.022 deg, and in picture space at the registered
-  May-01 GOOD view July's field held out takes the along-seam reading **1.30 ->
-  0.07 view px** with the epipolar median unmoved. Under the mean the same fit
-  predicts worse than the pose alone. **The table refusal is untouched**: cleanly
-  reduced, `5 + table` gains a thousandth of a degree on one flight, loses one on
-  another and does not hold its sign, while the same pipeline recovers a planted
-  0.05 deg six-cycle field (0.0374 -> 0.0191). The mean reduction also makes this
-  entry's amplitude bound conservative: a cleanly reduced corpus would exclude a
-  smaller field, not a larger one. A full-corpus re-run under the trimmed
-  reduction is in flight.
+  **And the "does not reproduce" half of this entry is WITHDRAWN**, by the
+  layer-2 preflight corpus run (`research/layer2-preflight`,
+  `scratch/layer2/CORPUS.txt` and nine per-reading dumps under
+  `scratch/layer2/corpus/`). It was a property of the estimator, not of the
+  camera. `seam::measure` means over each azimuth's frames and the band's
+  `off_epi` EMA does the same, over a population that moves 0.008 to 0.05 deg
+  between frames by median absolute deviation and **0.22 to 0.48 by rms**.
+  Reduced with `seam::left`'s own 4-MAD rule per reading, at full density, the
+  same nine captures under the same pose and the same gate read **apart 0.0293
+  against spread 0.0542 on all 15 X4 pairs and 3 of 3 X2 pairs** - where the
+  mean managed 2 of 15. So "two flights disagree at one azimuth by more than
+  either varies round the whole ring" and "the signal is under its own noise"
+  are struck.
+
+  **The table refusal survives and hardens.** Held out under the clean
+  reduction, a table on top of the five terms **costs** 2.4 percent on the X4
+  (0.0211 -> 0.0216) and 5.6 on the X2 (0.0249 -> 0.0263); the kernel sweep is
+  flat from 4 to 36 degrees on both; and what survives the five terms is
+  **0.0004 deg**, a hundredth of a source pixel and thirty times below what
+  `--bin crossing` resolves. The same pipeline recovers a planted 0.05 deg
+  six-cycle field with a clear 10-12 degree optimum, so it is a refusal and not
+  a blind spot. `Table::REST` ships.
+
+  **What does reproduce is the five-term along-seam field, one harmonic order
+  below where this stage looked.** Fitted on other flights only, held out on
+  every capture of both cameras: X4 pooled leftover **0.0536 -> 0.0211 deg**
+  (1.69 -> 0.66 source px), X2 **0.0606 -> 0.0249**, **9 of 9 improved**. That
+  is the pose-order field pooled per camera, which `band::Along` computes per
+  session and nothing yet carries between sessions. A pose refit on trimmed
+  readings moves the pool materially (`cy` -11.91 -> -13.18, `pitch` -0.936 ->
+  -1.096, per-capture leftovers 0.049-0.062 -> 0.028-0.039) but does not stack
+  with it (held out 0.0208 against 0.0211): two removals of the same thing.
+
+  **Why this stage's instrument could not see it, and the scope that follows.**
+  The reproduction needs roughly ten readings per azimuth. `--bin table`'s 12
+  places by 4 frames lands about two, and its `dump=` writes the ring after
+  `seam::measure` has meaned it, so the artifact is baked into the recorded
+  rows. Subsampling the peer's dumps to each depth and running this stage's own
+  trim and gate: 12 moments reads apart 0.0938 against spread 0.0780 and 2 of 15
+  pairs, 120 moments reads 0.0409 against 0.0531 and 15 of 15, all 1200 reads
+  0.0254 against 0.0483. Everything this entry says about amplitude was measured
+  at the thin end through the mean, so it bounds what a thin badly-reduced corpus
+  could see and not what the camera has.
+
+  **One consequence for the shipped code, for whichever stage takes it up**:
+  `seam::measure` and the band's `off_epi` update average a population they
+  should be filtering, and on the GPU that is one comparison against
+  `held.off_epi` before the exponential average.
 
   What ships is `band::Table` at `Table::REST`: 128 numbers in the `Reframe`
   block, added to the band's own along-seam term before projection on the

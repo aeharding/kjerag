@@ -219,18 +219,39 @@ fn fit(options: &Options) -> Fallible<()> {
         write(&table, out)?;
     }
     if let Some(dump) = &options.dump {
-        spill(&captures, dump)?;
+        spill(&captures, dump, options, &pose)?;
     }
     Ok(())
 }
 
 /// Every reading behind every number above, so a claim about this corpus can
 /// be re-checked without a second decode.
-fn spill(captures: &[Capture], dump: &Path) -> Fallible<()> {
+fn spill(captures: &[Capture], dump: &Path, options: &Options, pose: &SeamFit) -> Fallible<()> {
     if let Some(parent) = dump.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut text = String::from("capture,phi_deg,left_deg\n");
+    let mut text = format!(
+        "# kjerag-spike --bin table, {} places x {} frames, {} azimuths, gate {}\n\
+         # pose: roll:{} yaw:{} pitch:{} cx:{} cy:{}\n\
+         # REDUCTION: mean. `seam::measure` averages each azimuth's frames, and that\n\
+         # population is heavy tailed, so these rows carry the reduction's scatter and\n\
+         # not only the camera's field. They are enough to re-check what a table is\n\
+         # worth on top of five terms; they are NOT enough to ask whether the field\n\
+         # reproduces across flights (docs/research/stage9.md 4.5).\n\
+         capture,phi_deg,left_deg\n",
+        options.places,
+        options.frames,
+        options.patches,
+        match options.gate {
+            Some(mads) => format!("{mads:.1} scatters"),
+            None => "off".to_owned(),
+        },
+        pose.roll_deg,
+        pose.yaw_deg,
+        pose.pitch_deg,
+        pose.cx_px,
+        pose.cy_px,
+    );
     for capture in captures {
         for reading in &capture.left {
             text.push_str(&format!(

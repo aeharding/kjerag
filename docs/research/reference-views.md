@@ -109,12 +109,14 @@ add new owner references here with date, category, and status.
   table reaches on one is +1.25% (docs/research/stage9.md). The refusal carries a size: a static
   per-azimuth field above 0.02 to 0.06 deg (0.37 to 1.1 view px here) is excluded, below 0.02 is
   not.
-  **What DOES reproduce is the five-term field itself, and the layer-2 preflight probes measured
-  it at this very view**: with a five-term field fitted on the Jul-14 flight and held out, the
+  **What DOES reproduce is the five-term field itself**, on nine captures of two cameras at full
+  reading density (layer-2 preflight, `research/layer2-preflight`): fitted on other flights only
+  it takes the pooled along-seam leftover 0.0536 -> 0.0211 deg on this camera, 9 of 9 improved.
+  Measured at this very view: with a five-term field fitted on the Jul-14 flight and held out, the
   GOOD view's along-seam median magnitude goes **1.30 -> 0.07 view px** with the epipolar median
-  unmoved, and the BAD view goes 1.43 -> 1.06. That is a per-camera pose pooled across sessions,
-  which is layer 2, not a per-azimuth table. Read stage9.md 4.5 before quoting any "does not
-  reproduce" line from that document.
+  unmoved, and the BAD view 1.43 -> 1.06. That is a pose-order field pooled per camera, which is
+  layer 2, not a per-azimuth table. stage9.md 4.5 withdraws that document's "does not reproduce"
+  sentences: they were the mean reduction, not the camera.
 
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=127.56 pitch=-2.43 fov=33.95 lock=1`
