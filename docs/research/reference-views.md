@@ -63,7 +63,7 @@ caveat in the Motion section, which is the same trap at a smaller size.
   along-seam plateau at 17.21 px (0.3362 deg) out to +0.47 deg and down to 0.09 px by +1.41, with
   the handover bracketed inside +24 to +72 px, 0.94 degrees of view. `null=1` holds both arms and
   reads exactly zero at every probe on every frame; `mode=plant` yaws the second arm 0.05 and
-  0.10 deg and reads the expected -2.534 and -5.068 px back to within 0.023 px, every band,
+  0.10 deg and reads the expected -2.534 and -5.068 px back to within 0.024 px, every band,
   ratio 1.9948 to 1.9969.
   READ THE `+0` STEP RMS AS ONE FRAME AND NOT AS A FLOOR (2026-08-06, this rebaseline). #165
   reported that number falling 0.0773 to 0.0099 across the lock change, an eight-fold improvement
