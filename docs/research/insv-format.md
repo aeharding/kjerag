@@ -2027,7 +2027,7 @@ nothing measured here asks for one.
 | --- | ---: | --- |
 | `accel_seconds` | 1.0 s | the IMU runs at **997 Hz** and a paramotor engine at about 80, so the raw signal is mostly vibration: the raw magnitude runs 0.69 to 1.63 g between the 10th and 90th percentile and the same signal smoothed over a second runs 0.95 to 1.05 |
 | `tilt_seconds` | 20 s | it exists to cancel gyroscope bias, and it settles at `tilt_seconds * bias`. The quietest 10 s of capture A reads **0.25 deg/s**, so 20 s is worth 5 degrees at the worst and about 1 at the bias actually seen in flight. Longer rejects turns better and settles further off |
-| `yaw_seconds` | 3 s | the one number that is a judgement about flying. Measured on capture A: at 3 s the view's worst heading swing inside a second is 29 degrees against 103 unstabilized, and it still follows 946 degrees of real turning a minute against 986 unstabilized. At 10 s the swing is 16 but the turning followed drops to 697, which is a view that fights a deliberate turn |
+| `yaw_seconds` | infinite | the one number that is a ruling rather than a measurement (owner, 2026-08-06): the lock holds the world, so none of the heading reaches the picture and the drift left in it is the gyroscope's own, about 3 degrees a minute. The sweep that chose the 3 s this replaced still runs and still prices a follow. On capture A, 3 s takes the view's worst heading swing inside a second to 29 degrees from 103 unstabilized while still following 946 degrees of real turning a minute against 986; on the July 14 capture the same constant takes the swing only to 178.6 from 239.9 and follows 986.8. A follow that leaves nine tenths of the turning in the picture is what the owner met, and against a Studio export of that window the locked view swept 405 deg/min where Studio's held to 2 |
 | `trust_g` | 0.05 to 0.20 | an accelerometer cannot tell gravity from a turn: in a 45 degree bank the specific force is 1.41 g and points along the aircraft's own vertical. Outside the window it is not believed at all |
 
 The IMU rate is **997 Hz on the X4 Air and 500 on a ONE X2**, which is 1.8
@@ -2053,6 +2053,12 @@ frame and then left alone, which is the fair comparison and is also why they
 stop finding one. The 5.88 degree mean at 1043 s is the coordinated-turn
 lean the filter cannot remove and does not claim to: that stretch is a
 wingover.
+
+Read against the heading follow that shipped until 2026-08-06. The statistic
+is a roll and a locked yaw cannot move it, but each row was read at a fixed
+`yaw=` in the stabilized frame, whose zero moved with the lock, so the
+frames-found column is about a different stretch of sphere now. Re-measure
+before comparing a new number with one of these.
 
 #### The negative control
 
@@ -2336,7 +2342,11 @@ the zero crossings. The wandering phase that made apparent gravity look
 right was that selection and not the flying: refitting the phase against
 the body's own heading instead of the view's moves it by a few degrees
 (172 against 170, -77 against -77, 84 against 88), so it was never a
-coordinate error either.
+coordinate error either. Those three pairs were read while the view
+followed the slow heading and so sat a few degrees off the body; with the
+lock world-fixed since 2026-08-06 the same refit moves the phase by however
+far the aircraft has turned since the file opened, which is the frames
+disagreeing and not the fit.
 
 **The injection control passed anyway, and that is the lesson.** Tilts of
 1, 2 and -1 degrees read back as 0.97, 2.01 and -1.02, on a stretch whose

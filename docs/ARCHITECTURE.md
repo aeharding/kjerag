@@ -661,10 +661,14 @@ cursor while the picture turns underneath it.
 The filter is complementary and about sixty lines: integrate the gyroscope,
 turn the estimate towards the accelerometer with a 20 s time constant, and
 believe the accelerometer only while its magnitude is near 1 g, because a
-banked turn is not gravity. Roll and pitch are then locked completely; yaw is
-**high passed** with a 3 s constant instead, so a swing is cancelled and a
-deliberate turn is not. Every constant is measured, and the tables are in
-docs/research/insv-format.md 8.5.
+banked turn is not gravity. Roll, pitch and yaw are then **all locked**: the
+view is pointed at a direction in the world and the aircraft turns underneath
+it, which is what Insta360 Studio does (owner ruling, 2026-08-06). The three
+finite constants are measured and the tables are in
+docs/research/insv-format.md 8.5; the yaw one is infinite and is a ruling
+rather than a measurement. What the lock cannot hold is the gyroscope's own
+yaw drift, about 3 degrees a minute on this footage, because gravity does not
+observe heading and these cameras record no magnetometer.
 
 Verification without a Studio export: physics in the footage itself.
 `kjerag-spike --bin horizon` renders runs of frames through the app's own

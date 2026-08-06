@@ -297,12 +297,12 @@ struct Point {
     /// rather than from where the stabilized frame's own zero is.
     ///
     /// The two are not the same question and issue #45 turned on it. The
-    /// frame the camera reads its yaw in is the one the heading follow has
-    /// carried, and the follow lags the body by its own time constant times
-    /// the turn rate, which on this flying is tens of degrees. So a defect
-    /// bolted to the aircraft reads at a phase that wanders with the turning
-    /// when it is fitted against `yaw`, and at a fixed one when it is fitted
-    /// against this.
+    /// frame the camera reads its yaw in is held against the world, so it
+    /// sits at whatever the aircraft has turned through since the file
+    /// opened, which on this flying reaches a whole revolution inside a
+    /// minute. So a defect bolted to the aircraft reads at a phase that
+    /// wanders with the turning when it is fitted against `yaw`, and at a
+    /// fixed one when it is fitted against this.
     body_yaw: f64,
     /// The horizon's angle in the picture, degrees, from [`skyline`].
     angle: f64,

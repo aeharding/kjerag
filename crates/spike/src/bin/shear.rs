@@ -98,6 +98,16 @@
 //! band works in the body's frame and the bands work in the view's. A reading here that has moved is a question about
 //! what the view is now looking at before it is a question about the band.
 //!
+//! **The lock going world-fixed on 2026-08-06 is that same caveat at its
+//! largest.** The stabilized frame's zero stopped following the aircraft's
+//! slow heading, and at `time=36.303` on this file the old zero and the new
+//! one are 157 degrees apart, so the command above points somewhere else
+//! entirely: `yaw=160.63` is the old `yaw=3.78`, to about 1.6 degrees. The
+//! four rows have to be read again before they are compared with anything.
+//! What did not move is the floor: `null=1` reads exactly 0.000000 on every
+//! band either side of the change, because the null holds both arms and has
+//! no view in it at all.
+//!
 //! The `seam=` in that command is not decoration either: fitted from the file
 //! instead, the same view reads 0.027 deg at `-150` rather than 0.366, because
 //! what the band applies is what the calibration left it.

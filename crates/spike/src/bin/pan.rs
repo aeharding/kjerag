@@ -25,10 +25,18 @@
 //! in: the bearing of the middle of the output after the lock's own rotation
 //! is undone, which is `body_from_world * camera_rotation` applied to
 //! straight ahead. Zero is the camera's own nose. A drag to 60 degrees that
-//! reads 60 and stays there is a view that held; one that decays back to zero
-//! is the view being carried by the heading follow; one that steps to zero
-//! between two reads is something else entirely, and telling those two apart
+//! reads 60 and stays there is a view held by a camera that is not turning;
+//! one that steps to zero between two reads has been reset by an event, which
+//! is the defect this was written for, and telling that apart from the rest
 //! is the whole point of reading it every quarter second rather than twice.
+//!
+//! **This number wanders on its own now, and that is the lock working.** With
+//! the lock world-fixed since 2026-08-06 the view holds a direction in the
+//! world, so the moment the aircraft turns, where the view sits relative to
+//! its nose turns with it: on real footage this column walks by whatever the
+//! flying did and does not come back. What it cannot do any more is decay
+//! smoothly towards zero, which is what the heading follow used to look like
+//! here, so a smooth decay is now a finding rather than the design.
 //!
 //! Nothing is stubbed: the frames are decoded, the orientation comes off the
 //! trailer, and the composition is the one the shader is handed.
@@ -131,10 +139,10 @@ fn main() -> Fallible<()> {
     }
     println!(
         "\noff the nose is where the middle of the output looks in the camera body's own \n\
-         frame, in degrees: 0 is the camera's own nose and the drag put it at {:.0}. A view \n\
-         that holds keeps its number; one the heading follow is carrying decays back to 0 \n\
-         smoothly over a few seconds; one that steps back between two reads was reset by an \n\
-         event. Elapsed {:.0} s of wall clock.",
+         frame, in degrees: 0 is the camera's own nose and the drag put it at {:.0}. The \n\
+         lock is world-fixed, so this number walks by whatever the aircraft turns and does \n\
+         not come back; what it must not do is step between two reads, which is a view \n\
+         reset by an event. Elapsed {:.0} s of wall clock.",
         after.unwrap_or(f64::NAN),
         started.elapsed().as_secs_f64(),
     );
