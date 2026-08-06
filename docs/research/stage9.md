@@ -54,10 +54,12 @@ travels with the calibration.
 
 - **Applied before projection on the unwarped body ray.** `Reframe::bent` adds
   it to the band's own along-seam term; `blend_bent` gives lens 1 the sum whole
-  and lens 0 none of it, which is how `SeamFit` is applied. Blend weights are
-  computed from the unwarped ray and are not touched: measured, the traced 50/50
-  contour is identical with and without a planted table (arc 171.0 to -117.3 deg
-  in every run).
+  and lens 0 none of it, which is how `SeamFit` is applied. The **handover
+  fraction** is computed from the unwarped ray and is not touched: measured, the
+  traced 50/50 contour is identical with and without a planted table, arc 171.0
+  to -117.3 deg in every run. The **weight** is that fraction times the bent
+  landing's `depth`, which is 1 except within a bend's reach of a lens's image
+  circle, so the two are not the same statement - see 7.
 - **Zero is exactly identity.** `Table::REST` makes `Reframe::tabled` return the
   ray it was given and `Bend::along` the zero vector, by an equality and not by
   arithmetic that ought to come out at zero.
@@ -76,17 +78,29 @@ travels with the calibration.
   answers what is *still* wrong. Without that the same correction would be asked
   for on every session.
 
-Cost: two loads and a mix per fragment, unconditional. Measured under live
-decode at 2560x1440 (`--bin playback`, 20 s, three runs each): **8.10, 8.10,
-8.12 ms per redraw on `origin/main` against 8.14, 8.12, 8.15 on this branch**,
-so 0.04 ms, half a percent of a 16.6 ms frame. There is no per-frame estimation:
-the table is written once at open and never recomputed.
+Cost: two loads and a mix per fragment, unconditional. There is no per-frame
+estimation - the table is written once at open and never recomputed - so what is
+left is a lookup, and it does not measure. Under live decode at 2560x1440
+(`--bin playback`), on a quiet box, three runs each: 8.10 / 8.10 / 8.12 ms per
+redraw on `origin/main` against 8.14 / 8.12 / 8.15 on this branch, which is
+**0.04 ms, 0.24 percent of a 16.6 ms frame** and half a percent of the pass
+itself. Repeated later under load as eight interleaved A/B pairs, the paired
+difference is **+0.06 ms median with a 95 percent interval of -1.66 to +0.72**:
+the box's own noise is twenty times the effect, so the quiet figure is an upper
+bound rather than a reading.
 
 ## 4. The corpus, and the verdict
 
 `kjerag-spike --bin table` measures it. Every run below is 12 places by 4
 frames, 72 azimuths, one pose for every capture, and the readings are gated by
 the along-seam plausibility test described in 5.
+
+**The readings themselves are committed**, at `docs/research/stage9/along-seam-
+leftovers.csv`: 299 rows of capture, azimuth and what the pose left, in degrees.
+It is a derived table with no frame of anybody's footage in it and no capture
+time, and it is here so that the verdict below can be re-checked without a
+six-flight decode. The captures are named by date and clock only, which is how
+this repo's registry already names them.
 
 ### The owner's X4 Air, six flights from April to August
 
@@ -118,63 +132,122 @@ at the owner's two May-01 crossings reads the along-seam median magnitude at
 Order 2 is what the pass already applies. Everything above it is worth
 **3.7 percent** of the leftover.
 
-**Whether it reproduces**, which is the premise the whole table rests on. At an
-azimuth two captures both read, how far apart are they, against how much either
-of them varies round the ring:
+**Whether it reproduces**, which is the premise the whole table rests on. At the
+azimuths two captures both read - matched on the patch index, because a ring's
+azimuths are exact multiples of its own spacing only up to the float that
+carried them - two numbers per pair: the standard deviation of their difference,
+and the pooled standard deviation of the two captures' own readings there.
 
-| | apart rms | own spread |
+| over the 15 pairs | as they stand | with each capture's own five terms off |
 | --- | ---: | ---: |
-| the 15 pairs of captures | 0.070 to 0.166 | 0.064 to 0.141 |
+| apart, deg | 0.076 to 0.170 | 0.070 to 0.167 |
+| spread, deg | 0.064 to 0.123 | 0.048 to 0.107 |
+| correlation, all pairs pooled | **+0.194** | **-0.014** |
 
-**Two flights disagree at the same azimuth by more than either flight varies
-round the whole ring.** Binned at 15 degrees with the low orders taken off, the
-azimuth-to-azimuth structure of the cross-flight median is 0.0181 deg against
-0.0210 deg of cross-flight scatter at one azimuth: the signal is under its own
-noise.
+**Taking each flight's own five terms off costs `spread` 6 to 31 percent and
+costs `apart` 1 to 7.** What a flight varies by round the ring is a sixth
+low-order; how far two flights sit apart at one azimuth is not. Pooled over
+every pair, the two captures' readings correlate at **+0.194** as they stand and
+**-0.014** once each flight's own five terms are gone: all of the agreement
+between flights lives in the orders `band::Along` already applies, and nothing
+above them is shared between flights at all. That is the premise failing,
+measured on the quantity a table would actually be built out of.
+
+*An earlier draft said "two flights disagree at one azimuth by more than either
+varies round its whole ring". That compared a difference's magnitude against one
+capture's root mean square about zero at shared azimuths, which is neither a
+variation, nor "either", nor the whole ring. The correlation above is the same
+point measured properly, and it is stronger.*
 
 **Held out**, which is the test that decides. Each capture predicted by a table
 fitted on the other five, at every kernel width:
 
-| kernel, deg | fitted | held out |
+| kernel, deg (half-width) | fitted | held out |
 | ---: | ---: | ---: |
 | **no table** | 0.0828 | **0.0828** |
 | 4 | 0.0757 | 0.0872 |
-| 6 | 0.0761 | 0.0860 |
 | 8 | 0.0771 | 0.0845 |
-| 10 | 0.0780 | 0.0840 |
 | 12 | 0.0786 | 0.0836 |
-| 16 | 0.0795 | 0.0831 |
 | 24 | 0.0802 | 0.0824 |
 | 36 | 0.0807 | 0.0819 |
+| 48 | 0.0812 | **0.0818** |
+| 60 | 0.0815 | 0.0819 |
+| 90 | 0.0823 | 0.0824 |
 
-**A table costs the flight it was not fitted on at every width that could
-resolve anything.** It stops costing only at 36 degrees, where it buys 1.1
-percent - and a 36-degree kernel round a 360-degree ring can barely carry more
-than the two cycles the pass already applies, so the table converges on "nothing
-new" exactly where it stops doing harm. The first column improves monotonically
-as the kernel narrows and the second gets worse in step, which is the stage-7
-striping lesson written as a number: a field free to follow its own readings'
-noise always looks better on them.
+The first column improves monotonically as the kernel narrows and the second
+gets worse in step, which is the stage-7 striping lesson written as a number: a
+field free to follow its own readings' noise always looks better on them.
+`SMOOTH_DEG` is a **half-width**, so the 12 degrees the constant carries is a
+24-degree window; the sweep runs to 90 so that its best number is a ceiling
+rather than the edge of the range.
+
+**The bound.** The best any static table reaches on a capture it was not fitted
+on is **0.0818 deg at a 48-degree half-width, +1.25 percent** of the 0.0828 it
+would have read with none. That is the most this corpus could ever have paid
+for a per-azimuth field at any setting, and it is a fortieth of the along-seam
+error the owner can see.
+
+**What this corpus could have found, order by order.** A refusal needs the size
+of what it can exclude. A field of a known order and size is added to every
+capture's readings - the same field in all of them, which is what static means -
+and the whole leave-one-out test is run again. The criterion is not "did it
+help", because a noiseless plant helps a little at any size; it is how much of
+the planted field's own **power** comes back on the captures the table was not
+fitted on, over what the same test recovers with nothing planted.
+
+| order | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| half its power back at, deg | never | never | 0.020 | 0.030 | 0.060 | 0.040 | 0.030 | 0.020 |
+
+Orders 1 and 2 never come back, and that is correct rather than a failure: they
+are a pose, `Table` has them levelled out of it by construction, and
+`band::Along` applies them itself. Nothing under **0.0185 deg** is tried at any
+order - that is the field whose power equals the improvement this test makes out
+of a corpus with nothing planted in it at all, so a smaller claim would be a
+ratio of two numbers the same size.
+
+**So the honest bound is: this corpus excludes a static per-azimuth field of
+order 3 and up at amplitudes over about 0.02 to 0.06 degrees, and says nothing
+below 0.02.** At the owner's May-01 GOOD view 0.02 deg is 0.37 view px and 0.06
+is 1.1, against an along-seam error of 1.30. A static field of a few tenths of a
+pixel is compatible with everything measured here; one large enough to be most
+of the defect is not.
 
 ### A second camera: the ONE X2, three captures of one evening
 
 The starved camera of issue #130, whose factory extrinsics are 2.8 degrees out,
 is the best case for a table if there is one.
 
-| capture | azimuths | factory | under the pose |
-| --- | ---: | ---: | ---: |
-| 2025-10-18 18:44 | 52 | 2.431 | 0.090 |
-| 2025-10-18 19:13 | 36 | 2.329 | 0.036 |
-| 2025-10-18 19:36 | 58 | 2.515 | 0.069 |
+| capture | azimuths | factory | under the pose | gate refused |
+| --- | ---: | ---: | ---: | ---: |
+| 2025-10-18 18:44 | 52 | 2.431 | 0.090 | 14 |
+| 2025-10-18 19:13 | 36 | 2.329 | 0.036 | 12 |
+| 2025-10-18 19:36 | 58 | 2.515 | 0.069 | 9 |
 
 Orders: 0.0658 at order 0, **0.0518 at order 2**, 0.0489 at order 7 - 5.6
-percent above what the pass applies. Held out: 0.0692 at its best widths, 10
-and 12 degrees, against a **0.0711** no-table baseline - 2.7 percent, and the
+percent above what the pass applies. Held out: 0.0692 at its best widths, 10 and
+12 degrees, against a **0.0711** no-table baseline - **+2.7 percent**, while the
 first width that resolves anything (4 degrees) is already worse than nothing at
-0.0713. Its order-3-and-up structure does reproduce
-(0.0127 deg of signal against 0.0116 of noise) but it is one evening's three
-captures, so it is not established as a property of the unit, and it is a
-twentieth of the along-seam error either way.
+0.0713. Its order-3-and-up structure does reproduce (0.0127 deg of azimuth
+structure in the cross-capture median against 0.0116 of cross-capture scatter),
+but it is one evening's three captures an hour apart, so it is a property of a
+scene and an evening as much as of a unit, and 0.013 deg is a twentieth of the
+along-seam error either way.
+
+**And on this camera the answer turns on the gate, which the reader has to
+see.** With the along-seam plausibility gate off, the X2's three captures
+**support** a table: no table 0.2890 deg, best held out 0.2602 at an 8-degree
+half-width, **+10.0 percent**. With it on they do not, at +2.7 percent and worse
+than nothing at any width that resolves much. The gate's justification is
+physical and predeclared (5 below), and what it removes on this camera is 12 to
+14 readings per capture with an ungated tail past two degrees - which is
+precisely what an ungated table would be soaking up. But the sentence above
+depends on it, and a reader who rejects the gate should read the X2 as a
+marginal positive rather than a refusal.
+
+**The X4 Air corpus, which is the one that decides, does not turn on the
+gate.** Ungated it reads no table 0.2986 and best held out 0.2985 at a
+90-degree half-width: **+0.03 percent**. Gated, +1.25. Both are nothing.
 
 **The verdict: no table is fitted, for either camera.** `Table::REST` ships.
 
@@ -198,8 +271,16 @@ table=<planted>` at the May-01 GOOD view, per site:
 
 | planted | shared accepted sites | perp read / planted | epi moved |
 | --- | ---: | ---: | ---: |
-| 0.05 deg, 6 cycles | 13 | -1.259 | +0.023 src px (MAD 0.043) |
-| 0.10 deg, 6 cycles | 11 | -1.068 | +0.006 src px (MAD 0.057) |
+| 0.05 deg, 6 cycles | 13 of 20 | -1.259 | +0.023 src px (MAD 0.043) |
+| 0.10 deg, 6 cycles | 11 of 20 | -1.068 | +0.006 src px (MAD 0.057) |
+
+Those counts are the sites **accepted in both runs**, not the sites the run
+traced: 37 are traced, 19 to 20 accepted, and the plant moves a site's own
+correlation, so a few accept in one arm and not the other. Two of them do the
+opposite - they re-lock onto a different feature under the plant and are
+accepted at a value the median then hides - which is why the slope is fitted
+through the shared sites and reported with its scatter rather than read off a
+median difference.
 
 The sign is the one the geometry predicts: a table that displaces lens 1's ray
 by `+t` moves the offset the correlation reads by `-t`. **The epipolar axis does
@@ -207,8 +288,18 @@ not move**, which is the invariant the two-axis split is built on. The traced
 50/50 contour does not move either.
 
 So an order-6 field at half the size of the residual being looked for is read
-back at nine tenths of itself with a twentieth of a degree of scatter. What the
-corpus was asked for and did not have is well inside that.
+back at nine tenths of itself with a twentieth of a degree of scatter.
+
+**What a plant of this kind cannot do**, which the `feat/warp` charter said
+plainly about its own and which holds here: the delivered lens planes are one
+physical capture, so putting a field into the map does not make a second capture
+of a camera that really has one. It exercises the lookup, the axes, the units,
+the sign, the application law and both instruments' sampling. It does **not**
+validate that a fitted table would correct a real camera, and it cannot on its
+own say how small a real field would have to be to escape notice. That second
+question is what the order-by-order power scan in 4 is for, and its answer -
+0.02 to 0.06 degrees depending on order - is the bound the refusal actually
+carries.
 
 **The gate.** The along-seam leftovers are heavy-tailed: ungated, the six
 flights read 0.299 deg rms with a maximum of 2.47 deg, while the median absolute
@@ -235,11 +326,24 @@ per capture. It is a tolerance filter on a physical argument, not a classifier.
   parallax, it does not reproduce across flights (9 source px apart between May
   and April against 1.1 along the seam, #155), and the band answers it per
   frame.
-- **Whether the remaining 0.07 degrees is reachable at all.** It is 1.7 times
-  one reading's own repeatability. What is left after the pose and the five
-  terms may be per-session, may be elevation-dependent, or may be the
-  correlation's floor. This stage says only that it is not a static function of
-  azimuth.
+- **A small static field.** The refusal has a size on it and not more: this
+  corpus excludes a static per-azimuth field of order 3 and up above about 0.02
+  to 0.06 degrees of amplitude, and says nothing at all below 0.02, which at the
+  owner's May-01 GOOD view is 0.37 view px. "Not a static function of azimuth"
+  means "not one this corpus could have found", and what it could have found is
+  in 4.
+- **Whether the remaining 0.07 degrees is reachable at all.** What is left after
+  the pose and the five terms may be per-session, may be elevation-dependent, may
+  be a static field under the bound above, or may be the correlation's floor.
+- **Whether the freeze the protocol asks for was kept.** It was not, and this is
+  the honest record of it: item 4 of the controlled-capture protocol in 7 says to
+  freeze the support, taper, fit parameters and condition rule **before** opening
+  the hold-out partition. The kernel width was swept against the hold-out column
+  instead, and a first draft of this document then read the best width off that
+  sweep and called it optimal. Nothing turns on it - every width including the
+  best is at or worse than no table, so the sweep chose nothing - but a corpus
+  that had said yes would have needed the whole measurement taken again with the
+  width fixed first.
 
 ## 7. Rules a later applied candidate still inherits
 
@@ -249,16 +353,50 @@ than by prose:
 - A deterministic camera-frame displacement, with a declared smooth taper to
   exactly zero outside its support, fitted from measurement and never supplied
   per view or per clip.
-- Applied before projection on the unwarped body ray; blend weights stay
-  functions of the unwarped ray.
+- Applied before projection on the unwarped body ray. **The handover fraction**
+  stays a function of the unwarped ray; the weight that reaches the array is that
+  fraction times the **bent** landing's `depth`, so a bend that carries a ray past
+  a lens's image circle does move that lens's weight. `depth` is 1 everywhere but
+  within a bend's reach of the rim, and this predates stage 9 and is inert while
+  the table is at rest, but it is not the invariant the charter's prose claimed
+  and a later stage that widens the field inherits it.
 - No arbitrary per-direction table with nearest-neighbour fill. A field with
   holes in it is the mechanism that made stage 5 scallop and stage 8 stripe, and
   it is why an unmeasured direction here is zero rather than its neighbour's.
 - It may not widen the blend or apply photometry to conceal a registration
   error.
-- Accepted on the area it changes, not at the seam boundary alone.
 
-**One correction to that charter.** It concluded from a static read of
+**The acceptance battery, in full.** This stage's table never reached it,
+because it never had a field to apply. A later one that does has to clear all of
+it, and the list is the charter's rather than this document's:
+
+1. **Improve both May crossings without trading one for the other.** The GOOD
+   and BAD views at 50.117 s are the same instant on the same file, and a field
+   that fixes one at the other's expense is the defect moved rather than
+   removed. That is the whole reason the pair is in the registry.
+2. **Report both April views separately**, never averaged into the May pair.
+3. **Preserve the one-lens paths.** A capture with one lens stream has no seam,
+   and nothing here may reach its picture
+   (`a_file_with_one_lens_stream_is_still_drawn_exactly_as_stage_one_drew_it`).
+4. **Observe the no-fold and cap invariants.** The along-seam axis does not ask
+   the band for room because its Jacobian is off-diagonal and its determinant
+   stays exactly 1; a field that ever gains a component across the seam loses
+   that and has to be clamped like the epipolar one.
+5. **Pass `step`, `seam`, the one- and two-pixel same-content Weber excess, and
+   `colour`'s interior coherence, across the whole support** - the area the field
+   changes, not the seam boundary alone. The interior metric is the one the
+   acceptance layer was blind to before stage 8 (reference-views.md, ANTI-
+   ACCEPTANCE): main reads 0.03 percent and a rejected build read 1.01.
+6. **Flicker and a credible 16.6 ms frame-budget story remain release gates.**
+
+**The controlled-capture protocol, item 4.** Split by physical feature *and* by
+capture before fitting; fit on the development partition; **freeze the support,
+taper, axes, fit parameters and condition rule before the hold-out partition is
+opened**; no held-out feature may be used to choose a site, tune a threshold or
+refit either model. This stage swept the kernel width against the hold-out
+column and is recorded as having broken that rule in 6.
+
+**Two corrections to that charter.** First, it concluded from a static read of
 Insta360's renderer that the maker applies "a content-adaptive *fusion* stage
 after calibrated projection, not a camera-frame geometric displacement field",
 and told Kjerag not to imitate it. Later work established that Insta360 **does**
@@ -267,5 +405,9 @@ the UV lookups. That does not change any rule above - a per-frame flow field is
 the band's territory and not this table's - but the charter's inference about
 what the maker does is withdrawn.
 
-The charter's within-May "epipolar drift" finding is also withdrawn: it was an
-instrument artifact and #155 reversed it.
+Second, the withdrawn "within-May epipolar drift" belongs to **#155 and not to
+this charter**: it was that PR's own first reading, and that PR's later work
+retracted it once the runs behind it were found to be reference-withheld or
+three to six sites wide (ROADMAP, the #155 entry). It is named here because a
+reader arriving at stage 9 will meet it in the record, not because the charter
+made it.

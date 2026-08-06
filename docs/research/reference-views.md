@@ -105,9 +105,11 @@ add new owner references here with date, category, and status.
   0.03 to 0.04. That is 0.071 and 0.088 degrees, and it agrees with `--bin table`'s reading of
   the same residual round the whole ring on six flights (0.064 to 0.128 deg rms per capture).
   **Stage 9 refused to fit a per-azimuth table for it**: the part above what the pass already
-  applies is 3.7% of the leftover and does not predict a held-out flight (docs/research/stage9.md).
-  Any later candidate for these two numbers has to be a per-session or per-elevation channel,
-  not a static function of azimuth.
+  applies is 3.7% of the leftover, it does not predict a held-out flight, and the best any static
+  table reaches on one is +1.25% (docs/research/stage9.md). The refusal carries a size: a static
+  per-azimuth field above 0.02 to 0.06 deg (0.37 to 1.1 view px here) is excluded, below 0.02 is
+  not. Any later candidate for these two numbers is a per-session or per-elevation channel, or a
+  static field of a few tenths of a pixel that this corpus cannot see.
 
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=127.56 pitch=-2.43 fov=33.95 lock=1`

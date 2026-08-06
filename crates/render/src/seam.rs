@@ -304,6 +304,7 @@ fn sample(
     step: f64,
 ) -> Grid {
     let mut taps = Vec::with_capacity(((2 * half.0 + 1) * (2 * half.1 + 1)) as usize);
+    let moved = lens == 1 && !reframe.table().is_rest();
     for i in -half.0..=half.0 {
         for j in -half.1..=half.1 {
             let (a, b) = (i as f64 * step, j as f64 * step);
@@ -312,9 +313,14 @@ fn sample(
             }));
             // Through the table the picture is drawn with, if there is one:
             // a ring read past a correction that is already being applied
-            // would ask for it a second time ([`Reframe::tabled`]).
-            let ray = reframe.tabled(lens, ray.map(|c| c as f32));
-            let landing = reframe.project(lens, ray);
+            // would ask for it a second time ([`Reframe::tabled`]). The test
+            // for one is hoisted out of the loop: it compares every direction
+            // of the table, and this loop runs thousands of times per patch.
+            let ray = ray.map(|c| c as f32);
+            let landing = match moved {
+                true => reframe.project(lens, reframe.tabled(lens, ray)),
+                false => reframe.project(lens, ray),
+            };
             taps.push(
                 landing
                     .inside
@@ -1104,7 +1110,13 @@ fn predicted(
 /// correlated on, the kernel that builds the table is far wider than the five
 /// degrees between azimuths, and a table entry that rested on one reading
 /// would be shrunk to nothing by the ridge whatever weight it carried.
-pub fn left(readings: &[Reading], fit: &SeamFit, lenses: &[Lens], frame: Size) -> Left {
+pub fn left(
+    readings: &[Reading],
+    fit: &SeamFit,
+    lenses: &[Lens],
+    frame: Size,
+    gate: Option<f64>,
+) -> Left {
     let all: Vec<super::band::Leftover> = predicted(readings, fit, lenses, frame)
         .into_iter()
         .map(|(at, axes)| super::band::Leftover {
@@ -1113,9 +1125,16 @@ pub fn left(readings: &[Reading], fit: &SeamFit, lenses: &[Lens], frame: Size) -
             weight: 1.0,
         })
         .collect();
+    let Some(mads) = gate else {
+        return Left {
+            refused: 0,
+            readings: all,
+            tolerance: f32::INFINITY,
+        };
+    };
     let middle = middle_of(all.iter().map(|l| f64::from(l.perp)));
     let scatter = middle_of(all.iter().map(|l| f64::from(l.perp) - middle).map(f64::abs));
-    let tolerance = (GATE_MADS * scatter).max(GATE_FLOOR_DEG.to_radians()) as f32;
+    let tolerance = (mads * scatter).max(GATE_FLOOR_DEG.to_radians()) as f32;
     let kept: Vec<super::band::Leftover> = all
         .iter()
         .copied()
@@ -1141,6 +1160,10 @@ pub struct Left {
 /// How many times its own scatter a reading may sit from its capture's middle
 /// before it is a correlation on the wrong feature rather than a camera.
 ///
+/// The number [`left`]'s callers pass unless they are deliberately measuring
+/// what the gate does, which `--bin table gate=0` is for: a conclusion that
+/// turns on a filter has to be shown turning on it.
+///
 /// **A tolerance filter on a physical argument, not a classifier**, and the
 /// same argument `--bin crossing`'s along-seam gate is built on: a capture's
 /// calibration does not change while it plays and no distance can reach this
@@ -1149,14 +1172,16 @@ pub struct Left {
 /// the kept readings sit 0.054 degrees from their own middle on average and
 /// the refused ones reach 2.5, which is past the window the search even runs
 /// in (docs/research/stage9.md).
-const GATE_MADS: f64 = 4.0;
+pub const GATE_MADS: f64 = 4.0;
 
 /// The narrowest that tolerance may become, in degrees.
 ///
 /// A capture whose readings happen to agree closely must not thereby refuse a
-/// real one: this floor is above the whole along-seam residual a fitted pose
-/// leaves on any capture in the corpus, so it can only ever cut a reading no
-/// calibration could have produced.
+/// real one. It is the size of the along-seam residual itself - five of the
+/// six flights in the corpus read 0.064 to 0.084 degrees rms under their pose
+/// and the sixth reads 0.128 - so a reading this far from its own capture's
+/// middle is a whole residual away from it, and a reading twice as far again
+/// is what the gate is actually for (docs/research/stage9.md 5).
 const GATE_FLOOR_DEG: f64 = 0.10;
 
 /// The middle of a set of readings, which is a median and not a mean: one

@@ -38,9 +38,16 @@ use kjerag_meta::CalibrationSet;
 use kjerag_render::{Leftover, SeamFit, Size, Table, seam};
 use kjerag_spike::seam_fit;
 
-/// How wide a kernel the sweep tries, in degrees of azimuth. The shipped
-/// width has to be one of them or the report cannot say where it sits.
-const WIDTHS: [f32; 8] = [4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 24.0, 36.0];
+/// How wide a kernel the sweep tries, in degrees of azimuth, as half-widths:
+/// a kernel of `w` reaches `w` either side, so its window is `2w`.
+///
+/// It runs past any width a per-azimuth field could be interesting at, because
+/// the best number in the held-out column is the bound on what **any** static
+/// table could buy on this corpus, and a bound read off the edge of a sweep is
+/// a bound on the sweep.
+const WIDTHS: [f32; 11] = [
+    4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 24.0, 36.0, 48.0, 60.0, 90.0,
+];
 
 /// How many harmonic orders the structure table reports. Two is what the pass
 /// already applies, so anything this table is for lives above it.
@@ -102,9 +109,9 @@ fn observe(path: &Path, options: &Options) -> Fallible<Capture> {
 }
 
 /// The pose taken off every capture's ring, and what it leaves.
-fn subtract(captures: &mut [Capture], fit: &SeamFit) {
+fn subtract(captures: &mut [Capture], fit: &SeamFit, gate: Option<f64>) {
     for capture in captures {
-        let left = seam::left(&capture.readings, fit, &capture.lenses, capture.frame);
+        let left = seam::left(&capture.readings, fit, &capture.lenses, capture.frame, gate);
         capture.after = seam::rms(left.readings.iter().map(|l| f64::from(l.perp.to_degrees())));
         capture.refused = left.refused;
         capture.tolerance = f64::from(left.tolerance.to_degrees());
@@ -138,10 +145,14 @@ fn corpus_pose(captures: &[Capture]) -> Fallible<SeamFit> {
 
 fn fit(options: &Options) -> Fallible<()> {
     println!(
-        "plan:   {} places x {} frames, {} azimuths round the ring{}",
+        "plan:   {} places x {} frames, {} azimuths round the ring, gate {}{}",
         options.places,
         options.frames,
         options.patches,
+        match options.gate {
+            Some(mads) => format!("{mads:.1} scatters"),
+            None => "OFF".to_owned(),
+        },
         match options.through.is_rest() {
             true => String::new(),
             false => format!(
@@ -177,7 +188,7 @@ fn fit(options: &Options) -> Fallible<()> {
         pose.cx_px,
         pose.cy_px,
     );
-    subtract(&mut captures, &pose);
+    subtract(&mut captures, &pose, options.gate);
     for capture in &captures {
         println!(
             "read:   {:<40} {:>3} azimuths, along the seam {:.3} -> {:.3} deg rms under the \
@@ -190,18 +201,17 @@ fn fit(options: &Options) -> Fallible<()> {
             capture.tolerance,
         );
     }
-    let pooled: Vec<Leftover> = captures
-        .iter()
-        .flat_map(|c| c.left.iter().copied())
-        .collect();
+    let groups: Vec<Vec<Leftover>> = captures.iter().map(|c| c.left.clone()).collect();
+    let pooled: Vec<Leftover> = groups.iter().flatten().copied().collect();
     if pooled.is_empty() {
         return Err("no capture had a reading on its seam".into());
     }
     structure(&pooled);
-    reproduces(&captures);
+    reproduces(&captures, options.patches);
     let table = Table::of(&pooled, options.smooth);
     coverage(&table, &pooled, options.smooth);
     sweep(&captures);
+    power(&captures.iter().map(|c| c.left.clone()).collect::<Vec<_>>());
     if let Some(held) = &options.hold {
         held_out(&captures, held, options)?;
     }
@@ -295,51 +305,137 @@ fn basis(phi: f64, order: usize) -> Vec<f64> {
 /// Whether two captures read the same thing at the same azimuth, which is the
 /// premise the whole table rests on.
 ///
-/// Binned at the ring's own spacing and compared only where both captures have
-/// a reading: an azimuth one of them never correlated at says nothing about
-/// agreement.
-fn reproduces(captures: &[Capture]) {
+/// Two columns per pair, and the second is the one that matters. `apart` and
+/// `spread` are taken on the leftovers as they stand; `apart'` and `spread'`
+/// are taken with **each capture's own five terms removed first**, which is
+/// what `band::Along` already applies per session. A leftover that is a static
+/// per-azimuth property of the camera has to survive that removal; one that is
+/// only the low orders does not.
+fn reproduces(captures: &[Capture], patches: usize) {
     if captures.len() < 2 {
         return;
     }
     println!(
-        "\nagreement: the same azimuth read on two captures, in degrees along the seam. this is \n\
-         the premise: a leftover that does not reproduce is a scene and not a camera."
+        "\nagreement: the same azimuth read on two captures, in degrees along the seam. `apart` \n\
+         is the standard deviation of the difference and `spread` the pooled standard deviation \n\
+         of the two captures' own readings there; primed columns have each capture's own five \n\
+         terms taken off first, which is what the pass already applies per session."
     );
     println!(
-        "{:<20} {:<20} {:>7} {:>10} {:>10}",
-        "capture", "against", "shared", "apart rms", "spread"
+        "{:<17} {:<17} {:>7} {:>8} {:>8} {:>8} {:>8} {:>7}",
+        "capture", "against", "shared", "apart", "spread", "apart'", "spread'", "r'"
     );
+    let levelled: Vec<Vec<Leftover>> = captures.iter().map(without_pose).collect();
+    let (mut raw, mut clean) = (Vec::new(), Vec::new());
     for (index, one) in captures.iter().enumerate() {
-        for other in captures.iter().skip(index + 1) {
-            let shared = paired(one, other);
-            let apart = seam::rms(shared.iter().map(|(a, b)| a - b));
-            let spread = seam::rms(shared.iter().map(|(a, _)| *a));
+        for (other, them) in captures.iter().enumerate().skip(index + 1) {
+            let plain = paired(&one.left, &captures[other].left, patches);
+            let cut = paired(&levelled[index], &levelled[other], patches);
             println!(
-                "{:<20} {:<20} {:>7} {:>10.4} {:>10.4}",
+                "{:<17} {:<17} {:>7} {:>8.4} {:>8.4} {:>8.4} {:>8.4} {:>7.3}",
                 short(&one.path),
-                short(&other.path),
-                shared.len(),
-                apart,
-                spread,
+                short(&them.path),
+                plain.len(),
+                deviation(plain.iter().map(|(a, b)| a - b)),
+                pooled_deviation(&plain),
+                deviation(cut.iter().map(|(a, b)| a - b)),
+                pooled_deviation(&cut),
+                correlation(&cut),
             );
+            raw.extend(plain);
+            clean.extend(cut);
         }
     }
+    println!(
+        "\nover all {} pairs at once, the two captures' readings correlate at {:+.3} as they \n\
+         stand and {:+.3} with each capture's own five terms taken off. **All of the agreement \n\
+         between flights is in the orders the pass already applies**, and what is left above \n\
+         them is uncorrelated between flights, which is what a static per-azimuth field cannot \n\
+         be.",
+        captures.len() * (captures.len() - 1) / 2,
+        correlation(&raw),
+        correlation(&clean),
+    );
 }
 
-/// The two captures' readings at the azimuths both of them reached, in
-/// degrees.
-fn paired(one: &Capture, other: &Capture) -> Vec<(f64, f64)> {
-    let index = |l: &Leftover| (f64::from(l.phi).to_degrees().rem_euclid(360.0) / 5.0) as i32;
-    let theirs: BTreeMap<i32, f64> = other
+/// One capture's readings with its own five terms taken off it.
+fn without_pose(capture: &Capture) -> Vec<Leftover> {
+    let rows: Vec<(Vec<f64>, f64)> = capture
         .left
+        .iter()
+        .map(|l| (basis(f64::from(l.phi), 2), f64::from(l.perp.to_degrees())))
+        .collect();
+    let Some(fitted) = seam::least_squares(&rows) else {
+        return capture.left.clone();
+    };
+    capture
+        .left
+        .iter()
+        .zip(&rows)
+        .map(|(l, (row, value))| Leftover {
+            perp: (value - dot(row, &fitted.params)).to_radians() as f32,
+            ..*l
+        })
+        .collect()
+}
+
+fn dot(row: &[f64], params: &[f64]) -> f64 {
+    row.iter().zip(params).map(|(a, b)| a * b).sum()
+}
+
+/// The two sets of readings at the azimuths both of them reached, in degrees.
+///
+/// Binned on the **patch index** and not on a truncated division of the
+/// azimuth: the ring's azimuths are exact multiples of its own spacing only up
+/// to the float that carried them, and truncating put nine of seventy-two
+/// readings in their neighbour's bin, which compared readings five degrees
+/// apart in an eighth of the rows.
+fn paired(one: &[Leftover], other: &[Leftover], patches: usize) -> Vec<(f64, f64)> {
+    let index = |l: &Leftover| {
+        let turn = f64::from(l.phi) / std::f64::consts::TAU * patches as f64;
+        (turn.round() as i64).rem_euclid(patches as i64)
+    };
+    let theirs: BTreeMap<i64, f64> = other
         .iter()
         .map(|l| (index(l), f64::from(l.perp.to_degrees())))
         .collect();
-    one.left
-        .iter()
+    one.iter()
         .filter_map(|l| Some((f64::from(l.perp.to_degrees()), *theirs.get(&index(l))?)))
         .collect()
+}
+
+/// The standard deviation about the sample's own mean, which is what a
+/// "variation" is. Root mean square about zero is a magnitude and was printed
+/// under this heading until 2026-08-06.
+fn deviation(values: impl Iterator<Item = f64>) -> f64 {
+    let all: Vec<f64> = values.collect();
+    if all.len() < 2 {
+        return f64::NAN;
+    }
+    let mean = all.iter().sum::<f64>() / all.len() as f64;
+    (all.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (all.len() - 1) as f64).sqrt()
+}
+
+/// How much the two captures vary at these azimuths, both of them together:
+/// the number `apart` has to be small against if the leftover is the camera.
+fn pooled_deviation(pairs: &[(f64, f64)]) -> f64 {
+    let one = deviation(pairs.iter().map(|(a, _)| *a));
+    let other = deviation(pairs.iter().map(|(_, b)| *b));
+    (0.5 * (one * one + other * other)).sqrt()
+}
+
+/// Pearson's, between the two captures' readings at the azimuths they share.
+fn correlation(pairs: &[(f64, f64)]) -> f64 {
+    if pairs.len() < 3 {
+        return f64::NAN;
+    }
+    let mean = |f: fn(&(f64, f64)) -> f64| pairs.iter().map(f).sum::<f64>() / pairs.len() as f64;
+    let (ma, mb) = (mean(|p| p.0), mean(|p| p.1));
+    let together: f64 = pairs.iter().map(|(a, b)| (a - ma) * (b - mb)).sum();
+    let spread = |f: fn(&(f64, f64)) -> f64, m: f64| {
+        pairs.iter().map(|p| (f(p) - m).powi(2)).sum::<f64>().sqrt()
+    };
+    together / (spread(|p| p.0, ma) * spread(|p| p.1, mb))
 }
 
 /// How much of the ring the table speaks for, and how large it is where it
@@ -385,48 +481,158 @@ fn sweep(captures: &[Capture]) {
          in turn. a width is chosen by the second column."
     );
     println!("{:>8} {:>10} {:>10}", "deg", "fitted", "held out");
-    let pooled: Vec<Leftover> = captures
-        .iter()
-        .flat_map(|c| c.left.iter().copied())
-        .collect();
+    let groups: Vec<Vec<Leftover>> = captures.iter().map(|c| c.left.clone()).collect();
+    let pooled: Vec<Leftover> = groups.iter().flatten().copied().collect();
     // The row a table has to beat: every reading as it stands, with nothing
     // applied. A width whose held-out column sits above this one has cost the
     // capture it was not fitted on.
-    println!(
-        "{:>8} {:>10.4} {:>10.4}",
-        "none",
-        seam::rms(pooled.iter().map(|l| f64::from(l.perp.to_degrees()))),
-        seam::rms(pooled.iter().map(|l| f64::from(l.perp.to_degrees()))),
-    );
+    let none = seam::rms(pooled.iter().map(|l| f64::from(l.perp.to_degrees())));
+    println!("{:>8} {none:>10.4} {none:>10.4}", "none");
+    let mut best = (f64::INFINITY, 0.0f32);
     for width in WIDTHS {
         let table = Table::of(&pooled, width);
         let fitted = seam::rms(pooled.iter().map(|l| left_of(&table, l)));
-        println!(
-            "{width:>8.0} {fitted:>10.4} {:>10.4}",
-            rotated(captures, width),
-        );
+        let held = rotated(&groups, width);
+        println!("{width:>8.0} {fitted:>10.4} {held:>10.4}");
+        if held < best.0 {
+            best = (held, width);
+        }
     }
+    println!(
+        "\nthe bound: the best any static table reaches on a capture it was not fitted on is \n\
+         {:.4} deg at a {:.0} deg kernel, which is {:+.2} percent of the {:.4} deg it would \n\
+         have read with no table at all. That is not a width to ship, it is the ceiling on \n\
+         what this corpus could pay for a per-azimuth field at any setting.",
+        best.0,
+        best.1,
+        100.0 * (none - best.0) / none,
+        none,
+    );
 }
 
 /// The leave-one-capture-out mean: each capture predicted by a table built
 /// from every other one.
-fn rotated(captures: &[Capture], width: f32) -> f64 {
-    if captures.len() < 2 {
+fn rotated(groups: &[Vec<Leftover>], width: f32) -> f64 {
+    if groups.len() < 2 {
         return f64::NAN;
     }
     let mut left = Vec::new();
-    for (index, held) in captures.iter().enumerate() {
-        let pooled: Vec<Leftover> = captures
+    for (index, held) in groups.iter().enumerate() {
+        let pooled: Vec<Leftover> = groups
             .iter()
             .enumerate()
             .filter(|(other, _)| *other != index)
-            .flat_map(|(_, c)| c.left.iter().copied())
+            .flat_map(|(_, group)| group.iter().copied())
             .collect();
         let table = Table::of(&pooled, width);
-        left.extend(held.left.iter().map(|l| left_of(&table, l)));
+        left.extend(held.iter().map(|l| left_of(&table, l)));
     }
     seam::rms(left.into_iter())
 }
+
+/// What size of static per-azimuth field this corpus could have found, order
+/// by order.
+///
+/// **The number a refusal is worth nothing without.** A field of a known order
+/// and a known size is added to every capture's readings - the same field in
+/// all of them, which is what "static" means - and the whole leave-one-out test
+/// is run again. What is asked of the result is not "did it help", because a
+/// noiseless plant helps a little at any size; it is **how much of the planted
+/// field's own power came back** on the captures the table was not fitted on,
+/// over and above what the same test recovers with nothing planted.
+///
+/// The bound grows with order because the kernel that keeps the table honest
+/// is a low-pass filter. Orders 1 and 2 never come back at all, and that is
+/// correct rather than a failure: they are a pose, [`Table`] has them taken
+/// out of it by construction, and `band::Along` already applies them.
+fn power(groups: &[Vec<Leftover>]) {
+    let floor = recovered(groups, 0, 0.0).0;
+    println!(
+        "\npower: the smallest static field of each order this corpus can recover half of, in \n\
+         degrees of amplitude. planted into every capture's readings and put through the same \n\
+         leave-one-out test at every kernel width. orders 1 and 2 are a pose: the table has \n\
+         them taken out of it and the pass applies them itself, so they never come back here. \n\
+         a size under {:.4} deg is not tried: that is the field whose power equals the \n\
+         improvement this test makes out of a corpus with nothing planted in it at all.",
+        (2.0f64 * floor).sqrt(),
+    );
+    println!(
+        "{:>6} {:>14} {:>10} {:>12}",
+        "order", "half back at", "at kernel", "recovered"
+    );
+    for order in 1..=8 {
+        match limit(groups, order, floor) {
+            Some((size, width, share)) => {
+                println!(
+                    "{order:>6} {size:>14.4} {width:>10.0} {:>11.0}%",
+                    100.0 * share
+                )
+            }
+            None => println!("{order:>6} {:>14} {:>10} {:>12}", "not by 0.24", "-", "-"),
+        }
+    }
+}
+
+/// The smallest planted size of this order whose power the held-out test gets
+/// half of back, the kernel that got it, and what fraction that was.
+fn limit(groups: &[Vec<Leftover>], order: usize, floor: f64) -> Option<(f64, f32, f64)> {
+    for size in SIZES {
+        // A field smaller than the improvement this test manufactures from
+        // nothing cannot be claimed to have been recovered from it: the share
+        // below would be a ratio of two numbers the same size, and it reads
+        // eight hundred percent as readily as fifty.
+        let planted = 0.5 * size * size;
+        if planted <= floor {
+            continue;
+        }
+        let (power, width) = recovered(groups, order, size);
+        let share = (power - floor) / planted;
+        if share >= 0.5 {
+            return Some((size, width, share));
+        }
+    }
+    None
+}
+
+/// How much mean square the held-out test takes off a corpus with this field
+/// planted in it, and the kernel that took the most.
+///
+/// Mean square rather than rms because power is what adds: a planted field of
+/// amplitude `a` carries `a * a / 2` of it, and that is what the share above
+/// is a share of.
+fn recovered(groups: &[Vec<Leftover>], order: usize, size: f64) -> (f64, f32) {
+    let planted: Vec<Vec<Leftover>> = groups
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .copied()
+                .map(|l| ripple(l, order, size))
+                .collect()
+        })
+        .collect();
+    let flat: Vec<Leftover> = planted.iter().flatten().copied().collect();
+    let none = seam::rms(flat.iter().map(|l| f64::from(l.perp.to_degrees())));
+    let best = WIDTHS
+        .iter()
+        .map(|width| (rotated(&planted, *width), *width))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .unwrap_or((none, 0.0));
+    (none * none - best.0 * best.0, best.1)
+}
+
+fn ripple(reading: Leftover, order: usize, size: f64) -> Leftover {
+    let added = size * (order as f64 * f64::from(reading.phi)).cos();
+    Leftover {
+        perp: reading.perp + added.to_radians() as f32,
+        ..reading
+    }
+}
+
+/// The sizes the power scan tries, in degrees, smallest first.
+const SIZES: [f64; 13] = [
+    0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.04, 0.06, 0.08, 0.12, 0.16, 0.24,
+];
 
 /// One reading with the table's answer at its own azimuth taken off it, in
 /// degrees.
@@ -543,6 +749,10 @@ struct Options {
     out: Option<PathBuf>,
     dump: Option<PathBuf>,
     smooth: f32,
+    /// How many times its own scatter a reading may sit from its capture's
+    /// middle. `None` under `gate=0`, which is how the report says what the
+    /// gate is worth rather than assuming it.
+    gate: Option<f64>,
     places: usize,
     frames: usize,
     patches: usize,
@@ -570,6 +780,7 @@ impl Options {
             out: None,
             dump: None,
             smooth: kjerag_render::band::SMOOTH_DEG,
+            gate: Some(seam::GATE_MADS),
             places: 3,
             frames: 2,
             patches: 72,
@@ -589,6 +800,7 @@ impl Options {
                 Some(("read", value)) => options.mode = Mode::Read(PathBuf::from(value)),
                 Some(("plant", value)) => options.mode = planted(value)?,
                 Some(("smooth", value)) => options.smooth = value.parse()?,
+                Some(("gate", value)) => options.gate = gate_of(value.parse()?),
                 Some(("places", value)) => options.places = value.parse()?,
                 Some(("frames", value)) => options.frames = value.parse()?,
                 Some(("patches", value)) => options.patches = value.parse()?,
@@ -603,6 +815,12 @@ impl Options {
     }
 }
 
+/// `gate=0` turns the along-seam plausibility filter off, and anything else
+/// is how many of a capture's own scatters a reading may sit from its middle.
+fn gate_of(mads: f64) -> Option<f64> {
+    (mads > 0.0).then_some(mads)
+}
+
 fn planted(value: &str) -> Fallible<Mode> {
     let (size, cycles) = value
         .split_once(':')
@@ -614,7 +832,7 @@ fn planted(value: &str) -> Fallible<Mode> {
 }
 
 const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] [seam=roll:0.8,yaw:-2.3,pitch:-0.9,\
-cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [places=n] [frames=n] [patches=n] [out=path] [dump=path.csv] \
+cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [gate=mads|0] [places=n] [frames=n] [patches=n] [out=path] [dump=path.csv] \
 | read=path | plant=size_deg:cycles [out=path]";
 
 const USAGE_SEAM: &str = "this instrument needs one stored fit for every capture: a fit off each \

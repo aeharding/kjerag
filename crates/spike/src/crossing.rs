@@ -630,6 +630,9 @@ fn patch(
     offset: [f64; 2],
 ) -> Option<Vec<f64>> {
     let mut out = Vec::with_capacity(((2 * half + 1).pow(2)) as usize);
+    // Hoisted: the test compares every direction of the table, and this loop
+    // runs over a thousand samples per patch and a thousand patches per site.
+    let tabled = source.lens == 1 && !map.table().is_rest();
     for i in -half..=half {
         for j in -half..=half {
             let ray = unit(std::array::from_fn(|k| {
@@ -652,7 +655,10 @@ fn patch(
             // and what it does to `d(pixel)/d(body angle)` is its own
             // gradient, a hundredth of the column at any size this ships.
             let view = map.view_ray_from_body(ray.map(|v| v as f32));
-            let landing = map.project(source.lens, map.tabled(source.lens, view));
+            let landing = match tabled {
+                true => map.project(source.lens, map.tabled(source.lens, view)),
+                false => map.project(source.lens, view),
+            };
             if !landing.inside {
                 return None;
             }

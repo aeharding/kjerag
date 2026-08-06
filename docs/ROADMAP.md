@@ -573,8 +573,9 @@ live, no keyframe UI ever.
 ## Decisions log
 
 - 2026-08-06 **No along-seam table is fitted: what a pose and five harmonic
-  terms leave is not a static function of azimuth** (issue #103, stage 9,
-  docs/research/stage9.md). The mechanism is built, measured and ships at rest.
+  terms leave is not a static function of azimuth this corpus could have found**
+  (issue #103, stage 9, docs/research/stage9.md). The mechanism is built,
+  measured and ships at rest.
 
   Stage 9 asked for a fourth layer on the along-seam axis: one number per
   direction, pooled per camera, carrying what `SeamFit`'s five knobs and
@@ -586,17 +587,20 @@ live, no keyframe UI ever.
   pooled pose leaves **0.064 to 0.128 deg rms** along the seam per capture,
   which is the 1.30 and 1.43 view px `--bin crossing` reads at his two May-01
   crossings. A five-term fit takes the pooled leftover 0.0818 to **0.0739**;
-  five more orders take it to 0.0712, which is **3.7 percent**. At an azimuth
-  two flights both read, they sit 0.070 to 0.166 deg apart, against 0.064 to
-  0.141 deg of variation round either flight's own ring: **two flights disagree
-  at one azimuth by more than either varies over the whole circle.** And the
-  test that decides, each capture predicted by a table fitted on the other
+  five more orders take it to 0.0712, which is **3.7 percent**. Pooled over all
+  fifteen pairs of flights, the two captures' readings at the azimuths they
+  share correlate at **+0.194** as they stand and **-0.014** once each flight's
+  own five terms are taken off: all of the agreement between flights lives in
+  the orders `band::Along` already applies, and nothing above them is shared at
+  all. And the test that decides, each capture predicted by a table fitted on
+  the other
   five: **a table costs the flight it was not fitted on at every width that
-  resolves anything** (0.0836 to 0.0872 against a **0.0828** no-table baseline),
-  and stops costing only at a 36-degree kernel, where it buys 1.1 percent and
-  can barely carry more than the two cycles already applied. The fitted column
-  improves monotonically as the kernel narrows while the held-out column gets
-  worse in step - the stage-7 striping lesson as a number.
+  resolves anything** (0.0836 to 0.0872 against a **0.0828** no-table baseline).
+  The fitted column improves monotonically as the kernel narrows while the
+  held-out column gets worse in step - the stage-7 striping lesson as a number.
+  Swept past any width a per-azimuth field is interesting at, **the best any
+  static table reaches on a capture it was not fitted on is +1.25 percent**, and
+  that is the ceiling on what this corpus could ever have paid.
 
   **It is a refusal and not a blind spot.** A planted six-cycle table, an order
   above anything the pass applies, is put in the map and the corpus re-measured
@@ -605,14 +609,27 @@ live, no keyframe UI ever.
   slope -1.07 and -1.26 per site with the **epipolar axis unmoved** (+0.006 and
   +0.023 src px, MAD 0.04 to 0.06) and the traced 50/50 contour unmoved. An
   order-6 field at half the size of the residual being looked for is plainly
-  visible to this instrument.
+  visible to this instrument. **And the refusal carries a size**: planting a
+  static field of a known order and asking how much of its power comes back on
+  a held-out capture, this corpus excludes order 3 and up above **0.02 to 0.06
+  deg** of amplitude and says nothing below 0.02, which at the owner's May-01
+  GOOD view is 0.37 view px against an along-seam error of 1.30. A static field
+  of a few tenths of a pixel is not excluded; one large enough to be most of the
+  defect is.
 
-  The second camera says the same. The ONE X2 of issue #130, whose factory
-  extrinsics are 2.8 degrees out, has a leftover whose order-3-and-up structure
-  does reproduce across three captures of one evening (0.0127 deg of signal
-  against 0.0116 of noise) - and held out it buys 2.7 percent at its best width
-  (0.0692 against a 0.0711 baseline) while a 4-degree kernel is already worse
-  than nothing, and 0.013 deg is a twentieth of the along-seam error.
+  The second camera says the same, **and it is the one place the answer depends
+  on the gate.** The ONE X2 of issue #130, whose factory extrinsics are 2.8
+  degrees out, has a leftover whose order-3-and-up structure does reproduce
+  across three captures of one evening (0.0127 deg of azimuth structure against
+  0.0116 of cross-capture scatter) - and held out it buys 2.7 percent at its
+  best width (0.0692 against 0.0711) while a 4-degree kernel is already worse
+  than nothing. With the along-seam plausibility gate **off** those same three
+  captures support a table at **+10.0 percent** (0.2602 against 0.2890): what
+  the gate removes is 12 to 14 readings per capture with a tail past two
+  degrees, which is exactly what an ungated table would soak up, but the reader
+  has to see that the sentence turns on it. **The X4 Air corpus, which is the
+  one that decides, does not turn on it**: ungated it reads +0.03 percent
+  (0.2985 against 0.2986), gated +1.25.
 
   **This corrects the #155 entry below.** "A static per-azimuth map is enough
   for along the seam" was read off the fact that the along-seam **median**
@@ -624,9 +641,17 @@ live, no keyframe UI ever.
   block, added to the band's own along-seam term before projection on the
   unwarped body ray, lens 1 whole and lens 0 not at all, tapering to exactly
   zero at any direction no reading reached. Empty, it is the picture
-  `origin/main` draws, byte for byte at four registry views, and it costs 0.04
-  ms of an 8.10 ms redraw. Nothing in the app sets one, and the loop that would
-  is the open question at the top of the PR.
+  `origin/main` draws, byte for byte at four registry views, and its cost does
+  not measure: 0.04 ms of an 8.10 ms redraw on a quiet box, which is 0.24
+  percent of a 16.6 ms frame, and a paired -1.66 to +0.72 ms interval under
+  load. Nothing in the app sets one, and the loop that would is the open
+  question at the top of the PR.
+
+  **One process failure, recorded rather than tidied**: the charter's protocol
+  says to freeze the kernel width before the hold-out partition is opened, and
+  this stage swept it against the hold-out column instead. Nothing turns on it -
+  every width is at or worse than no table, so the sweep chose nothing - but a
+  corpus that had said yes would have needed the whole measurement retaken.
 
 - 2026-08-05 **The handover is eight degrees wide, because the eye said so
   against every instrument that had an opinion** (`projection::CROSSOVER_DEG`

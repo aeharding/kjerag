@@ -442,9 +442,15 @@ impl Scene {
     /// Draw this file with the along-seam table its camera has been read at
     /// (issue #103, stage 9).
     ///
-    /// Landed rather than walked, and only ever at open: a table is a
-    /// calibration and it does not change while a file plays, so there is
-    /// never a picture for it to jump.
+    /// Landed rather than walked. A table is a calibration and the caller is
+    /// expected to set it before the first frame, where there is no picture
+    /// for it to jump.
+    ///
+    /// **That is a discipline and not a property of this function.** Called
+    /// mid-play it lands whatever it is given in the next frame, and the
+    /// picture steps by the whole of it. If a later stage ever re-answers a
+    /// pool while a file is up, this needs [`Correction`]'s walk rather than
+    /// this cell.
     pub fn use_table(&self, table: Table) {
         if let Some(show) = &self.show {
             show.table.set(table);

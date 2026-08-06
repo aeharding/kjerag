@@ -451,10 +451,19 @@ pub struct Reframe {
     /// here - [`Reframe::crossover_at`] on this side and `band_width` on the
     /// shader's - so the two cannot disagree about it.
     crossover: f32,
-    /// A uniform block's members sit at their own alignment, which the
-    /// matrices in [`LensBlock`] and the table below make 16 bytes. WGSL does
-    /// that itself; `repr(C)` does not, and the two layouts have to agree or
-    /// `min_binding_size` rejects the pipeline.
+    /// What puts the table below on a sixteen-byte offset.
+    ///
+    /// **WGSL's alignment and not this struct's.** Every member of this block
+    /// is an `f32` or an array of them, so `repr(C)` gives the whole thing an
+    /// alignment of 4 and would happily start the table at 340. WGSL lays an
+    /// `array<vec4<f32>, N>` out at 16, so the two definitions would then
+    /// describe different bytes.
+    ///
+    /// **Nothing catches that at run time.** `min_binding_size` checks the
+    /// block's total size and not one offset in it, and the sizes agree either
+    /// way, so the shader would read the table shifted by twelve bytes and
+    /// draw a picture rather than an error. The test
+    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it.
     _pad: [f32; 3],
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
@@ -791,6 +800,15 @@ impl Reframe {
     /// The crossover is taken from the **unbent** ray, on purpose. The bend is
     /// what the handover asked for, so a handover that then followed the bend
     /// would be its own input.
+    ///
+    /// **That is true of the `share` and not of the whole weight.** `share` is
+    /// the handover fraction and it is a function of the unbent ray alone.
+    /// What goes into the array is [`claim`], which is `share` times the
+    /// **bent** landing's `depth`, so a bend that carries a ray over a lens's
+    /// image circle does change that lens's weight. `depth` is 1 everywhere
+    /// but within a bend's reach of the rim, so this bites only there - but it
+    /// bites, it predates stage 9, and a later stage that widens the field
+    /// inherits it.
     ///
     /// **How wide the handover is, is the same question** (issue #103, stage
     /// 4). The bend runs from zero to the whole disparity across the band, so
@@ -4084,10 +4102,13 @@ pub(crate) mod tests {
         let table = super::super::band::AZIMUTHS / 4 * 16;
         assert_eq!(std::mem::size_of::<super::super::band::Table>(), table);
         assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + table);
-        // Every member of a uniform block sits at its own alignment, and the
-        // table's is sixteen. The three pad floats above it are what put it
-        // there, and this is the arithmetic that says so.
-        assert_eq!((288 + 48 + 16) % 16, 0);
+        // The offset, not arithmetic that cannot fail: WGSL starts the table
+        // at a multiple of sixteen and `repr(C)` does not have to, and
+        // `min_binding_size` checks the block's size rather than any offset
+        // inside it, so a table that slid twelve bytes would draw a wrong
+        // picture rather than refuse a pipeline.
+        assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
+        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {

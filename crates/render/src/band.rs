@@ -554,12 +554,15 @@ pub struct Leftover {
 ///
 /// **Nothing in the app builds one, and that is a measurement** (stage 9,
 /// docs/research/stage9.md). On the owner's six X4 Air flights the part of the
-/// leftover that survives the five terms is 3.7 percent of it, two flights
-/// disagree at one azimuth by more than either varies round its whole ring, and
-/// held out a table costs the flight it was not fitted on at every kernel width
-/// that resolves anything. The ONE X2 of issue #130 reads the same. The
-/// mechanism is here because the refusal had to be checkable and because a
-/// camera that needs one may still turn up; `Table::REST` is what ships.
+/// leftover that survives the five terms is 3.7 percent of it; two flights'
+/// readings at the azimuths they share correlate at +0.194 as they stand and
+/// **-0.014** once each flight's own five terms are off, so nothing above those
+/// terms is shared between flights at all; and held out, a table costs the
+/// flight it was not fitted on at every kernel width that resolves anything.
+/// What the corpus can exclude has a size on it: a static field of order 3 and
+/// up above 0.02 to 0.06 degrees, and nothing below 0.02. The mechanism is here
+/// because the refusal had to be checkable and because a camera that needs one
+/// may still turn up; `Table::REST` is what ships.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Table {
@@ -687,15 +690,24 @@ impl Table {
 /// How far along the seam one reading is allowed to speak, in degrees of
 /// azimuth.
 ///
-/// **Declared from what the evidence resolves, not from what the picture
-/// would tolerate.** A reading is a correlation over a patch
-/// [`super::seam::Probe::span`] degrees wide, and the ring is read at 72
-/// azimuths five degrees apart, so neighbouring readings already share
-/// content; and one reading's own repeatability on the owner's captures is
-/// 0.0475 degrees against a field of 0.107 degrees rms, so a single azimuth
-/// cannot carry an entry on its own. This is the width at which the leftover
-/// field predicts a held-out capture best, measured on the owner's corpus
-/// (docs/research/stage9.md).
+/// **A half-width**: the kernel reaches this far either side, so its window is
+/// twice this and it holds about five of the ring's readings.
+///
+/// A reading is a correlation over a patch [`super::seam::Probe::span`] is
+/// wide - 3.7 degrees - and the ring is read at 72 azimuths five degrees
+/// apart, so neighbouring readings already share content and nothing here can
+/// resolve below that. What one reading is worth on its own is measured: a
+/// planted per-azimuth field comes back with 0.05 degrees of scatter per
+/// reading against a leftover of 0.064 to 0.128 degrees rms per capture
+/// (docs/research/stage9.md 4 and 5), so an entry resting on one azimuth would
+/// be mostly that scatter.
+///
+/// **It is not a width chosen for predicting anything, because on the corpus
+/// that decides nothing predicts.** On the owner's six flights no width beats
+/// no table on a held-out capture at all. Ten to twelve degrees is what the
+/// one corpus where a table is even marginally positive prefers, and it is
+/// what a table would be built at if one ever were. No shipped table uses it,
+/// because no table is fitted.
 pub const SMOOTH_DEG: f32 = 12.0;
 
 /// How much evidence an entry is shrunk against, in readings.
@@ -709,9 +721,12 @@ const TABLE_RIDGE: f32 = 1.0;
 /// The largest entry a table may carry, in radians.
 ///
 /// Half a degree, which is the argument `seam`'s own runaway guard makes at
-/// this scale: the whole along-seam residual a fitted pose leaves on the
-/// owner's corpus is 0.107 degrees rms and 0.2 at worst, so an entry past half
-/// a degree is a correlation that found the wrong feature and not a camera.
+/// this scale. Over the owner's six flights, 299 readings that passed the
+/// along-seam plausibility gate, the largest single leftover is 0.332 degrees
+/// and twelve of them are past 0.2; ungated the tail reaches 2.47. So this sits
+/// above every reading a calibration produced on that corpus and below what
+/// the correlations that found the wrong feature produced, and an entry past
+/// it is the second kind (docs/research/stage9.md 5).
 const TABLE_LIMIT_RAD: f32 = 0.5 * std::f32::consts::PI / 180.0;
 
 /// Every entry's weighted mean of the readings near it, and how much evidence
@@ -755,9 +770,14 @@ fn wrapped(angle: f32) -> f32 {
 /// of them.
 ///
 /// Without this the two would both correct the low-order part and the picture
-/// would be over-turned by however much they agreed on. What is left is
-/// orthogonal to the pass's own field by construction, so the table carries
-/// only what a pose and a five-term fit between them cannot say.
+/// would be over-turned by however much they agreed on.
+///
+/// **Almost orthogonal to the pass's own field, not exactly.** The fit is
+/// shrunk by [`RIDGE`] like every other fit in this file, so a cycle term the
+/// readings agree on keeps about `2/n` of itself, which is half a percent of a
+/// pose over three hundred readings and half of one over two
+/// (`the_five_terms_the_pass_already_applies_are_taken_back_out`). What the
+/// table carries is what a pose and a five-term fit cannot say, plus that.
 ///
 /// **Off the readings and not off the smoothed ring**, which is not a detail:
 /// a harmonic reaches the whole circle, so subtracting one from the ring
