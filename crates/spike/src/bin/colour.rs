@@ -1420,15 +1420,18 @@ fn profile(options: &Options) -> Fallible<()> {
 ///
 /// Three marks, and each is a claim the eye can check against the picture
 /// under it: the seam plane itself, where the two lenses meet; the crossover,
-/// which is the two degrees the pass mixes them over and therefore how sharp
-/// any residual difference is allowed to be; and the band the colour field
-/// fades out across, which is where a correction is still doing something.
-/// A step that sits inside the crossover is the handover's; one that does not
-/// is the scene's.
+/// which is what the pass mixes them over and therefore how sharp any residual
+/// difference is allowed to be; and the edge of the overlap, past which only
+/// one lens has a picture at all. A step that sits inside the crossover is the
+/// handover's; one that does not is the scene's.
+///
+/// Both edges are asked of the map this render was drawn with rather than
+/// written down: since 2026-08-05 the crossover is the camera's own width and
+/// the overlap always was.
 fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
     let seam = distances(reframe, size, 2, (0.0, 0.0, 1.0, 1.0));
-    let crossover = CROSSOVER_DEG / 2.0;
-    let overlap = 7.22;
+    let crossover = f64::from(reframe.crossover_at(0.0).to_degrees()) / 2.0;
+    let overlap = reframe.overlap().map_or(0.0, |o| f64::from(o.to_degrees())) / 2.0;
     let rgba = picture
         .rgba
         .chunks_exact(4)
@@ -1847,14 +1850,18 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
 /// very spacing it is looking for.
 const SWEEP: usize = 256;
 
-/// The crossover the projection ships, in degrees.
+/// The crossover the projection asks for, in degrees.
 ///
 /// Mirrored here rather than imported: it is private to its own module, and an
 /// instrument that reaches into a shipped crate's internals is one that cannot
 /// be run against a second build of that crate - which is exactly what this
-/// instrument is for. `the_crossover_is_the_width_it_says_it_is` is what keeps
-/// the two honest.
-const CROSSOVER_DEG: f64 = 2.0;
+/// instrument is for.
+///
+/// **Nothing checks this copy**, which the two lines it is left in say so
+/// twice: it scales a printed column and nothing that decides anything. What
+/// the picture actually hands over across is the camera's since 2026-08-05 and
+/// is asked of the map wherever it matters ([`marked`]).
+const CROSSOVER_DEG: f64 = 8.0;
 
 /// A small symmetric positive definite system, by Gaussian elimination with no
 /// pivoting.

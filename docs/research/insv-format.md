@@ -1489,6 +1489,30 @@ So the number to ship is **about 2 degrees, and only after the calibration
 correction**. Narrowing the band first would trade a soft wide ghost for a
 hard visible tear.
 
+#### SUPERSEDED 2026-08-05: the number that ships is 8
+
+The table above still holds and was reproduced to within 0.003 of every entry
+by `--bin seam mode=blend fit=1`, at five owner reference views rather than
+one. What changed is which end of it the owner wants. Run label-blind against
+the shipped 2 degrees he chose the 8, and said *"2 is way better. Def not
+perfect but way better"* of it. The same instrument extended to 6 and 12, on
+the May-26 dirt view at the azimuth his own gear crosses the seam:
+
+| crossover | doubled band | sharpness, corrected |
+| --- | ---: | ---: |
+| 2 deg | 1.60 | 0.686 |
+| 4 deg | 3.20 | 0.657 |
+| 6 deg | 4.80 | 0.626 |
+| **8 deg** | **6.40** | **0.593** |
+| 12 deg | 9.60 | 0.520 |
+
+There is no knee at any of them, and the curve has the same shape at all five
+views, so **this table prices the trade and cannot choose on it**. What it does
+rule out is the wide end, and not on sharpness: 12 degrees of handover reaches
+further off the seam than the two lenses share, on every camera in the corpus,
+and 8 leaves 0.62 degrees a side on the X4 Air and is clamped to 4.00 on the
+ONE X2 (docs/ROADMAP.md, 2026-08-05).
+
 #### What is left open
 
 - **Where the 2.4 degrees comes from.** The recorded extrinsics are all

@@ -53,6 +53,20 @@ add new owner references here with date, category, and status.
   this printed bracket at +24 to +60 px, unmoved; 8 degrees moves it only to +12 to +72, which is
   1.17 degrees of a ramp that is 8. Do not quote the bracket as the handover's width, and do not
   read a change in it as proportional to a change in the map.
+  OWNER VERDICT, THE WIDTH (2026-08-05, `fade-ab.sh`, LABEL-BLIND): two arms of one binary, arm 1
+  the shipped 2 degree handover, arm 2 an 8 he was not told about. **"2 is way better. Def not
+  perfect but way better"** - said of arm 2, the 8. Shipped as the default on
+  `feat/handover-width`.
+  READ THIS BEFORE QUOTING A WIDTH NUMBER: every instrument that has an opinion on the handover's
+  width is MONOTONE in it and not one of them picks 8 or anything else. Sharpness over the overlap
+  falls with width at all five reference views, the doubled band grows linearly, the corridor's own
+  step statistics get worse, and only the epipolar shear improves. The width is a perceptual call
+  and the numbers price it rather than make it. What the numbers do settle is the ceiling: the
+  handover reaches `width/2` off the seam plus the bend it carries, and past the two lenses' shared
+  ring that is a sample from off the end of a fisheye circle. The X4 Air affords 9.8 to 10.0
+  degrees, the ONE X2 affords 4.00, so the width is clamped per camera and 12 is refused
+  everywhere. What the owner still sees at 8 ("def not perfect") is the un-shrunk 0.36 deg
+  disagreement, which stage 9's estimator owns and a width cannot reach.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=93.99 pitch=4.12 fov=20.00 lock=1`

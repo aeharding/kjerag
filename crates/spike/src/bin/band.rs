@@ -339,16 +339,24 @@ fn crossover(reads: &[Read]) {
     };
     // The ceiling's own safety, measured on this camera rather than assumed
     // from the fixture: the widest band plus the whole bend it carries has to
-    // sit inside the ring both lenses have a picture of.
-    let ceiling = kjerag_render::band::WIDEST_DEG;
-    let reach = 0.5 * ceiling + 0.9 * ceiling;
+    // sit inside the ring both lenses have a picture of. The width is the
+    // camera's since 2026-08-05, so it is asked of the map rather than quoted
+    // from `WIDEST_DEG`, which stopped being the widest the band opens the
+    // moment the floor went above it.
+    let widest = last
+        .mapped
+        .crossover_at(kjerag_render::band::WIDEST_DEG.to_radians());
+    let reach = f64::from(kjerag_render::band::reach(widest).to_degrees());
+    let half = f64::from(overlap.to_degrees()) * 0.5;
     println!(
-        "           these two lenses overlap by {:.2} deg, {:.2} a side. the widest the band may \n\
-         open is {ceiling:.2} deg, and that band plus the whole bend it carries reaches {reach:.2} \n\
-         deg off the seam, so the handover stays inside the overlap with {:.2} deg to spare.",
+        "           these two lenses overlap by {:.2} deg, {half:.2} a side, which affords a \n\
+         handover of {:.2}. the widest this camera's band opens is {:.2} deg, and that band plus \n\
+         the whole bend it carries reaches {reach:.2} deg off the seam, so the handover stays \n\
+         inside the overlap with {:.2} deg to spare.",
         f64::from(overlap.to_degrees()),
-        f64::from(overlap.to_degrees()) * 0.5,
-        f64::from(overlap.to_degrees()) * 0.5 - f64::from(reach),
+        f64::from(kjerag_render::band::affordable(overlap).to_degrees()),
+        f64::from(widest.to_degrees()),
+        half - reach,
     );
 }
 

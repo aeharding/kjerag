@@ -572,14 +572,79 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
-- 2026-08-05 **The along-seam correction cannot be faded over a support of its
-  own, and the handover it does ride is twice as wide as the instrument reads**
-  (`KJERAG_HANDOVER_DEG`, research only, off by default).
+- 2026-08-05 **The handover is eight degrees wide, because the eye said so
+  against every instrument that had an opinion** (`projection::CROSSOVER_DEG`
+  2 -> 8, clamped per camera by `band::affordable`).
 
-  The shimmer epic asked for a wider fade on the along-seam correction, on the
-  reading that `--bin shear mode=profile` brackets the handover inside 0.70
-  degrees of view while the correction itself is 0.3646 degrees, which would be
-  a 52 percent shear dragged through streaming content. Two things came back.
+  The owner ran the two arms of `fade-ab.sh` label-blind on his own footage,
+  arm 1 the shipped 2 degrees and arm 2 an 8 he was not told about, and said
+  ***"2 is way better. Def not perfect but way better"*** of arm 2. Every
+  number in this campaign says the opposite, and this entry is the record of
+  both.
+
+  **No instrument in the sweep can pick a width, and that is a measurement.**
+  Five widths - 2, 4, 6, 8, 12 - at five owner reference views, on the four
+  statistics that bear on the trade, and every one of them is **monotone** with
+  no knee anywhere: sharpness over the overlap falls smoothly (0.686 / 0.657 /
+  0.626 / 0.593 / 0.520 at the May-26 dirt view, and the same shape at all five
+  views, `--bin seam mode=blend`), the doubled band grows exactly linearly
+  (1.60 / 3.20 / 4.80 / 6.40 / 9.60 degrees), the corridor's own step
+  statistics get **worse** (0.0619 / 0.0673 / 0.0723 / 0.0773 / 0.0824 deg rms
+  at the seam band, `--bin shear mode=probe`), and only the epipolar shear
+  improves (disparity over width, so 1/width by construction). A monotone curve
+  has no preferred point on it. **The instruments priced the trade; they were
+  never able to choose on it, and one label-blind verdict did.** Recording that
+  is the point: an agent that had waited for a number to justify 8 would have
+  waited forever, and an agent that had read the numbers as a verdict would
+  have shipped the arm the owner rejected.
+
+  **What the sweep did settle is the other end.** 12 is refused by the optics
+  on every camera in the corpus, and 8 is nearly the last width that is not.
+  The handover reaches `width / 2` off the seam plus the whole bend it carries,
+  and past the two lenses' shared ring that is a sample from off the end of a
+  fisheye circle rather than a dropped lens, because the coverage test is taken
+  on the unbent ray. The X4 Air overlaps by 15.0 to 15.2 degrees and affords
+  **9.8 to 10.0**; the ONE X2 overlaps by **9.19** and affords **4.00**, under
+  the 8 the picture asks for. So the width is the camera's now, not the
+  picture's: `Reframe::crossover` is the ask clamped by `band::affordable`, it
+  travels in the uniform block rather than being written into the shader source
+  (the shader is compiled once, before any file is open), and the X2 hands over
+  across 4.00 while the X4 Air hands over across 8. The margin inside the
+  overlap on the fixture goes from 3.18 degrees a side to **0.62**, which is
+  the honest price of this and is why the bound is now asserted against the
+  shipped width instead of against `WIDEST_DEG`
+  (`the_widest_band_and_its_bend_stay_inside_the_overlap`).
+
+  **Stage 4 is inert at this floor, and nothing it recovered is lost.** Its
+  adaptive term opens the band to `|disparity| / FOLD` and cannot exceed 2.89
+  degrees, so a floor of 8 is above every width it could ask for and
+  `band::width` is a constant on every file in the corpus
+  (`the_adaptive_width_is_inert_under_the_shipped_floor`). What stage 4 was for
+  - a near-field reading being clamped by a band too narrow to carry it -
+  cannot happen at 8 either: `carried` clamps at `FOLD * 8`, 7.2 degrees, and
+  the search cannot report past 2.6. The mechanism stays because the floor is
+  the camera's: a camera whose overlap forced it under 2.89 would put the
+  reading back in charge. What is genuinely lost is stage 4's other half, that
+  the band never opens further than it has to - **near-field content is now
+  drawn twice across the same 8 degrees as the far field**, where stage 4 would
+  have given it at most 2.89.
+
+  The along-seam findings the research arm came back with, which the width
+  above rides on, follow.
+
+  **There is only one support, and it is the crossover's.** The along-seam term
+  goes to lens 1 whole and lens 0 takes none of it, and that is not a choice
+  about width: it is the difference the fit measured, so it is what makes the
+  two lenses draw one piece of content in one place. Wherever both lenses are
+  in the picture that difference is pinned at one whole correction, so what the
+  picture shows walks from none of it to all of it exactly as the weights do,
+  and a ramp spread wider than the weights is a ramp that un-corrects the seam
+  over the width it spread. Splitting the correction across both lenses near
+  the seam, which was the other candidate, is that same un-correction written
+  differently: it displaces lens 0's near-seam content by up to half the
+  correction, which today is exactly zero, and leaves the crossover's own
+  excursion where it was. So the knob is the crossover width, and the width is
+  what moved.
 
   **There is only one support, and it is the crossover's.** The along-seam term
   goes to lens 1 whole and lens 0 takes none of it, and that is not a choice
@@ -595,44 +660,41 @@ live, no keyframe UI ever.
   excursion where it was. So the knob is the crossover width, and this is that
   knob with a name.
 
-  **The 0.70 degrees is the instrument's readout and not the map's ramp.** What
-  the picture carries of the along-seam correction at one distance from the
-  seam is lens 1's weight, which the Rust twin reports with no correlation in
-  the way: on the X4 Air fixture it is a smooth ramp over the whole 2.00 degree
-  crossover, nine tenths of the correction at +0.86 degrees and one tenth at
-  -0.76, so the applied shear is 0.182 degrees per degree and not 0.52
+  **`mode=profile`'s 0.70 degree bracket is the instrument's readout and not
+  the map's ramp.** What the picture carries of the along-seam correction at
+  one distance from the seam is lens 1's weight, which the Rust twin reports
+  with no correlation in the way: a smooth ramp over the whole crossover
   (`the_along_seam_correction_hands_over_across_the_whole_crossover`). The
   instrument reads a step because its held arm carries the two lenses' whole
   18.7 px disagreement as a double image across that same corridor: its match
   has two peaks and reports whichever leads. Doubling the map's ramp to 4
   degrees leaves the printed bracket at +24 to +60 px, exactly where 2 degrees
   put it; only 8 degrees moves it, to +12 to +72, which is 1.17 degrees of a
-  ramp that is 8. **`mode=profile`'s bracket is a lower bound on the handover
-  and not a measurement of it.**
+  ramp that is 8. **The bracket is a lower bound on the handover and not a
+  measurement of it.**
 
-  What widening does do is measured and is a trade with no free side. At 4 and
-  8 degrees the plateau is unmoved (18.67 px, 18.68), the null still reads
-  exactly zero at every probe on all 90 frames, and the plant still reads its
-  known displacements back inside 0.03 px. The corridor's step statistics get
-  **worse**, not better, and over a wider corridor: 0.062 to 0.067 to 0.077 deg
-  rms at the seam band, and the bands that read 0.005 on the plateau read 0.065
-  once the widened corridor reaches them. Lens 0's floor stops being a floor:
-  the band the correction never touched reads 0.0003 deg at 2 degrees, 0.0027
-  at 4 and 0.0080 at 8, because the blend carries the correction further into
-  lens 0's picture. Against the May-01 crossings under the pooled answer, the
-  along-seam median at the contour is unchanged inside the printed sensitivity
-  at both views, which is what says the fade does not move where the lenses
-  meet; the 50/50 contour itself moves half a view pixel, because the depth
-  term in the weights is not symmetric and the width scales it.
+  **And the ramp does not simply scale with the width.** The weights are
+  cosines of the two lens axes and not a distance, so a wider corridor is a
+  different slice of them: the walk from nine tenths of the correction to one
+  tenth spends 0.75 of a 2-degree crossover, 0.70 of a 4, 0.65 of a 6, 0.61 of
+  an 8 and 0.52 of a 12 (measured over 24 azimuths of the fixture). A handover
+  four times as wide therefore spreads the correction over **3.2 times** as
+  much picture, not four times, and the earlier 1/width arithmetic overstated
+  what widening buys.
 
-  The recorded cost is `insv-format.md` 6.8's own table: 2 degrees scores 0.687
-  of the front lens's sharpness over the overlap, 4 scores 0.658 and 8 scores
-  0.596, against 0.538 for the whole-overlap weights that shipped before issue
-  #48. What a wider handover buys is on the other column of that table: shear,
-  the disparity divided by the width, which at the corrected calibration is
-  0.52 at 2 degrees and 0.13 at 8. That one is a real warp of the delivered
-  picture and it sweeps with the corridor, which is the reason to put this in
-  front of the owner rather than to settle it here.
+  What widening costs is measured and the trade has no free side. The plateau
+  is unmoved at every width (0.3642 to 0.3657 deg), the null reads exactly zero
+  at every probe on all 90 frames, and the plant reads its known displacements
+  back inside 0.03 px, so the correction still corrects. What moves is the
+  corridor: the step statistics above, and lens 0's floor, which stops being a
+  floor - the band the correction never touched reads 0.0003 deg at 2 degrees
+  and 0.0243 at 8, because the blend carries the correction that much further
+  into lens 0's picture. Against all five reference views under the pooled
+  answer, the along-seam median at the contour is unchanged with width at every
+  view with the sites to say so (`--bin crossing`, `bins=180`); the 50/50
+  contour itself moves about half a view pixel, because the depth term in the
+  weights is not symmetric and the width scales it, and the sun view is refused
+  outright on 5 to 6 accepted sites of 49.
 
 - 2026-08-05 **What the band applies to a moving picture is an instrument now,
   and it says where its numbers came from** (`--bin shear`, issue #103's motion
