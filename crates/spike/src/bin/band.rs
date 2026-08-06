@@ -201,9 +201,10 @@ fn table(last: &Read) {
         "\nwhat the band settled on. `view px` is the disagreement a 1920-wide 90 degree view \n\
          would show, at {VIEW_PX_PER_DEG} px per degree; `metres` is the distance the disparity \n\
          stands for; `band` is how wide the crossover opened to carry the reading; `cut` is what \n\
-         the fixed 2 degree band of stage 2 would have thrown away, in view px, which is the \n\
-         width of the doubled edge it left; `off epi` is the axis a distance CANNOT displace \n\
-         content along, which is measured and never applied.\n"
+         a band held at this camera's own floor would have thrown away, in view px, which is \n\
+         the width of the doubled edge it would leave (the floor is 8 deg on an X4 Air and \n\
+         3.99 on a ONE X2, not the fixed 2 of stage 2); `off epi` is the axis a distance \n\
+         CANNOT displace content along, which is measured and never applied.\n"
     );
     println!(
         "   phi  disparity    view px     metres       band        cut  confidence    off epi"
@@ -231,14 +232,22 @@ fn table(last: &Read) {
     }
 }
 
-/// How far the crossover opened, and what the fixed band was throwing away
-/// (issue #103, stage 4).
+/// How far the crossover opened, and what a band held at this camera's floor
+/// would be throwing away (issue #103, stage 4).
 ///
 /// The two columns are the same measurement read two ways: the width solves
 /// `|disparity| <= FOLD * width` for the width, and the clamp solves it for
 /// the disparity. Everything `cut` reports is alignment the pass had measured,
 /// believed, and then declined to apply because the band could not carry it -
 /// a doubled edge that much wide, on content that near.
+///
+/// **The floor is the camera's and not stage 2's fixed 2 degrees**, so what
+/// this recovers depends on the width the run is drawing: at 8 degrees the
+/// floor carries every reading the search can report and both columns are zero
+/// on every file in the corpus, and at `KJERAG_HANDOVER_DEG=2` the same file
+/// and stretch open the band - 2 direction-frames of 40 x 128 to 2.531 deg,
+/// recovering 8.0 view px on content at 0.84 m, on the owner's May-01 file at
+/// `from=550` (2026-08-06).
 fn crossover(reads: &[Read]) {
     let last = reads.last().expect("play returns at least one frame");
     let floor = last.mapped.crossover_at(0.0);
@@ -281,9 +290,9 @@ fn crossover(reads: &[Read]) {
     println!(
         "\ncrossover: over {frames} frames of {AZIMUTHS} directions, {open} direction-frames \n\
          asked for more than the {:.2} deg floor, which is {:.2} percent of them, and the widest \n\
-         band any of them asked for is {:.3} deg. what stage 2's fixed band cut from those: \n\
-         {:.3} deg at worst, which is {:.1} view px of doubled edge on content at {}. this stage \n\
-         cuts nothing the search can report, so that is what it recovers.",
+         band any of them asked for is {:.3} deg. what a band held at that floor would have cut \n\
+         from those: {:.3} deg at worst, which is {:.1} view px of doubled edge on content at \n\
+         {}. this stage cuts nothing the search can report, so that is what it recovers.",
         f64::from(floor.to_degrees()),
         100.0 * open as f64 / seen.len() as f64,
         f64::from(widest.to_degrees()),

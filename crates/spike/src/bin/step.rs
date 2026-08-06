@@ -73,7 +73,8 @@ const FIT_DEG: f64 = 4.0;
 /// Two, because the line has to describe its own points and a ridge does not
 /// stay straight for longer than that: on the owner's reference frame the fit
 /// rms is 0.97 and 0.51 px over this window against 2.07 and 0.84 over
-/// [`FIT_DEG`] from `guard=2.5`.
+/// [`FIT_DEG`] from `guard=2.5`, which was [`GUARD_DEG`] when that was
+/// measured.
 const CLOSE_DEG: f64 = 2.0;
 
 /// How far past the crossover's own edge the close-in fit starts.
@@ -85,12 +86,20 @@ const CLOSE_MARGIN_DEG: f64 = 0.2;
 
 /// How far either side of the seam is left out of both fits, in degrees.
 ///
-/// The crossover is what the handover happens across and the bend runs to
-/// its edge, so a fit that reached into it would be fitting the artifact it
-/// is measuring. The widest the band may open is
-/// `kjerag_render::band` WIDEST_DEG / 2 either side, and this is comfortably
-/// past it.
-const GUARD_DEG: f64 = 2.5;
+/// The crossover is what the handover happens across and the bend runs to its
+/// edge, so a fit that reached into it would be fitting the artifact it is
+/// measuring. What it has to clear is therefore the crossover the pass
+/// **draws**, and since 2026-08-05 that is 8 degrees on an X4-class file - 4
+/// either side - rather than the 2.89 of `kjerag_render::band` WIDEST_DEG the
+/// old value was derived from. This is that 4 plus the same
+/// [`CLOSE_MARGIN_DEG`] the close-in window clears the taper by.
+///
+/// **Every number this instrument printed before that date was taken at 2.5**,
+/// which was a degree and a half outside a 2 degree crossover and is a degree
+/// and a half inside an 8 degree one. Absolute steps from the two windows are
+/// not comparable; a difference between two builds is, for the reason
+/// [`Trace::close`] gives.
+const GUARD_DEG: f64 = 4.2;
 
 /// How many rows either side of a candidate are averaged before the step
 /// across it is taken. `spike::skyline`'s own smoothing, for the same reason:

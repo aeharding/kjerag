@@ -1507,11 +1507,24 @@ the May-26 dirt view at the azimuth his own gear crosses the seam:
 | 12 deg | 9.60 | 0.520 |
 
 There is no knee at any of them, and the curve has the same shape at all five
-views, so **this table prices the trade and cannot choose on it**. What it does
-rule out is the wide end, and not on sharpness: 12 degrees of handover reaches
-further off the seam than the two lenses share, on every camera in the corpus,
-and 8 leaves 0.62 degrees a side on the X4 Air and is clamped to 4.00 on the
-ONE X2 (docs/ROADMAP.md, 2026-08-05).
+views, so **this table prices the trade and cannot choose on it**.
+
+**What this table is, and is not** (2026-08-06). Both columns are the
+instrument's own `bands=` weighting, which is a synthetic linear crossover
+built inside `--bin seam` with the per-frame bend switched off, so the doubled
+band comes out as `0.8 * width` by construction. What the pass draws is the
+same instrument's `shipped` row, swept with `KJERAG_HANDOVER_DEG`, and it is
+not linear: at the July-14 anchor view (`yaw 90 fov 60 fit=1`) it doubles 1.50
+/ 2.79 / 3.89 / 4.78 / 5.41 degrees over the same five asks and its sharpness
+runs 1.309 / 1.247 / 1.194 / 1.150 / 1.120. Quote the rows above against each
+other; do not quote them as the pass's own widths.
+
+What the table does rule out is the wide end, and not on sharpness: 12 degrees
+of handover reaches further off the seam than the two lenses share, on every
+camera in the corpus. 8 leaves 0.62 degrees a side on the calibration fixture
+and 0.68 to 0.91 on the six X4 Air captures, and is clamped to **3.99** on the
+ONE X2, which affords exactly that and nothing over
+(docs/ROADMAP.md, 2026-08-05).
 
 #### What is left open
 

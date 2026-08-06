@@ -87,9 +87,14 @@ const ALONG_STEP_DEG: f64 = 0.1;
 ///
 /// Bounded by the optics: the fixture's two lenses overlap by 14.4 degrees,
 /// 7.2 a side, and a column further out than that is one a lens has no picture
-/// of. 5 leaves room for the alignment shift on top of it, and it covers the
-/// whole of the widest crossover the pass can open
-/// ([`kjerag_render::band::WIDEST_DEG`] is 2.9).
+/// of. 5 leaves room for the alignment shift on top of it.
+///
+/// What that covers has changed under it. It used to reach past everything the
+/// handover could touch; since 2026-08-05 the crossover is 8 degrees wide, so
+/// these columns cover the whole doubled band (4 either side, with a degree to
+/// spare) but **not** the 6.6 degrees the band plus the bend it carries reaches
+/// to ([`kjerag_render::band::reach`]). The outermost columns are inside the
+/// handover now, and the optics are what stops this being widened to match.
 const ACROSS_DEG: f64 = 5.0;
 const ACROSS_STEP_DEG: f64 = 0.25;
 
@@ -956,10 +961,9 @@ fn steps(field: &Field, options: &Options) {
     }
     println!(
         "\nradial: how each channel's step slopes ACROSS the band, in codes per degree, and \n\
-         \twhat that is worth end to end over the {:.1} degree crossover the pass draws. a \n\
-         \tstep that is one number everywhere across the overlap is reachable by one \n\
-         \tcorrection; one that slopes is not, and needs a wider handover or a field.\n",
-        2.0 * CROSSOVER_DEG,
+         \twhat that is worth end to end over the {CROSSOVER_DEG:.1} degree crossover the pass \n\
+         \tasks for. a step that is one number everywhere across the overlap is reachable by \n\
+         \tone correction; one that slopes is not, and needs a wider handover or a field.\n"
     );
     println!(
         "  {:<40} {:>10} {:>10} {:>10} {:>12}",
@@ -976,7 +980,7 @@ fn steps(field: &Field, options: &Options) {
             read[0].mean,
             read[1].mean,
             read[2].mean,
-            read[2].mean * 2.0 * CROSSOVER_DEG,
+            read[2].mean * CROSSOVER_DEG,
         );
     }
     if options.verbose {
@@ -1857,10 +1861,13 @@ const SWEEP: usize = 256;
 /// be run against a second build of that crate - which is exactly what this
 /// instrument is for.
 ///
-/// **Nothing checks this copy**, which the two lines it is left in say so
-/// twice: it scales a printed column and nothing that decides anything. What
-/// the picture actually hands over across is the camera's since 2026-08-05 and
-/// is asked of the map wherever it matters ([`marked`]).
+/// **Nothing checks this copy**, and that cost a wrong number the day the
+/// width moved: the two lines it is left in scaled it by a leftover 2, which
+/// printed "the 16.0 degree crossover" - wider than the whole 14.4 degree
+/// overlap - and multiplied the `B end to end` column by sixteen instead of by
+/// eight. It is the width itself in both places now. What the picture actually
+/// hands over across is the camera's since 2026-08-05 and is asked of the map
+/// wherever it decides anything ([`marked`]).
 const CROSSOVER_DEG: f64 = 8.0;
 
 /// A small symmetric positive definite system, by Gaussian elimination with no
@@ -1892,7 +1899,12 @@ fn solve5(mut normal: [[f64; 5]; 5], mut right: [f64; 5]) -> [f64; 5] {
 /// How far off the seam the interior is sampled, in degrees: away from the
 /// handover itself, out where a wide correction is the only thing that can be
 /// changing the picture.
-const INTERIOR: (f64, f64) = (4.0, 60.0);
+///
+/// The near end is past everything the handover reaches, which is half the
+/// crossover plus the whole bend it carries: 6.6 degrees at the 8 the pass
+/// asks for ([`kjerag_render::band::reach`]). It was 4.0 while the crossover
+/// was 2, and 4.0 is inside the handover now.
+const INTERIOR: (f64, f64) = (7.0, 60.0);
 
 /// How dark "dark content" is, in codes of 255.
 ///

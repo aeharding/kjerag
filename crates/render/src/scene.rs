@@ -406,6 +406,39 @@ impl Scene {
             .is_some_and(|show| show.lenses.len() >= 2)
     }
 
+    /// How wide this file hands the picture over, in degrees, or `None` for a
+    /// capture with one lens stream, which has no seam to hand over at.
+    ///
+    /// **The width is the camera's and not the build's** since 2026-08-05: the
+    /// projection asks for one number and this file's own overlap clamps it
+    /// ([`Reframe::crossover_at`], `band::affordable`). An X4 Air takes the 8
+    /// asked for; the owner's ONE X2 draws 3.99, and nothing else the app says
+    /// would ever mention it.
+    ///
+    /// Read off the lenses the pass will draw with **now**, correction and all,
+    /// because a seam fit moves the principal point, which moves each lens's
+    /// coverage boundary, which moves the overlap: on that X2 the factory
+    /// calibration affords 4.91 and its own pooled fit affords 3.99. So this is
+    /// a reading and not a property of the file, and a fit landing later moves
+    /// it.
+    pub fn handover_deg(&self) -> Option<f32> {
+        let show = self.show.as_ref()?;
+        let lenses = show.lenses();
+        if lenses.len() < 2 {
+            return None;
+        }
+        let mapped = Reframe::new(
+            &lenses,
+            show.frame,
+            Camera::default(),
+            Held::default(),
+            1.0,
+            false,
+            Sampling::default(),
+        );
+        Some(mapped.crossover_at(0.0).to_degrees())
+    }
+
     /// Draw this file with what the pool knows about its camera. Applied here
     /// and now, with no walk, so it is in the first frame.
     pub fn use_seam(&self, fit: SeamFit) {

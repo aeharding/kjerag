@@ -1045,14 +1045,35 @@ pub fn reach(width_rad: f32) -> f32 {
 /// the picture both lenses have.
 ///
 /// **The optics bound the handover and the camera is not always the one the
-/// width was chosen on.** Past this the crossover asks a lens for content off
-/// the end of its own picture: the coverage test is taken on the unbent ray
-/// (`super::projection::Reframe::covers`), so what a ray past this edge gets
-/// is not a dropped lens but a sample from outside the fisheye circle, weighed
-/// by whatever share the handover was giving it. The X4 Air family overlaps by
-/// 15.0 to 15.2 degrees and affords 9.8 to 10.0; the ONE X2 overlaps by 9.19
-/// and affords 4.00, which is under the 8 the picture asks for, so that camera
-/// hands over across 4 (`the_narrow_overlap_camera_gets_the_width_it_can_pay`).
+/// width was chosen on.** Past this bound the crossover stops being what hands
+/// the picture over, and the way it stops is not a bad fetch. The coverage
+/// test is taken on the unbent ray (`super::projection::Reframe::covers`) and
+/// the bend then moves the sample, but a bent ray that lands outside that
+/// lens's own boundary comes back `inside == false`,
+/// `super::projection::claim` returns exactly zero for it, and the fragment
+/// shader reads a lens only where its weight is positive (`super::scene`,
+/// `picture`). So what a ray past this edge gets is the other lens alone,
+/// taken there by the **coverage depth** - a distance transform that reaches
+/// zero at the rim - instead of by the ramp the width was chosen as, and where
+/// both lenses miss the pixel is transparent. The price of crossing this bound
+/// is a handover cut short by the optics on one side while it is still open on
+/// the other; the bound is what keeps the crossover's own ramp the thing that
+/// decides the blend.
+///
+/// Measured off the owner's own captures with `kjerag-spike --bin band`
+/// (2026-08-05): six X4 Air files overlap by 14.56 to 15.02 degrees and afford
+/// **9.36 to 9.82**, and the calibration fixture overlaps by 14.44 and affords
+/// 9.24. The ONE X2 overlaps by 9.19 and affords **3.99**, which is under the
+/// 8 the picture asks for, so that camera hands over across 3.99
+/// (`the_narrow_overlap_camera_gets_the_width_it_can_pay`).
+///
+/// **Every one of those is under the file's own seam correction**, which is
+/// what the pass draws with, and it is not the same answer as the factory
+/// calibration's: a fit moves the principal point, which moves each lens's
+/// coverage boundary, which moves the overlap. On the X2 the factory
+/// calibration affords 4.91 and its own pooled fit affords 3.99, so the width
+/// follows the calibration in and the app reports it after the fit lands
+/// rather than before.
 ///
 /// Two regimes because [`reach`] has two. A camera with room to spare pays
 /// half a degree of overlap per degree of width, because the bend it carries
@@ -2521,14 +2542,29 @@ mod tests {
     /// A camera whose lenses do not overlap enough for the width the picture
     /// asks for gets the width it can pay for, and stage 4 with it.
     ///
-    /// The ONE X2 is that camera: 9.19 degrees of overlap where the X4 Air has
-    /// 15.0 to 15.2 (`kjerag-spike --bin band`, both measured off the owner's
-    /// own captures 2026-08-05), which affords 4.00 against the 8 asked for.
+    /// The ONE X2 is that camera: 9.19 degrees of overlap, which affords 3.99
+    /// against the 8 asked for. The X4 Air files are the other end and they
+    /// are **not one number**: the overlap is read off each file's own
+    /// calibration and the corpus spreads over half a degree of it, so every
+    /// row here names the file it was measured on rather than quoting a family
+    /// (`kjerag-spike --bin band`, the owner's own captures, 2026-08-05).
     #[test]
     fn the_narrow_overlap_camera_gets_the_width_it_can_pay() {
-        let (x2, air) = (9.19f32.to_radians(), 15.02f32.to_radians());
-        assert!((affordable(x2).to_degrees() - 4.00).abs() < 0.01);
-        assert!((affordable(air).to_degrees() - 9.82).abs() < 0.01);
+        for (file, overlap, affords) in [
+            ("VID_20251018_191318_00_002 (ONE X2)", 9.19f32, 3.99f32),
+            ("VID_20260501_183417_00_002", 14.56, 9.36),
+            ("VID_20260725_194424_00_002", 14.60, 9.40),
+            ("VID_20260802_191029_00_002", 14.61, 9.41),
+            ("VID_20260526_191025_00_004", 14.68, 9.48),
+            ("VID_20260714_193252_00_006", 14.89, 9.69),
+            ("VID_20260725_194424_00_001", 15.02, 9.82),
+        ] {
+            let width = affordable(overlap.to_radians()).to_degrees();
+            assert!(
+                (width - affords).abs() < 0.005,
+                "{file} overlaps by {overlap} deg, which affords {width:.2} and not {affords}",
+            );
+        }
         // And what it affords is what fits, at any overlap either regime of
         // `reach` can be in, the seam between them included.
         for step in 0..=400 {

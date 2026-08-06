@@ -102,22 +102,33 @@ const CAP_AZIMUTHS: usize = 8;
 /// the whole-overlap weights keep 0.518 and a hard cut would keep 0.721.
 ///
 /// **8 is what the owner's eye chose, against those numbers rather than with
-/// them** (2026-08-05, label-blind, two arms of one binary). At 8 the same
-/// table reads 0.596, the doubled band is four times as wide, and the
-/// corridor's own step statistics get worse, not better; he ran both arms
+/// them** (2026-08-05, label-blind, two arms of one binary). He ran both arms
 /// without being told which was which and said *"2 is way better. Def not
-/// perfect but way better"* of the 8. Every instrument in the sweep behind
-/// that call is **monotone** in this number - sharpness falls, the doubled
-/// band grows, the shear falls, all smoothly and with no knee at any of 2, 4,
-/// 6, 8 and 12 - so no instrument could have picked a width and none was asked
-/// to. What the sweep did settle is the other end: 12 is refused by the optics
-/// on every camera in the corpus ([`super::band::affordable`]).
+/// perfect but way better"* of the 8, while the corridor's own step statistics
+/// got worse rather than better. Every instrument in the sweep behind that call
+/// is **monotone** in this number - sharpness falls, the doubled band grows,
+/// the shear falls, all smoothly and with no knee at any of 2, 4, 6, 8 and 12 -
+/// so no instrument could have picked a width and none was asked to.
+///
+/// What widening costs, measured through **this map** rather than through the
+/// instrument's own linear ramp (`--bin seam mode=blend`, the `shipped` row, at
+/// the July-14 anchor moment, yaw 90, fov 60, the file's own fit): the band
+/// where both lenses are over a tenth of the picture goes from 1.50 degrees at
+/// 2 to 4.78 at 8, and that band's gradient energy against the front lens alone
+/// falls 12 percent over the same pixels, 1.309 to 1.150. What the sweep did
+/// settle is the other end: 12 is refused by the optics on every camera in the
+/// corpus ([`super::band::affordable`]).
 ///
 /// What bounds it from below is **shear**, the two lenses' disagreement
 /// divided by the band: above 1 the crossover folds the picture rather than
 /// blending it. That is why 2 could not ship before the calibration fit above
-/// it, and it is the axis widening buys on - 0.52 at 2 degrees against 0.13 at
-/// 8, at the corrected calibration.
+/// it, and it is the axis widening buys on - but not as `1 / width`, which is
+/// what issue #161 assumed. The weights are cosines of the two lens axes and
+/// not a distance, so the walk from nine tenths of the correction to one tenth
+/// spends 0.75 of a 2 degree crossover and 0.61 of an 8
+/// (`the_along_seam_correction_hands_over_across_the_whole_crossover`): four
+/// times the width spreads the disagreement over 3.2 times as much picture,
+/// and the shear falls by that rather than by four.
 ///
 /// This is what the picture **asks for** and not always what it draws. Two
 /// things sit between: the camera's own overlap, which clamps it per file
@@ -164,8 +175,8 @@ const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
 ///
 /// A guard against a typo and not the bound that matters. What actually caps
 /// the handover is the file's own calibration, which is a smaller number on
-/// every camera in the corpus ([`super::band::affordable`]): 9.8 to 10.0
-/// degrees on the X4 Air and 4.00 on the ONE X2.
+/// every camera in the corpus ([`super::band::affordable`]): 9.36 to 9.82
+/// degrees over six X4 Air files and 3.99 on the ONE X2.
 const OVERLAP_DEG: f32 = 14.0;
 
 /// How wide the handover asks to be on this run, in degrees, which is
@@ -173,6 +184,13 @@ const OVERLAP_DEG: f32 = 14.0;
 ///
 /// Read once, and read only by [`Reframe::crossover`], which is where the
 /// camera clamps it and where both halves of the map take it from.
+///
+/// **The line it prints is about the ask and says nothing about the width.**
+/// No file is open when this runs, so the width drawn is not known here and
+/// cannot be: at `KJERAG_HANDOVER_DEG=12` on a file that affords 9.69 the ask
+/// and the width differ by more than the whole change this switch was built to
+/// stage. What is drawn is said per file, once, where the lenses are known
+/// (`super::Scene::open_with`).
 fn crossover_deg() -> f32 {
     static WIDTH: OnceLock<f32> = OnceLock::new();
     *WIDTH.get_or_init(|| {
@@ -182,9 +200,9 @@ fn crossover_deg() -> f32 {
         match handover(&asked) {
             Ok(width) => {
                 println!(
-                    "blend:  research handover on, {HANDOVER_DEG}={width} deg: the two lenses \
-                     cross over across {width} degrees of world angle instead of {CROSSOVER_DEG}, \
-                     as far as this camera's overlap allows"
+                    "blend:  research handover on, {HANDOVER_DEG}={width}: the handover asks for \
+                     {width} degrees of world angle instead of {CROSSOVER_DEG}. what each file \
+                     draws is that clamped by its own two lenses, on its own blend line at open"
                 );
                 width
             }
@@ -2692,13 +2710,19 @@ pub(crate) mod tests {
     /// calibration fixture rather than quoted from the format study.
     ///
     /// A band that opened past the overlap would hand over to a lens that has
-    /// no picture there, and what a ray past that edge gets is not a dropped
-    /// lens but a sample from off the end of the fisheye circle: the coverage
-    /// test is taken on the **unbent** ray ([`Reframe::covers`]) and the bend
-    /// then moves the sample. What has to fit is half the band **plus the
-    /// whole bend it carries**: at the edge of the band one lens's weight is
-    /// 1, so the other lens is sampled a whole disparity away from where the
-    /// ray points.
+    /// no picture there. What that costs is **not** a sample from off the end
+    /// of the fisheye circle: the coverage test is taken on the **unbent** ray
+    /// ([`Reframe::covers`]) and the bend then moves the sample, but a bent ray
+    /// that lands outside the lens's own boundary comes back
+    /// `inside == false`, [`claim`] returns zero for it, and the fragment
+    /// shader reads a lens only where its weight is positive. What it costs is
+    /// the handover itself: past that edge the coverage depth takes the weight
+    /// over from the crossover's ramp and steps it to zero at the rim, so the
+    /// picture is handed over by the optics rather than by the width that was
+    /// chosen, and where both lenses miss it is transparent. What has to fit is
+    /// half the band **plus the whole bend it carries**: at the edge of the
+    /// band one lens's weight is 1, so the other lens is sampled a whole
+    /// disparity away from where the ray points.
     ///
     /// This is the bound the width the picture asks for is clamped by since
     /// 2026-08-05 ([`super::band::affordable`]), so it is asserted against the

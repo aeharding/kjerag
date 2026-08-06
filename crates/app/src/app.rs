@@ -985,6 +985,7 @@ impl App {
             Ok(scene) => {
                 self.alert.close();
                 self.hold_seam(&scene);
+                self.say_handover(&scene);
                 self.open = Some(Open {
                     path: path.to_path_buf(),
                     duration: scene.duration(),
@@ -1046,6 +1047,26 @@ impl App {
         if pooled < config::POOL_ENOUGH {
             scene.fit_seam(pooled == 0);
         }
+    }
+
+    /// Say how wide this file hands the picture over, once, after its stored
+    /// calibration has landed.
+    ///
+    /// **The width is the camera's since 2026-08-05** and there is nowhere else
+    /// a pilot or an agent could read it: the projection asks for 8 degrees and
+    /// a camera whose lenses overlap by less draws less
+    /// (`kjerag_render::band::affordable`). The owner's ONE X2 draws 3.99, and
+    /// an A/B on the width was run once already with no line anywhere saying
+    /// which width either arm actually drew.
+    ///
+    /// After [`Self::hold_seam`], because a seam correction moves the principal
+    /// point and therefore the overlap; a fallback fit that lands seconds later
+    /// moves it again, which is why this is not called a property of the file.
+    fn say_handover(&self, scene: &Scene) {
+        let Some(width) = scene.handover_deg() else {
+            return;
+        };
+        println!("blend:  the two lenses hand the picture over across {width:.2} deg");
     }
 
     /// Fold whatever the open file taught us about its camera's seam into that

@@ -135,10 +135,12 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
 ```
 
 The shader consumes both lenses (issue #27), so a view anywhere on the
-sphere has a picture in it, and it mixes them across a 2-degree crossover on
-the seam (issues #7 and #48). Outside that crossover one lens weighs exactly
-1 and the other exactly 0 and only the first is fetched: a pixel away from
-the seam costs what it cost before the blend, down to the bits it writes.
+sphere has a picture in it, and it mixes them across a crossover on the seam
+that is 8 degrees wide on an X4-class file and the camera's own width on any
+other (issues #7 and #48, and 2026-08-05 for the width). Outside that crossover
+one lens weighs exactly 1 and the other exactly 0 and only the first is
+fetched: a pixel away from the seam costs what it cost before the blend, down
+to the bits it writes.
 
 Since issue #10 the second lens is not projected there either. Each lens's
 picture is one cap around its own axis, and how wide that cap is comes out of
@@ -331,21 +333,39 @@ the tables.
 Every ray is weighed against both lenses (issue #7), and the weights sum
 to 1 wherever anything has it. Each lens's claim is its **share of the
 crossover** times its **coverage depth**, zero where the ray is not in that
-lens's picture at all. The crossover is **2 degrees wide** and centred where
-the two lenses are equally far off their own axes (issue #48), which is the
-seam wherever the calibration puts it; the coverage depth is a distance
-transform from the lens's own validity boundary, so a lens fades out as it
-runs out of picture and the rim of the image circle, where vignetting lands
-and where the distortion polynomial is least trustworthy, is down-weighted for
-nothing.
+lens's picture at all. The crossover is **8 degrees wide on an X4-class file**,
+and centred where the two lenses are equally far off their own axes (issue
+#48), which is the seam wherever the calibration puts it; the coverage depth is
+a distance transform from the lens's own validity boundary, so a lens fades out
+as it runs out of picture and the rim of the image circle, where vignetting
+lands and where the distortion polynomial is least trustworthy, is
+down-weighted for nothing.
+
+**The width is the camera's, not the build's** (2026-08-05). `CROSSOVER_DEG` is
+what the picture asks for; each file's own two lenses clamp it, because the
+handover reaches half its width off the seam plus the whole bend it carries and
+that has to stay inside the ring both lenses have a picture of
+(`band::affordable`). Six X4 Air captures afford 9.36 to 9.82 degrees and take
+the 8; a ONE X2 overlaps by 9.19 and hands over across **3.99**. The width
+travels in the uniform block rather than being written into the shader source,
+because the shader is compiled once before any file is open, and both halves of
+the map read it from there. The app says which width a file drew, on the
+`blend:` line at open.
 
 The width is the one number here a person chose, and it is a trade with
 measurements on both sides (docs/research/insv-format.md 6.8): a wider band
 draws whatever the two lenses disagree about twice, and a narrower one folds
-the picture where they disagree at all. It could only be narrowed after the
-calibration was corrected, and it takes the doubled band on real footage from
-10.6 degrees to 1.5 while the band's own sharpness goes from 0.723 of one
-lens's to 1.074.
+the picture where they disagree at all. Narrowing it could only happen after
+the calibration was corrected. Widening it back out was a percept and not a
+measurement: every instrument with an opinion is monotone in the width, and the
+owner chose 8 over 2 label-blind (docs/ROADMAP.md, 2026-08-05).
+
+SUPERSEDED, kept for the shape of the trade rather than for its numbers: at the
+2 degrees issue #48 shipped, this paragraph read that the crossover takes the
+doubled band on real footage from 10.6 degrees to 1.5 while the band's own
+sharpness goes from 0.723 of one lens's to 1.074. Through the shipped path at 8
+the doubled band is about 4.8 degrees and the sharpness about 12 percent under
+what 2 kept.
 
 A file with **one** lens stream takes no crossover at all: it has no seam to
 hand over at, and its picture runs to the edge of its own coverage, 7 degrees
@@ -702,11 +722,13 @@ on the X4 Air).
   applied to the whole sphere can take it out. That is the next thing on this
   seam and it wants depth, not knobs.
   docs/research/insv-format.md 6.8 has the numbers and the transfer table.
-- **Exposure across the seam is still not corrected** (6.3), and with the
-  crossover now 2 degrees wide instead of 10 there is less band to hide a
-  brightness step in. Measured on the flattest, brightest content in this
+- **Exposure across the seam is still not corrected** (6.3), and when the
+  crossover was narrowed from 10 degrees to 2 there was less band to hide a
+  brightness step in. Measured then on the flattest, brightest content in this
   footage, it did not become one: the luma profile across the seam is the same
   ramp either way, 147.8 to 153.8 codes over 70 px before and 147.1 to 154.4
   after, because what differs between the two lenses there is vignetting
   inside each lens's own picture rather than a step at the handover. One view;
-  it is still the thing to look at first if a seam shows on flat sky.
+  it is still the thing to look at first if a seam shows on flat sky. The
+  crossover is 8 degrees wide since 2026-08-05, which is band this reading was
+  not taken over.

@@ -291,6 +291,14 @@ struct Field {
     shifts: Vec<f64>,
     frames: usize,
     refused: usize,
+    /// How wide this file's own camera hands the picture over, in degrees,
+    /// read off the map the columns were sampled through.
+    ///
+    /// Carried rather than quoted because the width is the **camera's** since
+    /// 2026-08-05 (`kjerag_render::band::affordable`): an X4 Air draws 8
+    /// degrees and a ONE X2 draws 3.99, and the radial line below turns codes
+    /// per degree into codes end to end over exactly this.
+    crossover_deg: f64,
 }
 
 impl Field {
@@ -680,6 +688,7 @@ fn harvest(
     field: &mut Field,
 ) {
     field.frames += 1;
+    field.crossover_deg = f64::from(reframe.crossover_at(0.0).to_degrees());
     for (index, at) in ring.iter().enumerate() {
         let Some(hit) = found[index].filter(|hit| hit.r >= options.keep) else {
             field.refused += 1;
@@ -773,16 +782,16 @@ fn field(options: &Options) -> Fallible<()> {
     let radial = truth.radial();
     println!(
         "\nradial: {:+.5} ln per degree across the band, spread {:.5} over {} azimuth-frames, \n\
-         \t{:.1} standard errors from zero. over the {:.0} degrees the crossover can ever \n\
-         \treach that is {:+.2} percent end to end, against the {:+.2} percent step above. \n\
-         \tvignetting is radial and the two lenses see the band from opposite sides, so it \n\
-         \tCANNOT hide in the gain and the gain cannot hide in it.",
+         \t{:.1} standard errors from zero. over the {:.2} degrees this camera hands the \n\
+         \tpicture over across that is {:+.2} percent end to end, against the {:+.2} percent \n\
+         \tstep above. vignetting is radial and the two lenses see the band from opposite \n\
+         \tsides, so it CANNOT hide in the gain and the gain cannot hide in it.",
         radial.mean,
         radial.spread,
         radial.count,
         radial.signal(),
-        2.0 * kjerag_render::band::WIDEST_DEG,
-        100.0 * ((radial.mean * 2.0 * f64::from(kjerag_render::band::WIDEST_DEG)).exp() - 1.0),
+        truth.crossover_deg,
+        100.0 * ((radial.mean * truth.crossover_deg).exp() - 1.0),
         100.0 * (gain.mean.exp() - 1.0),
     );
 

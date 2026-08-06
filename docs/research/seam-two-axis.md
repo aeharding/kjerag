@@ -359,9 +359,11 @@ every distance from the seam**, and 0.028 deg per degree of that spread is
 measurable in the probe as well (`off=` -4 to +1 walks the residual from
 -0.571 to -0.431).
 
-`--bin step` prints both windows now, `step:` at the campaign's and `close:`
-over the two degrees just outside this frame's own crossover, with each fit's
-rms beside it.
+`--bin step` prints both windows now, `step:` at the wide one and `close:` over
+the two degrees just outside this frame's own crossover, with each fit's rms
+beside it. The wide window's default moved from 2.5 to **4.2** on 2026-08-06,
+because the crossover it has to clear went from 2 degrees to 8 and 2.5 sits
+inside that; everything above is `guard=2.5` and reproduces by asking for it.
 
 ## 11. The probe assumed the camera knew where its own lenses point (issue #130)
 
