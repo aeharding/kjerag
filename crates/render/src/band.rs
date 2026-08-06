@@ -540,18 +540,26 @@ pub struct Leftover {
 /// means exactly zero.
 ///
 /// **Why it is static.** The along-seam axis is the one parallax cannot reach
-/// at any distance (docs/research/seam-two-axis.md 1), so what is on it is the
-/// camera. Measured per azimuth it holds still through a flight and reproduces
-/// across flights weeks apart, which is what makes it a calibration and not a
-/// state: `--bin crossing`'s matched-azimuth series reads the two axes' medians
-/// 1.1 source pixels apart between the owner's May and April captures on this
-/// axis, against 9 on the other one.
+/// at any distance (docs/research/seam-two-axis.md 1), so what disagrees on it
+/// is the camera rather than the scene, and a camera does not change between
+/// sessions. Whether anything is left there that is also a function of azimuth
+/// is a separate question, and it is the one below.
 ///
 /// **It is never freer than its evidence.** Every entry is a weighted mean of
 /// the readings within [`SMOOTH_DEG`] of it, shrunk towards zero by
-/// [`TABLE_RIDGE`], with the five terms [`Along`] already applies taken back
-/// out so the two cannot both correct the same thing. An entry with no reading
-/// inside the kernel is exactly zero and its neighbours taper into it.
+/// [`TABLE_RIDGE`], fitted to readings the five terms [`Along`] already applies
+/// have been taken off so the two cannot both correct the same thing. An entry
+/// with no reading inside the kernel is exactly zero and its neighbours taper
+/// into it.
+///
+/// **Nothing in the app builds one, and that is a measurement** (stage 9,
+/// docs/research/stage9.md). On the owner's six X4 Air flights the part of the
+/// leftover that survives the five terms is 3.7 percent of it, two flights
+/// disagree at one azimuth by more than either varies round its whole ring, and
+/// held out a table costs the flight it was not fitted on at every kernel width
+/// that resolves anything. The ONE X2 of issue #130 reads the same. The
+/// mechanism is here because the refusal had to be checkable and because a
+/// camera that needs one may still turn up; `Table::REST` is what ships.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Table {
