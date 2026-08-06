@@ -59,7 +59,10 @@ too, so the terminal line is a complete launch command:
 `kjerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1`.
 All three read it with the one parser in `crates/render/src/framing.rs`, which
 is also where it is written; reframe's real parser reads the same line in a
-test, so no two of them can drift. Measured under the harness: copy a view,
+test, so no two of them can drift. A `lock=1` yaw is a direction in the
+stabilized world frame, whose zero moved on 2026-08-06, so a line copied before
+that date lands somewhere else and says nothing about it (docs/UI.md, the view
+line). Measured under the harness: copy a view,
 seek ten seconds away, zoom out a notch, paste, and the copied line comes back
 to the millisecond and the hundredth of a degree with the picture byte for
 byte what it was.
@@ -84,9 +87,10 @@ one the feasibility study called the riskiest correctness surface. The
 trailer's IMU is parsed and integrated into a `world_from_body` quaternion
 every 5 ms of the file, and the reprojection pass composes its inverse
 between the lens mounting and the camera, so the world stays put while the
-camera swings. Roll and pitch are locked completely; yaw is high passed with
-a 3 s constant, so a swing is cancelled and a deliberate turn still reads as
-a turn. Drag to look around needed no change at all: the anchor it stores is
+camera swings. Roll, pitch and yaw are all locked, so the view holds a
+direction in the world and a deliberate turn moves the aircraft rather than
+the picture (owner ruling, 2026-08-06; it was a 3 s yaw high pass until
+then). Drag to look around needed no change at all: the anchor it stores is
 in whatever frame the camera rotation lands in, and with the lock on that
 frame is the world. Measured on rendered frames: the horizon moves 0.23
 degrees peak to peak over 120 frames of calm flight and 2.86 through a
@@ -135,7 +139,10 @@ app's default 90-degree field of view that is 16.5% of the sphere; on real
 flying footage with the horizon locked, which is the default, a parked view
 is not a parked geometry, and the measured duty cycle is 21.6 to 24.3% with
 no hysteresis at all and 8.9 to 9.4% with the 15 degrees of margin a release
-would need. Releasing a cold gate costs 195 to 340 ms, six to eleven frames
+would need. Those were read under the heading follow; with the world-fixed
+lock of 2026-08-06 the body turns fully under a parked view and the same
+measurement on one of those captures reads 15.7% and 3.9%, which makes the
+answer below no less final. Releasing a cold gate costs 195 to 340 ms, six to eleven frames
 of stale far hemisphere, because HEVC has no way into the middle of a GOP and
 this camera's is 29 frames. Expected saving: **0.14 W**, for a state machine
 and a packet ring through the frame path. `kjerag-spike --bin gating` is the
@@ -571,6 +578,95 @@ no commitment: export that follows the view the pilot actually flies
 live, no keyframe UI ever.
 
 ## Decisions log
+
+- 2026-08-06 **The reference registry is re-derived into the world-fixed frame,
+  and the seam ladder is re-baselined there** (`--bin carried`,
+  docs/research/reference-views.md). Fourteen `lock=1` lines, one correction
+  each, computed at the line's own frame rather than per file: `carried` runs
+  from -72.41 to +79.33 degrees across the registry and moves by 3 degrees a
+  second at the shimmer view, so no two lines in a file share a correction.
+  Each was then checked in the picture, 67a4bcf rendering the old line against
+  this build rendering the new one: twelve match at zero pixels of 1024 and two
+  at 2 px, correlation 0.92 to 1.0000, against a control that leaves the yaw
+  alone and lands 1.7 to 20 degrees out.
+
+  **Two of #165's numbers do not survive that.** The shimmer view's re-derived
+  aim is `yaw=162.31` and not the `160.63` published there, which was the same
+  rule read off a half-second grid; the picture is 83 px out at 160.63 and 2 px
+  out at 162.31. And the eight-fold improvement in `--bin shear`'s floor
+  (0.0773 -> 0.0099 deg of step rms at the seam band) is neither a floor nor an
+  improvement: at the corrected aim it reads 0.0687, and dropping each run's two
+  worst steps leaves 0.0097 before, 0.0088 after and 0.0094 at #165's aim. One
+  frame in ninety fails its correlation and decides the statistic. What the lock
+  change really bought is yield, because fewer frames are refused for a seam
+  past `TILT_LIMIT`: usable step pairs go 71 to 89 at the seam band and 30 to 89
+  at `+60`. The seam itself did not move, `-150` reading 0.3646 -> 0.3381 deg
+  applied, and `--bin crossing` at the May-01 GOOD/BAD pair moves by 0.14 source
+  px across the change with its verdict and its sensitivity floor intact.
+
+- 2026-08-06 **The horizon lock holds the world, heading and all** (owner
+  ruling; `Filter::yaw_seconds` 3 s -> infinite). It supersedes the
+  2026-07-31 entry below, which chose the high pass.
+
+  The owner asked for what Insta360 Studio does, in his words hold the world
+  still, and the oracle probe had already measured how far from that the
+  shipped design was. Against a Studio export of the same July 14 window,
+  registered chain-free frame by frame, kjerag's view swept **404.7 deg/min
+  away from Studio's with r2 0.98** over ten seconds: a straight ramp, which
+  is a design and not a defect. The same measurement of this build reads
+  **4.4 deg/min with r2 0.04** over the same ten seconds, which is no ramp
+  at all, only a 6.6 degree peak-to-peak wobble the two stitchers disagree
+  by. Dense phase correlation, the second instrument, reads the picture's
+  own slide over the probe's headline three seconds at **22.3 degrees before
+  and 3.4 after**, against Studio's 0.1.
+
+  **The accepted price is gyroscope drift, and it is the technique's floor
+  rather than a shortfall.** Nothing observes heading: gravity cannot see it
+  and no capture on the test box carries a byte of the trailer's magnetic
+  record, so a locked yaw inherits the gyroscope's zero and nothing ever
+  corrects it. Studio's own export drifts the same order, 2.2 deg/min on the
+  probe's window.
+
+  **It is not a steady creep, which is the thing to say out loud.** The locked
+  frame turns about the world vertical at `bias . up_in_body`, so a camera
+  hanging tens of degrees off vertical brings its horizontal bias components
+  in, and those are the larger ones: on the July 14 file `--bin drift` walks
+  the running error to -36 degrees by minute 3, +87 by minute 8 and +149 by
+  minute 19, about 185 degrees peak to peak, against a signed mean of 2.08
+  deg/min. Quoting the mean alone, or the body's own yaw-axis bias, describes
+  a flight nobody flew. The shape is the finding and the size is not: this
+  file has no still moment good enough to read a zero from, and the ten
+  seconds `--bin gyro` picks instead give the same walk hundreds of degrees
+  either way with a 1.40 deg/min mean.
+
+  **The world frame's zero is the heading at the file's first IMU sample**,
+  not its first video frame: 18.71 degrees of the body's own turning apart on
+  that capture, and that is where `Ctrl+0` lands.
+
+  What the pilot loses with all this is the fly-forward feel: the view used to
+  settle back onto the nose within a few seconds of any turn, and now a turn
+  leaves it pointed where it was, so
+  a flight that turns round shows the way it came until somebody drags. What
+  goes with the follow is its erosion of a pan against the world, and gyro
+  drift takes that place: issue #44 was closed by the owner as the t0 seed
+  transient and not as a defect in the drag or the follow (entry above), and
+  the old design's own control says the same, 0.62/0.03/0.38/0.18 degrees per
+  half second after a pan at `from=300`.
+
+  **Every stored `lock=1` view line moved, and by a lot.** The yaw in one of
+  those lines is measured in the stabilized frame, whose zero was the
+  followed heading and is now the file's opening heading, so the two differ
+  by however far the old follow had been carried: measured on the July 14
+  file through `--bin lean`'s own heading column, 6.8 degrees at the first
+  frame, 44 by 6.5 s and 157 by 36 s. The rule is
+  `new_yaw = old_yaw + carried(t)`, confirmed in the picture at the shimmer
+  view. **The rule holds and the number this entry first put on it does not**
+  (corrected 2026-08-06): that view's re-derived aim is `yaw=162.31` and not
+  the `160.63` written here, because 156.85 is `carried` at the 36.036 instant
+  the half-second walk measured and 158.53 is `carried` at the frame
+  `time=36.303` shows. The picture is 83 px of 1024 out at 160.63 and 2 px out
+  at 162.31, which is where the "to 1.6 degrees" came from. The registry was
+  re-derived line by line the same day, in the entry above.
 
 - 2026-08-06 **No along-seam table is fitted: above the five terms the pass
   already applies, what is left is not a static function of azimuth this corpus
@@ -2635,8 +2731,10 @@ live, no keyframe UI ever.
   parked views and 60 s of two X4 Air captures, at 90 degrees, the gate would
   be on 21.6 to 24.3% of the time with no hysteresis and 8.9 to 9.4% with 15
   degrees of margin, releasing one to three times a minute with nobody
-  touching the mouse. With the lock off it holds forever, but only 5 to 17.5%
-  of parked views qualify. Expected saving at the default: **0.14 W of about
+  touching the mouse. (Both under the heading follow; the world-fixed lock of
+  2026-08-06 turns the body fully under a parked view and takes those to 15.7%
+  and 3.9% on one of the same captures.) With the lock off it holds forever,
+  but only 5 to 17.5% of parked views qualify. Expected saving at the default: **0.14 W of about
   10 W**, and 0.26 points of one core.
 
   Against that, releasing a cold gate is not free and cannot be made free.
@@ -2951,13 +3049,18 @@ live, no keyframe UI ever.
   with a covariance nobody can populate from a file that records no noise
   figures. Every constant is measured on real footage and the reason for each
   is in docs/research/insv-format.md 8.5; the one that is a judgement rather
-  than a measurement is the 3 s yaw constant, and the numbers either side of
-  it are there too.
+  than a measurement is the yaw constant, and the numbers either side of it
+  are there too.
 - 2026-07-31 Yaw is **high passed, not locked** (issue #8). A view welded to
   the heading the file starts on fights every deliberate turn; a view that
   follows the body exactly inherits every swing. At 3 s the view's worst
   heading swing inside a second is 29 degrees against 103 unstabilized, and
   it still follows 946 degrees of real turning a minute against 986.
+  **SUPERSEDED 2026-08-06**, top of this log: a deliberate turn carrying the
+  picture round is the thing the owner wanted gone, and the swing this entry
+  worried about was never what the high pass caught. On the July 14 file the
+  3 s constant took the view's worst swing inside a second from 239.9 degrees
+  only to 178.6 (`--bin gyro`), while following 986.8 deg/min of the turning.
 - 2026-07-31 The IMU axis convention is **measured, not transcribed** (issue
   #8). A three-letter convention string is only half of a convention; the
   other half is the frame it lands in, which is whatever the project it came
@@ -3129,6 +3232,17 @@ the mouse, the body's own swing takes the gate off and puts it back.
 |  90 | 15 deg |   9.4, 8.9% |     1.4, 2.0 | 0.57, 1.17 s |
 |  90 | 30 deg |   0.9, 0.3% |     0.9, 0.3 | 0.47, 0.40 s |
 | 110 | 15 deg |   3.2, 2.5% |     0.5, 1.0 | 0.70, 0.90 s |
+
+**Read under the heading follow that shipped until 2026-08-06, and the world-
+fixed lock makes every row of it worse.** The body now turns fully under a
+parked view instead of partly, so the gate comes off more. Re-run on
+VID_20260714_193252_00_006, before against after: at fov 90 and no margin
+18.2% gated becomes 15.7%, at 15 degrees of margin 5.2% becomes 3.9%, at fov
+45 and no margin 49.1% becomes 44.7%, and the longest single run over the file
+falls from 14.21 s to 9.41 s at the default field of view. Releases a minute
+barely move (5.5 to 5.6 at the default). **The decision the table gated is
+unchanged and better supported**: an expected saving of 0.14 W was already too
+little for a state machine and a packet ring, and there is less of it now.
 
 Releasing a gate, packets held since the last keyframe and replayed, nothing
 mapped on the way:

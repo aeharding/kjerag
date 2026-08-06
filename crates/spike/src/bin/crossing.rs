@@ -16,13 +16,23 @@
 //! ```sh
 //! # the owner's own view line, with a stored per-camera calibration
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> \
-//!   time=50.117 yaw=-74.43 pitch=0.06 fov=55.69 lock=1 bins=180 \
+//!   time=50.117 yaw=-80.28 pitch=0.06 fov=55.69 lock=1 bins=180 \
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! # the null control: lens 0 against its own picture, which must read zero
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 null=1
 //! # the plant control: a known calibration delta, read back at every site
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 plant=yaw:0.10
 //! ```
+//!
+//! **That `yaw` is re-derived and a stale one runs without a word.** The lock
+//! became world-fixed on 2026-08-06, so the frame a `lock=1` yaw is measured
+//! in no longer follows the aircraft's slow heading and its zero is the file's
+//! opening heading instead. The owner's line above said `yaw=-74.43` until
+//! that date and is the same picture at `-80.28`; the tables this branch's PR
+//! recorded were read at the old one, on the old build.
+//! `new_yaw = old_yaw + carried(t)`, which `--bin carried` computes for a
+//! line, and docs/research/reference-views.md has the rule and the re-derived
+//! registry.
 //!
 //! **What is measured, and what is not.** Only the decoded raw lens frames,
 //! projected through the app's own map. The projection is the unbent one,

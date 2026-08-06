@@ -7,10 +7,19 @@
 //! cargo run --release -p kjerag-spike --bin colour -- <file.insv> from=488.855 count=8
 //! # what a drawn view's three channels do as they cross the seam - the acceptance evidence
 //! cargo run --release -p kjerag-spike --bin colour -- <file.insv> mode=profile \
-//!   from=488.855 yaw=67.24 pitch=2.56 fov=60 out=scratch/stage7
+//!   from=488.855 yaw=-5.17 pitch=2.56 fov=60 lock=1 out=scratch/stage7
 //! # the same statistic on somebody else's stitch, from an equirectangular export
 //! cargo run --release -p kjerag-spike --bin colour -- <export.mp4> mode=studio at=12.0
 //! ```
+//!
+//! **`lock=1` is written out because it is the default and a bare `yaw=` does
+//! not say which frame it is in.** Since 2026-08-06 that frame is world-fixed:
+//! its zero is the file's opening heading rather than the followed one, so a
+//! `yaw` copied from before that date points somewhere else and runs without a
+//! word. The soil view above said `yaw=67.24` until that date and is the same
+//! picture at `-5.17`. `new_yaw = old_yaw + carried(t)`, computed per line by
+//! `--bin carried`, rule and re-derived registry in
+//! docs/research/reference-views.md.
 //!
 //! **Stage 3 measured brightness; this measures colour.** The two are not the
 //! same question and the difference is the whole charter: stage 3's correction

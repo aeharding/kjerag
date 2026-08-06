@@ -9,10 +9,19 @@
 //! cargo run --release -p kjerag-spike --bin expose -- <file.insv> mode=annulus from=488.855
 //! # what a rendered view's luma does as it crosses the seam
 //! cargo run --release -p kjerag-spike --bin expose -- <file.insv> mode=render \
-//!   from=488.855 yaw=67.24 pitch=2.56 fov=218.99 out=scratch/stage3-proof
+//!   from=488.855 yaw=-5.17 pitch=2.56 fov=218.99 lock=1 out=scratch/stage3-proof
 //! # the pooled gain frame by frame: does it pump
 //! cargo run --release -p kjerag-spike --bin expose -- <file.insv> mode=trace count=120
 //! ```
+//!
+//! **`lock=1` is written out because it is the default and a bare `yaw=` does
+//! not say which frame it is in.** Since 2026-08-06 that frame is world-fixed:
+//! its zero is the file's opening heading rather than the followed one, so a
+//! `yaw` copied from before that date points somewhere else and runs without a
+//! word. The soil view above said `yaw=67.24` until that date and is the same
+//! picture at `-5.17`. `new_yaw = old_yaw + carried(t)`, computed per line by
+//! `--bin carried`, rule and re-derived registry in
+//! docs/research/reference-views.md.
 //!
 //! **Nothing in the project's earlier exposure corpus is used here, or
 //! checked against.** It was audited and refused in full (issue #103): three
