@@ -27,9 +27,11 @@
 //! **That `yaw` is from before 2026-08-06 and points somewhere else now.** The
 //! lock became world-fixed that day, so the frame a `lock=1` yaw is measured
 //! in no longer follows the aircraft's slow heading and its zero is the file's
-//! opening heading instead. `new_yaw = old_yaw + carried(t)`;
-//! docs/research/reference-views.md has the rule and how to measure it. A line
-//! older than that date runs without a word and reads a different picture.
+//! opening heading instead. `new_yaw = old_yaw + carried(t)`, which `--bin
+//! carried` computes for a line; docs/research/reference-views.md has the rule
+//! and the re-derived registry, whose re-derived form of the view above is
+//! `yaw=-80.28`. A line older than that date runs without a word and reads a
+//! different picture.
 //!
 //! **What is measured, and what is not.** Only the decoded raw lens frames,
 //! projected through the app's own map. The projection is the unbent one,

@@ -579,6 +579,31 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-06 **The reference registry is re-derived into the world-fixed frame,
+  and the seam ladder is re-baselined there** (`--bin carried`,
+  docs/research/reference-views.md). Fourteen `lock=1` lines, one correction
+  each, computed at the line's own frame rather than per file: `carried` runs
+  from -72.41 to +79.33 degrees across the registry and moves by 3 degrees a
+  second at the shimmer view, so no two lines in a file share a correction.
+  Each was then checked in the picture, 67a4bcf rendering the old line against
+  this build rendering the new one: twelve match at zero pixels of 1024 and two
+  at 2 px, correlation 0.92 to 1.0000, against a control that leaves the yaw
+  alone and lands 1.7 to 20 degrees out.
+
+  **Two of #165's numbers do not survive that.** The shimmer view's re-derived
+  aim is `yaw=162.31` and not the `160.63` published there, which was the same
+  rule read off a half-second grid; the picture is 83 px out at 160.63 and 2 px
+  out at 162.31. And the eight-fold improvement in `--bin shear`'s floor
+  (0.0773 -> 0.0099 deg of step rms at the seam band) is neither a floor nor an
+  improvement: at the corrected aim it reads 0.0687, and dropping each run's two
+  worst steps leaves 0.0097 before, 0.0088 after and 0.0094 at #165's aim. One
+  frame in ninety fails its correlation and decides the statistic. What the lock
+  change really bought is yield, because fewer frames are refused for a seam
+  past `TILT_LIMIT`: usable step pairs go 71 to 89 at the seam band and 30 to 89
+  at `+60`. The seam itself did not move, `-150` reading 0.3646 -> 0.3381 deg
+  applied, and `--bin crossing` at the May-01 GOOD/BAD pair moves by 0.14 source
+  px across the change with its verdict and its sensitivity floor intact.
+
 - 2026-08-06 **The horizon lock holds the world, heading and all** (owner
   ruling; `Filter::yaw_seconds` 3 s -> infinite). It supersedes the
   2026-07-31 entry below, which chose the high pass.
@@ -636,9 +661,8 @@ live, no keyframe UI ever.
   frame, 44 by 6.5 s and 157 by 36 s. The rule is
   `new_yaw = old_yaw + carried(t)`, confirmed in the picture at the shimmer
   view (`time=36.303 yaw=3.78` before matches `yaw=160.63` after, to 1.6
-  degrees). docs/research/reference-views.md carries the caveat; the
-  registry needs re-deriving before its numbers are compared across this
-  change.
+  degrees). The registry was re-derived the same day and that 1.6 degrees is
+  gone with it; the entry above is what its lines say now.
 
 - 2026-08-05 **The handover is eight degrees wide, because the eye said so
   against every instrument that had an opinion** (`projection::CROSSOVER_DEG`

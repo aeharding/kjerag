@@ -4,16 +4,16 @@
 //! ```sh
 //! # four bands across the seam: what was applied at each, frame by frame
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90
+//!   time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1 frames=90
 //! # the same view with a thin patch walked across the seam: the field's shape
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 mode=profile
+//!   time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1 frames=90 mode=profile
 //! # the null, which has to read exactly zero everywhere
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 null=1
+//!   time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1 frames=90 null=1
 //! # the plant, which has to read back a displacement it was given
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 mode=plant
+//!   time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1 frames=90 mode=plant
 //! ```
 //!
 //! **Two arms of one frame, and not two runs of one file.** Every frame is
@@ -33,7 +33,7 @@
 //! only two readings in the set whose right answer is known before the run.
 //!
 //! **Seam-relative and not picture-relative.** Under a locked horizon the body
-//! turns beneath the view, so the seam walks across the picture: 330 px over
+//! turns beneath the view, so the seam walks across the picture: 393 px over
 //! the three seconds this was written for. A row pinned to the picture would be
 //! measuring that sweep. Every patch here is placed against the seam's own row,
 //! read out of the shipped map (`Reframe`) by walking down the gradient of the
@@ -71,22 +71,22 @@
 //! ```sh
 //! cargo run --release -p kjerag-spike --bin shear -- \
 //!   ~/Videos/Insta/VID_20260714_193252_00_006.insv \
-//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 warm=6.0 \
+//!   time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1 frames=90 warm=6.0 \
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! ```
 //!
-//! `-150` reads 0.3663 deg applied at 0.0047 deg step rms over 89 pairs; the
-//! seam itself (`+0`) 0.3623 at 0.0619 with a worst single step of 0.42; `+60`
-//! 0.0578 at 0.1350, over 23 pairs of 30 readings, which is the one band here
-//! whose statistic is fragile; and `+150` 0.0003 at 0.0003, which is this
-//! instrument's floor on a live arm. The band's own state moves 0.0449 deg rms
+//! `-150` reads 0.3381 deg applied at 0.0066 deg step rms over 87 pairs, worst
+//! single step 0.0187; the seam itself (`+0`) 0.3356 at 0.0687 over 89, with a
+//! worst single step of 0.4582 that is the whole of that rms; `+60` 0.0820 at
+//! 0.1471 over 89, which is the one band here whose statistic is fragile; and
+//! `+150` 0.0022 at 0.0091 over 76. The band's own state moves 0.0449 deg rms
 //! between frames on the bend and 0.0008 on the along-seam field.
 //!
-//! **Those four rows were read at a 2 degree handover and they are not where
-//! they were.** At the 8 the pass hands over across since 2026-08-05, all four
-//! sit inside it (`Mode::offsets`), so `+150` is no longer an unbent floor:
-//! at width 8 it reads 0.0243 deg applied. Take the four as distances from the
-//! seam and not as places in the handover.
+//! **Those four rows are distances from the seam and not places in the
+//! handover.** They are -2.93, 0, 1.17 and 2.93 degrees off it, and at the 8
+//! degrees the pass has handed over across since 2026-08-05 all four sit
+//! inside it (`Mode::offsets`), so `+150` is not an unbent floor: it read
+//! 0.0003 deg applied at the 2 degree width and reads a real number now.
 //!
 //! **Those readings are stated against a main, and the horizon is why.** Under
 //! `lock=1` the view is held against the orientation track, so a change to how
@@ -101,29 +101,37 @@
 //! **The lock going world-fixed on 2026-08-06 is that same caveat at its
 //! largest, and the yaw above has been re-derived for it.** The stabilized
 //! frame's zero stopped following the aircraft's slow heading, so at
-//! `time=36.303` on this file the old zero and the new one are 157 degrees
-//! apart: every command here said `yaw=3.78` until that date, and `yaw=160.63`
-//! is the same picture, to about 1.6 degrees. **A `lock=1` line older than
-//! that date points somewhere else entirely and will run without a word.**
+//! `time=36.303` on this file the old zero and the new one are 158.53 degrees
+//! apart: every command here said `yaw=3.78` until that date. **A `lock=1`
+//! line older than that date points somewhere else entirely and will run
+//! without a word.** #165 printed `yaw=160.63` here, which is the same rule
+//! read off a half-second grid and 1.68 degrees short of the view; `--bin
+//! carried` computes it at the line's own frame, and the picture agrees with
+//! the answer above to 2 px of 1024 at fov 20 where it was 83 px out at
+//! 160.63.
 //!
-//! Re-read at the new aim, the field is the field it was, which is what says
-//! the lock change did not reach the seam: `-150` 0.3646 -> 0.3341 deg applied,
-//! `+0` 0.3490 -> 0.3350, `+60` 0.1225 -> 0.0990, `+150` -0.0021 -> 0.0020,
-//! the differences being the 1.6 degrees the aim is out. `null=1` reads
-//! exactly 0.000000 on every band either side, because the null holds both
-//! arms and has no view in it at all.
+//! Re-read at the re-derived aim, the field is the field it was, which is what
+//! says the lock change did not reach the seam: `-150` 0.3646 -> 0.3381 deg
+//! applied, `+0` 0.3490 -> 0.3356, `+60` 0.1225 -> 0.0820, `+150` -0.0021 ->
+//! 0.0022. `null=1` reads exactly 0.000000 on every band either side, because
+//! the null holds both arms and has no view in it at all.
 //!
-//! **What did move is this instrument's own floor, and it moved the right
-//! way.** The body used to sweep the seam 330 px across the picture in three
-//! seconds, and the patch had to be read on a seam that was tilting past
-//! [`TILT_LIMIT`] while it did. With the view parked in the world instead, the
-//! seam band's step rms falls from 0.0773 deg to 0.0099 and its worst single
-//! step from 0.468 to 0.026, and three of the four bands yield more frames
-//! (90/79/35/85 -> 90/90/87/78). The seam ladder is worth re-baselining on
-//! that, once the reference lines are re-derived.
+//! **What the lock change moved is the yield, and not this instrument's
+//! floor.** The seam still sweeps down the picture while the body turns
+//! underneath it, further than before: 393 px end to end over these three
+//! seconds against 329 on the old build at the old aim. What improves is how
+//! many of those frames are read at all rather than refused for a seam past
+//! [`TILT_LIMIT`]: the usable step pairs go 71 to 89 at `+0` and 30 to 89 at
+//! `+60`, while `+150` goes 83 to 76. The seam band's step rms is NOT a floor
+//! and #165 read it as one: 0.0773 before, 0.0687 at the re-derived aim,
+//! 0.0099 at #165's own, and all three are one frame's correlation failure.
+//! Drop the two worst steps of each and they read 0.0097, 0.0088 and 0.0094,
+//! which is the floor, and it did not move. At the aim above the outlier is
+//! frame 6 of 90, reading -0.67 px between neighbours that read 18.4 and 18.5,
+//! at a peak of 0.905 the gate accepts.
 //!
 //! The `seam=` in that command is not decoration either: fitted from the file
-//! instead, the same view reads 0.027 deg at `-150` rather than 0.366, because
+//! instead, the same view reads 0.028 deg at `-150` rather than 0.340, because
 //! what the band applies is what the calibration left it.
 //!
 //! CSVs land in gitignored `scratch/`, stamped with the file they were read off
