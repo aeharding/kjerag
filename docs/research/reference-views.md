@@ -51,20 +51,28 @@ caveat in the Motion section, which is the same trap at a smaller size.
   under a parked view instead of carrying it round. The acceptance command is that
   line plus `frames=90 warm=6.0 seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
   and the `seam=` is not optional: fitted from the file instead, the same view reads 0.028 deg
-  at -150 px rather than 0.340, because what the band applies is what the calibration left it.
+  of total displacement at -150 px rather than 0.340, because what the band applies is what the
+  calibration left it. **Two columns and they are not the same number**: `size` is the whole
+  displacement and `along` is its along-seam part, and every "applied" figure below is the
+  `along deg` column unless it says otherwise.
   Live arm against the same frames with the band held off, 90 frames, READ AGAINST MAIN AT #165
-  (see the horizon caveat below): `-150` px 0.3381 deg applied at 0.0066 deg step rms over 87
-  pairs, worst single step 0.0187; `+0` 0.3356 at 0.0687 with a worst single step of 0.4582 over
-  89 pairs; `+60` 0.0820 at 0.1471 over 89; `+150` 0.0022 at 0.0091 over 76. Those four offsets
+  (see the horizon caveat below): `-150` px 0.3381 deg along (0.3397 total) at 0.0066 deg step
+  rms over 87 pairs, worst single step 0.0187; `+0` 0.3356 along (0.3564 total) at 0.0687 with a
+  worst single step of 0.4582 over 89 pairs; `+60` 0.0820 along (0.1871 total) at 0.1471 over 89;
+  `+150` 0.0022 along (0.0738 total) at 0.0091 over 76. Those four offsets
   are -2.93, 0, 1.17 and 2.93 degrees off the seam, and at the 8 degree handover the pass draws
   now all four are INSIDE it, so `+150` is not an unbent floor and has not been one since #162.
   The band's own state moves 0.0449 deg rms between frames on the bend and 0.0008 on the
   along-seam field, which is where it was before the lock changed. `mode=profile` puts the
-  along-seam plateau at 17.21 px (0.3362 deg) out to +0.47 deg and down to 0.09 px by +1.41, with
-  the handover bracketed inside +24 to +72 px, 0.94 degrees of view. `null=1` holds both arms and
-  reads exactly zero at every probe on every frame; `mode=plant` yaws the second arm 0.05 and
-  0.10 deg and reads the expected -2.534 and -5.068 px back to within 0.024 px, every band,
-  ratio 1.9948 to 1.9969.
+  along-seam plateau at 17.21 px (0.3362 deg), still 15.56 px at +0.47 deg, 1.19 px (0.0232 deg)
+  by +1.41, and only out past +3.5 degrees does it reach the 0.09 px its far quarter averages;
+  the handover is bracketed inside +24 to +72 px, 0.94 degrees of view. The instrument's own
+  bracket line said "down to 0.09 px by +1.41 deg" until 2026-08-06, which reads as the value
+  there and is not: +1.41 is where the field comes within a tenth of the plateau of that floor.
+  `null=1` holds both arms and reads exactly zero at every probe on every frame; `mode=plant`,
+  run with the same `seam=` as the rest of this line, yaws the second arm 0.05 and
+  0.10 deg and reads the expected -2.534 and -5.068 px back to within 0.026 px, every band,
+  ratio 1.9946 to 1.9971.
   READ THE `+0` STEP RMS AS ONE FRAME AND NOT AS A FLOOR (2026-08-06, this rebaseline). #165
   reported that number falling 0.0773 to 0.0099 across the lock change, an eight-fold improvement
   in the instrument's floor. It does not survive re-derivation: at the aim above it reads 0.0687,
@@ -190,8 +198,13 @@ caveat in the Motion section, which is the same trap at a smaller size.
   (seam-two-axis 11) take the three captures to 50/42/65 azimuths and a pool entry. Round the ring
   at this moment: 2.570 deg along and 2.830 across on factory, 0.257 and 0.267 fitted. Local step
   where the horizon crosses the seam, `yaw=-2.11 pitch=3.6 fov=35` (was `yaw=-21.5`, the same
-  +19.39 of carry, UNVERIFIED in the picture because that fragment carries no `lock=` and only a
-  locked view moved): -3.11 deg factory, -0.61 deg fitted.
+  +19.39 of carry; the picture verifies, 0 px and correlation 1.0000 against 67a4bcf at the old
+  yaw, 15.9 degrees out with the yaw left alone): -3.11 deg factory, -0.61 deg fitted.
+  **What is UNVERIFIED here is the lock flag and not the aim.** The fragment does not say whether
+  it was locked; an unlocked pair of renders is byte-identical across this change (0.00 codes), so
+  the picture cannot tell; and `--bin step` at this view answers "no horizon fitted on both sides
+  of the seam" on either flag today, so nothing reproduces the two numbers above either way. If
+  that fragment was `lock=0` it never moved and `yaw=-21.5` stands.
   Pictures: `scratch/x2fit/october-{factory,file}.png`.
 
 ## Photometric: brightness/color at the seam (stage 7 merged-in-draft, stage 8 in progress)
@@ -252,10 +265,16 @@ caveat in the Motion section, which is the same trap at a smaller size.
   and `VID_20260410_185407_00_004.insv time=602.368 yaw=-139.23 pitch=-37.74 fov=71.04 lock=1`
   RE-DERIVED 2026-08-06: was `yaw=-129.09` (carried +39.20) and `yaw=-132.22` (carried -7.01).
   Match 0 px on both, correlation 0.9244 and 0.9878; with the yaws left alone the same comparison
-  reads correlation 0.06 and 0.15. The first of the two is the weakest match in the registry, and
-  it is the steepest: at pitch -62.95 a yaw is nearly a roll of the picture, which a comparison
-  that only slides one image over another cannot take out. Its control says the check still works
-  there.
+  reads correlation 0.06 and 0.15. The first of the two is the weakest match in the registry and
+  the reason is measured, not guessed: sweeping the new build's yaw across the old build's picture
+  peaks at -89.86 (r 0.9937, 0.87 codes) against the -89.89 the rule gives, so the rule lands 0.03
+  degrees out here. That is about two milliseconds of this instant, which slides 0.565 degrees of
+  picture per frame, and the difference image is FLAT with radius (mean absolute 3.29 / 3.54 /
+  3.55 / 3.22 / 2.91 codes, centre out in five rings), which a residual roll about the view axis
+  could not be. What is left is a sub-pixel residual on low-contrast fine texture, 13.9 codes of
+  standard deviation on dark ground. Why the rule lands 0.03 out on the two fastest-turning views
+  and 0.00 elsewhere is NOT settled: the stored track is interpolated between samples 5 ms apart
+  that each carry their own carry, which is the right size of thing, but nothing here isolates it.
   A green cast on the lens facing the sun and not on the other, owner-reported on the April file and
   raised as an acceptance blocker. Colour at the seam is not new and this entry claims no novelty:
   insv-format.md 6.11 measured the per-channel step on 2026-08-01, including the sun isolated on a

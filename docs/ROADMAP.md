@@ -660,9 +660,13 @@ live, no keyframe UI ever.
   file through `--bin lean`'s own heading column, 6.8 degrees at the first
   frame, 44 by 6.5 s and 157 by 36 s. The rule is
   `new_yaw = old_yaw + carried(t)`, confirmed in the picture at the shimmer
-  view (`time=36.303 yaw=3.78` before matches `yaw=160.63` after, to 1.6
-  degrees). The registry was re-derived the same day and that 1.6 degrees is
-  gone with it; the entry above is what its lines say now.
+  view. **The rule holds and the number this entry first put on it does not**
+  (corrected 2026-08-06): that view's re-derived aim is `yaw=162.31` and not
+  the `160.63` written here, because 156.85 is `carried` at the 36.036 instant
+  the half-second walk measured and 158.53 is `carried` at the frame
+  `time=36.303` shows. The picture is 83 px of 1024 out at 160.63 and 2 px out
+  at 162.31, which is where the "to 1.6 degrees" came from. The registry was
+  re-derived line by line the same day, in the entry above.
 
 - 2026-08-05 **The handover is eight degrees wide, because the eye said so
   against every instrument that had an opinion** (`projection::CROSSOVER_DEG`

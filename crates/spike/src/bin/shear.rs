@@ -75,12 +75,17 @@
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! ```
 //!
-//! `-150` reads 0.3381 deg applied at 0.0066 deg step rms over 87 pairs, worst
-//! single step 0.0187; the seam itself (`+0`) 0.3356 at 0.0687 over 89, with a
-//! worst single step of 0.4582 that is the whole of that rms; `+60` 0.0820 at
-//! 0.1471 over 89, which is the one band here whose statistic is fragile; and
-//! `+150` 0.0022 at 0.0091 over 76. The band's own state moves 0.0449 deg rms
-//! between frames on the bend and 0.0008 on the along-seam field.
+//! `-150` reads 0.3381 deg along the seam at 0.0066 deg step rms over 87 pairs,
+//! worst single step 0.0187; the seam itself (`+0`) 0.3356 at 0.0687 over 89,
+//! with a worst single step of 0.4582 that is the whole of that rms; `+60`
+//! 0.0820 at 0.1471 over 89, which is the one band here whose statistic is
+//! fragile; and `+150` 0.0022 at 0.0091 over 76. **Every one of those is the
+//! `along deg` column**, which is the along-seam part of the displacement and
+//! not the whole of it: the `size deg` column at the same four offsets reads
+//! 0.3397, 0.3564, 0.1871 and 0.0738, and the two are not comparable.
+//!
+//! The band's own state moves 0.0449 deg rms between frames on the bend and
+//! 0.0008 on the along-seam field.
 //!
 //! **Those four rows are distances from the seam and not places in the
 //! handover.** They are -2.93, 0, 1.17 and 2.93 degrees off it, and at the 8
@@ -131,8 +136,10 @@
 //! at a peak of 0.905 the gate accepts.
 //!
 //! The `seam=` in that command is not decoration either: fitted from the file
-//! instead, the same view reads 0.028 deg at `-150` rather than 0.340, because
-//! what the band applies is what the calibration left it.
+//! instead, the same view reads 0.028 deg of total displacement at `-150`
+//! rather than 0.340, because what the band applies is what the calibration
+//! left it. Both of those are the `size deg` column, because with the
+//! calibration gone there is no along-seam term left to compare.
 //!
 //! CSVs land in gitignored `scratch/`, stamped with the file they were read off
 //! and the whole command line that read them: a table of numbers with no source
@@ -1087,10 +1094,15 @@ fn handover(options: &Options, bands: &[Option<Band>]) {
         println!("\nno handover inside these offsets: the field never reaches its floor.");
         return;
     };
+    // The floor is the far quarter's mean and the second offset is where the
+    // field comes within a tenth of the plateau of it, which is not the same
+    // as reading the floor there and is nearer than the offset that does. This
+    // line said "down to {floor} px by {off} deg" until 2026-08-06 and a
+    // reference doc quoted it as the reading at that offset, which it is not.
     println!(
         "\nthe pane: the along-seam field sits at {:.2} px ({:+.4} deg) out to {:+.2} deg and \
-         is\ndown to {:.2} px by {:+.2} deg, so the handover is inside {on:+} to {off:+} px, \
-         which is\n{:.2} degrees of view.",
+         comes\nwithin a tenth of that of its {:.2} px far-side floor by {:+.2} deg, so the \
+         handover is\ninside {on:+} to {off:+} px, which is {:.2} degrees of view.",
         plateau,
         plateau / options.scale(),
         f64::from(on) / options.scale(),
