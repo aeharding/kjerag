@@ -189,8 +189,10 @@ const OVERLAP_DEG: f32 = 14.0;
 /// No file is open when this runs, so the width drawn is not known here and
 /// cannot be: at `KJERAG_HANDOVER_DEG=12` on a file that affords 9.69 the ask
 /// and the width differ by more than the whole change this switch was built to
-/// stage. What is drawn is said per file, once, where the lenses are known
-/// (`super::Scene::open_with`).
+/// stage. What is drawn is said per file by the shell, off the lenses the pass
+/// will draw with (`Scene::handover_deg`, printed by the app's `say_handover`
+/// after the stored calibration lands, and again by `fit_into` if a fallback
+/// fit moves it).
 fn crossover_deg() -> f32 {
     static WIDTH: OnceLock<f32> = OnceLock::new();
     *WIDTH.get_or_init(|| {
@@ -2496,14 +2498,18 @@ pub(crate) mod tests {
     }
 
     /// The two halves of issue #48 against each other: with this file's own
-    /// seam correction on lens 1, the narrow crossover still hands the picture
-    /// over and still leaves nothing grey.
+    /// seam correction on lens 1, the crossover still hands the picture over
+    /// and still leaves nothing grey.
     ///
     /// The correction turns one lens by a couple of degrees, so the seam and
-    /// the crossover on it turn with it. What has to survive is the margin:
-    /// the band is 2 degrees wide inside an overlap of 14, so the lens the
-    /// crossover hands to has 6 degrees of its own picture in hand. This is
-    /// the check that the fit cannot eat that margin at the size it comes in.
+    /// the crossover on it turn with it. What has to survive is the margin, and
+    /// the margin is not what this was written against: at 2 degrees the lens
+    /// the crossover hands to had 6 degrees of its own picture in hand, and at
+    /// the 8 the fixture draws, the band plus the bend it carries reaches 6.60
+    /// into 7.22 a side and the margin is **0.62**
+    /// (`the_widest_band_and_its_bend_stay_inside_the_overlap`). This is the
+    /// check that the fit cannot eat that margin at the size it comes in, and
+    /// there is far less of it to eat.
     #[test]
     fn a_fitted_lens_still_hands_the_picture_over() {
         let correction = crate::seam::SeamFit {
@@ -2584,21 +2590,30 @@ pub(crate) mod tests {
     /// lenses' own angles buys: without that it would cross wherever the two
     /// image circles happen to end.
     ///
-    /// Not exactly half, and further off than it was before issue #48: this
-    /// fixture's two axes are 0.3 degrees from opposed, so a direction 90
-    /// degrees off lens 0 is up to 0.3 degrees off the line where the two
-    /// lenses are equally far off theirs. A 2-degree crossover turns that into
-    /// 0.06 of weight where the 14-degree one turned it into 0.008. The
-    /// picture is centred on the lenses either way; what moved is how quickly
-    /// weight answers an angle.
+    /// Not exactly half: this fixture's two axes are 0.3 degrees from opposed,
+    /// so a direction 90 degrees off lens 0 is up to 0.3 degrees off the line
+    /// where the two lenses are equally far off theirs. What that is worth in
+    /// weight is the width's business, and the width has moved twice. Measured
+    /// on this fixture: **0.008** across the 14-degree overlap, **0.06** at the
+    /// 2 issue #48 shipped, and **0.0264** at the 8 the picture draws since
+    /// 2026-08-05. It is centred on the lenses at every one of them; what moves
+    /// is how quickly weight answers an angle, and it answers 2.3 times less
+    /// quickly at 8 than at 2 rather than four times, which is the same
+    /// non-linearity
+    /// `the_along_seam_correction_hands_over_across_the_whole_crossover` reads
+    /// on the ramp.
+    ///
+    /// The bar is 0.04 because the effect is 0.0264. It was 0.08 when the
+    /// effect was 0.06, and a bar three times what it watches is a test that
+    /// has stopped watching.
     #[test]
     fn the_crossover_sits_on_the_seam() {
         let reframe = fixture(Camera::default());
 
         for phi in 0..36 {
             let blend = reframe.blend(direction(90.0, phi as f32 * 10.0));
-            near(blend.weights[0], 0.5, 0.08);
-            near(blend.weights[1], 0.5, 0.08);
+            near(blend.weights[0], 0.5, 0.04);
+            near(blend.weights[1], 0.5, 0.04);
         }
     }
 

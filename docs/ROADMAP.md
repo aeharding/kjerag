@@ -618,6 +618,12 @@ live, no keyframe UI ever.
   9.69, so the 12 column is a 9.69. Monotone either way, which is what the
   paragraph above rests on.
 
+  **Every row of that instrument is drawn with the per-frame bend off**, the
+  `shipped` row included, and it is only the far field that makes that
+  harmless: out there the bend is a fraction of a degree, so a weighting priced
+  without it is the picture to within its own size. Near field it is not, and
+  the near-field paragraph below uses `--bin band mode=render` instead.
+
   **What the sweep did settle is the other end.** 12 is refused by the optics
   on every camera in the corpus, and 8 is nearly the last width that is not.
   The handover reaches `width / 2` off the seam plus the whole bend it carries,
@@ -656,10 +662,16 @@ live, no keyframe UI ever.
   is a different answer: a fit moves the principal point, which moves each
   lens's coverage boundary, which moves the overlap. On the X2 the factory
   calibration affords 4.91 and its own pooled fit affords 3.99. So the drawn
-  width is a reading and not a property of the file, and the app says it after
-  the stored fit lands (`blend:` at open, beneath `seam:`) - which is also the
-  only place in the app that says it at all, and the state an A/B on the width
-  must not be run in again.
+  width is a reading and not a property of the file, and it is said twice
+  rather than once: the app prints `blend:` under `seam:` at open, off whatever
+  calibration has landed by then, and the render crate's own fit path prints
+  `blend:  that fit moves the handover: 4.91 -> 3.99 deg` when a later fit
+  moves it. The second line is not tidiness. On a camera with **nothing
+  pooled** the first line is the FACTORY width, because the fallback fit lands
+  a second after it: verified 2026-08-06 on the October X2 against an empty
+  pool, which prints 4.91 at open and 4.91 -> 3.99 when the fit lands 1.2 s
+  later. Before this branch there was no line at all, which is the state an A/B
+  on the width must not be run in again.
 
   **Stage 4 is inert at this floor, and nothing it recovered is lost.** Its
   adaptive term opens the band to `|disparity| / FOLD` and cannot exceed 2.89
@@ -685,13 +697,38 @@ live, no keyframe UI ever.
 
   What is genuinely lost is stage 4's other half, that the band never opens
   further than it has to - **near-field content is now drawn twice across the
-  same 8 degrees as the far field**, where stage 4 would have given it at most
-  2.89. That is witnessed and not arithmetic: the pilot's harness, legs and
-  machine sit at 0.8 to 1.5 m ON the seam in every corpus file (phi 79 to 127,
-  reached at yaw 90 or 270 and pitch -53 to -90), and through the shipped path
-  at those views the doubled corridor goes from 1.5 degrees at 2 to about 5 at
-  8, with the band's sharpness against one lens alone falling 11 to 12 percent
-  - the same size as the far field's. Pictures in gitignored
+  same 8 degrees as the far field, and it pays more for it than the far field
+  does**, where stage 4 would have given it at most 2.89.
+
+  That is witnessed and not arithmetic. The pilot's harness, legs and machine
+  sit at 0.8 to 1.5 m ON the seam in every corpus file, at phi 79 to 127, which
+  is reached at yaw 90 or 270 and pitch -53 to -90 with the horizon lock off.
+  The instrument is **`--bin band mode=render`**, whose `share` column is the
+  seam band's own gradient energy over the same picture's 9 to 25 degrees off
+  it, run twice per view under `KJERAG_HANDOVER_DEG`:
+
+  ```sh
+  KJERAG_HANDOVER_DEG=2 kjerag-spike --bin band -- <file.insv> mode=render \
+    from=30.23 count=60 yaw=270 pitch=-53 lock=0 out=scratch/nf-w2
+  ```
+
+  | view, 2 -> 8 | share | fall |
+  | --- | ---: | ---: |
+  | May-26 004 gear, 0.99 m (`from=30.23 yaw=270 pitch=-53`) | 1.387 -> 1.182 | 14.8% |
+  | May-01 001 under the pilot, 0.84 m (`from=550.15 yaw=90 pitch=-90`) | 0.725 -> 0.613 | 15.4% |
+  | May-26 004 far field, same frame (`yaw=90 pitch=0`) | 0.695 -> 0.626 | 9.9% |
+  | May-01 001 far field, same frame (`yaw=90 pitch=0`) | 0.341 -> 0.310 | 9.1% |
+
+  So the near field pays about **one and a half times** what the far field
+  pays, on the same instrument, the same frames and the same statistic. It has
+  to be this instrument and not `--bin seam mode=blend`: that one draws every
+  weighting with the per-frame bend OFF, including its `shipped` row, and the
+  bend is exactly the near-field mechanism (the disparity under the pilot reads
+  1.9 to 2.3 degrees there). Measured with the bend off, the same two views
+  read a 12 percent fall and looked like the far field, which is how this
+  paragraph first came to say "the same size". The `share` statistic's own
+  window stops at 5 degrees while the handover reaches 6.6, so all four rows
+  are floors under the effect rather than its size. Pictures in gitignored
   `scratch/near-field-witness/`.
 
   The along-seam findings the research arm came back with, which the width

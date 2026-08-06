@@ -65,13 +65,20 @@ add new owner references here with date, category, and status.
   statistics get worse, and only the epipolar shear improves. The width is a perceptual call and
   the numbers price it rather than make it.
   READ THIS BEFORE QUOTING A `mode=blend` NUMBER (2026-08-06): that instrument's `bands=` rows are
-  a SYNTHETIC linear crossover it builds itself, with the bend off, so their doubled band is
-  `0.8 * width` by construction and grows exactly linearly. The map's own is the `shipped` row,
-  swept with `KJERAG_HANDOVER_DEG`, and it is not linear: at this view (`yaw 90 fov 60 fit=1`) the
-  doubled band reads 1.50 / 2.79 / 3.89 / 4.78 / 5.41 and the sharpness 1.309 / 1.247 / 1.194 /
-  1.150 / 1.120 at 2 / 4 / 6 / 8 / 12 asked for, so four times the width doubles 3.2 times as much
-  picture and costs 12 percent of the sharpness, and the 12 column is really the 9.69 this file
-  affords.
+  a SYNTHETIC linear crossover it builds itself, so their doubled band is `0.8 * width` by
+  construction and grows exactly linearly. The map's own is the `shipped` row, swept with
+  `KJERAG_HANDOVER_DEG`, and it is not linear: at this view (`yaw 90 fov 60 fit=1`) the doubled
+  band reads 1.50 / 2.79 / 3.89 / 4.78 / 5.41 and the sharpness 1.309 / 1.247 / 1.194 / 1.150 /
+  1.120 at 2 / 4 / 6 / 8 / 12 asked for, so four times the width doubles 3.2 times as much picture
+  and costs 12 percent of the sharpness, and the 12 column is really the 9.69 this file affords.
+  AND EVERY ROW OF THAT MODE, `shipped` INCLUDED, IS DRAWN WITH THE PER-FRAME BEND OFF (empty
+  cells, `Weighting::at`). Far field that is the picture to within the bend's own size, which is
+  why the numbers above stand; near field it is not the picture at all, because the bend IS the
+  near-field mechanism. Score a view with somebody's gear on the seam with `--bin band
+  mode=render`, whose `share` column comes off the real pass with the band pass live: at the
+  May-26 gear (0.99 m) it falls 1.387 -> 1.182 across 2 to 8 and at the May-01 under-pilot view
+  (0.84 m) 0.725 -> 0.613, about 15 percent, against 9 to 10 percent at a far-field azimuth of the
+  same two frames.
   What the numbers do settle is the ceiling: the handover reaches `width/2` off the seam plus the
   bend it carries, and past the two lenses' shared ring the crossover stops deciding the blend -
   the coverage depth takes the weight over and steps it to zero at the rim, and a bent ray that

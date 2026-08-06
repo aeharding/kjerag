@@ -1780,7 +1780,13 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
         );
     };
     let mut away: Vec<Eye> = Vec::new();
-    for centre in [-12.0, -6.0, 6.0, 12.0] {
+    // Eight and twelve degrees off, and not the six this used until
+    // 2026-08-06: a decoy has to straddle content the handover never touched,
+    // and the handover plus the bend it carries reaches 6.60 degrees now that
+    // the crossover is 8 (`kjerag_render::band::reach`). A control inside the
+    // thing it is a control for reads the artifact and subtracts it from the
+    // excess line below.
+    for centre in [-12.0, -8.0, 8.0, 12.0] {
         if let Some(read) = eye_at(&planes, &seam, size, reach, centre) {
             show(&format!("{centre:+.0} deg off"), &read);
             away.push(read);

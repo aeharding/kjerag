@@ -86,6 +86,15 @@ const ALONG_STEP_DEG: f64 = 0.1;
 /// overlap by 14.4 degrees, 7.2 a side, and a column further out than that is
 /// a column one lens has no picture of. 4 degrees leaves room for the
 /// alignment shift on top, which is added to lens 1's sampling direction.
+///
+/// **What these columns sit inside has changed under them** (2026-08-06). At
+/// the 2 degree crossover this was written against, all but the innermost
+/// columns were outside the handover; at the 8 the pass draws, the crossover is
+/// 4 degrees a side and **every column is inside it**, which is what the radial
+/// line means by "across the band" now. No column reaches the 6.6 degrees the
+/// band plus its bend covers ([`kjerag_render::band::reach`]), and widening to
+/// there would spend the room the alignment shift needs, so the slope is read
+/// over the crossover and converted end to end over the file's own width.
 const ACROSS_DEG: f64 = 4.0;
 
 /// How far apart the columns are, in degrees.

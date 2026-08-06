@@ -1511,13 +1511,21 @@ views, so **this table prices the trade and cannot choose on it**.
 
 **What this table is, and is not** (2026-08-06). Both columns are the
 instrument's own `bands=` weighting, which is a synthetic linear crossover
-built inside `--bin seam` with the per-frame bend switched off, so the doubled
-band comes out as `0.8 * width` by construction. What the pass draws is the
-same instrument's `shipped` row, swept with `KJERAG_HANDOVER_DEG`, and it is
-not linear: at the July-14 anchor view (`yaw 90 fov 60 fit=1`) it doubles 1.50
-/ 2.79 / 3.89 / 4.78 / 5.41 degrees over the same five asks and its sharpness
-runs 1.309 / 1.247 / 1.194 / 1.150 / 1.120. Quote the rows above against each
-other; do not quote them as the pass's own widths.
+built inside `--bin seam`, so the doubled band comes out as `0.8 * width` by
+construction. What the pass draws is the same instrument's `shipped` row, swept
+with `KJERAG_HANDOVER_DEG`, and it is not linear: at the July-14 anchor view
+(`yaw 90 fov 60 fit=1`) it doubles 1.50 / 2.79 / 3.89 / 4.78 / 5.41 degrees
+over the same five asks and its sharpness runs 1.309 / 1.247 / 1.194 / 1.150 /
+1.120. Quote the rows above against each other; do not quote them as the pass's
+own widths.
+
+**And every row of this mode is drawn with the per-frame bend off**, the
+`shipped` row included. Far field the bend is a fraction of a degree and this
+is the picture to within its own size, which is why the table above and 6.8's
+stand. Near field it is the whole mechanism - under the pilot the disparity
+reads 1.9 to 2.3 degrees - and this mode is then the wrong instrument
+altogether: `--bin band mode=render` draws the real pass with the band live,
+and near-field views are scored there (docs/ROADMAP.md, 2026-08-05).
 
 What the table does rule out is the wide end, and not on sharpness: 12 degrees
 of handover reaches further off the seam than the two lenses share, on every

@@ -1023,6 +1023,15 @@ fn render(options: &Options) -> Fallible<()> {
 /// maker's export, and that is the whole point of doing it here: each picture
 /// is its own control, no projection has to be fitted, and there is no view
 /// for a fit to get wrong. What it cannot say is how we compare to them.
+///
+/// **Both windows were drawn around a 2 degree handover and neither has
+/// moved.** At the 8 the pass hands over across, the band plus the bend it
+/// carries reaches 6.60 degrees off the seam, so the inner window stops 1.6
+/// degrees short of it while the outer one still starts clear of it. That
+/// biases one way only: a share read at two widths **understates** the wider
+/// one's cost, because the part of its corridor past 5 degrees is scored in
+/// neither window. Read a fall between two widths as a floor under the effect
+/// rather than as its size.
 fn share(options: &Options, reframe: &Reframe, plain: &Picture, banded: &Picture) -> Fallible<()> {
     let size = options.size();
     let width = size.width as usize;

@@ -208,7 +208,7 @@ const TAU_NEAR_S: f32 = 0.10;
 /// first.
 const FOLD: f32 = 0.9;
 
-/// The widest the crossover may open, in degrees.
+/// The widest the **adaptive term** may ask for, in degrees.
 ///
 /// It is not a taste and not a margin: it is the widest width the inequality
 /// above can ever **ask for**. The search reports at most [`NEAR_DEG`] and
@@ -218,15 +218,23 @@ const FOLD: f32 = 0.9;
 /// inert for every disparity this pass can measure, and widening the search
 /// window widens the band with it, with no second number to keep in step.
 ///
-/// What bounds it from the other side is the optics, and that bound is not
-/// close. The widest band plus the whole bend it carries reaches **4.04
-/// degrees** off the seam; the two lenses of the calibration fixture overlap
-/// by 14.44, which is 7.22 a side
+/// **It is not the widest the crossover opens, and has not been since
+/// 2026-08-05.** [`width`] applies the floor last and the floor is the
+/// camera's - 8.00 degrees on an X4 Air, 3.99 on the ONE X2 - so on every
+/// camera in the corpus the floor is what comes back and this ceiling is never
+/// reached (`the_adaptive_width_is_inert_under_the_shipped_floor`). What it
+/// still is, is the widest a camera whose overlap forced its floor under 2.89
+/// can open to.
+///
+/// What bounds the crossover from the other side is the optics, and that bound
+/// is no longer far away. This ceiling plus the bend it carries reaches 4.04
+/// degrees off the seam, which inside the calibration fixture's 7.22 a side
+/// left 3.18 to spare; the shipped 8 reaches **6.60** and leaves **0.62**, and
+/// the ONE X2's 3.99 reaches 4.60 into its own 4.60 a side and leaves nothing
 /// (`the_widest_band_and_its_bend_stay_inside_the_overlap`, which measures it
 /// off the file's own calibration rather than quoting the format study).
-/// `kjerag-spike --bin band` reports the same two numbers for whatever file it
-/// is given, because the overlap is a property of the camera and this ceiling
-/// is not.
+/// `kjerag-spike --bin band` prints that pair **per file** and not one pair for
+/// every file, because both numbers are the camera's now.
 pub const WIDEST_DEG: f32 = NEAR_DEG / FOLD;
 
 /// Threads per workgroup. One workgroup reads one direction, and every thread
@@ -2333,8 +2341,8 @@ mod tests {
     /// to do, which is what the tests below are about.
     ///
     /// It was the shipped crossover until 2026-08-05 and is not one any more:
-    /// the projection now asks for 8 degrees and every camera in the corpus
-    /// affords at least 4, both of them over [`WIDEST_DEG`], so on real
+    /// the projection now asks for 8 degrees and the narrowest camera in the
+    /// corpus affords 3.99, both of them over [`WIDEST_DEG`], so on real
     /// footage this function is a constant
     /// (`the_adaptive_width_is_inert_under_the_shipped_floor`). What is tested
     /// here is the function and not the picture, and its floor is an argument.
