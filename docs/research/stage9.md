@@ -307,7 +307,9 @@ every pair of every capture of both cameras.
 **So two claims made above are withdrawn.** "Two flights disagree at the same
 azimuth by more than either varies round the whole ring" and "the signal is
 under its own noise" were properties of a mean over a heavy-tailed population
-sampled about five deep. They are not properties of the camera. The correlation
+sampled a few readings deep - two to five, depending on whether a `--bin table`
+place is counted as its four frames or as one moment; the density table below
+measures the moment-equivalent at 2.0. They are not properties of the camera. The correlation
 figures in 4 (+0.194 raw, -0.014 levelled) are the same artifact and may not be
 read as evidence about reproduction either; the second of them survives only as
 a statement about a table, which is what the next part is.
