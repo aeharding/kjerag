@@ -29,10 +29,11 @@
 //! below its own final answer by construction.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use kjerag_media::Fallible;
 use kjerag_render::{Leftover, Table, band, seam};
+use kjerag_spike::settled::{self, At, Middle, Row};
 
 /// The spans a convergence is reported at, in seconds.
 const SPANS: [f64; 6] = [30.0, 60.0, 120.0, 300.0, 600.0, 1200.0];
@@ -43,7 +44,7 @@ const WIDTHS: [f32; 8] = [4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 24.0, 36.0];
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
-    let mut rows = load(&options.input)?;
+    let mut rows = settled::load(&options.input)?.rows;
     if let Some((size, cycles)) = options.plant {
         // The positive control: a field of a known size and a known number of
         // cycles, put into every reading of every moment, so a run that finds
@@ -75,177 +76,6 @@ fn main() -> Fallible<()> {
 }
 
 // ------------------------------------------------------------ the readings
-
-/// One azimuth of one moment, as `--bin settle` wrote it.
-#[derive(Clone, Copy)]
-struct Row {
-    seconds: f64,
-    index: usize,
-    phi: f64,
-    /// What the pose leaves there, in degrees along the seam.
-    left: f64,
-}
-
-fn load(path: &Path) -> Fallible<Vec<Row>> {
-    let text = std::fs::read_to_string(path)?;
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        if line.starts_with('#') || line.starts_with("seconds") {
-            continue;
-        }
-        let cells: Vec<&str> = line.split(',').collect();
-        let [seconds, index, phi, _along, _across, left, ..] = cells[..] else {
-            return Err(format!("{}: {line} is not a settle row", path.display()).into());
-        };
-        rows.push(Row {
-            seconds: seconds.parse()?,
-            index: index.parse()?,
-            phi: phi.parse()?,
-            left: left.parse()?,
-        });
-    }
-    Ok(rows)
-}
-
-/// One azimuth of one accumulated field: its mean, and how firmly that mean
-/// is held.
-#[derive(Clone, Copy)]
-struct At {
-    index: usize,
-    /// Where on the ring it is, in degrees.
-    phi: f64,
-    /// The mean reading there over the stretch, in degrees.
-    mean: f64,
-    readings: usize,
-    /// The standard error of that mean, in degrees, or `NAN` from one reading.
-    /// A field is converged when the fields off two stretches sit no further
-    /// apart than this says two means of that many readings must.
-    error: f64,
-}
-
-/// The accumulated field over one stretch: every azimuth's mean reading over
-/// the moments inside it, gated the way one ring's readings are gated.
-///
-/// This is what `seam::measure` returns for a file, restricted to a span of
-/// it: `measure` averages each azimuth over every frame it read, and this
-/// averages each azimuth over every frame inside the span.
-fn field(rows: &[Row], from: f64, to: f64, middle: Middle) -> Vec<At> {
-    field_gated(rows, from, to, middle, true)
-}
-
-/// The same, with `seam::left`'s plausibility gate on the accumulated field
-/// switched off, which is the control that says whether a result belongs to
-/// the gate or to the way the readings were reduced.
-fn field_gated(rows: &[Row], from: f64, to: f64, middle: Middle, gate: bool) -> Vec<At> {
-    let mut all: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
-    let mut phi: BTreeMap<usize, f64> = BTreeMap::new();
-    for row in rows.iter().filter(|r| r.seconds >= from && r.seconds < to) {
-        all.entry(row.index).or_default().push(row.left);
-        phi.insert(row.index, row.phi);
-    }
-    let means: Vec<At> = all
-        .iter()
-        .map(|(index, readings)| middle_of(*index, phi[index], readings, middle))
-        .collect();
-    if !gate {
-        return means;
-    }
-    let kept = seam::gated(means.iter().map(leftover).collect());
-    let survived: Vec<f32> = kept.readings.iter().map(|l| l.phi).collect();
-    means
-        .into_iter()
-        .filter(|at| survived.contains(&leftover(at).phi))
-        .collect()
-}
-
-/// One azimuth of a field as the leftover the repo's own arithmetic takes.
-fn leftover(at: &At) -> Leftover {
-    Leftover {
-        phi: at.phi.to_radians() as f32,
-        perp: at.mean.to_radians() as f32,
-        weight: 1.0,
-    }
-}
-
-/// How one azimuth's readings are reduced to one number.
-///
-/// A mean is what `seam::measure` does over the frames it reads, and it is the
-/// arm layer 2 would inherit. A median is here because these readings are
-/// heavy tailed by the same measurement that made `seam::left` need a gate:
-/// one correlation on the wrong feature moves a mean by its whole size and a
-/// median not at all, so which of the two is accumulated is a design question
-/// and not a detail.
-#[derive(Clone, Copy, PartialEq)]
-enum Middle {
-    Mean,
-    Median,
-    /// The mean of the readings within four scaled median deviations of the
-    /// median, which is `seam::left`'s own gate rule applied to one azimuth's
-    /// readings instead of to a ring's.
-    ///
-    /// It is here because a median is not what a GPU accumulates: the band's
-    /// per-direction state is one exponential average and a stream has no
-    /// median. Refusing a reading that sits far from what the direction
-    /// already holds is a comparison and an early return, and this is the
-    /// offline shape of that rule.
-    Trimmed,
-}
-
-/// One azimuth's answer and the standard error of it.
-fn middle_of(index: usize, phi: f64, readings: &[f64], middle: Middle) -> At {
-    let count = readings.len();
-    let kept: Vec<f64> = match middle {
-        Middle::Trimmed => {
-            let (centre, spread) = (median(readings), MAD_TO_SIGMA * mad(readings));
-            let tolerance = (GATE_MADS * spread).max(GATE_FLOOR_DEG);
-            readings
-                .iter()
-                .copied()
-                .filter(|value| (value - centre).abs() <= tolerance)
-                .collect()
-        }
-        _ => readings.to_vec(),
-    };
-    let mean = match middle {
-        Middle::Mean => readings.iter().sum::<f64>() / count as f64,
-        Middle::Median => median(readings),
-        Middle::Trimmed => kept.iter().sum::<f64>() / kept.len().max(1) as f64,
-    };
-    // The spread the error is taken from is the one that matches: a mean's is
-    // the sample's own, and a median's is the scaled median absolute
-    // deviation, which is what a median's standard error is written in.
-    let spread = match middle {
-        Middle::Mean => seam::rms(readings.iter().map(|value| value - mean)),
-        Middle::Median => MAD_TO_SIGMA * mad(readings),
-        Middle::Trimmed => seam::rms(kept.iter().map(|value| value - mean)),
-    };
-    At {
-        index,
-        phi,
-        mean,
-        readings: count,
-        // `n - 1` under the root because `spread` is about the sample's own
-        // mean, and `NAN` from one reading rather than zero: one reading says
-        // nothing about how firmly it is held.
-        error: match count > 1 {
-            true => spread * (count as f64 / (count - 1) as f64).sqrt() / (count as f64).sqrt(),
-            false => f64::NAN,
-        },
-    }
-}
-
-/// The same azimuth in two fields.
-fn shared(one: &[At], other: &[At]) -> Vec<(At, At)> {
-    let theirs: BTreeMap<usize, At> = other.iter().map(|at| (at.index, *at)).collect();
-    one.iter()
-        .filter_map(|at| Some((*at, *theirs.get(&at.index)?)))
-        .collect()
-}
-
-/// A whole field as the leftovers the repo's own arithmetic takes.
-fn leftovers(field: &[At]) -> Vec<Leftover> {
-    field.iter().map(leftover).collect()
-}
 
 // ------------------------------------------------------------ the floors
 
@@ -282,7 +112,7 @@ fn repeatability(rows: &[Row]) {
             "{name:<10} {:>6} {:>10.4} {:>10.4}",
             all.len(),
             seam::rms(all.iter().copied()),
-            mad(all),
+            settled::mad(all),
         );
     };
     println!(
@@ -296,41 +126,12 @@ fn repeatability(rows: &[Row]) {
     say("a moment", &moment);
 }
 
-/// How many scaled median deviations from the middle a reading may sit before
-/// it is a correlation on the wrong feature, and the narrowest that tolerance
-/// may become, in degrees. `seam`'s own `GATE_MADS` and `GATE_FLOOR_DEG`,
-/// which are private to it; the same two numbers, one axis over.
-const GATE_MADS: f64 = 4.0;
-const GATE_FLOOR_DEG: f64 = 0.10;
-
-/// What a normal population's standard deviation is, in median absolute
-/// deviations of it. The constant every robust spread is quoted in.
-const MAD_TO_SIGMA: f64 = 1.4826;
-
 /// What a written table carries: the part of the field the five terms cannot
 /// describe, or the five terms themselves.
 #[derive(Clone, Copy, PartialEq)]
 enum Form {
     Residual,
     Terms,
-}
-
-/// The middle value.
-fn median(all: &[f64]) -> f64 {
-    let mut all = all.to_vec();
-    all.sort_by(f64::total_cmp);
-    all.get(all.len() / 2).copied().unwrap_or(f64::NAN)
-}
-
-/// The median absolute deviation from the median: the spread of a heavy-tailed
-/// population, which is what `seam::left`'s own gate is built on.
-fn mad(all: &[f64]) -> f64 {
-    let middle = |mut all: Vec<f64>| {
-        all.sort_by(f64::total_cmp);
-        all.get(all.len() / 2).copied().unwrap_or(f64::NAN)
-    };
-    let centre = middle(all.to_vec());
-    middle(all.iter().map(|value| (value - centre).abs()).collect())
 }
 
 /// How much of the ring answers at all, and how often.
@@ -381,11 +182,11 @@ fn windows(rows: &[Row], options: &Options) {
         let fields: Vec<Vec<At>> = (0..)
             .map(|step| span * step as f64)
             .take_while(|from| from + span <= last + 1.0)
-            .map(|from| field(rows, from, from + span, options.middle))
+            .map(|from| settled::field(rows, from, from + span, options.middle, options.gate))
             .collect();
         let both: Vec<(At, At)> = fields
             .windows(2)
-            .flat_map(|pair| shared(&pair[0], &pair[1]))
+            .flat_map(|pair| settled::shared(&pair[0], &pair[1]))
             .collect();
         if both.is_empty() {
             println!(
@@ -405,13 +206,13 @@ fn windows(rows: &[Row], options: &Options) {
             fields.len(),
             both.len(),
             both.iter().map(|(a, _)| a.readings as f64).sum::<f64>() / both.len() as f64,
-            seam::rms(both.iter().map(|(a, b)| a.mean - b.mean)),
+            seam::rms(both.iter().map(|(a, b)| a.left - b.left)),
             seam::rms(
                 both.iter()
                     .filter(|(a, b)| a.error.is_finite() && b.error.is_finite())
                     .map(|(a, b)| a.error.hypot(b.error))
             ),
-            seam::rms(both.iter().map(|(a, _)| a.mean)),
+            seam::rms(both.iter().map(|(a, _)| a.left)),
             applied_apart(&fields),
         );
     }
@@ -431,10 +232,13 @@ fn applied_apart(fields: &[Vec<At>]) -> f64 {
         .collect();
     let mut apart = Vec::new();
     for pair in fields.windows(2) {
-        let (one, other) = (five(&leftovers(&pair[0])), five(&leftovers(&pair[1])));
+        let (one, other) = (
+            settled::five(&settled::leftovers(&pair[0])),
+            settled::five(&settled::leftovers(&pair[1])),
+        );
         apart.extend(ring.iter().map(|phi| {
             let at = |terms: &[f64]| {
-                basis(*phi)
+                settled::basis(*phi)
                     .iter()
                     .zip(terms)
                     .map(|(term, coefficient)| term * coefficient)
@@ -458,11 +262,11 @@ fn starved(rows: &[Row], options: &Options) {
     let fields: Vec<Vec<At>> = (0..)
         .map(|step| span * step as f64)
         .take_while(|from| from + span <= last + 1.0)
-        .map(|from| field(rows, from, from + span, options.middle))
+        .map(|from| settled::field(rows, from, from + span, options.middle, options.gate))
         .collect();
     let both: Vec<(At, At)> = fields
         .windows(2)
-        .flat_map(|pair| shared(&pair[0], &pair[1]))
+        .flat_map(|pair| settled::shared(&pair[0], &pair[1]))
         .collect();
     println!(
         "\nstarved: the same {span:.0} s windows, cut by how many readings the azimuth had in \n\
@@ -489,7 +293,7 @@ fn starved(rows: &[Row], options: &Options) {
         println!(
             "{name:>12} {:>8} {:>10.4} {:>10.4}",
             cut.len(),
-            seam::rms(cut.iter().map(|(a, b)| a.mean - b.mean)),
+            seam::rms(cut.iter().map(|(a, b)| a.left - b.left)),
             seam::rms(
                 cut.iter()
                     .filter(|(a, b)| a.error.is_finite() && b.error.is_finite())
@@ -508,12 +312,12 @@ fn starved(rows: &[Row], options: &Options) {
 /// sits from where it is going.
 fn prefixes(rows: &[Row], options: &Options) {
     let last = rows.last().map_or(0.0, |row| row.seconds);
-    let whole = field(rows, 0.0, last + 1.0, options.middle);
+    let whole = settled::field(rows, 0.0, last + 1.0, options.middle, options.gate);
     println!(
         "\nprefix: the field off the first `span` seconds against the field off the whole \n\
          \x20       session ({} azimuths, {:.4} deg rms), in degrees.",
         whole.len(),
-        seam::rms(whole.iter().map(|at| at.mean)),
+        seam::rms(whole.iter().map(|at| at.left)),
     );
     println!(
         "{:>8} {:>10} {:>10} {:>12} {:>12}",
@@ -521,16 +325,20 @@ fn prefixes(rows: &[Row], options: &Options) {
     );
     let mut before: Option<Vec<At>> = None;
     for span in options.spans.iter().copied() {
-        let grown = field(rows, 0.0, span, options.middle);
-        let both = shared(&grown, &whole);
-        let step = before
-            .as_ref()
-            .map(|before| seam::rms(shared(&grown, before).iter().map(|(a, b)| a.mean - b.mean)));
+        let grown = settled::field(rows, 0.0, span, options.middle, options.gate);
+        let both = settled::shared(&grown, &whole);
+        let step = before.as_ref().map(|before| {
+            seam::rms(
+                settled::shared(&grown, before)
+                    .iter()
+                    .map(|(a, b)| a.left - b.left),
+            )
+        });
         println!(
             "{span:>8.0} {:>10} {:>10} {:>12.4} {:>12}",
             grown.len(),
             both.len(),
-            seam::rms(both.iter().map(|(a, b)| a.mean - b.mean)),
+            seam::rms(both.iter().map(|(a, b)| a.left - b.left)),
             step.map_or_else(|| "-".to_owned(), |step| format!("{step:.4}")),
         );
         before = Some(grown);
@@ -571,8 +379,8 @@ fn holdout(rows: &[Row], options: &Options) {
             (0.0, split),
         ),
     ] {
-        let train = field(rows, train.0, train.1, options.middle);
-        let test = field(rows, test.0, test.1, options.middle);
+        let train = settled::field(rows, train.0, train.1, options.middle, options.gate);
+        let test = settled::field(rows, test.0, test.1, options.middle, options.gate);
         let arms = predict(&train, &test, options.smooth);
         println!(
             "{name:<22} {:>8} {:>10.4} {:>10.4} {:>10.4} {:>10.4}",
@@ -588,14 +396,14 @@ fn holdout(rows: &[Row], options: &Options) {
 
 /// What the held-out half reads with each arm taken off it, in degrees rms.
 fn predict(train: &[At], test: &[At], smooth: f32) -> [f64; 4] {
-    let train = leftovers(train);
-    let test = leftovers(test);
-    let low = five(&train);
+    let train = settled::leftovers(train);
+    let test = settled::leftovers(test);
+    let low = settled::five(&train);
     let table = Table::of(&train, smooth);
     let at = |l: &Leftover| {
         let (sin, cos) = l.phi.sin_cos();
         (
-            basis(f64::from(l.phi))
+            settled::basis(f64::from(l.phi))
                 .iter()
                 .zip(&low)
                 .map(|(term, coefficient)| term * coefficient)
@@ -612,37 +420,11 @@ fn predict(train: &[At], test: &[At], smooth: f32) -> [f64; 4] {
     ]
 }
 
-/// The five terms the band fits per session, in degrees, off these leftovers.
-///
-/// Ordinary least squares over the same basis, which is `--bin table`'s own
-/// order-2 arm: `band::Along::fit` solves the same system with a ridge of one
-/// direction's evidence on it, and on a ring of fifty readings the two answers
-/// differ by that ridge and by nothing else.
-fn five(left: &[Leftover]) -> Vec<f64> {
-    let rows: Vec<(Vec<f64>, f64)> = left
-        .iter()
-        .map(|l| (basis(f64::from(l.phi)), f64::from(l.perp.to_degrees())))
-        .collect();
-    seam::least_squares(&rows).map_or_else(|| vec![0.0; 5], |fit| fit.params)
-}
-
-/// The real Fourier basis up to two cycles: a constant, one cycle, two.
-/// `band`'s own `terms`, written in the form `seam::least_squares` takes.
-fn basis(phi: f64) -> Vec<f64> {
-    vec![
-        1.0,
-        phi.cos(),
-        phi.sin(),
-        (2.0 * phi).cos(),
-        (2.0 * phi).sin(),
-    ]
-}
-
 /// The held-out arms at every kernel width, which is where a width would be
 /// chosen if one were ever worth choosing.
 fn sweep(rows: &[Row], options: &Options, split: f64, last: f64) {
-    let first = field(rows, 0.0, split, options.middle);
-    let second = field(rows, split, last + 1.0, options.middle);
+    let first = settled::field(rows, 0.0, split, options.middle, options.gate);
+    let second = settled::field(rows, split, last + 1.0, options.middle, options.gate);
     println!(
         "\nkernel: both directions of the same split, averaged, at every width. the row a table \n\
          \x20       has to beat is `5 terms`, which is what the pass already applies."
@@ -676,15 +458,15 @@ fn against(rows: &[Row], options: &Options) -> Fallible<()> {
     let Some(other) = &options.against else {
         return Ok(());
     };
-    let mine = field_gated(rows, 0.0, f64::INFINITY, options.middle, options.gate);
-    let theirs = field_gated(
-        &load(other)?,
+    let mine = settled::field(rows, 0.0, f64::INFINITY, options.middle, options.gate);
+    let theirs = settled::field(
+        &settled::load(other)?.rows,
         0.0,
         f64::INFINITY,
         options.middle,
         options.gate,
     );
-    let both = shared(&mine, &theirs);
+    let both = settled::shared(&mine, &theirs);
     println!(
         "\nbetween: this session against {}, at the {} azimuths both reached. `apart` is how far \n\
          \x20       the two fields sit from each other and `own` how large each is; a field that \n\
@@ -695,9 +477,9 @@ fn against(rows: &[Row], options: &Options) -> Fallible<()> {
     println!("{:>12} {:>10} {:>10}", "apart rms", "own rms", "theirs rms");
     println!(
         "{:>12.4} {:>10.4} {:>10.4}",
-        seam::rms(both.iter().map(|(a, b)| a.mean - b.mean)),
-        seam::rms(both.iter().map(|(a, _)| a.mean)),
-        seam::rms(both.iter().map(|(_, b)| b.mean)),
+        seam::rms(both.iter().map(|(a, b)| a.left - b.left)),
+        seam::rms(both.iter().map(|(a, _)| a.left)),
+        seam::rms(both.iter().map(|(_, b)| b.left)),
     );
     let there = predict(&theirs, &mine, options.smooth);
     let back = predict(&mine, &theirs, options.smooth);
@@ -722,7 +504,13 @@ fn write_table(rows: &[Row], options: &Options) -> Fallible<()> {
     let (Some(out), Some(window)) = (&options.out, options.window) else {
         return Ok(());
     };
-    let left = leftovers(&field(rows, window.0, window.1, options.middle));
+    let left = settled::leftovers(&settled::field(
+        rows,
+        window.0,
+        window.1,
+        options.middle,
+        options.gate,
+    ));
     let table = match options.form {
         Form::Residual => Table::of(&left, options.smooth),
         Form::Terms => terms_table(&left),
@@ -762,10 +550,10 @@ fn write_table(rows: &[Row], options: &Options) -> Fallible<()> {
 /// correction does to a view, which is the layer this instrument found
 /// reproduces and the table above is the layer that does not.
 fn terms_table(left: &[Leftover]) -> Table {
-    let low = five(left);
+    let low = settled::five(left);
     Table::of_entries(std::array::from_fn(|index| {
         let phi = index as f64 / kjerag_render::AZIMUTHS as f64 * std::f64::consts::TAU;
-        basis(phi)
+        settled::basis(phi)
             .iter()
             .zip(&low)
             .map(|(term, coefficient)| term * coefficient)

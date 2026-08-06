@@ -16,6 +16,10 @@ pub mod crossing;
 mod offscreen;
 mod picture;
 pub mod registration;
+/// What `--bin settle` writes, and how a direction's readings become one
+/// number (issue #103, stage 9 layer 2). Shared by the two instruments that
+/// read those dumps, because the reduction is the finding.
+pub mod settled;
 mod skyline;
 
 pub use kjerag_media::{Chroma, Pair, Plane, Walk};
