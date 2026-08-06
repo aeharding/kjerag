@@ -2,7 +2,10 @@
 
 **Status:** the mechanism is built, measured and shipped at rest. **No table is
 fitted for either camera in the corpus**, because neither camera's leftover
-predicts a capture it was not fitted on. **Issue:** #103.
+predicts a capture it was not fitted on, and because the most any static table
+could buy on the corpus that decides is +1.25 percent. The refusal carries an
+amplitude: what is excluded is a static per-azimuth field of order 3 and up
+above 0.02 to 0.06 degrees, and nothing smaller. **Issue:** #103.
 
 This supersedes the stage 9 charter that lived on the unmerged `feat/warp`
 branch (`docs/research/local-warp.md`). What that document established is
