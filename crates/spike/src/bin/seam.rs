@@ -15,6 +15,10 @@
 //! # our stitch against the camera maker's own, on the same capture
 //! cargo run --release -p kjerag-spike --bin seam -- <file.insv> mode=parity \
 //!   against=<their-export.mp4>
+//! # the same against a reframe whose projection they told us: Studio's
+//! # "Distortion" slider is Panini's d, and their d=0 is exactly rectilinear
+//! cargo run --release -p kjerag-spike --bin seam -- <file.insv> mode=parity \
+//!   against=<their-export.mp4> panini=0.9 fov=150
 //! ```
 //!
 //! Every earlier reading of this residual was taken in flight, where three
@@ -1003,6 +1007,10 @@ struct Options {
     /// A second capture of a different scene, measured on the same ring. It is
     /// the control that separates the camera from what it is looking at.
     also: Option<PathBuf>,
+    /// Insta360 Studio's "Distortion" slider for `mode=parity`, which is
+    /// Panini's `d`, or negative for an export whose projection is unknown and
+    /// has to be fitted. Given one, `fov=` is taken as given too.
+    panini: f64,
     /// The camera maker's own export of the same capture, for `mode=parity`.
     against: Option<PathBuf>,
     /// What the shipped per-frame band settled on, written out by
@@ -1061,6 +1069,7 @@ impl Options {
             mode: Mode::Residual,
             input,
             also: None,
+            panini: -1.0,
             against: None,
             band: Vec::new(),
             from: 0.0,
@@ -1117,6 +1126,7 @@ impl Options {
                 }
                 "fix" => options.fix = turns(value)?,
                 "fit" => options.fit = value.parse::<u32>()? != 0,
+                "panini" => options.panini = value.parse()?,
                 "from" => options.from = value.parse()?,
                 "count" => options.count = value.parse()?,
                 "patches" => options.patches = value.parse()?,
@@ -1283,7 +1293,7 @@ fn turns(value: &str) -> Fallible<Vec<(Knob, f64)>> {
 
 const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend|parity|fit] [also=<other.insv>] \
      [fix=roll:0.8,yaw:-2] [fit=1] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [bands=14,8,4] [out=x.png] \
-     [from=seconds] [count=frames] [patches=n] \
+     [from=seconds] [count=frames] [patches=n] [panini=d] \
      [span=deg] [step=deg] [along=deg] [across=deg] [off=deg] [keep=r] [contrast=codes] \
      [knobs=roll,cx,cy,...] [control=1]";
 
@@ -1829,18 +1839,40 @@ fn parity(options: &Options) -> Fallible<()> {
             angles: [0.0; 3],
             fov: 90.0,
             compression: 1.0,
+            panini: options.panini,
         },
     );
+    // A view whose projection is known is searched on its angles alone, and the
+    // grid is stepped by a fraction of what it can see: a 15 degree step finds
+    // nothing in a 20 degree view.
+    let told = options.panini >= 0.0;
+    // A told projection still has its scale searched: Studio's own FOV number
+    // is not the half angle this family measures in, and assuming it was put
+    // the fit in the wrong basin (measured 2026-08-06: correlating 0.39).
+    let fovs: Vec<f64> = match told {
+        true => vec![
+            options.fov,
+            options.fov * 1.4,
+            options.fov * 1.8,
+            options.fov * 2.2,
+        ],
+        false => vec![60.0, 80.0, 100.0, 120.0],
+    };
+    let step = match told {
+        true => (options.fov / 6.0).clamp(2.0, 15.0),
+        false => 15.0,
+    };
     let coarse = export.shape.scaled(48);
     let small = export.resampled(coarse);
-    for yaw in (0..24).map(|step| f64::from(step) * 15.0) {
-        for pitch in (-5..=5).map(|step| f64::from(step) * 15.0) {
+    for yaw in (0..(360.0 / step) as i32).map(|n| f64::from(n) * step) {
+        for pitch in (-(90.0 / step) as i32..=(90.0 / step) as i32).map(|n| f64::from(n) * step) {
             for roll in [-15.0, 0.0, 15.0] {
-                for fov in [60.0, 80.0, 100.0, 120.0] {
+                for fov in fovs.iter().copied() {
                     let look = Look {
                         angles: [yaw, pitch, roll],
                         fov,
                         compression: 1.0,
+                        panini: options.panini,
                     };
                     let score = agree(&looked(&lenses, frame, look, &ours, coarse, &[]), &small);
                     if score > best.0 {
@@ -1876,9 +1908,15 @@ fn parity(options: &Options) -> Fallible<()> {
     }
     let look = best.1;
     println!(
-        "fitted: yaw {:.2}, pitch {:.2}, roll {:.2}, fov {:.2} deg, compression {:.3} \
-         (1.000 is rectilinear), correlating {score:.4}",
-        look.angles[0], look.angles[1], look.angles[2], look.fov, look.compression,
+        "fitted: yaw {:.2}, pitch {:.2}, roll {:.2}, fov {:.2} deg, {}, correlating {score:.4}",
+        look.angles[0],
+        look.angles[1],
+        look.angles[2],
+        look.fov,
+        match look.panini >= 0.0 {
+            true => format!("panini d {:.2} as told", look.panini),
+            false => format!("compression {:.3} (1.000 is rectilinear)", look.compression),
+        },
     );
 
     // The comparison, and it is each stitch against itself rather than against
@@ -2105,6 +2143,26 @@ fn ffprobe_size(path: &Path) -> Fallible<MetaSize> {
 /// / c` is rectilinear at `c = 1`, equidistant in the limit at `c = 0`, and
 /// everything a consumer 360 app calls "natural" in between. A fit that lands
 /// on 1 has found a rectilinear reframe and said so.
+fn panini_ray(uv: [f64; 2], half_fov: f64, d: f64, aspect: f64) -> [f64; 3] {
+    // Their own shader: s = (d+1)/(d+cos lambda), x = s sin lambda, y = s tan phi,
+    // scaled so that the picture's half width is the half field of view asked for.
+    let edge = (d + 1.0) / (d + half_fov.cos()) * half_fov.sin();
+    let (x, y) = (
+        (uv[0] * 2.0 - 1.0) * edge,
+        (uv[1] * 2.0 - 1.0) * edge / aspect,
+    );
+    // x (d + cos l) = (d+1) sin l, which is one sinusoid in l and so has a closed inverse.
+    let radius = ((d + 1.0).powi(2) + x * x).sqrt();
+    let lambda = (x * d / radius).clamp(-1.0, 1.0).asin() + x.atan2(d + 1.0);
+    let s = (d + 1.0) / (d + lambda.cos());
+    let phi = (y / s).atan();
+    [
+        lambda.sin() * phi.cos(),
+        phi.sin(),
+        lambda.cos() * phi.cos(),
+    ]
+}
+
 fn ray_of(uv: [f64; 2], half_fov: f64, compression: f64, aspect: f64) -> [f64; 3] {
     let (u, v) = (uv[0] * 2.0 - 1.0, (uv[1] * 2.0 - 1.0) / aspect);
     let rho = u.hypot(v);
@@ -2141,12 +2199,7 @@ fn looked(
     );
     (0..shape.pixels())
         .map(|index| {
-            let ray = ray_of(
-                shape.uv(index),
-                view.fov.to_radians() / 2.0,
-                view.compression,
-                shape.aspect(),
-            );
+            let ray = view.ray(shape.uv(index), shape.aspect());
             let (weights, landings) = Weighting::Shipped.bent(&reframe, ray, cells);
             let mut luma = 0.0;
             let mut total = 0.0;
@@ -2177,15 +2230,30 @@ struct Look {
     angles: [f64; 3],
     fov: f64,
     compression: f64,
+    /// Insta360 Studio's "Distortion" slider, which is Panini's `d`, or a
+    /// negative number for a projection nobody has told us. Zero is exactly
+    /// rectilinear, because their d=0 collapses to gnomonic. A view given a
+    /// `d` is given its field of view with it, so neither is fitted and only
+    /// the three angles are searched.
+    panini: f64,
 }
 
 impl Look {
     /// The five numbers as one vector, so the pattern search can step any of
     /// them without knowing which is which.
+    fn ray(&self, uv: [f64; 2], aspect: f64) -> [f64; 3] {
+        let half = self.fov.to_radians() / 2.0;
+        match self.panini >= 0.0 {
+            true => panini_ray(uv, half, self.panini, aspect),
+            false => ray_of(uv, half, self.compression, aspect),
+        }
+    }
+
     fn nudge(mut self, axis: usize, step: f64) -> Self {
         match axis {
             0..=2 => self.angles[axis] += step,
             3 => self.fov += step,
+            _ if self.panini >= 0.0 => {}
             _ => self.compression = (self.compression + step * 0.005).clamp(0.05, 1.0),
         }
         self
@@ -2207,17 +2275,7 @@ fn seam_map(lenses: &[Lens], frame: Size, view: Look, shape: Shape) -> Vec<f64> 
         Sampling::default(),
     );
     (0..shape.pixels())
-        .map(|index| {
-            past_seam(
-                &reframe,
-                ray_of(
-                    shape.uv(index),
-                    view.fov.to_radians() / 2.0,
-                    view.compression,
-                    shape.aspect(),
-                ),
-            )
-        })
+        .map(|index| past_seam(&reframe, view.ray(shape.uv(index), shape.aspect())))
         .collect()
 }
 
@@ -2251,5 +2309,72 @@ fn agree(ours: &[f64], theirs: &[f64]) -> f64 {
     match var_a > 0.0 && var_b > 0.0 {
         true => covariance / (var_a * var_b).sqrt(),
         false => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Their `d = 0` is gnomonic, which is the identity `mode=parity`'s own
+    /// rectilinear family already had, so the two have to draw one picture.
+    #[test]
+    fn panini_at_zero_is_the_rectilinear_family() {
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            for v in [0.0, 0.3, 1.0] {
+                let half = 60f64.to_radians();
+                let told = panini_ray([u, v], half, 0.0, 16.0 / 9.0);
+                let fitted = ray_of([u, v], half, 1.0, 16.0 / 9.0);
+                for axis in 0..3 {
+                    assert!(
+                        (told[axis] - fitted[axis]).abs() < 1e-9,
+                        "at ({u}, {v}) axis {axis}: {} against {}",
+                        told[axis],
+                        fitted[axis],
+                    );
+                }
+            }
+        }
+    }
+
+    /// The inverse is closed form, so the forward map is the check on it:
+    /// `s = (d+1)/(d+cos lambda)`, `x = s sin lambda`, `y = s tan phi`.
+    #[test]
+    fn the_panini_inverse_undoes_their_forward_map() {
+        let (d, half, aspect) = (0.9, 75f64.to_radians(), 16.0 / 9.0);
+        let edge = (d + 1.0) / (d + half.cos()) * half.sin();
+        for u in [0.0, 0.2, 0.5, 0.9, 1.0] {
+            for v in [0.0, 0.4, 1.0] {
+                let ray = panini_ray([(u + 1.0) / 2.0, (v + 1.0) / 2.0], half, d, aspect);
+                let lambda = ray[0].atan2(ray[2]);
+                let phi = ray[1].asin();
+                let s = (d + 1.0) / (d + lambda.cos());
+                assert!(
+                    (s * lambda.sin() / edge - u).abs() < 1e-9
+                        && (s * phi.tan() * aspect / edge - v).abs() < 1e-9,
+                    "({u}, {v}) came back as ({}, {})",
+                    s * lambda.sin() / edge,
+                    s * phi.tan() * aspect / edge,
+                );
+            }
+        }
+    }
+
+    /// The half width is the half field of view asked for, whatever `d` does
+    /// in between: a scale that drifts with the slider would move the seam map
+    /// under every reading taken through it.
+    #[test]
+    fn the_picture_edge_is_the_field_of_view_asked_for() {
+        for d in [0.0, 0.3, 0.9, 2.0] {
+            for fov in [20.0, 90.0, 150.0f64] {
+                let half = (fov / 2.0).to_radians();
+                let ray = panini_ray([1.0, 0.5], half, d, 16.0 / 9.0);
+                assert!(
+                    (ray[0].atan2(ray[2]) - half).abs() < 1e-9,
+                    "d {d} fov {fov}: edge at {} deg",
+                    ray[0].atan2(ray[2]).to_degrees(),
+                );
+            }
+        }
     }
 }
