@@ -12,19 +12,20 @@
 //! ```sh
 //! # the owner's own view line, plus how the state was reached
 //! cargo run --release -p kjerag-spike --bin step -- <file.insv> \
-//!   time=2.836 yaw=93.99 pitch=4.12 fov=20.00 lock=1 warm=2.0 \
+//!   time=2.836 yaw=111.83 pitch=4.12 fov=20.00 lock=1 warm=2.0 \
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! # the same view with the band held off, which is stage 1's own picture
 //! cargo run --release -p kjerag-spike --bin step -- <file.insv> ... off=1
 //! ```
 //!
-//! **That `yaw` is from before 2026-08-06 and points somewhere else now.** The
-//! lock became world-fixed that day, so the frame a `lock=1` yaw is measured
+//! **That `yaw` is re-derived and a stale one runs without a word.** The lock
+//! became world-fixed on 2026-08-06, so the frame a `lock=1` yaw is measured
 //! in no longer follows the aircraft's slow heading and its zero is the file's
-//! opening heading instead. `new_yaw = old_yaw + carried(t)`, where `carried`
-//! is how far the old follow had been taken by then;
-//! docs/research/reference-views.md has the rule and how to measure it. A line
-//! older than that date runs without a word and reads a different picture.
+//! opening heading instead. The line above said `yaw=93.99` until that date
+//! and is the same picture at `111.83`. `new_yaw = old_yaw + carried(t)`,
+//! where `carried` is how far the old follow had been taken by then; `--bin
+//! carried` computes it for a line and docs/research/reference-views.md has
+//! the rule and the re-derived registry.
 //!
 //! **`warm` is the argument this instrument exists for.** The band's state is
 //! per direction and paced in media time, a seek throws it away, and half the

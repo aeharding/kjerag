@@ -3,7 +3,7 @@
 //!
 //! ```sh
 //! cargo run --release -p kjerag-spike --bin drift -- <file.insv>
-//! cargo run --release -p kjerag-spike --bin drift -- <file.insv> rest=1766,1776
+//! cargo run --release -p kjerag-spike --bin drift -- <file.insv> rest=1766.3,1776.3
 //! ```
 //!
 //! Written for PR #165's review, because the number the change was going to be
@@ -26,10 +26,14 @@
 //!
 //! **The shape is robust and the size is not, because this file has no still
 //! moment good enough to read a zero from.** `rest=` the ten seconds
-//! `--bin gyro` picks instead, 2.7 s later than the ten this one picks, and
-//! the same walk swings +64 degrees by minute 3 and -313 by minute 18 and ends
-//! at -43: hundreds of degrees either way, and 1.40 deg/min of signed mean
-//! against 2.08. Windows a few seconds apart read biases from 0.5 to 4.8 deg/s
+//! `--bin gyro` picks instead, 2.7 s later than the ten this one picks and the
+//! window in the second command above, and the same walk swings +64 degrees by
+//! minute 3 and -313 by minute 18 and ends at -43: hundreds of degrees either
+//! way, and 1.40 deg/min of signed mean against 2.08. Those numbers are that
+//! window to the tenth of a second: rounded to `rest=1766,1776` the same walk
+//! ends at -196 and reads -6.52 deg/min, which is this instrument's own lesson
+//! about zeros arriving in its usage line. Windows a few seconds apart read
+//! biases from 0.5 to 4.8 deg/s
 //! here, which is a camera being carried and not a gyroscope being read. So
 //! **take the wandering as the finding and the degrees as an order of
 //! magnitude**, and read a real number off a capture that is actually still.
