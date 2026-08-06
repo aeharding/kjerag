@@ -572,10 +572,10 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
-- 2026-08-06 **No along-seam table is fitted: what a pose and five harmonic
-  terms leave is not a static function of azimuth this corpus could have found**
-  (issue #103, stage 9, docs/research/stage9.md). The mechanism is built,
-  measured and ships at rest.
+- 2026-08-06 **No along-seam table is fitted: above the five terms the pass
+  already applies, what is left is not a static function of azimuth this corpus
+  could have found** (issue #103, stage 9, docs/research/stage9.md). The
+  mechanism is built, measured and ships at rest.
 
   Stage 9 asked for a fourth layer on the along-seam axis: one number per
   direction, pooled per camera, carrying what `SeamFit`'s five knobs and
@@ -636,6 +636,26 @@ live, no keyframe UI ever.
   reproduces across flights, 1.1 source px apart between May and April. It
   does. Its **per-azimuth structure above what the pass already applies** does
   not, and the median is what `band::Along`'s constant term is already for.
+
+  **And the "does not reproduce" half of this entry is scoped, by the layer-2
+  preflight probes on `research/layer2-preflight`.** It is a property of the
+  reduction, not of the camera. `seam::measure` means over each azimuth's frames
+  and the band's EMA does the same, over a population heavy-tailed about thirty
+  to one - between two frames 33 ms apart one azimuth moves with a median
+  absolute deviation of 0.008 to 0.014 deg against an **rms of 0.22 to 0.36**.
+  Reduced with per-reading outlier rejection, the same recordings' **five-term**
+  field reproduces across three months: May-01 against Jul-14 the two fields sit
+  **0.0203 deg apart** against their own 0.0553 and 0.0460, five terms from one
+  predict the other to 0.019-0.022 deg, and in picture space at the registered
+  May-01 GOOD view July's field held out takes the along-seam reading **1.30 ->
+  0.07 view px** with the epipolar median unmoved. Under the mean the same fit
+  predicts worse than the pose alone. **The table refusal is untouched**: cleanly
+  reduced, `5 + table` gains a thousandth of a degree on one flight, loses one on
+  another and does not hold its sign, while the same pipeline recovers a planted
+  0.05 deg six-cycle field (0.0374 -> 0.0191). The mean reduction also makes this
+  entry's amplitude bound conservative: a cleanly reduced corpus would exclude a
+  smaller field, not a larger one. A full-corpus re-run under the trimmed
+  reduction is in flight.
 
   What ships is `band::Table` at `Table::REST`: 128 numbers in the `Reframe`
   block, added to the band's own along-seam term before projection on the

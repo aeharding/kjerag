@@ -555,14 +555,23 @@ pub struct Leftover {
 /// **Nothing in the app builds one, and that is a measurement** (stage 9,
 /// docs/research/stage9.md). On the owner's six X4 Air flights the part of the
 /// leftover that survives the five terms is 3.7 percent of it; two flights'
-/// readings at the azimuths they share correlate at +0.194 as they stand and
-/// **-0.014** once each flight's own five terms are off, so nothing above those
-/// terms is shared between flights at all; and held out, a table costs the
-/// flight it was not fitted on at every kernel width that resolves anything.
-/// What the corpus can exclude has a size on it: a static field of order 3 and
-/// up above 0.02 to 0.06 degrees, and nothing below 0.02. The mechanism is here
-/// because the refusal had to be checkable and because a camera that needs one
-/// may still turn up; `Table::REST` is what ships.
+/// readings at the azimuths they share correlate at **-0.014** once each
+/// flight's own five terms are off, so nothing above those terms is shared
+/// between flights; and held out, a table costs the flight it was not fitted on
+/// at every kernel width that resolves anything. What the corpus can exclude has
+/// a size on it: a static field of order 3 and up above 0.02 to 0.06 degrees,
+/// and nothing below 0.02.
+///
+/// **Above those terms**, and the qualifier is load-bearing. The five terms
+/// themselves are a camera and do reproduce across flights: cleanly reduced,
+/// May-01's field and Jul-14's sit 0.0203 degrees apart against their own 0.055
+/// and 0.046, and one predicts the other in picture space to 0.07 view px
+/// (stage9.md 4.5). That is [`Along`]'s territory and it is applied per session
+/// already. What this type would carry is what is left over that, and that does
+/// not reproduce under either reduction.
+///
+/// The mechanism is here because the refusal had to be checkable and because a
+/// camera that needs one may still turn up; `Table::REST` is what ships.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Table {
