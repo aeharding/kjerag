@@ -1105,14 +1105,26 @@ fn predicted(
 /// degrees between azimuths, and a table entry that rested on one reading
 /// would be shrunk to nothing by the ridge whatever weight it carried.
 pub fn left(readings: &[Reading], fit: &SeamFit, lenses: &[Lens], frame: Size) -> Left {
-    let all: Vec<super::band::Leftover> = predicted(readings, fit, lenses, frame)
-        .into_iter()
-        .map(|(at, axes)| super::band::Leftover {
-            phi: at.phi as f32,
-            perp: axes[0].to_radians() as f32,
-            weight: 1.0,
-        })
-        .collect();
+    gated(
+        predicted(readings, fit, lenses, frame)
+            .into_iter()
+            .map(|(at, axes)| super::band::Leftover {
+                phi: at.phi as f32,
+                perp: axes[0].to_radians() as f32,
+                weight: 1.0,
+            })
+            .collect(),
+    )
+}
+
+/// The same gate, on leftovers that are already in hand.
+///
+/// [`left`] is this applied to what a pose leaves on one ring, and the split
+/// is not cosmetic: a ring read once is not the only way to these numbers. An
+/// instrument that accumulates one session's readings over a span of it
+/// arrives at the same quantity by a different road, and it has to be gated by
+/// the same rule or its spans and this function's rings are not comparable.
+pub fn gated(all: Vec<super::band::Leftover>) -> Left {
     let middle = middle_of(all.iter().map(|l| f64::from(l.perp)));
     let scatter = middle_of(all.iter().map(|l| f64::from(l.perp) - middle).map(f64::abs));
     let tolerance = (GATE_MADS * scatter).max(GATE_FLOOR_DEG.to_radians()) as f32;
