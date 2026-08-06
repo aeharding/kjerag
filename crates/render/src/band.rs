@@ -71,6 +71,11 @@ use kjerag_meta::Lens;
 /// overlap and the field cannot carry a step the picture does not have.
 pub const AZIMUTHS: usize = 128;
 
+/// The table travels four entries to a `vec4`, so a count that is not a
+/// multiple of four would lose the last few directions with no error
+/// anywhere ([`Table`]).
+const _: () = assert!(AZIMUTHS.is_multiple_of(4));
+
 /// How wide a patch is, in degrees of world angle.
 ///
 /// Phase A's number. Wide enough to hold structure at the scale the seam
@@ -404,7 +409,7 @@ impl Along {
     ///
     /// WGSL twin: `along_at`.
     pub fn at(&self, cos: f32, sin: f32) -> f32 {
-        let basis = [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+        let basis = terms(cos, sin);
         (0..5).map(|term| self.terms[term] * basis[term]).sum()
     }
 
@@ -436,7 +441,7 @@ impl Along {
                 continue;
             }
             let (sin, cos) = (index as f32 / cells.len() as f32 * std::f32::consts::TAU).sin_cos();
-            let basis = [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin];
+            let basis = terms(cos, sin);
             for row in 0..5 {
                 for (column, term) in basis.iter().enumerate() {
                     normal[row][column] += trust * basis[row] * term;
@@ -503,6 +508,288 @@ fn solve(mut normal: [[f32; 5]; 5], mut right: [f32; 5]) -> [f32; 5] {
         out[row] = total / normal[row][row];
     }
     out
+}
+
+/// One azimuth's worth of what a fitted pose left along the seam: the
+/// observation [`Table`] is built out of.
+///
+/// It is a *leftover*, not a reading: the pose the camera is drawn with has
+/// already been taken off it ([`super::seam::left`]), so what is here is the
+/// part of the disagreement no pose can describe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Leftover {
+    /// Azimuth about the body's +x, in radians. The one label a site keeps
+    /// under any calibration.
+    pub phi: f32,
+    /// What the pose left along [`Ring::perp`] there, in radians.
+    pub perp: f32,
+    /// How much this reading is believed: the correlation behind it, 0 up.
+    pub weight: f32,
+}
+
+/// The along-seam correction a pose cannot describe: one number per
+/// [`AZIMUTHS`] direction, in radians along [`Ring::perp`], read once per
+/// camera and held still (issue #103, stage 9).
+///
+/// **Why a table and not more harmonics.** [`Along`] is five numbers because
+/// three named calibration errors are all a *pose* can put on this axis. What
+/// is left over is not a pose and has no such shape, so raising the order
+/// would be guessing at one; and a harmonic reaches the whole circle, so an
+/// azimuth with no evidence behind it would still be moved by the azimuths
+/// that have some. A table is refused where it was never measured, and refused
+/// means exactly zero.
+///
+/// **Why it is static.** The along-seam axis is the one parallax cannot reach
+/// at any distance (docs/research/seam-two-axis.md 1), so what is on it is the
+/// camera. Measured per azimuth it holds still through a flight and reproduces
+/// across flights weeks apart, which is what makes it a calibration and not a
+/// state: `--bin crossing`'s matched-azimuth series reads the two axes' medians
+/// 1.1 source pixels apart between the owner's May and April captures on this
+/// axis, against 9 on the other one.
+///
+/// **It is never freer than its evidence.** Every entry is a weighted mean of
+/// the readings within [`SMOOTH_DEG`] of it, shrunk towards zero by
+/// [`TABLE_RIDGE`], with the five terms [`Along`] already applies taken back
+/// out so the two cannot both correct the same thing. An entry with no reading
+/// inside the kernel is exactly zero and its neighbours taper into it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Table {
+    /// Four to a `vec4`, because an array of scalars in a uniform block
+    /// strides sixteen bytes and this one would be four times the size for
+    /// nothing.
+    packed: [[f32; 4]; AZIMUTHS / 4],
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self::REST
+    }
+}
+
+impl Table {
+    /// Nothing measured, which is exactly the picture before this existed:
+    /// every entry zero, so [`Self::at`] returns zero at every azimuth and the
+    /// bend it adds is the zero vector.
+    pub const REST: Self = Self {
+        packed: [[0.0; 4]; AZIMUTHS / 4],
+    };
+
+    /// The entry at one azimuth, in radians, from that azimuth's own cosine
+    /// and sine, interpolated between the two directions it lands between and
+    /// wrapping: the field is a circle and a step between neighbours would be
+    /// a step in the picture.
+    ///
+    /// WGSL twin: `table_at`, which is handed the `low` and `mix` the cell
+    /// lookup has already worked out rather than taking a second `atan2`.
+    pub fn at(&self, cos: f32, sin: f32) -> f32 {
+        let turn = sin.atan2(cos) / std::f32::consts::TAU * AZIMUTHS as f32;
+        let low = turn.floor();
+        self.between(low as i32, turn - low)
+    }
+
+    /// The same from the azimuth already resolved into a direction index and
+    /// the fraction past it.
+    pub fn between(&self, low: i32, mix: f32) -> f32 {
+        let entry = |step: i32| {
+            let index = (low + step).rem_euclid(AZIMUTHS as i32) as usize;
+            self.packed[index / 4][index % 4]
+        };
+        entry(0) + (entry(1) - entry(0)) * mix
+    }
+
+    /// One entry per direction, in radians, for an instrument.
+    pub fn entries(&self) -> [f32; AZIMUTHS] {
+        std::array::from_fn(|index| self.packed[index / 4][index % 4])
+    }
+
+    /// A table straight from its entries, which is how a planted control and a
+    /// stored one are both built.
+    pub fn of_entries(entries: [f32; AZIMUTHS]) -> Self {
+        Self {
+            packed: std::array::from_fn(|group| {
+                std::array::from_fn(|lane| entries[group * 4 + lane])
+            }),
+        }
+    }
+
+    /// Whether this table moves anything at all. A table with nothing in it is
+    /// the picture stage 6 drew, byte for byte.
+    pub fn is_rest(&self) -> bool {
+        *self == Self::REST
+    }
+
+    /// The table these leftovers support, and nothing more.
+    ///
+    /// Three steps, each of which can be looked at on its own: smooth the
+    /// readings onto the ring, take back out the five terms [`Along`] already
+    /// applies, and refuse anything larger than a calibration.
+    ///
+    /// The width is [`SMOOTH_DEG`] everywhere the app builds one. It is an
+    /// argument because it is the one number in here that had to be measured
+    /// against held-out captures rather than argued for, and the instrument
+    /// that measured it has to be able to ask for a different one.
+    pub fn of(left: &[Leftover], smooth_deg: f32) -> Self {
+        let (mut values, _) = smoothed(&levelled(left), smooth_deg);
+        for value in &mut values {
+            *value = value.clamp(-TABLE_LIMIT_RAD, TABLE_LIMIT_RAD);
+        }
+        Self::of_entries(values)
+    }
+
+    /// How much evidence each direction has behind it, in readings: the same
+    /// kernel [`Self::of`] smooths with, with the readings' values left out.
+    ///
+    /// An entry with less than one reading's worth is one the ridge is taking
+    /// more than half of, which is the taper rather than a measurement. For an
+    /// instrument; the pass has no use for it, because the shrinking is
+    /// already in the entry.
+    pub fn evidence(left: &[Leftover], smooth_deg: f32) -> [f32; AZIMUTHS] {
+        smoothed(left, smooth_deg).1
+    }
+
+    /// The table written down, one entry per line in radians. This is how a
+    /// pooled calibration reaches an instrument, and how a fitted one is kept
+    /// between runs.
+    pub fn write(&self) -> String {
+        self.entries()
+            .iter()
+            .map(|entry| format!("{entry}\n"))
+            .collect()
+    }
+
+    /// The same, read back. `None` unless there are exactly [`AZIMUTHS`] of
+    /// them and every one is a number: a short table is a truncated file, and
+    /// filling the rest from neighbours is the hole-filling this type exists
+    /// to refuse.
+    pub fn read(text: &str) -> Option<Self> {
+        let entries: Vec<f32> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.trim().parse::<f32>().ok())
+            .collect::<Option<_>>()?;
+        let entries: [f32; AZIMUTHS] = entries.try_into().ok()?;
+        entries
+            .iter()
+            .all(|e| e.is_finite())
+            .then(|| Self::of_entries(entries))
+    }
+}
+
+/// How far along the seam one reading is allowed to speak, in degrees of
+/// azimuth.
+///
+/// **Declared from what the evidence resolves, not from what the picture
+/// would tolerate.** A reading is a correlation over a patch
+/// [`super::seam::Probe::span`] degrees wide, and the ring is read at 72
+/// azimuths five degrees apart, so neighbouring readings already share
+/// content; and one reading's own repeatability on the owner's captures is
+/// 0.0475 degrees against a field of 0.107 degrees rms, so a single azimuth
+/// cannot carry an entry on its own. This is the width at which the leftover
+/// field predicts a held-out capture best, measured on the owner's corpus
+/// (docs/research/stage9.md).
+pub const SMOOTH_DEG: f32 = 12.0;
+
+/// How much evidence an entry is shrunk against, in readings.
+///
+/// [`RIDGE`]'s argument, one axis over: an entry is believed in proportion to
+/// how many readings are behind it, an entry with none comes out at exactly
+/// zero rather than at a division, and the edge of the support tapers in by
+/// arithmetic rather than by a second rule.
+const TABLE_RIDGE: f32 = 1.0;
+
+/// The largest entry a table may carry, in radians.
+///
+/// Half a degree, which is the argument `seam`'s own runaway guard makes at
+/// this scale: the whole along-seam residual a fitted pose leaves on the
+/// owner's corpus is 0.107 degrees rms and 0.2 at worst, so an entry past half
+/// a degree is a correlation that found the wrong feature and not a camera.
+const TABLE_LIMIT_RAD: f32 = 0.5 * std::f32::consts::PI / 180.0;
+
+/// Every entry's weighted mean of the readings near it, and how much evidence
+/// that was, one per direction.
+///
+/// The kernel is a raised cosine over [`SMOOTH_DEG`], which is zero at its own
+/// edge and has no step anywhere: a top hat would put a corner in the picture
+/// wherever a reading walked in or out of one entry's window.
+fn smoothed(left: &[Leftover], smooth_deg: f32) -> ([f32; AZIMUTHS], [f32; AZIMUTHS]) {
+    let mut values = [0.0f32; AZIMUTHS];
+    let mut weights = [0.0f32; AZIMUTHS];
+    let width = smooth_deg.to_radians();
+    for (index, (value, weight)) in values.iter_mut().zip(&mut weights).enumerate() {
+        let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+        let mut total = 0.0;
+        for reading in left {
+            let near = kernel(wrapped(reading.phi - phi), width) * reading.weight.max(0.0);
+            *weight += near;
+            total += near * reading.perp;
+        }
+        *value = total / (*weight + TABLE_RIDGE);
+    }
+    (values, weights)
+}
+
+/// A raised cosine of half-width `width`, zero at and past it.
+fn kernel(apart: f32, width: f32) -> f32 {
+    match apart.abs() < width {
+        true => 0.5 * (1.0 + (std::f32::consts::PI * apart / width).cos()),
+        false => 0.0,
+    }
+}
+
+/// An angle brought into `-PI..PI`, which is what makes the kernel wrap.
+fn wrapped(angle: f32) -> f32 {
+    let turn = std::f32::consts::TAU;
+    (angle + std::f32::consts::PI).rem_euclid(turn) - std::f32::consts::PI
+}
+
+/// The readings with the five terms [`Along`] already applies taken back out
+/// of them.
+///
+/// Without this the two would both correct the low-order part and the picture
+/// would be over-turned by however much they agreed on. What is left is
+/// orthogonal to the pass's own field by construction, so the table carries
+/// only what a pose and a five-term fit between them cannot say.
+///
+/// **Off the readings and not off the smoothed ring**, which is not a detail:
+/// a harmonic reaches the whole circle, so subtracting one from the ring
+/// would move every direction the readings never reached, and those are
+/// exactly the directions this type exists to leave alone. Taken off the
+/// readings, a direction with no reading near it has a numerator of zero and
+/// stays at zero.
+fn levelled(left: &[Leftover]) -> Vec<Leftover> {
+    let mut normal = [[0.0f32; 5]; 5];
+    let mut right = [0.0f32; 5];
+    for reading in left {
+        let (sin, cos) = reading.phi.sin_cos();
+        let basis = terms(cos, sin);
+        let weight = reading.weight.max(0.0);
+        for row in 0..5 {
+            for (column, term) in basis.iter().enumerate() {
+                normal[row][column] += weight * basis[row] * term;
+            }
+            right[row] += weight * basis[row] * reading.perp;
+        }
+    }
+    for (term, row) in normal.iter_mut().enumerate() {
+        row[term] += RIDGE;
+    }
+    let low = Along::read(solve(normal, right), 0.0);
+    left.iter()
+        .map(|reading| {
+            let (sin, cos) = reading.phi.sin_cos();
+            Leftover {
+                perp: reading.perp - low.at(cos, sin),
+                ..*reading
+            }
+        })
+        .collect()
+}
+
+/// The five basis functions [`Along`] is written in, from an azimuth's own
+/// cosine and sine.
+fn terms(cos: f32, sin: f32) -> [f32; 5] {
+    [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin]
 }
 
 /// One direction's state, as the compute pass writes it and the fragment
@@ -1375,7 +1662,13 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // with holes in it, applied over a whole hemisphere, warps a horizon instead
   // of moving it. `flat / reach` is this azimuth's cosine and sine already.
   // Rust twins: `Along::at` and `Reframe::reading_at`.
-  let along = along_at(band.along, flat.x / reach, flat.y / reach);
+  //
+  // Plus what no pose can describe, read off this camera and held still
+  // (stage 9). It is the same displacement on the same axis at a higher
+  // order, and the table is levelled against the five terms above when it is
+  // built, so the two never correct the same thing twice. Rust twins:
+  // `Table::at` and `Reframe::bent`.
+  let along = along_at(band.along, flat.x / reach, flat.y / reach) + table_at(low, mix);
   // The epipolar bend's own gradient across the band is the disparity over the
   // band width, and past 1 the mapping folds. The band opens far enough to
   // carry this reading, and the clamp holds where it cannot. Rust twins:
@@ -1435,6 +1728,24 @@ fn band_width(disparity: f32) -> f32 {
 
 fn mix2(a: f32, b: f32, t: f32) -> f32 {
   return a + (b - a) * t;
+}
+
+// The stored along-seam table at one azimuth, in radians, between the two
+// directions the cell lookup already resolved and wrapping with it: one
+// `atan2` decides both fields, so this one is a pair of loads and a mix.
+//
+// Zero everywhere on a camera nothing has been pooled for, and zero at any
+// azimuth the readings never reached, which is the picture stage 6 drew.
+// Rust twin: `Table::between`.
+fn table_at(low: i32, mix: f32) -> f32 {
+  let a = table_entry(low);
+  let b = table_entry(low + 1);
+  return mix2(a, b, mix);
+}
+
+fn table_entry(index: i32) -> f32 {
+  let at = u32(index + i32(AZIMUTHS)) % AZIMUTHS;
+  return reframe.table[at / 4u][at % 4u];
 }
 "#;
 
@@ -3034,5 +3345,218 @@ mod tests {
         let bend = reframe.bend(ray, reframe.reading_at(ray, &cells, Along::fit(&cells)));
         assert_eq!(bend.epi, [0.0; 3]);
         assert_eq!(bend.along, [0.0; 3]);
+    }
+
+    // ------------------------------------------------- the along-seam table
+
+    /// Readings at every azimuth, all saying the same thing.
+    fn round_the_ring(perp_deg: f32, cycles: f32, count: usize) -> Vec<Leftover> {
+        (0..count)
+            .map(|index| {
+                let phi = index as f32 / count as f32 * std::f32::consts::TAU;
+                Leftover {
+                    phi,
+                    perp: perp_deg.to_radians() * (cycles * phi).cos(),
+                    weight: 1.0,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_table_with_nothing_in_it_moves_no_ray_at_all() {
+        // Rung 1 of stage 9's ladder, at the one place a test can reach it:
+        // an empty table is not a small correction, it is the same arithmetic
+        // the pass ran before it existed. The rendered half is measured
+        // against `origin/main` and reported in docs/research/stage9.md.
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        let reframe = crate::seam::mapped(&fixture_lenses(), FRAME);
+        assert!(reframe.table().is_rest());
+        assert_eq!(reframe.table(), Table::default());
+        for ray in [[0.6, 0.1, 0.8], [-0.2, 0.9, 0.1], [0.0, 0.0, 1.0]] {
+            assert_eq!(reframe.tabled(0, ray), ray);
+            assert_eq!(reframe.tabled(1, ray), ray);
+            let bend = reframe.bend(ray, Reading::default());
+            assert_eq!(bend.along, [0.0; 3]);
+        }
+    }
+
+    #[test]
+    fn a_planted_ripple_comes_back_at_every_direction_it_was_planted_at() {
+        // The table has to reproduce what it was given wherever the evidence
+        // is dense and even, which is the control the corpus measurement is
+        // read against: a field the fit cannot return is a fit whose refusals
+        // cannot be believed either.
+        let planted = 0.10f32;
+        let left = round_the_ring(planted, 6.0, 360);
+        let table = Table::of(&left, SMOOTH_DEG);
+        for index in 0..AZIMUTHS {
+            let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+            let want = planted.to_radians() * (6.0 * phi).cos();
+            let got = table.at(phi.cos(), phi.sin());
+            // Smoothed by a kernel wider than a sixth of the circle, so what
+            // comes back is the ripple attenuated rather than the ripple: the
+            // check is that it is the same shape, in phase, and large.
+            assert!(
+                (got / want).is_finite() && got * want > 0.0 || want.abs() < 1e-6,
+                "direction {index}: planted {want}, read {got}",
+            );
+        }
+        let amplitude = table.entries().iter().fold(0.0f32, |m, e| m.max(e.abs()));
+        assert!(
+            amplitude > 0.3 * planted.to_radians(),
+            "a 12 degree kernel kept {amplitude} of a 6 cycle ripple",
+        );
+    }
+
+    #[test]
+    fn twice_the_evidence_asks_for_twice_the_correction() {
+        // Linear in what it is given, which is what makes a planted control
+        // readable at two amplitudes.
+        let one = Table::of(&round_the_ring(0.05, 6.0, 360), SMOOTH_DEG);
+        let two = Table::of(&round_the_ring(0.10, 6.0, 360), SMOOTH_DEG);
+        for (a, b) in one.entries().iter().zip(two.entries()) {
+            assert!((2.0 * a - b).abs() < 1e-6, "{a} doubled is not {b}");
+        }
+    }
+
+    #[test]
+    fn the_five_terms_the_pass_already_applies_are_taken_back_out() {
+        // Otherwise the band's own field and this one would both correct the
+        // low orders and the picture would be turned by however much the two
+        // of them agreed.
+        for cycles in [0.0, 1.0, 2.0] {
+            let planted = 0.20f32.to_radians();
+            let table = Table::of(&round_the_ring(0.20, cycles, 360), SMOOTH_DEG);
+            let worst = table.entries().iter().fold(0.0f32, |m, e| m.max(e.abs()));
+            // Not exactly nothing: the levelling fit is shrunk by [`RIDGE`]
+            // like every other fit in this file. A cycle term's own diagonal
+            // is half the reading count, so 360 readings give up about 2/360
+            // of it, which is the 0.5 percent measured here. That is the
+            // ridge and not a leak, and it is under a hundredth of a source
+            // pixel at the size a calibration comes in.
+            assert!(
+                worst < 0.01 * planted,
+                "{cycles} cycles is a pose and left {worst} rad in the table",
+            );
+        }
+    }
+
+    #[test]
+    fn an_azimuth_no_reading_reached_is_left_exactly_alone() {
+        // The refusal stage 9 is built on: a table speaks for the directions
+        // it was measured at and tapers to exactly zero everywhere else, so a
+        // starved ring cannot warp a hemisphere the way a harmonic would.
+        let left: Vec<Leftover> = round_the_ring(0.20, 0.0, 360)
+            .into_iter()
+            .filter(|l| l.phi.to_degrees() < 90.0)
+            .collect();
+        let entries = table_entries(&left);
+        let far = (AZIMUTHS as f32 * 200.0 / 360.0) as usize;
+        assert_eq!(entries[far], 0.0, "an unmeasured direction was moved");
+        let evidence = Table::evidence(&left, SMOOTH_DEG);
+        assert_eq!(evidence[far], 0.0);
+        assert!(
+            evidence[AZIMUTHS / 8] > 1.0,
+            "the measured arc has evidence"
+        );
+    }
+
+    #[test]
+    fn the_edge_of_the_evidence_is_a_taper_and_not_a_cliff() {
+        // A top hat would put a corner in the picture wherever a reading
+        // walked in or out of one direction's window, which is the stage 5
+        // scallop and the stage 7 stripe in a third costume. So the entries
+        // beside the zeros have to be small: what the field does inside its
+        // own support is the field's business, and what it does at the edge of
+        // it is this stage's.
+        let left: Vec<Leftover> = round_the_ring(0.20, 6.0, 720)
+            .into_iter()
+            .filter(|l| l.phi.to_degrees() < 120.0)
+            .collect();
+        let entries = table_entries(&left);
+        let largest = entries.iter().fold(0.0f32, |m, e| m.max(e.abs()));
+        assert!(largest > 0.0, "the measured arc carries nothing");
+        for index in 0..AZIMUTHS {
+            let (here, next) = (entries[index], entries[(index + 1) % AZIMUTHS]);
+            if here != 0.0 && next != 0.0 {
+                continue;
+            }
+            assert!(
+                here.abs().max(next.abs()) < 0.2 * largest,
+                "direction {index} steps from {here} to {next} against {largest}",
+            );
+        }
+    }
+
+    fn table_entries(left: &[Leftover]) -> [f32; AZIMUTHS] {
+        Table::of(left, SMOOTH_DEG).entries()
+    }
+
+    #[test]
+    fn a_reading_larger_than_a_calibration_is_refused_rather_than_applied() {
+        let left = round_the_ring(4.0, 6.0, 360);
+        for entry in Table::of(&left, SMOOTH_DEG).entries() {
+            assert!(
+                entry.abs() <= TABLE_LIMIT_RAD,
+                "{entry} rad is not a camera"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lookup_wraps_and_lands_between_its_neighbours() {
+        let mut entries = [0.0f32; AZIMUTHS];
+        entries[0] = 1.0;
+        entries[AZIMUTHS - 1] = -1.0;
+        let table = Table::of_entries(entries);
+        assert_eq!(table.between(0, 0.0), 1.0);
+        assert_eq!(table.between(-1, 0.0), -1.0);
+        assert_eq!(table.between(AZIMUTHS as i32, 0.0), 1.0);
+        assert!((table.between(-1, 0.5) - 0.0).abs() < 1e-6);
+        let phi = std::f32::consts::TAU / AZIMUTHS as f32 * (AZIMUTHS - 1) as f32;
+        assert!((table.at(phi.cos(), phi.sin()) + 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_table_survives_being_written_down_and_read_back() {
+        let table = Table::of(&round_the_ring(0.10, 6.0, 360), SMOOTH_DEG);
+        assert_eq!(Table::read(&table.write()), Some(table));
+        assert_eq!(
+            Table::read("1.0\n2.0\n"),
+            None,
+            "a short table is not a table"
+        );
+        assert_eq!(Table::read(&"nan\n".repeat(AZIMUTHS)), None);
+    }
+
+    #[test]
+    fn only_lens_one_takes_the_table_and_it_takes_it_whole() {
+        // The convention the calibration it belongs to already uses: the seam
+        // cannot say which lens is wrong, so one of them is turned and the
+        // other is left exactly alone (`SeamFit::applied`).
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        let table = Table::of(&round_the_ring(0.10, 6.0, 360), SMOOTH_DEG);
+        let reframe = crate::seam::mapped(&fixture_lenses(), FRAME).with_table(table);
+        let ray = [0.6, 0.1, 0.0];
+        assert_eq!(reframe.tabled(0, ray), ray);
+        assert_ne!(reframe.tabled(1, ray), ray);
+    }
+
+    #[test]
+    fn the_table_goes_to_nothing_at_the_poles_where_an_azimuth_does_not_exist() {
+        // Same argument and the same factor as the band's own along-seam
+        // field: `w x d` is `|w| cos(elevation)` along the seam's tangent, so
+        // a per-azimuth correction cannot swirl where there is no azimuth.
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        let table = Table::of(&round_the_ring(0.10, 6.0, 360), SMOOTH_DEG);
+        let reframe = crate::seam::mapped(&fixture_lenses(), FRAME).with_table(table);
+        let moved = |ray: [f32; 3]| {
+            let out = reframe.tabled(1, ray);
+            norm(std::array::from_fn(|axis| out[axis] - ray[axis]))
+        };
+        let seam = moved([1.0, 0.0, 0.0]);
+        assert!(moved([0.1, 0.0, 1.0]) < 0.2 * seam, "the pole still moves");
+        assert_eq!(reframe.tabled(1, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]);
     }
 }

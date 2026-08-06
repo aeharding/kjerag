@@ -642,7 +642,17 @@ fn patch(
             // ray. Passing the body ray straight in mixes the two frames and
             // reports a real root as projected out merely because the view
             // was rotated.
-            let landing = map.project(source.lens, map.view_ray_from_body(ray.map(|v| v as f32)));
+            //
+            // Through the along-seam table as well, if the map carries one
+            // (issue #103, stage 9): what this instrument reads is what the
+            // picture would still disagree by, so a correction the sampling
+            // could not see would be asked for a second time. The Jacobian
+            // probes below are left on the bare projection on purpose - a
+            // table is a displacement of the content and not of the scale,
+            // and what it does to `d(pixel)/d(body angle)` is its own
+            // gradient, a hundredth of the column at any size this ships.
+            let view = map.view_ray_from_body(ray.map(|v| v as f32));
+            let landing = map.project(source.lens, map.tabled(source.lens, view));
             if !landing.inside {
                 return None;
             }

@@ -572,6 +572,62 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-06 **No along-seam table is fitted: what a pose and five harmonic
+  terms leave is not a static function of azimuth** (issue #103, stage 9,
+  docs/research/stage9.md). The mechanism is built, measured and ships at rest.
+
+  Stage 9 asked for a fourth layer on the along-seam axis: one number per
+  direction, pooled per camera, carrying what `SeamFit`'s five knobs and
+  `band::Along`'s five harmonic terms cannot say. `kjerag-spike --bin table`
+  measures the case for one, off the ring `seam::measure` already reads, and
+  the case fails on every count that decides it.
+
+  On the owner's X4 Air, six flights April to August, 299 gated readings: the
+  pooled pose leaves **0.064 to 0.128 deg rms** along the seam per capture,
+  which is the 1.30 and 1.43 view px `--bin crossing` reads at his two May-01
+  crossings. A five-term fit takes the pooled leftover 0.0818 to **0.0739**;
+  five more orders take it to 0.0712, which is **3.7 percent**. At an azimuth
+  two flights both read, they sit 0.070 to 0.166 deg apart, against 0.064 to
+  0.141 deg of variation round either flight's own ring: **two flights disagree
+  at one azimuth by more than either varies over the whole circle.** And the
+  test that decides, each capture predicted by a table fitted on the other
+  five: **a table costs the flight it was not fitted on at every width that
+  resolves anything** (0.0836 to 0.0872 against a **0.0828** no-table baseline),
+  and stops costing only at a 36-degree kernel, where it buys 1.1 percent and
+  can barely carry more than the two cycles already applied. The fitted column
+  improves monotonically as the kernel narrows while the held-out column gets
+  worse in step - the stage-7 striping lesson as a number.
+
+  **It is a refusal and not a blind spot.** A planted six-cycle table, an order
+  above anything the pass applies, is put in the map and the corpus re-measured
+  through it: read back at 0.894 and 0.910 of itself at 0.05 and 0.10 deg over
+  107 azimuths, and through `--bin crossing table=` at the May-01 GOOD view at
+  slope -1.07 and -1.26 per site with the **epipolar axis unmoved** (+0.006 and
+  +0.023 src px, MAD 0.04 to 0.06) and the traced 50/50 contour unmoved. An
+  order-6 field at half the size of the residual being looked for is plainly
+  visible to this instrument.
+
+  The second camera says the same. The ONE X2 of issue #130, whose factory
+  extrinsics are 2.8 degrees out, has a leftover whose order-3-and-up structure
+  does reproduce across three captures of one evening (0.0127 deg of signal
+  against 0.0116 of noise) - and held out it buys 2.7 percent at its best width
+  (0.0692 against a 0.0711 baseline) while a 4-degree kernel is already worse
+  than nothing, and 0.013 deg is a twentieth of the along-seam error.
+
+  **This corrects the #155 entry below.** "A static per-azimuth map is enough
+  for along the seam" was read off the fact that the along-seam **median**
+  reproduces across flights, 1.1 source px apart between May and April. It
+  does. Its **per-azimuth structure above what the pass already applies** does
+  not, and the median is what `band::Along`'s constant term is already for.
+
+  What ships is `band::Table` at `Table::REST`: 128 numbers in the `Reframe`
+  block, added to the band's own along-seam term before projection on the
+  unwarped body ray, lens 1 whole and lens 0 not at all, tapering to exactly
+  zero at any direction no reading reached. Empty, it is the picture
+  `origin/main` draws, byte for byte at four registry views, and it costs 0.04
+  ms of an 8.10 ms redraw. Nothing in the app sets one, and the loop that would
+  is the open question at the top of the PR.
+
 - 2026-08-05 **The handover is eight degrees wide, because the eye said so
   against every instrument that had an opinion** (`projection::CROSSOVER_DEG`
   2 -> 8, clamped per camera by `band::affordable`).

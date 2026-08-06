@@ -339,6 +339,11 @@ struct Mapped {
 fn map(options: &Options, seam: Seam) -> Fallible<Mapped> {
     let scene = Scene::still(&options.input, Cue::Time(options.at()))?;
     seam.hold(&scene);
+    // The along-seam table this camera would be drawn with (issue #103, stage
+    // 9), so what this instrument reads is what the picture still disagrees
+    // by rather than what it would have without one. `Table::REST` unless a
+    // run names a table, and then nothing here moves at all.
+    scene.use_table(options.table);
     scene.set_horizon(match options.lock {
         true => Horizon::Locked,
         false => Horizon::Free,
@@ -363,6 +368,19 @@ fn plant(options: &Options, knob: usize, amount: f64) -> Fallible<Mapped> {
 }
 
 const KNOBS: [&str; 5] = ["roll", "yaw", "pitch", "cx", "cy"];
+
+/// One camera's along-seam table, off the file `kjerag-spike --bin table`
+/// writes.
+fn read_table(path: &str) -> Fallible<kjerag_render::Table> {
+    let text = std::fs::read_to_string(path)?;
+    kjerag_render::Table::read(&text).ok_or_else(|| {
+        format!(
+            "{path} is not {} numbers, one per direction",
+            kjerag_render::AZIMUTHS
+        )
+        .into()
+    })
+}
 
 fn perturb(mut fit: SeamFit, knob: usize, amount: f64) -> SeamFit {
     match knob {
@@ -809,6 +827,10 @@ struct Options {
     null: bool,
     plant: Option<(usize, f64)>,
     seam: Seam,
+    /// The along-seam table the picture would be drawn with (issue #103,
+    /// stage 9). `Table::REST` unless a run names one, and then this
+    /// instrument reads exactly what it read before the stage existed.
+    table: kjerag_render::Table,
     out: Option<String>,
 }
 
@@ -865,6 +887,7 @@ impl Options {
             null: false,
             plant: None,
             seam: Seam::File,
+            table: kjerag_render::Table::REST,
             out: None,
         };
         for arg in args {
@@ -915,6 +938,7 @@ impl Options {
                         _ => Seam::Stored(seam_fit(value)?),
                     }
                 }
+                Some(("table", value)) => out.table = read_table(value)?,
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
@@ -1017,7 +1041,7 @@ fn knob(value: &str) -> Fallible<(usize, f64)> {
 const USAGE: &str = "usage: crossing <file.insv> [time=seconds] [yaw=deg] [pitch=deg] [fov=deg] \
      [lock=1] [size=px] [bins=n] [span=deg] [search=deg] [step=deg] [contrast=codes] [ncc=score] \
      [perpgate=deg | perpgate=0] [perpref=deg] [dither=deg] [null=1] [plant=knob:amount] \
-     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] [out=name.csv]";
+     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] [table=table.txt] [out=name.csv]";
 
 /// The view line the app copies is this instrument's command line too, which
 /// is the only reason a reported reading can be pointed at a picture the owner

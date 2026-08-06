@@ -310,7 +310,11 @@ fn sample(
             let ray = unit(std::array::from_fn(|axis| {
                 at.centre[axis] + at.along[axis] * a + at.across[axis] * b
             }));
-            let landing = reframe.project(lens, ray.map(|c| c as f32));
+            // Through the table the picture is drawn with, if there is one:
+            // a ring read past a correction that is already being applied
+            // would ask for it a second time ([`Reframe::tabled`]).
+            let ray = reframe.tabled(lens, ray.map(|c| c as f32));
+            let landing = reframe.project(lens, ray);
             taps.push(
                 landing
                     .inside
@@ -1060,18 +1064,111 @@ fn round(
 /// arithmetic the fit minimized, and it is here so a fit that did not improve
 /// the thing it was fitted to can be thrown away without a second decode.
 fn residual(readings: &[Reading], fit: &SeamFit, lenses: &[Lens], frame: Size) -> [f64; 2] {
+    let left = predicted(readings, fit, lenses, frame);
+    [
+        rms(left.iter().map(|(_, axes)| axes[0])),
+        rms(left.iter().map(|(_, axes)| axes[1])),
+    ]
+}
+
+/// The same, kept per azimuth rather than reduced: where each patch would read
+/// with the correction in place, along the seam first and across it second.
+fn predicted(
+    readings: &[Reading],
+    fit: &SeamFit,
+    lenses: &[Lens],
+    frame: Size,
+) -> Vec<(Where, [f64; 2])> {
     let base = mapped(lenses, frame);
     let corrected = mapped(&fit.applied(lenses), frame);
-    let mut along = Vec::with_capacity(readings.len());
-    let mut across = Vec::with_capacity(readings.len());
-    for reading in readings {
-        let Some(shift) = moved(&base, &corrected, 1, &reading.at) else {
-            continue;
-        };
-        along.push(reading.along + shift[0]);
-        across.push(reading.across + shift[1]);
+    readings
+        .iter()
+        .filter_map(|reading| {
+            let shift = moved(&base, &corrected, 1, &reading.at)?;
+            let axes = [reading.along + shift[0], reading.across + shift[1]];
+            Some((reading.at, axes))
+        })
+        .collect()
+}
+
+/// What a pose leaves along the seam, azimuth by azimuth: the observation
+/// [`super::band::Table`] is built out of (issue #103, stage 9).
+///
+/// The along-seam axis only, because that is the axis parallax cannot reach
+/// and therefore the only one whose leftover is the camera rather than the
+/// scene. Across the seam the same readings carry a scene's distances, and
+/// what is left there is a per-session question the band already answers per
+/// frame.
+///
+/// Every reading counts once. It is already the mean over the frames it
+/// correlated on, the kernel that builds the table is far wider than the five
+/// degrees between azimuths, and a table entry that rested on one reading
+/// would be shrunk to nothing by the ridge whatever weight it carried.
+pub fn left(readings: &[Reading], fit: &SeamFit, lenses: &[Lens], frame: Size) -> Left {
+    let all: Vec<super::band::Leftover> = predicted(readings, fit, lenses, frame)
+        .into_iter()
+        .map(|(at, axes)| super::band::Leftover {
+            phi: at.phi as f32,
+            perp: axes[0].to_radians() as f32,
+            weight: 1.0,
+        })
+        .collect();
+    let middle = middle_of(all.iter().map(|l| f64::from(l.perp)));
+    let scatter = middle_of(all.iter().map(|l| f64::from(l.perp) - middle).map(f64::abs));
+    let tolerance = (GATE_MADS * scatter).max(GATE_FLOOR_DEG.to_radians()) as f32;
+    let kept: Vec<super::band::Leftover> = all
+        .iter()
+        .copied()
+        .filter(|l| f64::from((l.perp - middle as f32).abs()) <= f64::from(tolerance))
+        .collect();
+    Left {
+        refused: all.len() - kept.len(),
+        readings: kept,
+        tolerance,
     }
-    [rms(along.iter().copied()), rms(across.iter().copied())]
+}
+
+/// What one pose left on one capture's ring, and what had to be thrown away
+/// to say it.
+pub struct Left {
+    pub readings: Vec<super::band::Leftover>,
+    /// How far from this capture's own middle a reading was allowed to sit,
+    /// in radians.
+    pub tolerance: f32,
+    pub refused: usize,
+}
+
+/// How many times its own scatter a reading may sit from its capture's middle
+/// before it is a correlation on the wrong feature rather than a camera.
+///
+/// **A tolerance filter on a physical argument, not a classifier**, and the
+/// same argument `--bin crossing`'s along-seam gate is built on: a capture's
+/// calibration does not change while it plays and no distance can reach this
+/// axis, so one capture's along-seam readings are one number plus a slow trend
+/// round the ring. What is refused is not a tail: on the owner's six flights
+/// the kept readings sit 0.054 degrees from their own middle on average and
+/// the refused ones reach 2.5, which is past the window the search even runs
+/// in (docs/research/stage9.md).
+const GATE_MADS: f64 = 4.0;
+
+/// The narrowest that tolerance may become, in degrees.
+///
+/// A capture whose readings happen to agree closely must not thereby refuse a
+/// real one: this floor is above the whole along-seam residual a fitted pose
+/// leaves on any capture in the corpus, so it can only ever cut a reading no
+/// calibration could have produced.
+const GATE_FLOOR_DEG: f64 = 0.10;
+
+/// The middle of a set of readings, which is a median and not a mean: one
+/// correlation on the wrong feature moves a mean by its whole size and a
+/// median not at all.
+fn middle_of(values: impl Iterator<Item = f64>) -> f64 {
+    let mut all: Vec<f64> = values.collect();
+    if all.is_empty() {
+        return 0.0;
+    }
+    all.sort_by(f64::total_cmp);
+    all[all.len() / 2]
 }
 
 // ------------------------------------------------------------ least squares
@@ -1170,6 +1267,15 @@ pub struct Plan {
     pub places: usize,
     pub frames: usize,
     pub probe: Probe,
+    /// The along-seam table the picture is already being drawn with
+    /// ([`super::band::Table`]).
+    ///
+    /// A ring is read through the map the picture is drawn through, which is
+    /// the same rule the band's own measurement follows: what a measurement
+    /// answers is what is *still* wrong, and a correction the reading cannot
+    /// see would be asked for twice. [`Table::REST`] on a camera nothing has
+    /// been pooled for, which is every capture the first time it plays.
+    pub table: super::band::Table,
 }
 
 impl Default for Plan {
@@ -1178,6 +1284,7 @@ impl Default for Plan {
             places: 3,
             frames: 2,
             probe: Probe::default(),
+            table: super::band::Table::REST,
         }
     }
 }
@@ -1196,7 +1303,7 @@ pub fn measure(
     frame: Size,
     plan: &Plan,
 ) -> Fallible<Vec<Reading>> {
-    let base = mapped(lenses, frame);
+    let base = mapped(lenses, frame).with_table(plan.table);
     let ring = ring(plan.probe.patches);
     let mut walk = Walk::over(files, 0.0, frame)?;
     if walk.streams() < 2 {
