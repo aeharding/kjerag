@@ -553,13 +553,18 @@ pub struct Leftover {
 /// into it.
 ///
 /// **Nothing in the app builds one, and that is a measurement** (stage 9,
-/// docs/research/stage9.md). Over nine captures of two cameras, reduced with
-/// per-reading outlier rejection and held out on every arm, a table on top of
-/// the five terms **costs** 2.4 percent on the X4 Air and 5.6 on the ONE X2;
-/// the kernel sweep is flat from 4 to 36 degrees on both; and what survives the
-/// five terms is **0.0004 degrees**, a hundredth of a source pixel and thirty
-/// times under what `--bin crossing` can resolve. The same test recovers a
-/// planted six-cycle field, so that is a refusal and not a blind spot.
+/// docs/research/stage9.md). Over nine captures of two cameras, held out on
+/// every arm: on the ONE X2 a table costs 4 to 6 percent under every reduction;
+/// on the X4 Air the effect runs -1 to +2 percent depending on the estimator,
+/// which is nothing either way. The kernel sweep is flat from 4 to 36 degrees on
+/// both, in the table-alone arm. And what survives the five terms has an
+/// amplitude of 0.004 to 0.005 degrees - the orthogonal part of two
+/// root-mean-squares 0.0199 and 0.0195, not their difference - which is
+/// **0.13 to 0.16 source px, an eighth of a pixel**
+/// and two to three times finer than `--bin crossing` resolves. Removing all of
+/// it perfectly would improve the held-out residual by under three percent, and
+/// a fitted table does not get it. The same test recovers the five-term field on
+/// 9 captures of 9, so that is a refusal and not a blind spot.
 ///
 /// **Above those terms**, and the qualifier is the whole finding. The five
 /// terms themselves are a camera and do reproduce: at full density they agree
@@ -702,10 +707,10 @@ impl Table {
 /// **A half-width**: the kernel reaches this far either side, so its window is
 /// twice this and it holds about five of the ring's readings.
 ///
-/// A reading is a correlation over a patch [`super::seam::Probe::span`] is
-/// wide - 3.7 degrees - and the ring is read at 72 azimuths five degrees
-/// apart, so neighbouring readings already share content and nothing here can
-/// resolve below that. What one reading is worth on its own is measured: a
+/// A reading is a correlation over a patch as wide as
+/// [`super::seam::Probe::span`] - 3.7 degrees - and the ring is read at 72
+/// azimuths five degrees apart, so neighbouring readings already share content
+/// and nothing here can resolve below that. What one reading is worth on its own is measured: a
 /// planted per-azimuth field comes back with 0.05 degrees of scatter per
 /// reading against a leftover of 0.064 to 0.128 degrees rms per capture
 /// (docs/research/stage9.md 4 and 5), so an entry resting on one azimuth would

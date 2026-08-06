@@ -468,9 +468,10 @@ pub struct Reframe {
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
-    /// Last in the block because it is the one member with a sixteen-byte
-    /// alignment of its own: put anywhere else it would need padding in front
-    /// of it as well as behind.
+    /// Last in the block because WGSL gives it a sixteen-byte alignment - it is
+    /// an array of `vec4` there, whatever `repr(C)` makes of it here, which is
+    /// an alignment of 4. Put anywhere else it would need padding in front of it
+    /// as well as behind.
     ///
     /// It is a calibration and it travels with the calibration. Every caller
     /// that builds a map with a camera's correction in it gets this along with

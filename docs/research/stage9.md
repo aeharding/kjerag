@@ -175,12 +175,6 @@ varies round its whole ring", and a draft before that compared a difference's
 magnitude against a root mean square about zero. Both are withdrawn: the first
 for the statistic, the second for the estimator underneath it.*
 
-*An earlier draft said "two flights disagree at one azimuth by more than either
-varies round its whole ring". That compared a difference's magnitude against one
-capture's root mean square about zero at shared azimuths, which is neither a
-variation, nor "either", nor the whole ring. The correlation above is the same
-point measured properly, and it is stronger.*
-
 **Held out**, which is the test that decides. Each capture predicted by a table
 fitted on the other five, at every kernel width:
 
@@ -321,19 +315,37 @@ predicted by a field fitted on the others, nothing measured on its own data:
 
 | trimmed, held out | pose only | 5 terms | 5 + table |
 | --- | ---: | ---: | ---: |
-| X4 Air, 405 readings | 0.0536 | **0.0211** | 0.0216 (**+2.4 %**) |
-| ONE X2, 176 readings | 0.0606 | **0.0249** | 0.0263 (**+5.6 %**) |
+| X4 Air, 405 readings | 0.0536 | **0.0211** | 0.0216 |
+| ONE X2, 176 readings | 0.0606 | **0.0249** | 0.0263 |
 
-The kernel sweep is flat from 4 to 36 degrees on both cameras (X4 0.0540 to
-0.0534 against a 0.0536 no-table baseline). And what actually survives the five
-terms is **0.0004 degrees** - the harmonic ladder under a refitted pose reads
-0.0199 at order 2 and 0.0195 at order 7 - which at 31.49 source px per degree is
-**one hundredth of a source pixel**, thirty times below what `--bin crossing`
-can resolve. There is nothing there to put in a table.
+**Read that across all three reductions, because one of the two cameras is
+estimator-selected and one is not.** On the X2 a table costs 4 to 6 percent
+under every reduction (mean +4.1, trimmed +5.6, median +5.2). On the X4 the
+effect runs -1 to +2 percent depending on the estimator (mean -0.1 and -0.6,
+median -0.6, trimmed +2.4, and an independent re-implementation of the same trim
++1.3), which is nothing either way. The table is not owed on either camera; it
+is refused on the X2 by a number that holds still, and on the X4 by a number too
+small to have a sign.
 
-**And the clean pipeline is not blind**: a planted 0.05-degree six-cycle field
-is recovered held out, with a clear optimum at a 10 to 12 degree kernel, by
-exactly this test.
+The kernel sweep is flat from 4 to 36 degrees on both cameras, in the table-alone
+arm (X4 0.0540 to 0.0534 against a 0.0536 no-table baseline).
+
+**How large is what survives the five terms.** The harmonic ladder under a
+refitted pose reads 0.0199 at order 2 and 0.0195 at order 7, and the difference
+of two root-mean-squares is not a field: the surviving component's own amplitude
+is the orthogonal part, `sqrt(0.0199^2 - 0.0195^2)` = **0.0040 degrees**, and the
+median reduction's ladder (0.0173 and 0.0165) gives **0.0052**. At 31.49 source
+px per degree that is **0.13 to 0.16 source px, about an eighth of a pixel**, two
+to three times finer than `--bin crossing` can resolve. Removing the whole of it
+perfectly from the 0.021-degree held-out residual would improve that residual by
+**1.8 to 3.1 percent**; a fitted table does not get it, which is the table above.
+
+**And the clean pipeline is not blind.** The control that certifies this
+leave-one-out is a cross-capture one, not a within-session one: the same test on
+the same partitions recovers the five-term field on 9 captures of 9, taking the
+pooled leftover from 0.0536 to 0.0211 degrees. A test that finds a real
+cross-capture field on every capture and finds no table on any is measuring, not
+failing.
 
 #### What does reproduce, and it is one order down
 
@@ -474,12 +486,14 @@ per capture. It is a tolerance filter on a physical argument, not a classifier.
   looked at what **its** per-frame population does either, and after 4.5 that is
   a question rather than a settled no.
 - **A small static field.** The refusal has a size on it and not more: above the
-  five terms the pass already applies, what is left under a clean reduction is
-  0.0004 degrees, a hundredth of a source pixel, and a table on top of the five
-  terms costs 2.4 percent on the X4 and 5.6 on the X2 (4.5). It does **not** mean
-  the along-seam field is not a camera: its five-term part reproduces on 18 of 18
-  pairs across both cameras and predicts a held-out flight to 0.021 degrees. That
-  part is layer 2's.
+  five terms the pass already applies, what survives under a clean reduction has
+  an amplitude of 0.004 to 0.005 degrees, which is 0.13 to 0.16 source px, an
+  eighth of a pixel and two to three times finer than `--bin crossing` resolves.
+  A table on top of the five terms costs 4 to 6 percent on the X2 under every
+  reduction and runs -1 to +2 percent on the X4 depending on the estimator (4.5).
+  It does **not** mean the along-seam field is not a camera: its five-term part
+  reproduces on 18 of 18 pairs across both cameras and predicts a held-out flight
+  to 0.021 degrees. That part is layer 2's.
 - **Anything at fewer than about ten readings per azimuth.** That is the density
   the reproduction needs, this stage's own instrument sampled about two, and the
   amplitude bound in 4 was measured at that density through the mean. Both are

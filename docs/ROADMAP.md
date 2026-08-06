@@ -651,14 +651,20 @@ live, no keyframe UI ever.
   either varies round the whole ring" and "the signal is under its own noise"
   are struck.
 
-  **The table refusal survives and hardens.** Held out under the clean
-  reduction, a table on top of the five terms **costs** 2.4 percent on the X4
-  (0.0211 -> 0.0216) and 5.6 on the X2 (0.0249 -> 0.0263); the kernel sweep is
-  flat from 4 to 36 degrees on both; and what survives the five terms is
-  **0.0004 deg**, a hundredth of a source pixel and thirty times below what
-  `--bin crossing` resolves. The same pipeline recovers a planted 0.05 deg
-  six-cycle field with a clear 10-12 degree optimum, so it is a refusal and not
-  a blind spot. `Table::REST` ships.
+  **The table refusal survives, and one of its two cameras carries it.** Held
+  out: **on the X2 a table costs 4 to 6 percent under every reduction** (mean
+  +4.1, trimmed +5.6, median +5.2); **on the X4 the effect runs -1 to +2 percent
+  depending on the estimator** (mean -0.1 and -0.6, median -0.6, trimmed +2.4, an
+  independent trim +1.3), which is nothing either way. The kernel sweep is flat
+  from 4 to 36 degrees on both in the table-alone arm. And what survives the five
+  terms has an **amplitude of 0.004 to 0.005 deg** - the orthogonal part of the
+  ladder's 0.0199 and 0.0195, not their difference - which is **0.13 to 0.16
+  source px, an eighth of a pixel** and two to three times finer than `--bin
+  crossing` resolves; removing all of it perfectly would improve the held-out
+  residual by 1.8 to 3.1 percent, and a fitted table does not get it. The
+  certifying control is cross-capture, not within-session: the same test on the
+  same partitions recovers the five-term field on 9 of 9 captures. So it is a
+  refusal and not a blind spot. `Table::REST` ships.
 
   **What does reproduce is the five-term along-seam field, one harmonic order
   below where this stage looked.** Fitted on other flights only, held out on
