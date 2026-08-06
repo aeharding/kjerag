@@ -21,13 +21,28 @@
 //! Nothing bounds the heading, and that is the price. The accelerometer
 //! observes the vertical and says nothing about which way round the vertical
 //! the body is pointing, so the heading is the gyroscope's alone and it carries
-//! the gyroscope's bias: about 0.05 deg/s on this footage
-//! (docs/research/insv-format.md 8.5), or 3 degrees of slow yaw a minute, which
-//! accumulates over a flight and is never corrected. A magnetometer is what
-//! would bound it; the trailer has a record type for one (13, `Magnetic`,
+//! the gyroscope's zero, and nothing here ever corrects it. A magnetometer is
+//! what would bound it; the trailer has a record type for one (13, `Magnetic`,
 //! contents unknown) and none of the X4 Air or ONE X2 captures here carries a
 //! single byte of it. Studio's own drift is the same order, so this is the
 //! floor of the technique rather than a shortfall against it.
+//!
+//! **It is not a steady creep, and the yaw-axis bias figure is the wrong one
+//! to quote.** The locked frame turns about the world vertical at
+//! `bias . up_in_body`, so a camera hanging tens of degrees off vertical
+//! brings its horizontal bias components in with it, and they are the larger
+//! ones. `kjerag-spike --bin drift` walks that through the July 14 capture:
+//! the running error reaches -36 degrees by minute 3, +87 by minute 8 and +149
+//! by minute 19, about 185 degrees peak to peak, while its signed mean is 2.08
+//! deg/min. A flight that wanders out and back has the average of one that
+//! never moved.
+//!
+//! **Where the world frame's zero is:** the heading at the track's first
+//! sample, which is a couple of seconds before the file's first video frame.
+//! On that capture the body turns 18.71 degrees in between, so `Ctrl+0` opens
+//! there and not on the aircraft's nose. It is a convention rather than a
+//! landmark, and every stored `lock=1` view line means what it means only
+//! while it holds (docs/research/reference-views.md).
 //!
 //! ## Why a complementary filter and not something cleverer
 //!
@@ -103,9 +118,10 @@ const STORE_US: i64 = 5_000;
 /// Both are time constants in seconds, and both limits are the useful ones:
 /// an infinite `tilt_seconds` is the gyroscope alone, a zero `yaw_seconds` is
 /// no heading stabilization at all, and an infinite `yaw_seconds` locks the
-/// view to the heading the file starts on. The shipped filter is that last
-/// limit, and the harness in `kjerag-spike` sweeps the rest of the range to
-/// say what the heading follow it replaced was worth.
+/// view to the heading of the track's first sample, which is a couple of
+/// seconds before the file's first video frame. The shipped filter is that
+/// last limit, and the harness in `kjerag-spike` sweeps the rest of the range
+/// to say what the heading follow it replaced was worth.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Filter {
     /// How long the accelerometer is smoothed over before it is believed.
@@ -1078,9 +1094,10 @@ mod tests {
 
     /// The two limits of the yaw constant, which is what says the constant is
     /// the only thing choosing between them: no stabilization at all, and a
-    /// view welded to the heading the file started on. The second is what
-    /// [`Filter::default`] ships, stated here as an angle rather than as an
-    /// infinity, so a build that quietly stopped locking fails here too.
+    /// view welded to the heading the file started on. The second limit is
+    /// what [`Filter::default`] ships, but this test names the constant rather
+    /// than reading it, so what pins the shipped value is the sibling above
+    /// and not this.
     #[test]
     fn the_yaw_constant_runs_from_following_to_locked() {
         let turning = || track(10.0, |_| ([0.0, 20.0, 0.0], [0.0, -1.0, 0.0]));

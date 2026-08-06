@@ -9,11 +9,18 @@
 //! cargo run --release -p kjerag-spike --bin band -- <file.insv> from=9.0 off=1
 //! # a stretch rendered as a sequence, with the flicker of the applied bend
 //! cargo run --release -p kjerag-spike --bin band -- <file.insv> mode=sequence \
-//!   from=9.0 count=90 yaw=90 pitch=-60 out=scratch/stage2-proof
+//!   from=9.0 count=90 yaw=90 pitch=-60 lock=1 out=scratch/stage2-proof
 //! # before and after at one view, and what moved between them
 //! cargo run --release -p kjerag-spike --bin band -- <file.insv> mode=render \
-//!   from=9.0 count=60 yaw=90 fov=60 out=scratch/stage2-proof
+//!   from=9.0 count=60 yaw=90 fov=60 lock=1 out=scratch/stage2-proof
 //! ```
+//!
+//! **`lock=1` is written out because it is the default and a bare `yaw=` does
+//! not say which frame it is in.** Since 2026-08-06 that frame is world-fixed:
+//! its zero is the file's opening heading rather than the followed one, so a
+//! `yaw` copied from before that date points somewhere else and runs without a
+//! word. `new_yaw = old_yaw + carried(t)`, rule and method in
+//! docs/research/reference-views.md.
 //!
 //! **This is the shipped path and not a model of it.** Every number below is
 //! read out of the very buffer `kjerag_render::ScenePipeline` dispatches into

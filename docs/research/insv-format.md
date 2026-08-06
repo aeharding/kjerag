@@ -1301,6 +1301,13 @@ twist would give; that is three seconds and it names the wrong file before an
 hour of measuring does. And `pair=1` injects all four directions rather than
 one, so an axis that cannot be read says so in its own control column.
 
+That `carries:` line moved up a few percent when the lock went world-fixed on
+2026-08-06, and the new numbers are the truer ones: the turn across a readout
+window is read off the stored track, and the heading follow used to cancel its
+own catch-up out of it. On VID_20260714_193252_00_006 the line now reads median
+19.9 deg/s against 19.1, 99th 117.3 against 109.4 and worst 493.7 against
+479.9. The threshold below is unaffected, being hundreds.
+
 The still captures are worth keeping for a different question. 4.9 asks for a
 capture from a camera that is not moving, and these are it.
 

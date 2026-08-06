@@ -667,9 +667,20 @@ it, which is what Insta360 Studio does (owner ruling, 2026-08-06). The three
 finite constants are measured and the tables are in
 docs/research/insv-format.md 8.5; the yaw one is infinite and is a ruling
 rather than a measurement. What the lock cannot hold is the gyroscope's own
-yaw drift, about 3 degrees a minute on this footage, because gravity does not
-observe heading and no capture here carries a byte of the trailer's magnetic
-record.
+yaw drift, because gravity does not observe heading and no capture here carries
+a byte of the trailer's magnetic record. It is **not a steady creep**: the
+locked frame turns at `bias . up_in_body`, so a camera tens of degrees off
+vertical brings its horizontal bias in, and `kjerag-spike --bin drift` walks
+that through the July 14 file at -36 degrees by minute 3, +87 by minute 8 and
++149 by minute 19, about 185 degrees peak to peak against a signed mean of
+2.08 deg/min.
+
+**The world frame's yaw zero is the heading at the file's first IMU sample**,
+which is a couple of seconds before its first video frame: the body has turned
+18.71 degrees by the time the picture starts on that capture, so `Ctrl+0` is
+that direction and not the aircraft's nose. It is a convention, and every
+stored `lock=1` view line means what it means only while the convention holds
+(docs/UI.md, the view line; docs/research/reference-views.md).
 
 Verification without a Studio export: physics in the footage itself.
 `kjerag-spike --bin horizon` renders runs of frames through the app's own

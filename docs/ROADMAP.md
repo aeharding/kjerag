@@ -59,7 +59,10 @@ too, so the terminal line is a complete launch command:
 `kjerag flight.insv time=9.576 yaw=144.40 pitch=0.90 fov=24.10 lock=1`.
 All three read it with the one parser in `crates/render/src/framing.rs`, which
 is also where it is written; reframe's real parser reads the same line in a
-test, so no two of them can drift. Measured under the harness: copy a view,
+test, so no two of them can drift. A `lock=1` yaw is a direction in the
+stabilized world frame, whose zero moved on 2026-08-06, so a line copied before
+that date lands somewhere else and says nothing about it (docs/UI.md, the view
+line). Measured under the harness: copy a view,
 seek ten seconds away, zoom out a notch, paste, and the copied line comes back
 to the millisecond and the hundredth of a degree with the picture byte for
 byte what it was.
@@ -136,7 +139,10 @@ app's default 90-degree field of view that is 16.5% of the sphere; on real
 flying footage with the horizon locked, which is the default, a parked view
 is not a parked geometry, and the measured duty cycle is 21.6 to 24.3% with
 no hysteresis at all and 8.9 to 9.4% with the 15 degrees of margin a release
-would need. Releasing a cold gate costs 195 to 340 ms, six to eleven frames
+would need. Those were read under the heading follow; with the world-fixed
+lock of 2026-08-06 the body turns fully under a parked view and the same
+measurement on one of those captures reads 15.7% and 3.9%, which makes the
+answer below no less final. Releasing a cold gate costs 195 to 340 ms, six to eleven frames
 of stale far hemisphere, because HEVC has no way into the middle of a GOP and
 this camera's is 29 frames. Expected saving: **0.14 W**, for a state machine
 and a packet ring through the frame path. `kjerag-spike --bin gating` is the
@@ -592,15 +598,35 @@ live, no keyframe UI ever.
   **The accepted price is gyroscope drift, and it is the technique's floor
   rather than a shortfall.** Nothing observes heading: gravity cannot see it
   and no capture on the test box carries a byte of the trailer's magnetic
-  record, so a locked yaw inherits the gyroscope's bias, about 0.05 deg/s or
-  3 degrees a minute
-  (docs/research/insv-format.md 8.5). Studio's own export drifts the same
-  order, 2.2 deg/min on the probe's window. What the pilot loses with it is
-  the fly-forward feel: the view used to settle back onto the nose within a
-  few seconds of any turn, and now a turn leaves it pointed where it was, so
-  a flight that turns round shows the way it came until somebody drags. The
-  same change makes issue #44's symptom impossible by construction, because
-  there is no follow left to erode a pan.
+  record, so a locked yaw inherits the gyroscope's zero and nothing ever
+  corrects it. Studio's own export drifts the same order, 2.2 deg/min on the
+  probe's window.
+
+  **It is not a steady creep, which is the thing to say out loud.** The locked
+  frame turns about the world vertical at `bias . up_in_body`, so a camera
+  hanging tens of degrees off vertical brings its horizontal bias components
+  in, and those are the larger ones: on the July 14 file `--bin drift` walks
+  the running error to -36 degrees by minute 3, +87 by minute 8 and +149 by
+  minute 19, about 185 degrees peak to peak, against a signed mean of 2.08
+  deg/min. Quoting the mean alone, or the body's own yaw-axis bias, describes
+  a flight nobody flew. The shape is the finding and the size is not: this
+  file has no still moment good enough to read a zero from, and the ten
+  seconds `--bin gyro` picks instead give the same walk hundreds of degrees
+  either way with a 1.40 deg/min mean.
+
+  **The world frame's zero is the heading at the file's first IMU sample**,
+  not its first video frame: 18.71 degrees of the body's own turning apart on
+  that capture, and that is where `Ctrl+0` lands.
+
+  What the pilot loses with all this is the fly-forward feel: the view used to
+  settle back onto the nose within a few seconds of any turn, and now a turn
+  leaves it pointed where it was, so
+  a flight that turns round shows the way it came until somebody drags. What
+  goes with the follow is its erosion of a pan against the world, and gyro
+  drift takes that place: issue #44 was closed by the owner as the t0 seed
+  transient and not as a defect in the drag or the follow (entry above), and
+  the old design's own control says the same, 0.62/0.03/0.38/0.18 degrees per
+  half second after a pan at `from=300`.
 
   **Every stored `lock=1` view line moved, and by a lot.** The yaw in one of
   those lines is measured in the stabilized frame, whose zero was the
@@ -2540,8 +2566,10 @@ live, no keyframe UI ever.
   parked views and 60 s of two X4 Air captures, at 90 degrees, the gate would
   be on 21.6 to 24.3% of the time with no hysteresis and 8.9 to 9.4% with 15
   degrees of margin, releasing one to three times a minute with nobody
-  touching the mouse. With the lock off it holds forever, but only 5 to 17.5%
-  of parked views qualify. Expected saving at the default: **0.14 W of about
+  touching the mouse. (Both under the heading follow; the world-fixed lock of
+  2026-08-06 turns the body fully under a parked view and takes those to 15.7%
+  and 3.9% on one of the same captures.) With the lock off it holds forever,
+  but only 5 to 17.5% of parked views qualify. Expected saving at the default: **0.14 W of about
   10 W**, and 0.26 points of one core.
 
   Against that, releasing a cold gate is not free and cannot be made free.
@@ -3039,6 +3067,17 @@ the mouse, the body's own swing takes the gate off and puts it back.
 |  90 | 15 deg |   9.4, 8.9% |     1.4, 2.0 | 0.57, 1.17 s |
 |  90 | 30 deg |   0.9, 0.3% |     0.9, 0.3 | 0.47, 0.40 s |
 | 110 | 15 deg |   3.2, 2.5% |     0.5, 1.0 | 0.70, 0.90 s |
+
+**Read under the heading follow that shipped until 2026-08-06, and the world-
+fixed lock makes every row of it worse.** The body now turns fully under a
+parked view instead of partly, so the gate comes off more. Re-run on
+VID_20260714_193252_00_006, before against after: at fov 90 and no margin
+18.2% gated becomes 15.7%, at 15 degrees of margin 5.2% becomes 3.9%, at fov
+45 and no margin 49.1% becomes 44.7%, and the longest single run over the file
+falls from 14.21 s to 9.41 s at the default field of view. Releases a minute
+barely move (5.5 to 5.6 at the default). **The decision the table gated is
+unchanged and better supported**: an expected saving of 0.14 W was already too
+little for a state machine and a packet ring, and there is less of it now.
 
 Releasing a gate, packets held since the last keyframe and replayed, nothing
 mapped on the way:

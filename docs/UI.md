@@ -548,7 +548,10 @@ Notes:
   action, one menu item). cosmic-files and cosmic-edit both bind that trio
   the same way, and cosmic-edit's source notes why those three characters
   in particular: they are not special to terminals, so they are free
-  (`src/key_bind.rs:41`).
+  (`src/key_bind.rs:41`). The yaw it restores is a direction in the world and
+  not the aircraft's nose, and with the lock world-fixed it stays one however
+  far the flight turns away from it: see the view line below for which
+  direction, and why it is a convention.
 - **The zoom range runs from 20 degrees to the whole sphere** (issue #47).
   Scrolling out does not stop at a wide flat view any more: past 110 degrees
   the picture bends, through the tiny planet at 220, and ends with the whole
@@ -594,6 +597,18 @@ Notes:
   JPEG's name says which video and which moment (issue #15) and nothing
   anywhere says which direction, so a picture sent back months later would
   otherwise be unplaceable.
+
+  **A `lock=1` yaw is a direction in the stabilized world frame, and that
+  frame's zero is a convention rather than a landmark.** It is the heading at
+  the file's first IMU sample, a couple of seconds before the first video
+  frame: on VID_20260714_193252_00_006 the body has turned 18.71 degrees by the
+  time the picture starts, and that is where `Ctrl+0` lands rather than on the
+  nose. Until 2026-08-06 the zero followed the aircraft's slow heading instead,
+  so **a line copied before that date points somewhere else and pastes without
+  a word**, by 157 degrees at 36 s into that file.
+  `new_yaw = old_yaw + carried(t)`, and docs/research/reference-views.md
+  carries the rule. A line is durable across builds only while that convention
+  holds, which is what makes changing it a change to every stored line.
 - **`Ctrl+V` goes there**, which is the half that makes the line a place
   rather than a label, and it is the owner's own expectation of it: "I
   thought I can paste into kjerag to go to that exact spot". The desktop's
