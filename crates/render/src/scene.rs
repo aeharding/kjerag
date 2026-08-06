@@ -99,8 +99,12 @@ pub enum FrameClock {
 /// Whether the picture is held against the world or against the camera body.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Horizon {
-    /// The world stays put: the body's roll and pitch are taken out
-    /// completely, and the fast half of its heading with them.
+    /// The world stays put: the body's roll, pitch and heading are all taken
+    /// out, so the view is pointed at a direction in the world and the
+    /// aircraft turns underneath it (owner ruling, 2026-08-06). Until then
+    /// the heading was high passed and a deliberate turn carried the picture
+    /// round with it; what is left of the lock's own motion is the
+    /// gyroscope's yaw drift, which nothing in these files can bound.
     #[default]
     Locked,
     /// The view rides the camera, as it did before issue #8.

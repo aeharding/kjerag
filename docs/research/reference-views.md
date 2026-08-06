@@ -10,6 +10,17 @@ expands a tilde, which makes such a paste a silent no-op (issue #157).
 Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 
+**Every `lock=1` yaw below is from before 2026-08-06 and points somewhere else now.** The yaw in
+one of these lines is measured in the stabilized frame, and the owner's ruling that day made that
+frame world-fixed: its zero used to follow the aircraft's slow heading and is now the heading the
+file opened on. The two differ by however far the old follow had been carried, which is not small.
+Measured on VID_20260714_193252_00_006 through `--bin lean`'s own heading column: 6.8 degrees at
+the first frame, 44 by 6.5 s, 157 by 36 s. The rule is `new_yaw = old_yaw + carried(t)`, and it was
+confirmed in the picture at the shimmer view, where the old `time=36.303 yaw=3.78` is the new
+`yaw=160.63` to about 1.6 degrees. `lock=0` lines are unaffected. **Re-derive a line before
+treating a reading off it as comparable with one taken before that date**, and re-read the caveat
+below, which is the same trap at a smaller size.
+
 ## Motion: what the band applies, and how much of it moves (`--bin shear`)
 - 2026-08-05 `VID_20260714_193252_00_006.insv time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1`
   The shimmer view, and the acceptance instrument for the seam epic's motion work. Under the

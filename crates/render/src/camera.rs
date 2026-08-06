@@ -278,6 +278,15 @@ pub enum Nudge {
     /// Yaw, pitch and field of view together, in one action: `Ctrl+0` in
     /// cosmic-files and cosmic-edit resets only zoom, because zoom is all
     /// those apps have (docs/UI.md open question 4).
+    ///
+    /// Yaw zero is a direction in the world and not the aircraft's nose, and
+    /// with the lock world-fixed since 2026-08-06 it stays a direction in the
+    /// world however far the aircraft turns away from it. Which direction is
+    /// the heading at the file's first IMU sample, a couple of seconds before
+    /// its first video frame: 18.71 degrees of turning before the picture
+    /// starts on the July 14 capture, and a whole flight's worth by the end of
+    /// one. Pitch zero and the default field of view are the camera's own and
+    /// have nothing to do with the file.
     Reset,
     /// Point the view exactly here: a copied view coming back, from `Ctrl+V`
     /// or from the command line.

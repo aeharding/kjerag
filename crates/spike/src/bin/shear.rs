@@ -4,16 +4,16 @@
 //! ```sh
 //! # four bands across the seam: what was applied at each, frame by frame
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1 frames=90
+//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90
 //! # the same view with a thin patch walked across the seam: the field's shape
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1 frames=90 mode=profile
+//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 mode=profile
 //! # the null, which has to read exactly zero everywhere
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1 frames=90 null=1
+//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 null=1
 //! # the plant, which has to read back a displacement it was given
 //! cargo run --release -p kjerag-spike --bin shear -- <file.insv> \
-//!   time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1 frames=90 mode=plant
+//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 mode=plant
 //! ```
 //!
 //! **Two arms of one frame, and not two runs of one file.** Every frame is
@@ -71,7 +71,7 @@
 //! ```sh
 //! cargo run --release -p kjerag-spike --bin shear -- \
 //!   ~/Videos/Insta/VID_20260714_193252_00_006.insv \
-//!   time=36.303 yaw=3.78 pitch=5.44 fov=20.00 lock=1 frames=90 warm=6.0 \
+//!   time=36.303 yaw=160.63 pitch=5.44 fov=20.00 lock=1 frames=90 warm=6.0 \
 //!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
 //! ```
 //!
@@ -97,6 +97,30 @@
 //! readings from 43 to 30, while the band's own state moved by 0.000002: the
 //! band works in the body's frame and the bands work in the view's. A reading here that has moved is a question about
 //! what the view is now looking at before it is a question about the band.
+//!
+//! **The lock going world-fixed on 2026-08-06 is that same caveat at its
+//! largest, and the yaw above has been re-derived for it.** The stabilized
+//! frame's zero stopped following the aircraft's slow heading, so at
+//! `time=36.303` on this file the old zero and the new one are 157 degrees
+//! apart: every command here said `yaw=3.78` until that date, and `yaw=160.63`
+//! is the same picture, to about 1.6 degrees. **A `lock=1` line older than
+//! that date points somewhere else entirely and will run without a word.**
+//!
+//! Re-read at the new aim, the field is the field it was, which is what says
+//! the lock change did not reach the seam: `-150` 0.3646 -> 0.3341 deg applied,
+//! `+0` 0.3490 -> 0.3350, `+60` 0.1225 -> 0.0990, `+150` -0.0021 -> 0.0020,
+//! the differences being the 1.6 degrees the aim is out. `null=1` reads
+//! exactly 0.000000 on every band either side, because the null holds both
+//! arms and has no view in it at all.
+//!
+//! **What did move is this instrument's own floor, and it moved the right
+//! way.** The body used to sweep the seam 330 px across the picture in three
+//! seconds, and the patch had to be read on a seam that was tilting past
+//! [`TILT_LIMIT`] while it did. With the view parked in the world instead, the
+//! seam band's step rms falls from 0.0773 deg to 0.0099 and its worst single
+//! step from 0.468 to 0.026, and three of the four bands yield more frames
+//! (90/79/35/85 -> 90/90/87/78). The seam ladder is worth re-baselining on
+//! that, once the reference lines are re-derived.
 //!
 //! The `seam=` in that command is not decoration either: fitted from the file
 //! instead, the same view reads 0.027 deg at `-150` rather than 0.366, because

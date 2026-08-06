@@ -18,6 +18,14 @@
 //! cargo run --release -p kjerag-spike --bin step -- <file.insv> ... off=1
 //! ```
 //!
+//! **That `yaw` is from before 2026-08-06 and points somewhere else now.** The
+//! lock became world-fixed that day, so the frame a `lock=1` yaw is measured
+//! in no longer follows the aircraft's slow heading and its zero is the file's
+//! opening heading instead. `new_yaw = old_yaw + carried(t)`, where `carried`
+//! is how far the old follow had been taken by then;
+//! docs/research/reference-views.md has the rule and how to measure it. A line
+//! older than that date runs without a word and reads a different picture.
+//!
 //! **`warm` is the argument this instrument exists for.** The band's state is
 //! per direction and paced in media time, a seek throws it away, and half the
 //! circle is read per frame, so what the pass is drawing with depends on how

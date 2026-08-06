@@ -369,10 +369,11 @@ fn motion(samples: &[GyroSample], calibration: &CalibrationSet) {
         );
     }
 
-    // What the two ends of the yaw constant do to the same flight, which is
-    // the whole of the choice `yaw_seconds` is making. The reference is a
-    // fully locked solve: what reaches the picture is the heading it holds
-    // that a stabilized solve does not.
+    // What a heading follow would do to this flight, priced against the
+    // shipped lock. The reference is the fully locked solve, which is what
+    // ships: what reaches the picture at a finite constant is the heading the
+    // lock holds and that solve does not. Every row here is a design that was
+    // rejected on 2026-08-06, and the table is why.
     let locked = calibration.orientation(Filter {
         yaw_seconds: f64::INFINITY,
         ..Filter::default()
@@ -393,8 +394,10 @@ fn motion(samples: &[GyroSample], calibration: &CalibrationSet) {
 /// How the view's own heading moves at one filter setting: the worst it
 /// swings inside a second, and the most real turning it follows in a minute.
 ///
-/// The first is the artifact to remove and the second is the motion to keep,
-/// and they are the same measurement over two window lengths.
+/// The same measurement over two window lengths. The first was read as the
+/// artifact to remove and the second as the motion to keep, which is the
+/// trade the shipped lock stopped making: both are now motion the picture
+/// does not take.
 fn view_heading(locked: &OrientationTrack, solved: &OrientationTrack) -> (f64, f64) {
     let turned: Vec<f64> = locked
         .samples()
