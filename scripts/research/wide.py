@@ -4,12 +4,15 @@
 """Where Studio's export points, inside a wide kjerag render of the same instants.
 
 SOURCES
-  kjerag wide  /home/aeharding/kjerag/.worktrees/oracle-probe/scratch/oracle/kjerag-wide/
-      `band mode=sequence from=24.0 count=1080 yaw=3.78 pitch=5.44 fov=70.00 lock=1
-       size=2048 seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`
-      over /home/aeharding/Videos/Insta/VID_20260714_193252_00_006.insv, worktree
-      research/oracle-probe at origin/main 67a4bcf. Frame k is source frame 719+k
-      at (719+k)/29.97003 s.
+  kjerag wide  scratch/oracle/kjerag-wide/, or wherever $KJ_DIR says. What drew
+      them is read out of the `render.cmd` beside them and copied into the CSV;
+      the run this was written for was `band mode=sequence from=24.0 count=1080
+      yaw=3.78 pitch=5.44 fov=70.00 lock=1 size=2048
+      seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91` over
+      /home/aeharding/Videos/Insta/VID_20260714_193252_00_006.insv from
+      research/oracle-probe at origin/main 67a4bcf, which is BEFORE the lock went
+      world-fixed on 2026-08-06, so that yaw is in the old frame (#165). Frame k
+      is source frame 719+k at (719+k)/29.97003 s.
   studio  /home/aeharding/Videos/Insta/studio_exports/20-fov-creek.mp4, gray PNGs
       from `ffmpeg -ss 30 -frames:v 900 -vf format=gray`. Frame j is at 30+j/30 s.
 
@@ -29,11 +32,17 @@ METHOD
   round as the narrow run: right>0 means kjerag looks RIGHT of Studio.
 """
 
+import os
 import sys
 import numpy as np
 import cv2
 
-KJ = "/home/aeharding/kjerag/.worktrees/oracle-probe/scratch/oracle/kjerag-wide"
+# $KJ_DIR points this at another build's frames, so one instrument reads a
+# before and an after. Whatever it points at, the stamp in the CSV comes from
+# the `render.cmd` the renderer left beside those frames and not from here.
+KJ = os.environ.get(
+    "KJ_DIR", "/home/aeharding/kjerag/.worktrees/oracle-probe/scratch/oracle/kjerag-wide"
+)
 ST = "/home/aeharding/kjerag/.worktrees/oracle-probe/scratch/oracle/studio-creek"
 STEM = "VID_20260714_193252_00_006"
 FPS = 30000.0 / 1001.0
@@ -49,6 +58,20 @@ ORB = cv2.ORB_create(nfeatures=8000, scaleFactor=1.12, nlevels=14, fastThreshold
 MATCHER = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 CLAHE = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
 KEEP = 30
+
+
+def stamp(directory):
+    """Whatever the renderer wrote beside these frames, or an admission.
+
+    The CSV used to carry a copy of one run's command, typed in here. A copy
+    goes stale the first time the frames are re-rendered and says nothing when
+    $KJ_DIR points somewhere else, and a provenance line that is wrong is worse
+    than one that is missing.
+    """
+    beside = os.path.join(directory, "render.cmd")
+    if not os.path.exists(beside):
+        return "NOT RECORDED: no render.cmd beside these frames"
+    return open(beside).read().strip().replace("\n", " ")
 
 
 def kjerag(index):
@@ -142,10 +165,8 @@ def main():
         fh.write(
             "# how far kjerag's delivered view points from Studio's export's, degrees.\n"
             "# right>0: kjerag looks RIGHT of Studio.  up>0: kjerag looks ABOVE Studio.\n"
-            "# kjerag: band mode=sequence from=24.0 count=1080 yaw=3.78 pitch=5.44 fov=70.00"
-            " lock=1 size=2048 seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91\n"
-            "#   over /home/aeharding/Videos/Insta/VID_20260714_193252_00_006.insv,"
-            " worktree research/oracle-probe at origin/main 67a4bcf\n"
+            f"# kjerag frames: {KJ}\n"
+            f"#   render command, as recorded beside them: {stamp(KJ)}\n"
             "# studio: /home/aeharding/Videos/Insta/studio_exports/20-fov-creek.mp4"
             " FOV 20 Distortion 0 pan -53.7 tilt 3.5 roll 0, shrunk to kjerag's scale\n"
             "# fit: ORB+RANSAC homography, Studio into kjerag; the mapped centre is the reading\n"
