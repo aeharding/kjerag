@@ -661,7 +661,8 @@ live, no keyframe UI ever.
   ladder's 0.0199 and 0.0195, not their difference - which is **0.13 to 0.16
   source px, an eighth of a pixel** and two to three times finer than `--bin
   crossing` resolves; removing all of it perfectly would improve the held-out
-  residual by 1.8 to 3.1 percent, and a fitted table does not get it. The
+  residual by 1.8 to 4 percent, depending on which arm's residual it is measured
+  against, and a fitted table does not get it. The
   certifying control is cross-capture, not within-session: the same test on the
   same partitions recovers the five-term field on 9 of 9 captures. So it is a
   refusal and not a blind spot. `Table::REST` ships.

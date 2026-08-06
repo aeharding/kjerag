@@ -337,8 +337,9 @@ is the orthogonal part, `sqrt(0.0199^2 - 0.0195^2)` = **0.0040 degrees**, and th
 median reduction's ladder (0.0173 and 0.0165) gives **0.0052**. At 31.49 source
 px per degree that is **0.13 to 0.16 source px, about an eighth of a pixel**, two
 to three times finer than `--bin crossing` can resolve. Removing the whole of it
-perfectly from the 0.021-degree held-out residual would improve that residual by
-**1.8 to 3.1 percent**; a fitted table does not get it, which is the table above.
+perfectly would improve the held-out residual by **1.8 to 4 percent, depending on which arm's residual it is measured against** - each reduction's
+amplitude against its own arm gives 1.8 percent trimmed and 4.1 median. A fitted
+table does not get it, which is the table above.
 
 **And the clean pipeline is not blind.** The control that certifies this
 leave-one-out is a cross-capture one, not a within-session one: the same test on

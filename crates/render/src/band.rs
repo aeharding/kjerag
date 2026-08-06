@@ -562,8 +562,9 @@ pub struct Leftover {
 /// root-mean-squares 0.0199 and 0.0195, not their difference - which is
 /// **0.13 to 0.16 source px, an eighth of a pixel**
 /// and two to three times finer than `--bin crossing` resolves. Removing all of
-/// it perfectly would improve the held-out residual by under three percent, and
-/// a fitted table does not get it. The same test recovers the five-term field on
+/// it perfectly would improve the held-out residual by 1.8 to 4 percent,
+/// depending on which arm's residual it is measured against, and a fitted table
+/// does not get it. The same test recovers the five-term field on
 /// 9 captures of 9, so that is a refusal and not a blind spot.
 ///
 /// **Above those terms**, and the qualifier is the whole finding. The five
