@@ -240,8 +240,8 @@ fn mark(
     // changes sign between neighbours, is what stops a near-horizontal line
     // coming out as scattered dots.
     let thick = LINE_PX * f64::from(options.fov as f32) / width as f64;
-    for cell in 0..width * height {
-        if !past[cell].is_finite() {
+    for (cell, off) in past.iter().enumerate() {
+        if !off.is_finite() {
             continue;
         }
         for (edge, colour) in [
@@ -249,7 +249,7 @@ fn mark(
             (half_deg, [255, 170, 0]),
             (-half_deg, [255, 170, 0]),
         ] {
-            if (past[cell] - edge).abs() <= thick {
+            if (off - edge).abs() <= thick {
                 let at = cell * channels;
                 pixels[at..at + 3].copy_from_slice(&colour);
             }
