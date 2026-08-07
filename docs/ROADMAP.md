@@ -3530,3 +3530,48 @@ release lands on the exact frame every time either way.
   `pose` arm drops it from 96 of 128 directions with evidence to 64 - and
   nothing in the code enforces that bound. And no eye has seen any of this:
   there was no blind A/B, because there is no applied claim to gate.
+
+- 2026-08-07 **The per-session across-seam field: the same mechanism with the
+  flight's own number in it collapses the delivered ramp on every crossing the
+  guards accept, including BOTH May-01 crossings from one field. Still not a
+  shipping candidate** (issue #103, the epi fork, docs/research/stage9.md 11).
+
+  **What changed is one input.** `seam::epi_term` still composes the drawn pose's
+  own across-seam displacement with a reading; the reading is now the capture's
+  own, harvested by `--bin epifield` off its own frames. `seam::measure` is split
+  into `seam::moments` and a reduction so the per-moment readings are reachable,
+  with neither half's answer changed.
+
+  **The delivered table**, nine crossings, off -> pooled -> per-session, in view
+  pixels of corridor swing: May-01 **BAD 19.94 -> 14.70 -> 0.89**, **GOOD 1.98 ->
+  11.32 -> 0.35**, July-25's cloud top **10.85 -> 4.74 -> 0.57**, the ONE X2 with
+  its own session's field **3.55 -> 3.55 -> 2.26**, May-26 1.73 -> 0.52 -> 0.68.
+  Both May-01 crossings are the same instant of the same file and one field
+  serves both, which is the acceptance battery's first rule satisfied rather
+  than traded - the rule the pooled table was refused on. The band keeps all 96
+  of 128 directions it had and its epipolar mean falls **0.554 -> 0.190 deg**.
+
+  **Three fields of seven are refused whole** by the band's own search window,
+  now enforced at one degree in `EPI_LIMIT_RAD` and no longer a paragraph: April
+  at 1.104, July-14 at 1.582, August at 2.155. Those crossings draw the untouched
+  picture and their rows equal their `off` rows to the last digit. **The cost is
+  real**: July-14 is the flight the pooled table collapsed by 89 percent and this
+  arm gives it nothing. **The bound's value sits in an unmeasured gap** - 0.7 deg
+  keeps 96 directions, 2.5 leaves 64, nothing between has been measured - and
+  moving it on the strength of the delivered table would be fitting a bound to
+  its own answer.
+
+  **Two traps worth carrying.** An unread direction must be identity on the
+  COMPOSED term and not on the reading: with a zero reading a direction still
+  draws the whole pose displacement, which is the arm that blinds the band, and
+  composed that way May-01's field reached 4.141 deg and was refused. And the far
+  gate belongs on the excursion, not the reading: the factory across-seam error
+  is positive over half the ring, so an absolute 60 m gate throws away 1829
+  moments of 3205 and calls a calibration a hedge.
+
+  **Not shipping, and the record says why**: the offline harvest is nothing a
+  player does, `--bin shear` has no view in this corpus where it can read AND a
+  field is applied, so the steadiness half of the acceptance is unrun, and no eye
+  has seen any of it. `scripts/uitest.sh` with a field applied for the whole run
+  reads 47 checks and the same 2 failures `main` has, which answers the
+  paused-window byte check and nothing beyond it.

@@ -1597,3 +1597,22 @@ them:
   displacement - so a live form has no corpus problem and a feedback-stability
   problem instead.
 - **Does it survive a moving picture?** Unanswered, and 11.4 says why.
+
+### 11.6 The gates, and the paused window with the term applied
+
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings`,
+`cargo test --workspace` (42 suites, green), `scripts/name-check.sh`.
+
+`scripts/uitest.sh` **with a per-session field applied for the whole run**
+(`KJERAG_EPI_TERM=session:…may01.txt`, on the May-01 file the field was
+harvested from) reads **47 checks, 2 failed** - the same two `main` fails on
+this box, and no others.
+
+That is the **paused-window byte check** answered, and it is the probe worth
+naming: the applied along-seam field's withdrawn form left 716790 pixels of
+716800 differing between two captures of a paused window, against 10996 on
+`main`, and this harness is what caught it. Nothing of the sort happens here.
+
+The two failures are `a toast is drawn clear of the controls` and `ctrl+v goes
+back to the copied view`, both of which a checkout of `main` at 75a03cc fails on
+this box as well (10.14).
