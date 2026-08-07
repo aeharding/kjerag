@@ -1345,15 +1345,113 @@ fn pose_terms(fit: SeamFit, lenses: &[Lens], frame: Size) -> Option<[f64; 5]> {
 /// item. It stages one question the way `KJERAG_HANDOVER_DEG` staged the
 /// handover width, and for the same reason - the two arms differ by a rebuild,
 /// so a blind session takes an evening rather than a day.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum EpiArm {
     /// Nothing at all: the picture `main` draws, byte for byte.
     #[default]
     Off,
     /// The five knobs' own across-seam displacement and nothing measured.
     Pose,
-    /// That plus the pooled static reading ([`EPI_STILL_DEG`]).
+    /// That plus the pooled static reading ([`EPI_STILL_DEG`]), which the
+    /// delivered table refused (docs/research/stage9.md 10.10).
     Full,
+    /// That plus **this session's own** reading, as `--bin epifield` wrote it:
+    /// one entry per direction of the band's ring, in degrees, read through the
+    /// factory map on this capture's own frames and far-gated.
+    ///
+    /// The same composition as [`Self::Full`] with one input swapped, which is
+    /// what makes the two columns of the delivered table comparable.
+    Session(Box<Session>),
+}
+
+/// One session's own across-seam reading, direction by direction, and whether
+/// each direction was read at all.
+///
+/// **The second half is load-bearing.** The term is the reading PLUS the drawn
+/// pose's own displacement, and that displacement reaches two and a half
+/// degrees on this camera, so a direction with no reading is not a direction
+/// that draws nothing - it is a direction that draws the whole pose arm, which
+/// is the one measured to take the band's eyes out. What makes an unread
+/// direction identity is [`epi_term`] zeroing the composed term there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    /// Degrees, read through the factory map.
+    pub read: [f64; super::band::AZIMUTHS],
+    /// How many moments are behind each, and zero where none is.
+    pub moments: [usize; super::band::AZIMUTHS],
+}
+
+/// How far, in directions, the composed term fades to zero either side of the
+/// last direction that has evidence.
+///
+/// A taper and not a step: a term that switched off between neighbouring cells
+/// would put that step in the picture, which is the argument
+/// [`super::band::Table::between`] interpolates for. Nothing is filled from a
+/// neighbour's value - a tapered direction gets a fraction of the term at the
+/// nearest supported direction on the way to zero, and zero is where it
+/// arrives.
+const EPI_TAPER_CELLS: usize = 4;
+
+/// The composed term over the arc a session actually read, in radians, and zero
+/// outside it with [`EPI_TAPER_CELLS`] of raised cosine in between.
+fn supported(
+    composed: &[f64; super::band::AZIMUTHS],
+    moments: &[usize; super::band::AZIMUTHS],
+) -> [f32; super::band::AZIMUTHS] {
+    let count = super::band::AZIMUTHS;
+    std::array::from_fn(|index| {
+        if moments[index] > 0 {
+            return composed[index].to_radians() as f32;
+        }
+        let Some(reach) = (1..=EPI_TAPER_CELLS).find(|step| {
+            moments[(index + count - step) % count] > 0 || moments[(index + step) % count] > 0
+        }) else {
+            return 0.0;
+        };
+        let (low, high) = ((index + count - reach) % count, (index + reach) % count);
+        let near = match moments[low] > 0 {
+            true => composed[low],
+            false => composed[high],
+        };
+        let along = reach as f64 / (EPI_TAPER_CELLS + 1) as f64;
+        (near * 0.5 * (1.0 + (std::f64::consts::PI * along).cos())).to_radians() as f32
+    })
+}
+
+/// One session's own field, as `--bin epifield` wrote it: comment lines, then
+/// one `value moments` pair per direction of the band's ring.
+///
+/// Read once at startup and never again, like every other research switch here.
+fn session(path: &str) -> Result<Box<Session>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let rows: Vec<(f64, usize)> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+        .map(|line| {
+            let (value, moments) = line
+                .trim()
+                .split_once(char::is_whitespace)
+                .ok_or_else(|| format!("{path}: every line is a value and its moment count"))?;
+            Ok((
+                value.parse::<f64>().map_err(|e| format!("{path}: {e}"))?,
+                moments
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|e| format!("{path}: {e}"))?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    if rows.len() != super::band::AZIMUTHS {
+        return Err(format!(
+            "{path} holds {} directions and the ring is {}",
+            rows.len(),
+            super::band::AZIMUTHS,
+        ));
+    }
+    Ok(Box::new(Session {
+        read: std::array::from_fn(|index| rows[index].0),
+        moments: std::array::from_fn(|index| rows[index].1),
+    }))
 }
 
 /// The name of the variable that picks the arm.
@@ -1364,9 +1462,9 @@ const EPI_TERM: &str = "KJERAG_EPI_TERM";
 /// A value that names no arm is a typo and takes [`EpiArm::Off`] with a line
 /// saying so: the arms differ in the picture, and a run that silently drew the
 /// wrong one would be a measurement of nothing.
-pub fn epi_arm() -> EpiArm {
+pub fn epi_arm() -> &'static EpiArm {
     static ARM: std::sync::OnceLock<EpiArm> = std::sync::OnceLock::new();
-    *ARM.get_or_init(|| {
+    ARM.get_or_init(|| {
         let Ok(asked) = std::env::var(EPI_TERM) else {
             return EpiArm::Off;
         };
@@ -1374,13 +1472,20 @@ pub fn epi_arm() -> EpiArm {
             "" | "off" => EpiArm::Off,
             "pose" => EpiArm::Pose,
             "full" => EpiArm::Full,
-            _ => {
-                eprintln!(
-                    "kjerag: {EPI_TERM}={asked} names no arm, so the across-seam research term \
-                     stays off. The arms are pose and full"
-                );
-                EpiArm::Off
-            }
+            named => match named.strip_prefix("session:").map(session) {
+                Some(Ok(entries)) => EpiArm::Session(entries),
+                Some(Err(said)) => {
+                    eprintln!("kjerag: {EPI_TERM}: {said}, so the term stays off");
+                    EpiArm::Off
+                }
+                None => {
+                    eprintln!(
+                        "kjerag: {EPI_TERM}={asked} names no arm, so the across-seam research \
+                         term stays off. The arms are pose, full and session:<field.txt>"
+                    );
+                    EpiArm::Off
+                }
+            },
         };
         if arm != EpiArm::Off {
             println!(
@@ -1544,42 +1649,74 @@ fn epi_still(phi_deg: f64) -> f64 {
 /// sum is too large to be a calibration: whole support or nothing, like every
 /// other table here.
 pub fn epi_term(
-    arm: EpiArm,
+    arm: &EpiArm,
     fit: SeamFit,
     lenses: &[Lens],
     frame: Size,
 ) -> Option<super::band::Table> {
-    if arm == EpiArm::Off {
+    if *arm == EpiArm::Off {
         return None;
     }
     let base = mapped(lenses, frame);
     let corrected = mapped(&fit.applied(lenses), frame);
     let ring = ring(super::band::AZIMUTHS);
-    let mut entries = [0.0f32; super::band::AZIMUTHS];
-    for (entry, at) in entries.iter_mut().zip(&ring) {
+    let mut composed = [0.0f64; super::band::AZIMUTHS];
+    for (index, at) in ring.iter().enumerate() {
         let shift = moved(&base, &corrected, 1, at)?[1];
         let still = match arm {
             EpiArm::Full => epi_still(at.phi.to_degrees()),
+            EpiArm::Session(field) => field.read[index],
             _ => 0.0,
         };
-        *entry = (shift + still).to_radians() as f32;
+        composed[index] = shift + still;
     }
-    entries
-        .iter()
-        .all(|entry| entry.is_finite() && entry.abs() <= EPI_LIMIT_RAD)
-        .then(|| super::band::Table::of_entries(entries))
+    // Identity where the session read nothing, and a taper into it. The WHOLE
+    // composed term goes to zero there and not just its reading half: with the
+    // reading missing what is left is the pose's own displacement, which is the
+    // arm measured to take the band's eyes out.
+    let entries: [f32; super::band::AZIMUTHS] = match arm {
+        EpiArm::Session(field) => supported(&composed, &field.moments),
+        _ => std::array::from_fn(|index| composed[index].to_radians() as f32),
+    };
+    let worst = entries.iter().fold(0.0f32, |worst, e| worst.max(e.abs()));
+    if !entries.iter().all(|entry| entry.is_finite()) {
+        println!("seam:   the across-seam term came out not a number, so it is refused whole");
+        return None;
+    }
+    if worst > EPI_LIMIT_RAD {
+        println!(
+            "seam:   the across-seam term reaches {:.3} deg, past the {:.1} the band can \
+             re-measure through, so it is REFUSED WHOLE and the picture is the one with no term \
+             on it. A clamped field is a different field from the one that was measured",
+            worst.to_degrees(),
+            EPI_LIMIT_RAD.to_degrees(),
+        );
+        return None;
+    }
+    Some(super::band::Table::of_entries(entries))
 }
 
 /// How large an entry of [`epi_term`] may be before the whole table is refused,
 /// in radians.
 ///
-/// **Not the along table's half degree, and for a measured reason.** That limit
-/// is what a *pose leftover* along the seam can plausibly be. Across the seam
-/// the two lenses of this camera disagree by a degree at the registry's BAD
-/// crossing and by two and a half under the factory calibration, and the band
-/// reads and applies exactly that every frame. A limit that refused a degree
-/// would refuse the field this term is built from.
-const EPI_LIMIT_RAD: f32 = 3.0 * std::f32::consts::PI / 180.0;
+/// **This is the band's own search window and not a taste**, and it binds any
+/// applied across-seam term. The band re-measures the residual THROUGH whatever
+/// is applied, and its epipolar search runs `FAR_DEG` to `NEAR_DEG`, -1.2 to
+/// +2.6 degrees. A term past that moves what the band is asked to correlate
+/// outside the window it can search in, and a band that finds nothing gives up
+/// its evidence and stops bending: the picture then looks steadier because the
+/// correction went quiet rather than because the geometry got right.
+///
+/// Measured at the BAD May-01 crossing, band live and warm: a term reaching 2.5
+/// degrees takes the band from **96 of 128 directions with evidence down to
+/// 64** and doubles what the survivors read, while a term under a degree keeps
+/// all 96 (docs/research/stage9.md 10.7). One degree is the tighter half of the
+/// window with room for the residual to sit inside it.
+///
+/// **Whole support or nothing**, like every other table here: a clamped field
+/// is a different field from the one that was measured, and nothing measured
+/// that one.
+const EPI_LIMIT_RAD: f32 = 1.0 * std::f32::consts::PI / 180.0;
 
 /// The field this capture may be **pooled** for: its five terms, or `None`
 /// where composing them with this capture's own pose does not come out a
@@ -1839,8 +1976,9 @@ impl Default for Plan {
     }
 }
 
-/// Every patch this capture's seam offers, pooled over the frames it was read
-/// on.
+/// Every patch this capture's seam offers, and every moment each of them was
+/// read at, unreduced: `[along, across]` in degrees, one entry per frame the
+/// direction correlated on.
 ///
 /// A capture is its files in lens order, not the one path it was named by
 /// ([`Walk::over`], issue #123). A capture picked in a sandbox's file chooser
@@ -1848,19 +1986,17 @@ impl Default for Plan {
 /// first, so a fit that starts from one path again reads half the capture and
 /// then says the whole of it has one lens.
 ///
-/// **A direction's frames are reduced by [`reduced`] and not by a mean**, and
-/// that is stage 9's estimator finding (docs/research/stage9.md 4.5): one
-/// azimuth's reading moves between two frames 33 ms apart by 0.008 to 0.05
-/// degrees of median absolute deviation and by 0.22 to 0.48 of root mean
-/// square, so the population is heavy tailed and a mean over it is a statistic
-/// about its outliers. Reduced this way instead, the owner's six flights agree
-/// at the same azimuth on 15 pairs of 15 where the mean agreed on 2.
-pub fn measure(
+/// **Unreduced is the point.** [`measure`] reduces this to one reading per
+/// direction and that is what a fit is made from; a caller with a different
+/// question about the same population - what the moments do over a session, and
+/// which of them are near content rather than camera - has to be able to see
+/// them. Splitting the two apart changed neither one's answer.
+pub fn moments(
     files: &[PathBuf],
     lenses: &[Lens],
     frame: Size,
     plan: &Plan,
-) -> Fallible<Vec<Reading>> {
+) -> Fallible<Vec<(Where, Vec<[f64; 2]>)>> {
     let base = mapped(lenses, frame).with_table(plan.table);
     let ring = ring(plan.probe.patches);
     let mut walk = Walk::over(files, 0.0, frame)?;
@@ -1906,14 +2042,38 @@ pub fn measure(
             }
         }
     }
-    Ok(ring
-        .iter()
-        .zip(&seen)
+    Ok(ring.into_iter().zip(seen).collect())
+}
+
+/// The same ring reduced to one reading per direction, which is what a fit is
+/// made from.
+///
+/// **A direction's frames are reduced by [`reduced`] and not by a mean**, and
+/// that is stage 9's estimator finding (docs/research/stage9.md 4.5): one
+/// azimuth's reading moves between two frames 33 ms apart by 0.008 to 0.05
+/// degrees of median absolute deviation and by 0.22 to 0.48 of root mean
+/// square, so the population is heavy tailed and a mean over it is a statistic
+/// about its outliers. Reduced this way instead, the owner's six flights agree
+/// at the same azimuth on 15 pairs of 15 where the mean agreed on 2.
+///
+/// [`moments`] and this are one function split in two, and the split is where
+/// the per-moment readings become reachable: everything above the reduction is
+/// the same walk, the same acquisition and the same refusals, so a caller that
+/// wants to reduce them differently reads the same measurement rather than a
+/// second one. Nothing about this function's answer changed when it was split.
+pub fn measure(
+    files: &[PathBuf],
+    lenses: &[Lens],
+    frame: Size,
+    plan: &Plan,
+) -> Fallible<Vec<Reading>> {
+    Ok(moments(files, lenses, frame, plan)?
+        .into_iter()
         .filter(|(_, moments)| !moments.is_empty())
         .map(|(at, moments)| {
-            let axes = reduced(moments);
+            let axes = reduced(&moments);
             Reading {
-                at: *at,
+                at,
                 along: axes[0],
                 across: axes[1],
             }
@@ -2123,7 +2283,7 @@ impl Correction {
     /// correction costs one lock and a compare.
     pub fn epi(&self, frame: Size) -> super::band::Table {
         let arm = epi_arm();
-        if arm == EpiArm::Off {
+        if *arm == EpiArm::Off {
             return super::band::Table::REST;
         }
         let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
@@ -2587,14 +2747,18 @@ mod tests {
         }
     }
 
-    /// The composed term is the pose's own across-seam displacement plus the
-    /// pooled reading, and the first of those is the larger one.
+    /// The composed term is the pose's own across-seam displacement plus a
+    /// reading, the pose's own part is the larger of the two, and the band's
+    /// own search window refuses the pose alone.
     ///
-    /// Not a claim that either is right - that is what the delivered
+    /// Not a claim that any of it is right - that is what the delivered
     /// measurement is for - but that the split the docstring describes is the
-    /// arithmetic the code does.
+    /// arithmetic the code does, and that [`EPI_LIMIT_RAD`] is enforced rather
+    /// than described. The `pose` arm on the fixture reaches past a degree,
+    /// which is what took the band from 96 of 128 directions with evidence down
+    /// to 64 on real footage, and it is refused here for exactly that.
     #[test]
-    fn the_across_seam_term_is_the_pose_plus_the_pooled_reading() {
+    fn the_across_seam_term_is_refused_when_the_band_could_not_re_measure_through_it() {
         let lenses = fixture_lenses();
         let fit = SeamFit {
             roll_deg: 0.795,
@@ -2603,36 +2767,64 @@ mod tests {
             cx_px: -3.28,
             cy_px: -11.91,
         };
-        let pose = epi_term(EpiArm::Pose, fit, &lenses, FRAME).expect("the pose arm");
-        let full = epi_term(EpiArm::Full, fit, &lenses, FRAME).expect("the full arm");
-        let (pose, full) = (pose.entries(), full.entries());
-        let apart: Vec<f64> = pose
-            .iter()
-            .zip(&full)
-            .enumerate()
-            .map(|(index, (a, b))| {
-                let phi = index as f64 / crate::band::AZIMUTHS as f64 * 360.0;
-                f64::from(b - a).to_degrees() - epi_still(phi)
-            })
-            .collect();
-        assert!(
-            rms(apart.into_iter()) < 1e-4,
-            "the full arm is not the pose arm plus the pooled reading",
+        assert_eq!(
+            epi_term(&EpiArm::Pose, fit, &lenses, FRAME),
+            None,
+            "the knobs' own displacement is past what the band can search",
         );
-        let sizes = |entries: [f32; crate::band::AZIMUTHS]| {
-            rms(entries.iter().map(|e| f64::from(*e).to_degrees()))
-        };
+        let full = epi_term(&EpiArm::Full, fit, &lenses, FRAME)
+            .expect("the pooled reading takes it back inside the window");
+        let sizes = rms(full.entries().iter().map(|e| f64::from(*e).to_degrees()));
         assert!(
-            sizes(pose) > 1.0,
-            "the fixture pose barely moves the across-seam axis: {:.3} deg",
-            sizes(pose),
+            sizes > 0.05 && sizes < f64::from(EPI_LIMIT_RAD).to_degrees(),
+            "the full arm is {sizes:.3} deg, which is either nothing or past the bound",
+        );
+
+        // The session arm is the full arm with one input swapped, and nothing
+        // else: handed the pooled reading with every direction supported it has
+        // to give the pooled arm back exactly.
+        let read: [f64; crate::band::AZIMUTHS] = std::array::from_fn(|index| {
+            let phi = index as f64 / crate::band::AZIMUTHS as f64 * 360.0;
+            epi_still(phi)
+        });
+        let whole = Box::new(Session {
+            read,
+            moments: [6; crate::band::AZIMUTHS],
+        });
+        assert_eq!(
+            epi_term(&EpiArm::Session(whole), fit, &lenses, FRAME),
+            epi_term(&EpiArm::Full, fit, &lenses, FRAME),
+            "the session arm handed the pooled reading is the pooled arm",
+        );
+
+        // And a direction the session never read draws NOTHING, not the pose's
+        // own displacement. This is the trap the first draft fell into: an
+        // unread direction with a zero reading still carries the whole pose
+        // arm, which is the arm that takes the band's eyes out.
+        let mut moments = [6usize; crate::band::AZIMUTHS];
+        for entry in moments.iter_mut().take(80).skip(40) {
+            *entry = 0;
+        }
+        let holed = Box::new(Session { read, moments });
+        let term = epi_term(&EpiArm::Session(holed), fit, &lenses, FRAME)
+            .expect("an arc of the ring is still a field");
+        let entries = term.entries();
+        assert!(
+            entries[45..75].iter().all(|entry| *entry == 0.0),
+            "the unread arc is not identity: it is drawing the pose's own displacement",
         );
         assert!(
-            sizes(full) < sizes(pose) / 2.0,
-            "the pooled reading is meant to take most of the pose back out: {:.3} against {:.3}",
-            sizes(full),
-            sizes(pose),
+            entries[..40].iter().any(|entry| entry.abs() > 1e-4)
+                && entries[80..].iter().any(|entry| entry.abs() > 1e-4),
+            "the read arc lost its term",
         );
+        // And the walk between the two is monotone rather than a step.
+        for pair in entries[40..45].windows(2) {
+            assert!(
+                pair[1].abs() <= pair[0].abs() + 1e-9,
+                "the taper into the unread arc goes back up",
+            );
+        }
     }
 
     /// How much of a pose's own along-seam signature the five terms cannot say,
