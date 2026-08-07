@@ -1362,6 +1362,18 @@ pub enum EpiArm {
     /// The same composition as [`Self::Full`] with one input swapped, which is
     /// what makes the two columns of the delivered table comparable.
     Session(Box<Session>),
+    /// **A PLANT, and not a candidate.** The same session field multiplied by a
+    /// gain, exempt from [`EPI_LIMIT_RAD`], for the one experiment that has to
+    /// put a term past the bound on purpose: which of `|T|` and
+    /// `|T - truth|` is what takes the band's eyes out.
+    ///
+    /// A gain `k` on a field that is right at `k = 1` gives a term of `k|D|`
+    /// leaving a residual of `(k - 1)|D|`, so the pairs `k = 0` and `k = 2`
+    /// carry the SAME residual at very different sizes, and `k = -1` and
+    /// `k = 3` carry the same residual again at two more. That is the only way
+    /// this corpus can separate the two, because nothing can change the
+    /// disagreement a capture actually has.
+    Plant(Box<Session>, f64),
 }
 
 /// One session's own across-seam reading, direction by direction, and whether
@@ -1472,6 +1484,26 @@ pub fn epi_arm() -> &'static EpiArm {
             "" | "off" => EpiArm::Off,
             "pose" => EpiArm::Pose,
             "full" => EpiArm::Full,
+            named if named.starts_with("plant:") => {
+                let rest = named.trim_start_matches("plant:");
+                match rest.rsplit_once(':') {
+                    Some((path, gain)) => match (session(path), gain.parse::<f64>()) {
+                        (Ok(field), Ok(gain)) => EpiArm::Plant(field, gain),
+                        (Err(said), _) => {
+                            eprintln!("kjerag: {EPI_TERM}: {said}, so the term stays off");
+                            EpiArm::Off
+                        }
+                        (_, Err(said)) => {
+                            eprintln!("kjerag: {EPI_TERM}: {gain} is no gain ({said})");
+                            EpiArm::Off
+                        }
+                    },
+                    None => {
+                        eprintln!("kjerag: {EPI_TERM}: a plant is plant:<field.txt>:<gain>");
+                        EpiArm::Off
+                    }
+                }
+            }
             named => match named.strip_prefix("session:").map(session) {
                 Some(Ok(entries)) => EpiArm::Session(entries),
                 Some(Err(said)) => {
@@ -1665,23 +1697,41 @@ pub fn epi_term(
         let shift = moved(&base, &corrected, 1, at)?[1];
         let still = match arm {
             EpiArm::Full => epi_still(at.phi.to_degrees()),
-            EpiArm::Session(field) => field.read[index],
+            EpiArm::Session(field) | EpiArm::Plant(field, _) => field.read[index],
             _ => 0.0,
         };
         composed[index] = shift + still;
+    }
+    // A plant scales the whole composed term, which is what makes its gain a
+    // multiple of a field that is right at one.
+    if let EpiArm::Plant(_, gain) = arm {
+        for entry in &mut composed {
+            *entry *= gain;
+        }
     }
     // Identity where the session read nothing, and a taper into it. The WHOLE
     // composed term goes to zero there and not just its reading half: with the
     // reading missing what is left is the pose's own displacement, which is the
     // arm measured to take the band's eyes out.
     let entries: [f32; super::band::AZIMUTHS] = match arm {
-        EpiArm::Session(field) => supported(&composed, &field.moments),
+        EpiArm::Session(field) | EpiArm::Plant(field, _) => supported(&composed, &field.moments),
         _ => std::array::from_fn(|index| composed[index].to_radians() as f32),
     };
     let worst = entries.iter().fold(0.0f32, |worst, e| worst.max(e.abs()));
     if !entries.iter().all(|entry| entry.is_finite()) {
         println!("seam:   the across-seam term came out not a number, so it is refused whole");
         return None;
+    }
+    // A plant is exempt, loudly. The bound exists to keep the band able to
+    // re-measure the residual, and the whole point of a plant is to walk past
+    // that and watch what happens.
+    if let EpiArm::Plant(_, gain) = arm {
+        println!(
+            "seam:   PLANTED across-seam term, gain {gain:+.2}, worst {:.3} deg, and the band's \
+             own search bound is NOT applied to it. This is an experiment and not a candidate",
+            worst.to_degrees(),
+        );
+        return Some(super::band::Table::of_entries(entries));
     }
     if worst > EPI_LIMIT_RAD {
         println!(
@@ -1699,24 +1749,35 @@ pub fn epi_term(
 /// How large an entry of [`epi_term`] may be before the whole table is refused,
 /// in radians.
 ///
-/// **This is the band's own search window and not a taste**, and it binds any
-/// applied across-seam term. The band re-measures the residual THROUGH whatever
-/// is applied, and its epipolar search runs `FAR_DEG` to `NEAR_DEG`, -1.2 to
-/// +2.6 degrees. A term past that moves what the band is asked to correlate
-/// outside the window it can search in, and a band that finds nothing gives up
-/// its evidence and stops bending: the picture then looks steadier because the
-/// correction went quiet rather than because the geometry got right.
+/// **This bound is on the wrong quantity, and the number is a rail rather than
+/// a guard.** It was one degree, chosen because a 2.5 degree term took the band
+/// from 96 of 128 directions with evidence down to 64. That term was both large
+/// and WRONG, and nothing separated the two until the gain sweep in
+/// docs/research/stage9.md 12 did:
 ///
-/// Measured at the BAD May-01 crossing, band live and warm: a term reaching 2.5
-/// degrees takes the band from **96 of 128 directions with evidence down to
-/// 64** and doubles what the survivors read, while a term under a degree keeps
-/// all 96 (docs/research/stage9.md 10.7). One degree is the tighter half of the
-/// window with room for the residual to sit inside it.
+/// | at the same residual | term 0.935 deg | term 2.806 deg |
+/// | --- | ---: | ---: |
+/// | directions with evidence | **79 of 128** | **95 of 128** |
+///
+/// Three times the displacement, the same residual, and the larger one keeps
+/// sixteen more directions. What blinds the band is the **residual** it is left
+/// to find leaving its own `FAR_DEG..NEAR_DEG` search window, -1.2 to +2.6, and
+/// that window's asymmetry is why a negative residual blinds at half the
+/// magnitude a positive one does. A correct-sign term of 2.806 degrees keeps 95
+/// of 128; a wrong-sign term of 0.935, inside the old bound, keeps 79.
+///
+/// So this is the largest term the sweep measured to leave the band's evidence
+/// intact, and what it catches is a field that is not a calibration at all.
+/// **It cannot be the safety guard**, because the quantity that matters is
+/// `|T - truth|` and nothing knows `truth` before the band has measured through
+/// the term. What would guard it is a staged walk-in that steps the term and
+/// aborts when the band's evidence falls or its residual grows step over step.
+/// That is not implemented, and 12.3 says so in the record rather than here.
 ///
 /// **Whole support or nothing**, like every other table here: a clamped field
 /// is a different field from the one that was measured, and nothing measured
 /// that one.
-const EPI_LIMIT_RAD: f32 = 1.0 * std::f32::consts::PI / 180.0;
+const EPI_LIMIT_RAD: f32 = 2.8 * std::f32::consts::PI / 180.0;
 
 /// The field this capture may be **pooled** for: its five terms, or `None`
 /// where composing them with this capture's own pose does not come out a
@@ -2748,17 +2809,19 @@ mod tests {
     }
 
     /// The composed term is the pose's own across-seam displacement plus a
-    /// reading, the pose's own part is the larger of the two, and the band's
-    /// own search window refuses the pose alone.
+    /// reading, the pose's own part is the larger of the two, and
+    /// [`EPI_LIMIT_RAD`] is a rail that is enforced rather than described.
     ///
-    /// Not a claim that any of it is right - that is what the delivered
-    /// measurement is for - but that the split the docstring describes is the
-    /// arithmetic the code does, and that [`EPI_LIMIT_RAD`] is enforced rather
-    /// than described. The `pose` arm on the fixture reaches past a degree,
-    /// which is what took the band from 96 of 128 directions with evidence down
-    /// to 64 on real footage, and it is refused here for exactly that.
+    /// **The rail does NOT catch the `pose` arm**, and that is the finding
+    /// rather than an oversight. That arm blinds the band - 96 of 128
+    /// directions with evidence down to 64 on real footage - and it blinds it
+    /// because it is WRONG, not because it is large: at the same residual a
+    /// 2.806 degree term keeps 95 directions where a 0.935 degree one keeps 79
+    /// (docs/research/stage9.md 12). Nothing computable at compose time knows
+    /// which a field is, so nothing here refuses the `pose` arm and the record
+    /// says what would.
     #[test]
-    fn the_across_seam_term_is_refused_when_the_band_could_not_re_measure_through_it() {
+    fn the_across_seam_term_is_the_pose_plus_a_reading_and_the_rail_is_enforced() {
         let lenses = fixture_lenses();
         let fit = SeamFit {
             roll_deg: 0.795,
@@ -2767,17 +2830,33 @@ mod tests {
             cx_px: -3.28,
             cy_px: -11.91,
         };
-        assert_eq!(
-            epi_term(&EpiArm::Pose, fit, &lenses, FRAME),
-            None,
-            "the knobs' own displacement is past what the band can search",
+        let pose = epi_term(&EpiArm::Pose, fit, &lenses, FRAME)
+            .expect("the rail is not what catches a wrong field");
+        let biggest = |table: super::super::band::Table| {
+            table.entries().iter().fold(0.0f64, |worst, e| {
+                worst.max(f64::from(e.abs()).to_degrees())
+            })
+        };
+        assert!(
+            biggest(pose) > 1.0,
+            "the fixture pose barely moves the across-seam axis, so this test proves nothing",
         );
         let full = epi_term(&EpiArm::Full, fit, &lenses, FRAME)
-            .expect("the pooled reading takes it back inside the window");
-        let sizes = rms(full.entries().iter().map(|e| f64::from(*e).to_degrees()));
+            .expect("the pooled reading takes most of the pose back out");
         assert!(
-            sizes > 0.05 && sizes < f64::from(EPI_LIMIT_RAD).to_degrees(),
-            "the full arm is {sizes:.3} deg, which is either nothing or past the bound",
+            biggest(full) < biggest(pose) / 2.0,
+            "the pooled reading is meant to take most of the pose back out",
+        );
+
+        // The rail itself, on a field that is not a calibration at all.
+        let wild = Box::new(Session {
+            read: [12.0; crate::band::AZIMUTHS],
+            moments: [6; crate::band::AZIMUTHS],
+        });
+        assert_eq!(
+            epi_term(&EpiArm::Session(wild), fit, &lenses, FRAME),
+            None,
+            "twelve degrees across the seam was accepted",
         );
 
         // The session arm is the full arm with one input swapped, and nothing
