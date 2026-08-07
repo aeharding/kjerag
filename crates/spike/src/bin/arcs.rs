@@ -100,7 +100,7 @@ fn main() -> Fallible<()> {
     let rows = sweep(&options, &calibration, &track, timing, frame, half_deg)?;
     report(&rows);
     if let Some(name) = &options.out {
-        write(&rows, name)?;
+        write(&options, &rows, half_deg, name)?;
     }
     if let Some((from, onto)) = options.mark.as_ref().zip(options.marked.as_ref()) {
         mark(
@@ -417,11 +417,27 @@ fn report(rows: &[Row]) {
     );
 }
 
-fn write(rows: &[Row], name: &str) -> Fallible<()> {
+fn write(options: &Options, rows: &[Row], half_deg: f64, name: &str) -> Fallible<()> {
     let out = PathBuf::from("scratch").join(name);
     std::fs::create_dir_all("scratch")?;
-    let mut text = String::from(
-        "frame,time_s,centre_deg,arc_from_deg,arc_to_deg,rays_inside,down_phi_deg,down_deg\n",
+    let mut text = format!(
+        "# instrument: kjerag-spike --bin arcs\n\
+         # source: {}\n\
+         # args: {}\n\
+         # corridor: +/-{half_deg:.2} deg off the seam plane, the drawn handover's own half \
+         width (Reframe::crossover_at)\n\
+         # reduction: {GRID}x{GRID} view rays per frame through Reframe::view_ray and \
+         Reframe::body_ray; the arc is the widest run of filled {ARC_BIN_DEG:.0}-degree bins, \
+         cut at its widest gap\n\
+         # azimuth: degrees from the body's +x through its +y, so cell = azimuth * 128 / 360 \
+         (kjerag_render::band::Ring)\n\
+         # nothing is decoded: the orientation is the trailer's track and the instants are the \
+         exposure record's\n\
+         frame,time_s,centre_deg,arc_from_deg,arc_to_deg,rays_inside,down_phi_deg,down_deg\n",
+        std::fs::canonicalize(&options.input)
+            .unwrap_or_else(|_| options.input.clone())
+            .display(),
+        options.args,
     );
     for row in rows {
         let (from, to) = row.arc.map_or((f64::NAN, f64::NAN), |arc| arc);
@@ -453,6 +469,8 @@ struct Options {
     lock: bool,
     window: f64,
     aspect: f32,
+    /// The whole command line, so a file this writes says what wrote it.
+    args: String,
     out: Option<String>,
     /// A rendered view of the same line to draw the corridor onto, and where
     /// to put the result.
@@ -471,10 +489,13 @@ impl Options {
             lock: true,
             window: 5.0,
             aspect: 1.0,
+            args: String::new(),
             out: None,
             mark: None,
             marked: None,
         };
+        let args: Vec<String> = args.collect();
+        options.args = args.join(" ");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),

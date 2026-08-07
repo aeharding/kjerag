@@ -160,6 +160,10 @@ struct Place {
 }
 
 struct Gathered {
+    /// What this was read off and what asked for it, so a file it writes says
+    /// what wrote it.
+    input: PathBuf,
+    args: String,
     places: Vec<Place>,
     moments: Vec<Moment>,
     centre: isize,
@@ -197,6 +201,8 @@ fn gather(
     }
     let duration = walk.duration().as_secs_f64();
     let mut gathered = Gathered {
+        input: options.input.clone(),
+        args: options.args.clone(),
         places: Vec::new(),
         moments: Vec::new(),
         centre: 0,
@@ -542,9 +548,24 @@ fn wrapped(degrees: f64) -> f64 {
 fn write_rows(read: &Gathered, session: &Session, name: &str) -> Fallible<()> {
     let out = PathBuf::from("scratch").join(name);
     std::fs::create_dir_all("scratch")?;
-    let mut text = String::from(
-        "place,frame,time_s,cell,phi_deg,along_deg,across_deg,r,contrast,excursion_deg,gate_deg,\
+    let mut text = format!(
+        "# instrument: kjerag-spike --bin refusals\n\
+         # source: {}\n\
+         # args: {}\n\
+         # plan: {PLACES} places at duration*(place+0.5)/{PLACES}, {FRAMES} consecutive frames \
+         each, {AZIMUTHS} directions\n\
+         # readings: seam::ring, seam::acquired and seam::read_ring_centred off main, unchanged, \
+         one direction per call so a refusal has an owner\n\
+         # gates: reproduced from feat/per-session-epi (needed {MOMENTS_NEEDED}, far {FAR_M} m, \
+         {GATE_MADS} MADs floored at {GATE_FLOOR_DEG} deg, wild floor {WILD_FLOOR_DEG} deg); \
+         checked against --bin epifield's own counts on this capture\n\
+         # units: degrees of world angle; azimuth is degrees from the body's +x through its +y\n\
+         place,frame,time_s,cell,phi_deg,along_deg,across_deg,r,contrast,excursion_deg,gate_deg,\
          fate,outside,flat,pinned\n",
+        std::fs::canonicalize(&read.input)
+            .unwrap_or_else(|_| read.input.clone())
+            .display(),
+        read.args,
     );
     let number = |value: Option<f64>| value.map_or(String::new(), |v| format!("{v:.4}"));
     for moment in &read.moments {
@@ -702,6 +723,8 @@ struct Options {
     /// An arc of azimuths to mark on the sheets and in the table, which is how
     /// one view's own directions are picked out of the ring.
     arc: Option<(f64, f64)>,
+    /// The whole command line, for the stamp.
+    args: String,
 }
 
 impl Options {
@@ -711,7 +734,10 @@ impl Options {
             rows: None,
             sheets: None,
             arc: None,
+            args: String::new(),
         };
+        let args: Vec<String> = args.collect();
+        options.args = args.join(" ");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
@@ -774,6 +800,7 @@ mod tests {
             rows: None,
             sheets: None,
             arc: Some((350.0, 10.0)),
+            args: String::new(),
         };
         assert!(options.marked(0.0));
         assert!(options.marked(-5.0));
