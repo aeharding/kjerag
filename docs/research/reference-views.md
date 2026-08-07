@@ -161,6 +161,27 @@ caveat in the Motion section, which is the same trap at a smaller size.
   points reads 0.5 to 2.1. It still prints a step, and that step is not the seam's. Two builds are
   comparable only where both their fits are clean, which at this view is the cold pair.
 
+## Geometry: the along-seam axis after stage 9 (VERDICT: no table)
+- 2026-08-06 The two May-01 crossings below, `--bin crossing bins=180` under the pooled fit,
+  read the along-seam median magnitude at **1.30** (GOOD) and **1.43** (BAD) view px, sensitivity
+  0.03 to 0.04. Taken at 67a4bcf, before the world-fixed lock, at those views' pre-derivation
+  yaws; the entry below re-measured the same views both ways and the along-seam medians agree to
+  0.14 source px, so the lock change does not reach these two numbers. That is 0.071 and 0.088 degrees, and it agrees with `--bin table`'s reading of
+  the same residual round the whole ring on six flights (0.064 to 0.128 deg rms per capture).
+  **Stage 9 refused to fit a per-azimuth table for it**: the part above what the pass already
+  applies is 3.7% of the leftover, it does not predict a held-out flight, and the best any static
+  table reaches on one is +1.25% (docs/research/stage9.md). The refusal carries a size: a static
+  per-azimuth field above 0.02 to 0.06 deg (0.37 to 1.1 view px here) is excluded, below 0.02 is
+  not.
+  **What DOES reproduce is the five-term field itself**, on nine captures of two cameras at full
+  reading density (layer-2 preflight, `research/layer2-preflight`): fitted on other flights only
+  it takes the pooled along-seam leftover 0.0536 -> 0.0211 deg on this camera, 9 of 9 improved.
+  Measured at this very view: with a five-term field fitted on the Jul-14 flight and held out, the
+  GOOD view's along-seam median magnitude goes **1.30 -> 0.07 view px** with the epipolar median
+  unmoved, and the BAD view 1.43 -> 1.06. That is a pose-order field pooled per camera, which is
+  layer 2, not a per-azimuth table. stage9.md 4.5 withdraws that document's "does not reproduce"
+  sentences: they were the mean reduction, not the camera.
+
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=93.36 pitch=-2.43 fov=33.95 lock=1`
   vs `VID_20260410_185407_00_004.insv time=45.112 yaw=-86.05 pitch=3.18 fov=38.28 lock=1`

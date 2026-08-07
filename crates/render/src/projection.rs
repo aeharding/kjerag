@@ -451,11 +451,34 @@ pub struct Reframe {
     /// here - [`Reframe::crossover_at`] on this side and `band_width` on the
     /// shader's - so the two cannot disagree about it.
     crossover: f32,
-    /// A uniform block's size rounds up to its own alignment, which the
-    /// matrices in [`LensBlock`] make 16 bytes. WGSL does that itself;
-    /// `repr(C)` does not, and the two sizes have to agree or
-    /// `min_binding_size` rejects the pipeline.
+    /// What puts the table below on a sixteen-byte offset.
+    ///
+    /// **WGSL's alignment and not this struct's.** Every member of this block
+    /// is an `f32` or an array of them, so `repr(C)` gives the whole thing an
+    /// alignment of 4 and would happily start the table at 340. WGSL lays an
+    /// `array<vec4<f32>, N>` out at 16, so the two definitions would then
+    /// describe different bytes.
+    ///
+    /// **Nothing catches that at run time.** `min_binding_size` checks the
+    /// block's total size and not one offset in it, and the sizes agree either
+    /// way, so the shader would read the table shifted by twelve bytes and
+    /// draw a picture rather than an error. The test
+    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it.
     _pad: [f32; 3],
+    /// What the along-seam axis still disagrees by after a pose, direction by
+    /// direction, in radians (issue #103, stage 9).
+    ///
+    /// Last in the block because WGSL gives it a sixteen-byte alignment - it is
+    /// an array of `vec4` there, whatever `repr(C)` makes of it here, which is
+    /// an alignment of 4. Put anywhere else it would need padding in front of it
+    /// as well as behind.
+    ///
+    /// It is a calibration and it travels with the calibration. Every caller
+    /// that builds a map with a camera's correction in it gets this along with
+    /// it, which is what lets an instrument reading the raw planes through
+    /// [`Reframe::project`] read what the picture is drawn with rather than
+    /// what it would have been without.
+    table: super::band::Table,
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -643,9 +666,30 @@ impl Reframe {
             // just laid out and there is nowhere earlier to read them from.
             crossover: 0.0,
             _pad: [0.0; 3],
+            // Nothing measured until a caller says otherwise
+            // ([`Self::with_table`]), which is the picture stage 6 drew.
+            table: super::band::Table::REST,
         };
         block.crossover = block.afforded();
         block
+    }
+
+    /// The same map with a camera's along-seam table in it (issue #103, stage
+    /// 9).
+    ///
+    /// A step of its own rather than an argument to [`Self::new`], because
+    /// every caller that has no table at all - every instrument that is not
+    /// asking about this stage, and the blank pane - would otherwise have to
+    /// say so, and the thing they would be saying is that the picture is what
+    /// it always was.
+    pub fn with_table(mut self, table: super::band::Table) -> Self {
+        self.table = table;
+        self
+    }
+
+    /// The table this map is drawing with.
+    pub fn table(&self) -> super::band::Table {
+        self.table
     }
 
     /// How wide this camera can hand the picture over, in radians: what
@@ -694,6 +738,8 @@ impl Reframe {
             // itself, which is what a camera with room for it would get.
             crossover: crossover_deg().to_radians(),
             _pad: [0.0; 3],
+            // No file, so no camera and no calibration to carry.
+            table: super::band::Table::REST,
         }
     }
 
@@ -755,6 +801,15 @@ impl Reframe {
     /// The crossover is taken from the **unbent** ray, on purpose. The bend is
     /// what the handover asked for, so a handover that then followed the bend
     /// would be its own input.
+    ///
+    /// **That is true of the `share` and not of the whole weight.** `share` is
+    /// the handover fraction and it is a function of the unbent ray alone.
+    /// What goes into the array is [`claim`], which is `share` times the
+    /// **bent** landing's `depth`, so a bend that carries a ray over a lens's
+    /// image circle does change that lens's weight. `depth` is 1 everywhere
+    /// but within a bend's reach of the rim, so this bites only there - but it
+    /// bites, it predates stage 9, and a later stage that widens the field
+    /// inherits it.
     ///
     /// **How wide the handover is, is the same question** (issue #103, stage
     /// 4). The bend runs from zero to the whole disparity across the band, so
@@ -1002,27 +1057,73 @@ impl Reframe {
     /// free, and it makes a constant reading exactly a relative roll - which
     /// is what the harmonic decomposition says a constant along-seam residual
     /// is (`kjerag-spike --bin seam`).
+    ///
+    /// **The along-seam term has two halves since stage 9**, and the same
+    /// scale carries both because they are the same displacement on the same
+    /// axis. The band's own is a pose, fitted live to this session's ring.
+    /// [`super::band::Table`]'s is what no pose can describe, read off the
+    /// camera and held still. The table has the pass's own five terms taken
+    /// out of it when it is built, so adding them is not applying one
+    /// correction twice.
     fn bent(&self, view_ray: [f32; 3], reading: super::band::Reading, band: f32) -> Bend {
         let Some(at) = self.seam_at(view_ray) else {
             return Bend::default();
         };
         let body = self.body_ray(view_ray);
+        let reach = body[0].hypot(body[1]);
         let epi = super::band::carried(reading.epi, band) * norm3(view_ray);
-        let along = reading.along * body[0].hypot(body[1]);
-        // Back out of the body's frame. `view_to_body` is a rotation, so its
-        // transpose is its inverse.
-        let out = |axis: [f32; 3], scale: f32| {
-            std::array::from_fn(|row| {
-                scale
-                    * (0..3)
-                        .map(|c| self.view_to_body[row][c] * axis[c])
-                        .sum::<f32>()
-            })
-        };
+        // The measured field and the stored one, on one axis and at one
+        // scale: the first is what this session's ring supports as a pose,
+        // the second is what no pose can say and what the camera reads the
+        // same on every flight ([`super::band::Table`]). They are added
+        // because they are the same displacement measured at two orders, and
+        // the table has the pass's own five terms taken out of it so neither
+        // of them corrects what the other already did.
+        let along = (reading.along + self.table.at(body[0] / reach, body[1] / reach)) * reach;
         Bend {
-            epi: out(at.epi, epi),
-            along: out(at.perp, along),
+            epi: self.out(at.epi, epi),
+            along: self.out(at.perp, along),
         }
+    }
+
+    /// A body-frame axis, scaled, expressed in the named view's frame.
+    ///
+    /// `view_to_body` is a rotation, so its transpose is its inverse.
+    fn out(&self, axis: [f32; 3], scale: f32) -> [f32; 3] {
+        std::array::from_fn(|row| {
+            scale
+                * (0..3)
+                    .map(|c| self.view_to_body[row][c] * axis[c])
+                    .sum::<f32>()
+        })
+    }
+
+    /// Where the stored table alone sends one lens's ray, before projection.
+    ///
+    /// Lens 1 takes it whole and lens 0 does not take it at all, which is how
+    /// [`Self::blend_bent`] applies it and how the calibration it belongs to
+    /// is applied ([`super::seam::SeamFit`]). This is that one step on its
+    /// own, for a reader that samples the raw planes through [`Self::project`]
+    /// rather than drawing a picture: `seam::measure` reads a ring through the
+    /// map the picture is drawn through, so what it answers is what is
+    /// **still** wrong.
+    ///
+    /// The ray back unchanged on lens 0, on a map with no table, and straight
+    /// down a lens's own axis, where there is no azimuth to look one up at.
+    pub fn tabled(&self, lens: usize, view_ray: [f32; 3]) -> [f32; 3] {
+        if lens != 1 || self.table.is_rest() {
+            return view_ray;
+        }
+        let Some(at) = self.seam_at(view_ray) else {
+            return view_ray;
+        };
+        let body = self.body_ray(view_ray);
+        let reach = body[0].hypot(body[1]);
+        let along = self.out(
+            at.perp,
+            self.table.at(body[0] / reach, body[1] / reach) * reach,
+        );
+        std::array::from_fn(|axis| view_ray[axis] + along[axis])
     }
 
     /// How far a ray is off one lens's axis, as an unnormalized cosine: one
@@ -1744,7 +1845,15 @@ pub(crate) fn wgsl() -> String {
     // The crossover is NOT here. It was a constant while it was the picture's;
     // it is the camera's now, and the shader is compiled once before any file
     // is open, so it travels in the block instead (`Reframe::crossover`).
-    format!("const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n{WGSL}")
+    // The table's length is in `vec4`s, which is how the block carries it and
+    // what an array's size in WGSL has to be written in. `AZIMUTHS` itself is
+    // the band's own name and is declared by the band's own half, which only
+    // one of the two pipelines compiled from this file is given.
+    let lanes = super::band::AZIMUTHS / 4;
+    format!(
+        "const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n\
+         const TABLE_LANES = {lanes}u;\n{WGSL}"
+    )
 }
 
 const WGSL: &str = r#"
@@ -1809,11 +1918,16 @@ struct Reframe {
   // How wide this camera hands the picture over, in radians. Rust twin:
   // `Reframe::crossover`. Read by `band_width` and `band_rest`.
   crossover: f32,
-  // WGSL rounds this block's size up to its own 16-byte alignment. Rust twin:
-  // `Reframe::_pad`, which is what makes the two sizes agree.
+  // What puts the table below on its own 16-byte boundary. Rust twin:
+  // `Reframe::_pad`, which is what makes the two layouts agree.
   pad0: f32,
   pad1: f32,
   pad2: f32,
+  // What the along-seam axis still disagrees by after a pose, direction by
+  // direction, in radians, four to a lane. Rust twin: `Reframe::table`. Read
+  // by `table_at`, which the band's own half declares because the wrapping is
+  // written in `AZIMUTHS` and that name is the band's.
+  table: array<vec4<f32>, TABLE_LANES>,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -3984,8 +4098,18 @@ pub(crate) mod tests {
         assert_eq!(std::mem::size_of::<LensBlock>(), 112);
         assert_eq!(std::mem::size_of::<Screen>(), 16);
         // 288 before the band's two fields, which add a padded mat3x3 and a
-        // padded vec3 (issue #103).
-        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16);
+        // padded vec3 (issue #103), and the table's own lane per four
+        // directions after them (stage 9).
+        let table = super::super::band::AZIMUTHS / 4 * 16;
+        assert_eq!(std::mem::size_of::<super::super::band::Table>(), table);
+        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + table);
+        // The offset, not arithmetic that cannot fail: WGSL starts the table
+        // at a multiple of sixteen and `repr(C)` does not have to, and
+        // `min_binding_size` checks the block's size rather than any offset
+        // inside it, so a table that slid twelve bytes would draw a wrong
+        // picture rather than refuse a pipeline.
+        assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
+        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {

@@ -38,7 +38,7 @@ use kjerag_meta::{
     CalibrationSet, ExposureTrack, Filter, Format, Lens, OrientationTrack, Quat, Readout,
 };
 
-use super::band;
+use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
@@ -204,6 +204,10 @@ struct Show {
     /// Shared rather than owned because the fallback fit runs on a thread of
     /// its own and hands its answer back through this.
     corrected: Arc<Correction>,
+    /// The along-seam table this camera has been read at, landed at open
+    /// (issue #103, stage 9). A cell because it is set once from outside and
+    /// read on every redraw, exactly like the toggles above.
+    table: Cell<Table>,
     /// What a fallback fit off this file came to, for the pool to keep if it
     /// is good enough. The shell reads it when the file is closed or another
     /// is opened; nothing in the render path touches it.
@@ -437,6 +441,24 @@ impl Scene {
             return;
         };
         show.corrected.land(fit);
+    }
+
+    /// Draw this file with the along-seam table its camera has been read at
+    /// (issue #103, stage 9).
+    ///
+    /// Landed rather than walked. A table is a calibration and the caller is
+    /// expected to set it before the first frame, where there is no picture
+    /// for it to jump.
+    ///
+    /// **That is a discipline and not a property of this function.** Called
+    /// mid-play it lands whatever it is given in the next frame, and the
+    /// picture steps by the whole of it. If a later stage ever re-answers a
+    /// pool while a file is up, this needs [`Correction`]'s walk rather than
+    /// this cell.
+    pub fn use_table(&self, table: Table) {
+        if let Some(show) = &self.show {
+            show.table.set(table);
+        }
     }
 
     /// Ask for this correction, walking to it rather than landing it. What a
@@ -826,15 +848,18 @@ impl Scene {
     /// change.
     pub fn mapped(&self, camera: Camera, aspect: f32) -> Option<Reframe> {
         let view = self.primitive(camera).view?;
-        Some(Reframe::new(
-            &view.lenses,
-            view.frames.size,
-            camera,
-            view.held,
-            aspect,
-            false,
-            self.sampling.get(),
-        ))
+        Some(
+            Reframe::new(
+                &view.lenses,
+                view.frames.size,
+                camera,
+                view.held,
+                aspect,
+                false,
+                self.sampling.get(),
+            )
+            .with_table(view.table),
+        )
     }
 
     pub fn primitive(&self, camera: Camera) -> ScenePrimitive {
@@ -867,6 +892,7 @@ impl Show {
             files,
             frame,
             corrected: Arc::new(Correction::none(&calibrated.lenses)),
+            table: Cell::new(Table::REST),
             harvested: Harvested::default(),
             lenses: calibrated.lenses,
             camera: calibrated.camera,
@@ -899,6 +925,7 @@ impl Show {
                     .rolling(at, held.readout.unwrap_or(self.held.readout)),
             },
             lenses: self.lenses(),
+            table: self.table.get(),
             frames,
         })
     }
@@ -1125,6 +1152,10 @@ pub struct ScenePrimitive {
 #[derive(Clone, Debug)]
 struct View {
     lenses: Arc<[Lens]>,
+    /// What the along-seam axis still disagrees by after the pose, direction
+    /// by direction (issue #103, stage 9). Part of this camera's calibration
+    /// and carried with it, like the lenses above.
+    table: Table,
     frames: Arc<Frames>,
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
@@ -1436,7 +1467,8 @@ impl ScenePipeline {
                 aspect,
                 self.linearize(),
                 primitive.sampling,
-            ),
+            )
+            .with_table(view.table),
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
