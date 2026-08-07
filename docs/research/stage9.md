@@ -1050,3 +1050,84 @@ duplicate shape) - and its row says so.
 
 Both arms of every pair share that calibration. The toggle is the only
 difference between them.
+
+### 10.5 The null
+
+The toggle off draws `main`'s picture byte for byte, in both domains, at the
+BAD crossing under the drawn pose:
+
+| render | `main` at 75a03cc | this branch, toggle off |
+| --- | --- | --- |
+| `--bin reframe`, the unbent projection | `783182e2f9169b34e002690f1678b5e3` | the same |
+| `--bin step`, the delivered picture with the band live and warm | `90b0b0354c3e2a34b3259d44d303e7e3` | the same |
+
+Both checkouts built into their own `CARGO_TARGET_DIR`, which is not optional
+(AGENTS.md, issue #47: one shared target directory silently gives an instrument
+the other tree's binary).
+
+The delivered one is the load-bearing half. The unbent render never runs the
+band's compute pass, which is where the term's read-through lives, so a
+read-through that fired with an empty table would not show there.
+
+### 10.6 The instrument
+
+`--bin epiramp`, and it reads the delivered domain and nothing else, which is
+9.4's rule. `--bin reframe` draws the unbent projection and `--bin crossing`
+builds its map with the band held off; both were the wrong domain for an applied
+claim, and PR #167 is the record of what that cost.
+
+One run is the app's own path: `Scene::still`, every frame from `warm` seconds
+before the view played through `ScenePipeline` so the band is as warm as it is
+in a real run, then the picture. Two runs make a reading, at two handover
+widths. At `KJERAG_HANDOVER_DEG=0.1` each side of the seam is drawn by one lens
+with no ramp on it, so the lag between the two renders at a given distance from
+the contour is what the handover put there and nothing else.
+
+**Each arm reads against its OWN cut render.** A build that displaces lens 1's
+whole picture displaces it in the cut too, so a lag read that way is the
+**residual** ramp - what the corridor still does after the displacement - which
+is the question. Reading one arm against the other's cut would measure the
+displacement instead, which is not a defect and is not what anyone sees.
+
+The seam's own field is the app's, per pixel: the angle off the body's `xy`
+plane, from `Reframe::body_ray`, and the unit normal from its gradient. So a
+strip at "1.6 degrees off the seam" is that everywhere in the frame rather than
+a straight line fitted through a picture. Lags are read at 0.7 to 4.8 degrees
+either side - the epi-probe's 40 to 260 view pixels at the BAD crossing's scale,
+in the unit that means the same thing at every field of view in the registry -
+and a straight line is fitted through them and extrapolated to the contour.
+
+**What the number is.** `Reframe::blend_bent` gives each lens the other one's
+weight times the disagreement, so at the contour the two are half of it each and
+in opposite directions. The swing across the whole corridor is therefore twice
+either side's own, and `E` is lens 1's side doubled. Lens 0's is printed beside
+it with its own rms, and where the two disagree the rms says which line
+describes its own points. **A row whose rms is a large fraction of its own
+intercept is not quotable**, which is `--bin step`'s rule in this instrument.
+
+**The controls.** `plant=<view px>` slides the reference's lens 1 side by a
+known amount before correlating: a probe that cannot see a shift it was handed
+is not a probe. Every CSV carries the build, the file, the aim, both
+environment variables, the reference it read against, the plant, the scale and
+the window, because a CSV nobody can tell the provenance of is a CSV nobody can
+check.
+
+### 10.7 The `pose` arm, and why its numbers are not read as a result
+
+`KJERAG_EPI_TERM=pose` applies the knobs' own across-seam displacement with no
+pooled reading taking it back out. That displacement reaches **2.5 degrees**,
+and the band's own epipolar search runs `FAR_DEG` to `NEAR_DEG`, **-1.2 to
++2.6**. So a term near the top of its range moves what the band is asked to
+correlate outside the window the band can search in.
+
+What that predicts is a band that finds nothing, gives up its evidence and
+stops bending - a picture that looks *steadier* because the correction went
+quiet rather than because the geometry got right. 10.9 measures whether that is
+what happens, with `--bin step`'s own count of how many of the 128 directions
+still have evidence.
+
+Either way the arm's ramp numbers are not read as a result here, and the
+arithmetic above is a **constraint any later applied across-seam term
+inherits**: whatever such a term carries, the residual it leaves has to stay
+inside the band's own search window, or the thing measuring the residual is
+measuring nothing.
