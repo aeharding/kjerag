@@ -336,8 +336,7 @@ fn middle_of(fits: &[SeamFit]) -> Option<SeamFit> {
 pub struct ConfigState {
     pub recent_files: VecDeque<PathBuf>,
     /// What each camera's seam has been measured to be off by, under
-    /// [`CalibrationSet::camera_key`](kjerag_meta::CalibrationSet::camera_key)
-    /// in hex.
+    /// `CalibrationSet::camera_key` (`crates/meta/src/calibration.rs`) in hex.
     ///
     /// **State rather than config**, which is the same call cosmic-player
     /// makes for its recent files (docs/UI.md, "Persistence"): this is a
@@ -417,10 +416,7 @@ impl Stored {
     pub fn load(app_id: &str) -> Self {
         let (config_handler, config) =
             read("config", cosmic_config::Config::new(app_id, CONFIG_VERSION));
-        let (state_handler, state) = read(
-            "saved state",
-            cosmic_config::Config::new_state(app_id, CONFIG_VERSION),
-        );
+        let (state_handler, state) = saved_state(app_id);
         Self {
             config,
             state,
@@ -436,6 +432,25 @@ impl Stored {
     pub fn write_state(&self) {
         write("saved state", &self.state, self.state_handler.as_ref());
     }
+}
+
+/// What the app noticed, on its own: the saved state and the handler that
+/// writes it back.
+fn saved_state(app_id: &str) -> (Option<cosmic_config::Config>, ConfigState) {
+    read(
+        "saved state",
+        cosmic_config::Config::new_state(app_id, CONFIG_VERSION),
+    )
+}
+
+/// The saved state read-only, which is what a headless instrument drawing with
+/// `seam=pool` reads and all of what it reads (`crates/spike/src/seam.rs`).
+///
+/// The config entry beside it is the pilot's own preferences and none of an
+/// instrument's business, and this returns no handler, so nothing that calls
+/// it can write the pool back.
+pub fn state(app_id: &str) -> ConfigState {
+    saved_state(app_id).1
 }
 
 /// One entry, or the default if it is unreadable. A half-readable entry keeps

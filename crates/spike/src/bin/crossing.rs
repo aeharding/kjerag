@@ -17,12 +17,21 @@
 //! # the owner's own view line, with a stored per-camera calibration
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> \
 //!   time=50.117 yaw=-80.28 pitch=0.06 fov=55.69 lock=1 bins=180 \
-//!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
+//!   seam=pool
 //! # the null control: lens 0 against its own picture, which must read zero
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 null=1
 //! # the plant control: a known calibration delta, read back at every site
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 plant=yaw:0.10
 //! ```
+//!
+//! **The `seam=` there was a literal string until 2026-08-07, and it was the
+//! wrong pose.** It said `roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
+//! which is the knob-by-knob median of the owner's pool and no member of it:
+//! the combination `SeamPool::answer` stopped shipping on 2026-08-05
+//! (docs/research/seam-two-axis.md 4), so the app had not drawn it since.
+//! `seam=pool` asks for the pose the app draws rather than copying it, and a
+//! run prints the five knobs it applied. **Nothing recorded below has been
+//! re-read at the drawn pose.**
 //!
 //! **That `yaw` is re-derived and a stale one runs without a word.** The lock
 //! became world-fixed on 2026-08-06, so the frame a `lock=1` yaw is measured
@@ -65,7 +74,7 @@ use kjerag_media::{Fallible, Plane};
 use kjerag_meta::CalibrationSet;
 use kjerag_render::{Camera, Cue, Horizon, Reframe, Scene, SeamFit, Size};
 use kjerag_spike::crossing::{self, Axes, Floor, Reading, Refused, Site, Source, Support};
-use kjerag_spike::{Walk, seam_fit};
+use kjerag_spike::{Seam, Walk};
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
@@ -157,7 +166,7 @@ fn sensitivity(options: &Options, baseline: [f64; 3], front: &Plane, back: &Plan
         return Ok(());
     };
     let Seam::Stored(fit) = options.seam else {
-        println!("sensitivity: withheld; a dither needs seam=<stored fit> to move");
+        println!("sensitivity: withheld; a dither needs seam=pool or five knobs to move");
         return Ok(());
     };
     let mut swing = Vec::new();
@@ -368,7 +377,7 @@ fn map(options: &Options, seam: Seam) -> Fallible<Mapped> {
 /// The same view under one knob moved by a known amount.
 fn plant(options: &Options, knob: usize, amount: f64) -> Fallible<Mapped> {
     let Seam::Stored(fit) = options.seam else {
-        return Err("plant=<knob>:<amount> requires seam=<stored fit> to perturb".into());
+        return Err("plant=<knob>:<amount> requires seam=pool or five knobs to perturb".into());
     };
     println!(
         "plant:  {} by {:+.3} on top of the stored fit",
@@ -779,25 +788,6 @@ fn deviation(values: &[f64]) -> f64 {
     )
 }
 
-/// Which calibration this view is drawn through. The same three paths `step`
-/// and `reframe` expose; the raw pixels stay raw either way.
-#[derive(Clone, Copy)]
-enum Seam {
-    Factory,
-    File,
-    Stored(SeamFit),
-}
-
-impl Seam {
-    fn hold(self, scene: &Scene) {
-        match self {
-            Self::Factory => println!("seam:   factory calibration, no correction"),
-            Self::File => scene.fit_seam(true),
-            Self::Stored(fit) => scene.use_seam(fit),
-        }
-    }
-}
-
 struct Options {
     input: PathBuf,
     time: f64,
@@ -887,6 +877,7 @@ impl Options {
             table: kjerag_render::Table::REST,
             out: None,
         };
+        let mut seam = String::from("file");
         for arg in args {
             match arg.split_once('=') {
                 None => out.input = PathBuf::from(arg),
@@ -928,13 +919,7 @@ impl Options {
                 Some(("null", value)) => out.null = value.parse::<u32>()? != 0,
                 Some(("plant", value)) => out.plant = Some(knob(value)?),
                 Some(("out", value)) => out.out = Some(value.to_owned()),
-                Some(("seam", value)) => {
-                    out.seam = match value {
-                        "factory" => Seam::Factory,
-                        "file" => Seam::File,
-                        _ => Seam::Stored(seam_fit(value)?),
-                    }
-                }
+                Some(("seam", value)) => seam = value.to_string(),
                 Some(("table", value)) => out.table = kjerag_spike::seam_table(value)?,
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
@@ -958,6 +943,9 @@ impl Options {
         if out.perp_reference.is_some() && out.perp_gate.is_none() {
             return Err("perpref= is the value perpgate= judges against, and that is off".into());
         }
+        // After the loop, because `seam=pool` is resolved against the file and
+        // the file may be named anywhere on the line.
+        out.seam = Seam::parse(&seam, &out.input)?;
         Ok(out)
     }
 
@@ -1038,7 +1026,7 @@ fn knob(value: &str) -> Fallible<(usize, f64)> {
 const USAGE: &str = "usage: crossing <file.insv> [time=seconds] [yaw=deg] [pitch=deg] [fov=deg] \
      [lock=1] [size=px] [bins=n] [span=deg] [search=deg] [step=deg] [contrast=codes] [ncc=score] \
      [perpgate=deg | perpgate=0] [perpref=deg] [dither=deg] [null=1] [plant=knob:amount] \
-     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] [table=table.txt] [out=name.csv]";
+     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] [table=table.txt] [out=name.csv]";
 
 /// The view line the app copies is this instrument's command line too, which
 /// is the only reason a reported reading can be pointed at a picture the owner

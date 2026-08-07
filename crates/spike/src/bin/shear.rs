@@ -72,8 +72,17 @@
 //! cargo run --release -p kjerag-spike --bin shear -- \
 //!   ~/Videos/Insta/VID_20260714_193252_00_006.insv \
 //!   time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1 frames=90 warm=6.0 \
-//!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
+//!   seam=pool
 //! ```
+//!
+//! **The `seam=` there was a literal string until 2026-08-07, and it was the
+//! wrong pose.** It said `roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
+//! which is the knob-by-knob median of the owner's pool and no member of it:
+//! the combination `SeamPool::answer` stopped shipping on 2026-08-05
+//! (docs/research/seam-two-axis.md 4), so the app had not drawn it since.
+//! `seam=pool` asks for the pose the app draws rather than copying it, and a
+//! run prints the five knobs it applied. **Nothing recorded below has been
+//! re-read at the drawn pose.**
 //!
 //! `-150` reads 0.3381 deg along the seam at 0.0066 deg step rms over 87 pairs,
 //! worst single step 0.0187; the seam itself (`+0`) 0.3356 at 0.0687 over 89,
@@ -151,10 +160,9 @@ use std::time::Duration;
 
 use kjerag_media::Fallible;
 use kjerag_render::{
-    Along, Camera, Cell, Cue, Framing, Horizon, Reframe, Sampling, Scene, ScenePipeline, SeamFit,
-    Size,
+    Along, Camera, Cell, Cue, Framing, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size,
 };
-use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
+use kjerag_spike::{FORMAT, Gpu, Picture, Render, Seam};
 
 /// How far the match searches across the seam, in rows. The applied field is
 /// small and the search only has to hold it; a wider one costs time and finds
@@ -1288,25 +1296,6 @@ impl Mode {
     }
 }
 
-/// Which seam correction the map is built with, exactly as `reframe` and `band`
-/// take it, so a run here is read through the calibration those two draw.
-#[derive(Clone)]
-enum Seam {
-    Factory,
-    File,
-    Stored(SeamFit),
-}
-
-impl Seam {
-    fn hold(&self, scene: &Scene) {
-        match self {
-            Self::Factory => println!("seam:   factory calibration, no correction"),
-            Self::File => scene.fit_seam(true),
-            Self::Stored(fit) => scene.use_seam(*fit),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Options {
     input: PathBuf,
@@ -1357,6 +1346,7 @@ impl Options {
             args: args.iter().skip(1).cloned().collect::<Vec<_>>().join(" "),
         };
         let mut view = Vec::new();
+        let mut seam = String::from("file");
         for arg in args.iter().skip(1) {
             if Framing::is_term(arg) {
                 view.push(arg.as_str());
@@ -1379,13 +1369,7 @@ impl Options {
                 Some(("plant", value)) => options.plant = value.parse()?,
                 Some(("out", value)) => options.out = PathBuf::from(value),
                 Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
-                Some(("seam", value)) => {
-                    options.seam = match value {
-                        "factory" => Seam::Factory,
-                        "file" => Seam::File,
-                        _ => Seam::Stored(seam_fit(value)?),
-                    }
-                }
+                Some(("seam", value)) => seam = value.to_string(),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
@@ -1393,6 +1377,9 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
+        // After the loop, because `seam=pool` is resolved against the file and
+        // the file may be named anywhere on the line.
+        options.seam = Seam::parse(&seam, &options.input)?;
         let (rows, cols) = options.mode.patch();
         if options.size as usize <= rows.max(cols) {
             return Err(format!(
@@ -1481,7 +1468,7 @@ const USAGE: &str = "usage: shear <file.insv> time=seconds yaw=deg pitch=deg fov
      [mode=probe|profile|plant] [frames=90] [warm=seconds] [size=px] [null=1] [plant=deg] \
      [out=dir] \
      [table=table.txt] \
-     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
+     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
 
 #[cfg(test)]
 mod tests {

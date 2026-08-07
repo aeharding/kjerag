@@ -12,7 +12,7 @@
 //! ffmpeg -i shot.jpg -vf scale=320:-1,format=gray -f rawvideo -y shot.gray
 //! cargo run --release -p kjerag-spike --bin proof -- <file.insv> \
 //!   time=9.576 lock=1 shot=shot.gray shape=320x225 \
-//!   seam=roll:0.789,yaw:-2.450,pitch:-0.668,cx:-2.55,cy:-13.84 out=after.png
+//!   before=factory after=pool out=after.png
 //! ```
 //!
 //! The screenshot arrives as raw 8-bit luma at a stated size rather than as a
@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kjerag_media::Fallible;
-use kjerag_render::{Camera, Cue, Horizon, Sampling, Scene, ScenePipeline, SeamFit, Size};
-use kjerag_spike::{FORMAT, Gpu, Picture, Render};
+use kjerag_render::{Camera, Cue, Horizon, Sampling, Scene, ScenePipeline, Size};
+use kjerag_spike::{FORMAT, Gpu, Picture, Render, Seam};
 
 /// How wide the rendered proof is, in pixels. 1920 because that is the width
 /// the seam residuals are quoted in view pixels at (docs 6.8), so what is
@@ -58,30 +58,6 @@ const REFINE_TO_DEG: f64 = 0.02;
 /// screenshot was taken at. Unbounded, the fit walks down to seven degrees of
 /// smeared magnification, because a blurred picture correlates with a blur.
 const FOV_RANGE_DEG: (f64, f64) = (20.0, 120.0);
-
-/// Which seam correction a render draws with. Verbatim `reframe`'s three
-/// paths, because the point of this instrument is to draw the same view
-/// through each of them.
-enum Seam {
-    /// The calibration the camera wrote, uncorrected.
-    Factory,
-    /// Fitted off this file's own frames, which is what a camera with no
-    /// stored calibration gets.
-    File,
-    /// A stored per-camera calibration, applied as the app applies one at
-    /// open.
-    Stored(SeamFit),
-}
-
-impl Seam {
-    fn hold(&self, scene: &Scene) {
-        match self {
-            Self::Factory => println!("seam:   factory calibration, no correction"),
-            Self::File => scene.fit_seam(true),
-            Self::Stored(fit) => scene.use_seam(*fit),
-        }
-    }
-}
 
 /// The screenshot, as luma at the size the fit is scored at.
 struct Shot {
@@ -458,8 +434,8 @@ impl Options {
                         _ => Horizon::Locked,
                     }
                 }
-                "before" => before = seam_of(value)?,
-                "after" => after = seam_of(value)?,
+                "before" => before = Seam::parse(value, &input)?,
+                "after" => after = Seam::parse(value, &input)?,
                 "scan" => scan = value.parse::<u32>()? > 0,
                 "shot" => shot = Some(PathBuf::from(value)),
                 "shape" => shape = Some(pixels(value)?),
@@ -497,34 +473,7 @@ fn pixels(value: &str) -> Fallible<Size> {
     Ok(Size::new(width.parse()?, height.parse()?))
 }
 
-fn seam_of(value: &str) -> Fallible<Seam> {
-    Ok(match value {
-        "factory" => Seam::Factory,
-        "file" => Seam::File,
-        _ => Seam::Stored(stored(value)?),
-    })
-}
-
-/// `roll:0.71,yaw:-2.35,pitch:-1.61,cx:-1.26,cy:-14.60`, in each knob's own
-/// units, as the app's config stores them.
-fn stored(value: &str) -> Fallible<SeamFit> {
-    let mut fit = SeamFit::default();
-    for term in value.split(',') {
-        let (name, amount) = term.split_once(':').ok_or("a stored knob is knob:amount")?;
-        let amount: f64 = amount.parse()?;
-        match name {
-            "roll" => fit.roll_deg = amount,
-            "yaw" => fit.yaw_deg = amount,
-            "pitch" => fit.pitch_deg = amount,
-            "cx" => fit.cx_px = amount,
-            "cy" => fit.cy_px = amount,
-            _ => return Err(format!("no stored knob called {name}").into()),
-        }
-    }
-    Ok(fit)
-}
-
 const USAGE: &str = "usage: proof <file.insv> [time=seconds | frame=n] [lock=0] \
      [shot=<gray.raw> shape=320x225] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [aspect=w/h] \
      [scan=1] [out=prefix] \
-     before=factory|file|roll:..,yaw:..,pitch:..,cx:..,cy:.. after=<the same>";
+     before=factory|file|pool|roll:..,yaw:..,pitch:..,cx:..,cy:.. after=<the same>";

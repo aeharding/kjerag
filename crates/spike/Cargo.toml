@@ -20,6 +20,13 @@ name = "spike"
 path = "src/main.rs"
 
 [dependencies]
+# The shell, for one thing and one only: `seam=pool` reads the app's own saved
+# seam pool through the app's own reader and answers with the app's own rule
+# (`src/seam.rs`). A second copy of either would be a second answer to "what
+# pose does the app draw this camera with", which is the question an
+# acceptance line in docs/research/reference-views.md exists to hold still.
+# The edge points up the layer diagram and it is the only one that does.
+kjerag = { workspace = true }
 kjerag-media = { workspace = true }
 # The IMU track and the orientation it integrates to, which `gyro` reports
 # on and `horizon` renders against (issue #8).

@@ -2885,6 +2885,7 @@ version = "0.2.0"
 dependencies = [
  "ashpd 0.12.3",
  "ffmpeg-next",
+ "kjerag",
  "kjerag-media",
  "kjerag-meta",
  "kjerag-render",

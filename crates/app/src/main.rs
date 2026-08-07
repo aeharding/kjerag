@@ -11,19 +11,12 @@
 //! src/framing.rs`).
 //!
 //! The shell is docs/UI.md's, which is the design this crate implements and
-//! which cites a first-party COSMIC app for every call it makes.
-
-mod app;
-mod args;
-mod config;
-mod dnd;
-mod fail;
-mod key_bind;
-mod menu;
-mod shot;
-mod strings;
+//! which cites a first-party COSMIC app for every call it makes. It lives in
+//! `src/lib.rs`, which says why it is reachable as a library.
 
 use std::process::ExitCode;
+
+use kjerag::{app, args};
 
 fn main() -> ExitCode {
     match args::parse(std::env::args().skip(1)) {

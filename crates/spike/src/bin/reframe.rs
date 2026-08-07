@@ -35,8 +35,14 @@
 //! the camera's own calibration alone; and five numbers apply a **stored
 //! per-camera calibration** through `Scene::use_seam`, which is the path the
 //! app takes at open and the only way to look at what a pilot's own config
-//! draws. The applied numbers are printed by that path, so a render can be
+//! draws. Whichever path is taken prints what it applied, so a render can be
 //! checked against what is stored rather than assumed to match it.
+//!
+//! `seam=pool` is those five numbers read out of this box's own saved state
+//! rather than typed, which is the pose the app itself would draw this file
+//! with today (`crates/spike/src/seam.rs`). Prefer it to a typed copy in
+//! anything meant to stay true: a copy is a pose taken on a date, and the
+//! app's answer moves as its pool grows.
 //!
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
 //! are personal video and this repo is public.
@@ -47,8 +53,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kjerag_media::Fallible;
-use kjerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, SeamFit, Size};
-use kjerag_spike::{Gpu, Offscreen, seam_fit};
+use kjerag_render::{Camera, Cue, Horizon, Scene, ScenePipeline, Size};
+use kjerag_spike::{Gpu, Offscreen, Seam};
 
 /// Not sRGB, so the shader writes the video's own gamma-encoded numbers
 /// straight out and a PNG viewer shows what the window shows. `srgb=1`
@@ -71,34 +77,6 @@ struct Options {
     horizon: Horizon,
     seam: Seam,
     out: PathBuf,
-}
-
-/// Which seam correction this render draws with.
-///
-/// The app has three paths and an instrument that only walks one of them
-/// cannot check the other two. `Stored` is the one the owner is looking at:
-/// five numbers out of his own config, applied through the app's own
-/// [`Scene::use_seam`], which prints them so the render can be checked
-/// against what is stored.
-enum Seam {
-    /// The calibration the camera wrote, uncorrected.
-    Factory,
-    /// Fitted off this file's own frames, which is what a camera with no
-    /// stored calibration gets.
-    File,
-    /// A stored per-camera calibration, applied exactly as the app applies
-    /// one at open.
-    Stored(SeamFit),
-}
-
-impl Seam {
-    fn hold(&self, scene: &Scene) {
-        match self {
-            Self::Factory => println!("seam:   factory calibration, no correction"),
-            Self::File => scene.fit_seam(true),
-            Self::Stored(fit) => scene.use_seam(*fit),
-        }
-    }
 }
 
 fn main() -> Fallible<()> {
@@ -166,13 +144,7 @@ impl Options {
                         _ => Horizon::Locked,
                     }
                 }
-                "seam" => {
-                    seam = match value {
-                        "factory" => Seam::Factory,
-                        "file" => Seam::File,
-                        _ => Seam::Stored(seam_fit(value)?),
-                    }
-                }
+                "seam" => seam = Seam::parse(value, &input)?,
                 "out" => out = Some(value.to_owned()),
                 _ => return Err(format!("unknown argument {key}. {USAGE}").into()),
             }
@@ -205,7 +177,7 @@ impl Options {
 
 const USAGE: &str = "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] \
      [frame=n | time=seconds] [size=px] [srgb=1] [lock=1] \
-     [seam=factory|file|roll:0.7,yaw:-2.4,pitch:-0.7,cx:-2.6,cy:-13.8] [out=name.png]";
+     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] [out=name.png]";
 
 /// The app's copied view line is a command line for this binary, and the only
 /// way to know that is to hand one to the parser above.

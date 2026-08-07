@@ -3,9 +3,8 @@
 //! was not fitted on (issue #103, stage 9).
 //!
 //! ```sh
-//! # what one flight's pose leaves, azimuth by azimuth, under a stored fit
-//! cargo run --release -p kjerag-spike --bin table -- <a.insv> \
-//!   seam=roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91
+//! # what one flight's pose leaves, azimuth by azimuth, under the app's own
+//! cargo run --release -p kjerag-spike --bin table -- <a.insv> seam=pool
 //! # a table off several flights, written down
 //! cargo run --release -p kjerag-spike --bin table -- <a.insv> <b.insv> <c.insv> \
 //!   seam=<stored> out=scratch/stage9/table.txt
@@ -18,10 +17,13 @@
 //!
 //! **One pose for every capture.** `seam=file` is prohibited: a fit off each
 //! capture's own frames absorbs that scene's own content into the pose, and the
-//! leftovers of two such fits are not the same quantity measured twice. Name a
-//! stored fit with `seam=`, or name none and get one pose fitted on every
-//! capture's readings at once, which is what a per-camera pool is when there is
-//! no pool yet. The app has exactly one fit per camera and so does this.
+//! leftovers of two such fits are not the same quantity measured twice.
+//! `seam=pool` is the pose the app itself draws these captures with and is what
+//! a reading meant to be quoted later should use; five knobs written out are
+//! the same thing pinned to a date. Name neither and one pose is fitted on
+//! every capture's readings at once, which is what a per-camera pool is when
+//! there is no pool yet. The app has exactly one fit per camera and so does
+//! this.
 //!
 //! **The readings are the shipped fit's own.** Nothing here re-derives a seam
 //! measurement: it calls `kjerag_render::seam::measure`, which is the function
@@ -36,7 +38,7 @@ use std::path::{Path, PathBuf};
 use kjerag_media::Fallible;
 use kjerag_meta::CalibrationSet;
 use kjerag_render::{Leftover, SeamFit, Size, Table, seam};
-use kjerag_spike::seam_fit;
+use kjerag_spike::fit_arg;
 
 /// How wide a kernel the sweep tries, in degrees of azimuth, as half-widths:
 /// a kernel of `w` reaches `w` either side, so its window is `2w`.
@@ -1015,13 +1017,14 @@ impl Options {
             field: None,
             patches: 72,
         };
+        let mut seam = None;
         for arg in args {
             match arg.split_once('=') {
                 Some(("seam", value)) => {
                     if value == "file" || value == "factory" {
                         return Err(USAGE_SEAM.into());
                     }
-                    options.seam = Some(seam_fit(value)?);
+                    seam = Some(value.to_string());
                 }
                 Some(("through", value)) => options.through = load(Path::new(value))?,
                 Some(("hold", value)) => options.hold = Some(PathBuf::from(value)),
@@ -1041,6 +1044,14 @@ impl Options {
         }
         if matches!(options.mode, Mode::Fit) && options.inputs.is_empty() {
             return Err(USAGE.into());
+        }
+        // After the loop, because `seam=pool` is resolved against a capture
+        // and the captures may be named anywhere on the line. The first is
+        // enough: the pool is keyed by camera and this instrument is a
+        // per-camera reading already.
+        if let Some(value) = seam {
+            let input = options.inputs.first().ok_or(USAGE_SEAM_POOL)?;
+            options.seam = Some(fit_arg(&value, input)?);
         }
         Ok(options)
     }
@@ -1062,10 +1073,14 @@ fn planted(value: &str) -> Fallible<Mode> {
     })
 }
 
-const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] [seam=roll:0.8,yaw:-2.3,pitch:-0.9,\
-cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [gate=mads|0] [places=n] [frames=n] [patches=n] [out=path] [field=path] [dump=path.csv] \
+const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] [seam=pool|roll:0.8,yaw:-2.3,\
+pitch:-0.9,cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [gate=mads|0] [places=n] [frames=n] [patches=n] [out=path] [field=path] [dump=path.csv] \
 | read=path | plant=size_deg:cycles [out=path]";
 
 const USAGE_SEAM: &str = "this instrument needs one stored fit for every capture: a fit off each \
 capture's own frames absorbs that scene into the pose, and two such fits do not leave the same \
-quantity behind. seam=roll:..,yaw:..,pitch:..,cx:..,cy:..";
+quantity behind. seam=pool, which is the one the app draws with, or \
+seam=roll:..,yaw:..,pitch:..,cx:..,cy:..";
+
+const USAGE_SEAM_POOL: &str = "seam=pool is read out of the saved state under the camera a capture \
+names, so it needs a capture on the line to name one";

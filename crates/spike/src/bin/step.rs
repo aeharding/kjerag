@@ -13,10 +13,19 @@
 //! # the owner's own view line, plus how the state was reached
 //! cargo run --release -p kjerag-spike --bin step -- <file.insv> \
 //!   time=2.836 yaw=111.83 pitch=4.12 fov=20.00 lock=1 warm=2.0 \
-//!   seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
+//!   seam=pool
 //! # the same view with the band held off, which is stage 1's own picture
 //! cargo run --release -p kjerag-spike --bin step -- <file.insv> ... off=1
 //! ```
+//!
+//! **The `seam=` there was a literal string until 2026-08-07, and it was the
+//! wrong pose.** It said `roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
+//! which is the knob-by-knob median of the owner's pool and no member of it:
+//! the combination `SeamPool::answer` stopped shipping on 2026-08-05
+//! (docs/research/seam-two-axis.md 4), so the app had not drawn it since.
+//! `seam=pool` asks for the pose the app draws rather than copying it, and a
+//! run prints the five knobs it applied. **Nothing recorded below has been
+//! re-read at the drawn pose.**
 //!
 //! **That `yaw` is re-derived and a stale one runs without a word.** The lock
 //! became world-fixed on 2026-08-06, so the frame a `lock=1` yaw is measured
@@ -68,7 +77,7 @@ use kjerag_media::Fallible;
 use kjerag_render::{
     Along, Camera, Cell, Cue, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size,
 };
-use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
+use kjerag_spike::{FORMAT, Gpu, Picture, Render, Seam};
 
 /// How far either side of the seam the horizon is fitted, in degrees.
 ///
@@ -821,25 +830,6 @@ struct Options {
     out: Option<PathBuf>,
 }
 
-/// Which of the app's three seam paths this render draws with. `reframe`'s
-/// own three, and the same words, because the whole question here is what the
-/// owner's own config draws.
-enum Seam {
-    Factory,
-    File,
-    Stored(kjerag_render::SeamFit),
-}
-
-impl Seam {
-    fn hold(&self, scene: &Scene) {
-        match self {
-            Self::Factory => println!("seam:   factory calibration, no correction"),
-            Self::File => scene.fit_seam(true),
-            Self::Stored(fit) => scene.use_seam(*fit),
-        }
-    }
-}
-
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Fallible<Self> {
         let mut options = Self {
@@ -858,6 +848,7 @@ impl Options {
             seam: Seam::File,
             out: None,
         };
+        let mut seam = String::from("file");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
@@ -873,19 +864,16 @@ impl Options {
                 Some(("trace", value)) => options.trace = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
-                Some(("seam", value)) => {
-                    options.seam = match value {
-                        "factory" => Seam::Factory,
-                        "file" => Seam::File,
-                        _ => Seam::Stored(seam_fit(value)?),
-                    }
-                }
+                Some(("seam", value)) => seam = value.to_string(),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
+        // After the loop, because `seam=pool` is resolved against the file and
+        // the file may be named anywhere on the line.
+        options.seam = Seam::parse(&seam, &options.input)?;
         Ok(options)
     }
 
@@ -924,5 +912,5 @@ impl Options {
 
 const USAGE: &str = "usage: step <file.insv> [time=seconds] [warm=seconds] [yaw=deg] \
      [pitch=deg] [fov=deg] [size=px] [lock=0] [off=1] [guard=deg] [trace=1] \
-     [table=table.txt] [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] \
+     [table=table.txt] [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] \
      [out=name.png]";

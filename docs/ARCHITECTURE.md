@@ -22,10 +22,10 @@ crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
 crates/meta     kjerag-meta    .insv trailer, read directly: per-lens Mei
                                calibration, gyro track, per-frame exposure.
                                No UI, no ffmpeg, no wgpu.
-crates/spike    kjerag-spike   the headless instruments, kept out of the
-                               app's dependency graph: `spike` (M0 frame-path
-                               timings) and `reframe` (the projection pass to
-                               a PNG, no compositor needed)
+crates/spike    kjerag-spike   the headless instruments, which nothing else
+                               depends on: `spike` (M0 frame-path timings)
+                               and `reframe` (the projection pass to a PNG,
+                               no compositor needed)
 ```
 
 `app` -> `render` -> `media` -> `meta`, `render` -> `meta` as well for the
@@ -33,6 +33,17 @@ calibration the shader runs on, and `meta` depends on nothing but `prost`.
 That last one is the point of the split: `cargo test -p kjerag-meta` passes
 on a box with no libav headers, and a CI job that installs nothing proves it
 on every push.
+
+`spike -> app` is the one edge that points up that list, and it is one
+function wide: `seam=pool` (`crates/spike/src/seam.rs`) reads the saved seam
+pool through `kjerag::config::state` and answers off it with
+`SeamPool::answer`, so an instrument draws the pose the app draws. Copying
+either the file's shape or the medoid rule into the instruments would be a
+second answer to "what pose does the app draw this camera with", and a second
+answer is exactly the defect it was added for: two acceptance lines in
+docs/research/reference-views.md, and four copies of them, spent two days
+quoting a pose the app had stopped drawing. The app crate has a `src/lib.rs`
+for this and for nothing else; `src/main.rs` is the same thin binary it was.
 
 `media -> meta` is one function wide and it is issue #79's: a capture is not
 always one file, and which file holds the other lens is a fact about `.insv`
