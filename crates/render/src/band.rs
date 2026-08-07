@@ -2512,9 +2512,23 @@ mod tests {
     /// it towards zero there, so the table's own value is delivered whole at
     /// exactly the directions the session never read.
     ///
-    /// The real pooled field, planted and put through `Along::fit` at each
-    /// coverage. On real footage `--bin step` reports 27 of 128 directions with
-    /// evidence.
+    /// **The field planted here is not the one section 9.2's table was
+    /// measured with**, and the two are reported side by side there. That table
+    /// is the real pooled field `--bin table field=` wrote (0.2735 deg rms
+    /// composed); this one is a plain five-term field of 0.2163 deg rms, chosen
+    /// so the test needs no footage and no scratch file. At 27 directions of
+    /// evidence it leaves **0.0856 deg rms and 0.1710 worst** against the real
+    /// field's 0.0333 and 0.0696, so it makes the point a fortiori and not
+    /// more weakly.
+    ///
+    /// **The sweep is not monotone in coverage** on either field - here 64 and
+    /// 48 directions read 0.0677 and 0.0676 rms while their worst entries go
+    /// 0.1403 to 0.1440 - because what is left depends on where the arc sits
+    /// against the field's own phase and not only on how wide it is. The
+    /// assertions below are therefore about the two ends and not about the
+    /// shape between them.
+    ///
+    /// On real footage `--bin step` reports 27 of 128 directions with evidence.
     #[test]
     fn a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it() {
         let planted: [f32; AZIMUTHS] = std::array::from_fn(|index| {

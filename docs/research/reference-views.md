@@ -148,12 +148,16 @@ caveat in the Motion section, which is the same trap at a smaller size.
   so the width is clamped per camera and 12 is refused everywhere.
   What the owner still sees at 8 ("def not perfect") is the un-shrunk 0.36 deg disagreement, which
   stage 9's estimator owns and a width cannot reach.
-  WHAT THE POOLED FIELD DOES TO THIS LINE (2026-08-06, stage9.md 8): with a five-term field fitted
-  on the five flights that are not this one and composed with the same `seam=`, the `along deg`
-  column reads 0.0037 / 0.0031 / 0.0012 / 0.0014 at -150 / +0 / +60 / +150, against the
-  0.3381 / 0.3356 / 0.0820 / 0.0022 above, and the `+0` step rms falls 0.0687 to 0.0128. The
-  no-field column is main's number for number, band state and worst step included, which is that
-  change's own null. **That is not the picture's correction shrinking, it is the
+  WHAT A POOLED FIELD DID TO THIS LINE ON A BUILD THAT WAS WITHDRAWN (2026-08-06; read stage9.md 9
+  before quoting any of it). With a five-term field fitted on the five flights that are not this
+  one and COMPOSED INTO THE PICTURE, the `along deg` column read 0.0037 / 0.0031 / 0.0012 / 0.0014
+  at -150 / +0 / +60 / +150 against the 0.3381 / 0.3356 / 0.0820 / 0.0022 above, and the `+0` step
+  rms fell 0.0687 to 0.0128. **Nothing composes a field today**: the delivered-picture comparison
+  found the per-frame band had already taken this leftover out, and at the May-01 BAD crossing the
+  composition made the delivered axis about two view px worse. So those four numbers describe a
+  build that does not exist, and what they show is only where the correction MOVED to, not that
+  the picture improved. The no-field column is main's number for number, band state and worst step
+  included, and it is the column that still stands. **That is not the picture's correction shrinking, it is the
   correction moving**: this instrument measures what the BAND applies, and the band now reads
   through the table and applies what the table still leaves. Read a plateau from this line only
   together with whatever table the run was given.
@@ -294,13 +298,14 @@ caveat in the Motion section, which is the same trap at a smaller size.
   edge lives at. **THOSE TWO NUMBERS ARE AT THE OLD AIM** (`yaw=-60.70`) and do not compare with
   anything measured at the re-derived one: at `yaw=-66.00` this build with no field at all reads
   +0.86 and +1.12. Re-measure before quoting either set, and say which aim.
-  STATUS 2026-08-06, THE POOLED FIELD (stage9.md 8.4): with a five-term field fitted on the five
-  flights that are not this one, the 1 px excess goes +0.86 -> **+1.34 percent**, which crosses the
-  owner's ~1 percent bar, while 2 px is flat at +1.12 -> +1.13. It is geometry and not photometry -
-  the step in codes is unmoved, the control line 8 deg off on LENS 1's side moves with it while
-  lens 0's does not, and the change is not one-signed across views (the May wide view is flat and
-  the soil view improves) - but the pilot meets the picture and not the content-matched comparison,
-  so it is an owner decision. Evidence: .worktrees/stage7/scratch/stage8/evidence-zoom30.png
+  STATUS 2026-08-06, A POOLED FIELD ON A BUILD THAT WAS WITHDRAWN (read stage9.md 9 first). With a
+  five-term field COMPOSED INTO THE PICTURE, fitted on the five flights that are not this one, the
+  1 px excess went +0.86 -> **+1.34 percent**, crossing the owner's ~1 percent bar, while 2 px was
+  flat at +1.12 -> +1.13. It was geometry and not photometry - the step in codes unmoved, the
+  control line 8 deg off on LENS 1's side moving with it while lens 0's did not, and the change not
+  one-signed across views. **Nothing composes a field today** and this view reads its no-field
+  numbers, so the crossing of the bar is not a live defect; it is on the record because it is what
+  an applied field cost at a fine view, and the next attempt at one inherits it. Evidence: .worktrees/stage7/scratch/stage8/evidence-zoom30.png
 - 2026-08-01 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=630.763 yaw=95.00 pitch=0.00 fov=60.00 lock=0`
   The GEOMETRIC CONTROL, chosen by the instrument rather than by the owner: the azimuth his own gear
   crosses the seam at. `lock=0`, so this line means what it always did and was not re-derived. It reads a 1 px excess of +5.87 percent over the same content elsewhere, and

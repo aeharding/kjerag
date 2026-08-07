@@ -719,7 +719,13 @@ live, no keyframe UI ever.
   **THE NEW BINDING RULE**: any change that applies something at the seam must
   include a **delivered-app-path comparison against `main`** in its acceptance,
   not only the unbent instruments. The A/B protocol is part of the battery and
-  not only the owner's gate.
+  not only the owner's gate, and it has **two halves**
+  (`~/kjerag-ab/delivered.sh`): a **difference** half, the app photographed at
+  the view against the same binary run twice, which says whether two builds draw
+  the same picture and cannot say which is better; and a **quality** half,
+  `--bin step` and `--bin shear` with `seam=file` and the band live, which reads
+  the seam itself. One control pair does not bound a spread, and a capture only
+  counts if the fit landed before the shutter.
 
   **What ships.** The per-reading trim; `seam::along_kept`'s harvest guard,
   which refuses a sample whose own five terms compose to more than 1.2x the
@@ -734,8 +740,14 @@ live, no keyframe UI ever.
   spread at both May-01 views (2.275 codes mean against a 4.443 control at GOOD,
   7.343 against 6.740 at BAD) and outside it at the shimmer view (0.758 against
   0.105), where the trim moves that file's fit by +0.032 deg of roll, -0.079 of
-  pitch and -1.31 px of `cy`. **Which of those two fits is better in the picture
-  is not established**, and it is the live question this leaves open.
+  pitch and -1.31 px of `cy`. **And the trimmed fit is the better one in the delivered picture**, which the
+  quality half settles: step at the seam -21.19 -> **-18.89 view px**, the
+  band's own along-seam load 0.176 -> **0.159 deg** mean and 0.792 -> **0.498**
+  worst, and `--bin shear`'s residuals smaller at all four bands with the
+  steadiness unchanged, three runs each and deterministic; reproduced
+  independently at the registry's own step view at -21.97 -> -20.69 view px with
+  the band's load 0.227 -> 0.199 deg mean. A cleaner pose leaves less step at
+  the seam and less for the band to carry, and it does.
 
 - 2026-08-06 **No along-seam table is fitted: above the five terms the pass
   already applies, what is left is not a static function of azimuth this corpus

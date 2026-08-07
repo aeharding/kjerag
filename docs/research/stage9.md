@@ -763,25 +763,50 @@ necessary and it is **not sufficient**, and the reason is arithmetic:
 > differ by exactly **`T - fit(T)`**.
 
 `fit` is `Along::fit`: five terms, weighted by each direction's own confidence,
-shrunk by a ridge. It reproduces `T` only where it has evidence. Planting the
-real pooled field and fitting it back
-(`a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it`):
+shrunk by a ridge. It reproduces `T` only where it has evidence.
 
-| ring directions with evidence | `T - fit(T)` rms | worst |
-| ---: | ---: | ---: |
-| 128 of 128 | 0.0007 deg | 0.0011 deg |
-| 64 | 0.0080 | 0.0175 |
-| 48 | 0.0247 | 0.0514 |
-| **27**, which is what `--bin step` reports on real footage | **0.0333** | **0.0696** |
-| 16 | 0.0392 | 0.0759 |
+**Two fields, and the columns say which is which.** The first is the real pooled
+field this branch composed, as `--bin table field=` wrote it, 0.2735 deg rms
+composed - that is the one the delivered readings in 9.1 were taken through, and
+it is read out of a scratch file. The second is the plain five-term field of
+0.2163 deg rms that
+`a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it` plants, which
+needs no footage and is what `cargo test` keeps honest:
 
-0.0696 degrees at the BAD view's 16.3 view px per degree is **1.13 view px**,
-the size and the variability-with-azimuth of what was measured. **A session's
-ring is an arc**, because only the directions with content correlate; the table
-is a field over the whole circle; and where the ring has no evidence the fit is
-unconstrained, the ridge pulls it to zero, and the table's own value is
-delivered whole. That is why GOOD - where the band had evidence at the crossing
-azimuth - was unchanged and BAD was not.
+| ring directions with evidence | real field, rms | worst | test's field, rms | worst |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 of 128 | 0.0007 deg | 0.0011 | 0.0020 | 0.0037 |
+| 96 | - | - | 0.0127 | 0.0279 |
+| 64 | 0.0080 | 0.0175 | 0.0677 | 0.1403 |
+| 48 | 0.0247 | 0.0514 | 0.0676 | 0.1440 |
+| **27**, what `--bin step` reports on real footage | **0.0333** | **0.0696** | **0.0856** | **0.1710** |
+| 16 | 0.0392 | 0.0759 | 0.1319 | 0.2329 |
+
+At the BAD view's 16.3 view px per degree, 27 directions of evidence leave
+**1.13 view px** on the real field and **2.79** on the test's, so the test makes
+the point a fortiori. The delivered measurement in 9.1 read about two view px,
+which sits between them.
+
+**The sweep is not monotone in coverage.** On the test's field 64 and 48
+directions read 0.0677 and 0.0676 rms while their worst entries go 0.1403 to
+0.1440. What is left depends on where the arc sits against the field's own phase
+as well as on how wide it is, so neither column is a curve to read a threshold
+off; what they establish is the difference between a ring with evidence
+everywhere and a ring that is an arc.
+
+**And the derivation's linearity has one caveat.** `T + fit(L - T)` minus
+`fit(L)` is exactly `T - fit(T)` only if `fit` is the same linear operator in
+both arms. `Along::fit` weights each direction by its own `off_conf`, which is
+the smoothed correlation peak and therefore a function of the readings, so a
+table that moves where the correlation lands can move the weights too. Both
+columns above are computed at fixed weights. The delivered measurement of 9.1
+carries whatever the weights actually did, and it is the larger number.
+
+**A session's ring is an arc**, because only the directions with content
+correlate; the table is a field over the whole circle; and where the ring has no
+evidence the fit is unconstrained, the ridge pulls it to zero, and the table's
+own value is delivered whole. That is why GOOD - where the band had evidence at
+the crossing azimuth - was unchanged and BAD was not.
 
 **This binds any future use of the `Table` vehicle.** Reading through it is not
 enough on its own; what applies a table has to answer for `T - fit(T)` at the
@@ -829,6 +854,26 @@ only the owner's gate. Section 8's numbers were true in their domain; the domain
 was the wrong one for an applied claim, and no amount of held-out rigour inside
 it would have caught this.
 
+**And the comparison has two halves, because one of them is not enough.**
+`~/kjerag-ab/delivered.sh` runs both.
+
+1. **Difference.** The app, at the view, photographed, against the same binary
+   run twice. It says whether the two builds draw the same picture and how that
+   compares with a build's own run-to-run spread. It **cannot say which is
+   better**: it is a whole-window number dominated by whatever the two fits do
+   to the framing, and it says nothing about the seam. A cross-arm difference
+   under the control means "not resolved", never "identical" - one control pair
+   is one sample and does not bound the spread.
+2. **Quality.** `--bin step` and `--bin shear` with `seam=file` and **the band
+   live**. These read the seam itself in the delivered domain. It is the half
+   that answered this stage's own open question (9.5), and it is the half a
+   difference metric cannot stand in for.
+
+The capture in half 1 is only comparable if the fit **landed before the
+shutter**: an empty pool fits off the file and walks the correction in over a
+second, so a frame grabbed mid-walk is a picture of the walk. The script asserts
+the fit's own report line rather than trusting the settle.
+
 ### 9.5 What the restructured branch delivers
 
 The render path is now `main`'s: `Table::REST`, no read-through, no composition.
@@ -845,7 +890,29 @@ second settle, against the same binary run twice as the control:
 At the two May-01 views the branch is **inside the same binary's own run-to-run
 spread**. At the shimmer view it is outside it by about seven times, and the
 report line says why: on that file the trim moves the fit by +0.032 deg of roll,
--0.079 of pitch and -1.31 px of `cy`. **Which of those two fits is better in the
-delivered picture is not established here**, and the two fits' own residuals do
-not answer it because each is measured on its own reading set. That is the live
-question this PR leaves for the owner and the reviewer.
+-0.079 of pitch and -1.31 px of `cy`.
+
+**Which fit is better, answered in the delivered domain.** A whole-window
+difference cannot say, and that was this section's open question until the
+second half of the comparison was run: `--bin step` and `--bin shear` with
+`seam=file` and the band live, both builds. Three signals, all one way
+(the adversarial reviewer's runs, three each and deterministic):
+
+| delivered, band live, `seam=file` | main | with the trim |
+| --- | ---: | ---: |
+| step at the seam, view px | -21.19 | **-18.89** |
+| the band's along-seam load, mean deg | 0.176 | **0.159** |
+| the same, worst deg | 0.792 | **0.498** |
+
+and `--bin shear`'s residuals are smaller at all four bands with the steadiness
+unchanged. Reproduced here independently at the registry's own step view
+(`VID_20260714_193252_00_006.insv time=2.836 yaw=111.83 pitch=4.12 fov=20.00
+lock=1`), which is a different aim and gives different absolute numbers in the
+same direction: step at the seam **-21.97 to -20.69 view px**, its along-seam
+part -0.439 to -0.384 deg, and the band's along-seam load **0.227 to 0.199 deg**
+mean and **0.613 to 0.538** worst, over the same 26 directions of evidence.
+
+**The trimmed fit is the better one in the picture**: it leaves less step at the
+seam and it leaves the per-frame band less to carry, which is what a cleaner
+pose should do. That is the delivered-domain evidence for the one thing this PR
+still applies, and it is the half a difference metric could not have supplied.

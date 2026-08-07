@@ -914,12 +914,17 @@ pub struct Harvest {
     /// map. Lower is a fit that flattened more of what it was given.
     pub residual_deg: f64,
     /// What this capture read along the seam above its factory calibration, as
-    /// five terms in degrees ([`along_terms`]), or `None` where the ring could
-    /// not pin them.
+    /// five terms in degrees ([`along_kept`]), or `None` where the ring could
+    /// not pin them or the guard refused them.
     ///
     /// Travels with the fit because it is the same measurement: one ring, read
-    /// once, answering two questions. Pooled beside the fit and composed with
-    /// it at open ([`along_table`]).
+    /// once, answering two questions. **The second answer is stored and never
+    /// drawn with** (docs/research/stage9.md 9): composed into the picture it
+    /// bought nothing where the per-frame band already holds this axis and cost
+    /// about two view pixels where the band's ring had no evidence. Whatever
+    /// reads it next owes a delivered-app-path comparison against `main` and an
+    /// answer for `T - fit(T)`; nothing measured on the unbent projection is
+    /// either.
     pub along: Option<[f64; 5]>,
 }
 
@@ -1557,17 +1562,23 @@ pub struct Plan {
     /// see would be asked for twice. [`Table::REST`] on a camera nothing has
     /// been pooled for, which is every capture the first time it plays.
     ///
-    /// **The app leaves it at rest even on a camera that has a table**, and
-    /// that is deliberate (stage 9 layer 2). What the app pools is
-    /// [`along_terms`], a reading of the camera in the frame the camera wrote,
-    /// and it is the same quantity on every capture only because every ring is
-    /// read through the factory calibration with nothing applied. Read through
-    /// the table instead, each session's answer would be relative to whatever
-    /// had been pooled by then, which is the one thing a pool cannot average.
-    /// The double correction this field exists to prevent is prevented where
-    /// it is actually live: the band's own measurement pass reads through the
-    /// table every frame (`band.rs`, `measure`), so what the band fits and
-    /// applies on top is what the table still leaves.
+    /// **Nothing in the app ever sets it to anything else** (stage 9 layer 2,
+    /// docs/research/stage9.md 9): no table is composed, `Table::REST` ships,
+    /// and this argument is here for whoever changes that.
+    ///
+    /// What the app pools is [`along_kept`], a reading of the camera in the
+    /// frame the camera wrote, and it is the same quantity on every capture
+    /// only because every ring is read through the factory calibration with
+    /// nothing applied. Read a ring through an applied table instead and each
+    /// session's answer would be relative to whatever had been pooled by then,
+    /// which is the one thing a pool cannot average. So a stage that applies a
+    /// table wants this at `REST` here and its double-correction answered on
+    /// the GPU rather than on this ring - **and that turns out to be the hard
+    /// half**. The compute pass was made to read through the table for exactly
+    /// that, and it was not enough: the band's fit reproduces a table only
+    /// where its ring has evidence, so `T - fit(T)` is delivered whole
+    /// everywhere else (stage9.md 9.2). Both the read-through and the table it
+    /// served are gone with the applied field.
     pub table: super::band::Table,
 }
 

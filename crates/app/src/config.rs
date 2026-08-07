@@ -128,16 +128,32 @@ pub struct SeamSample {
     pub patches: usize,
     pub residual_deg: f64,
     /// What the same ring read along the seam above the calibration the camera
-    /// wrote, as the five terms the pass applies, in degrees
-    /// ([`kjerag_render::seam::along_terms`]).
+    /// wrote, as the five terms `band::Along` is written in, in degrees
+    /// ([`kjerag_render::seam::along_kept`]).
     ///
-    /// **Not a leftover**, which is what makes it worth storing: no pose has
-    /// been taken off it, so it is the same quantity on every capture of this
-    /// camera whatever the pool's answer happens to be that day, and the two
-    /// are composed at open rather than stored composed.
+    /// **NOTHING READS THIS AND NOTHING DRAWS WITH IT** (issue #103, stage 9
+    /// layer 2, docs/research/stage9.md 9). It was composed into the picture
+    /// and withdrawn: it improves the **unbent** projection every seam
+    /// instrument in this repository measures, and in the **delivered** picture
+    /// the per-frame band has already taken the same leftover out, so applying
+    /// it bought nothing at two reference views and cost about two view pixels
+    /// at a third. The owner, blind, said "same, both bad".
     ///
-    /// `None` on a ring that could not pin five terms, which costs the pool
-    /// this sample's field and keeps its pose.
+    /// It accumulates anyway, because a pool fills over months and the one
+    /// regime that finding does not cover is the first frames of a session,
+    /// before the band has any evidence. **Anything that reads this has to
+    /// clear a delivered-app-path comparison against `main` before it draws
+    /// with it**, and it has `T - fit(T)` to answer for at the directions a
+    /// session never reads (stage9.md 9.2). No number measured on the
+    /// projection is that comparison.
+    ///
+    /// **Not a leftover**, which is what makes it worth storing at all: no pose
+    /// has been taken off it, so it is the same quantity on every capture of
+    /// this camera whatever the pool's answer happens to be that day.
+    ///
+    /// `None` on a ring that could not pin five terms, or on one the harvest
+    /// guard refused, which costs the pool this sample's field and keeps its
+    /// pose.
     pub along_deg: Option<[f64; 5]>,
 }
 
