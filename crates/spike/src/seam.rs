@@ -54,7 +54,7 @@ impl Seam {
         match value {
             "factory" => Ok(Self::Factory),
             "file" => Ok(Self::File),
-            knobs => Ok(Self::Stored(fit_arg(knobs, input)?)),
+            knobs => Ok(Self::Stored(fit_arg(knobs, Some(input))?)),
         }
     }
 
@@ -66,11 +66,21 @@ impl Seam {
     /// only place that pose is written down. `File` says nothing here because
     /// `Scene::fit_seam` prints its own fit when it lands.
     pub fn hold(self, scene: &Scene) {
+        self.hold_as("seam", scene);
+    }
+
+    /// The same, under a name of the caller's choosing.
+    ///
+    /// `proof` draws one view through two of these in a row, and two lines
+    /// both saying `seam:` say which poses were drawn and not which drew
+    /// which, which is the whole purpose of printing them.
+    pub fn hold_as(self, what: &str, scene: &Scene) {
+        let label = format!("{what}:");
         match self {
-            Self::Factory => println!("seam:   factory calibration, no correction"),
+            Self::Factory => println!("{label:<8}factory calibration, no correction"),
             Self::File => scene.fit_seam(true),
             Self::Stored(fit) => {
-                println!("seam:   {}", knobs_of(fit));
+                println!("{label:<8}{}", knobs_of(fit));
                 scene.use_seam(fit);
             }
         }
@@ -82,13 +92,22 @@ impl Seam {
 ///
 /// `table` takes this one rather than [`Seam`], because one pose for every
 /// capture is that instrument's whole premise and it has no `factory` or
-/// `file` to offer.
-pub fn fit_arg(value: &str, input: &Path) -> Fallible<SeamFit> {
+/// `file` to offer. It is also the one instrument that can be run with no
+/// capture at all (`read=` and `plant=`), which is why the input is an
+/// `Option` and why only the `pool` arm looks at it: knobs written out are
+/// answerable with no file, and asking one for a file it does not need was a
+/// refusal this argument invented.
+pub fn fit_arg(value: &str, input: Option<&Path>) -> Fallible<SeamFit> {
     match value {
-        "pool" => pooled(input),
+        "pool" => pooled(input.ok_or(NEEDS_A_CAPTURE)?),
         knobs => knobs_fit(knobs),
     }
 }
+
+/// `seam=pool` is filed under the camera a capture names, so with no capture
+/// on the line there is nothing to look it up by.
+const NEEDS_A_CAPTURE: &str = "seam=pool is read out of the saved state under the camera a \
+     capture names, so it needs a capture on the line to name one";
 
 /// What the app itself draws this file's camera with: `SeamPool::answer` over
 /// the pool this box has watched into its own saved state.
@@ -164,6 +183,12 @@ mod tests {
 
     /// The owner's own pool, as `seam_pool` holds it on 2026-08-06: three
     /// distinct fits over five samples, two of the three stored twice.
+    ///
+    /// The same five, to the same digits, as the fixture in
+    /// `crates/app/src/config.rs`. Two copies because the crates cannot share
+    /// a `#[cfg(test)]` fixture and the app is not going to ship one for the
+    /// instruments; both ends assert a string off it, and those strings are
+    /// what would catch them drifting apart.
     const OWNERS_CAMERA: u64 = 0xd8a3_9338_9b7b_8639;
     const OWNERS_FITS: [(SeamFit, usize, f64, usize); 3] = [
         (
@@ -222,42 +247,17 @@ mod tests {
         state
     }
 
-    /// The middle of each knob taken on its own, which is what the registry
-    /// quoted and what `SeamPool::answer` stopped shipping on 2026-08-05.
-    /// Computed here rather than written out so the fixture shows the
-    /// combination that rule produces.
-    fn knobwise_median() -> SeamFit {
-        let median = |of: fn(&SeamFit) -> f64| {
-            let mut values: Vec<f64> = OWNERS_FITS
-                .iter()
-                .flat_map(|(fit, _, _, copies)| std::iter::repeat_n(of(fit), *copies))
-                .collect();
-            values.sort_by(f64::total_cmp);
-            values[values.len() / 2]
-        };
-        SeamFit {
-            roll_deg: median(|fit| fit.roll_deg),
-            yaw_deg: median(|fit| fit.yaw_deg),
-            pitch_deg: median(|fit| fit.pitch_deg),
-            cx_px: median(|fit| fit.cx_px),
-            cy_px: median(|fit| fit.cy_px),
-        }
-    }
-
-    /// The defect `seam=pool` exists for, at the size it was found at: the
-    /// knob-by-knob middle of this pool is a fit nobody took, and the pool
-    /// answers with one somebody did.
+    /// What `seam=pool` hands an instrument off this pool: a fit some capture
+    /// took, and specifically not the knob-by-knob middle two acceptance lines
+    /// quoted until 2026-08-07.
+    ///
+    /// That the middle of this pool IS that string is asserted where the rule
+    /// it came from lives, in `crates/app/src/config.rs`
+    /// (`the_pooled_answer_is_a_fit_some_capture_actually_took`). This end
+    /// asserts what the reader returns, which is the other half.
     #[test]
     fn the_pool_answers_with_a_member_and_not_with_a_knobwise_middle() {
         let members: Vec<SeamFit> = OWNERS_FITS.iter().map(|(fit, ..)| *fit).collect();
-        let median = knobwise_median();
-        assert_eq!(
-            knobs_of(median),
-            "roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91",
-            "the fixture is not the pool the registry's string came off",
-        );
-        assert!(!members.contains(&median), "{median:?} is somebody's fit");
-
         let answer = from_pool(&owners_pool(), OWNERS_CAMERA).unwrap();
         assert!(members.contains(&answer), "{answer:?} is nobody's fit");
         assert_eq!(

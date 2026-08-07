@@ -201,15 +201,17 @@ struct Both {
 
 impl Both {
     fn open(gpu: &Gpu, options: &Options) -> Fallible<Self> {
-        let opened = |seam: &Seam| -> Fallible<(Scene, ScenePipeline)> {
+        // Named, not `seam:` twice: this instrument's whole output is a pair
+        // and a reader has to be able to tell which pose drew which arm.
+        let opened = |what: &str, seam: &Seam| -> Fallible<(Scene, ScenePipeline)> {
             let scene = Scene::still(&options.input, options.at)?;
-            seam.hold(&scene);
+            seam.hold_as(what, &scene);
             scene.set_horizon(options.horizon);
             Ok((scene, ScenePipeline::new(&gpu.device, FORMAT)))
         };
         Ok(Self {
-            before: opened(&options.before)?,
-            after: opened(&options.after)?,
+            before: opened("before", &options.before)?,
+            after: opened("after", &options.after)?,
         })
     }
 

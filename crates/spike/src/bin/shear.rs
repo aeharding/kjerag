@@ -1377,8 +1377,10 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        // After the loop, because `seam=pool` is resolved against the file and
-        // the file may be named anywhere on the line.
+        // Deferred out of the loop because `seam=pool` is resolved against the
+        // file and the file may be named anywhere on the line, but resolved
+        // before the rest of the checks so a bad `seam=` is still the first
+        // thing a bad line is told about.
         options.seam = Seam::parse(&seam, &options.input)?;
         let (rows, cols) = options.mode.patch();
         if options.size as usize <= rows.max(cols) {

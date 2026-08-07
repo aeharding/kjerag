@@ -1048,9 +1048,10 @@ impl Options {
         // After the loop, because `seam=pool` is resolved against a capture
         // and the captures may be named anywhere on the line. The first is
         // enough: the pool is keyed by camera and this instrument is a
-        // per-camera reading already.
+        // per-camera reading already. `read=` and `plant=` runs name no
+        // capture at all, and `fit_arg` only wants one for `pool`.
         if let Some(value) = seam {
-            let input = options.inputs.first().ok_or(USAGE_SEAM_POOL)?;
+            let input = options.inputs.first().map(PathBuf::as_path);
             options.seam = Some(fit_arg(&value, input)?);
         }
         Ok(options)
@@ -1081,6 +1082,3 @@ const USAGE_SEAM: &str = "this instrument needs one stored fit for every capture
 capture's own frames absorbs that scene into the pose, and two such fits do not leave the same \
 quantity behind. seam=pool, which is the one the app draws with, or \
 seam=roll:..,yaw:..,pitch:..,cx:..,cy:..";
-
-const USAGE_SEAM_POOL: &str = "seam=pool is read out of the saved state under the camera a capture \
-names, so it needs a capture on the line to name one";

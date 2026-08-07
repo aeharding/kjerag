@@ -113,11 +113,14 @@ caveat in the Motion section, which is the same trap at a smaller size.
   knob-by-knob median of the owner's five-sample pool and is no member of it - roll and cx off one
   fit, yaw off a second, pitch and cy off a third - which is exactly the combination
   `SeamPool::answer` was changed to stop shipping on 2026-08-05 (seam-two-axis 4). **The app has
-  not drawn it since.** The audit that found it measured 0.394 deg peak to peak between the two
-  poses along the seam ring and 0.294 across, 12.4 and 4.9 source px, which is larger than some of
-  the numbers this line reports; those two figures are that audit's and have not been re-taken
-  here. **Every reading above was measured through the old string and none has been re-read at the
-  drawn pose.** They stand as a record of what was measured, not as a claim about what the app
+  not drawn it since.** How far apart the two poses put the picture, re-derived on #168's review by
+  sweeping `seam::mapped` and `seam::moved` round the ring over this file's own two lenses under
+  each pose: **0.397 deg peak to peak along the seam and 0.290 across**, the along figure being
+  12.4 source px. That is larger than several of the numbers this line reports. The first audit
+  put the same two at 0.394 and 0.294 and also quoted 4.9 source px across, which the re-derivation
+  could not reproduce by any obvious reduction; the across figure is left in degrees for that
+  reason. **Every reading above was measured through the old string and none has been re-read at
+  the drawn pose.** They stand as a record of what was measured, not as a claim about what the app
   draws today; re-reading them is a job of its own.
   CAVEAT, THE HORIZON: everything above except the null, the plant and the band's own state is a
   reading about where the seam lands in THIS view, and under `lock=1` that is decided by the

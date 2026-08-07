@@ -927,6 +927,11 @@ impl Options {
         if out.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
+        // Deferred out of the loop because `seam=pool` is resolved against the
+        // file and the file may be named anywhere on the line, but resolved
+        // before the rest of the checks so a bad `seam=` is still the first
+        // thing a bad line is told about.
+        out.seam = Seam::parse(&seam, &out.input)?;
         if out.bins == 0 {
             return Err("bins= is how many arc bins the crossing is cut into".into());
         }
@@ -943,9 +948,6 @@ impl Options {
         if out.perp_reference.is_some() && out.perp_gate.is_none() {
             return Err("perpref= is the value perpgate= judges against, and that is off".into());
         }
-        // After the loop, because `seam=pool` is resolved against the file and
-        // the file may be named anywhere on the line.
-        out.seam = Seam::parse(&seam, &out.input)?;
         Ok(out)
     }
 
