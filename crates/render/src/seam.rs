@@ -172,6 +172,27 @@ pub struct Probe {
     /// How much picture a patch needs, in 8-bit codes of standard deviation.
     /// Flat sky correlates with anything.
     pub contrast: f64,
+    /// How long a pass rests for every second of work it does, so that a long
+    /// one leaves the picture room to be drawn.
+    ///
+    /// **Measured, and it is not a nicety.** This box is an APU: the CPU and
+    /// the GPU share one memory bus, and one direction's patch pair is
+    /// thousands of scattered taps into two 3840x3840 luma planes. Reading a
+    /// session's own across-seam field flat out takes `--bin playback` from 2
+    /// dropped frames in 150 seconds to 61 in 60, its worst lateness from 27
+    /// ms to 208, and the render pass's own cost from 7.9 ms a redraw to 13.3.
+    /// Smooth playback beats features (AGENTS.md), so a pass nobody is waiting
+    /// for gets out of the way.
+    ///
+    /// **Per frame and not per direction, which was tried and is worse**: at
+    /// five seconds of rest per second of work, sleeping between directions
+    /// read 97 dropped frames in 240 seconds against 47 for the same ratio
+    /// slept between frames. A sleep of a couple of milliseconds is mostly a
+    /// wake-up, and thousands of them a second cost more than they buy.
+    ///
+    /// Zero for the pose fit, which is six frames and which the picture IS
+    /// waiting for.
+    pub rest: f64,
 }
 
 impl Default for Probe {
@@ -184,6 +205,7 @@ impl Default for Probe {
             across: 4.0,
             keep: 0.80,
             contrast: 6.0,
+            rest: 0.0,
         }
     }
 }
@@ -304,7 +326,7 @@ fn sample(
     step: f64,
 ) -> Grid {
     let mut taps = Vec::with_capacity(((2 * half.0 + 1) * (2 * half.1 + 1)) as usize);
-    let moved = lens == 1 && !reframe.table().is_rest();
+    let moved = lens == 1 && !(reframe.table().is_rest() && reframe.epi().is_rest());
     for i in -half.0..=half.0 {
         for j in -half.1..=half.1 {
             let (a, b) = (i as f64 * step, j as f64 * step);
@@ -585,6 +607,30 @@ pub fn read_ring_centred(
     let patch = (half, half);
     ring.iter()
         .map(|at| {
+            one(
+                reframe, planes, at, probe, centre, refused, patch, half, step, search,
+            )
+        })
+        .collect()
+}
+
+/// One direction of the ring, which is the unit [`read_ring_centred`] rests
+/// between.
+#[allow(clippy::too_many_arguments)]
+fn one(
+    reframe: &Reframe,
+    planes: &[Plane],
+    at: &Where,
+    probe: &Probe,
+    centre: isize,
+    refused: &mut Refused,
+    patch: (isize, isize),
+    half: isize,
+    step: f64,
+    search: (isize, isize),
+) -> Option<Found> {
+    {
+        {
             let front = sample(reframe, planes.first()?, 0, at, patch, step);
             if !front.whole(0, 0, patch) {
                 refused.outside += 1;
@@ -629,8 +675,8 @@ pub fn read_ring_centred(
                 r: peak.r,
                 contrast: front.contrast(),
             })
-        })
-        .collect()
+        }
+    }
 }
 
 // ------------------------------------------------------------ the knobs
@@ -1457,6 +1503,533 @@ pub fn along_table(
     super::band::Table::plausible(entries)
 }
 
+// ------------------------------------------------- across the seam, per session
+
+/// What one session read **across** its own seam, direction by direction of
+/// the band's ring, in degrees through the factory map, and how many moments
+/// are behind each (issue #103, the epi fork; docs/research/stage9.md 11).
+///
+/// **The second half is load-bearing.** The term applied is this reading
+/// **plus** the drawn pose's own across-seam displacement, and that
+/// displacement reaches two and a half degrees on the owner's camera, so a
+/// direction with no reading is not a direction that draws nothing: it is a
+/// direction that would draw the whole pose arm, which is the arm measured to
+/// take the band's eyes out (stage9.md 10.7). What makes an unread direction
+/// identity is [`epi_term`] zeroing the composed term there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    /// Degrees, read through the factory map, one per direction of the ring.
+    pub read: [f64; super::band::AZIMUTHS],
+    /// How many moments are behind each, and zero where none is.
+    pub moments: [usize; super::band::AZIMUTHS],
+    /// How many moments the far gate refused, and how many directions the
+    /// shape gate did, for the line the app prints.
+    pub near: usize,
+    pub wild: usize,
+}
+
+impl Session {
+    /// How many directions of the ring this session actually read.
+    pub fn covered(&self) -> usize {
+        self.moments.iter().filter(|count| **count > 0).count()
+    }
+
+    /// What this harvest read, for the report line.
+    pub fn describe(&self, seconds: f64) -> String {
+        format!(
+            "{} of {} directions, {} moment(s) refused as near content, {} direction(s) as \
+             the wrong feature, {seconds:.1} s",
+            self.covered(),
+            super::band::AZIMUTHS,
+            self.near,
+            self.wild,
+        )
+    }
+}
+
+/// How many surviving moments a direction needs before its value is believed.
+///
+/// Below it the direction is **identity** - zero, the picture unchanged - and
+/// not its neighbour's value. A field with holes filled from next door is the
+/// mechanism that made stage 5 scallop and stage 8 stripe, and it is why stage
+/// 9's rules say an unmeasured direction is zero.
+const EPI_MOMENTS_NEEDED: usize = 3;
+
+/// How near a thing has to be before a moment that swung to it is not this
+/// camera, in metres.
+///
+/// **On the excursion and not on the reading**, which is the whole of the
+/// gate. Parallax on this axis is one-signed - [`super::band::Cell::metres`]
+/// is `reach_m / disparity` and exists only where the disparity is positive,
+/// because a negative one is not a distance - so near content can only push a
+/// reading one way. A first pass takes each direction's own middle; a moment
+/// whose excursion above that middle implies something nearer than this is
+/// dropped; the survivors are reduced again.
+///
+/// Applied to the reading itself it is nonsense, and that is measured: the
+/// factory calibration's own across-seam error reaches two and a half degrees
+/// and is positive over half the ring, so an absolute gate at this distance
+/// throws away 1829 moments of 3205 on the May-01 flight and calls a
+/// calibration a hedge. On the excursion it drops 720 (stage9.md 11.1).
+///
+/// **What it cannot do**, plainly: this camera's own term and a far object's
+/// parallax are the same sign on the same axis, and a session whose near
+/// content never moves would have that content in its middle. What this
+/// removes is what *wanders* nearby - the wing, the lines, the prop cage
+/// swinging through a direction.
+const EPI_FAR_M: f64 = 60.0;
+
+/// How far, in directions, the composed term fades to zero either side of the
+/// last direction that has evidence.
+///
+/// A taper and not a step: a term that switched off between neighbouring cells
+/// would put that step in the picture, which is the argument
+/// [`super::band::Table::between`] interpolates for. Nothing is filled from a
+/// neighbour's value - a tapered direction gets a fraction of the term at the
+/// nearest supported direction on the way to zero, and zero is where it
+/// arrives.
+const EPI_TAPER_CELLS: usize = 4;
+
+/// The composed term over the arc a session actually read, in radians, and
+/// zero outside it with [`EPI_TAPER_CELLS`] of raised cosine in between.
+fn supported(
+    composed: &[f64; super::band::AZIMUTHS],
+    moments: &[usize; super::band::AZIMUTHS],
+) -> [f32; super::band::AZIMUTHS] {
+    let count = super::band::AZIMUTHS;
+    std::array::from_fn(|index| {
+        if moments[index] > 0 {
+            return composed[index].to_radians() as f32;
+        }
+        let Some(reach) = (1..=EPI_TAPER_CELLS).find(|step| {
+            moments[(index + count - step) % count] > 0 || moments[(index + step) % count] > 0
+        }) else {
+            return 0.0;
+        };
+        let (low, high) = ((index + count - reach) % count, (index + reach) % count);
+        let near = match moments[low] > 0 {
+            true => composed[low],
+            false => composed[high],
+        };
+        let along = reach as f64 / (EPI_TAPER_CELLS + 1) as f64;
+        (near * 0.5 * (1.0 + (std::f64::consts::PI * along).cos())).to_radians() as f32
+    })
+}
+
+/// How large an entry of [`epi_term`] may be before the whole term is refused,
+/// in radians.
+///
+/// **A rail and not the guard**, and the difference is the finding this stage
+/// ends on. It was one degree, chosen because a 2.5 degree term took the band
+/// from 96 of 128 directions with evidence down to 64. That term was both
+/// large and WRONG, and nothing separated the two until the gain sweep in
+/// docs/research/stage9.md 12 did:
+///
+/// | at the same residual | term 0.935 deg | term 2.806 deg |
+/// | --- | ---: | ---: |
+/// | directions with evidence | **79 of 128** | **95 of 128** |
+///
+/// Three times the displacement, the same residual, and the larger one keeps
+/// sixteen more directions. What blinds the band is the **residual** it is
+/// left to find leaving its own `FAR_DEG..NEAR_DEG` search window, -1.2 to
+/// +2.6 degrees, and that window's asymmetry is why a negative residual blinds
+/// at half the magnitude a positive one does.
+///
+/// So this is the largest term that sweep measured to leave the band's
+/// evidence intact, and what it catches is a field that is not a calibration
+/// at all. The quantity that decides safety is `|T - truth|`, which nothing
+/// knows before the band has measured through the term, and what guards it is
+/// [`walked`]: the term goes on in steps and stops when this capture's own
+/// seam says a step made things worse.
+const EPI_LIMIT_RAD: f32 = 2.8 * std::f32::consts::PI / 180.0;
+
+/// The plan a session's own across-seam field is read on: this capture's own
+/// ring, at the band's own 128 directions so that nothing has to resample
+/// anything.
+pub fn epi_plan(places: usize, frames: usize) -> Plan {
+    Plan {
+        places,
+        frames,
+        probe: Probe {
+            patches: super::band::AZIMUTHS,
+            rest: EPI_REST,
+            ..Probe::default()
+        },
+        ..Plan::default()
+    }
+}
+
+/// How long the harvest and each step of its walk rest for every second they
+/// work ([`Plan::rest`]).
+pub const EPI_REST: f64 = 2.0;
+
+/// How much of the file the app reads to learn its own across-seam field.
+///
+/// **Sampled over the whole capture and not over its opening**, which is
+/// [`Plan`]'s own rule: places are spread across the duration, so what a
+/// harvest at open answers is the session and not its first minute.
+///
+/// Six by four is where the depth curve flattens against what it costs. On the
+/// May-01 flight, one pass each: 3x2 reads 10 of 128 directions in 2.2 s, 6x4
+/// reads 71 in 6.9, 8x6 reads 77 in 15.9, 12x6 reads 80 in 24.5 and 24x6 reads
+/// 88 in 52.4. The rule this was chosen by, before any delivered picture was
+/// looked at, is the cheapest plan that reads more than half the ring.
+///
+/// **[`walked`] reads the same plan, and a thinner one was measured to be a
+/// worse instrument rather than a cheaper one.** At 3 places by 3 frames each
+/// step of the April-10 walk read 27 of the 55 directions its field claims,
+/// and the 27 that correlate on nine frames are the easy ones: the residual
+/// they show is a different quantity from the one the field is about, and it
+/// read 0.189 degrees where the full plan reads 0.518. On that measurement the
+/// walk refused a field the same walk accepts whole at this depth, taking the
+/// April flight's delivered ramp from 1.68 view px to 1.68. A guard that
+/// refuses a good field because its own instrument is thin is the trap the
+/// gain plants exist to catch, one level up.
+pub const EPI_PLACES: usize = 6;
+pub const EPI_FRAMES: usize = 4;
+
+/// What this session reads across its own seam, far-gated, one entry per
+/// direction of the band's ring, or `None` where nothing survived.
+///
+/// **Read through the factory map**, which is the same rule the along-seam
+/// pool follows and for the same reason ([`along_terms`]): the pose a camera
+/// is drawn with moves as its pool grows, so a leftover is one quantity only
+/// under one map, and the map every capture is read through for the life of
+/// the camera is the one the camera wrote. The pose's own across-seam
+/// displacement is added back by [`epi_term`], from whichever pose the picture
+/// is actually drawn with.
+pub fn harvest(files: &[PathBuf], lenses: &[Lens], frame: Size, plan: &Plan) -> Fallible<Session> {
+    let moments = moments(files, lenses, frame, plan)?;
+    if moments.len() != super::band::AZIMUTHS {
+        return Err(format!(
+            "the ring came back {} long, not {}",
+            moments.len(),
+            super::band::AZIMUTHS,
+        )
+        .into());
+    }
+    let baseline = super::band::baseline(lenses);
+    let mut session = Session {
+        read: [0.0; super::band::AZIMUTHS],
+        moments: [0; super::band::AZIMUTHS],
+        near: 0,
+        wild: 0,
+    };
+    for (index, (_, seen)) in moments.iter().enumerate() {
+        let all: Vec<f64> = seen.iter().map(|axes| axes[1]).collect();
+        if all.len() < EPI_MOMENTS_NEEDED {
+            continue;
+        }
+        // What a near thing at the gate's own distance would add here, by
+        // `Cell::metres`' arithmetic run backwards on this capture's baseline.
+        let reach =
+            (f64::from(super::band::Ring::cell(index, baseline).reach_m) / EPI_FAR_M).to_degrees();
+        let (middle, _) = tolerated(&all, GATE_MADS, GATE_FLOOR_DEG);
+        let far: Vec<f64> = all
+            .into_iter()
+            .filter(|across| {
+                let keep = across - middle <= reach;
+                session.near += usize::from(!keep);
+                keep
+            })
+            .collect();
+        if far.len() < EPI_MOMENTS_NEEDED {
+            continue;
+        }
+        // The same reduction one level in that every other ring here takes:
+        // the middle of the population, and the moments that agree with it.
+        let (middle, tolerance) = tolerated(&far, GATE_MADS, GATE_FLOOR_DEG);
+        let kept: Vec<f64> = far
+            .into_iter()
+            .filter(|value| (value - middle).abs() <= tolerance)
+            .collect();
+        if kept.len() < EPI_MOMENTS_NEEDED {
+            continue;
+        }
+        session.read[index] = kept.iter().sum::<f64>() / kept.len() as f64;
+        session.moments[index] = kept.len();
+    }
+    for index in wild(&session) {
+        session.read[index] = 0.0;
+        session.moments[index] = 0;
+        session.wild += 1;
+    }
+    match session.covered() {
+        0 => Err("no direction of this capture's seam survived the far gate".into()),
+        _ => Ok(session),
+    }
+}
+
+/// Which directions do not belong to the ring's own five-term shape.
+///
+/// The factory across-seam error is pose-order on this camera - a constant, a
+/// one-cycle and a two-cycle term, the same basis [`super::band::Along`] is
+/// written in - so a reading that sits far off a least-squares fit of those
+/// five over the whole ring is a correlation that locked onto something else.
+/// Measured on the May-01 flight: two directions read -1.86 degrees where
+/// every neighbour and every other flight reads +2.36.
+///
+/// **A detector and not a smoother.** What survives keeps its own value,
+/// including whatever it says above pose order, which is the entire thing a
+/// per-session field exists to carry. [`tolerated`]'s rule again, one level
+/// out, with a floor wide enough that real structure above pose order survives
+/// it.
+fn wild(session: &Session) -> Vec<usize> {
+    let phi = |index: usize| index as f64 / super::band::AZIMUTHS as f64 * std::f64::consts::TAU;
+    let covered = || (0..super::band::AZIMUTHS).filter(|index| session.moments[*index] > 0);
+    let rows: Vec<(Vec<f64>, f64)> = covered()
+        .map(|index| (super::band::basis(phi(index)).to_vec(), session.read[index]))
+        .collect();
+    let Some(fit) = least_squares(&rows) else {
+        return Vec::new();
+    };
+    let left = |index: usize| {
+        let basis = super::band::basis(phi(index));
+        session.read[index]
+            - (0..5)
+                .map(|term| basis[term] * fit.params[term])
+                .sum::<f64>()
+    };
+    let all: Vec<f64> = covered().map(left).collect();
+    let (middle, tolerance) = tolerated(&all, GATE_MADS, WILD_FLOOR_DEG);
+    covered()
+        .filter(|index| (left(*index) - middle).abs() > tolerance)
+        .collect()
+}
+
+/// How far a direction may sit off the ring's own five-term shape before it is
+/// a wrong feature rather than a camera, in degrees, however tight the rest of
+/// the ring is.
+///
+/// [`GATE_FLOOR_DEG`]'s argument at the ring's scale rather than one
+/// direction's: what is being refused here is a correlation that found
+/// something else, and half a degree is well above anything this axis carries
+/// above pose order.
+const WILD_FLOOR_DEG: f64 = 0.50;
+
+/// What the two lenses still disagree by **across** the seam at each direction
+/// under the pose the picture is drawn with, in radians, or `None` where that
+/// is not a calibration.
+///
+/// Two terms, and the split is the whole idea:
+///
+/// - the **pose's own across-seam displacement**, [`moved`]'s second component
+///   between the factory calibration and `fit`. Pure geometry from the five
+///   knobs, no reading in it, and it is the larger: the five-knob fit is made
+///   to null the along-seam axis and nothing in it asks what it does to the
+///   other one, which on the owner's camera reaches 2.5 degrees.
+/// - **this session's own reading**, which is what the same camera's ring says
+///   through the map the camera wrote ([`harvest`]).
+///
+/// Their sum is what the band reads at that direction and applies as a bend
+/// ramped across the handover. Applied instead to lens 1's whole picture it is
+/// the same disagreement carried by a displacement rather than by a shear,
+/// which is what removes it from far content.
+///
+/// **Whole support or nothing**: a term over [`EPI_LIMIT_RAD`] is refused
+/// entire rather than clamped, because a clamped field is a different field
+/// from the one that was measured and nothing measured that one.
+///
+/// This is the whole of what the session read. How much of it the picture
+/// draws is [`walked`]'s answer, applied with [`part_of`], and the two are
+/// separate because the term is linear in that fraction: composing it costs
+/// 128 projections and scaling it costs 128 multiplies, so a walk in progress
+/// composes once and scales per redraw.
+pub fn epi_term(
+    field: &Session,
+    fit: SeamFit,
+    lenses: &[Lens],
+    frame: Size,
+) -> Option<super::band::Table> {
+    let base = mapped(lenses, frame);
+    let corrected = mapped(&fit.applied(lenses), frame);
+    let ring = ring(super::band::AZIMUTHS);
+    let mut composed = [0.0f64; super::band::AZIMUTHS];
+    for (index, at) in ring.iter().enumerate() {
+        let shift = moved(&base, &corrected, 1, at)?[1];
+        composed[index] = shift + field.read[index];
+    }
+    // Identity where the session read nothing, and a taper into it. The WHOLE
+    // composed term goes to zero there and not just its reading half: with the
+    // reading missing what is left is the pose's own displacement, which is
+    // the arm measured to take the band's eyes out.
+    let entries = supported(&composed, &field.moments);
+    if !entries.iter().all(|entry| entry.is_finite()) {
+        return None;
+    }
+    let worst = entries.iter().fold(0.0f32, |worst, e| worst.max(e.abs()));
+    if worst > EPI_LIMIT_RAD {
+        println!(
+            "seam:   the across-seam term reaches {:.3} deg, past the {:.1} that could still \
+             be a calibration, so it is refused whole and this session keeps the picture it had",
+            worst.to_degrees(),
+            EPI_LIMIT_RAD.to_degrees(),
+        );
+        return None;
+    }
+    Some(super::band::Table::of_entries(entries))
+}
+
+/// A fraction of a term, which is what a walk in progress draws.
+///
+/// The whole term's own support and taper come with it: scaling every entry by
+/// the same number moves no direction into or out of the field, and a
+/// direction that was identity stays identity.
+pub fn part_of(term: super::band::Table, part: f64) -> super::band::Table {
+    super::band::Table::of_entries(term.entries().map(|entry| entry * part as f32))
+}
+
+/// One step of the walk: how much of the field was on, and what this capture's
+/// own seam then read through it.
+#[derive(Clone, Copy, Debug)]
+pub struct Step {
+    /// How much of the field this step put on, 0 to 1.
+    pub part: f64,
+    /// How many directions of the ring still correlated.
+    pub read: usize,
+    /// What they still disagree by across the seam, in degrees: the **median**
+    /// magnitude and not a root mean square, because this population is the
+    /// heavy-tailed one stage 9's estimator finding is about and a mean over
+    /// it is a statistic about its outliers.
+    pub left_deg: f64,
+    /// The worst single direction, for the line and not for the criterion.
+    pub worst_deg: f64,
+    /// Whether the walk kept this step.
+    pub kept: bool,
+}
+
+/// How many steps the walk takes to put the whole field on.
+///
+/// The step size is what has to be small enough that a wrong step is visible
+/// before it is blinding, and the gain sweep is what sizes it
+/// (docs/research/stage9.md 12.2): a wrong-sign term of 0.468 degrees costs 7
+/// directions of 128 and one of 0.935 costs 17. A quarter of the largest field
+/// this rail admits is 0.7 degrees, so the first step of a field that is
+/// entirely wrong lands between those two and the count says so.
+pub const EPI_STEPS: usize = 4;
+
+/// How much of the ring's own evidence a step may cost before the walk stops.
+///
+/// From the same sweep, which is the only measurement of what a wrong term
+/// does to the evidence: a **correct-sign** term of 2.806 degrees, three times
+/// the old bound, costs one direction of 96, while a wrong-sign one of 0.935
+/// costs 17 and one of 1.870 costs 30. One percent and eighteen have a wide
+/// gap between them and this sits in it.
+const EPI_EVIDENCE_KEEP: f64 = 0.95;
+
+/// Whether one step of the walk is an improvement on the step before it, which
+/// is the whole of the guard.
+///
+/// The two signatures the gain sweep measured on a term that was wrong: the
+/// ring's own **evidence** falling, and its **residual** growing. Either one
+/// stops the walk, and what is drawn is the last step neither happened at.
+fn better(now: &Step, last: &Step) -> bool {
+    now.read as f64 >= EPI_EVIDENCE_KEEP * last.read as f64 && now.left_deg <= last.left_deg
+}
+
+/// How much of this session's own field its own seam says is an improvement,
+/// and every step of the walk that decided it.
+///
+/// **The safety question is `|T - truth|` and nothing knows `truth` before
+/// something has measured through the term** (docs/research/stage9.md 12.3),
+/// so no compose-time bound can be the guard and [`EPI_LIMIT_RAD`] is only a
+/// rail. What can guard it is this: the term goes on a quarter at a time, the
+/// capture's own ring is read again through each step, and the walk stops at
+/// the last step that left the seam better than the step before it.
+///
+/// The two signatures it stops on are the two the gain sweep measured on a
+/// term that was wrong: the ring's **evidence** falling, and its **residual**
+/// growing. Both are read here on the CPU rather than off the band, and the
+/// quantity is the same one: what the two lenses still disagree by across the
+/// seam with the term applied. Nothing wrong ever reaches the picture, because
+/// every step is measured before any of it is drawn.
+///
+/// Every pass reads the same places of the same file, so what moves between
+/// two steps is the term and nothing else.
+pub fn walked(
+    files: &[PathBuf],
+    lenses: &[Lens],
+    frame: Size,
+    fit: SeamFit,
+    term: super::band::Table,
+    field: &Session,
+    plan: &Plan,
+) -> Fallible<(f64, Vec<Step>)> {
+    let drawn = fit.applied(lenses);
+    let parts: Vec<f64> = (0..=EPI_STEPS)
+        .map(|step| step as f64 / EPI_STEPS as f64)
+        .collect();
+    let terms: Vec<super::band::Table> = parts.iter().map(|part| part_of(term, *part)).collect();
+    let read: Vec<Vec<Option<f64>>> = rings(files, &drawn, frame, plan, &terms)?
+        .iter()
+        .map(|ring| {
+            ring.iter()
+                .enumerate()
+                .map(|(index, (_, seen))| {
+                    let supported = field.moments[index] > 0;
+                    (supported && !seen.is_empty()).then(|| reduced(seen)[1].abs())
+                })
+                .collect()
+        })
+        .collect();
+    // **The set is the first pass's and it does not move.** A median over
+    // whatever each step happens to read is a median over a different
+    // population every time, and the population that changes is a selected
+    // one: a term that pushes a direction's disagreement past what the search
+    // can reach loses that direction, so the survivors are the directions the
+    // term hurt least. Measured on the May-01 flight, a field of the right
+    // size pointing the WRONG way read a *smaller* median that way, on two
+    // fewer directions.
+    //
+    // So a direction the first pass read and this step cannot counts as
+    // [`Probe::across`] degrees, which is the edge of what the search could
+    // have found: what happened to it is not that it agrees, it is that it has
+    // gone past measuring.
+    let first = &read[0];
+    let lost = plan.probe.across;
+    let over = |part: f64, now: &[Option<f64>]| {
+        let mut left = Vec::new();
+        let mut read = Vec::new();
+        for (index, base) in first.iter().enumerate() {
+            if base.is_none() {
+                continue;
+            }
+            left.push(now[index].unwrap_or(lost));
+            read.extend(now[index]);
+        }
+        Step {
+            part,
+            read: read.len(),
+            left_deg: middle_of(left.iter().copied()),
+            // Over what still reads, because a direction counted at the
+            // instrument's own edge would make this column say `lost` from the
+            // first direction lost onwards. What it is for is the line, and the
+            // count beside it is what says how many are missing.
+            worst_deg: read.iter().fold(0.0, |worst: f64, value| worst.max(*value)),
+            kept: true,
+        }
+    };
+    let mut last = over(0.0, first);
+    let mut steps = vec![last];
+    // A ring that reads nothing through the map it is already drawn with has
+    // no measurement to walk on, and a step's evidence would then be compared
+    // against zero and pass.
+    if last.read == 0 {
+        return Ok((0.0, steps));
+    }
+    let mut taken = 0.0;
+    for (part, read) in parts.iter().zip(&read).skip(1) {
+        let mut now = over(*part, read);
+        now.kept = better(&now, &last);
+        steps.push(now);
+        if !now.kept {
+            break;
+        }
+        (taken, last) = (*part, now);
+    }
+    Ok((taken, steps))
+}
+
 // ------------------------------------------------------------ least squares
 
 pub struct Fit {
@@ -1580,6 +2153,16 @@ pub struct Plan {
     /// everywhere else (stage9.md 9.2). Both the read-through and the table it
     /// served are gone with the applied field.
     pub table: super::band::Table,
+    /// The across-seam term the picture is being drawn with ([`epi_term`]),
+    /// carried and read through for the same reason as the table above.
+    ///
+    /// **This one the app does set**, which is what the field above says of
+    /// itself that it never does, and the difference between them is the
+    /// domain: a ring read through this answers what the term still leaves,
+    /// and that residual is the quantity the walk takes its steps on
+    /// ([`walked`]). [`super::band::Table::REST`] on a harvest, which reads
+    /// this camera through its own factory map and must see none of it.
+    pub epi: super::band::Table,
 }
 
 impl Default for Plan {
@@ -1589,12 +2172,18 @@ impl Default for Plan {
             frames: 2,
             probe: Probe::default(),
             table: super::band::Table::REST,
+            epi: super::band::Table::REST,
         }
     }
 }
 
-/// Every patch this capture's seam offers, pooled over the frames it was read
-/// on.
+/// One ring's worth of readings, unreduced: every direction of it, and every
+/// moment each of them was read at, `[along, across]` in degrees, one entry
+/// per frame the direction correlated on.
+pub type Moments = Vec<(Where, Vec<[f64; 2]>)>;
+
+/// Every patch this capture's seam offers, and every moment each of them was
+/// read at.
 ///
 /// A capture is its files in lens order, not the one path it was named by
 /// ([`Walk::over`], issue #123). A capture picked in a sandbox's file chooser
@@ -1602,27 +2191,51 @@ impl Default for Plan {
 /// first, so a fit that starts from one path again reads half the capture and
 /// then says the whole of it has one lens.
 ///
-/// **A direction's frames are reduced by [`reduced`] and not by a mean**, and
-/// that is stage 9's estimator finding (docs/research/stage9.md 4.5): one
-/// azimuth's reading moves between two frames 33 ms apart by 0.008 to 0.05
-/// degrees of median absolute deviation and by 0.22 to 0.48 of root mean
-/// square, so the population is heavy tailed and a mean over it is a statistic
-/// about its outliers. Reduced this way instead, the owner's six flights agree
-/// at the same azimuth on 15 pairs of 15 where the mean agreed on 2.
-pub fn measure(
+/// **Unreduced is the point.** [`measure`] reduces this to one reading per
+/// direction and that is what a fit is made from; a caller with a different
+/// question about the same population - which moments are near content rather
+/// than camera ([`harvest`]) - has to be able to see them.
+pub fn moments(files: &[PathBuf], lenses: &[Lens], frame: Size, plan: &Plan) -> Fallible<Moments> {
+    Ok(rings(files, lenses, frame, plan, &[plan.epi])?.swap_remove(0))
+}
+
+/// The same walk read through several across-seam terms at once, one ring per
+/// term.
+///
+/// **One decode, not one per term**, and that is a playback decision rather
+/// than a tidiness one. A jump is a keyframe seek and a decode forward to the
+/// instant asked for, and this box shares one memory bus and one video engine
+/// between the picture and everything else: read five terms as five passes and
+/// `--bin playback` drops 61 frames in sixty seconds with a worst lateness of
+/// 208 ms, against 2 and 26 ms on `main`. Five terms through one pass is a
+/// fifth of the jumps and a third less work, because lens 0's grid and the
+/// search's centre are read once for all of them.
+///
+/// It is also the stronger statement for [`walked`], which is what needs it:
+/// every term is answered on the **same frames** and not merely on the same
+/// places, so what moves between two of them is the term and nothing else.
+fn rings(
     files: &[PathBuf],
     lenses: &[Lens],
     frame: Size,
     plan: &Plan,
-) -> Fallible<Vec<Reading>> {
-    let base = mapped(lenses, frame).with_table(plan.table);
+    epi: &[super::band::Table],
+) -> Fallible<Vec<Moments>> {
+    let maps: Vec<Reframe> = epi
+        .iter()
+        .map(|epi| mapped(lenses, frame).with_table(plan.table).with_epi(*epi))
+        .collect();
+    let base = maps
+        .first()
+        .copied()
+        .unwrap_or_else(|| mapped(lenses, frame));
     let ring = ring(plan.probe.patches);
     let mut walk = Walk::over(files, 0.0, frame)?;
     if walk.streams() < 2 {
         return Err("this capture carries one lens stream, so it has no seam".into());
     }
     let duration = walk.duration().as_secs_f64();
-    let mut seen: Vec<Vec<[f64; 2]>> = vec![Vec::new(); ring.len()];
+    let mut seen: Vec<Vec<Vec<[f64; 2]>>> = vec![vec![Vec::new(); ring.len()]; maps.len()];
     let mut refused = Refused::default();
     let mut centre = None;
     for place in 0..plan.places.max(1) {
@@ -1633,6 +2246,7 @@ pub fn measure(
             walk.jump(at)?;
         }
         for _ in 0..plan.frames.max(1) {
+            let started = Instant::now();
             let Some(pair) = walk.next_pair()? else {
                 break;
             };
@@ -1642,32 +2256,65 @@ pub fn measure(
             if centre.is_none() {
                 centre = acquired(&base, &pair.lenses, &ring, &plan.probe);
             }
-            for (found, moments) in read_ring_centred(
-                &base,
-                &pair.lenses,
-                &ring,
-                &plan.probe,
-                centre.unwrap_or(0),
-                &mut refused,
-            )
-            .iter()
-            .zip(&mut seen)
-            {
-                let Some(found) = found.filter(|found| found.r >= plan.probe.keep) else {
-                    continue;
-                };
-                moments.push([found.along, found.across]);
+            for (map, seen) in maps.iter().zip(&mut seen) {
+                for (found, moments) in read_ring_centred(
+                    map,
+                    &pair.lenses,
+                    &ring,
+                    &plan.probe,
+                    centre.unwrap_or(0),
+                    &mut refused,
+                )
+                .iter()
+                .zip(seen)
+                {
+                    let Some(found) = found.filter(|found| found.r >= plan.probe.keep) else {
+                        continue;
+                    };
+                    moments.push([found.along, found.across]);
+                }
+            }
+            // Out of the picture's way ([`Probe::rest`]).
+            if plan.probe.rest > 0.0 {
+                std::thread::sleep(started.elapsed().mul_f64(plan.probe.rest));
             }
         }
     }
-    Ok(ring
-        .iter()
-        .zip(&seen)
+    Ok(seen
+        .into_iter()
+        .map(|seen| ring.clone().into_iter().zip(seen).collect())
+        .collect())
+}
+
+/// The same ring reduced to one reading per direction, which is what a fit is
+/// made from.
+///
+/// **A direction's frames are reduced by [`reduced`] and not by a mean**, and
+/// that is stage 9's estimator finding (docs/research/stage9.md 4.5): one
+/// azimuth's reading moves between two frames 33 ms apart by 0.008 to 0.05
+/// degrees of median absolute deviation and by 0.22 to 0.48 of root mean
+/// square, so the population is heavy tailed and a mean over it is a statistic
+/// about its outliers. Reduced this way instead, the owner's six flights agree
+/// at the same azimuth on 15 pairs of 15 where the mean agreed on 2.
+///
+/// [`moments`] and this are one function split in two, and the split is where
+/// the per-moment readings become reachable: everything above the reduction is
+/// the same walk, the same acquisition and the same refusals, so a caller that
+/// wants to reduce them differently reads the same measurement rather than a
+/// second one. Nothing about this function's answer changed when it was split.
+pub fn measure(
+    files: &[PathBuf],
+    lenses: &[Lens],
+    frame: Size,
+    plan: &Plan,
+) -> Fallible<Vec<Reading>> {
+    Ok(moments(files, lenses, frame, plan)?
+        .into_iter()
         .filter(|(_, moments)| !moments.is_empty())
         .map(|(at, moments)| {
-            let axes = reduced(moments);
+            let axes = reduced(&moments);
             Reading {
-                at: *at,
+                at,
                 along: axes[0],
                 across: axes[1],
             }
@@ -1804,17 +2451,67 @@ struct Walking {
     /// the last tenth take as long as the first, which is a different curve
     /// and a slower one.
     from: SeamFit,
-    /// How far along that walk the picture is, 0 to 1.
-    progress: f64,
     /// What the picture is drawn with.
     shown: SeamFit,
+    /// How far along that walk the picture is.
+    ease: Ease,
     /// `shown` applied to `factory`. Rebuilt only when `shown` moves, so a
     /// redraw of a settled correction costs one lock and one `Arc` clone.
     lenses: Arc<[Lens]>,
-    /// When `shown` last moved, so the walk is per second rather than per
-    /// redraw: a 144 Hz window must not correct five times faster than a
-    /// 30 Hz one, and a paused window must not correct at all.
+    /// What this session read across its own seam ([`harvest`]), once it has,
+    /// and the same three numbers for the fraction of it the walk accepted.
+    field: Option<Session>,
+    asked_part: f64,
+    from_part: f64,
+    shown_part: f64,
+    part: Ease,
+    /// [`epi_term`] cached on the pose and frame it was composed for, whole
+    /// rather than scaled ([`part_of`]). `None` until a field lands, which on
+    /// a capture whose seam reads nothing is never.
+    epi: (Option<(SeamFit, Size)>, super::band::Table),
+}
+
+/// A walk in progress, paced by the clock rather than by the redraw count: a
+/// 144 Hz window must not correct five times faster than a 30 Hz one, and a
+/// paused window must not correct at all.
+///
+/// Two things walk here - the pose and how much of the across-seam term is on
+/// - and they are asked for at different moments, so each keeps its own.
+#[derive(Clone, Copy)]
+struct Ease {
+    /// How far along, 0 to 1.
+    progress: f64,
+    /// When it last moved.
     walked: Option<Instant>,
+}
+
+impl Ease {
+    const LANDED: Self = Self {
+        progress: 1.0,
+        walked: None,
+    };
+    const STARTED: Self = Self {
+        progress: 0.0,
+        walked: None,
+    };
+
+    /// How far along this walk is now, having taken one step of it, or `None`
+    /// where the picture does not move: a walk that has arrived, and the first
+    /// redraw after an ask, which has no interval behind it and walks the one
+    /// after it from here.
+    ///
+    /// The clock is read here rather than passed in because these are the only
+    /// callers that need it, and reading it costs less than threading an
+    /// instant through the primitive that would only ever be used here.
+    fn step(&mut self) -> Option<f64> {
+        if self.progress >= 1.0 {
+            return None;
+        }
+        let now = Instant::now();
+        let seconds = now.duration_since(self.walked.replace(now)?).as_secs_f64();
+        self.progress = (self.progress + seconds / WALK_SECONDS).min(1.0);
+        Some(self.progress)
+    }
 }
 
 impl Correction {
@@ -1827,10 +2524,15 @@ impl Correction {
             walking: Mutex::new(Walking {
                 asked: SeamFit::default(),
                 from: SeamFit::default(),
-                progress: 1.0,
                 shown: SeamFit::default(),
+                ease: Ease::LANDED,
                 lenses: lenses.clone(),
-                walked: None,
+                field: None,
+                asked_part: 0.0,
+                from_part: 0.0,
+                shown_part: 0.0,
+                part: Ease::LANDED,
+                epi: (None, super::band::Table::REST),
             }),
         }
     }
@@ -1845,9 +2547,8 @@ impl Correction {
         walking.asked = fit;
         walking.from = fit;
         walking.shown = fit;
-        walking.progress = 1.0;
+        walking.ease = Ease::LANDED;
         walking.lenses = fit.applied(&self.factory).into();
-        walking.walked = None;
     }
 
     /// Ask for this correction. The picture walks towards it from wherever it
@@ -1859,8 +2560,67 @@ impl Correction {
         }
         walking.from = walking.shown;
         walking.asked = fit;
-        walking.progress = 0.0;
-        walking.walked = None;
+        walking.ease = Ease::STARTED;
+    }
+
+    /// Draw with this session's own across-seam term, or with `part` of it
+    /// where the walk accepted only part ([`walked`]).
+    ///
+    /// `land` for a still and `ask` for a file that is playing, which is the
+    /// pose's own rule one axis over: by the time a harvest returns there is a
+    /// picture on screen, and a picture that jumps is worse than a picture
+    /// that is briefly what `main` draws.
+    pub fn land_epi(&self, field: Session, part: f64) {
+        let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
+        walking.field = Some(field);
+        walking.epi = (None, super::band::Table::REST);
+        walking.asked_part = part;
+        walking.from_part = part;
+        walking.shown_part = part;
+        walking.part = Ease::LANDED;
+    }
+
+    pub fn ask_epi(&self, field: Session, part: f64) {
+        let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
+        walking.field = Some(field);
+        walking.epi = (None, super::band::Table::REST);
+        walking.from_part = walking.shown_part;
+        walking.asked_part = part;
+        walking.part = Ease::STARTED;
+    }
+
+    /// The across-seam term the pass runs on this redraw, having taken one
+    /// step of that walk.
+    ///
+    /// [`super::band::Table::REST`] until a field has been harvested, wherever
+    /// the ring leaves a lens's picture, and on a term the rail refuses -
+    /// which is the picture with nothing of this in it at all.
+    ///
+    /// The term is composed once per pose and scaled per redraw, because it is
+    /// linear in how much of it is on: a walk moves that fraction every frame
+    /// and a settled one costs a lock, a compare and 128 multiplies.
+    pub fn epi(&self, frame: Size) -> super::band::Table {
+        let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(progress) = walking.part.step() {
+            walking.shown_part =
+                walking.from_part + (walking.asked_part - walking.from_part) * progress;
+        }
+        let Walking {
+            field,
+            shown,
+            shown_part,
+            epi,
+            ..
+        } = &mut *walking;
+        let Some(field) = field.as_ref() else {
+            return super::band::Table::REST;
+        };
+        if epi.0 != Some((*shown, frame)) {
+            let term =
+                epi_term(field, *shown, &self.factory, frame).unwrap_or(super::band::Table::REST);
+            *epi = (Some((*shown, frame)), term);
+        }
+        part_of(epi.1, *shown_part)
     }
 
     /// What the pass runs on this redraw, having taken one step of the walk.
@@ -1870,18 +2630,10 @@ impl Correction {
     /// instant through the primitive that would only ever be used here.
     pub fn lenses(&self) -> Arc<[Lens]> {
         let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
-        if walking.progress >= 1.0 {
-            return walking.lenses.clone();
-        }
-        let now = Instant::now();
-        let since = walking.walked.replace(now);
-        // The first redraw after an ask has no interval behind it, so it walks
-        // nothing and the one after it walks from here.
-        let Some(seconds) = since.map(|then| now.duration_since(then).as_secs_f64()) else {
+        let Some(progress) = walking.ease.step() else {
             return walking.lenses.clone();
         };
-        walking.progress = (walking.progress + seconds / WALK_SECONDS).min(1.0);
-        walking.shown = walking.from.towards(walking.asked, walking.progress);
+        walking.shown = walking.from.towards(walking.asked, progress);
         walking.lenses = walking.shown.applied(&self.factory).into();
         walking.lenses.clone()
     }
@@ -2234,6 +2986,216 @@ mod tests {
             FRAME,
         );
         assert_eq!(wild, None, "two and a half degrees was accepted");
+    }
+
+    // ------------------------------------------ across the seam, per session
+
+    /// A session that read one arc of the ring and nothing else, for the tests
+    /// below: `read` degrees at every direction it claims.
+    fn session_over(arc: std::ops::Range<usize>, read: f64) -> Session {
+        let mut field = Session {
+            read: [0.0; crate::band::AZIMUTHS],
+            moments: [0; crate::band::AZIMUTHS],
+            near: 0,
+            wild: 0,
+        };
+        for index in arc {
+            field.read[index] = read;
+            field.moments[index] = 6;
+        }
+        field
+    }
+
+    /// The across-seam term displaces lens 1's ray by exactly itself, across
+    /// the seam and nowhere else, which is what every number taken through it
+    /// rests on.
+    ///
+    /// Three claims, all on the projection because that is where they can be
+    /// checked with no GPU and no file:
+    ///
+    /// 1. **The size and the axis.** [`Reframe::tabled`] moves the ray by the
+    ///    term's own entry along [`Where::across`] and by nothing along
+    ///    [`Where::along`]. A term that leaked onto the along-seam axis would
+    ///    break the invariant the two-axis split is built on, and it is the
+    ///    first thing a wrong axis would do.
+    /// 2. **What the correlation then reads.** By [`moved`]'s own law - a
+    ///    change that moves lens 1's projection of a fixed direction moves the
+    ///    shift the content correlates at by the negative of it - a term of
+    ///    `+t` takes the across reading to `read - t`. That is the same sign
+    ///    the along-seam plant measured one axis over
+    ///    (docs/research/stage9.md 5), and it is why the band reading THROUGH
+    ///    the term and applying the rest leaves the two lenses exactly as far
+    ///    apart as they were.
+    /// 3. **It cannot fold.** The displacement is across the seam and the
+    ///    gradient is along it, so the map it adds is a shear whose Jacobian is
+    ///    off-diagonal, and the determinant of the whole tabled map stays 1 to
+    ///    the finite difference's own noise.
+    #[test]
+    fn the_across_seam_term_displaces_lens_one_across_the_seam_and_nowhere_else() {
+        let lenses = fixture_lenses();
+        // Half a degree, one cycle round the ring: an order the corridor could
+        // not hide and a size the corpus reaches.
+        let entries: [f32; crate::band::AZIMUTHS] = std::array::from_fn(|index| {
+            let phi = index as f64 / crate::band::AZIMUTHS as f64 * std::f64::consts::TAU;
+            (0.5 * phi.cos()).to_radians() as f32
+        });
+        let table = crate::band::Table::of_entries(entries);
+        let map = mapped(&lenses, FRAME).with_epi(table);
+        let step = 0.01f64.to_radians();
+        for at in ring(24) {
+            let want = f64::from(table.at(at.phi.cos() as f32, at.phi.sin() as f32));
+            let ray = at.centre.map(|c| c as f32);
+            let moved_by = |axis: [f64; 3]| {
+                let from = unit(std::array::from_fn(|c| at.centre[c] - step * axis[c]));
+                let to = unit(std::array::from_fn(|c| at.centre[c] + step * axis[c]));
+                let take = |v: [f64; 3]| {
+                    let v = v.map(|c| c as f32);
+                    let bent = map.tabled(1, v);
+                    std::array::from_fn::<f64, 3, _>(|c| f64::from(bent[c] - v[c]))
+                };
+                let (a, b) = (take(from), take(to));
+                std::array::from_fn::<f64, 3, _>(|c| (b[c] - a[c]) / (2.0 * step))
+            };
+            let bent = map.tabled(1, ray);
+            let put: [f64; 3] = std::array::from_fn(|c| f64::from(bent[c] - ray[c]));
+            let dot = |v: [f64; 3], w: [f64; 3]| (0..3).map(|c| v[c] * w[c]).sum::<f64>();
+            let (across, along) = (dot(put, at.across), dot(put, at.along));
+            assert!(
+                (across - want).abs() < 1e-6,
+                "at {:.0} deg a term of {want:+.5} rad displaced the ray by {across:+.5} across",
+                at.phi.to_degrees(),
+            );
+            assert!(
+                along.abs() < 1e-6,
+                "at {:.0} deg the across term moved the ray {along:+.5} rad ALONG the seam",
+                at.phi.to_degrees(),
+            );
+            // The two off-diagonal entries of the displacement's own Jacobian
+            // in the seam's frame. The determinant of `identity + J` is
+            // `1 - (across-by-along)(along-by-across)`, and the second factor
+            // is zero by the claim above, so nothing here can fold whatever
+            // the first one is.
+            let along_by_across = dot(moved_by(at.across), at.along);
+            let across_by_across = dot(moved_by(at.across), at.across);
+            assert!(
+                along_by_across.abs() < 1e-4 && across_by_across.abs() < 1e-4,
+                "at {:.0} deg the term has a gradient ACROSS the seam: {along_by_across:+.6}, \
+                 {across_by_across:+.6}",
+                at.phi.to_degrees(),
+            );
+        }
+    }
+
+    /// A direction the session never read draws **nothing**, and what it does
+    /// not draw is the pose's own displacement.
+    ///
+    /// This is the trap the research branch's first draft fell into and the
+    /// delivered measurement caught: the term is the reading PLUS the drawn
+    /// pose's own across-seam displacement, so a direction with a zero
+    /// *reading* still carries the whole pose arm - two and a half degrees of
+    /// it on the owner's camera - which is the arm measured to take the band
+    /// from 96 of 128 directions with evidence down to 64
+    /// (docs/research/stage9.md 10.7).
+    #[test]
+    fn a_direction_no_session_read_draws_nothing_and_not_the_pose() {
+        let lenses = fixture_lenses();
+        let fit = SeamFit {
+            roll_deg: 0.795,
+            yaw_deg: -2.310,
+            pitch_deg: -0.936,
+            cx_px: -3.28,
+            cy_px: -11.91,
+        };
+        let whole = epi_term(&session_over(0..128, 0.0), fit, &lenses, FRAME)
+            .expect("the pose's own displacement is not what the rail catches");
+        let biggest = |table: super::super::band::Table| {
+            table.entries().iter().fold(0.0f64, |worst, e| {
+                worst.max(f64::from(e.abs()).to_degrees())
+            })
+        };
+        assert!(
+            biggest(whole) > 1.0,
+            "the fixture pose barely moves the across-seam axis, so this test proves nothing",
+        );
+
+        let term = epi_term(&session_over(0..40, 0.0), fit, &lenses, FRAME)
+            .expect("an arc of the ring is still a field");
+        let entries = term.entries();
+        assert!(
+            entries[44..124].iter().all(|entry| *entry == 0.0),
+            "the unread arc is not identity: it is drawing the pose's own displacement",
+        );
+        assert!(
+            entries[..40].iter().any(|entry| entry.abs() > 1e-4),
+            "the read arc lost its term",
+        );
+        // And the walk out of the read arc is monotone rather than a step.
+        for pair in entries[39..45].windows(2) {
+            assert!(
+                pair[1].abs() <= pair[0].abs() + 1e-9,
+                "the taper into the unread arc goes back up",
+            );
+        }
+    }
+
+    /// The rail catches a field that is not a calibration at all, and a part
+    /// of a term is that term's own shape.
+    #[test]
+    fn a_term_too_large_to_be_a_calibration_is_refused_whole() {
+        let lenses = fixture_lenses();
+        let wild = session_over(0..128, 12.0);
+        assert_eq!(
+            epi_term(&wild, SeamFit::default(), &lenses, FRAME),
+            None,
+            "twelve degrees across the seam was accepted",
+        );
+        let sane = session_over(0..128, 0.5);
+        let term = epi_term(&sane, SeamFit::default(), &lenses, FRAME)
+            .expect("half a degree is a calibration");
+        let half = part_of(term, 0.5);
+        for (whole, part) in term.entries().iter().zip(half.entries()) {
+            assert!(
+                (0.5 * whole - part).abs() < 1e-9,
+                "{whole} halved to {part}"
+            );
+        }
+    }
+
+    /// What the walk stops on, which is the guard the rail is not: the ring's
+    /// own evidence falling, or its own residual growing
+    /// (docs/research/stage9.md 12.3).
+    ///
+    /// The rule and not the measurement. What exercises it against real
+    /// footage is `kjerag-spike --bin epifield gain=-1`, which hands the walk a
+    /// field of the right size pointing the wrong way and has to be refused at
+    /// the first step; a guard nobody has watched fire is a guard nobody has
+    /// tested.
+    #[test]
+    fn a_step_that_costs_evidence_or_leaves_more_is_not_walked_into() {
+        let step = |read: usize, left_deg: f64| Step {
+            part: 0.25,
+            read,
+            left_deg,
+            worst_deg: left_deg,
+            kept: false,
+        };
+        let last = step(96, 0.500);
+        assert!(
+            better(&step(95, 0.400), &last),
+            "one direction of 96 is not blinding"
+        );
+        assert!(
+            !better(&step(79, 0.400), &last),
+            "seventeen directions of 96 is the wrong-sign signature and was walked into",
+        );
+        assert!(
+            !better(&step(96, 0.501), &last),
+            "a step that left MORE than the step before it was walked into",
+        );
+        assert!(
+            better(&step(96, 0.500), &last),
+            "a step that changed nothing was refused"
+        );
     }
 
     /// How much of a pose's own along-seam signature the five terms cannot say,

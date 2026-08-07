@@ -163,6 +163,15 @@ fn main() -> Fallible<()> {
     let mut scene = Scene::still(&options.input, options.start())?;
     scene.use_table(options.table);
     options.seam.hold(&scene);
+    // The app's own path since the epi fork: this session's own across-seam
+    // term, harvested off this file's frames and walked in as far as its own
+    // seam accepts it (`Scene::learn_epi`). ON by default, because an
+    // instrument that silently drew a picture the app does not draw is what
+    // PR #167 cost; `epi=0` is the arm with none of it, which is `main`'s
+    // picture byte for byte.
+    if options.epi {
+        scene.learn_epi();
+    }
     scene.set_horizon(match options.lock {
         true => Horizon::Locked,
         false => Horizon::Free,
@@ -827,6 +836,9 @@ struct Options {
     guard: f64,
     trace: bool,
     seam: Seam,
+    /// Whether this run draws with the session's own across-seam term, which
+    /// is the app's own path (`Scene::learn_epi`).
+    epi: bool,
     out: Option<PathBuf>,
 }
 
@@ -846,6 +858,7 @@ impl Options {
             guard: GUARD_DEG,
             trace: false,
             seam: Seam::File,
+            epi: true,
             out: None,
         };
         let mut seam = String::from("file");
@@ -864,6 +877,7 @@ impl Options {
                 Some(("trace", value)) => options.trace = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
+                Some(("epi", value)) => options.epi = value.parse::<u32>()? != 0,
                 Some(("seam", value)) => seam = value.to_string(),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
@@ -914,5 +928,5 @@ impl Options {
 
 const USAGE: &str = "usage: step <file.insv> [time=seconds] [warm=seconds] [yaw=deg] \
      [pitch=deg] [fov=deg] [size=px] [lock=0] [off=1] [guard=deg] [trace=1] \
-     [table=table.txt] [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] \
+     [table=table.txt] [epi=0] [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] \
      [out=name.png]";

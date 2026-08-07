@@ -1645,6 +1645,19 @@ fn along_at(field: Along, cos: f32, sin: f32) -> f32 {
 
 /// The seam circle's geometry, shared by both shaders. Rust twin: `Ring`.
 const RING: &str = r#"
+// This session's own across-seam term at one direction of the ring, in
+// radians, and zero at every direction until one has been read. Rust twin:
+// `Reframe::epi`'s entries.
+//
+// In the SHARED block and not beside `table_at`, because both halves read it:
+// the fragment half bends a ray by it and the compute half reads lens 1
+// through it, and a shader that names a function it has not been given does
+// not compile.
+fn epi_entry(index: i32) -> f32 {
+  let at = u32(index + i32(AZIMUTHS)) % AZIMUTHS;
+  return reframe.epi[at / 4u][at % 4u];
+}
+
 struct Ring {
   centre: vec3<f32>,
   epi: vec3<f32>,
@@ -1775,12 +1788,22 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // Back into view space: view_to_body is a rotation, so its transpose is its
   // inverse, and `v * m` is `transpose(m) * v`.
   out.offset = (carried * length(ray)) * (at.epi * reframe.view_to_body);
+  // This session's own across-seam term: the same axis and the same scale as
+  // the offset above, added to the part lens 1 takes WHOLE. That is the whole
+  // difference - one displacement of a whole picture instead of a ramp across
+  // the corridor - and it is why this rides on `along` rather than on
+  // `offset`, which is shared out. Rust twin: `Bend::still`.
+  //
+  // The seam circle's own normal and NOT `at.epi`, which is the baseline's
+  // line and a few degrees round from it: what this term carries was measured
+  // along the normal. Rust twin: `ACROSS_SEAM`.
+  let still = (epi_at(low, mix) * length(ray)) * (vec3<f32>(0.0, 0.0, 1.0) * reframe.view_to_body);
   // Scaled by the FLATTENED length and not the whole one, which is the
   // `cos(elevation)` a relative roll about the body's z produces: `w x d` is
   // `|w| cos(elevation)` along the seam's own tangent everywhere, and exactly
   // zero at both lens poles, where an azimuth does not exist and a per-azimuth
   // correction would otherwise swirl. Rust twin: `Reframe::bent`.
-  out.along = (along * reach) * (at.perp * reframe.view_to_body);
+  out.along = (along * reach) * (at.perp * reframe.view_to_body) + still;
   return out;
 }
 
@@ -1836,6 +1859,12 @@ fn table_at(low: i32, mix: f32) -> f32 {
 fn table_entry(index: i32) -> f32 {
   let at = u32(index + i32(AZIMUTHS)) % AZIMUTHS;
   return reframe.table[at / 4u][at % 4u];
+}
+
+// This session's across-seam term at one direction, the same lookup one array
+// over. Rust twin: `Table::between` on `Reframe::epi`.
+fn epi_at(low: i32, mix: f32) -> f32 {
+  return mix2(epi_entry(low), epi_entry(low + 1), mix);
 }
 "#;
 
@@ -1971,10 +2000,19 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
 
   // The back lens's grid: the patch widened by everywhere the search may
   // slide it.
+  //
+  // Read THROUGH this session's own across-seam term, and zero until one has
+  // been read: a ring read past a displacement the picture is already drawn
+  // with would ask for it a second time, and the band would then apply as a
+  // corridor ramp exactly what the term had just taken out. What this pass
+  // answers with a term applied is what the term still leaves. Rust twin:
+  // `Reframe::tabled`, which `seam::measure`'s sampler goes through for the
+  // same reason.
+  let still = epi_entry(i32(cell));
   for (var i = lane; i < BACK_ALONG * BACK_ACROSS; i += THREADS) {
     let a = f32(i32(i % BACK_ALONG) - HALF - PERP_STEPS * PERP_STEP) * STEP;
     let b = f32(i32(i / BACK_ALONG) - HALF + EPI_FAR) * STEP;
-    back[i] = tap(1u, aim1, at.centre + a * at.perp + b * at.epi);
+    back[i] = tap(1u, aim1, at.centre + a * at.perp + b * at.epi + still * vec3<f32>(0.0, 0.0, 1.0));
   }
   workgroupBarrier();
 

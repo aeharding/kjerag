@@ -1172,6 +1172,8 @@ impl Options {
             across: self.across,
             keep: self.keep,
             contrast: self.contrast,
+            // An instrument is what the box is doing, so it reads flat out.
+            rest: 0.0,
         }
     }
 

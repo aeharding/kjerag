@@ -927,3 +927,410 @@ about before any step is quoted - and the ONE X2 view answers "no horizon
 fitted on both sides of the seam". So this is the delivered-domain evidence for
 the one thing this PR still applies, on the one flight that could carry it, and
 it is the half a difference metric could not have supplied.
+
+## 13. The shipping build: the term a session reads for itself, walked in
+
+**Sections 10 to 12 are the experiment and this section is the build.** They
+live on `research/epi-term` (PR #169): a research toggle, a pooled static table
+that the delivered picture refused, a per-session arm that collapsed nine
+crossings of nine on fields computed offline by an instrument, and the gain
+sweep that established what actually blinds the band. Nothing there ships.
+What ships is here, and it is three pieces the experiment named and did not
+build: the harvest the app does itself, the staged walk-in 12.3 designed, and a
+guard on the residual rather than on the term's size.
+
+### 13.1 What ships and what does not
+
+| from the experiment | here |
+| --- | --- |
+| `Reframe::epi` beside `table`, `Bend::still`, the compute pass's read-through, `ACROSS_SEAM` | unchanged, and the tests with them |
+| `seam::supported`, the raised-cosine taper, per-direction moment counts | unchanged |
+| `EPI_LIMIT_RAD` | a **rail** at 2.8 deg, and the walk is the guard (13.4) |
+| `KJERAG_EPI_TERM`, `EpiArm`, its `pose` and `full` arms | **gone**. There is no toggle: the term is what the app draws |
+| `EPI_STILL_DEG`, the pooled static table | **gone**. Refused in the delivered picture at 10.10 and by 10.12's own number |
+| `KJERAG_EPI_TERM=plant:` | **gone as a path**. The plant is `kjerag-spike --bin epifield gain=`, which is where a control belongs |
+| `--bin epifield` computing a field offline into a file nothing in the app could read | the app's own `seam::harvest` and `seam::walked`, printed. The binary is a bench over the shipped functions, not a second copy of them |
+
+Nothing is stored, nothing is pooled, and nothing is asked of the pilot. A
+session's field is read off that session and dies with it, which is what
+10.12's number says it has to be: six flights disagree at a given azimuth by
+0.597 degrees at the median against a pooled amplitude of 0.229 rms.
+
+### 13.2 The harvest, live
+
+`seam::harvest` is 11.1's `--bin epifield` moved into the render crate and run
+by `Scene::learn_epi` on a thread of its own, on every capture that has a seam.
+It reads the same stream the pose fit reads - `seam::moments`, which is
+`seam::measure` split at its reduction - through the **factory** map, and
+applies 11.1's three gates unchanged: the excursion-based far gate at 60 m, the
+trimmed middle, and the five-term shape gate that refuses a direction which
+found the wrong feature. A direction under three surviving moments is identity.
+
+**It is its own pass and not the fit's**, for a reason the app's shape decides:
+`Scene::fit_seam` runs only while a camera's pool is short of
+`POOL_ENOUGH`, and this has to run on every session. The two rings are not the
+same ring either - a pose is fitted on 72 azimuths and this is the band's own
+128 - so there was nothing to share but a decode.
+
+**How deep, and what that cost.** One pass each on the May-01 flight, harvest
+only:
+
+| plan | directions read of 128 | moments refused as near content | seconds |
+| --- | ---: | ---: | ---: |
+| 3 x 2, the pose fit's own plan | **10** | 10 | 2.2 |
+| **6 x 4** | **71** | 99 | **6.9** |
+| 8 x 6 | 77 | 189 | 15.9 |
+| 12 x 6 | 80 | 325 | 24.5 |
+| 24 x 6, the experiment's | 88 | 720 | 52.4 |
+
+The plan is **6 by 4**, by a rule stated before any delivered picture was
+looked at: the cheapest plan that reads more than half the ring. The pose fit's
+own 3 by 2 is not an option at any price - ten directions of 128 is not a
+field.
+
+**And nothing turns on that choice**, which is the check the freeze rule in 6
+asks for after the fact. The delivered ramp at the BAD crossing, off at 19.94
+view px, with the field from each plan applied whole:
+
+| field from | 6 x 4 | 8 x 6 | 12 x 6 | 24 x 6 |
+| --- | ---: | ---: | ---: | ---: |
+| delivered ramp, view px | **0.83** | 1.32 | 1.61 | 0.89 |
+
+Every one of them is a fifth of the four-pixel floor. The sweep was run before
+the plan was fixed and it chose nothing.
+
+**What the pilot sees.** At the first frame, `main`'s picture: the term is
+`Table::REST` until a field lands. The harvest is 7 seconds and the walk five
+more passes of the same plan, so on the owner's box the term walks in over a
+second, **about 50 seconds in**, and holds for the rest of the session. **A
+session that reads nothing never leaves that first state**, and neither does
+one whose walk accepts nothing (13.3), and in both cases the picture is
+`main`'s byte for byte (13.5).
+
+**Sampled over the whole capture and not over its opening**, which is `Plan`'s
+own rule: the places are spread across the duration. So what a harvest answers
+23 seconds in is the session and not its first minute, and there is no later
+answer to wait for. The field is fixed from then on.
+
+**Deterministic per file, and seeks cannot reach it.** The harvest jumps to
+places computed from the file's duration and reads the same frames every run;
+the three plant arms of 13.3 and the two runs of the delivered table all
+re-read the same 71 directions and the same 99 refusals. The term is then a
+constant for the session - not a function of where the picture is - so a seek
+has nothing to desynchronize. That is the orientation track's property in its
+strongest form: that state is a function of the frame's own timestamp
+(`Held::instant`), which is why a seek lands on the right sample; this is a
+function of nothing that moves.
+
+### 13.3 The staged walk-in
+
+12.3's design, with one thing settled that the design left open: **what
+re-measures**.
+
+> a staged walk-in that applies the term in steps, each small enough that the
+> residual it leaves stays inside the window even if the whole field is wrong,
+> with the band re-measuring at each step and the walk aborting when its
+> evidence falls or its residual grows step over step.
+
+The band re-measures on the GPU and reading its state back is a stall that no
+shipped path takes (`ScenePipeline::band_state`'s own docstring). What reads
+the same quantity without one is this capture's own ring, read through the map
+the picture is drawn with - the pose applied and the term applied - which is
+exactly what the band is left to find. So `seam::walked` steps the term a
+quarter at a time and reads the ring again at each step, and **nothing wrong
+ever reaches the picture**, because every step is measured before any of it is
+drawn: what the walk hands the picture is one number, the last fraction that
+was an improvement, and the picture walks to it once over `WALK_SECONDS`.
+
+**Four steps**, because the step size is what has to be small enough to be
+visible before it is blinding, and 12.2 is what sizes it: a wrong-sign term of
+0.468 degrees costs 7 directions of 128 and one of 0.935 costs 17. A quarter of
+the largest field the rail admits is 0.7 degrees, which lands between them.
+
+**The two criteria, and where their numbers come from.** A step is kept if the
+ring keeps at least 95 percent of the directions the first pass read, and if
+the median of what it still disagrees by does not grow. The 95 is 12.2's own
+gap: a **correct-sign** term of 2.806 degrees, three times the old bound, costs
+one direction of 96, while a wrong-sign one of 0.935 costs 17 and one of 1.870
+costs 30.
+
+**The set is the first pass's and it does not move, and that is a finding.** A
+median over whatever each step happens to read is a median over a different
+population every time, and the population that changes is a *selected* one: a
+term that pushes a direction's disagreement past what the search can reach
+loses that direction, so the survivors are the directions the term hurt least.
+Measured on the May-01 flight, a field of the right size pointing the **wrong**
+way read a *smaller* median that way - 0.5595 to 0.5394 degrees - on two fewer
+directions. Anchored to the first pass's own directions, with a direction it
+can no longer find counted at the edge of what the search could have found, the
+same arm reads 0.5595 to 0.5661 and the walk refuses it.
+
+**The walk reads the harvest's own plan, and a thinner one was measured to be
+a worse instrument rather than a cheaper one.** The first build ran each step
+at 3 places by 3 frames, on the argument that a count and a middle need less
+evidence than a value per direction. They do not. At that depth each step of
+the April-10 walk read **27** of the 55 directions its field claims, and the 27
+that correlate on nine frames are the easy ones: the residual they show is a
+different quantity from the one the field is about, reading **0.189** degrees
+where the full plan reads **0.518**. On that measurement the walk refused a
+field it accepts whole at this depth, and the April flight's delivered ramp
+went 1.68 view px to 1.68. Two of nine crossings were refused that way and two
+more came out worse than `main`. **A guard that refuses a good field because
+its own instrument is thin is the trap the gain plants exist to catch, one
+level up**, and the fix is that a step is read exactly as deeply as the field
+it is judging.
+
+**The guard is shown firing, which is the whole point of having one.**
+`--bin epifield gain=k` scales the composed term before the walk, so `k` is
+12.2's own plant one level out: a field that is right at 1 leaves the seam
+`(k - 1)` times its own disagreement. May-01, the app's own harvest, the app's
+own walk, 71 directions read at every step of every arm:
+
+| gain | what it is | the ladder, deg | what the picture takes |
+| ---: | --- | --- | ---: |
+| **1** | the session's own field | 0.295, 0.204, 0.164, 0.144, **0.054** | **100 percent** |
+| **-1** | the same size, the wrong way | 0.295, **0.346** and refused | **nothing** |
+| **2** | twice too large | 0.295, 0.164, **0.054**, then 0.116 and refused | **50 percent, which is the true field to the digit** |
+
+The gain-2 arm is the one worth sitting with: handed a field twice too big, the
+walk stops at the half of it that is the flight's own answer, and reads the
+same 0.054 degrees there that the un-planted arm reads at its own full step.
+
+**Which of the two criteria fires is worth saying.** At this depth it is the
+residual, every time: the wrong-sign arm keeps all 71 directions and is refused
+for leaving more, and both early stops in 13.6 are residual stops with the
+evidence within one direction. The evidence rule fired once, at the thin depth,
+on the same wrong-sign arm. It stays because it is the signature 12.2 measured
+on a term that takes the band's eyes out, and because a median cannot see a
+handful of directions going missing - but on this corpus, at this depth, it has
+never been the rule that stopped a walk.
+
+### 13.4 The bound, and what it is for
+
+`EPI_LIMIT_RAD` stays at 12.3's 2.8 degrees and its docstring says what it is:
+the largest term the gain sweep measured to leave the band's evidence intact,
+which catches a field that is not a calibration at all and nothing finer.
+
+> The safety question is not `|T|` and it never was: it is `|T - truth|`, and
+> nothing knows `truth` before the band has measured through the term.
+
+That is 12.3, and it is why the rail cannot be the guard and why the walk is.
+The rail refuses a term whole rather than clamping it, because a clamped field
+is a different field from the one that was measured and nothing measured that
+one.
+
+### 13.5 The null
+
+A session with no term applied draws `main`'s picture **byte for byte**, in
+both domains, at the BAD crossing under the drawn pose. Both checkouts built
+into their own `CARGO_TARGET_DIR`, which is not optional (AGENTS.md, issue
+#47).
+
+| render | `main` at a7b6930 | this branch, no term |
+| --- | --- | --- |
+| `--bin reframe`, the unbent projection | `4ecca5a996a3ccb41156040f58198278` | the same |
+| `--bin step`, the delivered picture with the band live and warm | `a9a489ebf49584ee44568320b73539f3` | the same |
+
+The delivered one is the load-bearing half: the unbent render never runs the
+band's compute pass, which is where the read-through lives, so a read-through
+that fired with an empty term would not show there.
+
+**And that is the same code path a session with no evidence takes.** There is
+no toggle to be off: what `epi=0` skips is `Scene::learn_epi`, and a capture
+whose seam reads nothing, or whose walk accepts nothing, ends up in exactly the
+state that skipping it leaves - `Table::REST`, and `Reframe::tabled` and
+`sample`'s read-through both short-circuit on it. Two captures in the corpus
+take that path for real under the thin walk of 13.3, and their delivered ramps
+are their own off rows to the last digit.
+
+### 13.6 The nine-row delivered table, on the shipping path
+
+Same nine crossings as 12.6, same instrument, same aims, at the pose the app
+draws (`seam=pool`). **The only difference between the two arms is
+`Scene::learn_epi`**: nothing hands the app a field, and the `live` column is
+what it harvested off the file it was drawing and walked in on its own.
+
+`E` is the swing the corridor delivers across itself, in view pixels of the
+render the row was taken at, lens 1's side doubled. `l0` and `l1` are the two
+sides' own contour intercepts with the rms of each line about its own points,
+because a row whose line does not describe its points is not quotable and the
+reader has to be able to see that.
+
+| crossing | off | live | | walked in | l0 off / live (rms) | l1 off / live (rms) |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| **May 01 BAD** | **19.92** | **0.83** | **-96%** | 100% | -3.58 / -0.15 (10.3, 0.3) | -9.96 / -0.41 (1.7, 0.1) |
+| **May 01 GOOD** | **1.99** | **1.20** | **-40%** | 100% | +1.00 / +1.01 (0.2, 0.2) | +1.00 / +0.60 (0.2, 0.6) |
+| Apr 10 | 1.68 | **0.18** | -89% | 100% | +1.91 / +0.10 (0.3, 0.1) | +0.84 / +0.09 (1.4, 0.2) |
+| May 26 | 1.72 | **0.72** | -58% | 100% | -0.66 / -0.19 (0.1, 0.1) | -0.86 / -0.36 (0.4, 0.1) |
+| Jul 14 | 9.00 | **0.68** | **-92%** | 100% | +3.63 / +0.24 (0.3, 0.1) | -4.50 / -0.34 (0.4, 0.1) |
+| Aug 02 | 1.66 | **1.90** | **+14%** | 25% | -0.74 / -0.51 (0.2, 0.3) | +0.83 / +0.95 (0.1, 0.1) |
+| Jul 14 shimmer | 5.47 | 6.28 | not quotable | 100% | **-13.88 / -2.15** (2.0, 0.4) | +2.74 / +3.14 (**12.4**, **5.2**) |
+| Jul 25, cloud top | 10.87 | **0.10** | **-99%** | 100% | +8.20 / +0.05 (0.9, 0.1) | -5.43 / -0.05 (3.3, 0.1) |
+| Oct 18, ONE X2 | 3.54 | **3.28** | -7% | 75% | +0.83 / +0.56 (0.5, 0.3) | -1.77 / -1.64 (**3.2**, 1.5) |
+
+**Eight of nine improve on their quotable side and one worsens.** The
+shimmer view's `E` column is lens 1's and lens 1's line does not describe its
+own points at either arm - that view is `fov=20`, where 4.8 degrees off the
+seam is most of the frame and the outer samples have nowhere to sit - so the
+quotable side there is lens 0, which reads **-13.88 to -2.15 view px, an 85
+percent fall**, its rms falling with it from 2.00 to 0.41. The experiment's own
+offline field read that side at -13.90 to -5.12 (10.8).
+
+**The trade the acceptance battery's first rule names is not made.** The two
+May-01 crossings are the same instant of the same file and one field serves
+both: BAD 19.92 to 0.83 and GOOD 1.99 to 1.20, where the pooled table improved
+BAD by a quarter and cost GOOD five and a half times its whole reading.
+
+**Aug-02 is the one that worsens and it is reported as measured**: 1.66 to
+1.90 view px, a quarter of a view pixel, on a crossing whose off row is already
+under half the perceptual floor. Its walk is the one that stopped early -
+0.3840 to 0.2467 degrees at a quarter of the field, then 0.2534 at a half, so
+the second step was refused and a quarter is what the picture took. The ring's
+median improved by 36 percent while that one azimuth got slightly worse, which
+is the honest shape of the limitation: **the walk's criterion is the whole
+ring's residual and a crossing is one direction of it.** Nothing in this design
+optimizes a crossing, and a flight whose ring improves can carry an azimuth
+that does not.
+
+**Every row lands under the four view pixel floor** on its quotable side, and
+the two that were tens of pixels - BAD at 19.92 and the cloud top at 10.87 -
+land at 0.83 and 0.10.
+
+**The X2 is a different camera and it is now touched at all**, which is the
+other thing per-session buys: the pooled X4 Air table reached it not at all
+(a zero row in 10.8, the guard refusing a table measured on another camera),
+and its own session's field takes it 3.54 to 3.28 with the walk stopping at
+three quarters. Its lens 1 line is a poor one at both arms and the row is
+quoted with that on it.
+
+### 13.7 T - fit(T): what the band does with a term it measures through
+
+The along-seam field's failure was `T - fit(T)`: with a table applied and the
+band measuring through it, the delivered correction is `T + fit(L - T)` against
+`fit(L)` with none, and the two differ by exactly `T - fit(T)`, which
+`Along::fit` reproduces only where the session's arc has evidence and delivers
+whole everywhere else (9.2).
+
+**The across-seam channel is not that shape**, which is the one structural
+thing this term has going for it: the band's epipolar channel is per cell, no
+five-term fit, no ridge, no arc. Where a direction has evidence the band reads
+the residual and applies it; where it has none it applies nothing.
+
+`--bin step`, band live and warm at 6 seconds, each capture's own harvested
+field, at the pose the app draws:
+
+| view | directions with evidence | epipolar mean | worst |
+| --- | ---: | ---: | ---: |
+| May 01 BAD, off | 96 of 128 | 0.554 deg | 0.942 |
+| May 01 BAD, **live** | **96 of 128** | **0.299 deg** | 2.065 |
+| Jul 14 shimmer, off | 128 of 128 | 0.552 deg | 1.885 |
+| Jul 14 shimmer, **live** | **127 of 128** | **0.528 deg** | **1.436** |
+
+**The band keeps what it had and carries about half of what it did.** It does
+not lose the seam, does not re-open the crossover and does not chase the term.
+The worst single direction at BAD goes the other way, 0.942 to 2.065, so there
+is at least one direction where the term overshoots and the band is left
+carrying more than it started with; that direction is not identified here, and
+the experiment's own offline field did the same thing (11.4).
+
+**The step at the two May-01 views is not quotable and is not quoted**: the
+registry warns that `--bin step`'s line fits there come out at 51 to 54 px rms
+(9.5). The band's own evidence counts off the same runs are what those rows are
+for, which is how 10.7 and 11.4 used the same instrument.
+
+### 13.8 Steadiness, and the paused window
+
+`--bin shear` at the shimmer view, 90 frames, `warm=6.0`, band live, same drawn
+pose: the frame-to-frame step of the **applied** displacement at four bands,
+and the band's own state. This is the probe that caught the GPU trim's snapping
+in #167's review.
+
+| | off | **live** |
+| --- | ---: | ---: |
+| band state, frame to frame, 360 directions | 0.0445 deg rms | **0.0374** |
+| the same, worst single step | 1.0089 | **0.5051** |
+| applied step rms / worst at -150 px | 0.0036 / 0.0102 | **0.0019 / 0.0051** |
+| at the seam | 0.0133 / 0.0690 | **0.0082 / 0.0286** |
+| at +60 px | 0.1011 / 0.2566 | **0.0333 / 0.1455** |
+| at +150 px | 0.0118 / 0.0745 | **0.0058 / 0.0150** |
+| **frame pairs stepping over a view pixel at +60** | **21 of 89** | **4 of 89** |
+
+**Steadier at every band**, and the band where the shipped build steps over a
+view pixel on a quarter of its frame pairs drops to four of them. The applied
+displacement itself is smaller at every band as well - 3.96 to 2.46 view px at
+the seam and 4.19 to 1.64 at +60 - which is the corridor being asked to carry
+less. The experiment's own offline field reached 0 of 87 at that band (12.5);
+this field is the shallower harvest's and it reaches 4 of 89.
+
+### 13.9 What it costs, and the two numbers the owner has to rule on
+
+**The pass is not free and this is the honest ledger.** `--bin playback`, the
+app's own frame path paced against a 60 Hz display while it decodes 30 fps of
+3840x3840 pairs, on the May-01 flight, quiet box:
+
+| arm | presented | dropped | worst late | pass cost |
+| --- | ---: | ---: | ---: | ---: |
+| `main`, 180 s | 29.89 fps | **14** | 80 ms | 8.44 ms |
+| this branch, flat out, 60 s | 28.95 | **61** | 208 ms | 13.32 ms |
+| this branch, one decode pass, resting 2:1, 180 s | 29.53 | **79** | 438 ms | 9.60 ms |
+
+**Why it costs anything at all**, because the term itself is two loads and a mix
+per fragment: the *reading* is what costs. This box is an APU and the CPU and
+GPU share one memory bus; one direction's patch pair is thousands of scattered
+taps into two 3840x3840 luma planes, and 24 frames of 128 directions at five
+terms is a quarter of a billion of them.
+
+**Three things were tried and measured.** Reading each walk step as its own
+decode pass costs 61 dropped frames in sixty seconds; reading all five terms
+through **one** pass - a fifth of the jumps, a third less work, and every step
+answered on the same frames rather than merely the same places - takes it to 30
+in 150 s. Resting the pass 2 seconds per second of work spreads the damage
+rather than removing it, and resting **per direction** rather than per frame is
+worse than either (97 dropped in 240 s), because a two-millisecond sleep is
+mostly a wake-up.
+
+**What is left is above `main` and it is disclosed rather than solved.** The
+run-to-run spread on this box is wide - `main` itself reads 2 dropped frames in
+one 150 s run and 14 in another - but the branch is several times it either
+way. The next lever is named and not taken: the back lens's grid is sampled
+once per term where the term shifts the search by at most sixteen grid steps of
+a window that spans 147, so one sampling could serve all five with the search
+re-centred instead. That would take the walk's tap count down by about four
+fifths, and it is a change to `read_ring_centred`'s inner loop that wants its
+own measurement.
+
+**And the second number is when it lands.** Seven seconds to read the field
+flat out and about thirty-five to walk it in, so **about forty-five seconds**
+with no rest and **near two minutes** resting 2:1. The floor for anything
+measured is about ten seconds: the field needs frames from around the whole
+file because different headings put content at different azimuths, and the walk
+needs one more pass to check the field before any of it is drawn. **Until it
+lands the picture is `main`'s**, byte for byte, so nothing is ever worse than
+today - the improvement arrives late rather than the picture waiting for it.
+
+Both numbers are owner decisions and they pull against each other: the rest
+that protects playback is what makes the landing slow.
+
+### 13.10 What still needs an eye, and what this did not answer
+
+- **No eye has seen any of it.** That is the gate (9.3), and the crops are
+  `scratch/epiship/panel-bad.png` and `scratch/epiship/panel-jul14.png`, cut
+  from `--bin epiramp png=` renders with nothing drawn on them, off above live.
+  The blind A/B against `main` is what decides, and this branch has not been
+  staged for one.
+- **The far gate is a hypothesis with a delivered result behind it, not a
+  proof**, and this carries 11.5's caveat unchanged: nothing separates a
+  camera's own term from a far object's parallax at one azimuth. What the gate
+  removes is content that *wandered*. That the picture improves is evidence the
+  gate keeps mostly camera; it is not evidence that it keeps only camera.
+- **The walk's criterion is the whole ring and a crossing is one direction of
+  it.** Aug-02 is the row that shows it: the ring's median improved by 36
+  percent at a quarter of the field and that crossing got a quarter of a view
+  pixel worse.
+- **The harvest depth is a cost decision with a measured price.** At the
+  GOOD crossing the app's own 6x4 field delivers 1.20 view px where the
+  experiment's 24x6 field delivers 0.35, on the same instrument at the same
+  aim; at BAD the two are 0.83 and 0.89. Four times the decode buys most of a
+  view pixel at one of the nine crossings and nothing at another.
+- **One crossing per flight.** Nine moments across seven captures, two
+  cameras.

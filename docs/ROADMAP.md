@@ -579,6 +579,40 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-07 **The across-seam term is a session's own, harvested live and
+  walked in** (issue #103, the epi fork; docs/research/stage9.md 13). The band
+  reads what the two lenses disagree by across the seam and applies it **ramped
+  across the handover**, which is right where that disagreement is parallax and
+  draws far content with a bend in it where it is the camera: at the registry's
+  BAD May-01 crossing, a horizon drawn as a shallow S, 19.9 view px of swing
+  across the corridor. The fix is to carry the camera's share as one
+  displacement of lens 1's whole picture instead, before projection, with the
+  band re-measuring through it.
+
+  **Per session, because a pooled one was refused in the delivered picture**
+  (stage9.md 10): six flights disagree at a given azimuth by 0.597 degrees at
+  the median against a pooled amplitude of 0.229 rms, so the mean reconstructs
+  no member of the population, and the delivered table refused it on the
+  acceptance battery's first rule - it improved BAD by a quarter and cost GOOD
+  five and a half times its whole reading, on the same instant of the same file.
+
+  **The app harvests its own**, 6 places by 4 frames off the file it is
+  drawing, through the factory map, far-gated on the excursion rather than on
+  the reading, on its own thread, with no user surface and nothing stored.
+  Seven seconds to read and sixteen to walk in, and until it lands the picture
+  is `main`'s.
+
+  **What guards it is the walk and not a bound on its size**, which is the gain
+  sweep's finding (stage9.md 12.2): at the same residual a 2.806 degree term
+  keeps 95 of 128 directions where a 0.935 degree one keeps 79, so `|T|` is not
+  what blinds the band and no compose-time test can tell a right field from a
+  wrong one. The term goes on a quarter at a time and this capture's own ring
+  is read again through each step; the walk stops at the last step that left
+  the seam better than the one before it, and nothing wrong reaches the picture
+  because every step is measured before any of it is drawn. Handed a field of
+  the right size pointing the wrong way, it takes nothing; handed one twice too
+  large, it takes the half of it that is the flight's own answer.
+
 - 2026-08-07 **An acceptance line names the pose instead of copying it**
   (`seam=pool`, docs/research/reference-views.md). Three acceptance commands -
   the shimmer line, the May-01 crossing pair, and the `--bin step` block under
