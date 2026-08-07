@@ -461,6 +461,27 @@ impl Scene {
         }
     }
 
+    /// Draw this file with the along-seam field its camera has been read at,
+    /// composed with the pose it is being drawn with (issue #103, stage 9).
+    ///
+    /// The rms of what that asks for, in degrees, for the line the shell
+    /// prints; `None` where the two do not compose into a table a calibration
+    /// could have produced, which leaves the picture exactly as the pose alone
+    /// draws it ([`seam::along_table`]).
+    ///
+    /// Both halves come from the same pool and are composed here rather than
+    /// stored composed, because the pose moves as the pool grows and the field
+    /// does not: it is what the camera reads above the calibration the camera
+    /// wrote.
+    pub fn use_field(&self, terms: [f64; 5], fit: SeamFit) -> Option<f64> {
+        let show = self.show.as_ref()?;
+        let table = seam::along_table(terms, fit, &show.lenses, show.frame)?;
+        self.use_table(table);
+        Some(seam::rms(
+            table.entries().iter().map(|e| f64::from(e.to_degrees())),
+        ))
+    }
+
     /// Ask for this correction, walking to it rather than landing it. What a
     /// freshly pooled fit does to the file it was measured on: the picture is
     /// already up, so it must not jump.
@@ -987,6 +1008,7 @@ fn fit_into(
         fit: fitted.fit,
         patches: fitted.patches,
         residual_deg: fitted.after[0].hypot(fitted.after[1]),
+        along: fitted.along,
     };
     if let Ok(mut slot) = kept.lock() {
         *slot = Some(harvest);

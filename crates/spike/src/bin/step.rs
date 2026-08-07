@@ -152,6 +152,7 @@ fn main() -> Fallible<()> {
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     pipeline.hold_band(options.off);
     let mut scene = Scene::still(&options.input, options.start())?;
+    scene.use_table(options.table);
     options.seam.hold(&scene);
     scene.set_horizon(match options.lock {
         true => Horizon::Locked,
@@ -802,6 +803,10 @@ fn overlay(picture: &Picture, field: &Field, trace: &Trace) -> Picture {
 
 struct Options {
     input: PathBuf,
+    /// The along-seam table the picture is drawn with (issue #103, stage 9).
+    /// `Table::REST` unless a run names one, so a run that does not is the
+    /// picture this instrument has always measured, byte for byte.
+    table: kjerag_render::Table,
     time: f64,
     warm: f64,
     yaw: f64,
@@ -839,6 +844,7 @@ impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Fallible<Self> {
         let mut options = Self {
             input: PathBuf::new(),
+            table: kjerag_render::Table::REST,
             time: 0.0,
             warm: 0.0,
             yaw: 90.0,
@@ -866,6 +872,7 @@ impl Options {
                 Some(("guard", value)) => options.guard = value.parse()?,
                 Some(("trace", value)) => options.trace = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
+                Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
                 Some(("seam", value)) => {
                     options.seam = match value {
                         "factory" => Seam::Factory,
@@ -917,4 +924,5 @@ impl Options {
 
 const USAGE: &str = "usage: step <file.insv> [time=seconds] [warm=seconds] [yaw=deg] \
      [pitch=deg] [fov=deg] [size=px] [lock=0] [off=1] [guard=deg] [trace=1] \
-     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] [out=name.png]";
+     [table=table.txt] [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] \
+     [out=name.png]";

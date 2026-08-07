@@ -147,6 +147,31 @@ const FAR_DEG: f32 = -1.2;
 /// (`the_along_seam_bend_costs_no_overlap_and_cannot_fold`).
 pub const PERP_DEG: f32 = 0.90;
 
+/// How far one frame's along-seam reading may sit from what its direction
+/// already holds before it is refused, in radians.
+///
+/// [`super::seam::GATE_FLOOR_DEG`], which is the floor of the rule
+/// [`super::seam::measure`] applies to this same population one instrument
+/// over, and on the GPU it is the whole of the rule there is room for: that one
+/// takes a median and a median absolute deviation over a direction's frames,
+/// and a direction here is one exponential average that a stream walks past
+/// once. A comparison against the held value is what a stream can afford, and
+/// it is what stage 9's estimator finding asked for by name
+/// (docs/research/stage9.md 4.5).
+///
+/// **The floor is the part of the rule worth keeping**, because it is the part
+/// that binds: the population's own median absolute deviation between frames is
+/// 0.008 to 0.05 degrees, so four of them is under this number on most
+/// directions and this is what refuses the tail either way. A direction whose
+/// own scatter is genuinely wider loses a few readings it would have kept, and
+/// what it keeps instead is the average it already had, which is what those
+/// readings would have averaged to.
+///
+/// It is also exactly one whole search step ([`STEP_DEG`] times the along-seam
+/// stride), so what it refuses is a peak that moved by more than the grid it
+/// was found on.
+const HOLD_RAD: f32 = super::seam::GATE_FLOOR_DEG as f32 * std::f32::consts::PI / 180.0;
+
 /// How many along-seam offsets are tried, either side of zero.
 ///
 /// Nine at [`STEP_DEG`], which makes the grid **square**: the same 0.10 degrees
@@ -477,7 +502,11 @@ impl Along {
 /// ring with nothing on it come out at exactly zero rather than at a division.
 /// A term forty directions agree on gives up two percent of itself to this; a
 /// term one direction has seen gives up half.
-const RIDGE: f32 = 1.0;
+///
+/// Public because the pooled field is the same five terms fitted over a ring of
+/// azimuths instead of a ring of cells, and it is held against the same
+/// evidence ([`super::seam::along_terms`]).
+pub const RIDGE: f32 = 1.0;
 
 /// A small symmetric positive definite system, by Gaussian elimination with no
 /// pivoting.
@@ -552,7 +581,15 @@ pub struct Leftover {
 /// with no reading inside the kernel is exactly zero and its neighbours taper
 /// into it.
 ///
-/// **Nothing in the app builds one, and that is a measurement** (stage 9,
+/// **What the app writes here is a five-term field and not a per-azimuth
+/// table**, and the two are opposite constructions on one vehicle
+/// ([`super::seam::along_table`], stage 9 layer 2). This type is the uniform,
+/// the lookup and the application law; what fills it is whichever field has
+/// been measured, and the one that has is [`Along`]'s own shape pooled per
+/// camera. [`Self::of`] below is the per-azimuth constructor, which the corpus
+/// refused, and it is kept because the refusal has to stay checkable.
+///
+/// **Nothing pooled per azimuth, and that is a measurement** (stage 9,
 /// docs/research/stage9.md). Over nine captures of two cameras, held out on
 /// every arm: on the ONE X2 a table costs 4 to 6 percent under every reduction;
 /// on the X4 Air the effect runs -1 to +2 percent depending on the estimator,
@@ -572,12 +609,12 @@ pub struct Leftover {
 /// on 18 of 18 pairs of captures, and fitted on other flights only they take
 /// the pooled leftover from 0.0536 to 0.0211 degrees on the X4 and 0.0606 to
 /// 0.0249 on the X2, nine captures of nine improved. That is [`Along`]'s
-/// territory, computed per session already and pooled per camera by nobody yet.
-/// What this type would carry is what is left over it, and there is a
-/// hundredth of a pixel of that.
+/// territory, computed per session already and now pooled per camera as well
+/// ([`super::seam::along_terms`]). What a per-azimuth table would carry is what
+/// is left over it, and there is a hundredth of a pixel of that.
 ///
-/// The mechanism is here because the refusal had to be checkable and because a
-/// camera that needs one may still turn up; `Table::REST` is what ships.
+/// The per-azimuth mechanism stays here because the refusal had to be
+/// checkable and because a camera that needs one may still turn up.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Table {
@@ -627,6 +664,23 @@ impl Table {
     /// One entry per direction, in radians, for an instrument.
     pub fn entries(&self) -> [f32; AZIMUTHS] {
         std::array::from_fn(|index| self.packed[index / 4][index % 4])
+    }
+
+    /// The same, refused whole where any entry is larger than a calibration or
+    /// is not a number.
+    ///
+    /// **Whole support or nothing**, which is the acceptance rule a later
+    /// applied candidate inherits (docs/research/stage9.md 7): a table is one
+    /// field over one ring, and a ring with one direction knocked out of it is
+    /// the hole-filling this type exists to refuse. What builds one this way is
+    /// [`super::seam::along_table`], where a single direction the projection
+    /// cannot reach is a camera whose seam circle leaves a lens's picture and
+    /// not a reading to be patched around.
+    pub fn plausible(entries: [f32; AZIMUTHS]) -> Option<Self> {
+        entries
+            .iter()
+            .all(|entry| entry.is_finite() && entry.abs() <= TABLE_LIMIT_RAD)
+            .then(|| Self::of_entries(entries))
     }
 
     /// A table straight from its entries, which is how a planted control and a
@@ -835,6 +889,20 @@ fn terms(cos: f32, sin: f32) -> [f32; 5] {
     [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin]
 }
 
+/// The same five functions at one azimuth, in `f64`.
+///
+/// A second expression of one identity, which is what
+/// [`the_two_bases_are_the_same_five_functions`] is for. It exists because the
+/// two live at different precisions for different reasons: [`terms`] is the
+/// twin of what a fragment shader computes and may not be widened without
+/// changing every pixel the CPU map draws, while the pooled field
+/// ([`super::seam::along_terms`]) is a least squares over hundreds of readings
+/// and is fitted in `f64` like every other fit in this repository.
+pub fn basis(phi: f64) -> [f64; 5] {
+    let (sin, cos) = phi.sin_cos();
+    [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin]
+}
+
 /// One direction's state, as the compute pass writes it and the fragment
 /// shader reads it.
 ///
@@ -986,6 +1054,22 @@ pub struct Reading {
     /// Along [`Ring::perp`], in radians. The camera, and nothing else can
     /// reach it.
     pub along: f32,
+}
+
+/// Whether one frame's along-seam reading may move the direction it was read
+/// at, or is a correlation on the wrong feature rather than a camera.
+///
+/// **The whole of the per-frame trim** ([`HOLD_RAD`]), and it is a function so
+/// that a rule the GPU runs where no test can reach it is a rule `cargo test`
+/// can call with no device and no footage.
+///
+/// A direction with no evidence behind it takes its reading whole, and so does
+/// a reset frame, for the same reason the ease does: there is nothing behind
+/// them for a reading to be an outlier of.
+///
+/// WGSL twin: `settle`'s `believed`.
+pub fn believed(held: &Cell, reading: f32, fresh: bool) -> bool {
+    fresh || held.off_conf <= 0.0 || (reading - held.off_epi).abs() <= HOLD_RAD
 }
 
 /// How much of the along-seam channel is parallax leaking onto an axis that
@@ -1473,8 +1557,10 @@ pub(crate) fn wgsl() -> String {
          const BACK_ALONG = {back_along}u;\n\
          const BACK_ACROSS = {back_across}u;\n\
          const TAU = {tau:?};\n\
-         {photometry}{CELL}{RING}{WGSL}",
+         const HOLD = {hold:?};\n\
+         {photometry}{CELL}{RING}{TABLE}{WGSL}",
         tau = std::f32::consts::TAU,
+        hold = HOLD_RAD,
         step = STEP_DEG.to_radians(),
         perp_steps = PERP_STEPS,
         keep = KEEP,
@@ -1499,7 +1585,7 @@ pub(crate) fn lookup_wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst KEEP = {KEEP:?};\n\
          const WIDEST = {widest:?};\nconst TAU = {tau:?};\nconst LIMIT_LN = {LIMIT_LN:?};\n\
-         {CELL}{RING}{LOOKUP}",
+         {CELL}{RING}{TABLE}{LOOKUP}",
         widest = WIDEST_DEG.to_radians(),
         tau = std::f32::consts::TAU,
     )
@@ -1785,7 +1871,15 @@ fn table_at(low: i32, mix: f32) -> f32 {
   let b = table_entry(low + 1);
   return mix2(a, b, mix);
 }
+"#;
 
+/// One entry of the along-seam table, shared by both shaders.
+///
+/// Its own block because both stages read it and for opposite reasons: the
+/// fragment shader applies the table, and the compute pass **subtracts** it
+/// from where it looks, so that what the correlation answers is what is still
+/// wrong rather than what was wrong before the table was written.
+const TABLE: &str = r#"
 fn table_entry(index: i32) -> f32 {
   let at = u32(index + i32(AZIMUTHS)) % AZIMUTHS;
   return reframe.table[at / 4u][at % 4u];
@@ -1923,11 +2017,24 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   }
 
   // The back lens's grid: the patch widened by everywhere the search may
-  // slide it.
+  // slide it, about the direction the picture is DRAWN at rather than the
+  // direction the ring names.
+  //
+  // The two differ by the stored along-seam table, which the fragment shader
+  // adds to lens 1's ray and nothing else moves. Reading through it is what
+  // makes the two fields one answer instead of two: the band fits five terms to
+  // what this pass reports and applies them ON TOP of the table, so a pass that
+  // looked where the table was not applied would report the correction the
+  // table is already making and the picture would take it twice. The same rule,
+  // and the same sentence, as `seam::Plan::table`.
+  //
+  // Exactly the direction the ring names on a camera nothing is pooled for,
+  // because the entry is zero and a zero displacement is the zero vector.
+  let drawn = at.centre + table_entry(i32(cell)) * at.perp;
   for (var i = lane; i < BACK_ALONG * BACK_ACROSS; i += THREADS) {
     let a = f32(i32(i % BACK_ALONG) - HALF - PERP_STEPS * PERP_STEP) * STEP;
     let b = f32(i32(i / BACK_ALONG) - HALF + EPI_FAR) * STEP;
-    back[i] = tap(1u, aim1, at.centre + a * at.perp + b * at.epi);
+    back[i] = tap(1u, aim1, drawn + a * at.perp + b * at.epi);
   }
   workgroupBarrier();
 
@@ -2156,16 +2263,47 @@ fn settle(cell: u32, at: Ring) {
     held.disparity += (read * STEP - held.disparity) * learn;
     held.confidence += (best - held.confidence) * learn;
   }
-  if along_pinned {
-    held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
-  } else {
+  // A reading further than HOLD from what this direction already holds is
+  // refused, and refused the way every other refusal in this pass works: the
+  // measurement is kept and the evidence is given up. It is `seam::measure`'s
+  // own per-frame rule, one instrument over and with the only part of it a
+  // stream can run - the band's per-direction state is one exponential average
+  // and there is no median in it, so what survives is the rule's floor, which
+  // is one whole search step. Why the floor is the right part to keep: the
+  // population it filters moves by 0.008 to 0.05 degrees of median absolute
+  // deviation between frames and by 0.22 to 0.48 of root mean square, so the
+  // readings this refuses are the tail and not the shoulder
+  // (docs/research/stage9.md 4.5).
+  //
+  // **No distance reaches this axis**, which is what makes a jump this large
+  // impossible rather than merely unlikely: a direction's along-seam offset is
+  // its camera, and a camera does not move while a file plays. What DOES move
+  // it legitimately is a correction walking in, and that is why the test is
+  // against the held value rather than against zero - a walk crosses at most
+  // 0.03 degrees a frame and is tracked, while a correlation that found the
+  // wrong feature arrives whole.
+  //
+  // A direction with no evidence takes its reading whole, and so does a reset
+  // frame, for the reason the ease above takes them whole: there is nothing
+  // behind them to be an outlier of.
+  var along_read = 0.0;
+  var believed = !along_pinned;
+  if !along_pinned {
     // The same parabola on the same grid: the along-seam neighbours are one
     // score apart because the table runs perp fastest, where the epipolar ones
     // are PERP_SHIFTS apart. Without it this channel quantizes to PERP_STEP,
-    // which is 15 view px of horizon at the view stage 5 exists for.
+    // which is 15 view px of horizon at the view stage 5 exists for. Inside the
+    // branch because a pinned peak sits at the end of the search and its
+    // neighbours are off the end of the table.
     let read = f32(perp) + parabola(scores[found - 1u], best, scores[found + 1u]);
-    held.off_epi += (read * f32(PERP_STEP) * STEP - held.off_epi) * learn_along;
+    along_read = read * f32(PERP_STEP) * STEP;
+    believed = fresh || unread_along || abs(along_read - held.off_epi) <= HOLD;
+  }
+  if believed {
+    held.off_epi += (along_read - held.off_epi) * learn_along;
     held.off_conf += (best - held.off_conf) * learn_along;
+  } else {
+    held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
   }
   // Stage 3's own gate, unchanged: the photometry is read at the shift that
   // made the two patches the same content, so a shift that did not establish
@@ -2434,6 +2572,99 @@ mod tests {
                 at.epi,
             );
         }
+    }
+
+    /// The two expressions of the five basis functions are one identity, and
+    /// only their precision differs.
+    #[test]
+    fn the_two_bases_are_the_same_five_functions() {
+        for step in 0..AZIMUTHS {
+            let phi = step as f64 / AZIMUTHS as f64 * std::f64::consts::TAU;
+            let (sin, cos) = (phi as f32).sin_cos();
+            for (wide, narrow) in basis(phi).iter().zip(terms(cos, sin)) {
+                assert!(
+                    (*wide as f32 - narrow).abs() < 1e-6,
+                    "at {phi:.4} rad the bases read {wide} and {narrow}",
+                );
+            }
+        }
+    }
+
+    /// The per-frame trim, in the arithmetic the GPU runs (issue #103, stage 9
+    /// layer 2). A direction holding a tenth of a degree takes a reading beside
+    /// it and refuses one two degrees away, which is past the window the search
+    /// even runs in.
+    #[test]
+    fn a_reading_far_from_what_a_direction_holds_does_not_move_it() {
+        let held = Cell {
+            off_epi: 0.10f32.to_radians(),
+            off_conf: 0.8,
+            ..Cell::default()
+        };
+        let near = 0.13f32.to_radians();
+        let far = 2.10f32.to_radians();
+        assert!(
+            believed(&held, near, false),
+            "a reading 0.03 deg off was refused"
+        );
+        assert!(
+            !believed(&held, far, false),
+            "a reading 2.0 deg off was kept"
+        );
+        // A walk crosses at most a hundredth of a degree a frame, which is the
+        // reason the test is against the held value and not against zero.
+        assert!(believed(&held, held.off_epi + 0.03f32.to_radians(), false));
+    }
+
+    /// Nothing behind a reading is nothing for it to be an outlier of: a
+    /// direction with no evidence takes it whole, and so does a reset frame.
+    /// The same two exemptions the ease itself takes.
+    #[test]
+    fn a_direction_with_no_evidence_takes_its_reading_whole() {
+        let unread = Cell::default();
+        let far = 2.10f32.to_radians();
+        assert!(believed(&unread, far, false), "a first reading was refused");
+        let held = Cell {
+            off_epi: 0.10f32.to_radians(),
+            off_conf: 0.8,
+            ..Cell::default()
+        };
+        assert!(believed(&held, far, true), "a reset frame was gated");
+    }
+
+    /// A table is accepted over its whole support or not at all.
+    #[test]
+    fn a_table_with_an_entry_larger_than_a_calibration_is_refused() {
+        let flat = [0.2f32.to_radians(); AZIMUTHS];
+        assert!(Table::plausible(flat).is_some());
+        let mut wild = flat;
+        wild[57] = 0.9f32.to_radians();
+        assert_eq!(
+            Table::plausible(wild),
+            None,
+            "0.9 deg at one direction was kept"
+        );
+        let mut broken = flat;
+        broken[3] = f32::NAN;
+        assert_eq!(Table::plausible(broken), None);
+    }
+
+    /// The band reads through the table it is drawn with, which is what keeps
+    /// the two along-seam fields one answer: the compute pass names
+    /// `table_entry` and the fragment shader names it too, out of one block
+    /// that both are built from.
+    #[test]
+    fn both_shaders_read_the_stored_table() {
+        for source in [wgsl(), lookup_wgsl()] {
+            assert!(
+                source.contains("fn table_entry("),
+                "a shader was built without the table block",
+            );
+        }
+        assert!(
+            wgsl().contains("at.centre + table_entry(i32(cell)) * at.perp"),
+            "the compute pass stopped reading through the table it is drawn with",
+        );
     }
 
     #[test]

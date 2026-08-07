@@ -1647,10 +1647,10 @@ pooled_calibration() {
 
 	# The session's directories persist between runs, so a pool a previous run
 	# stored is still there and would make this session take the path it is
-	# here to rule out. The superseded single-entry key goes too: it is
-	# derived data and nothing reads it any more.
+	# here to rule out. The two superseded keys go too: both are derived data
+	# and nothing reads either of them any more (docs/research/stage9.md 8.5).
 	local state=$STATE_HOME/cosmic/dev.harding.Kjerag/v1
-	rm -f "$state/seam_pool" "$state/seam_calibration"
+	rm -f "$state/seam_learned" "$state/seam_pool" "$state/seam_calibration"
 
 	boot fallback "$media"
 	if ! await '^seam:' "$READY"; then
@@ -1676,7 +1676,7 @@ pooled_calibration() {
 	# that they reach the first frame, not what they are.
 	mkdir -p "$state"
 	printf '{"%s":(samples:[(roll_deg:0.789,yaw_deg:-2.450,pitch_deg:-0.668,cx_px:-2.55,cy_px:-13.84,patches:13,residual_deg:0.108)])}\n' \
-		"$camera" >"$state/seam_pool"
+		"$camera" >"$state/seam_learned"
 
 	boot calibrated "$media"
 	if ! await 'pooled over 1 fits' "$READY"; then
@@ -1724,8 +1724,8 @@ a_camera_pointing_elsewhere_is_still_fitted() {
 		return
 	fi
 	local state=$STATE_HOME/cosmic/dev.harding.Kjerag/v1
-	local pool=$state/seam_pool
-	rm -f "$pool" "$state/seam_calibration"
+	local pool=$state/seam_learned
+	rm -f "$pool" "$state/seam_pool" "$state/seam_calibration"
 
 	boot offset "$offset_media"
 	if ! await 'nothing pooled for this camera yet' "$READY"; then
@@ -2194,7 +2194,7 @@ a_pair_is_one_capture_to_the_seam() {
 		;;
 	esac
 
-	rm -f "$STATE_HOME/cosmic/dev.harding.Kjerag/v1/seam_pool"
+	rm -f "$STATE_HOME/cosmic/dev.harding.Kjerag/v1/seam_learned"
 	boot "pair-$route"
 	if ! await_paint "pair-$route-welcome"; then
 		alive || lost "$check"

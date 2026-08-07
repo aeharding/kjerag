@@ -275,6 +275,7 @@ fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
     live.hold_band(options.held());
     let mut scene = Scene::still(&options.input, options.start())?;
     scene.set_horizon(options.view.horizon);
+    scene.use_table(options.table);
     options.seam.hold(&scene);
 
     let size = options.size();
@@ -1309,6 +1310,10 @@ impl Seam {
 #[derive(Clone)]
 struct Options {
     input: PathBuf,
+    /// The along-seam table the picture is drawn with (issue #103, stage 9).
+    /// `Table::REST` unless a run names one, so a run that does not is the
+    /// picture this instrument has always measured, byte for byte.
+    table: kjerag_render::Table,
     view: Framing,
     mode: Mode,
     frames: usize,
@@ -1331,6 +1336,7 @@ impl Options {
         let args: Vec<String> = args.collect();
         let mut options = Self {
             input: PathBuf::new(),
+            table: kjerag_render::Table::REST,
             view: Framing {
                 at: Duration::ZERO,
                 camera: Camera {
@@ -1372,6 +1378,7 @@ impl Options {
                 Some(("null", value)) => options.null = value.parse::<u32>()? != 0,
                 Some(("plant", value)) => options.plant = value.parse()?,
                 Some(("out", value)) => options.out = PathBuf::from(value),
+                Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
                 Some(("seam", value)) => {
                     options.seam = match value {
                         "factory" => Seam::Factory,
@@ -1473,6 +1480,7 @@ impl Options {
 const USAGE: &str = "usage: shear <file.insv> time=seconds yaw=deg pitch=deg fov=deg lock=0|1 \
      [mode=probe|profile|plant] [frames=90] [warm=seconds] [size=px] [null=1] [plant=deg] \
      [out=dir] \
+     [table=table.txt] \
      [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
 
 #[cfg(test)]

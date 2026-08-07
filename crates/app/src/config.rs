@@ -127,6 +127,18 @@ pub struct SeamSample {
     /// off fifty far-field patches from one off seven near-field ones.
     pub patches: usize,
     pub residual_deg: f64,
+    /// What the same ring read along the seam above the calibration the camera
+    /// wrote, as the five terms the pass applies, in degrees
+    /// ([`kjerag_render::seam::along_terms`]).
+    ///
+    /// **Not a leftover**, which is what makes it worth storing: no pose has
+    /// been taken off it, so it is the same quantity on every capture of this
+    /// camera whatever the pool's answer happens to be that day, and the two
+    /// are composed at open rather than stored composed.
+    ///
+    /// `None` on a ring that could not pin five terms, which costs the pool
+    /// this sample's field and keeps its pose.
+    pub along_deg: Option<[f64; 5]>,
 }
 
 impl SeamSample {
@@ -152,6 +164,7 @@ impl From<Harvest> for SeamSample {
             cy_px: harvest.fit.cy_px,
             patches: harvest.patches,
             residual_deg: harvest.residual_deg,
+            along_deg: harvest.along,
         }
     }
 }
@@ -227,6 +240,46 @@ impl SeamPool {
             .map(|(fit, _)| fit)
             .collect();
         middle_of(&agreed)
+    }
+
+    /// The pooled along-seam field: the middle of what each capture read,
+    /// coefficient by coefficient (issue #103, stage 9 layer 2).
+    ///
+    /// **A middle taken coefficient by coefficient, which is exactly what
+    /// [`Self::answer`] refuses to do for the five knobs**, and the difference
+    /// is that these five do not trade against each other. The knobs are one
+    /// fit's parameters and a relative roll and a principal point leave
+    /// overlapping signatures round the seam, so a knobwise middle ships a
+    /// combination no capture asked for. These are the coefficients of five
+    /// functions that are orthogonal round a full circle, so on a ring with
+    /// content most of the way round, each is measured on its own and a middle
+    /// of each is a field some ring could have asked for. On a starved ring
+    /// they are not orthogonal, and what protects that case is the same thing
+    /// that protects a starved fit: the ridge inside
+    /// [`kjerag_render::seam::along_terms`], which shrinks a term the readings
+    /// do not pin.
+    ///
+    /// A median rather than a mean for the reason every middle in this file is
+    /// one: one capture that correlated on the wrong feature moves a mean by
+    /// its whole size and a median not at all.
+    ///
+    /// `None` until one capture has answered, which is the first file of a
+    /// camera the pool has never seen.
+    pub fn field(&self) -> Option<[f64; 5]> {
+        let read: Vec<[f64; 5]> = self
+            .samples
+            .iter()
+            .filter_map(|sample| sample.along_deg)
+            .filter(|terms| terms.iter().all(|term| term.is_finite()))
+            .collect();
+        if read.is_empty() {
+            return None;
+        }
+        Some(std::array::from_fn(|term| {
+            let mut all: Vec<f64> = read.iter().map(|terms| terms[term]).collect();
+            all.sort_by(f64::total_cmp);
+            all[all.len() / 2]
+        }))
     }
 
     /// Take one fit if it is worth keeping. `false` for one that is not, which
@@ -315,15 +368,31 @@ pub struct ConfigState {
     /// measurement the app made, not a preference the pilot expressed, and it
     /// has no row in the Settings page.
     ///
-    /// It is now a **cache**, which is what changed: nothing here costs the
-    /// pilot an action to remake, so deleting it costs a few seconds of
-    /// watching and nothing else. That is why the single-entry
-    /// `seam_calibration` this replaces is discarded rather than migrated. The
-    /// old entries were made by a menu action off whichever file was open, so
-    /// migrating them would carry exactly the contamination the pool exists to
-    /// average out; the old key is left on disk unread and the pool refills
-    /// itself from the next few files played.
-    pub seam_pool: BTreeMap<String, SeamPool>,
+    /// It is a **cache**, which is what makes discarding one an option:
+    /// nothing here costs the pilot an action to remake, so deleting it costs a
+    /// few seconds of watching and nothing else. That is why the single-entry
+    /// `seam_calibration` it began as was discarded rather than migrated, and
+    /// it is why `seam_pool` after it is discarded now.
+    ///
+    /// **This is the third key and the second discard** (issue #103, stage 9
+    /// layer 2). Every sample under `seam_pool` was fitted through a ring whose
+    /// directions were each a **mean** over a heavy-tailed set of frames, and
+    /// the record measures what that cost: refitted with the outlying moments
+    /// refused, the same corpus moves `cy` from -11.91 to -13.18 and `pitch`
+    /// from -0.936 to -1.096, and per-capture leftovers from 0.049-0.062 down
+    /// to 0.028-0.039 degrees (docs/research/stage9.md 4.5). Those are not the
+    /// same measurement taken twice, and a pool that answers with the fit the
+    /// rest of it agrees with most is a pool where five old samples outvote
+    /// every new one. Keeping them would hold a camera on the old estimator's
+    /// answer for as long as the file existed.
+    ///
+    /// It is also what makes the field arrive at all: `App::hold_seam` stops
+    /// asking for a fit once a pool has [`POOL_ENOUGH`] samples in it, and a
+    /// full pool of samples with no field in them would never learn one.
+    ///
+    /// The old key is left on disk unread, which is what the previous discard
+    /// did, and the pool refills itself from the next few files played.
+    pub seam_learned: BTreeMap<String, SeamPool>,
 }
 
 impl ConfigState {
@@ -336,12 +405,18 @@ impl ConfigState {
 
     /// What this box knows about this camera's seam, if anything.
     pub fn seam(&self, camera: u64) -> Option<SeamFit> {
-        self.seam_pool.get(&camera_name(camera))?.answer()
+        self.seam_learned.get(&camera_name(camera))?.answer()
+    }
+
+    /// What it knows about the same camera's along-seam field, which is the
+    /// other half of one answer and is composed with the fit above at open.
+    pub fn seam_field(&self, camera: u64) -> Option<[f64; 5]> {
+        self.seam_learned.get(&camera_name(camera))?.field()
     }
 
     /// How many fits that answer rests on, for the report line.
     pub fn seam_pooled(&self, camera: u64) -> usize {
-        self.seam_pool
+        self.seam_learned
             .get(&camera_name(camera))
             .map_or(0, |pool| pool.samples.len())
     }
@@ -349,7 +424,7 @@ impl ConfigState {
     /// Fold one watched fit into this camera's pool. `false` where the fit was
     /// not good enough to keep, which is ordinary and is not shown anywhere.
     pub fn harvest(&mut self, camera: u64, harvest: Harvest) -> bool {
-        self.seam_pool
+        self.seam_learned
             .entry(camera_name(camera))
             .or_default()
             .keep(harvest.into())
@@ -469,6 +544,7 @@ mod tests {
             },
             patches,
             residual_deg,
+            along: None,
         }
     }
 
@@ -488,8 +564,72 @@ mod tests {
         assert!((two - -2.40).abs() < 1e-9, "{two} is not the middle of two");
         assert_eq!(state.seam(0x0fed_cba9_8765_4321).unwrap().yaw_deg, -1.10);
         assert_eq!(state.seam(0), None);
-        assert_eq!(state.seam_pool.len(), 2);
-        assert!(state.seam_pool.contains_key("123456789abcdef0"));
+        assert_eq!(state.seam_learned.len(), 2);
+        assert!(state.seam_learned.contains_key("123456789abcdef0"));
+    }
+
+    /// The other half of one answer, and it is pooled the same way: a middle
+    /// over the captures that read one, and nothing at all until one has.
+    #[test]
+    fn the_pooled_field_is_the_middle_of_what_the_captures_read() {
+        let mut state = ConfigState::default();
+        assert_eq!(state.seam_field(1), None, "a camera nobody has watched");
+
+        let field = |first: f64| Harvest {
+            along: Some([first, -0.40, -0.10, -0.02, 0.02]),
+            ..harvest(-2.4, 30, 0.6)
+        };
+        for constant in [-0.77, -0.74, -0.80] {
+            assert!(state.harvest(1, field(constant)));
+        }
+        let answer = state.seam_field(1).expect("three captures read one");
+        assert!((answer[0] - -0.77).abs() < 1e-12, "{answer:?}");
+        assert!((answer[1] - -0.40).abs() < 1e-12, "{answer:?}");
+    }
+
+    /// A capture whose ring could not pin five terms costs the pool its field
+    /// and keeps its pose, and a pool of only such captures answers with no
+    /// field rather than with zero, which would be a claim that the camera has
+    /// none.
+    #[test]
+    fn a_capture_that_read_no_field_still_pools_its_fit() {
+        let mut state = ConfigState::default();
+        assert!(state.harvest(1, harvest(-2.4, 30, 0.6)));
+        assert!(state.seam(1).is_some());
+        assert_eq!(state.seam_field(1), None);
+
+        assert!(state.harvest(
+            1,
+            Harvest {
+                along: Some([-0.77, -0.40, -0.10, -0.02, 0.02]),
+                ..harvest(-2.4, 30, 0.6)
+            },
+        ));
+        assert_eq!(state.seam_pooled(1), 2);
+        assert_eq!(state.seam_field(1).map(|f| f[0]), Some(-0.77));
+    }
+
+    /// A field with a term that is not a number is left out of the middle the
+    /// way a fit with one is left out of the pool: one of them in a median
+    /// sorts to an end and takes the answer with it.
+    #[test]
+    fn a_field_with_a_term_that_is_not_a_number_is_not_pooled() {
+        let mut state = ConfigState::default();
+        for terms in [
+            [-0.77, -0.40, -0.10, -0.02, 0.02],
+            [f64::NAN, -0.40, -0.10, -0.02, 0.02],
+            [-0.79, -0.40, -0.10, -0.02, 0.02],
+        ] {
+            assert!(state.harvest(
+                1,
+                Harvest {
+                    along: Some(terms),
+                    ..harvest(-2.4, 30, 0.6)
+                },
+            ));
+        }
+        let answer = state.seam_field(1).expect("two captures read one");
+        assert!((answer[0] - -0.77).abs() < 1e-12, "{answer:?}");
     }
 
     /// The point of pooling: one file whose seam is full of near content asks
@@ -657,10 +797,11 @@ mod tests {
                     fit,
                     patches: 30,
                     residual_deg: 0.6,
+                    along: None,
                 },
             ));
         }
-        let pool = &state.seam_pool[&camera_name(camera)];
+        let pool = &state.seam_learned[&camera_name(camera)];
 
         let median = knobwise_median(pool);
         assert!(
@@ -678,6 +819,7 @@ mod tests {
                     fit,
                     patches: 30,
                     residual_deg: 0.6,
+                    along: None,
                 },
             ));
         }
@@ -707,7 +849,7 @@ mod tests {
             state.harvest(1, harvest(-2.4, 20 + patches, 0.5));
         }
         state.harvest(1, harvest(-2.4, 99, 0.5));
-        let pool = &state.seam_pool["0000000000000001"];
+        let pool = &state.seam_learned["0000000000000001"];
         assert_eq!(pool.samples.len(), POOLED);
         assert_eq!(pool.samples.iter().map(|s| s.patches).min(), Some(21));
         assert!(pool.samples.iter().any(|s| s.patches == 99));

@@ -379,19 +379,6 @@ fn plant(options: &Options, knob: usize, amount: f64) -> Fallible<Mapped> {
 
 const KNOBS: [&str; 5] = ["roll", "yaw", "pitch", "cx", "cy"];
 
-/// One camera's along-seam table, off the file `kjerag-spike --bin table`
-/// writes.
-fn read_table(path: &str) -> Fallible<kjerag_render::Table> {
-    let text = std::fs::read_to_string(path)?;
-    kjerag_render::Table::read(&text).ok_or_else(|| {
-        format!(
-            "{path} is not {} numbers, one per direction",
-            kjerag_render::AZIMUTHS
-        )
-        .into()
-    })
-}
-
 fn perturb(mut fit: SeamFit, knob: usize, amount: f64) -> SeamFit {
     match knob {
         0 => fit.roll_deg += amount,
@@ -948,7 +935,7 @@ impl Options {
                         _ => Seam::Stored(seam_fit(value)?),
                     }
                 }
-                Some(("table", value)) => out.table = read_table(value)?,
+                Some(("table", value)) => out.table = kjerag_spike::seam_table(value)?,
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
         }

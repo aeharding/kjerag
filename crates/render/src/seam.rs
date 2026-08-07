@@ -913,6 +913,14 @@ pub struct Harvest {
     /// What the fit left across the seam, in degrees, predicted through the
     /// map. Lower is a fit that flattened more of what it was given.
     pub residual_deg: f64,
+    /// What this capture read along the seam above its factory calibration, as
+    /// five terms in degrees ([`along_terms`]), or `None` where the ring could
+    /// not pin them.
+    ///
+    /// Travels with the fit because it is the same measurement: one ring, read
+    /// once, answering two questions. Pooled beside the fit and composed with
+    /// it at open ([`along_table`]).
+    pub along: Option<[f64; 5]>,
 }
 
 /// What a fit came to and how well it holds.
@@ -923,6 +931,8 @@ pub struct Fitted {
     pub before: [f64; 2],
     pub after: [f64; 2],
     pub patches: usize,
+    /// The five-term along-seam field the same ring carries ([`along_terms`]).
+    pub along: Option<[f64; 5]>,
 }
 
 impl Fitted {
@@ -1005,6 +1015,7 @@ pub fn fit_held(
             rms(readings.iter().map(|r| r.across)),
         ],
         after: residual(readings, &fit, lenses, frame),
+        along: along_terms(readings, &fit, lenses, frame),
         fit,
         patches,
     })
@@ -1079,12 +1090,17 @@ fn residual(readings: &[Reading], fit: &SeamFit, lenses: &[Lens], frame: Size) -
 
 /// The same, kept per azimuth rather than reduced: where each patch would read
 /// with the correction in place, along the seam first and across it second.
-fn predicted(
-    readings: &[Reading],
+///
+/// The reading itself comes back beside its prediction, because a caller that
+/// gates on what the pose leaves may still want what the camera read before it
+/// ([`along_terms`]), and a map that drops the patches the projection cannot
+/// reach cannot be zipped back onto the readings it was given.
+fn predicted<'a>(
+    readings: &'a [Reading],
     fit: &SeamFit,
     lenses: &[Lens],
     frame: Size,
-) -> Vec<(Where, [f64; 2])> {
+) -> Vec<(&'a Reading, [f64; 2])> {
     let base = mapped(lenses, frame);
     let corrected = mapped(&fit.applied(lenses), frame);
     readings
@@ -1092,7 +1108,7 @@ fn predicted(
         .filter_map(|reading| {
             let shift = moved(&base, &corrected, 1, &reading.at)?;
             let axes = [reading.along + shift[0], reading.across + shift[1]];
-            Some((reading.at, axes))
+            Some((reading, axes))
         })
         .collect()
 }
@@ -1119,8 +1135,8 @@ pub fn left(
 ) -> Left {
     let all: Vec<super::band::Leftover> = predicted(readings, fit, lenses, frame)
         .into_iter()
-        .map(|(at, axes)| super::band::Leftover {
-            phi: at.phi as f32,
+        .map(|(reading, axes)| super::band::Leftover {
+            phi: reading.at.phi as f32,
             perp: axes[0].to_radians() as f32,
             weight: 1.0,
         })
@@ -1132,9 +1148,9 @@ pub fn left(
             tolerance: f32::INFINITY,
         };
     };
-    let middle = middle_of(all.iter().map(|l| f64::from(l.perp)));
-    let scatter = middle_of(all.iter().map(|l| f64::from(l.perp) - middle).map(f64::abs));
-    let tolerance = (mads * scatter).max(GATE_FLOOR_DEG.to_radians()) as f32;
+    let perp: Vec<f64> = all.iter().map(|l| f64::from(l.perp)).collect();
+    let (middle, tolerance) = tolerated(&perp, mads, GATE_FLOOR_DEG.to_radians());
+    let tolerance = tolerance as f32;
     let kept: Vec<super::band::Leftover> = all
         .iter()
         .copied()
@@ -1182,7 +1198,33 @@ pub const GATE_MADS: f64 = 4.0;
 /// and the sixth reads 0.128 - so a reading this far from its own capture's
 /// middle is a whole residual away from it, and a reading twice as far again
 /// is what the gate is actually for (docs/research/stage9.md 5).
-const GATE_FLOOR_DEG: f64 = 0.10;
+///
+/// Public because the band applies the same floor to its own per-frame
+/// readings, where it has no median to scale by and the floor is the whole of
+/// the rule it can afford (`band::HOLD_DEG`).
+pub const GATE_FLOOR_DEG: f64 = 0.10;
+
+/// The middle of some readings and how far from it one may sit before it is a
+/// correlation on the wrong feature rather than a camera.
+///
+/// **One rule, applied at two depths, and the whole of stage 9's estimator
+/// finding is that both are needed** (docs/research/stage9.md 4.5). [`left`]
+/// applies it across a ring's azimuths, so what it refuses is an outlying
+/// *direction*; [`measure`] applies it across one direction's frames, so what
+/// it refuses is an outlying *moment*. Neither refuses what the other does:
+/// on the six-flight corpus the ring gate refuses 0 to 8 azimuths per capture
+/// and the per-frame trim takes the same captures' agreement from 2 pairs of
+/// 15 to 15 of 15.
+///
+/// A median and a median absolute deviation, not a mean and a standard
+/// deviation, because one correlation on the wrong feature moves a mean by its
+/// whole size and a median not at all. `floor` is in whatever unit the values
+/// are.
+fn tolerated(values: &[f64], mads: f64, floor: f64) -> (f64, f64) {
+    let middle = middle_of(values.iter().copied());
+    let scatter = middle_of(values.iter().map(|value| (value - middle).abs()));
+    (middle, (mads * scatter).max(floor))
+}
 
 /// The middle of a set of readings, which is a median and not a mean: one
 /// correlation on the wrong feature moves a mean by its whole size and a
@@ -1194,6 +1236,143 @@ fn middle_of(values: impl Iterator<Item = f64>) -> f64 {
     }
     all.sort_by(f64::total_cmp);
     all[all.len() / 2]
+}
+
+// ------------------------------------------------- the along-seam field
+
+/// What one capture's two lenses disagree by along the seam, as the five terms
+/// [`super::band::Along`] is written in, in **degrees**, in the frame the
+/// camera itself wrote.
+///
+/// This is the layer stage 9 went looking for and found one harmonic order
+/// below where it looked (docs/research/stage9.md 4.5). Fitted on other flights
+/// only, it takes the pooled along-seam leftover from 0.0536 to 0.0211 degrees
+/// on the owner's X4 Air and 0.0606 to 0.0249 on his ONE X2 - nine captures of
+/// nine improved, both cameras. `band::Along` computes the same five terms per
+/// session already; nothing carried them between sessions until this one.
+///
+/// **Above the factory calibration and above no pose at all, and that is what
+/// makes it poolable.** A leftover is a quantity relative to whichever pose was
+/// subtracted from it, so two captures' leftovers are the same quantity only
+/// under one pose, and the pose a camera is drawn with moves as its pool grows.
+/// [`Reading::along`] does not move: [`measure`] reads every ring through the
+/// factory calibration, on every capture, for the life of the camera. So what
+/// is stored is what the camera does, and the pose it is composed with is
+/// whatever the pool answers today ([`along_table`]).
+///
+/// **The pose is still what gates it.** The plausibility test that refuses a
+/// correlation on the wrong feature is an argument about what is *left* - one
+/// capture's readings are one number plus a slow trend, once a pose is off them
+/// ([`GATE_MADS`]) - and a raw reading swings most of a degree round the ring,
+/// so the gate is applied to the leftover and the fit to what survived it.
+///
+/// **No ridge, and that is a measurement rather than an omission.** Every other
+/// fit in this file and in `band` is shrunk towards zero by about one unit of
+/// evidence in its own currency, because zero is the right answer for a
+/// *correction* nothing supports. This is not a correction, it is a reading of
+/// a field 0.85 degrees wide, and zero says the camera is perfect. One
+/// azimuth's worth of shrinking on seventy azimuths is 1.4 percent of it, which
+/// is 0.012 degrees - three times the whole of what a pooled field is worth
+/// (`a_pooled_field_and_a_pose_compose_into_the_table_the_ring_asks_for` reads
+/// exactly that number with a ridge on).
+///
+/// What refuses a starved ring instead is what refuses one everywhere else
+/// here: [`PATCHES_NEEDED`] before a fit is believed at all, the same
+/// plausibility gate above, [`super::band::Table::plausible`] on the composed
+/// answer, and the pool's own middle over the captures behind it.
+pub fn along_terms(
+    readings: &[Reading],
+    fit: &SeamFit,
+    lenses: &[Lens],
+    frame: Size,
+) -> Option<[f64; 5]> {
+    let seen = predicted(readings, fit, lenses, frame);
+    let left: Vec<f64> = seen.iter().map(|(_, axes)| axes[0]).collect();
+    let (middle, tolerance) = tolerated(&left, GATE_MADS, GATE_FLOOR_DEG);
+    let rows: Vec<(Vec<f64>, f64)> = seen
+        .iter()
+        .filter(|(_, axes)| (axes[0] - middle).abs() <= tolerance)
+        .map(|(reading, _)| (super::band::basis(reading.at.phi).to_vec(), reading.along))
+        .collect();
+    least_squares(&rows)?.params.try_into().ok()
+}
+
+/// The five terms one pose's own displacement carries along the seam, in
+/// degrees: pure geometry, with no reading in it.
+///
+/// **The bridge between the frame a leftover is measured in and the frame a
+/// field is stored in**, and it is the same projection at both ends: a field
+/// taken off one pose ([`along_terms`]) and composed back onto the same pose
+/// ([`along_table`]) comes out the number it went in as, whatever this function
+/// is or is not a good model of.
+///
+/// No ridge, because there is nothing here to be starved: the ring is
+/// [`super::band::AZIMUTHS`] directions evenly round a circle, the five
+/// functions are orthogonal on exactly that, and every row is filled by
+/// arithmetic rather than by content.
+fn pose_terms(fit: SeamFit, lenses: &[Lens], frame: Size) -> Option<[f64; 5]> {
+    let base = mapped(lenses, frame);
+    let corrected = mapped(&fit.applied(lenses), frame);
+    let mut rows: Vec<(Vec<f64>, f64)> = Vec::with_capacity(super::band::AZIMUTHS);
+    for at in ring(super::band::AZIMUTHS) {
+        rows.push((
+            super::band::basis(at.phi).to_vec(),
+            moved(&base, &corrected, 1, &at)?[0],
+        ));
+    }
+    least_squares(&rows)?.params.try_into().ok()
+}
+
+/// The along-seam table a pooled field and a pooled pose ask for together: what
+/// the picture drawn with that pose still owes at each of the band's
+/// directions, in radians.
+///
+/// **The one place the two halves of the answer are composed**, and they are
+/// not two layers. `terms` is what the camera does above its factory
+/// calibration; the pose takes most of it out and leaves the rest; the table
+/// carries the rest. A pool whose pose moves does not strand a field fitted
+/// under the old one, because no field here was ever fitted under a pose - the
+/// composition is redone from the same two stored numbers every time a file
+/// opens. That is why a refitted pose and this field do not stack: they are one
+/// answer written in two places, and held out they read 0.0208 and 0.0211
+/// degrees (docs/research/stage9.md 4.5).
+///
+/// **Not [`super::band::Table::of`]**, which levels the five terms back out of
+/// its readings because what it was built for is what a pose and a five-term
+/// fit *cannot* say. This carries exactly those five terms and nothing above
+/// them, so the two constructors are opposites and neither is the other's
+/// smoothing.
+///
+/// **The pose is composed in through five terms of its own rather than whole**,
+/// and the difference is measured rather than argued
+/// (`a_pooled_field_and_a_pose_compose_into_the_table_the_ring_asks_for`). What
+/// a five-knob correction does along this axis is a five-term field to about a
+/// part in seventy, and on the fixture the seventieth left over is 0.013
+/// degrees of a signature 0.85 degrees wide - three times the size of what is
+/// being corrected. Added whole, that leftover goes into the picture; taken at
+/// the order the two halves share, the table is exactly the pose-order field
+/// the corpus measured and nothing above it.
+///
+/// `None` where any direction of the ring falls outside a lens's picture, or
+/// where the composed field is too large to be a calibration: a table is
+/// accepted over its whole support or not at all, and a hole filled from a
+/// neighbour is the mechanism that made stage 5 scallop.
+pub fn along_table(
+    terms: [f64; 5],
+    fit: SeamFit,
+    lenses: &[Lens],
+    frame: Size,
+) -> Option<super::band::Table> {
+    let pose = pose_terms(fit, lenses, frame)?;
+    let entries = std::array::from_fn(|index| {
+        let phi = index as f64 / super::band::AZIMUTHS as f64 * std::f64::consts::TAU;
+        let basis = super::band::basis(phi);
+        let along: f64 = (0..5)
+            .map(|term| basis[term] * (terms[term] + pose[term]))
+            .sum();
+        along.to_radians() as f32
+    });
+    super::band::Table::plausible(entries)
 }
 
 // ------------------------------------------------------------ least squares
@@ -1300,6 +1479,18 @@ pub struct Plan {
     /// answers is what is *still* wrong, and a correction the reading cannot
     /// see would be asked for twice. [`Table::REST`] on a camera nothing has
     /// been pooled for, which is every capture the first time it plays.
+    ///
+    /// **The app leaves it at rest even on a camera that has a table**, and
+    /// that is deliberate (stage 9 layer 2). What the app pools is
+    /// [`along_terms`], a reading of the camera in the frame the camera wrote,
+    /// and it is the same quantity on every capture only because every ring is
+    /// read through the factory calibration with nothing applied. Read through
+    /// the table instead, each session's answer would be relative to whatever
+    /// had been pooled by then, which is the one thing a pool cannot average.
+    /// The double correction this field exists to prevent is prevented where
+    /// it is actually live: the band's own measurement pass reads through the
+    /// table every frame (`band.rs`, `measure`), so what the band fits and
+    /// applies on top is what the table still leaves.
     pub table: super::band::Table,
 }
 
@@ -1322,6 +1513,14 @@ impl Default for Plan {
 /// has its second lens in the pilot's second pick and nowhere beside the
 /// first, so a fit that starts from one path again reads half the capture and
 /// then says the whole of it has one lens.
+///
+/// **A direction's frames are reduced by [`reduced`] and not by a mean**, and
+/// that is stage 9's estimator finding (docs/research/stage9.md 4.5): one
+/// azimuth's reading moves between two frames 33 ms apart by 0.008 to 0.05
+/// degrees of median absolute deviation and by 0.22 to 0.48 of root mean
+/// square, so the population is heavy tailed and a mean over it is a statistic
+/// about its outliers. Reduced this way instead, the owner's six flights agree
+/// at the same azimuth on 15 pairs of 15 where the mean agreed on 2.
 pub fn measure(
     files: &[PathBuf],
     lenses: &[Lens],
@@ -1335,7 +1534,7 @@ pub fn measure(
         return Err("this capture carries one lens stream, so it has no seam".into());
     }
     let duration = walk.duration().as_secs_f64();
-    let mut sums: Vec<(usize, f64, f64)> = vec![(0, 0.0, 0.0); ring.len()];
+    let mut seen: Vec<Vec<[f64; 2]>> = vec![Vec::new(); ring.len()];
     let mut refused = Refused::default();
     let mut centre = None;
     for place in 0..plan.places.max(1) {
@@ -1355,7 +1554,7 @@ pub fn measure(
             if centre.is_none() {
                 centre = acquired(&base, &pair.lenses, &ring, &plan.probe);
             }
-            for (found, sum) in read_ring_centred(
+            for (found, moments) in read_ring_centred(
                 &base,
                 &pair.lenses,
                 &ring,
@@ -1364,27 +1563,54 @@ pub fn measure(
                 &mut refused,
             )
             .iter()
-            .zip(&mut sums)
+            .zip(&mut seen)
             {
                 let Some(found) = found.filter(|found| found.r >= plan.probe.keep) else {
                     continue;
                 };
-                sum.0 += 1;
-                sum.1 += found.along;
-                sum.2 += found.across;
+                moments.push([found.along, found.across]);
             }
         }
     }
     Ok(ring
         .iter()
-        .zip(&sums)
-        .filter(|(_, (frames, _, _))| *frames > 0)
-        .map(|(at, (frames, along, across))| Reading {
-            at: *at,
-            along: along / *frames as f64,
-            across: across / *frames as f64,
+        .zip(&seen)
+        .filter(|(_, moments)| !moments.is_empty())
+        .map(|(at, moments)| {
+            let axes = reduced(moments);
+            Reading {
+                at: *at,
+                along: axes[0],
+                across: axes[1],
+            }
         })
         .collect())
+}
+
+/// One direction's frames as one reading: the mean of the moments that agree
+/// with the direction's own middle, and nothing else.
+///
+/// **[`tolerated`]'s rule one level in**, which is what [`left`] applies across
+/// a ring. The along-seam axis decides, and a refused moment takes its
+/// across-seam reading with it: no distance reaches the along-seam axis, so a
+/// moment that disagrees there did not correlate on the content it was pointed
+/// at, and what it says across the seam is a reading of that same wrong
+/// content.
+///
+/// **Exactly the mean where nothing is refused**, and by the same additions in
+/// the same order, so a direction whose frames all agree yields the number this
+/// function replaced, bit for bit. A direction read on one or two frames cannot
+/// have an outlier separated from it and keeps both, which is what a tolerance
+/// filter does with too little evidence rather than what a classifier would do.
+fn reduced(moments: &[[f64; 2]]) -> [f64; 2] {
+    let along: Vec<f64> = moments.iter().map(|axes| axes[0]).collect();
+    let (middle, tolerance) = tolerated(&along, GATE_MADS, GATE_FLOOR_DEG);
+    let kept: Vec<&[f64; 2]> = moments
+        .iter()
+        .filter(|axes| (axes[0] - middle).abs() <= tolerance)
+        .collect();
+    let count = kept.len() as f64;
+    [0, 1].map(|axis| kept.iter().map(|axes| axes[axis]).sum::<f64>() / count)
 }
 
 /// One capture's correction, measured off its own frames, or why there is
@@ -1764,6 +1990,162 @@ mod tests {
             None,
             "a frame with too little on its seam answered anyway",
         );
+    }
+
+    // ------------------------------------------- the per-frame trim
+
+    /// The null the whole change rests on: a direction whose frames agree is
+    /// reduced to exactly the number the mean this replaced would have
+    /// produced, by the same additions in the same order.
+    #[test]
+    fn a_direction_whose_frames_agree_reduces_to_their_own_mean() {
+        let moments = [
+            [0.0731, 1.204],
+            [0.0688, 1.187],
+            [0.0755, 1.240],
+            [0.0702, 1.199],
+            [0.0719, 1.211],
+        ];
+        let mean =
+            |axis: usize| moments.iter().map(|m| m[axis]).sum::<f64>() / moments.len() as f64;
+        assert_eq!(reduced(&moments), [mean(0), mean(1)]);
+    }
+
+    /// What the change is for. One frame of five correlated on something else
+    /// and says so by two and a half degrees, which is past the window the
+    /// search even runs in; under a mean it moves the direction's answer by
+    /// half a degree, which is seven times the whole along-seam residual.
+    ///
+    /// **The refused frame takes its across-seam reading with it**, which is
+    /// the rule and not an implementation detail: a frame that did not
+    /// correlate on the content it was pointed at did not correlate on it for
+    /// either axis.
+    #[test]
+    fn one_frame_that_found_the_wrong_feature_does_not_reach_the_reading() {
+        let good = [[0.071, 1.20], [0.069, 1.19], [0.075, 1.24], [0.070, 1.21]];
+        let mut moments = good.to_vec();
+        moments.push([2.47, 9.90]);
+        let kept = reduced(&moments);
+        let meaned =
+            [0, 1].map(|axis| moments.iter().map(|m| m[axis]).sum::<f64>() / moments.len() as f64);
+        assert_eq!(
+            kept,
+            [0, 1].map(|axis| good.iter().map(|m| m[axis]).sum::<f64>() / good.len() as f64),
+        );
+        assert!(
+            (meaned[0] - kept[0]).abs() > 0.4,
+            "the mean this replaces was not moved by the outlier: {meaned:?} against {kept:?}",
+        );
+    }
+
+    /// A tolerance filter with nothing to measure a tolerance on keeps what it
+    /// was given. Two readings have a median absolute deviation of their own
+    /// difference, and four of those is not a population - the floor is what
+    /// decides, and both sit inside it or the direction is a tenth of a degree
+    /// wide, which is a whole residual.
+    #[test]
+    fn a_direction_read_on_one_or_two_frames_keeps_both() {
+        assert_eq!(reduced(&[[0.07, 1.2]]), [0.07, 1.2]);
+        let two = reduced(&[[0.07, 1.2], [0.09, 1.3]]);
+        assert!((two[0] - 0.08).abs() < 1e-12, "{two:?}");
+    }
+
+    // ------------------------------------------- the along-seam field
+
+    /// The property the pool rests on: what [`along_terms`] answers is a
+    /// reading of the camera and not of the pose it was gated under, so two
+    /// captures' fields are the same quantity however the pool's answer moves
+    /// between them.
+    ///
+    /// The two poses here are a degree and eight pixels apart, which is more
+    /// than the whole spread of the owner's own pool.
+    #[test]
+    fn the_along_seam_field_is_the_same_quantity_under_any_pose() {
+        let lenses = fixture_lenses();
+        let error = SeamFit {
+            roll_deg: 0.795,
+            yaw_deg: -2.310,
+            pitch_deg: -0.936,
+            cx_px: -3.28,
+            cy_px: -11.91,
+        };
+        let readings = readings_for(error, &lenses, 72);
+        let one = along_terms(&readings, &error, &lenses, FRAME).expect("five terms");
+        let other = SeamFit {
+            yaw_deg: -1.310,
+            cy_px: -19.91,
+            ..error
+        };
+        let two = along_terms(&readings, &other, &lenses, FRAME).expect("five terms");
+        for (a, b) in one.iter().zip(&two) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "the field moved with the pose it was gated under: {one:?} against {two:?}",
+            );
+        }
+    }
+
+    /// The composition, end to end and through the arithmetic the pass runs:
+    /// a camera with a known error is read, its field is fitted, the field is
+    /// composed with a pose into a table, and what the table leaves at every
+    /// direction is what the pose alone left minus the table's own entry.
+    ///
+    /// The pose here is deliberately not the error, so the table has something
+    /// to carry: what it must remove is the whole of what that pose leaves,
+    /// because a five-knob error IS a five-term field along this axis.
+    #[test]
+    fn a_pooled_field_and_a_pose_compose_into_the_table_the_ring_asks_for() {
+        let lenses = fixture_lenses();
+        let error = SeamFit {
+            roll_deg: 0.795,
+            yaw_deg: -2.310,
+            pitch_deg: -0.936,
+            cx_px: -3.28,
+            cy_px: -11.91,
+        };
+        let readings = readings_for(error, &lenses, 72);
+        let pose = SeamFit {
+            yaw_deg: -2.100,
+            cy_px: -13.20,
+            ..error
+        };
+        let terms = along_terms(&readings, &pose, &lenses, FRAME).expect("five terms");
+        let table = along_table(terms, pose, &lenses, FRAME).expect("a table");
+        let left = left(&readings, &pose, &lenses, FRAME, Some(GATE_MADS));
+        let before = rms(left.readings.iter().map(|l| f64::from(l.perp.to_degrees())));
+        let after = rms(left.readings.iter().map(|l| {
+            let (sin, cos) = l.phi.sin_cos();
+            f64::from((l.perp - table.at(cos, sin)).to_degrees())
+        }));
+        assert!(
+            before > 0.02,
+            "the fixture pose leaves nothing for a table to carry: {before:.4} deg",
+        );
+        assert!(
+            after < before / 10.0,
+            "the table left {after:.4} deg of the {before:.4} the pose left",
+        );
+    }
+
+    /// Whole support or nothing: a field big enough to be a correlation on the
+    /// wrong feature rather than a camera does not reach the picture at all.
+    #[test]
+    fn a_field_too_large_to_be_a_calibration_composes_into_no_table() {
+        let lenses = fixture_lenses();
+        let sane = along_table(
+            [0.01, 0.0, 0.0, 0.0, 0.0],
+            SeamFit::default(),
+            &lenses,
+            FRAME,
+        );
+        assert!(sane.is_some(), "a hundredth of a degree was refused");
+        let wild = along_table(
+            [2.5, 0.0, 0.0, 0.0, 0.0],
+            SeamFit::default(),
+            &lenses,
+            FRAME,
+        );
+        assert_eq!(wild, None, "two and a half degrees was accepted");
     }
 
     /// The seam as a capture with content all the way round it would read it,

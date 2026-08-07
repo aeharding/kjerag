@@ -148,6 +148,14 @@ caveat in the Motion section, which is the same trap at a smaller size.
   so the width is clamped per camera and 12 is refused everywhere.
   What the owner still sees at 8 ("def not perfect") is the un-shrunk 0.36 deg disagreement, which
   stage 9's estimator owns and a width cannot reach.
+  WHAT THE POOLED FIELD DOES TO THIS LINE (2026-08-06, stage9.md 8): with a five-term field fitted
+  on the five flights that are not this one and composed with the same `seam=`, the `along deg`
+  column reads 0.0093 / 0.0078 / 0.0033 / 0.0018 at -150 / +0 / +60 / +150, against 0.3476 /
+  0.3443 / 0.0858 / 0.0028 with no field, and the `+0` step rms falls 0.0689 to 0.0130 with the
+  worst single step 0.4585 to 0.0551. **That is not the picture's correction shrinking, it is the
+  correction moving**: this instrument measures what the BAND applies, and the band now reads
+  through the table and applies what the table still leaves. Read a plateau from this line only
+  together with whatever table the run was given.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=111.83 pitch=4.12 fov=20.00 lock=1`
@@ -181,6 +189,17 @@ caveat in the Motion section, which is the same trap at a smaller size.
   unmoved, and the BAD view 1.43 -> 1.06. That is a pose-order field pooled per camera, which is
   layer 2, not a per-azimuth table. stage9.md 4.5 withdraws that document's "does not reproduce"
   sentences: they were the mean reduction, not the camera.
+  **SHIPPED 2026-08-06, and re-read here through the shipped path** (stage9.md 8): the field is
+  learned by watching, pooled per camera beside `SeamFit`, and composed with the pool's pose at
+  open into `band::Table`. At these two views under `seam=roll:0.795,yaw:-2.310,pitch:-0.936,
+  cx:-3.28,cy:-11.91`, with the field fitted on flights that are NOT May-01, the along-seam median
+  magnitude reads **GOOD 1.29 -> 0.12 and BAD 1.47 -> 0.86 view px**, and the epipolar median moves
+  0.02 to 0.15 view px against this instrument's own 0.01 to 0.17 of dither sensitivity, which is
+  unmoved. **Both crossings improve and neither is traded for the other.** A field off the Jul-14
+  flight ALONE reads 0.97 and 1.09 here rather than the 0.07 above, and the difference is reading
+  density and not the code: that number was fitted on 1200 moments of that flight and this one on
+  48 frames of it. Read 1.29 rather than 1.30 as this build's baseline for the same reason the
+  entry above gives - the two agree to the instrument's floor.
 
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=93.36 pitch=-2.43 fov=33.95 lock=1`

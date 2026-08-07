@@ -46,3 +46,21 @@ pub fn seam_fit(value: &str) -> kjerag_media::Fallible<kjerag_render::SeamFit> {
     }
     Ok(fit)
 }
+
+/// One camera's along-seam table, off the file `kjerag-spike --bin table`
+/// writes ([`kjerag_render::Table::write`]).
+///
+/// Here rather than inside one instrument for `seam_fit`'s reason: four of
+/// them now draw a picture through a stored table, and a second copy of this
+/// reader is a second chance for two of them to disagree about what a stored
+/// calibration says.
+pub fn seam_table(path: &str) -> kjerag_media::Fallible<kjerag_render::Table> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    kjerag_render::Table::read(&text).ok_or_else(|| {
+        format!(
+            "{path} is not {} numbers, one per line",
+            kjerag_render::AZIMUTHS,
+        )
+        .into()
+    })
+}
