@@ -1171,3 +1171,53 @@ the same **96 of 128** directions have evidence with the term on as with it off
 (10.7). The band does not lose the seam, does not re-open the crossover, and
 does not chase the term. What it does is read a slightly smaller residual:
 epipolar mean **0.554 to 0.518 degrees**.
+
+### 10.11 What a later attempt would have to be
+
+Not this table, and the size of what it would have to be instead is measurable
+from what is above.
+
+The needed term at one crossing is the disagreement itself: `E_off` in degrees,
+because `E` is the disagreement and the ramp is what the corridor does with it.
+The term applied is `E_off - E_on` with the sign the intercepts carry. So the
+gap between what the pooled table supplies and what the crossing wants is a
+number this measurement prints, per flight, and it is the thing that sizes a
+per-session refinement.
+
+**The per-session form is the obvious next candidate and it is not free.** The
+band already reads this quantity per direction per frame; what it does wrong,
+for far content, is apply it as a corridor ramp instead of as a displacement.
+So a term that took the band's own settled epipolar ring and applied it whole
+to lens 1 - a feedback path rather than a stored table - would need no corpus
+at all. Three things that would have to be answered first, none of them
+answered here:
+
+1. **It would be applying a NEAR-field measurement to the whole picture.** The
+   band's epipolar channel is parallax where the content is near, and moving a
+   whole hemisphere by a near object's disparity is a worse defect than the
+   shear it removes.
+2. **The feedback has to be shown stable.** `T` changes what the band reads,
+   which changes `T`. Nothing here measures that loop.
+3. **It inherits 10.7's constraint**: whatever is applied, the residual has to
+   stay inside the band's own search window.
+
+### 10.12 Why the pooled table cannot work, in one number from the study itself
+
+The six flights' epipolar leftovers **disagree with each other at a given
+azimuth by more than the pooled table's whole amplitude**. From
+`docs/research/epi/epi-leftovers-x4.csv`, over the 67 azimuths where two or more
+captures read:
+
+| quantity | value |
+| --- | ---: |
+| per-azimuth spread across flights, median | **0.597 deg** |
+| the same, worst | **1.531 deg** |
+| the leftover's own rms over all readings | 0.295 deg |
+| the pooled per-azimuth median's rms | **0.229 deg** |
+
+A mean over a population whose members are two and a half times further apart
+than the mean's own size does not reconstruct any member of it. That is a
+statement about this corpus and this reduction and not about the camera: it is
+consistent with the leftover being scene rather than camera (the study's own
+reading), with it being per-session, or with the readings being too noisy at
+this density. Nothing here separates those.
