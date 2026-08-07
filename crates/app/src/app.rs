@@ -1047,6 +1047,12 @@ impl App {
         if pooled < config::POOL_ENOUGH {
             scene.fit_seam(pooled == 0);
         }
+        // On every capture, and not only the ones that still owe the pool a
+        // fit: what this reads is what THIS session's two lenses disagree by
+        // across the seam, which is a property of the flight and not of the
+        // camera, and nothing carries it to the next file (issue #103, the epi
+        // fork).
+        scene.learn_epi();
     }
 
     /// Say how wide this file hands the picture over, once, after its stored

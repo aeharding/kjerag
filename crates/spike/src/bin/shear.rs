@@ -285,6 +285,15 @@ fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
     scene.set_horizon(options.view.horizon);
     scene.use_table(options.table);
     options.seam.hold(&scene);
+    // The app's own path since the epi fork: this session's own across-seam
+    // term, harvested off this file's frames and walked in as far as its own
+    // seam accepts it (`Scene::learn_epi`). ON by default, because an
+    // instrument that silently drew a picture the app does not draw is what
+    // PR #167 cost; `epi=0` is the arm with none of it, which is `main`'s
+    // picture byte for byte.
+    if options.epi {
+        scene.learn_epi();
+    }
 
     let size = options.size();
     let offsets = options.mode.offsets();
@@ -1316,6 +1325,9 @@ struct Options {
     plant: f64,
     out: PathBuf,
     seam: Seam,
+    /// Whether this run draws with the session's own across-seam term, which
+    /// is the app's own path (`Scene::learn_epi`).
+    epi: bool,
     /// The whole command line, for the CSV header.
     args: String,
 }
@@ -1343,6 +1355,7 @@ impl Options {
             plant: 0.05,
             out: PathBuf::from("scratch/shear"),
             seam: Seam::File,
+            epi: true,
             args: args.iter().skip(1).cloned().collect::<Vec<_>>().join(" "),
         };
         let mut view = Vec::new();
@@ -1369,6 +1382,7 @@ impl Options {
                 Some(("plant", value)) => options.plant = value.parse()?,
                 Some(("out", value)) => options.out = PathBuf::from(value),
                 Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
+                Some(("epi", value)) => options.epi = value.parse::<u32>()? != 0,
                 Some(("seam", value)) => seam = value.to_string(),
                 Some((key, _)) => return Err(format!("no argument called {key}. {USAGE}").into()),
             }
@@ -1469,7 +1483,7 @@ impl Options {
 const USAGE: &str = "usage: shear <file.insv> time=seconds yaw=deg pitch=deg fov=deg lock=0|1 \
      [mode=probe|profile|plant] [frames=90] [warm=seconds] [size=px] [null=1] [plant=deg] \
      [out=dir] \
-     [table=table.txt] \
+     [table=table.txt] [epi=0] \
      [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
 
 #[cfg(test)]

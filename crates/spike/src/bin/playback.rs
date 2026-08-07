@@ -225,6 +225,12 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
     // to the camera (issue #48).
     let mut scene = Scene::open(input)?;
     scene.fit_seam(true);
+    // And the app's other background pass, which every capture runs: this
+    // session's own across-seam term, harvested off the file being played and
+    // walked in as far as its own seam accepts it. Unconditional, because what
+    // this instrument exists to report is what playback does, and playback
+    // does this (issue #103, the epi fork).
+    scene.learn_epi();
     if let (Some(forced), Some(file)) = (forced(readout), scene.readout()) {
         scene.set_readout(Some(forced(file)));
     }

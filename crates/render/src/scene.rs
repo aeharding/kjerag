@@ -519,6 +519,43 @@ impl Scene {
         }
     }
 
+    /// Learn what this session's two lenses disagree by **across** its seam,
+    /// off its own frames, and draw with as much of it as its own seam says is
+    /// an improvement (issue #103, the epi fork).
+    ///
+    /// **Per session and not per camera**, which is the one thing the corpus
+    /// settled: six flights disagree at a given azimuth by 0.597 degrees at
+    /// the median against a pooled amplitude of 0.229 rms, so a mean over them
+    /// reconstructs no member of the population and only a flight's own number
+    /// is near its own answer (docs/research/stage9.md 10.12). Nothing here is
+    /// pooled and nothing is stored.
+    ///
+    /// A thread of its own and not the fit's, because a camera whose pool is
+    /// full runs no fit at all and this runs on every capture. Nothing is
+    /// asked of the pilot (AGENTS.md, zero-config playback); the terminal
+    /// lines are the whole of what is said about it.
+    pub fn learn_epi(&self) {
+        let Some(show) = &self.show else {
+            return;
+        };
+        if show.lenses.len() < 2 {
+            return;
+        }
+        let stepped = matches!(show.playing.borrow().source, Source::Stepped(_));
+        let (files, lenses, frame) = (show.files.clone(), show.lenses.clone(), show.frame);
+        let corrected = show.corrected.clone();
+        if stepped {
+            learn_into(&files, &lenses, frame, &corrected, true);
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("seam epi".to_owned())
+            .spawn(move || learn_into(&files, &lenses, frame, &corrected, false));
+        if let Err(e) = spawned {
+            eprintln!("kjerag: the across-seam harvest did not start: {e}");
+        }
+    }
+
     /// What this file's own frames came to, for the pool to keep if it is good
     /// enough. `None` until a fallback fit has landed, and on a file whose
     /// camera the pool already knew, which fits nothing.
@@ -858,7 +895,8 @@ impl Scene {
                 false,
                 self.sampling.get(),
             )
-            .with_table(view.table),
+            .with_table(view.table)
+            .with_epi(view.epi),
         )
     }
 
@@ -926,6 +964,7 @@ impl Show {
             },
             lenses: self.lenses(),
             table: self.table.get(),
+            epi: self.corrected.epi(frames.size),
             frames,
         })
     }
@@ -993,6 +1032,86 @@ fn fit_into(
         *slot = Some(harvest);
     }
     Some(harvest)
+}
+
+/// This session's own across-seam field, harvested off its own frames and
+/// walked into the picture a quarter at a time (issue #103, the epi fork).
+///
+/// **The walk is the guard and the rail is not.** What decides whether a term
+/// is safe is `|T - truth|`, which nothing knows before something has measured
+/// through the term, so the term goes on in steps and this capture's own ring
+/// is read again through each of them; the walk stops at the last step that
+/// left the seam better than the step before it (docs/research/stage9.md
+/// 12.3). Nothing wrong reaches the picture, because every step is measured
+/// before any of it is drawn.
+///
+/// `land` for a still, which has no later moment to correct itself in, and
+/// `ask` for a file that is playing, which does.
+fn learn_into(
+    files: &[PathBuf],
+    lenses: &Arc<[Lens]>,
+    frame: Size,
+    corrected: &Arc<Correction>,
+    now: bool,
+) {
+    let started = Instant::now();
+    let plan = seam::epi_plan(seam::EPI_PLACES, seam::EPI_FRAMES);
+    let field = match seam::harvest(files, lenses, frame, &plan) {
+        Ok(field) => field,
+        Err(e) => {
+            println!("seam:   across the seam this session reads nothing: {e}");
+            return;
+        }
+    };
+    println!(
+        "seam:   across the seam, this session reads {}",
+        field.describe(started.elapsed().as_secs_f64()),
+    );
+    // The pose the picture is HEADING for and not the one it is drawing: a
+    // fallback fit walks in over a second and the term is composed against
+    // wherever the pose ends up anyway (`Correction::epi`), so a walk measured
+    // against a pose in mid-stride would be measuring the stride.
+    let (_, fit) = corrected.state();
+    let Some(term) = seam::epi_term(&field, fit, lenses, frame) else {
+        return;
+    };
+    let walked = seam::walked(files, lenses, frame, fit, term, &field, &plan);
+    let (part, steps) = match walked {
+        Ok(walked) => walked,
+        Err(e) => {
+            println!("seam:   the across-seam walk could not read this seam again: {e}");
+            return;
+        }
+    };
+    let (first, last) = (steps[0], steps[steps.len() - 1]);
+    println!(
+        "seam:   the across-seam term walked in to {:.0} percent of what it read over {} step(s), \
+         {:.1} s: the seam's own residual {:.3} -> {:.3} deg on {} -> {} direction(s){}",
+        100.0 * part,
+        steps.len() - 1,
+        started.elapsed().as_secs_f64(),
+        first.left_deg,
+        last.left_deg,
+        first.read,
+        last.read,
+        match last.kept {
+            true => String::new(),
+            false => format!(
+                ". The step to {:.0} percent read {} direction(s) and left {:.3} deg, so the \
+                 walk stopped there",
+                100.0 * last.part,
+                last.read,
+                last.left_deg,
+            ),
+        },
+    );
+    if part <= 0.0 {
+        return;
+    }
+    match now {
+        true => corrected.land_epi(field, part),
+        false => corrected.ask_epi(field, part),
+    }
 }
 
 /// How wide a camera with these lenses hands the picture over, in degrees, or
@@ -1157,6 +1276,12 @@ struct View {
     /// by direction (issue #103, stage 9). Part of this camera's calibration
     /// and carried with it, like the lenses above.
     table: Table,
+    /// What the two lenses still disagree by ACROSS the seam, direction by
+    /// direction, as much of it as the walk has accepted and put on
+    /// (`seam::walked`, issue #103, the epi fork). This one belongs to the
+    /// session rather than to the camera: it is read off this capture's own
+    /// frames and nothing carries it to the next file.
+    epi: Table,
     frames: Arc<Frames>,
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
@@ -1469,7 +1594,8 @@ impl ScenePipeline {
                 self.linearize(),
                 primitive.sampling,
             )
-            .with_table(view.table),
+            .with_table(view.table)
+            .with_epi(view.epi),
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
