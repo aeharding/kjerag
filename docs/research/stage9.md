@@ -1360,3 +1360,19 @@ term happens to be near the flight's own answer the ramp goes to nothing:
 every line describing its own points.** A across-seam displacement of lens 1's
 whole picture *is* the right shape for this defect. What is wrong is the number
 being put in it.
+
+### 10.14 The gates
+
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings`,
+`cargo test --workspace` (41 suites, green, including two new tests: the term's
+axis, size and determinant on the projection, and that the composed table is the
+pose plus the pooled reading and not something else) and
+`scripts/name-check.sh`.
+
+`scripts/uitest.sh` on real footage reads **47 checks, 2 failed**:
+`ctrl+v goes back to the copied view`, which `main` has failed on this box since
+before this branch (#167's own note), and `a toast is drawn clear of the
+controls`. The second is run against `main` as a control, because a branch whose
+delivered picture is `main`'s byte for byte cannot have moved a toast, and a
+failure that is not on `main` too would mean the null is wrong somewhere the
+byte compare did not look.
