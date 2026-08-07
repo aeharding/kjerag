@@ -1,12 +1,15 @@
 # Stage 9: the static per-azimuth along-seam table
 
-**Status:** the mechanism is built, measured and shipped at rest. **No table is
-fitted for either camera in the corpus**, because neither camera's leftover
-above the five terms the pass already applies predicts a capture it was not
-fitted on, and because the most any static table could buy on the corpus that
-decides is +1.25 percent. The refusal carries an amplitude: what is excluded is
-a static per-azimuth field of order 3 and up above 0.02 to 0.06 degrees, and
-nothing smaller. **Issue:** #103.
+**Status:** the per-azimuth table is refused and the vehicle it was built on
+carries a different field. **No per-azimuth table is fitted for either camera in
+the corpus**, because neither camera's leftover above the five terms the pass
+already applies predicts a capture it was not fitted on, and because the most
+any static table could buy on the corpus that decides is +1.25 percent. The
+refusal carries an amplitude: what is excluded is a static per-azimuth field of
+order 3 and up above 0.02 to 0.06 degrees, and nothing smaller. **What is
+shipped in `band::Table` is the five-term field of 4.5, pooled per camera and
+learned by watching; section 8 is that layer and its numbers.** **Issue:**
+#103.
 
 **Read 4.5 before quoting any cross-flight sentence from 4.** Everything in 4 is
 measured through an estimator that takes the **mean** of each azimuth's frames
@@ -404,9 +407,8 @@ needs.
 
 `seam::measure` and the band's `off_epi` update average a population they should
 be filtering. On the GPU that is one comparison against `held.off_epi` before
-the exponential average takes the new reading. Neither is this PR's to change -
-both belong to whichever stage pools the five-term field - but the measurement
-above is what says they are worth changing.
+the exponential average takes the new reading. Neither was that PR's to change;
+both are section 8's, and both are done.
 
 ## 5. Why this is a refusal and not a blind spot
 
@@ -579,3 +581,349 @@ retracted it once the runs behind it were found to be reference-withheld or
 three to six sites wide (ROADMAP, the #155 entry). It is named here because a
 reader arriving at stage 9 will meet it in the record, not because the charter
 made it.
+
+## 8. Layer 2: the field that reproduces, measured through the shipped path
+
+**Read section 9 before reading any applied claim in this one.** Everything
+below is measured on the **unbent** projection - `seam::measure`'s ring and
+`--bin crossing`, both of which draw with the per-frame band held off. In that
+domain the field is real and reproduces on nine captures of nine. In the
+**delivered** picture it buys nothing, because the band has already taken the
+same leftover out, and section 9 is that measurement and what it cost. The field
+is measured, guarded and stored; nothing applies it.
+
+### 8.1 The estimator, where there is a median to take
+
+`seam::tolerated` is one rule in one function: the middle of a set of readings
+is a median, the spread is a median absolute deviation, and a reading further
+than `GATE_MADS` spreads from the middle - never nearer than `GATE_FLOOR_DEG`,
+which is 0.10 degrees - is a correlation on the wrong feature rather than a
+camera.
+
+- **Across a ring's azimuths**, which is `seam::left` and was already there.
+- **Across one azimuth's frames**, which is `seam::reduced` and is new.
+  `seam::measure` meaned them. A direction whose frames all agree reduces to
+  exactly the mean this replaced, by the same additions in the same order.
+
+**Both are load-bearing and neither replaces the other**, which is the peer
+branch's own finding and is why the ring gate is untouched. On the six flights
+at `--bin table`'s own plan the trim alone takes the pooled leftover under the
+stored pose from 0.0828 to **0.0653** degrees, and the corpus's cross-capture
+agreement from 2 pairs of 15 to 15 of 15 (4.5).
+
+**The GPU half of 4.5's request is not here.** One comparison against
+`held.off_epi` before the exponential average re-introduces snapping, which is
+`seam.rs`'s own forbidden artifact: measured at the shimmer view with no field
+on either side, the band's frame-to-frame state went 0.000760 to 0.015042 deg
+rms, its worst single step 0.0032 to 0.1028, and the applied picture stepped by
+over a view pixel on 12 of 87 frame pairs where the shipped pass steps on none.
+It belongs to a stage that can instrument it.
+
+**What the trim refuses and what it keeps.** The along-seam axis decides and a
+refused moment takes its across-seam reading with it, because a frame that did
+not correlate on the content it was pointed at did not correlate on it for
+either axis. **The converse is not true and is the scope of this**: a moment
+whose along-seam reading is ordinary and whose across-seam reading is wild is
+kept whole, because that axis carries parallax and the physical argument this
+rule is built on does not hold there.
+
+**What the trim buys in the picture is not measured.** Everything above is a
+statement about readings. What it changes in the app is the fit those readings
+produce, and section 9.5 measures that change and does not say which fit is
+better in the delivered picture. That is the live question this PR leaves open.
+
+### 8.2 What the pool stores and what nothing carries
+
+| | what it is | where it lives | fitted from |
+| --- | --- | --- | --- |
+| `SeamSample::along_deg` | five terms, degrees, **above the factory calibration** | the app's config, beside the five knobs | `seam::along_kept`, off the ring the fit already reads |
+| `band::Table` | 128 numbers, radians, along `Ring::perp` | the `Reframe` uniform | **nothing. `Table::REST` ships** (section 9) |
+
+**The stored number is pose-free.** A leftover is a quantity relative to
+whichever pose was taken off it, so two captures' leftovers are the same thing
+only under one pose - and the pose a camera is drawn with moves as its pool
+grows. `Reading::along` does not move: `seam::measure` reads every ring through
+the calibration the camera wrote, on every capture, for the life of the camera.
+The pose is still what **gates** the reading, because the plausibility argument
+is about what is left. `seam::along_table` composes the two on demand and is
+now called only by the guard below and by the instruments.
+
+Two details that were measured rather than argued:
+
+- **The pose is a five-term field to one part in 1904** - 0.00043 degrees of a
+  0.8212 degree signature
+  (`a_pose_is_a_five_term_field_to_a_part_in_two_thousand`).
+- **No ridge on the field fit**, because one azimuth's worth of shrinking on a
+  0.85 degree field is 0.012 degrees, which is most of what a field is worth.
+  What refuses a starved ring instead is a guard at harvest: `seam::along_kept`
+  refuses a sample whose own five terms compose to more than `FIELD_LIMIT`
+  times the leftover they were fitted to. Measured as `composed / leftover`:
+
+  | capture | covered, deg | app plan 3x2 | 12x4 | 24x20 |
+  | --- | ---: | ---: | ---: | ---: |
+  | X4 2026-04-10 | 285 to 340 | 0.80 | 0.78 | 0.93 |
+  | X4 2026-05-01 | 280 to 340 | 0.83 | 0.85 | 0.91 |
+  | X4 2026-05-26 | 320 to 350 | 0.64 | 0.93 | 0.92 |
+  | X4 2026-07-14 | 275 to 345 | 1.02 | 0.76 | 0.81 |
+  | **X4 2026-07-25** | **105 to 240** | **refused** | **1.33** | **1.10** |
+  | X4 2026-08-02 | 275 to 330 | 1.00 | 0.75 | 0.68 |
+  | X2, three captures | 280 to 310 | 0.61 to 0.83 | 0.79 to 0.92 | - |
+
+  `FIELD_LIMIT` is 1.2, in the gap between 1.02 and 1.33. At the deepest plan
+  the July-25 flight reads 1.10 and passes, which is the guard's own limit: a
+  ring deep enough stops looking starved by this test before it stops having a
+  hole in it.
+
+### 8.3 The ladder, on the unbent projection, every arm held out
+
+`kjerag-spike --bin table` pools through `seam::along_kept`, the same guard the
+app harvests through. Every column is held out.
+
+| held out, deg rms along the seam | azimuths | pose only | field | mean control | field + table |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| X4 Air, six flights, 24x20 | 372 | 0.0644 | **0.0375** | 0.0391 | 0.0387 |
+| ONE X2, three captures, 24x20 | 190 | 0.0414 | **0.0140** | 0.0136 | 0.0137 |
+
+**Nine captures of nine improved.** At 12 by 4: 0.0653 -> 0.0432 and
+0.0675 -> 0.0477, 9 of 9 again. At the app's own `Plan::default`, 3 places by 2
+frames: X4 **0.0844 -> 0.0707, 4 of 6** (Aug-02 worse by 10.2 percent, May-01 by
+2.6) and X2 0.0325 -> 0.0297, 2 of 3.
+
+**All of it is the unbent projection.** Section 9 is what happens when the same
+field is put into the picture.
+
+Over the six corpus-and-plan arms the mean control beats the app's middle on the
+pooled number in four:
+
+| pooled, deg rms | middle | mean |
+| --- | ---: | ---: |
+| X4, 24x20 | **0.0375** | 0.0391 |
+| X4, 12x4 | 0.0432 | **0.0430** |
+| X4, app plan 3x2 | **0.0707** | 0.0715 |
+| X2, 24x20 | 0.0140 | **0.0136** |
+| X2, 12x4 | 0.0477 | **0.0465** |
+| X2, app plan 3x2 | 0.0297 | **0.0275** |
+
+Per capture the middle wins 5 of 9 at either plan. A per-azimuth table on top of
+the field costs 2 to 3 percent on the X4 Air and **gains 2 to 5 on the ONE X2**.
+
+### 8.4 At the registry, still on the unbent projection
+
+`--bin crossing bins=180` at the two re-derived May-01 crossings under
+`seam=roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91`, field pooled
+through the shipped guard off flights that are not May-01. **The band is held
+off in this instrument** (`Held::default`), and section 9 is why that sentence
+turned out to be the whole story:
+
+| view | along-seam median magnitude, view px | epipolar median, view px |
+| --- | ---: | ---: |
+| GOOD, no field | 1.29 | -6.00 |
+| GOOD, field off five other flights | **0.12** | -6.11 |
+| BAD, no field | 1.47 | -10.17 |
+| BAD, field off five other flights | **0.93** | -10.07 |
+
+The epipolar axis is untouched range to range and not run to run: it spans 0.13
+view px at GOOD and 0.15 at BAD against along-seam moves of 1.17 and 0.54, but
+three of four arms move it by more than the smaller of the two runs' own dither.
+
+## 9. The delivered picture, and why the field is not applied
+
+**This section overturns every applied claim in 8 and it is the binding one.**
+Section 8's instruments all draw the **unbent** projection: `seam::measure`
+reads a ring through `Reframe` with no band, and `--bin crossing` builds its map
+with `Held::default()`. The app does not. In the picture the pilot sees, the
+per-frame band measures the same seam every frame and applies its own five-term
+`Along` fit, and **that fit had already taken the along-seam leftover out**.
+
+### 9.1 What the delivered comparison read
+
+Both builds, the app itself, the same clip and the same view, photographed:
+
+| view | main, along-seam at the probes | branch with the field applied |
+| --- | --- | --- |
+| GOOD | +0.44, +1.83, +0.43, +0.42 view px | +0.43, +1.82, +0.43, -0.29 |
+| BAD | -2.59, +0.05, **-0.11**, +0.05 | -3.12, +0.05, **-2.06**, +0.05 |
+| shimmer | -39.01, -31.61, -38.93, -31.61 | -39.55, -32.70, -39.78, -32.47 |
+
+At GOOD the delivered along-seam axis is **already at or under 0.6 view px on
+`main`** and the field arm matches it within 0.2, against an instrument shown
+capable at 1 px. At BAD `main` reads -0.11 where the unbent projection reads
+1.47 - the band had zeroed it - and the field arm reads **-2.06, about two view
+pixels the wrong way**. At the shimmer view the field arm is slightly worse on
+every probe.
+
+### 9.2 Why the read-through did not prevent it
+
+The compute pass was made to sample lens 1 through the table, so that the band
+would fit the residual and apply only what the table still left. That is
+necessary and it is **not sufficient**, and the reason is arithmetic:
+
+> With a table `T` applied and the band measuring through it, the delivered
+> correction is `T + fit(L - T)` against `fit(L)` with none. By linearity the two
+> differ by exactly **`T - fit(T)`**.
+
+`fit` is `Along::fit`: five terms, weighted by each direction's own confidence,
+shrunk by a ridge. It reproduces `T` only where it has evidence.
+
+**Two fields, and the columns say which is which.** The first is the real pooled
+field this branch composed, as `--bin table field=` wrote it, 0.2735 deg rms
+composed - that is the one the delivered readings in 9.1 were taken through, and
+it is read out of a scratch file. The second is the plain five-term field of
+0.2163 deg rms that
+`a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it` plants, which
+needs no footage and is what `cargo test` keeps honest:
+
+| ring directions with evidence | real field, rms | worst | test's field, rms | worst |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 of 128 | 0.0007 deg | 0.0011 | 0.0020 | 0.0037 |
+| 96 | - | - | 0.0127 | 0.0279 |
+| 64 | 0.0080 | 0.0175 | 0.0677 | 0.1403 |
+| 48 | 0.0247 | 0.0514 | 0.0676 | 0.1440 |
+| **27**, what `--bin step` reports on real footage | **0.0333** | **0.0696** | **0.0856** | **0.1710** |
+| 16 | 0.0392 | 0.0759 | 0.1319 | 0.2329 |
+
+At the BAD view's 16.3 view px per degree, 27 directions of evidence leave
+**1.13 view px** on the real field and **2.79** on the test's, so the test makes
+the point a fortiori. The delivered measurement in 9.1 read about two view px,
+which sits between them.
+
+**The sweep is not monotone in coverage.** On the test's field 64 and 48
+directions read 0.0677 and 0.0676 rms while their worst entries go 0.1403 to
+0.1440. What is left depends on where the arc sits against the field's own phase
+as well as on how wide it is, so neither column is a curve to read a threshold
+off; what they establish is the difference between a ring with evidence
+everywhere and a ring that is an arc.
+
+**And the derivation's linearity has one caveat.** `T + fit(L - T)` minus
+`fit(L)` is exactly `T - fit(T)` only if `fit` is the same linear operator in
+both arms. `Along::fit` weights each direction by its own `off_conf`, which is
+the smoothed correlation peak and therefore a function of the readings, so a
+table that moves where the correlation lands can move the weights too. Both
+columns above are computed at fixed weights. The delivered measurement of 9.1
+carries whatever the weights actually did, and it is the larger number.
+
+**A session's ring is an arc**, because only the directions with content
+correlate; the table is a field over the whole circle; and where the ring has no
+evidence the fit is unconstrained, the ridge pulls it to zero, and the table's
+own value is delivered whole. That is why GOOD - where the band had evidence at
+the crossing azimuth - was unchanged and BAD was not.
+
+**This binds any future use of the `Table` vehicle.** Reading through it is not
+enough on its own; what applies a table has to answer for `T - fit(T)` at the
+directions the session never reads.
+
+### 9.3 The owner's blind verdicts
+
+Two builds, one clip, one view, no labels, four views, arms randomized
+(`~/kjerag-ab/seam-ab.sh`). Verbatim:
+
+> **"same, both bad"**
+
+at every view, and the `main` arm called slightly steadier at the shimmer view -
+which the instrument agrees with: 10.081 against 10.214 codes per frame over 60
+frames. **He was right**, and the acceptance battery that said otherwise was
+measuring a picture the app does not draw.
+
+### 9.4 What is left, and the new rule
+
+- The **per-frame trim** stays. It is the estimator finding and it demonstrably
+  cleans the readings a fit is made from (8.1).
+- The **field is measured, guarded and stored**, and nothing applies it. What is
+  kept is `seam::along_terms`, `seam::along_kept`'s guard and
+  `SeamSample::along_deg`. Why keep it dormant: the one regime 9.1 does not
+  cover is the **first frames of a session**, before the band has any evidence,
+  which is exactly where `T - fit(T)` is largest and where a stored field is the
+  only thing that could act; and nine captures at a density the app does not
+  reach is what the measurement cost. A pool fills over months, so a harvest
+  that starts now is what a later attempt would have to start with. Nothing
+  reads it, and the docstring at the storage site says what any reader must
+  prove first.
+- The **pool is not discarded**. An earlier form of this change discarded it,
+  because samples stored under the old estimator are a worse estimate of the
+  same pose and a pool that answers by agreement lets them outvote new ones.
+  What paid for that cost was the applied field, and without it the ledger is a
+  certain owner cost - a cold first file, five files to re-earn - against a
+  benefit the band already covers wherever it has evidence.
+- **`band::Table` ships at `REST`**, as on `main`, and the compute pass's
+  read-through is removed with the thing it existed for.
+
+**THE NEW BINDING RULE.** Any change that applies something at the seam must
+include a **delivered-app-path comparison against `main`** in its acceptance,
+not only the unbent instruments. The A/B protocol is part of the battery and not
+only the owner's gate. Section 8's numbers were true in their domain; the domain
+was the wrong one for an applied claim, and no amount of held-out rigour inside
+it would have caught this.
+
+**And the comparison has two halves, because one of them is not enough.**
+`~/kjerag-ab/delivered.sh` runs both.
+
+1. **Difference.** The app, at the view, photographed, against the same binary
+   run twice. It says whether the two builds draw the same picture and how that
+   compares with a build's own run-to-run spread. It **cannot say which is
+   better**: it is a whole-window number dominated by whatever the two fits do
+   to the framing, and it says nothing about the seam. A cross-arm difference
+   under the control means "not resolved", never "identical" - one control pair
+   is one sample and does not bound the spread.
+2. **Quality.** `--bin step` and `--bin shear` with `seam=file` and **the band
+   live**. These read the seam itself in the delivered domain. It is the half
+   that answered this stage's own open question (9.5), and it is the half a
+   difference metric cannot stand in for.
+
+The capture in half 1 is only comparable if the fit **landed before the
+shutter**: an empty pool fits off the file and walks the correction in over a
+second, so a frame grabbed mid-walk is a picture of the walk. The script asserts
+the fit's own report line rather than trusting the settle.
+
+### 9.5 What the restructured branch delivers
+
+The render path is now `main`'s: `Table::REST`, no read-through, no composition.
+The only thing that can still differ is the **fit**, which the trim changes by
+design. Both builds, empty pool, the app at each view, photographed after a 14
+second settle, against the same binary run twice as the control:
+
+| view | main vs main (control) | main vs branch |
+| --- | ---: | ---: |
+| GOOD | 4.443 codes mean, worst 74 | **2.275, worst 60** |
+| BAD | 6.740, worst 234 | **7.343, worst 242** |
+| shimmer | 0.105, worst 7 | **0.758, worst 30** |
+
+At the two May-01 views the branch is **inside the same binary's own run-to-run
+spread**. At the shimmer view it is outside it by about seven times, and the
+report line says why: on that file the trim moves the fit by +0.032 deg of roll,
+-0.079 of pitch and -1.31 px of `cy`.
+
+**Which fit is better, answered in the delivered domain.** A whole-window
+difference cannot say, and that was this section's open question until the
+second half of the comparison was run: `--bin step` and `--bin shear` with
+`seam=file` and the band live, both builds. Three signals, all one way
+(the adversarial reviewer's runs, three each and deterministic):
+
+| delivered, band live, `seam=file` | main | with the trim |
+| --- | ---: | ---: |
+| step at the seam, view px | -21.19 | **-18.89** |
+| the band's along-seam load, mean deg | 0.176 | **0.159** |
+| the same, worst deg | 0.792 | **0.498** |
+
+and `--bin shear`'s residuals are smaller at all four bands with the steadiness
+unchanged. Reproduced here independently, at the **same aim** - the registry's
+step view, `VID_20260714_193252_00_006.insv time=2.836 yaw=111.83 pitch=4.12
+fov=20.00 lock=1`, character for character - and from a **different band
+state**: this run gave the band no warm-up and read 26 of 128 directions with
+evidence where the reviewer's `warm=6.0` read 47 to 48. Step at the seam
+**-21.97 to -20.69 view px**, its along-seam part -0.439 to -0.384 deg, and the
+band's along-seam load **0.227 to 0.199 deg** mean and **0.613 to 0.538** worst.
+
+That the absolute numbers differ and the direction does not is the **stronger**
+reading, not the weaker one: the same aim seen through two band states, one with
+half the ring's evidence of the other, moves the same way.
+
+**The trimmed fit is the better one in the picture** - it leaves less step at
+the seam and less for the per-frame band to carry, which is what a cleaner pose
+should do - **and the claim is exactly as wide as its evidence**: one camera,
+one flight (the July-14 X4 Air capture), two views on it, two band states. The
+two May-01 crossings cannot be read this way at all - `--bin step`'s line fits
+there come out at 51 to 54 px rms, which is the condition the registry warns
+about before any step is quoted - and the ONE X2 view answers "no horizon
+fitted on both sides of the seam". So this is the delivered-domain evidence for
+the one thing this PR still applies, on the one flight that could carry it, and
+it is the half a difference metric could not have supplied.

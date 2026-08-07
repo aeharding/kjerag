@@ -477,7 +477,11 @@ impl Along {
 /// ring with nothing on it come out at exactly zero rather than at a division.
 /// A term forty directions agree on gives up two percent of itself to this; a
 /// term one direction has seen gives up half.
-const RIDGE: f32 = 1.0;
+///
+/// Public because the pooled field is the same five terms fitted over a ring of
+/// azimuths instead of a ring of cells, and it is held against the same
+/// evidence ([`super::seam::along_terms`]).
+pub const RIDGE: f32 = 1.0;
 
 /// A small symmetric positive definite system, by Gaussian elimination with no
 /// pivoting.
@@ -552,7 +556,18 @@ pub struct Leftover {
 /// with no reading inside the kernel is exactly zero and its neighbours taper
 /// into it.
 ///
-/// **Nothing in the app builds one, and that is a measurement** (stage 9,
+/// **Nothing writes one and `Table::REST` ships**, and that survived a second
+/// attempt (stage 9 layer 2, docs/research/stage9.md 9). A five-term field
+/// pooled per camera was composed into this vehicle and withdrawn: it improves
+/// the **unbent** projection every instrument here measures and does nothing in
+/// the **delivered** picture, where the per-frame band already holds the
+/// along-seam axis, and at one reference view it made the delivered axis about
+/// two view pixels worse. Why the band does not simply absorb an applied table
+/// is measured in
+/// [`a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it`], and it
+/// binds anything that ever fills this uniform.
+///
+/// **Nothing pooled per azimuth either, and that is a measurement** (stage 9,
 /// docs/research/stage9.md). Over nine captures of two cameras, held out on
 /// every arm: on the ONE X2 a table costs 4 to 6 percent under every reduction;
 /// on the X4 Air the effect runs -1 to +2 percent depending on the estimator,
@@ -572,12 +587,13 @@ pub struct Leftover {
 /// on 18 of 18 pairs of captures, and fitted on other flights only they take
 /// the pooled leftover from 0.0536 to 0.0211 degrees on the X4 and 0.0606 to
 /// 0.0249 on the X2, nine captures of nine improved. That is [`Along`]'s
-/// territory, computed per session already and pooled per camera by nobody yet.
-/// What this type would carry is what is left over it, and there is a
-/// hundredth of a pixel of that.
+/// territory, computed per session already, and measured per camera by
+/// [`super::seam::along_terms`] whose answer the pool now stores without
+/// applying it. What a per-azimuth table would carry is what is left over it,
+/// and there is a hundredth of a pixel of that.
 ///
-/// The mechanism is here because the refusal had to be checkable and because a
-/// camera that needs one may still turn up; `Table::REST` is what ships.
+/// The per-azimuth mechanism stays here because the refusal had to be
+/// checkable and because a camera that needs one may still turn up.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Table {
@@ -627,6 +643,23 @@ impl Table {
     /// One entry per direction, in radians, for an instrument.
     pub fn entries(&self) -> [f32; AZIMUTHS] {
         std::array::from_fn(|index| self.packed[index / 4][index % 4])
+    }
+
+    /// The same, refused whole where any entry is larger than a calibration or
+    /// is not a number.
+    ///
+    /// **Whole support or nothing**, which is the acceptance rule a later
+    /// applied candidate inherits (docs/research/stage9.md 7): a table is one
+    /// field over one ring, and a ring with one direction knocked out of it is
+    /// the hole-filling this type exists to refuse. What builds one this way is
+    /// [`super::seam::along_table`], where a single direction the projection
+    /// cannot reach is a camera whose seam circle leaves a lens's picture and
+    /// not a reading to be patched around.
+    pub fn plausible(entries: [f32; AZIMUTHS]) -> Option<Self> {
+        entries
+            .iter()
+            .all(|entry| entry.is_finite() && entry.abs() <= TABLE_LIMIT_RAD)
+            .then(|| Self::of_entries(entries))
     }
 
     /// A table straight from its entries, which is how a planted control and a
@@ -832,6 +865,20 @@ fn levelled(left: &[Leftover]) -> Vec<Leftover> {
 /// The five basis functions [`Along`] is written in, from an azimuth's own
 /// cosine and sine.
 fn terms(cos: f32, sin: f32) -> [f32; 5] {
+    [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin]
+}
+
+/// The same five functions at one azimuth, in `f64`.
+///
+/// A second expression of one identity, which is what
+/// [`the_two_bases_are_the_same_five_functions`] is for. It exists because the
+/// two live at different precisions for different reasons: [`terms`] is the
+/// twin of what a fragment shader computes and may not be widened without
+/// changing every pixel the CPU map draws, while the pooled field
+/// ([`super::seam::along_terms`]) is a least squares over hundreds of readings
+/// and is fitted in `f64` like every other fit in this repository.
+pub fn basis(phi: f64) -> [f64; 5] {
+    let (sin, cos) = phi.sin_cos();
     [1.0, cos, sin, cos * cos - sin * sin, 2.0 * cos * sin]
 }
 
@@ -2434,6 +2481,103 @@ mod tests {
                 at.epi,
             );
         }
+    }
+
+    /// The two expressions of the five basis functions are one identity, and
+    /// only their precision differs.
+    #[test]
+    fn the_two_bases_are_the_same_five_functions() {
+        for step in 0..AZIMUTHS {
+            let phi = step as f64 / AZIMUTHS as f64 * std::f64::consts::TAU;
+            let (sin, cos) = (phi as f32).sin_cos();
+            for (wide, narrow) in basis(phi).iter().zip(terms(cos, sin)) {
+                assert!(
+                    (*wide as f32 - narrow).abs() < 1e-6,
+                    "at {phi:.4} rad the bases read {wide} and {narrow}",
+                );
+            }
+        }
+    }
+
+    /// **Why reading the table through the band does not make the band cancel
+    /// it**, which is the measurement that took the applied field out of
+    /// PR #167 (docs/research/stage9.md 9).
+    ///
+    /// If the pass applies a table `T` and the band measures the residual
+    /// through it, the delivered correction is `T + fit(L - T)` against `fit(L)`
+    /// with no table, so by linearity the two differ by exactly **`T - fit(T)`**.
+    /// That is zero only if the band's own five-term least squares can
+    /// reproduce `T`, and it cannot when the ring it is fitted over is an arc:
+    /// the fit is unconstrained where there is no evidence and the ridge pulls
+    /// it towards zero there, so the table's own value is delivered whole at
+    /// exactly the directions the session never read.
+    ///
+    /// **The field planted here is not the one section 9.2's table was
+    /// measured with**, and the two are reported side by side there. That table
+    /// is the real pooled field `--bin table field=` wrote (0.2735 deg rms
+    /// composed); this one is a plain five-term field of 0.2163 deg rms, chosen
+    /// so the test needs no footage and no scratch file. At 27 directions of
+    /// evidence it leaves **0.0856 deg rms and 0.1710 worst** against the real
+    /// field's 0.0333 and 0.0696, so it makes the point a fortiori and not
+    /// more weakly.
+    ///
+    /// **The sweep is not monotone in coverage** on either field - here 64 and
+    /// 48 directions read 0.0677 and 0.0676 rms while their worst entries go
+    /// 0.1403 to 0.1440 - because what is left depends on where the arc sits
+    /// against the field's own phase and not only on how wide it is. The
+    /// assertions below are therefore about the two ends and not about the
+    /// shape between them.
+    ///
+    /// On real footage `--bin step` reports 27 of 128 directions with evidence.
+    #[test]
+    fn a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it() {
+        let planted: [f32; AZIMUTHS] = std::array::from_fn(|index| {
+            let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+            (0.20 + 0.10 * phi.cos() - 0.06 * (2.0 * phi).sin()).to_radians()
+        });
+        let left = |covered: usize| {
+            let cells: Vec<Cell> = (0..AZIMUTHS)
+                .map(|index| Cell {
+                    off_epi: -planted[index],
+                    off_conf: f32::from(u8::from(index < covered)) * 0.9,
+                    ..Cell::default()
+                })
+                .collect();
+            let fitted = Along::fit(&cells);
+            (0..AZIMUTHS).fold(0.0f32, |worst, index| {
+                let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+                let (sin, cos) = phi.sin_cos();
+                worst.max((planted[index] + fitted.at(cos, sin)).abs())
+            })
+        };
+        let whole = left(AZIMUTHS).to_degrees();
+        let arc = left(27).to_degrees();
+        assert!(
+            whole < 0.005,
+            "a ring with evidence everywhere left {whole:.4} deg of the table",
+        );
+        assert!(
+            arc > 10.0 * whole,
+            "an arc of 27 directions left {arc:.4} deg against {whole:.4} for the whole ring, \
+             so this test no longer shows what it is for",
+        );
+    }
+
+    /// A table is accepted over its whole support or not at all.
+    #[test]
+    fn a_table_with_an_entry_larger_than_a_calibration_is_refused() {
+        let flat = [0.2f32.to_radians(); AZIMUTHS];
+        assert!(Table::plausible(flat).is_some());
+        let mut wild = flat;
+        wild[57] = 0.9f32.to_radians();
+        assert_eq!(
+            Table::plausible(wild),
+            None,
+            "0.9 deg at one direction was kept"
+        );
+        let mut broken = flat;
+        broken[3] = f32::NAN;
+        assert_eq!(Table::plausible(broken), None);
     }
 
     #[test]

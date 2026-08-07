@@ -201,6 +201,7 @@ fn fit(options: &Options) -> Fallible<()> {
             capture.tolerance,
         );
     }
+    coverage_of(&captures, &pose);
     let groups: Vec<Vec<Leftover>> = captures.iter().map(|c| c.left.clone()).collect();
     let pooled: Vec<Leftover> = groups.iter().flatten().copied().collect();
     if pooled.is_empty() {
@@ -208,6 +209,9 @@ fn fit(options: &Options) -> Fallible<()> {
     }
     structure(&pooled);
     reproduces(&captures, options.patches);
+    if captures.len() > 1 {
+        ladder(&captures, &pose, options);
+    }
     let table = Table::of(&pooled, options.smooth);
     coverage(&table, &pooled, options.smooth);
     sweep(&captures);
@@ -216,6 +220,25 @@ fn fit(options: &Options) -> Fallible<()> {
         held_out(&captures, held, options)?;
     }
     if let Some(out) = &options.out {
+        write(&table, out)?;
+    }
+    if let Some(out) = &options.field {
+        let first = captures.first().ok_or("no capture")?;
+        // `along_kept` and not `along_terms`: what this writes is what the app
+        // would draw with, so a capture the app would refuse to pool has to be
+        // refused here too or the file is a table nothing ships.
+        let fields: Vec<[f64; 5]> = captures
+            .iter()
+            .filter_map(|c| seam::along_kept(&c.readings, &pose, &c.lenses, c.frame))
+            .collect();
+        let pooled = middle(&fields).ok_or("no capture pinned five terms")?;
+        let table = seam::along_table(pooled, pose, &first.lenses, first.frame)
+            .ok_or("that field and that pose do not compose into a calibration")?;
+        println!(
+            "field:  five terms off {} captures, {:.4} deg rms composed with this pose",
+            fields.len(),
+            seam::rms(table.entries().iter().map(|e| f64::from(e.to_degrees()))),
+        );
         write(&table, out)?;
     }
     if let Some(dump) = &options.dump {
@@ -233,11 +256,11 @@ fn spill(captures: &[Capture], dump: &Path, options: &Options, pose: &SeamFit) -
     let mut text = format!(
         "# kjerag-spike --bin table, {} places x {} frames, {} azimuths, gate {}\n\
          # pose: roll:{} yaw:{} pitch:{} cx:{} cy:{}\n\
-         # REDUCTION: mean. `seam::measure` averages each azimuth's frames, and that\n\
-         # population is heavy tailed, so these rows carry the reduction's scatter and\n\
-         # not only the camera's field. They are enough to re-check what a table is\n\
-         # worth on top of five terms; they are NOT enough to ask whether the field\n\
-         # reproduces across flights (docs/research/stage9.md 4.5).\n\
+         # REDUCTION: trimmed. `seam::measure` reduces each azimuth's frames by\n\
+         # `seam::left`'s own rule applied per frame, so these rows are what the\n\
+         # shipped path reads. Rows written before 2026-08-06 were MEAN reduced over a\n\
+         # heavy-tailed population and carry that estimator's scatter\n\
+         # (docs/research/stage9.md 4.5).\n\
          capture,phi_deg,left_deg\n",
         options.places,
         options.frames,
@@ -265,6 +288,64 @@ fn spill(captures: &[Capture], dump: &Path, options: &Options, pose: &SeamFit) -
     std::fs::write(dump, text)?;
     println!("wrote:  {}", dump.display());
     Ok(())
+}
+
+/// What each capture's OWN field composes to against the leftover it was fitted
+/// to, and how much of the circle it was fitted over.
+///
+/// The harvest guard's own numbers (`seam`'s `FIELD_LIMIT`): a field fitted over
+/// one arc says whatever it likes over the rest of the circle, and this is where
+/// that shows. `covered` is the widest run of azimuths with no reading in it,
+/// subtracted from the whole circle.
+fn coverage_of(captures: &[Capture], pose: &SeamFit) {
+    println!(
+        "\ncoverage: each capture's own five terms composed with this pose, against the leftover \n\
+        they were fitted to. a ring with a hole in it fits terms that speak where it never read."
+    );
+    println!(
+        "{:<17} {:>9} {:>9} {:>10} {:>10} {:>7}",
+        "capture", "azimuths", "covered", "leftover", "composed", "ratio"
+    );
+    for capture in captures {
+        let Some(terms) =
+            seam::along_terms(&capture.readings, pose, &capture.lenses, capture.frame)
+        else {
+            println!(
+                "{:<17} {:>9} no five terms",
+                short(&capture.path),
+                capture.left.len()
+            );
+            continue;
+        };
+        let composed = seam::along_table(terms, *pose, &capture.lenses, capture.frame)
+            .map(|table| seam::rms(table.entries().iter().map(|e| f64::from(e.to_degrees()))));
+        let leftover = seam::rms(capture.left.iter().map(|l| f64::from(l.perp.to_degrees())));
+        println!(
+            "{:<17} {:>9} {:>8.0} {:>10.4} {:>10} {:>7}",
+            short(&capture.path),
+            capture.left.len(),
+            covered_deg(&capture.left),
+            leftover,
+            composed.map_or_else(|| "refused".to_owned(), |rms| format!("{rms:.4}")),
+            composed.map_or_else(|| "-".to_owned(), |rms| format!("{:.2}", rms / leftover)),
+        );
+    }
+}
+
+/// How much of the circle a capture read, in degrees: the whole of it less the
+/// widest gap between two readings it has.
+fn covered_deg(left: &[Leftover]) -> f64 {
+    let mut phi: Vec<f64> = left.iter().map(|l| f64::from(l.phi.to_degrees())).collect();
+    if phi.len() < 2 {
+        return 0.0;
+    }
+    phi.sort_by(f64::total_cmp);
+    let widest = phi
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .chain(std::iter::once(360.0 - (phi[phi.len() - 1] - phi[0])))
+        .fold(0.0f64, f64::max);
+    360.0 - widest
 }
 
 /// How much of the pooled leftover each harmonic order can describe.
@@ -662,6 +743,129 @@ fn left_of(table: &Table, reading: &Leftover) -> f64 {
     f64::from((reading.perp - table.at(cos, sin)).to_degrees())
 }
 
+/// The ladder the shipped answer is measured on: each capture predicted by a
+/// **five-term field** pooled off the others, through the very functions the
+/// app runs (issue #103, stage 9 layer 2).
+///
+/// Every arm is held out. `pose only` is what the pose alone leaves, `5 terms`
+/// is what it leaves with `seam::along_kept` pooled off the OTHER captures and
+/// composed with this pose by `seam::along_table`, and `5 + table` puts the
+/// per-azimuth table of the same others on top of that, which is stage 9's own
+/// refusal re-asked with the field underneath it.
+///
+/// The fields are `seam::along_kept`'s, which is the function the app harvests
+/// through, so a capture whose ring did not pin a field it can stand behind is
+/// out of every other capture's pool here exactly as it would be out of the
+/// app's.
+///
+/// The pooling rule is the app's own, `SeamPool::field`, restated here because
+/// the app crate is a binary and this one cannot link it: a middle taken
+/// coefficient by coefficient. `mean` is printed beside it as the control,
+/// because the corpus arm that measured this pooled the readings and fitted
+/// once, which is an average of coefficients and not a middle of them.
+fn ladder(captures: &[Capture], pose: &SeamFit, options: &Options) {
+    let fields: Vec<Option<[f64; 5]>> = captures
+        .iter()
+        .map(|c| seam::along_kept(&c.readings, pose, &c.lenses, c.frame))
+        .collect();
+    println!(
+        "\nfield: each capture predicted by a five-term along-seam field fitted on the OTHERS and \n\
+        composed with this pose, in degrees rms along the seam. every column is held out. \n\
+        `middle` is the app's pooling rule and `mean` is the control."
+    );
+    println!(
+        "{:<17} {:>9} {:>10} {:>10} {:>10} {:>10}",
+        "capture", "azimuths", "pose only", "middle", "mean", "5 + table"
+    );
+    let mut totals: [Vec<f64>; 4] = std::array::from_fn(|_| Vec::new());
+    for (index, capture) in captures.iter().enumerate() {
+        let others: Vec<[f64; 5]> = fields
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter_map(|(_, terms)| *terms)
+            .collect();
+        let elsewhere: Vec<Leftover> = captures
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .flat_map(|(_, c)| c.left.iter().copied())
+            .collect();
+        let arms = [None, middle(&others), mean(&others), middle(&others)];
+        let mut read = [0.0f64; 4];
+        for (column, terms) in arms.into_iter().enumerate() {
+            let field = terms
+                .and_then(|terms| seam::along_table(terms, *pose, &capture.lenses, capture.frame));
+            let above = (column == 3).then(|| Table::of(&elsewhere, options.smooth));
+            read[column] = seam::rms(capture.left.iter().map(|l| {
+                let (sin, cos) = l.phi.sin_cos();
+                let corrected =
+                    field.map_or(0.0, |t| t.at(cos, sin)) + above.map_or(0.0, |t| t.at(cos, sin));
+                f64::from((l.perp - corrected).to_degrees())
+            }));
+            totals[column].push(read[column]);
+        }
+        println!(
+            "{:<17} {:>9} {:>10.4} {:>10.4} {:>10.4} {:>10.4}",
+            short(&capture.path),
+            capture.left.len(),
+            read[0],
+            read[1],
+            read[2],
+            read[3],
+        );
+    }
+    let pooled = |column: usize| {
+        seam::rms(
+            captures
+                .iter()
+                .zip(&totals[column])
+                .flat_map(|(c, value)| std::iter::repeat_n(*value, c.left.len())),
+        )
+    };
+    println!(
+        "{:<17} {:>9} {:>10.4} {:>10.4} {:>10.4} {:>10.4}",
+        "all",
+        captures.iter().map(|c| c.left.len()).sum::<usize>(),
+        pooled(0),
+        pooled(1),
+        pooled(2),
+        pooled(3),
+    );
+    let improved = captures
+        .iter()
+        .zip(totals[1].iter().zip(&totals[0]))
+        .filter(|(_, (five, pose))| five < pose)
+        .count();
+    println!(
+        "\n{improved} of {} captures improved by a field they were not in.",
+        captures.len(),
+    );
+}
+
+/// The middle of some fields, coefficient by coefficient: `SeamPool::field`.
+fn middle(fields: &[[f64; 5]]) -> Option<[f64; 5]> {
+    if fields.is_empty() {
+        return None;
+    }
+    Some(std::array::from_fn(|term| {
+        let mut all: Vec<f64> = fields.iter().map(|terms| terms[term]).collect();
+        all.sort_by(f64::total_cmp);
+        all[all.len() / 2]
+    }))
+}
+
+/// The control: their mean, which is what pooling the readings and fitting once
+/// comes to on a basis this nearly orthogonal.
+fn mean(fields: &[[f64; 5]]) -> Option<[f64; 5]> {
+    if fields.is_empty() {
+        return None;
+    }
+    Some(std::array::from_fn(|term| {
+        fields.iter().map(|terms| terms[term]).sum::<f64>() / fields.len() as f64
+    }))
+}
+
 /// One named capture predicted by a table fitted on the others, reported on
 /// its own.
 fn held_out(captures: &[Capture], held: &Path, options: &Options) -> Fallible<()> {
@@ -776,6 +980,10 @@ struct Options {
     gate: Option<f64>,
     places: usize,
     frames: usize,
+    /// Where to write the pooled FIVE-TERM field composed with the pose, which
+    /// is what the app applies, as against `out`, which writes the per-azimuth
+    /// table stage 9 refused.
+    field: Option<PathBuf>,
     patches: usize,
 }
 
@@ -804,6 +1012,7 @@ impl Options {
             gate: Some(seam::GATE_MADS),
             places: 3,
             frames: 2,
+            field: None,
             patches: 72,
         };
         for arg in args {
@@ -822,6 +1031,7 @@ impl Options {
                 Some(("plant", value)) => options.mode = planted(value)?,
                 Some(("smooth", value)) => options.smooth = value.parse()?,
                 Some(("gate", value)) => options.gate = gate_of(value.parse()?),
+                Some(("field", value)) => options.field = Some(PathBuf::from(value)),
                 Some(("places", value)) => options.places = value.parse()?,
                 Some(("frames", value)) => options.frames = value.parse()?,
                 Some(("patches", value)) => options.patches = value.parse()?,
@@ -853,7 +1063,7 @@ fn planted(value: &str) -> Fallible<Mode> {
 }
 
 const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] [seam=roll:0.8,yaw:-2.3,pitch:-0.9,\
-cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [gate=mads|0] [places=n] [frames=n] [patches=n] [out=path] [dump=path.csv] \
+cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [gate=mads|0] [places=n] [frames=n] [patches=n] [out=path] [field=path] [dump=path.csv] \
 | read=path | plant=size_deg:cycles [out=path]";
 
 const USAGE_SEAM: &str = "this instrument needs one stored fit for every capture: a fit off each \

@@ -987,6 +987,7 @@ fn fit_into(
         fit: fitted.fit,
         patches: fitted.patches,
         residual_deg: fitted.after[0].hypot(fitted.after[1]),
+        along: fitted.along,
     };
     if let Ok(mut slot) = kept.lock() {
         *slot = Some(harvest);

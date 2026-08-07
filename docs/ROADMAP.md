@@ -668,6 +668,91 @@ live, no keyframe UI ever.
   at 162.31, which is where the "to 1.6 degrees" came from. The registry was
   re-derived line by line the same day, in the entry above.
 
+- 2026-08-07 **The along-seam field is real on the unbent projection and worth
+  nothing in the delivered picture, because the per-frame band had already taken
+  it out. It is measured, guarded, stored and NOT applied; what ships is the
+  per-reading trim and a new rule about acceptance** (issue #103, stage 9 layer
+  2, docs/research/stage9.md 8 and 9).
+
+  **What was built.** `seam::measure` reduced each azimuth's frames with a mean
+  over a population that moves 0.22 to 0.48 deg by rms between frames; it now
+  reduces them with `seam::left`'s own rule applied per frame, one function
+  (`seam::tolerated`) shared by the ring gate and the per-frame trim. On the
+  unbent projection the trim alone takes the pooled X4 leftover under the stored
+  pose from **0.0828 to 0.0653 deg** and the corpus's cross-capture agreement
+  from 2 pairs of 15 to 15 of 15. `seam::along_terms` then reads the five terms
+  `band::Along` is written in, above the factory calibration and above no pose
+  at all, and held out through the shipped functions it takes the pooled
+  leftover **0.0644 -> 0.0375 deg on the X4 Air and 0.0414 -> 0.0140 on the ONE
+  X2, 9 of 9 improved**. At the two May-01 crossings `--bin crossing` reads the
+  along-seam median **1.29 -> 0.12 view px at GOOD and 1.47 -> 0.93 at BAD**,
+  both improved, neither traded.
+
+  **Why none of that is an applied result.** Every instrument above draws the
+  **unbent** projection: `seam::measure` reads its ring through `Reframe` with
+  no band, and `--bin crossing` builds its map with `Held::default()`. The app
+  does not. Photographed out of the app itself, at the same clip and view, the
+  delivered along-seam axis on `main` is **already at or under 0.6 view px at
+  GOOD** - the band's own per-frame `Along` fit had taken the same leftover out -
+  and the field arm matches it within 0.2 against an instrument shown capable at
+  1 px. At BAD `main` reads **-0.11 view px** where the unbent projection reads
+  1.47, and the field arm reads **-2.06: two view pixels the wrong way**. At the
+  shimmer view the field arm is slightly worse on every probe.
+
+  **The owner's blind A/B said the same thing first**: "same, both bad" at every
+  view, with the `main` arm called slightly steadier at the shimmer view, which
+  the instrument agrees with at 10.081 against 10.214 codes per frame over 60
+  frames.
+
+  **Why reading the table through the band did not save it.** With a table `T`
+  applied and the band measuring through it, the delivered correction is
+  `T + fit(L - T)` against `fit(L)` with none, so the two differ by exactly
+  **`T - fit(T)`**. `Along::fit` reproduces `T` only where the ring has
+  evidence, and a session's ring is an arc: planting the real pooled field,
+  `T - fit(T)` reads 0.0007 deg rms with all 128 directions covered and
+  **0.0333 rms, 0.0696 worst at the 27 of 128 `--bin step` reports on real
+  footage** - 1.13 view px at the BAD view's scale, varying with azimuth, which
+  is the size and the shape of what was measured. Reading through a table is
+  necessary and not sufficient, and that binds anything that ever fills the
+  `Table` uniform.
+
+  **THE NEW BINDING RULE**: any change that applies something at the seam must
+  include a **delivered-app-path comparison against `main`** in its acceptance,
+  not only the unbent instruments. The A/B protocol is part of the battery and
+  not only the owner's gate, and it has **two halves**
+  (`~/kjerag-ab/delivered.sh`): a **difference** half, the app photographed at
+  the view against the same binary run twice, which says whether two builds draw
+  the same picture and cannot say which is better; and a **quality** half,
+  `--bin step` and `--bin shear` with `seam=file` and the band live, which reads
+  the seam itself. One control pair does not bound a spread, and a capture only
+  counts if the fit landed before the shutter.
+
+  **What ships.** The per-reading trim; `seam::along_kept`'s harvest guard,
+  which refuses a sample whose own five terms compose to more than 1.2x the
+  leftover they were fitted to (the July-25 flight, 170 deg of hole, reads 1.33
+  and is refused outright at the app's plan); and the field stored dormant in
+  `SeamSample::along_deg` against the one regime the delivered finding does not
+  cover, the first frames of a session before the band has evidence. `Table`
+  ships at `REST` as on `main` and the compute pass's read-through is removed
+  with it. **The pool is not discarded**: what paid for that cost was the
+  applied field. Measured against `main` in the delivered picture with an empty
+  pool on both arms, the branch sits inside the same binary's own run-to-run
+  spread at both May-01 views (2.275 codes mean against a 4.443 control at GOOD,
+  7.343 against 6.740 at BAD) and outside it at the shimmer view (0.758 against
+  0.105), where the trim moves that file's fit by +0.032 deg of roll, -0.079 of
+  pitch and -1.31 px of `cy`. **And the trimmed fit is the better one in the delivered picture**, which the
+  quality half settles: step at the seam -21.19 -> **-18.89 view px**, the
+  band's own along-seam load 0.176 -> **0.159 deg** mean and 0.792 -> **0.498**
+  worst, and `--bin shear`'s residuals smaller at all four bands with the
+  steadiness unchanged, three runs each and deterministic; reproduced
+  independently at the same aim from a different band state (no warm-up, 26 of
+  128 directions against 47 to 48) at -21.97 -> -20.69 view px with the band's
+  load 0.227 -> 0.199 deg mean. A cleaner pose leaves less step at the seam and
+  less for the band to carry, and it does. **The claim is one camera, one flight
+  (July-14), two views, two band states**: the two May-01 crossings cannot be
+  read this way (line fits at 51 to 54 px rms) and the X2 view answers "no
+  horizon fitted on both sides of the seam".
+
 - 2026-08-06 **No along-seam table is fitted: above the five terms the pass
   already applies, what is left is not a static function of azimuth this corpus
   could have found** (issue #103, stage 9, docs/research/stage9.md). The

@@ -127,6 +127,34 @@ pub struct SeamSample {
     /// off fifty far-field patches from one off seven near-field ones.
     pub patches: usize,
     pub residual_deg: f64,
+    /// What the same ring read along the seam above the calibration the camera
+    /// wrote, as the five terms `band::Along` is written in, in degrees
+    /// ([`kjerag_render::seam::along_kept`]).
+    ///
+    /// **NOTHING READS THIS AND NOTHING DRAWS WITH IT** (issue #103, stage 9
+    /// layer 2, docs/research/stage9.md 9). It was composed into the picture
+    /// and withdrawn: it improves the **unbent** projection every seam
+    /// instrument in this repository measures, and in the **delivered** picture
+    /// the per-frame band has already taken the same leftover out, so applying
+    /// it bought nothing at two reference views and cost about two view pixels
+    /// at a third. The owner, blind, said "same, both bad".
+    ///
+    /// It accumulates anyway, because a pool fills over months and the one
+    /// regime that finding does not cover is the first frames of a session,
+    /// before the band has any evidence. **Anything that reads this has to
+    /// clear a delivered-app-path comparison against `main` before it draws
+    /// with it**, and it has `T - fit(T)` to answer for at the directions a
+    /// session never reads (stage9.md 9.2). No number measured on the
+    /// projection is that comparison.
+    ///
+    /// **Not a leftover**, which is what makes it worth storing at all: no pose
+    /// has been taken off it, so it is the same quantity on every capture of
+    /// this camera whatever the pool's answer happens to be that day.
+    ///
+    /// `None` on a ring that could not pin five terms, or on one the harvest
+    /// guard refused, which costs the pool this sample's field and keeps its
+    /// pose.
+    pub along_deg: Option<[f64; 5]>,
 }
 
 impl SeamSample {
@@ -152,6 +180,7 @@ impl From<Harvest> for SeamSample {
             cy_px: harvest.fit.cy_px,
             patches: harvest.patches,
             residual_deg: harvest.residual_deg,
+            along_deg: harvest.along,
         }
     }
 }
@@ -323,6 +352,19 @@ pub struct ConfigState {
     /// migrating them would carry exactly the contamination the pool exists to
     /// average out; the old key is left on disk unread and the pool refills
     /// itself from the next few files played.
+    ///
+    /// **It survives the per-frame trim rather than being discarded for it**
+    /// (issue #103, stage 9 layer 2, docs/research/stage9.md 9.3). Samples
+    /// stored before it were fitted through rings reduced by a mean and are a
+    /// worse estimate of the same quantity - `cy` -11.91 against -13.18
+    /// refitted - and an earlier form of that change discarded the pool for it.
+    /// What paid for the discard was an applied field the same PR withdrew, and
+    /// without that the ledger is a certain cost against a benefit the band
+    /// already covers wherever it has evidence. A pool is a mixture of better
+    /// and worse estimates of one number by construction, so a trimmed fit
+    /// joins it like any other and the answer migrates as they accumulate. A
+    /// later stage that shows the trimmed pose is worth forcing can discard on
+    /// its own evidence.
     pub seam_pool: BTreeMap<String, SeamPool>,
 }
 
@@ -469,6 +511,7 @@ mod tests {
             },
             patches,
             residual_deg,
+            along: None,
         }
     }
 
@@ -490,6 +533,32 @@ mod tests {
         assert_eq!(state.seam(0), None);
         assert_eq!(state.seam_pool.len(), 2);
         assert!(state.seam_pool.contains_key("123456789abcdef0"));
+    }
+
+    /// The field rides in on the same sample as the fit, and it is **stored
+    /// and not applied** (docs/research/stage9.md 9.4). What is under test is
+    /// that a capture that read one keeps it and a capture that did not is
+    /// still pooled for its pose.
+    #[test]
+    fn a_sample_carries_the_field_its_ring_read_and_is_pooled_either_way() {
+        let mut state = ConfigState::default();
+        assert!(state.harvest(1, harvest(-2.4, 30, 0.6)));
+        assert!(state.harvest(
+            1,
+            Harvest {
+                along: Some([-0.77, -0.40, -0.10, -0.02, 0.02]),
+                ..harvest(-2.4, 30, 0.6)
+            },
+        ));
+        let pool = &state.seam_pool["0000000000000001"];
+        assert_eq!(pool.samples.len(), 2);
+        assert_eq!(pool.samples[0].along_deg, None, "a ring that read none");
+        assert_eq!(
+            pool.samples[1].along_deg.map(|terms| terms[0]),
+            Some(-0.77),
+            "a ring that read one",
+        );
+        assert!(state.seam(1).is_some(), "the pose is pooled either way");
     }
 
     /// The point of pooling: one file whose seam is full of near content asks
@@ -657,6 +726,7 @@ mod tests {
                     fit,
                     patches: 30,
                     residual_deg: 0.6,
+                    along: None,
                 },
             ));
         }
@@ -678,6 +748,7 @@ mod tests {
                     fit,
                     patches: 30,
                     residual_deg: 0.6,
+                    along: None,
                 },
             ));
         }

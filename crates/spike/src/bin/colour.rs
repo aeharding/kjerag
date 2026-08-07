@@ -1332,6 +1332,7 @@ fn profile(options: &Options) -> Fallible<()> {
             false => Horizon::Free,
         });
         scene.fit_seam(true);
+        scene.use_table(options.table);
         let mut shot = None;
         for _ in 0..options.count.max(1) {
             shot = Some(
@@ -2283,6 +2284,7 @@ fn trace(options: &Options) -> Fallible<()> {
         false => Horizon::Free,
     });
     scene.fit_seam(true);
+    scene.use_table(options.table);
     let size = Size::new(256, 256);
     // Per frame: the three gains, then the field evaluated at four azimuths a
     // quarter turn apart, which is what a view sees one of.
@@ -2507,6 +2509,10 @@ fn seam_transition(column: &[[f64; 3]], options: &Options) {
 
 struct Options {
     input: PathBuf,
+    /// The along-seam table the picture is drawn with (issue #103, stage 9).
+    /// `Table::REST` unless a run names one, so a run that does not is the
+    /// picture this instrument has always measured, byte for byte.
+    table: kjerag_render::Table,
     mode: Mode,
     from: f64,
     count: usize,
@@ -2538,6 +2544,7 @@ impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Fallible<Self> {
         let mut options = Self {
             input: PathBuf::new(),
+            table: kjerag_render::Table::REST,
             mode: Mode::Field,
             from: 0.0,
             count: 8,
@@ -2575,6 +2582,7 @@ impl Options {
                 Some(("places", value)) => options.places = value.parse()?,
                 Some(("patches", value)) => options.patches = value.parse()?,
                 Some(("keep", value)) => options.keep = value.parse()?,
+                Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
                 Some(("seam", value)) => options.fit = value != "factory",
                 Some(("verbose", value)) => options.verbose = value.parse::<u32>()? != 0,
                 Some(("yaw", value)) => options.yaw = value.parse()?,
@@ -2662,4 +2670,4 @@ fn pair(value: &str) -> Fallible<(f64, f64)> {
 const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|studio|trace] \
      [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [seam=factory] [verbose=1] \
      [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg] \
-     [rows=lo:hi] [cols=lo:hi] [box=left:top:right:bottom]";
+     [rows=lo:hi] [cols=lo:hi] [box=left:top:right:bottom] [table=table.txt]";
