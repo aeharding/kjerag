@@ -16,6 +16,7 @@ pub mod crossing;
 mod offscreen;
 mod picture;
 pub mod registration;
+pub mod settled;
 mod skyline;
 
 pub use kjerag_media::{Chroma, Pair, Plane, Walk};
