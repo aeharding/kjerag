@@ -1334,3 +1334,91 @@ that protects playback is what makes the landing slow.
   view pixel at one of the nine crossings and nothing at another.
 - **One crossing per flight.** Nine moments across seven captures, two
   cameras.
+
+### 13.11 The owner's verdict: refused, on the eye and on the clock
+
+**2026-08-07, on his own box, on the branch build, after the walk had landed.**
+Verbatim:
+
+> I don't think it worked. If I look here, the parking lot looks incredibly
+> distorted during playback just like before - and this is after the "100
+> percent" message comes up in logs. So either I'm doing something wrong or
+> this isn't the right approach to solving the distortion/seam alignment
+> problem. Regardless, the performance of this approach is unworkable, we need
+> orders of magnitude better - insta360 studio launches perfect seam with <2s
+> of loading time.
+
+**Both halves are binding and neither is a surprise the evidence could not have
+carried. This section is the record of what the battery above measured and what
+it did not.**
+
+#### The eye and the instrument were not looking at the same defect
+
+Everything in 13 is measured on **far-field seam crossings**: the corridor's
+lag on content at infinity, read by `--bin epiramp` between two handover widths
+(10.6), on nine crossings chosen for having a horizon or a cloud top across the
+seam and nothing near. On that defect the term does what it says: nine rows,
+eight of them better, BAD from 19.92 view px of swing to 0.83.
+
+**What the owner looked at is a parking lot during playback**, which is near
+content moving through the corridor, and the term is by construction the wrong
+tool for it:
+
+- The far gate exists precisely to **throw near content away**. A moment whose
+  excursion implies something nearer than 60 m is dropped before the field is
+  fitted (11.1), so a parking lot is one of the readings this design refuses to
+  learn from.
+- What is left for near content is the band's per-frame ramp, unchanged from
+  `main`. The term takes the camera's constant share out of the corridor; the
+  parallax that draws a parking lot twice is still ramped across the handover
+  exactly as before, because that is the part which *should* be.
+- So "just like before" is the correct description of what this build does to
+  that view, and it is not a failure of the walk or of the harvest. It is the
+  scope of the thing, and **the scope was never checked against what the owner
+  sees.** No line in this stage asked him which view he means by the seam
+  problem before nine crossings were measured on the assumption.
+
+**That is 9.3's lesson repeating one fork over.** There the battery measured
+the unbent projection while the app drew something else; here the battery
+measured far content while the eye was on near content. Both times the
+instrument was rigorous inside a domain nobody had checked was the right one.
+
+#### The clock is not a tuning problem
+
+Insta360 Studio has a correct seam under two seconds. This build reads the file
+for seven seconds and walks the term in over about thirty-five more, or near
+two minutes at the rest that keeps playback smooth (13.9), and the floor for
+anything *measured this way* is about ten seconds. Orders of magnitude is not
+reachable by trimming: it is a different design.
+
+**What the gap says, plainly.** A player that has a correct seam in under two
+seconds is not measuring the seam off the file it just opened. It is applying
+something it already knows - a calibration that travels with the camera, or one
+the maker ships - and whatever this project ends up doing about the seam in
+under two seconds will have that shape. The pooled per-camera form is the
+shape that fits the clock, and the pooled form is what 10.10 refused **on the
+far-field delivered picture**. Those two facts together are the constraint any
+next attempt inherits, and this stage cannot resolve them: nothing here
+measured what a pooled term does to the defect the owner is actually pointing
+at.
+
+#### What survives
+
+- **The mechanism is sound and it is measured**: an across-seam displacement of
+  lens 1's whole picture, read through by the band, does collapse the far-field
+  corridor lag, on nine crossings of two cameras, with the picture steadier at
+  every band and the band keeping all of its evidence.
+- **The walk is the part worth keeping under any next design.** It is the only
+  guard measured to tell a right field from a wrong one after the fact
+  (`|T - truth|`, 12.3), it fires on planted fields, and it is cheap in
+  everything but decode.
+- **The null is exact**: with nothing applied the picture is `main`'s byte for
+  byte in both domains, so nothing here has to be unpicked before something
+  else is tried.
+
+**The verdict on this branch is REFUSED**, on the owner's eye and on the clock,
+and it is not merged. What it is for now is the record: what a per-session
+across-seam term does to far-field crossings, what it costs, and the two
+questions - which view the defect actually lives in, and what can be known
+about the seam before the first frame is drawn - that have to be answered
+before anything else is built here.

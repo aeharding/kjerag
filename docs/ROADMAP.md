@@ -579,6 +579,25 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-07 **REFUSED by the owner: the per-session across-seam term**
+  (PR #171, branch `feat/per-session-epi`, docs/research/stage9.md 13.11). Two
+  reasons, both binding. **The eye**: on his own box, after the term had landed,
+  "the parking lot looks incredibly distorted during playback just like before".
+  Everything the branch measures is far-field seam crossings, and the far gate
+  throws near content away by construction, so near-field distortion is exactly
+  what it does not touch - which nobody had checked against what he sees before
+  nine crossings were measured on the assumption. **The clock**: Insta360
+  Studio has a correct seam under two seconds; this reads the file for seven
+  and walks the term in over about thirty-five more. Orders of magnitude is a
+  different design, not a tuning: a player that is correct in two seconds is
+  applying something it already knows rather than measuring the file it just
+  opened. The pooled per-camera form is the shape that fits that clock, and it
+  is the form 10.10 refused on the far-field picture - the two together are the
+  constraint the next attempt inherits.
+
+  The mechanism itself is measured and stands (below); the null is exact, so
+  nothing has to be unpicked before something else is tried.
+
 - 2026-08-07 **The across-seam term is a session's own, harvested live and
   walked in** (issue #103, the epi fork; docs/research/stage9.md 13). The band
   reads what the two lenses disagree by across the seam and applies it **ramped
