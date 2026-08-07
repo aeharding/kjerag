@@ -1172,6 +1172,39 @@ the same **96 of 128** directions have evidence with the term on as with it off
 does not chase the term. What it does is read a slightly smaller residual:
 epipolar mean **0.554 to 0.518 degrees**.
 
+**Does the picture still stand still?** This is the along field's other failure
+probe, the one the #167 review's B1 used to catch the GPU trim snapping.
+`--bin shear` at the shimmer view, 90 frames, `warm=6.0`, band live, same drawn
+pose - the frame-to-frame step of the **applied displacement** at four bands,
+and the band's own state:
+
+| | off | `pose` | `full` |
+| --- | ---: | ---: | ---: |
+| band state, frame to frame, 360 directions | 0.0444 deg rms | **0.0933** | **0.0392** |
+| applied step rms / worst at -150 px | 0.0035 / 0.0102 | - | **0.0016 / 0.0050** |
+| at the seam | 0.0129 / 0.0698 | - | **0.0037 / 0.0096** |
+| at +60 px | 0.0995 / 0.2565 | - | **0.0116 / 0.0391** |
+| at +150 px | 0.0113 / 0.0681 | - | **0.0025 / 0.0084** |
+| frame pairs stepping over a view pixel at +60 | **21 of 87** | - | **0 of 87** |
+
+**With the term on the picture is steadier than `main`'s at every band**, and the
+one band where the shipped build steps over a view pixel on a quarter of its
+frame pairs stops doing it entirely. The band's own state settles too, 0.0444 to
+0.0392 deg rms.
+
+That is the opposite of what the along field's applied form did, and it is the
+one result here that argues for the mechanism rather than against it: taking a
+disagreement out of the corridor and putting it into a displacement removes the
+thing the corridor was breathing.
+
+**The `pose` arm doubles the band's own frame-to-frame state**, 0.0444 to 0.0933
+deg rms, which is the same arm going blind seen from the other side: a band with
+a third of its ring refused is a band whose surviving directions swing.
+
+**And at the shimmer view the band reads BETTER with the term on**: 128 of 128
+directions with evidence either way, epipolar mean 0.550 to 0.503 deg and worst
+1.884 to 1.520.
+
 ### 10.11 What a later attempt would have to be
 
 Not this table, and the size of what it would have to be instead is measurable
