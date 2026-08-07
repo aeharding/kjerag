@@ -150,9 +150,10 @@ caveat in the Motion section, which is the same trap at a smaller size.
   stage 9's estimator owns and a width cannot reach.
   WHAT THE POOLED FIELD DOES TO THIS LINE (2026-08-06, stage9.md 8): with a five-term field fitted
   on the five flights that are not this one and composed with the same `seam=`, the `along deg`
-  column reads 0.0286 / 0.0232 / 0.0085 / 0.0019 at -150 / +0 / +60 / +150, against 0.3204 /
-  0.3189 / 0.0791 / 0.0008 with no field, and the `+0` step rms falls 0.0690 to 0.0167 with the
-  worst single step 0.4475 to 0.0565. **That is not the picture's correction shrinking, it is the
+  column reads 0.0037 / 0.0031 / 0.0012 / 0.0014 at -150 / +0 / +60 / +150, against the
+  0.3381 / 0.3356 / 0.0820 / 0.0022 above, and the `+0` step rms falls 0.0687 to 0.0128. The
+  no-field column is main's number for number, band state and worst step included, which is that
+  change's own null. **That is not the picture's correction shrinking, it is the
   correction moving**: this instrument measures what the BAND applies, and the band now reads
   through the table and applies what the table still leaves. Read a plateau from this line only
   together with whatever table the run was given.
@@ -193,13 +194,18 @@ caveat in the Motion section, which is the same trap at a smaller size.
   learned by watching, pooled per camera beside `SeamFit`, and composed with the pool's pose at
   open into `band::Table`. At these two views under `seam=roll:0.795,yaw:-2.310,pitch:-0.936,
   cx:-3.28,cy:-11.91`, with the field fitted on flights that are NOT May-01, the along-seam median
-  magnitude reads **GOOD 1.29 -> 0.12 and BAD 1.47 -> 0.86 view px**, and the epipolar median moves
-  0.02 to 0.15 view px against this instrument's own 0.01 to 0.17 of dither sensitivity, which is
-  unmoved. **Both crossings improve and neither is traded for the other.** A field off the Jul-14
-  flight ALONE reads 0.97 and 1.09 here rather than the 0.07 above, and the difference is reading
-  density and not the code: that number was fitted on 1200 moments of that flight and this one on
-  48 frames of it. Read 1.29 rather than 1.30 as this build's baseline for the same reason the
-  entry above gives - the two agree to the instrument's floor.
+  magnitude reads **GOOD 1.29 -> 0.12 and BAD 1.47 -> 0.86 view px**. **Both crossings improve and
+  neither is traded for the other.** A field off the Jul-14 flight ALONE reads 0.97 and 1.09 here
+  rather than the 0.07 above, and the difference is reading density and not the code: that number
+  was fitted on 1200 moments of that flight and this one on 48 frames of it. Read 1.29 rather than
+  1.30 as this build's baseline for the same reason the entry above gives - the two agree to the
+  instrument's floor.
+  THE EPIPOLAR AXIS IS NOT MEASURABLY UNTOUCHED, AND SAY IT THAT WAY. Across the six runs its
+  median spans 0.14 view px at GOOD (-5.98 to -6.12) and 0.15 at BAD (-10.02 to -10.17), about a
+  tenth of the 1.17 and 0.61 the along-seam median moves. Run by run it is outside the dither:
+  three of the four arms move it by more than the smaller of the two runs' own sensitivity, and
+  only GOOD's Jul-14 arm (0.02 against 0.01) is marginal. Quote it range to range, never as
+  "unmoved" per run.
 
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=93.36 pitch=-2.43 fov=33.95 lock=1`
@@ -279,7 +285,16 @@ caveat in the Motion section, which is the same trap at a smaller size.
   Sent with no commentary straight after "to the eye, it still effectively looks like a line".
   Same May file, pitched down, fov 30.6 - a fine view, 0.0064 deg per pixel. STATUS after stage 8:
   1 px excess -0.82 percent and 2 px -0.69, so the line there is NOT photometric at any scale an
-  edge lives at. Evidence: .worktrees/stage7/scratch/stage8/evidence-zoom30.png
+  edge lives at. **THOSE TWO NUMBERS ARE AT THE OLD AIM** (`yaw=-60.70`) and do not compare with
+  anything measured at the re-derived one: at `yaw=-66.00` this build with no field at all reads
+  +0.86 and +1.12. Re-measure before quoting either set, and say which aim.
+  STATUS 2026-08-06, THE POOLED FIELD (stage9.md 8.4): with a five-term field fitted on the five
+  flights that are not this one, the 1 px excess goes +0.86 -> **+1.34 percent**, which crosses the
+  owner's ~1 percent bar, while 2 px is flat at +1.12 -> +1.13. It is geometry and not photometry -
+  the step in codes is unmoved, the control line 8 deg off on LENS 1's side moves with it while
+  lens 0's does not, and the change is not one-signed across views (the May wide view is flat and
+  the soil view improves) - but the pilot meets the picture and not the content-matched comparison,
+  so it is an owner decision. Evidence: .worktrees/stage7/scratch/stage8/evidence-zoom30.png
 - 2026-08-01 `~/Videos/Insta/ab_testing/"clip 2"/VID_20260526_191025_00_004.insv time=630.763 yaw=95.00 pitch=0.00 fov=60.00 lock=0`
   The GEOMETRIC CONTROL, chosen by the instrument rather than by the owner: the azimuth his own gear
   crosses the seam at. `lock=0`, so this line means what it always did and was not re-derived. It reads a 1 px excess of +5.87 percent over the same content elsewhere, and

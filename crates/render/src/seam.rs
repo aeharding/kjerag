@@ -1015,7 +1015,7 @@ pub fn fit_held(
             rms(readings.iter().map(|r| r.across)),
         ],
         after: residual(readings, &fit, lenses, frame),
-        along: along_terms(readings, &fit, lenses, frame),
+        along: along_kept(readings, &fit, lenses, frame),
         fit,
         patches,
     })
@@ -1198,11 +1198,7 @@ pub const GATE_MADS: f64 = 4.0;
 /// and the sixth reads 0.128 - so a reading this far from its own capture's
 /// middle is a whole residual away from it, and a reading twice as far again
 /// is what the gate is actually for (docs/research/stage9.md 5).
-///
-/// Public because the band applies the same floor to its own per-frame
-/// readings, where it has no median to scale by and the floor is the whole of
-/// the rule it can afford (`band::HOLD_DEG`).
-pub const GATE_FLOOR_DEG: f64 = 0.10;
+const GATE_FLOOR_DEG: f64 = 0.10;
 
 /// The middle of some readings and how far from it one may sit before it is a
 /// correlation on the wrong feature rather than a camera.
@@ -1323,6 +1319,67 @@ fn pose_terms(fit: SeamFit, lenses: &[Lens], frame: Size) -> Option<[f64; 5]> {
     least_squares(&rows)?.params.try_into().ok()
 }
 
+/// The field this capture may be **pooled** for: its five terms, or `None`
+/// where composing them with this capture's own pose does not come out a
+/// calibration (issue #103, stage 9 layer 2).
+///
+/// [`along_terms`] is the reading and this is the guard, and they are separate
+/// because an instrument measuring what a ring reads wants it whatever it came
+/// to. What a pool wants is a sample it can stand behind, and this is the
+/// function the app harvests through and the one `--bin table`'s ladder pools
+/// from, so the two are measuring the same thing.
+///
+/// **A ring with a hole in it is what this is for.** Five terms fitted over one
+/// arc say whatever they like over the rest of the circle, and nothing else in
+/// the path notices: the fit's own residual is measured where the readings are,
+/// the plausibility gate is about single readings, and [`Table::plausible`]'s
+/// half a degree is wide enough for a field that is wrong by two tenths. The
+/// owner's July-25 flight is the case in the corpus - 190 degrees of coverage
+/// and a 170 degree hole - and its own field composes 2.1 times larger than the
+/// leftover it was fitted to.
+///
+/// So the test is that the composed field is the size of the thing it claims to
+/// describe. Both numbers are the same quantity measured two ways: the gated
+/// leftover is what the pose leaves where this capture had readings, and the
+/// composed table is what the five terms say it leaves everywhere. A field that
+/// says more, round the whole circle, than the readings it was fitted to ever
+/// showed is a field speaking where it was not measured.
+pub fn along_kept(
+    readings: &[Reading],
+    fit: &SeamFit,
+    lenses: &[Lens],
+    frame: Size,
+) -> Option<[f64; 5]> {
+    let terms = along_terms(readings, fit, lenses, frame)?;
+    let table = along_table(terms, *fit, lenses, frame)?;
+    let asked = rms(table.entries().iter().map(|e| f64::from(e.to_degrees())));
+    let left = left(readings, fit, lenses, frame, Some(GATE_MADS));
+    let leftover = rms(left.readings.iter().map(|l| f64::from(l.perp.to_degrees())));
+    (asked <= FIELD_LIMIT * leftover).then_some(terms)
+}
+
+/// How much larger than the leftover it was fitted to a composed field may be
+/// before the ring behind it is too thin to have pinned one.
+///
+/// **One is where the argument puts it and 1.2 is where the measurement does.**
+/// A projection cannot exceed what it projects, so a five-term field fitted over
+/// a ring that covers the circle composes to at most the leftover it was fitted
+/// to; anything above one is the field speaking over an arc that had no reading
+/// in it. It is not exactly one because the two numbers are sampled
+/// differently: the leftover over the capture's own azimuths, the composition
+/// over [`super::band::AZIMUTHS`] evenly, so a well-covered ring can read a
+/// little over.
+///
+/// Measured as `composed / gated leftover` on the nine captures of the
+/// two-camera corpus, at both the instrument's plan and the app's own thinner
+/// one: the eight captures that read 275 degrees of the circle or more come out
+/// between **0.64 and 1.02**, and the owner's July-25 flight, which reads 105 to
+/// 225 degrees with a hole in the rest, comes out at **1.33** at the plan where
+/// it composes at all and is refused outright at the app's. There is nothing
+/// between 1.02 and 1.33 and this sits in that gap, which is the same shape of
+/// choice as [`POOL_RESIDUAL_DEG`](../../app/config.rs).
+const FIELD_LIMIT: f64 = 1.2;
+
 /// The along-seam table a pooled field and a pooled pose ask for together: what
 /// the picture drawn with that pose still owes at each of the band's
 /// directions, in radians.
@@ -1343,15 +1400,18 @@ fn pose_terms(fit: SeamFit, lenses: &[Lens], frame: Size) -> Option<[f64; 5]> {
 /// them, so the two constructors are opposites and neither is the other's
 /// smoothing.
 ///
-/// **The pose is composed in through five terms of its own rather than whole**,
-/// and the difference is measured rather than argued
-/// (`a_pooled_field_and_a_pose_compose_into_the_table_the_ring_asks_for`). What
-/// a five-knob correction does along this axis is a five-term field to about a
-/// part in seventy, and on the fixture the seventieth left over is 0.013
-/// degrees of a signature 0.85 degrees wide - three times the size of what is
-/// being corrected. Added whole, that leftover goes into the picture; taken at
-/// the order the two halves share, the table is exactly the pose-order field
-/// the corpus measured and nothing above it.
+/// **The pose is composed in through five terms of its own rather than whole,
+/// and the reason is the shape and not the size.** What a five-knob correction
+/// does along this axis is a five-term field to **one part in 1904** - 0.00043
+/// degrees of a 0.8212 degree signature on the fixture
+/// (`a_pose_is_a_five_term_field_to_a_part_in_two_thousand`), which is a
+/// fiftieth of what the field itself is worth and would do no harm in the
+/// picture either way. What the projection buys is that the table is **exactly**
+/// a pose-order field: five terms and nothing above them, smooth round the whole
+/// circle by construction, which is the shape the charter's applied-candidate
+/// rules ask for and the shape the corpus measured. An earlier draft of this
+/// paragraph claimed a part in seventy and 0.013 degrees; that number was the
+/// ridge this fit no longer carries, not the pose, and it is withdrawn.
 ///
 /// `None` where any direction of the ring falls outside a lens's picture, or
 /// where the composed field is too large to be a calibration: a table is
@@ -2146,6 +2206,124 @@ mod tests {
             FRAME,
         );
         assert_eq!(wild, None, "two and a half degrees was accepted");
+    }
+
+    /// How much of a pose's own along-seam signature the five terms cannot say,
+    /// which is the number [`along_table`]'s composition rests on.
+    ///
+    /// A five-knob correction is a relative roll, a principal point and a focal
+    /// aspect, and those are the constant, the one cycle and the two cycles
+    /// exactly - so the remainder ought to be small, and how small decides
+    /// whether the pose may be composed in whole. It may not, but not by the
+    /// margin an earlier draft of this claimed: the remainder is a part in two
+    /// thousand and not a part in seventy.
+    #[test]
+    fn a_pose_is_a_five_term_field_to_a_part_in_two_thousand() {
+        let lenses = fixture_lenses();
+        let fit = SeamFit {
+            roll_deg: 0.795,
+            yaw_deg: -2.310,
+            pitch_deg: -0.936,
+            cx_px: -3.28,
+            cy_px: -11.91,
+        };
+        let base = mapped(&lenses, FRAME);
+        let corrected = mapped(&fit.applied(&lenses), FRAME);
+        let terms = pose_terms(fit, &lenses, FRAME).expect("five terms");
+        let mut whole = Vec::new();
+        let mut left = Vec::new();
+        for at in ring(crate::band::AZIMUTHS) {
+            let shift = moved(&base, &corrected, 1, &at).expect("the ring is inside both lenses");
+            let basis = crate::band::basis(at.phi);
+            let modelled: f64 = (0..5).map(|term| basis[term] * terms[term]).sum();
+            whole.push(shift[0]);
+            left.push(shift[0] - modelled);
+        }
+        let (signature, remainder) = (rms(whole.into_iter()), rms(left.into_iter()));
+        assert!(signature > 0.5, "the fixture pose barely moves the seam");
+        assert!(
+            remainder < signature / 1000.0,
+            "a pose left {remainder:.5} deg of {signature:.4}, one part in {:.0}",
+            signature / remainder,
+        );
+    }
+
+    /// The harvest guard, on the capture in the corpus that needs it: the
+    /// owner's July-25 flight reads 105 to 225 degrees of the circle with a
+    /// hole in the rest, and five terms fitted over one arc say whatever they
+    /// like over the other.
+    ///
+    /// **The noise is the point and the fixture has to carry it.** A noiseless
+    /// arc of a five-term field pins that field exactly, and refusing it would
+    /// be wrong; what a real arc carries is the correlation's own scatter, and
+    /// five terms fitted through it over one arc extrapolate into the rest of
+    /// the circle by much more. So the readings here are the injected error
+    /// plus a fixed per-azimuth wobble the size the corpus measures, and the
+    /// whole ring - the same wobble, the same size - is the control that says
+    /// the guard refuses an arc and not noise.
+    ///
+    /// **What this pins is the mechanism and not the threshold.** Swept over
+    /// this fixture the ratio reads 0.78, 0.61 and 0.58 at 220, 190 and 160
+    /// degrees of arc and 3.42 at 130, and below about 110 the composition is
+    /// refused outright by [`super::band::Table::plausible`]. That transition
+    /// is narrower than the corpus's, whose July-25 flight reads 1.33 at 225
+    /// degrees, because this fixture's noise is even round its arc and a real
+    /// capture's is not. Where [`FIELD_LIMIT`] sits between the two populations
+    /// is the corpus's evidence, not this test's.
+    #[test]
+    fn a_field_fitted_over_one_arc_of_the_ring_is_not_pooled() {
+        let lenses = fixture_lenses();
+        let error = SeamFit {
+            roll_deg: 0.795,
+            yaw_deg: -2.310,
+            pitch_deg: -0.936,
+            cx_px: -3.28,
+            cy_px: -11.91,
+        };
+        let pose = SeamFit {
+            yaw_deg: -2.100,
+            cy_px: -13.20,
+            ..error
+        };
+        // A fixed wobble per azimuth, about 0.05 deg rms, which is what one
+        // reading is worth on its own (docs/research/stage9.md 5). Off a
+        // multiplier rather than off a harmonic, because a harmonic of a known
+        // order is orthogonal to these five and would extrapolate no worse than
+        // they do.
+        let wobbled: Vec<Reading> = readings_for(error, &lenses, 72)
+            .into_iter()
+            .enumerate()
+            .map(|(index, reading)| {
+                let scrambled = (index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                let unit = (scrambled >> 40) as f64 / f64::from(1u32 << 24) - 0.5;
+                Reading {
+                    along: reading.along + 0.17 * unit,
+                    ..reading
+                }
+            })
+            .collect();
+        assert!(
+            along_kept(&wobbled, &pose, &lenses, FRAME).is_some(),
+            "a ring round the whole circle was refused for its noise",
+        );
+        let arc: Vec<Reading> = wobbled
+            .iter()
+            .copied()
+            .filter(|reading| reading.at.phi.to_degrees() <= 130.0)
+            .collect();
+        assert!(
+            arc.len() >= PATCHES_NEEDED,
+            "the fixture arc is too short to fit"
+        );
+        assert!(
+            along_terms(&arc, &pose, &lenses, FRAME).is_some(),
+            "the fixture arc does not fit five terms at all, so this proves nothing",
+        );
+        assert_eq!(
+            along_kept(&arc, &pose, &lenses, FRAME),
+            None,
+            "a field fitted over 130 degrees of the circle reached the pool",
+        );
     }
 
     /// The seam as a capture with content all the way round it would read it,

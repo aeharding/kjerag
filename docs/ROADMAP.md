@@ -670,77 +670,85 @@ live, no keyframe UI ever.
 
 - 2026-08-06 **The along-seam field the corpus found is learned by watching,
   pooled per camera and carried between sessions, and the readings it is fitted
-  from have their outliers refused at both depths** (issue #103, stage 9 layer
-  2, docs/research/stage9.md 8). Three pieces, in dependency order, and one
-  answer.
+  from have their outliers refused where a median exists to refuse them** (issue
+  #103, stage 9 layer 2, docs/research/stage9.md 8).
 
-  **The estimator, twice.** `seam::measure` reduced each azimuth's frames with a
-  mean over a population that moves 0.008 to 0.05 deg between frames by median
-  absolute deviation and 0.22 to 0.48 by rms; it now reduces them with
-  `seam::left`'s own rule applied per frame, 4 median deviations from the
-  direction's middle with a 0.10 deg floor, one function
-  (`seam::tolerated`) shared by the ring gate and the per-frame trim. On the
-  GPU the same argument is one comparison against `held.off_epi` before the
-  exponential average, and a reading further than the rule's floor is refused
-  the way every other refusal in that pass works: the measurement is kept, the
-  evidence is given up. **Both are load-bearing and neither replaces the
-  other** (the preflight branch's own finding). Measured on the six-flight
-  corpus at this stage's own plan, the trim alone takes the pooled leftover
-  under the stored pose from **0.0828 to 0.0653 deg**.
+  **The estimator, on the CPU only.** `seam::measure` reduced each azimuth's
+  frames with a mean over a population that moves 0.008 to 0.05 deg between
+  frames by median absolute deviation and 0.22 to 0.48 by rms; it now reduces
+  them with `seam::left`'s own rule applied per frame, one function
+  (`seam::tolerated`) shared by the ring gate and the per-frame trim. The trim
+  alone takes the pooled X4 leftover under the stored pose from **0.0828 to
+  0.0653 deg**. **The GPU half of 4.5's request is withdrawn from this stage**:
+  one comparison against `held.off_epi` re-introduces snapping, measured at the
+  shimmer view with no field on either side as band state 0.000760 -> 0.015042
+  deg rms, worst step 0.0032 -> 0.1028, and 12 of 87 frame pairs stepping over a
+  view pixel where the shipped pass steps on none. Nothing in the result rests
+  on it and it belongs to a stage that can instrument it.
 
   **The field, pooled per camera.** `seam::along_terms` reads the five terms
   `band::Along` is written in off the same ring the fit uses, **above the
   factory calibration and above no pose at all**, which is what makes two
-  captures' answers the same quantity: every ring is read through the
-  calibration the camera wrote, so the number does not move when the pool's
-  pose does. `SeamPool` stores it beside the five knobs and answers with the
-  middle of it coefficient by coefficient; `seam::along_table` composes the two
-  at open into `band::Table`, which is #164's vehicle carrying a pose-order
-  field instead of the per-azimuth one that stage refused. The band's own
-  measurement pass now reads **through** that table, so what it fits and
-  applies on top is what the table still leaves and no correction is made
-  twice.
+  captures' answers the same quantity. `seam::along_kept` refuses a sample whose
+  own terms compose to more than 1.2 times the leftover they were fitted to,
+  which is the guard a ring with a 170 degree hole in it needs and the ridge
+  this fit deliberately does not carry. `SeamPool` stores the terms beside the
+  five knobs and answers with the middle of them; `seam::along_table` composes
+  the two at open into `band::Table`, #164's vehicle carrying a pose-order field
+  instead of the per-azimuth one that stage refused. The band's own measurement
+  pass reads **through** that table, so no correction is made twice.
 
-  **The ladder, through the real pipeline, every arm held out.** `--bin table`
-  now runs the five-term arm off the shipped functions. At 24 places by 20
-  frames, which is about ten readings an azimuth: X4 Air six flights **0.0644
-  -> 0.0375 deg**, ONE X2 three captures **0.0414 -> 0.0140**, **9 of 9
-  improved**. At this stage's own thin plan, 12 by 4, **0.0653 -> 0.0432** and
-  **0.0675 -> 0.0477**, 9 of 9 again. The app's middle beats the mean control
-  on the pooled number in both corpora. A per-azimuth table on top of the field
-  costs 2 to 3 percent, which is stage 9's refusal re-asked with the field
-  underneath it and answered the same way.
+  **The ladder, through the real pipeline, every arm held out.** At 24 places by
+  20 frames, about ten readings an azimuth: X4 Air six flights **0.0644 ->
+  0.0375 deg**, ONE X2 three captures **0.0414 -> 0.0140**, **9 of 9 improved**.
+  At 12 by 4: 0.0653 -> 0.0432 and 0.0675 -> 0.0477, 9 of 9. **At the app's own
+  `Plan::default`, 3 places by 2 frames, it is worth a third of that and it is
+  not 9 of 9**: X4 0.0844 -> 0.0707 with **4 of 6** improved (Aug-02 worse by
+  10.2 percent, May-01 by 2.6) and X2 0.0325 -> 0.0297 with 2 of 3. Nothing here
+  changes that plan, so that is what the app itself delivers. The mean control
+  beats the app's middle on the pooled number in three of the four
+  corpus-and-plan arms and the middle wins 5 of 9 captures; the middle is chosen
+  for robustness to one contaminated capture, not for the number. A per-azimuth
+  table on top of the field **costs 2 to 3 percent on the X4 Air and gains 2 to
+  5 on the ONE X2**, which is 4.5's split with the signs reversed under this
+  reduction.
 
   **At the registry.** `--bin crossing bins=180` at the two re-derived May-01
-  crossings under the stage-9 pose, with a field fitted on flights that are not
-  May-01: the along-seam median magnitude goes **1.29 -> 0.12 view px at GOOD
-  and 1.47 -> 0.86 at BAD**, so **both crossings improve and neither is traded
-  for the other**, which is the acceptance battery's first line. The epipolar
-  median moves 0.02 to 0.15 view px against a dither sensitivity of 0.01 to
-  0.17: unmoved. A field off one other flight alone reaches 0.97 and 1.09,
-  which is the density story again. At the shimmer view `--bin shear` reads the
-  band's own applied along-seam displacement falling from 0.320 to 0.029 deg at
-  `-150` px and its `+0` step rms from 0.0690 to 0.0167: **the correction moved
-  out of the per-session fit and into the calibration**, which is what carrying
-  it between sessions means. `--bin colour`'s interior coherence over the whole
-  support reads 0.01 percent against main's 0.03 with nothing regressed, and
-  the 1 and 2 px Weber excesses at the May wide view are +0.62/+1.58 before and
-  +0.63/+1.57 after, inside the instrument's own repeat.
+  crossings, with a field fitted on flights that are not May-01: the along-seam
+  median magnitude goes **1.29 -> 0.12 view px at GOOD and 1.47 -> 0.86 at
+  BAD**, so **both crossings improve and neither is traded for the other**. The
+  epipolar median is not measurably untouched: it spans 0.14 view px across all
+  six runs against along-seam moves of 1.17 and 0.61, but run by run three of
+  the four arms move it by more than the smaller of the two runs' own dither.
+  At the shimmer view `--bin shear` reads the band's own applied along-seam
+  displacement falling from 0.3381 to 0.0037 deg at `-150` px and its `+0` step
+  rms from 0.0687 to 0.0128 - **and the no-field column is `main`'s number for
+  number, band state and worst step included**, which is this stage's null.
+  `--bin colour`'s interior coherence does not regress at any of three views;
+  **the zoom30 view's 1 px Weber excess goes +0.86 to +1.34 percent and crosses
+  the owner's 1 percent bar**, and three readings say that is the picture moving
+  rather than photometry (the step in codes unmoved, the lens-1 control line
+  moving while the lens-0 one does not, and the change not one-signed across
+  views). It is an owner decision either way and it is in the PR's tradeoff
+  list.
 
   **The pool is discarded once, silently.** Every stored sample was fitted
-  through a mean over a heavy-tailed ring, the record measures what that cost
-  (`cy` -11.91 against -13.18 refitted), and a pool that answers with the fit
-  the rest of it agrees with most is a pool where five old samples outvote
-  every new one. `ConfigState::seam_learned` is a new key and `seam_pool` is
-  left on disk unread, which is the call the previous discard made. A camera
-  refills it over the next five files, which is the path a new camera already
-  takes.
+  through a mean over a heavy-tailed ring (`cy` -11.91 against -13.18 refitted),
+  and a pool that answers by agreement lets five old samples outvote every new
+  one. `ConfigState::seam_learned` is a new key and `seam_pool` is left on disk
+  unread, which is the call the previous discard made.
 
-  **Cost.** `--bin playback` at 2560x1440, three runs: 7.99 / 7.96 / 7.98 ms
-  per redraw, against the 8.10 / 8.10 / 8.12 #164 recorded on `main` and the
-  8.14 / 8.12 / 8.15 it recorded with the table mechanism at rest. The fragment
-  shader is unchanged; what is new is one uniform load and one comparison per
-  workgroup in a pass that already scores 171 candidates over 3120 texels.
+  **What it leaves open** (stage9.md 8.6): the composed table strands mid-file
+  while a pool is under `POOL_ENOUGH`, because the pose walks every five seconds
+  and the table is composed only at open, which is 0.013 to 0.048 deg of error
+  over the owner's own pool and needs a table that walks; nothing unlearns a
+  field; and a `SeamSample` still carries no file identity (issue #156), so
+  reopening one file five times freezes both halves on one capture.
+
+  **Cost.** `--bin playback` at 2560x1440, three runs: 7.99 / 7.96 / 7.98 ms per
+  redraw, against the 8.10 / 8.10 / 8.12 #164 recorded on `main`. The fragment
+  shader is unchanged; the compute pass gains one uniform load and one vector
+  add per workgroup.
 
 - 2026-08-06 **No along-seam table is fitted: above the five terms the pass
   already applies, what is left is not a static function of azimuth this corpus

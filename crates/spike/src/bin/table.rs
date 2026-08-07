@@ -201,6 +201,7 @@ fn fit(options: &Options) -> Fallible<()> {
             capture.tolerance,
         );
     }
+    coverage_of(&captures, &pose);
     let groups: Vec<Vec<Leftover>> = captures.iter().map(|c| c.left.clone()).collect();
     let pooled: Vec<Leftover> = groups.iter().flatten().copied().collect();
     if pooled.is_empty() {
@@ -284,6 +285,64 @@ fn spill(captures: &[Capture], dump: &Path, options: &Options, pose: &SeamFit) -
     std::fs::write(dump, text)?;
     println!("wrote:  {}", dump.display());
     Ok(())
+}
+
+/// What each capture's OWN field composes to against the leftover it was fitted
+/// to, and how much of the circle it was fitted over.
+///
+/// The harvest guard's own numbers (`seam`'s `FIELD_LIMIT`): a field fitted over
+/// one arc says whatever it likes over the rest of the circle, and this is where
+/// that shows. `covered` is the widest run of azimuths with no reading in it,
+/// subtracted from the whole circle.
+fn coverage_of(captures: &[Capture], pose: &SeamFit) {
+    println!(
+        "\ncoverage: each capture's own five terms composed with this pose, against the leftover \n\
+        they were fitted to. a ring with a hole in it fits terms that speak where it never read."
+    );
+    println!(
+        "{:<17} {:>9} {:>9} {:>10} {:>10} {:>7}",
+        "capture", "azimuths", "covered", "leftover", "composed", "ratio"
+    );
+    for capture in captures {
+        let Some(terms) =
+            seam::along_terms(&capture.readings, pose, &capture.lenses, capture.frame)
+        else {
+            println!(
+                "{:<17} {:>9} no five terms",
+                short(&capture.path),
+                capture.left.len()
+            );
+            continue;
+        };
+        let composed = seam::along_table(terms, *pose, &capture.lenses, capture.frame)
+            .map(|table| seam::rms(table.entries().iter().map(|e| f64::from(e.to_degrees()))));
+        let leftover = seam::rms(capture.left.iter().map(|l| f64::from(l.perp.to_degrees())));
+        println!(
+            "{:<17} {:>9} {:>8.0} {:>10.4} {:>10} {:>7}",
+            short(&capture.path),
+            capture.left.len(),
+            covered_deg(&capture.left),
+            leftover,
+            composed.map_or_else(|| "refused".to_owned(), |rms| format!("{rms:.4}")),
+            composed.map_or_else(|| "-".to_owned(), |rms| format!("{:.2}", rms / leftover)),
+        );
+    }
+}
+
+/// How much of the circle a capture read, in degrees: the whole of it less the
+/// widest gap between two readings it has.
+fn covered_deg(left: &[Leftover]) -> f64 {
+    let mut phi: Vec<f64> = left.iter().map(|l| f64::from(l.phi.to_degrees())).collect();
+    if phi.len() < 2 {
+        return 0.0;
+    }
+    phi.sort_by(f64::total_cmp);
+    let widest = phi
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .chain(std::iter::once(360.0 - (phi[phi.len() - 1] - phi[0])))
+        .fold(0.0f64, f64::max);
+    360.0 - widest
 }
 
 /// How much of the pooled leftover each harmonic order can describe.
@@ -691,6 +750,11 @@ fn left_of(table: &Table, reading: &Leftover) -> f64 {
 /// per-azimuth table of the same others on top of that, which is stage 9's own
 /// refusal re-asked with the field underneath it.
 ///
+/// The fields are `seam::along_kept`'s, which is the function the app harvests
+/// through, so a capture whose ring did not pin a field it can stand behind is
+/// out of every other capture's pool here exactly as it would be out of the
+/// app's.
+///
 /// The pooling rule is the app's own, `SeamPool::field`, restated here because
 /// the app crate is a binary and this one cannot link it: a middle taken
 /// coefficient by coefficient. `mean` is printed beside it as the control,
@@ -699,7 +763,7 @@ fn left_of(table: &Table, reading: &Leftover) -> f64 {
 fn ladder(captures: &[Capture], pose: &SeamFit, options: &Options) {
     let fields: Vec<Option<[f64; 5]>> = captures
         .iter()
-        .map(|c| seam::along_terms(&c.readings, pose, &c.lenses, c.frame))
+        .map(|c| seam::along_kept(&c.readings, pose, &c.lenses, c.frame))
         .collect();
     println!(
         "\nfield: each capture predicted by a five-term along-seam field fitted on the OTHERS and \n\

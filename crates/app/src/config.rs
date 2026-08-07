@@ -253,15 +253,31 @@ impl SeamPool {
     /// combination no capture asked for. These are the coefficients of five
     /// functions that are orthogonal round a full circle, so on a ring with
     /// content most of the way round, each is measured on its own and a middle
-    /// of each is a field some ring could have asked for. On a starved ring
-    /// they are not orthogonal, and what protects that case is the same thing
-    /// that protects a starved fit: the ridge inside
-    /// [`kjerag_render::seam::along_terms`], which shrinks a term the readings
-    /// do not pin.
+    /// of each is a field some ring could have asked for.
+    ///
+    /// **On a starved ring they are not orthogonal, and there is no ridge in
+    /// the fit to hold them** - `along_terms` deliberately carries none,
+    /// because one azimuth's worth of shrinking on a 0.85 degree field is 0.012
+    /// degrees and that is most of what a field is worth. What protects that
+    /// case instead is a refusal at the door: a sample whose own five terms
+    /// compose to more than the leftover they were fitted to arrives here with
+    /// no field at all (`kjerag_render::seam`'s `FIELD_LIMIT`). What is left is
+    /// this middle, over the samples that passed it.
     ///
     /// A median rather than a mean for the reason every middle in this file is
     /// one: one capture that correlated on the wrong feature moves a mean by
-    /// its whole size and a median not at all.
+    /// its whole size and a median not at all. **It is not what the corpus's
+    /// own arm does**, which pools the readings and fits once - an average of
+    /// coefficients rather than a middle of them - and the two are measured
+    /// against each other in docs/research/stage9.md 8.3: the middle wins on
+    /// the X4 Air and loses on the ONE X2, and it is chosen for the robustness
+    /// rather than for the number.
+    ///
+    /// **Nothing here unlearns a field.** A sample is dropped only when the
+    /// pool overflows [`POOLED`] and only by patch count, so a field this box
+    /// has learned is corrected by later samples outvoting it and by nothing
+    /// else. That is the pose's own arrangement and it is stated rather than
+    /// solved.
     ///
     /// `None` until one capture has answered, which is the first file of a
     /// camera the pool has never seen.

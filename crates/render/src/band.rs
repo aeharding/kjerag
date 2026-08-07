@@ -147,31 +147,6 @@ const FAR_DEG: f32 = -1.2;
 /// (`the_along_seam_bend_costs_no_overlap_and_cannot_fold`).
 pub const PERP_DEG: f32 = 0.90;
 
-/// How far one frame's along-seam reading may sit from what its direction
-/// already holds before it is refused, in radians.
-///
-/// [`super::seam::GATE_FLOOR_DEG`], which is the floor of the rule
-/// [`super::seam::measure`] applies to this same population one instrument
-/// over, and on the GPU it is the whole of the rule there is room for: that one
-/// takes a median and a median absolute deviation over a direction's frames,
-/// and a direction here is one exponential average that a stream walks past
-/// once. A comparison against the held value is what a stream can afford, and
-/// it is what stage 9's estimator finding asked for by name
-/// (docs/research/stage9.md 4.5).
-///
-/// **The floor is the part of the rule worth keeping**, because it is the part
-/// that binds: the population's own median absolute deviation between frames is
-/// 0.008 to 0.05 degrees, so four of them is under this number on most
-/// directions and this is what refuses the tail either way. A direction whose
-/// own scatter is genuinely wider loses a few readings it would have kept, and
-/// what it keeps instead is the average it already had, which is what those
-/// readings would have averaged to.
-///
-/// It is also exactly one whole search step ([`STEP_DEG`] times the along-seam
-/// stride), so what it refuses is a peak that moved by more than the grid it
-/// was found on.
-const HOLD_RAD: f32 = super::seam::GATE_FLOOR_DEG as f32 * std::f32::consts::PI / 180.0;
-
 /// How many along-seam offsets are tried, either side of zero.
 ///
 /// Nine at [`STEP_DEG`], which makes the grid **square**: the same 0.10 degrees
@@ -1059,44 +1034,6 @@ pub struct Reading {
 /// Whether one frame's along-seam reading may move the direction it was read
 /// at, or is a correlation on the wrong feature rather than a camera.
 ///
-/// What one frame's along-seam reading does to the direction it was read at.
-///
-/// **The whole of the per-frame trim** ([`HOLD_RAD`]), and a function so that a
-/// rule the GPU runs where no test can reach it is a rule `cargo test` can call
-/// with no device and no footage.
-///
-/// WGSL twin: `settle`'s `believed` and `restart`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Reads {
-    /// A correlation on the wrong feature rather than a camera. The direction
-    /// keeps its answer and gives up evidence, which is what every other
-    /// refusal in the pass does.
-    Refused,
-    /// One eased step of the exponential average, which is every ordinary
-    /// reading.
-    Eased,
-    /// The reading, whole, in one step. A reset frame; a direction with no
-    /// evidence; and **a direction the refusal has stopped confirming**, whose
-    /// held value the readings have left behind. That last is the recovery, and
-    /// it has to be whole: an eased step does not close a tenth of a degree
-    /// before the evidence climbs back over [`KEEP`], and a refusal that cannot
-    /// be escaped is a direction stuck on a stale answer for ever.
-    Whole,
-}
-
-pub fn reads(held: &Cell, reading: f32, fresh: bool) -> Reads {
-    if fresh || held.off_conf <= 0.0 {
-        return Reads::Whole;
-    }
-    if (reading - held.off_epi).abs() <= HOLD_RAD {
-        return Reads::Eased;
-    }
-    match held.off_conf < KEEP {
-        true => Reads::Whole,
-        false => Reads::Refused,
-    }
-}
-
 /// How much of the along-seam channel is parallax leaking onto an axis that
 /// cannot hold any, as a correlation coefficient over the ring: **the control
 /// that replaces not applying it** (issue #103, stage 5).
@@ -1582,10 +1519,8 @@ pub(crate) fn wgsl() -> String {
          const BACK_ALONG = {back_along}u;\n\
          const BACK_ACROSS = {back_across}u;\n\
          const TAU = {tau:?};\n\
-         const HOLD = {hold:?};\n\
          {photometry}{CELL}{RING}{TABLE}{WGSL}",
         tau = std::f32::consts::TAU,
-        hold = HOLD_RAD,
         step = STEP_DEG.to_radians(),
         perp_steps = PERP_STEPS,
         keep = KEEP,
@@ -2288,68 +2223,16 @@ fn settle(cell: u32, at: Ring) {
     held.disparity += (read * STEP - held.disparity) * learn;
     held.confidence += (best - held.confidence) * learn;
   }
-  // A reading further than HOLD from what this direction already holds is
-  // refused, and refused the way every other refusal in this pass works: the
-  // measurement is kept and the evidence is given up. It is `seam::measure`'s
-  // own per-frame rule, one instrument over and with the only part of it a
-  // stream can run - the band's per-direction state is one exponential average
-  // and there is no median in it, so what survives is the rule's floor, which
-  // is one whole search step. Why the floor is the right part to keep: the
-  // population it filters moves by 0.008 to 0.05 degrees of median absolute
-  // deviation between frames and by 0.22 to 0.48 of root mean square, so the
-  // readings this refuses are the tail and not the shoulder
-  // (docs/research/stage9.md 4.5).
-  //
-  // **No distance reaches this axis**, which is what makes a jump this large
-  // improbable rather than merely unusual: a direction's along-seam offset is
-  // its camera, and a camera does not move while a file plays. What DOES move
-  // it is a correction walking in, and that is the case the recovery below
-  // exists for.
-  //
-  // **A direction the refusal has stopped confirming starts again from the
-  // reading**, and that is not a softening, it is the difference between a
-  // filter and a trap. A test against a held value can hold a value the
-  // readings have legitimately left behind: a cold start walks the seam
-  // correction in over a second while each direction is read once every
-  // `stride` frames, so two consecutive readings of one direction can be a
-  // tenth of a degree apart because the correction moved between them.
-  // Refused for good, such a direction keeps a stale answer, gives up its
-  // evidence for ever, and its bend fades under a paused window that ought to
-  // be still - which is what the headless harness caught, twice: first as a
-  // refusal with no way out at all, then as a limit cycle when the way out was
-  // one eased step, because one eased step does not close a tenth of a degree
-  // and the evidence climbs back over the threshold before the answer does.
-  //
-  // So the escape is `unread_along`'s own: the reading whole, in one step,
-  // exactly as a direction that never had one takes its first. The threshold
-  // is `KEEP` and no new constant - the correlation a single reading must
-  // reach to move anything, so a smoothed confidence under it says this
-  // direction's recent readings have not been reaching it and what it still
-  // applies is taxed to nothing by `off_conf / KEEP`.
-  //
-  // A reset frame takes its reading whole for the reason the ease above does.
-  var along_read = 0.0;
-  var believed = !along_pinned;
-  var restart = false;
-  if !along_pinned {
+  if along_pinned {
+    held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
+  } else {
     // The same parabola on the same grid: the along-seam neighbours are one
     // score apart because the table runs perp fastest, where the epipolar ones
     // are PERP_SHIFTS apart. Without it this channel quantizes to PERP_STEP,
-    // which is 15 view px of horizon at the view stage 5 exists for. Inside the
-    // branch because a pinned peak sits at the end of the search and its
-    // neighbours are off the end of the table.
+    // which is 15 view px of horizon at the view stage 5 exists for.
     let read = f32(perp) + parabola(scores[found - 1u], best, scores[found + 1u]);
-    along_read = read * f32(PERP_STEP) * STEP;
-    let apart = abs(along_read - held.off_epi) > HOLD;
-    restart = apart && held.off_conf < KEEP;
-    believed = fresh || restart || !apart;
-  }
-  if believed {
-    let step = select(learn_along, 1.0, restart);
-    held.off_epi += (along_read - held.off_epi) * step;
-    held.off_conf += (best - held.off_conf) * step;
-  } else {
-    held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
+    held.off_epi += (read * f32(PERP_STEP) * STEP - held.off_epi) * learn_along;
+    held.off_conf += (best - held.off_conf) * learn_along;
   }
   // Stage 3's own gate, unchanged: the photometry is read at the shift that
   // made the two patches the same content, so a shift that did not establish
@@ -2634,78 +2517,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// The per-frame trim, in the arithmetic the GPU runs (issue #103, stage 9
-    /// layer 2). A direction holding a tenth of a degree eases towards a reading
-    /// beside it and refuses one two degrees away, which is past the window the
-    /// search even runs in.
-    #[test]
-    fn a_reading_far_from_what_a_direction_holds_does_not_move_it() {
-        let held = Cell {
-            off_epi: 0.10f32.to_radians(),
-            off_conf: 0.9,
-            ..Cell::default()
-        };
-        assert_eq!(reads(&held, 0.13f32.to_radians(), false), Reads::Eased);
-        assert_eq!(reads(&held, 2.10f32.to_radians(), false), Reads::Refused);
-        // A correction walking in crosses less than this between two readings
-        // of one direction, which is why the test is against the held value
-        // and not against zero.
-        let walked = held.off_epi + 0.03f32.to_radians();
-        assert_eq!(reads(&held, walked, false), Reads::Eased);
-    }
-
-    /// Nothing behind a reading is nothing for it to be an outlier of: a
-    /// direction with no evidence takes it whole, and so does a reset frame.
-    #[test]
-    fn a_direction_with_no_evidence_takes_its_reading_whole() {
-        let far = 2.10f32.to_radians();
-        assert_eq!(reads(&Cell::default(), far, false), Reads::Whole);
-        let held = Cell {
-            off_epi: 0.10f32.to_radians(),
-            off_conf: 0.9,
-            ..Cell::default()
-        };
-        assert_eq!(reads(&held, far, true), Reads::Whole);
-    }
-
-    /// The recovery, which is what stops a filter being a trap: refusing costs
-    /// a direction its evidence, and a direction whose evidence has fallen
-    /// under [`KEEP`] takes the next reading **whole**. Both halves matter and
-    /// the harness caught both - a refusal with no way out at all, and then a
-    /// limit cycle when the way out was one eased step.
-    #[test]
-    fn a_direction_the_refusal_stopped_confirming_starts_again_from_the_reading() {
-        let far = 2.10f32.to_radians();
-        let mut held = Cell {
-            off_epi: 0.10f32.to_radians(),
-            off_conf: 0.9,
-            ..Cell::default()
-        };
-        let mut waited = 0.0f32;
-        while reads(&held, far, false) == Reads::Refused {
-            held.off_conf -= held.off_conf * ease(1.0 / 60.0, TAU_FAR_S);
-            waited += 1.0 / 60.0;
-            assert!(
-                waited < 5.0,
-                "it refused for {waited:.2} s and was still refusing"
-            );
-        }
-        // Under a second, which is the walk this has to survive, and long
-        // enough that one bad frame costs a direction three percent of its
-        // evidence rather than its answer.
-        assert!(
-            (0.5..1.0).contains(&waited),
-            "it took {waited:.2} s to relearn"
-        );
-        assert_eq!(reads(&held, far, false), Reads::Whole);
-        // Whole, so the direction is at the reading afterwards and cannot
-        // refuse it again: an eased step would leave it apart and the evidence
-        // would climb back over KEEP before the answer closed.
-        held.off_epi = far;
-        held.off_conf = 0.9;
-        assert_eq!(reads(&held, far, false), Reads::Eased);
     }
 
     /// A table is accepted over its whole support or not at all.

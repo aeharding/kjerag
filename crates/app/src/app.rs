@@ -1064,7 +1064,14 @@ impl App {
         let Some(terms) = self.stored.state.seam_field(camera) else {
             return;
         };
+        // A composition that does not come out a calibration says so, because
+        // silence here is indistinguishable from a camera that has no field
+        // and the two want different things done about them.
         let Some(deg) = scene.use_field(terms, fit) else {
+            println!(
+                "seam:   this camera's along-seam field does not compose with that fit into a \
+                 calibration, so the pose is drawn alone"
+            );
             return;
         };
         println!("seam:   and {deg:.3} deg rms along the seam that no pose of it can describe");
