@@ -1383,6 +1383,28 @@ the unbent projection while the app drew something else; here the battery
 measured far content while the eye was on near content. Both times the
 instrument was rigorous inside a domain nobody had checked was the right one.
 
+**The view he was on, from his own `i` line**:
+`time=45.545 yaw=-146.13 pitch=-37.35 fov=20.00 lock=1`. That is **37 degrees
+below the horizon at fov 20** - looking down at the ground from a flight, zoomed
+in - and the corridor crosses it, because the seam is a great circle and its
+handover runs through the picture at every elevation. So the term was applied
+there and did nothing he could see, which is what it is built to do: the field
+it carries was fitted after 99 moments of that flight were thrown away for
+implying something nearer than 60 m.
+
+**Every crossing in 13.6 is within a couple of degrees of elevation zero.**
+Nothing in this stage, or in 10, 11 or 12 before it, measured a downward view
+at all. The delivered battery and the owner's eye have no view in common.
+
+**His playback log is worth keeping too, because it disagrees with 13.9 in his
+favour.** In the real app, on his box, the five-second report lines read 0 to 6
+dropped frames while the harvest and the walk ran, with one window at 14 and a
+worst lateness of 33.3 ms throughout - far better than `--bin playback`'s 79
+dropped and 438 ms. The instrument renders 2560x1440 offscreen at 60 Hz redraws
+and the window does not, so the harness overstates this. **The cost that
+refused this is the clock and not the dropped frames**, and the log is the
+evidence: 27.3 s to read the field and 135.1 s to walk it in.
+
 #### The clock is not a tuning problem
 
 Insta360 Studio has a correct seam under two seconds. This build reads the file
