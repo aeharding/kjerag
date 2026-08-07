@@ -224,9 +224,12 @@ fn fit(options: &Options) -> Fallible<()> {
     }
     if let Some(out) = &options.field {
         let first = captures.first().ok_or("no capture")?;
+        // `along_kept` and not `along_terms`: what this writes is what the app
+        // would draw with, so a capture the app would refuse to pool has to be
+        // refused here too or the file is a table nothing ships.
         let fields: Vec<[f64; 5]> = captures
             .iter()
-            .filter_map(|c| seam::along_terms(&c.readings, &pose, &c.lenses, c.frame))
+            .filter_map(|c| seam::along_kept(&c.readings, &pose, &c.lenses, c.frame))
             .collect();
         let pooled = middle(&fields).ok_or("no capture pinned five terms")?;
         let table = seam::along_table(pooled, pose, &first.lenses, first.frame)
@@ -745,7 +748,7 @@ fn left_of(table: &Table, reading: &Leftover) -> f64 {
 /// app runs (issue #103, stage 9 layer 2).
 ///
 /// Every arm is held out. `pose only` is what the pose alone leaves, `5 terms`
-/// is what it leaves with `seam::along_terms` pooled off the OTHER captures and
+/// is what it leaves with `seam::along_kept` pooled off the OTHER captures and
 /// composed with this pose by `seam::along_table`, and `5 + table` puts the
 /// per-azimuth table of the same others on top of that, which is stage 9's own
 /// refusal re-asked with the field underneath it.

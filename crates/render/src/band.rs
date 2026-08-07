@@ -1031,9 +1031,6 @@ pub struct Reading {
     pub along: f32,
 }
 
-/// Whether one frame's along-seam reading may move the direction it was read
-/// at, or is a correlation on the wrong feature rather than a camera.
-///
 /// How much of the along-seam channel is parallax leaking onto an axis that
 /// cannot hold any, as a correlation coefficient over the ring: **the control
 /// that replaces not applying it** (issue #103, stage 5).

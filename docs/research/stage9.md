@@ -681,8 +681,11 @@ Three details that were measured rather than argued:
   enough for a field wrong by two tenths. So `seam::along_kept` refuses a
   sample whose own five terms compose to more than `FIELD_LIMIT` times the
   leftover they were fitted to. A projection cannot exceed what it projects, so
-  a ring that covers the circle reads under one; anything over is the field
-  speaking where it never read. Measured as `composed / leftover`:
+  a ring that covers the circle composes to about the leftover it was fitted to
+  or less - not exactly, because the leftover is sampled over the capture's own
+  azimuths and the composition over 128 evenly, so a well-covered ring can read
+  a little over one. What is well over is the field speaking across an arc that
+  had no reading in it. Measured as `composed / leftover`:
 
   | capture | covered, deg | app plan 3x2 | 12x4 | 24x20 |
   | --- | ---: | ---: | ---: | ---: |
@@ -692,13 +695,14 @@ Three details that were measured rather than argued:
   | X4 2026-07-14 | 275 to 345 | 1.02 | 0.76 | 0.81 |
   | **X4 2026-07-25** | **105 to 240** | **refused** | **1.33** | **1.10** |
   | X4 2026-08-02 | 275 to 330 | 1.00 | 0.75 | 0.68 |
-  | X2, three captures | 280 to 310 | - | 0.79 to 0.92 | - |
+  | X2, three captures | 280 to 310 | 0.61 to 0.83 | 0.79 to 0.92 | - |
 
-  The July-25 flight is the case in the corpus: 190 degrees of coverage with a
-  170 degree hole. `FIELD_LIMIT` is 1.2, in the gap between 1.02 and 1.33. **At
-  the deepest plan it reads 1.10 and passes**, which is the honest limit of this
-  guard: it catches a starved ring at the sampling the app and the instrument
-  actually use, and a deep enough ring on the same flight is judged fit to pool.
+  The July-25 flight is the case in the corpus: 105 to 240 degrees of coverage
+  with a hole in the rest. `FIELD_LIMIT` is 1.2, in the gap between 1.02 and
+  1.33. **At the deepest plan it reads 1.10 and passes**, which is the honest
+  limit of this guard: it catches a starved ring at the sampling the app and the
+  instrument actually use, and a ring deep enough stops looking starved by this
+  test before it stops having a hole in it.
 
 **The band reads through the table.** `band::measure` displaces lens 1's search
 grid by the entry at its own direction, so `Along` fits and applies what the
@@ -744,14 +748,24 @@ later stage measures a deeper plan against the decode it costs.**
 control says so. The corpus arm that measured this pooled the readings and
 fitted once, which on a nearly orthogonal basis is an average of coefficients;
 `SeamPool::field` takes a middle of them instead, for the reason
-`SeamPool::answer` takes one. Over the four corpus-and-plan arms the **mean wins
-three**: X4 24x20 0.0375 middle against 0.0391 mean is the middle's, X4 12x4
-reads 0.0432 against 0.0430, X2 24x20 0.0140 against 0.0136 and X2 12x4 0.0477
-against 0.0465 are the mean's. Per capture at the deepest plan the middle wins
-**5 of 9**. The two are within a few percent of each other everywhere and
-neither wins consistently; what the middle buys is that one capture that
-correlated on the wrong feature cannot move it, and that is the whole of the
-case for it.
+`SeamPool::answer` takes one. Over the six corpus-and-plan arms the **mean wins
+four**:
+
+| pooled, deg rms | middle | mean |
+| --- | ---: | ---: |
+| X4, 24x20 | **0.0375** | 0.0391 |
+| X4, 12x4 | 0.0432 | **0.0430** |
+| X4, app plan 3x2 | **0.0707** | 0.0715 |
+| X2, 24x20 | 0.0140 | **0.0136** |
+| X2, 12x4 | 0.0477 | **0.0465** |
+| X2, app plan 3x2 | 0.0297 | **0.0275** |
+
+Per capture the middle wins **5 of 9** at the deepest plan and 5 of 9 again at
+the app's. **The app's plan is the operative one**, and there the middle takes
+the camera that decides and loses the other. The two are within a few percent of
+each other everywhere and neither wins consistently; what the middle buys is
+that one capture that correlated on the wrong feature cannot move it, and that
+is the whole of the case for it.
 
 **What a per-azimuth table on top of the field costs depends on the camera.**
 On the X4 Air it costs: 0.0387 against 0.0375 at 24x20 and 0.0443 against 0.0432
@@ -773,20 +787,30 @@ per-frame:
 | --- | ---: | ---: |
 | GOOD, no field | 1.29 | -6.00 |
 | GOOD, field off the Jul-14 flight | 0.97 | -5.98 |
-| GOOD, field off five other flights | **0.12** | -6.12 |
+| GOOD, field off five other flights | **0.12** | -6.11 |
 | BAD, no field | 1.47 | -10.17 |
 | BAD, field off the Jul-14 flight | 1.09 | -10.02 |
-| BAD, field off five other flights | **0.86** | -10.08 |
+| BAD, field off five other flights | **0.93** | -10.07 |
 
 **Both crossings improve and neither is traded for the other**, which is the
 acceptance battery's first line (7).
 
+**These are the SHIPPED pool's numbers.** The field file is written through
+`seam::along_kept`, the same guard the app harvests through, so the July-25
+flight - whose ring has a hole in it and whose ratio at this plan is 1.33 - is
+out of the pool here exactly as it would be out of the app's. An earlier draft
+of this table pooled through `along_terms` with no guard and read **0.86 at
+BAD**; with the guard it reads 0.93. GOOD does not move. **The guard costs BAD
+seven hundredths of a view pixel and it is the honest number**, because a table
+built the way the instrument builds one and not the way the app does is a table
+nothing ships.
+
 **The epipolar axis moves, and the honest form of the claim is range to range.**
-Across all six runs the epipolar median spans 0.14 view px at GOOD and 0.15 at
-BAD, about a tenth of the 1.17 and 0.61 the along-seam median moves. Run by run
+Across all six runs the epipolar median spans 0.13 view px at GOOD and 0.15 at
+BAD, about a tenth of the 1.17 and 0.54 the along-seam median moves. Run by run
 it is not inside the dither: three of the four arms move the epipolar median by
-more than the smaller of the two runs' own sensitivity (GOOD five-flight 0.12
-against 0.02, BAD Jul-14 0.15 against 0.05, BAD five-flight 0.09 against 0.00),
+more than the smaller of the two runs' own sensitivity (GOOD five-flight 0.11
+against 0.03, BAD Jul-14 0.15 against 0.05, BAD five-flight 0.10 against 0.00),
 and only the GOOD Jul-14 arm at 0.02 against 0.01 is marginal. So: **the
 epipolar axis is not measurably untouched; it is untouched to about a tenth of
 what the along-seam axis moves.**
@@ -859,11 +883,21 @@ step is dominated by its epipolar half, and its far-side line fit reads an rms
 of 27 px in both arms, which is the condition the registry entry warns about
 before any step is quoted from there.
 
-**Cost.** `--bin playback` at 2560x1440 on a quiet box, three runs: 7.99 / 7.96
-/ 7.98 ms per redraw, against the 8.10 / 8.10 / 8.12 recorded on `main` in 3.
-The fragment shader is unchanged. The compute pass gains one uniform load and
-one vector add per workgroup, in a pass that already scores 171 candidates over
-3120 sampled texels.
+**Cost, measured against `main` and not against a number from another day.**
+`--bin playback` at 2560x1440, the two builds run **interleaved**, four pairs:
+
+| | 1 | 2 | 3 | 4 | range |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `main` 226f814 | 7.96 | 7.96 | 7.98 | 7.98 | 7.96 to 7.98 |
+| this branch | 8.00 | 7.96 | 7.97 | 8.00 | 7.96 to 8.00 |
+
+The paired differences are +0.04, 0.00, -0.01 and +0.02 ms, a median of **+0.01
+ms on a 33 ms frame**, and the two ranges overlap. **No difference this box can
+resolve.** An earlier draft quoted 7.99 against the 8.10 #164 recorded on `main`
+on another day, which is not a controlled comparison and is withdrawn - and it
+was taken on the withdrawn build besides. The fragment shader is unchanged; the
+compute pass gains one uniform load and one vector add per workgroup, in a pass
+that already scores 171 candidates over 3120 sampled texels.
 
 ### 8.5 The pool is discarded once
 

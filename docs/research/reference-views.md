@@ -193,16 +193,18 @@ caveat in the Motion section, which is the same trap at a smaller size.
   **SHIPPED 2026-08-06, and re-read here through the shipped path** (stage9.md 8): the field is
   learned by watching, pooled per camera beside `SeamFit`, and composed with the pool's pose at
   open into `band::Table`. At these two views under `seam=roll:0.795,yaw:-2.310,pitch:-0.936,
-  cx:-3.28,cy:-11.91`, with the field fitted on flights that are NOT May-01, the along-seam median
-  magnitude reads **GOOD 1.29 -> 0.12 and BAD 1.47 -> 0.86 view px**. **Both crossings improve and
+  cx:-3.28,cy:-11.91`, with the field fitted on flights that are NOT May-01 and pooled through the
+  shipped guard, the along-seam median magnitude reads **GOOD 1.29 -> 0.12 and BAD 1.47 -> 0.93
+  view px**. Pooled WITHOUT the guard the same arm reads BAD 0.86; 0.93 is the number a shipped
+  pool produces, because `seam::along_kept` drops the July-25 flight's field at this plan. **Both crossings improve and
   neither is traded for the other.** A field off the Jul-14 flight ALONE reads 0.97 and 1.09 here
   rather than the 0.07 above, and the difference is reading density and not the code: that number
   was fitted on 1200 moments of that flight and this one on 48 frames of it. Read 1.29 rather than
   1.30 as this build's baseline for the same reason the entry above gives - the two agree to the
   instrument's floor.
   THE EPIPOLAR AXIS IS NOT MEASURABLY UNTOUCHED, AND SAY IT THAT WAY. Across the six runs its
-  median spans 0.14 view px at GOOD (-5.98 to -6.12) and 0.15 at BAD (-10.02 to -10.17), about a
-  tenth of the 1.17 and 0.61 the along-seam median moves. Run by run it is outside the dither:
+  median spans 0.13 view px at GOOD (-5.98 to -6.11) and 0.15 at BAD (-10.02 to -10.17), about a
+  tenth of the 1.17 and 0.54 the along-seam median moves. Run by run it is outside the dither:
   three of the four arms move it by more than the smaller of the two runs' own sensitivity, and
   only GOOD's Jul-14 arm (0.02 against 0.01) is marginal. Quote it range to range, never as
   "unmoved" per run.

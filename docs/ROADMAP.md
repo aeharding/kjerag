@@ -715,11 +715,15 @@ live, no keyframe UI ever.
 
   **At the registry.** `--bin crossing bins=180` at the two re-derived May-01
   crossings, with a field fitted on flights that are not May-01: the along-seam
-  median magnitude goes **1.29 -> 0.12 view px at GOOD and 1.47 -> 0.86 at
-  BAD**, so **both crossings improve and neither is traded for the other**. The
-  epipolar median is not measurably untouched: it spans 0.14 view px across all
-  six runs against along-seam moves of 1.17 and 0.61, but run by run three of
-  the four arms move it by more than the smaller of the two runs' own dither.
+  median magnitude goes **1.29 -> 0.12 view px at GOOD and 1.47 -> 0.93 at
+  BAD**, so **both crossings improve and neither is traded for the other**. Those
+  are the shipped pool's numbers: the field file is written through
+  `seam::along_kept`, so the July-25 flight is out of it exactly as it is out of
+  the app's, which costs BAD seven hundredths of a view pixel against an
+  unguarded pool and is the honest figure. The epipolar median is not measurably
+  untouched: it spans 0.13 to 0.15 view px across all six runs against along-seam
+  moves of 1.17 and 0.54, but run by run three of the four arms move it by more
+  than the smaller of the two runs' own dither.
   At the shimmer view `--bin shear` reads the band's own applied along-seam
   displacement falling from 0.3381 to 0.0037 deg at `-150` px and its `+0` step
   rms from 0.0687 to 0.0128 - **and the no-field column is `main`'s number for
@@ -745,10 +749,12 @@ live, no keyframe UI ever.
   field; and a `SeamSample` still carries no file identity (issue #156), so
   reopening one file five times freezes both halves on one capture.
 
-  **Cost.** `--bin playback` at 2560x1440, three runs: 7.99 / 7.96 / 7.98 ms per
-  redraw, against the 8.10 / 8.10 / 8.12 #164 recorded on `main`. The fragment
-  shader is unchanged; the compute pass gains one uniform load and one vector
-  add per workgroup.
+  **Cost: none this box can resolve.** `--bin playback` at 2560x1440 with the
+  two builds run interleaved, four pairs: `main` 7.96 to 7.98 ms per redraw and
+  this branch 7.96 to 8.00, paired differences +0.04 / 0.00 / -0.01 / +0.02 for
+  a median of +0.01 ms on a 33 ms frame, ranges overlapping. The fragment shader
+  is unchanged; the compute pass gains one uniform load and one vector add per
+  workgroup.
 
 - 2026-08-06 **No along-seam table is fitted: above the five terms the pass
   already applies, what is left is not a static function of azimuth this corpus

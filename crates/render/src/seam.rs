@@ -1361,23 +1361,32 @@ pub fn along_kept(
 /// How much larger than the leftover it was fitted to a composed field may be
 /// before the ring behind it is too thin to have pinned one.
 ///
-/// **One is where the argument puts it and 1.2 is where the measurement does.**
-/// A projection cannot exceed what it projects, so a five-term field fitted over
-/// a ring that covers the circle composes to at most the leftover it was fitted
-/// to; anything above one is the field speaking over an arc that had no reading
-/// in it. It is not exactly one because the two numbers are sampled
-/// differently: the leftover over the capture's own azimuths, the composition
-/// over [`super::band::AZIMUTHS`] evenly, so a well-covered ring can read a
-/// little over.
+/// **One is roughly where the argument puts it and 1.2 is where the measurement
+/// does.** A projection cannot exceed what it projects, so a five-term field
+/// fitted over a ring that covers the circle composes to about the leftover it
+/// was fitted to or less. It is not exactly one, and two of the corpus's
+/// well-covered captures read 1.02 and 1.00: the two numbers are sampled
+/// differently - the leftover over the capture's own azimuths, the composition
+/// over [`super::band::AZIMUTHS`] evenly - so a ring with content most of the
+/// way round can read a little over. What is well over is the field speaking
+/// across an arc that had no reading in it.
 ///
 /// Measured as `composed / gated leftover` on the nine captures of the
-/// two-camera corpus, at both the instrument's plan and the app's own thinner
-/// one: the eight captures that read 275 degrees of the circle or more come out
-/// between **0.64 and 1.02**, and the owner's July-25 flight, which reads 105 to
-/// 225 degrees with a hole in the rest, comes out at **1.33** at the plan where
-/// it composes at all and is refused outright at the app's. There is nothing
-/// between 1.02 and 1.33 and this sits in that gap, which is the same shape of
-/// choice as [`POOL_RESIDUAL_DEG`](../../app/config.rs).
+/// two-camera corpus, at the app's own plan and at the two the instrument reads
+/// them with: the eight captures that read 275 degrees of the circle or more
+/// come out between **0.61 and 1.02**, and the owner's July-25 flight, which
+/// reads 105 to 240 degrees with a hole in the rest, comes out at **1.33** at
+/// twelve places by four and is refused outright at the app's plan. There is
+/// nothing between 1.02 and 1.33 and this sits in that gap, which is the same
+/// shape of choice the app's own `POOL_RESIDUAL_DEG` makes between two
+/// populations.
+///
+/// **It is a guard against a starved ring and not against a deep one.** The
+/// same July-25 flight read at twenty-four places by twenty covers 240 degrees
+/// and comes out at **1.10**, inside this limit and pooled. A ring deep enough
+/// stops looking starved by this test before it stops having a hole in it, and
+/// nothing here measures whether the field such a capture contributes is good
+/// or merely small.
 const FIELD_LIMIT: f64 = 1.2;
 
 /// The along-seam table a pooled field and a pooled pose ask for together: what
