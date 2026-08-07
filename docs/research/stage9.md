@@ -927,3 +927,873 @@ about before any step is quoted - and the ONE X2 view answers "no horizon
 fitted on both sides of the seam". So this is the delivered-domain evidence for
 the one thing this PR still applies, on the one flight that could carry it, and
 it is the half a difference metric could not have supplied.
+
+## 10. Across the seam: a research term, and what the delivered picture did with it
+
+**This section is a research result and nothing here ships.** `KJERAG_EPI_TERM`
+is off by default, the picture with it off is `main`'s byte for byte, and the
+verdict below is that the pooled form of the term is not the fix.
+
+### 10.1 The defect, and why a table on this axis is a different animal
+
+Everything above is about the **along-seam** axis, where a leftover is the
+camera by construction because no distance can reach it. Across the seam a
+leftover is the camera plus the scene, and the band answers it per frame per
+direction. That is why 6 called the across-seam axis untouched by design.
+
+What reopened it is what the band does with a reading it cannot remove. The
+epipolar bend is shared across the handover: `Reframe::blend_bent` gives each
+lens the OTHER one's weight times the disagreement, so the two lenses are one
+whole disparity apart everywhere in the corridor and the picture is right where
+the disagreement is parallax. Where the disagreement is a **pose error** the
+same arithmetic draws far content with a bend in it - zero at the corridor's
+edge, half the disagreement at the contour, and the other half the same way on
+the other lens. At the registry's BAD May-01 crossing that is a horizon drawn
+as a shallow S.
+
+`--bin epiramp` measures exactly that, in the delivered domain and nowhere
+else: the app's own path with the band live and warm, photographed twice at two
+handover widths, the far content correlated between them along the seam normal.
+The 0.1 degree render is the reference because each side of it is drawn by one
+lens with no ramp on it, so the lag between the two renders at one distance
+from the contour is what the handover put there and nothing else.
+
+### 10.2 What the term is
+
+`seam::epi_term` composes, per direction of the band's ring:
+
+- **the pose's own across-seam displacement**, `seam::moved`'s second component
+  between the factory calibration and the pose being drawn. Pure geometry from
+  the five knobs, no reading in it, and it is large: the fit is made to null the
+  along-seam axis and nothing in it asks what it does to the other one, which on
+  this camera reaches **2.5 degrees**.
+- **the pooled static reading**, `EPI_STILL_DEG`: what the six X4 Air flights
+  read across the seam under the factory calibration, trimmed per azimuth, from
+  `docs/research/epi/epi-leftovers-x4.csv` on `research/epi-study`. Pose
+  invariant, which is the only reason six flights' readings are six
+  measurements of one thing.
+
+Their sum is what the two lenses still disagree by under the drawn pose, and it
+is applied as a displacement of lens 1's **whole picture** across the seam,
+before projection, on the unwarped ray - one displacement instead of a ramp.
+The band's own measurement pass reads lens 1 through it, so what the band then
+fits and applies is what the term still leaves.
+
+**It cannot fold**, for the along-seam term's reason read one axis over: the
+displacement is across the seam and its gradient is along it, so the Jacobian it
+adds is off-diagonal and its determinant stays exactly 1
+(`the_across_seam_term_displaces_lens_one_across_the_seam_and_nowhere_else`).
+
+### 10.3 The corpus: one seam crossing per flight
+
+The two May-01 crossings are the registry's. The rest were derived for this
+measurement on `research/crossing-views`, at this build, by tracing the 50/50
+contour on a `fov=250` render and reading where it crosses elevation zero. The
+derivation recovers the registry's own May-01 pair to about a degree
+(-79.9 and +100.0 against -80.28 and +101.13), which is what validated it. Every
+`lock=1` yaw here is a per-build quantity - the world-fixed lock's zero is the
+heading the file opened on - so none of these lines may be copied to an older
+commit without `--bin carried`.
+
+| flight | line (`lock=1`) | what is at the seam |
+| --- | --- | --- |
+| May 01 GOOD | `time=50.117 yaw=-80.28 pitch=0.06 fov=55.69` | the registry's matched crossing |
+| May 01 BAD | `time=50.117 yaw=101.13 pitch=0.75 fov=62.79` | the registry's mismatched crossing |
+| Apr 10 | `time=45.112 yaw=-86.05 pitch=3.18 fov=38.28` | floodplain, meandering river, distant ridge; nothing near |
+| May 26 | `clip 2/… time=600.000 yaw=-96.74 pitch=0.00 fov=58.00` | ploughed field, distant treeline, sun 25 deg off the crossing |
+| Jul 14 | `time=600.000 yaw=156.90 pitch=0.00 fov=58.00` | treeline horizon over a wooded valley |
+| Jul 14 (shimmer) | `time=36.303 yaw=162.31 pitch=5.44 fov=20.00` | the registry's motion view, on the same flight |
+| Aug 02 | `clip 1/… time=600.000 yaw=135.58 pitch=0.00 fov=58.00` | corn rows to a treeline horizon; the tightest reading in the set |
+
+**Two captures are their own rows and are never pooled with the six.** The
+July-25 flight (`time=200.000 yaw=-127.45 pitch=0.00 fov=58.00`) is above a
+**solid undercast for its whole length** - 200, 600, 1000 and 1500 s all are -
+so its far content is a cloud top with the sun five degrees above the crossing,
+which is a different target class from a treeline. The October ONE X2
+(`time=270.000 yaw=-58.99 pitch=0.00 fov=58.00`) is a **different camera and a
+ground capture**: the far stretch is a ridge crest down to mid-field, grass at 3
+to 10 m crosses the same seam at the bottom of the frame, and the pooled static
+table this term carries was measured on the X4 Air and not on it. The
+registry's own X2 line is not a far-content crossing at all - the seam there
+cuts a person 20 m off and the wing on the sand.
+
+**One line the corpus refused.** April's registry pair has a mismatched half
+(`time=43.143 yaw=93.36`) that reads the same order of disagreement as BAD, and
+it is **not** usable as a far-field crossing: the prop cage and its netting
+cross the seam over the last quarter of the arc and the first third is
+low-contrast haze, leaving one narrow band of far content. `--bin step` fits no
+horizon on its far side (rms 94.91) and `--bin crossing` withholds its gate.
+
+**And one thing the corpus cannot do, which bears on the verdict.** The large
+disagreement the BAD crossing carries sits at body arc +40 to +70, and on this
+rig that half of the seam circle is where the pilot and the prop cage are. The
+only other crossing measured in that band is April's refused line, whose narrow
+far-content core reads the same order (-13.6 to -14.6 source px against BAD's
+-13.37). Every other flight's clean far-field crossing is elsewhere on the ring
+and reads between 0.06 and 5.87. So **"the other flights do not show the
+defect" and "the other flights do not sample the arc where the defect lives"
+are not separated by this corpus**, and no verdict below may be read as if they
+were.
+
+### 10.4 The calibration every row is taken at
+
+The pose the app **draws** and not the registry's literal. The X4 Air rows are
+all at the pool's own answer for camera `d8a393389b7b8639`,
+`roll:0.795 yaw:-2.310 pitch:-0.936 cx:-3.28 cy:-11.91`, which is also the pose
+the epi study's leftovers are quoted under. The registry's
+`roll:0.577 … cx:-9.53` is a knob median that nothing draws, and a first pass of
+this whole measurement taken at it has been discarded rather than reported.
+The X2 row is at its own camera's pooled answer,
+`roll:-2.426 yaw:1.114 pitch:2.562 cx:1.58 cy:-9.70`, **which is five identical
+samples of one capture** - one fit wearing a pool's clothes (issue #156's
+duplicate shape) - and its row says so.
+
+Both arms of every pair share that calibration. The toggle is the only
+difference between them.
+
+### 10.5 The null
+
+The toggle off draws `main`'s picture byte for byte, in both domains, at the
+BAD crossing under the drawn pose:
+
+| render | `main` at 75a03cc | this branch, toggle off |
+| --- | --- | --- |
+| `--bin reframe`, the unbent projection | `783182e2f9169b34e002690f1678b5e3` | the same |
+| `--bin step`, the delivered picture with the band live and warm | `90b0b0354c3e2a34b3259d44d303e7e3` | the same |
+
+Both checkouts built into their own `CARGO_TARGET_DIR`, which is not optional
+(AGENTS.md, issue #47: one shared target directory silently gives an instrument
+the other tree's binary).
+
+The delivered one is the load-bearing half. The unbent render never runs the
+band's compute pass, which is where the term's read-through lives, so a
+read-through that fired with an empty table would not show there.
+
+### 10.6 The instrument
+
+`--bin epiramp`, and it reads the delivered domain and nothing else, which is
+9.4's rule. `--bin reframe` draws the unbent projection and `--bin crossing`
+builds its map with the band held off; both were the wrong domain for an applied
+claim, and PR #167 is the record of what that cost.
+
+One run is the app's own path: `Scene::still`, every frame from `warm` seconds
+before the view played through `ScenePipeline` so the band is as warm as it is
+in a real run, then the picture. Two runs make a reading, at two handover
+widths. At `KJERAG_HANDOVER_DEG=0.1` each side of the seam is drawn by one lens
+with no ramp on it, so the lag between the two renders at a given distance from
+the contour is what the handover put there and nothing else.
+
+**Each arm reads against its OWN cut render.** A build that displaces lens 1's
+whole picture displaces it in the cut too, so a lag read that way is the
+**residual** ramp - what the corridor still does after the displacement - which
+is the question. Reading one arm against the other's cut would measure the
+displacement instead, which is not a defect and is not what anyone sees.
+
+The seam's own field is the app's, per pixel: the angle off the body's `xy`
+plane, from `Reframe::body_ray`, and the unit normal from its gradient. So a
+strip at "1.6 degrees off the seam" is that everywhere in the frame rather than
+a straight line fitted through a picture. Lags are read at 0.7 to 4.8 degrees
+either side - the epi-probe's 40 to 260 view pixels at the BAD crossing's scale,
+in the unit that means the same thing at every field of view in the registry -
+and a straight line is fitted through them and extrapolated to the contour.
+
+**What the number is.** `Reframe::blend_bent` gives each lens the other one's
+weight times the disagreement, so at the contour the two are half of it each and
+in opposite directions. The swing across the whole corridor is therefore twice
+either side's own, and `E` is lens 1's side doubled. Lens 0's is printed beside
+it with its own rms, and where the two disagree the rms says which line
+describes its own points. **A row whose rms is a large fraction of its own
+intercept is not quotable**, which is `--bin step`'s rule in this instrument.
+
+**The controls.** `plant=<view px>` slides the reference's lens 1 side by a
+known amount before correlating: a probe that cannot see a shift it was handed
+is not a probe. Every CSV carries the build, the file, the aim, both
+environment variables, the reference it read against, the plant, the scale and
+the window, because a CSV nobody can tell the provenance of is a CSV nobody can
+check.
+
+### 10.7 The `pose` arm takes the band's own eyes out, and it is measured
+
+`KJERAG_EPI_TERM=pose` applies the knobs' own across-seam displacement with no
+pooled reading taking it back out. That displacement reaches **2.5 degrees**,
+and the band's own epipolar search runs `FAR_DEG` to `NEAR_DEG`, **-1.2 to
++2.6**. So a term near the top of its range moves what the band is asked to
+correlate outside the window the band can search in.
+
+That is exactly what it does. `--bin step` at the BAD crossing, same file, same
+aim, same drawn pose, band live and warm at 6 seconds:
+
+| arm | directions with evidence | epipolar mean | worst |
+| --- | ---: | ---: | ---: |
+| off | **96 of 128** | 0.554 deg | 0.948 |
+| `full` | **96 of 128** | 0.518 deg | 0.995 |
+| `pose` | **64 of 128** | 1.172 deg | 1.939 |
+
+The `pose` arm loses a third of the ring's evidence, and what still correlates
+reads twice as far out - the term's own size rather than the camera's. A band
+that has gone quiet draws a *steadier* picture without the geometry having got
+any better, which is why that arm's ramp numbers are reported nowhere in 10.8.
+
+The `full` arm keeps every direction the shipped build keeps, which is what
+makes its rows readable at all.
+
+**A constraint any later applied across-seam term inherits.** Whatever such a
+term carries, the residual it leaves has to stay inside the band's own search
+window, or the thing measuring the residual is measuring nothing. Nothing in
+the code enforces that today.
+
+**And a number worth sitting with.** With `full` on, the band's epipolar mean
+across the ring goes **0.554 to 0.518 degrees**. The term took a fifteenth of
+what the band reads. That is the whole story of 10.8 in one row, measured
+somewhere else.
+
+### 10.9 T - fit(T), and whether the band fights the term
+
+The along field's failure was `T - fit(T)`: with a table applied and the band
+measuring through it, the delivered correction is `T + fit(L - T)` against
+`fit(L)` with none, and the two differ by exactly `T - fit(T)`. `Along::fit` is
+five terms over the whole circle, so it reproduces `T` only where the session's
+arc has evidence and delivers `T` whole everywhere else (9.2).
+
+**The across-seam channel is not that shape, and that is the one structural
+thing this term had going for it.** The band's epipolar channel is **per cell**:
+no five-term fit, no ridge, no arc. Where a direction has evidence the band
+reads the residual and applies it; where it has none it applies nothing. So
+`T - fit(T)` is `T` at the directions with no evidence and **zero** at the
+directions with evidence - and at the directions with evidence the term does
+not cancel either, because `T` and the band's own answer are applied by
+**different laws**: `T` displaces lens 1's whole picture, the band's answer is
+ramped across the corridor. That is the entire mechanism this experiment rests
+on and it is why the ramp moves at all.
+
+**Does the band fight it?** Measured, at the BAD crossing, band live and warm:
+the same **96 of 128** directions have evidence with the term on as with it off
+(10.7). The band does not lose the seam, does not re-open the crossover, and
+does not chase the term. What it does is read a slightly smaller residual:
+epipolar mean **0.554 to 0.518 degrees**.
+
+**Does the picture still stand still?** This is the along field's other failure
+probe, the one the #167 review's B1 used to catch the GPU trim snapping.
+`--bin shear` at the shimmer view, 90 frames, `warm=6.0`, band live, same drawn
+pose - the frame-to-frame step of the **applied displacement** at four bands,
+and the band's own state:
+
+| | off | `pose` | `full` |
+| --- | ---: | ---: | ---: |
+| band state, frame to frame, 360 directions | 0.0444 deg rms | **0.0933** | **0.0392** |
+| applied step rms / worst at -150 px | 0.0035 / 0.0102 | - | **0.0016 / 0.0050** |
+| at the seam | 0.0129 / 0.0698 | - | **0.0037 / 0.0096** |
+| at +60 px | 0.0995 / 0.2565 | - | **0.0116 / 0.0391** |
+| at +150 px | 0.0113 / 0.0681 | - | **0.0025 / 0.0084** |
+| frame pairs stepping over a view pixel at +60 | **21 of 87** | - | **0 of 87** |
+
+**With the term on the picture is steadier than `main`'s at every band**, and the
+one band where the shipped build steps over a view pixel on a quarter of its
+frame pairs stops doing it entirely. The band's own state settles too, 0.0444 to
+0.0392 deg rms.
+
+That is the opposite of what the along field's applied form did, and it is the
+one result here that argues for the mechanism rather than against it: taking a
+disagreement out of the corridor and putting it into a displacement removes the
+thing the corridor was breathing.
+
+**The `pose` arm doubles the band's own frame-to-frame state**, 0.0444 to 0.0933
+deg rms, which is the same arm going blind seen from the other side: a band with
+a third of its ring refused is a band whose surviving directions swing.
+
+**And at the shimmer view the band reads BETTER with the term on**: 128 of 128
+directions with evidence either way, epipolar mean 0.550 to 0.503 deg and worst
+1.884 to 1.520.
+
+### 10.11 What a later attempt would have to be
+
+Not this table, and the size of what it would have to be instead is measurable
+from what is above.
+
+The needed term at one crossing is the disagreement itself: `E_off` in degrees,
+because `E` is the disagreement and the ramp is what the corridor does with it.
+The term applied is `E_off - E_on` with the sign the intercepts carry. So the
+gap between what the pooled table supplies and what the crossing wants is a
+number this measurement prints, per flight, and it is the thing that sizes a
+per-session refinement.
+
+**The per-session form is the obvious next candidate and it is not free.** The
+band already reads this quantity per direction per frame; what it does wrong,
+for far content, is apply it as a corridor ramp instead of as a displacement.
+So a term that took the band's own settled epipolar ring and applied it whole
+to lens 1 - a feedback path rather than a stored table - would need no corpus
+at all. Three things that would have to be answered first, none of them
+answered here:
+
+1. **It would be applying a NEAR-field measurement to the whole picture.** The
+   band's epipolar channel is parallax where the content is near, and moving a
+   whole hemisphere by a near object's disparity is a worse defect than the
+   shear it removes.
+2. **The feedback has to be shown stable.** `T` changes what the band reads,
+   which changes `T`. Nothing here measures that loop.
+3. **It inherits 10.7's constraint**: whatever is applied, the residual has to
+   stay inside the band's own search window.
+
+### 10.12 Why the pooled table cannot work, in one number from the study itself
+
+The six flights' epipolar leftovers **disagree with each other at a given
+azimuth by more than the pooled table's whole amplitude**. From
+`docs/research/epi/epi-leftovers-x4.csv`, over the 67 azimuths where two or more
+captures read:
+
+| quantity | value |
+| --- | ---: |
+| per-azimuth spread across flights, median | **0.597 deg** |
+| the same, worst | **1.531 deg** |
+| the leftover's own rms over all readings | 0.295 deg |
+| the pooled per-azimuth median's rms | **0.229 deg** |
+
+A mean over a population whose members are two and a half times further apart
+than the mean's own size does not reconstruct any member of it. That is a
+statement about this corpus and this reduction and not about the camera: it is
+consistent with the leftover being scene rather than camera (the study's own
+reading), with it being per-session, or with the readings being too noisy at
+this density. Nothing here separates those.
+
+### 10.13 What still needs the owner's eye, and what this stage did not do
+
+- **The owner's panel.** `scratch/epiramp/panel-bad-clean.png` is the BAD
+  crossing off above on, cut from `--bin epiramp png=` renders with nothing
+  drawn on them. `panel-bad.png` is the same crop from `--bin step` renders and
+  carries that instrument's trace lines across the very stretch of seam the
+  question is about; it is kept only because the band-evidence numbers came off
+  the same runs. **No eye has been over either.**
+- **No blind A/B was run.** 9.4's protocol has two halves and the owner's blind
+  verdict is the gate on an applied claim. Nothing here is an applied claim, so
+  the gate was not asked for - but that also means **no number in 10.8 has been
+  seen by an eye**, and the along field's whole lesson is that an eye disagreed
+  with a battery that was measuring the wrong thing.
+- **The paused-window byte check was not run.** It is `scripts/uitest.sh`'s
+  toast capture, and it is the probe that caught the GPU trim's snapping. With
+  the toggle off the picture is `main`'s byte for byte so there is nothing for
+  it to catch there; with the toggle on nobody has looked.
+- **One flight, one crossing.** Each row is one moment on one flight at one
+  aim. The band's state is warm at 6 seconds and the reading is deterministic
+  (the BAD row reproduces to the hundredth of a view pixel across runs), but a
+  crossing is not a flight.
+
+### 10.8 The delivered table
+
+`E` is the swing the corridor delivers across itself, in view pixels of the
+render the row was taken at, lens 1's side doubled (10.6). Every row is one
+moment on one flight at one aim, band live, warm at 6 seconds, at the drawn
+pose of 10.4, both arms sharing everything but the toggle. The reading is
+deterministic: the BAD row reproduces to the hundredth of a view pixel across
+separate runs of the whole sweep.
+
+`l0` and `l1` are the two sides' own contour intercepts with the rms of each
+line about its own points, because a row whose line does not describe its points
+is not quotable and the reader has to be able to see that.
+
+| crossing | E off | E on | | l0 off / on (rms) | l1 off / on (rms) |
+| --- | ---: | ---: | --- | --- | --- |
+| **May 01 BAD** | **19.94 px, 0.363 deg** | **14.70 px, 0.268** | **-26%** | -3.59 / -3.02 (10.3, 8.2) | -9.97 / -7.35 (1.7, 1.3) |
+| **May 01 GOOD** | **1.98 px, 0.031 deg** | **11.32 px, 0.179** | **+472%** | +1.99 / +2.46 (0.3, 0.4) | +0.99 / +5.66 (1.9, **4.2**) |
+| Apr 10 | 1.72 px, 0.018 deg | 3.61 px, 0.037 | **+110%** | +1.91 / +4.53 (0.3, 0.8) | +0.86 / +1.80 (1.4, **3.3**) |
+| May 26 | 1.73 px, 0.029 deg | 0.52 px, 0.009 | -70% | -0.66 / -0.02 (0.1, 0.0) | -0.86 / -0.26 (0.4, 0.1) |
+| Jul 14 | 8.99 px, 0.149 deg | 0.95 px, 0.016 | **-89%** | +3.63 / +0.27 (0.3, 0.1) | -4.50 / +0.48 (0.4, 0.2) |
+| Aug 02 | 1.66 px, 0.027 deg | 0.74 px, 0.012 | -55% | -0.73 / +0.19 (0.2, 0.5) | +0.83 / -0.37 (0.1, 0.1) |
+| Jul 14 shimmer | 5.47 px, 0.029 deg | 2.65 px, 0.014 | -52% | **-13.90 / -5.12** (2.0, 0.8) | +2.74 / +1.32 (**12.4**, **5.1**) |
+| Jul 25, cloud top | 10.85 px, 0.180 deg | 4.74 px, 0.078 | -56% | +8.20 / +4.93 (0.9, 0.5) | -5.43 / -2.37 (3.3, 1.7) |
+
+| **Oct 18, ONE X2** | 3.55 px, 0.059 deg | **3.55 px, 0.059** | **0%** | +0.83 / +0.83 (0.5, 0.5) | -1.78 / -1.78 (3.2, 3.2) |
+
+**The X2 row is a zero and it is the guard working.** Both arms produce the
+same CSV to the last digit, which means the composed term came out
+`Table::REST` on that camera and the two builds drew one picture. `epi_term`
+refuses a table whole rather than in part - whole support or nothing, the rule
+stage 9 wrote after stage 5 scalloped - and on the X2 either the sum exceeded
+`EPI_LIMIT_RAD` or a direction of the ring left a lens's picture. **Which of the
+two is not established here**, and nothing in the run says so out loud, which is
+a gap in the instrument rather than a result. What the row does establish is
+that no X4 Air table reached the X2's picture, which is the right outcome for a
+table measured on another camera and the wrong way to have got it.
+
+Bold rms is a line that does not describe its own points and a column that
+should not be quoted. Three rows carry one: BAD's lens 0 side at both arms
+(near content in that stretch, which is why the run windows it), GOOD's and
+April's lens 1 side **only with the term on**, and the shimmer view's lens 1
+side at both arms - that view is `fov=20`, where 4.8 degrees off the seam is
+most of the frame and the outer samples have nowhere to sit. At the shimmer
+view the quotable side is lens 0, and it reads **-13.90 to -5.12 view px, a 63
+percent fall**.
+
+### 10.10 The verdicts
+
+**(a) It does not collapse everywhere.** The bar was under about 4 view pixels,
+the GOOD crossing's own floor. Four of the six X4 Air crossings land there
+(May 26, Jul 14, Aug 02, and the shimmer view on its quotable side). **BAD does
+not**: 19.94 to 14.70 view pixels, a quarter of the way, and 0.268 degrees is
+still four times the GOOD crossing's own reading before anything was applied.
+
+**(b) It collapses unevenly, and on two crossings it makes the picture worse.**
+GOOD goes **1.98 to 11.32 view pixels** and April **1.72 to 3.61**, and on both
+the lens 1 line stops describing its own points at the same moment (rms 1.9 to
+4.2, and 1.4 to 3.3), which says the term has put a shape into that side that a
+straight ramp no longer fits.
+
+**And GOOD is the one that matters most, because of what it is paired with.**
+The acceptance battery's first rule is *improve both May crossings without
+trading one for the other; a field that fixes one at the other's expense is the
+defect moved rather than removed*. This term improves BAD by a quarter and
+costs GOOD five and a half times its whole reading, on **the same instant of the
+same file**. That is the trade the rule names, and it is refused on it alone.
+
+**(c) It fails on a flight that is one sixth of the table.** May-01 is not held
+out - it is one of the six captures the pooled table is built from - and the
+table still leaves three quarters of BAD's ramp in the picture and multiplies
+GOOD's. 10.12 is the reason in one number: the six flights disagree at a given
+azimuth by 0.597 degrees at the median and 1.531 at worst, against a pooled
+table whose own amplitude is 0.229 rms. **The pooled static form of this term is
+refused.**
+
+**What is NOT refused, and this matters for what comes next.** The mechanism
+works. The sign is right at every crossing but one, the term moves the delivered
+ramp by about what it carries, the band does not fight it (10.9), and where the
+term happens to be near the flight's own answer the ramp goes to nothing:
+**Jul 14 reads 8.99 to 0.95 view pixels, an 89 percent fall, on both sides, with
+every line describing its own points.** A across-seam displacement of lens 1's
+whole picture *is* the right shape for this defect. What is wrong is the number
+being put in it.
+
+### 10.14 The gates
+
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings`,
+`cargo test --workspace` (41 suites, green, including two new tests: the term's
+axis, size and determinant on the projection, and that the composed table is the
+pose plus the pooled reading and not something else) and
+`scripts/name-check.sh`.
+
+`scripts/uitest.sh` on real footage reads **47 checks, 2 failed**:
+`ctrl+v goes back to the copied view`, which `main` has failed on this box since
+before this branch (#167's own note), and `a toast is drawn clear of the
+controls`. **Both are on `main` too**: the same harness run in a
+checkout of 75a03cc, with its own `CARGO_TARGET_DIR` and its own app binary,
+fails `a toast is drawn clear of the controls` as well. That control was run
+because a branch whose delivered picture is `main`'s byte for byte cannot have
+moved a toast, and a failure that had NOT been on `main` would have meant the
+null was wrong somewhere the byte compare did not look. It was not.
+
+## 11. The per-session arm: the same mechanism with the flight's own number in it
+
+**10 stands as measured and this section does not rewrite it.** The pooled
+static table is refused, and what refused it was the number rather than the
+mechanism: the sign was right at every crossing but one, the band did not fight
+the term, the delivered picture was steadier with it on at every band, and the
+one flight that happened to sit near the pooled answer collapsed its delivered
+ramp by 89 percent. 10.12 is why a pooled number cannot be near any flight's
+answer: the six disagree at a given azimuth by 0.597 degrees at the median
+against a pooled amplitude of 0.229 rms.
+
+So this arm changes **one input**. `seam::epi_term` still composes the drawn
+pose's own across-seam displacement with a reading; what the reading is is now
+this capture's own, harvested off its own frames.
+
+### 11.1 `--bin epifield`, and the three gates it needed
+
+`seam::measure` reduces each direction's frames to one reading, which is what a
+fit is made from and is the wrong granularity for a question about which
+moments are near content. It is now `seam::moments` - the same walk, the same
+acquisition, the same refusals - and `seam::measure` is that reduced. Neither
+half's answer changed.
+
+**The far gate is on the excursion and not on the reading.** Parallax on this
+axis is one-signed: `band::Cell::metres` is `reach_m / disparity` and exists
+only where the disparity is positive, because a negative one is not a distance.
+So near content can only push a reading one way. A first pass takes each
+direction's own middle; a moment whose excursion above that middle implies a
+distance nearer than 60 metres, by `metres`' own arithmetic on this capture's
+own baseline, is dropped; the survivors are reduced again by the trimmed middle.
+
+**Applied to the reading itself the gate is nonsense, and that is measured.**
+The factory calibration's own across-seam error reaches two and a half degrees
+and is positive over half the ring, so an absolute gate at 60 metres throws away
+**1829 moments of 3205** on the May-01 flight and calls a calibration a hedge.
+On the excursion it drops **720**. The excursion is what a distance can move;
+the middle is what the camera is.
+
+**What the far gate cannot do**, plainly: the camera's own term and a far
+object's parallax are the same sign on the same axis, and a session whose near
+content never moves would have that content in its middle. This removes what
+*wanders* nearby - the wing, the lines, the prop cage swinging through a
+direction - and leaves the rest alone.
+
+**A direction that departs from the ring's own five-term shape is refused.** The
+factory across-seam error is pose-order on this camera, so a reading far off a
+least-squares fit of those five over the whole ring is a correlation that found
+the wrong feature: on the May-01 flight two directions read -1.86 degrees where
+every neighbour and every other flight reads +2.36. A detector and not a
+smoother - what survives keeps whatever it says above pose order, which is the
+entire thing a per-session field exists to carry.
+
+| session | directions read of 128 | moments | refused as near content |
+| --- | ---: | ---: | ---: |
+| May 01 | 88 | 3205 | 720 |
+| Apr 10 | 104 | 2842 | 986 |
+| May 26 | 123 | 4713 | 1280 |
+| Jul 14 | 121 | 2307 | 816 |
+| Jul 25 | **74** | 2974 | 820 |
+| Aug 02 | 121 | 2492 | 814 |
+| Oct 18 X2 | 119 | 6761 | 2438 |
+
+The July-25 flight reads the thinnest ring in the corpus, which is what a
+capture above a solid undercast for its whole length should read.
+
+### 11.2 Three constraints, each from something 10 measured
+
+**One: the band's own search window binds, and it is now code.**
+`EPI_LIMIT_RAD` was a plausibility guess at three degrees; it is one degree now,
+because the band re-measures the residual THROUGH whatever is applied, its
+epipolar search runs -1.2 to +2.6 degrees, and a term at 2.5 degrees was
+measured to take the band from 96 of 128 directions with evidence down to 64
+(10.7). The `pose` arm is refused by it, which is the right answer, and
+`the_across_seam_term_is_refused_when_the_band_could_not_re_measure_through_it`
+is that as a test rather than as a paragraph.
+
+**And a refusal says so, in one line.** That was the instrument gap the X2 row
+exposed in 10.8: two arms produced identical CSVs to the last digit and nothing
+in either run said the table had been thrown away. Now it does, and it says
+which bound and by how much.
+
+**Two: an unread direction is identity, and identity is on the COMPOSED TERM.**
+This is a trap worth naming because the first draft of this arm fell into it and
+the delivered measurement caught it. The term is the reading **plus** the drawn
+pose's own displacement, so a direction with a zero *reading* still draws the
+whole pose arm - two and a half degrees of it - which is the arm that blinds the
+band. The May-01 field has 40 directions with nothing in them, and composed that
+way the term reached **4.141 degrees** and was refused whole. `Session`
+therefore carries a moment count per direction and `seam::supported` zeroes the
+whole term where there is none, with a raised cosine over four cells walking it
+in. Nothing is filled from a neighbour's value.
+
+**Three: whole support or nothing, over the arc the session claims.** A field
+whose composed term passes the bound over its own supported arc is accepted; one
+that does not is refused entire rather than clamped, because a clamped field is
+a different field from the one that was measured and nothing measured that one.
+
+### 11.3 The three-column delivered table
+
+Same nine crossings, same instrument, same drawn pose, each arm against its own
+cut render. `E` is the corridor swing in view pixels, lens 1's side doubled.
+
+| crossing | off | pooled | **per-session** | |
+| --- | ---: | ---: | ---: | --- |
+| **May 01 BAD** | 19.94 | 14.70 | **0.89** | **-96%** |
+| **May 01 GOOD** | 1.98 | 11.32 | **0.35** | **-82%** |
+| Apr 10 | 1.72 | 3.61 | 1.72 | field **refused at 1.104 deg** |
+| May 26 | 1.73 | 0.52 | **0.68** | -61% |
+| Jul 14 | 8.99 | 0.95 | 8.99 | field **refused at 1.582 deg** |
+| Aug 02 | 1.66 | 0.74 | 1.66 | field **refused at 2.155 deg** |
+| Jul 14 shimmer | 5.47 | 2.65 | 5.47 | the Jul-14 field, refused |
+| Jul 25, cloud top | 10.85 | 4.74 | **0.57** | **-95%** |
+| Oct 18 ONE X2 | 3.55 | 3.55 | **2.26** | -36%, its own session's field |
+
+**The bet came in on every crossing whose field was accepted, and the trade is
+broken.** The two May-01 crossings are the same instant of the same file and one
+field serves both: BAD **19.94 to 0.89** and GOOD **1.98 to 0.35**, both under
+the GOOD crossing's own perceptual floor, where the pooled table improved BAD by
+a quarter and cost GOOD five and a half times its reading. That is the
+acceptance battery's first rule satisfied rather than traded, and it is the
+thing 10 refused the pooled table on.
+
+Every accepted row improves and none worsens. The July-25 cloud-top row, read on
+its own terms, goes **10.85 to 0.57**. The ONE X2, a different camera with its
+own session's field where the X4 Air's pooled table had reached it not at all,
+goes **3.55 to 2.26**. Both sides' lines describe their own points at every
+accepted row (rms 0.03 to 0.61), which none of the pooled arm's improved rows
+could say.
+
+**And three fields of seven are refused whole by the band's own search window.**
+April at 1.104 degrees, July-14 at 1.582, August at 2.155 - so those three
+crossings draw the untouched picture and their rows are their `off` rows to the
+last digit, which is the refusal being visible rather than silent. **The cost is
+real and it is not hidden: July-14 is the flight the pooled table collapsed by
+89 percent, and this arm gives it nothing.**
+
+**The bound's exact value is a research choice sitting in an unmeasured gap, and
+it should be said plainly.** What is measured is 0.7 degrees keeping 96 of 128
+directions and 2.5 degrees leaving 64. One degree is between them and nothing
+has been measured between them. Whether a field at 1.1 or 1.6 degrees blinds the
+band is the obvious next measurement and it is not this one; **what is not
+available is deciding it from the delivered table**, because a bound chosen to
+let three more rows through would be a bound fitted to its own answer.
+
+### 11.4 T - fit(T) with the per-session values, and one probe that could not be run
+
+**The band keeps every direction it had, and carries a third of what it did.**
+`--bin step` at the BAD crossing, band live and warm, May-01's own accepted
+field:
+
+| arm | directions with evidence | epipolar mean | worst |
+| --- | ---: | ---: | ---: |
+| off | 96 of 128 | 0.554 deg | 0.948 |
+| pooled | 96 of 128 | 0.518 deg | 0.995 |
+| **per-session** | **96 of 128** | **0.190 deg** | 2.011 |
+
+That is the T - fit(T) statement in the delivered domain: the term took **two
+thirds of what the band reads** and the band lost nothing to it, where the
+pooled table took a fifteenth. The worst single direction goes the other way,
+0.948 to 2.011, so there is at least one direction where the term overshoots
+and the band is left carrying more than it started with; that direction is not
+identified here.
+
+**The steadiness half could not be run, and no number stands in for it.**
+`--bin shear` is the instrument that caught the GPU trim snapping and that
+measured the pooled arm's steadiness win (10.9). It refuses both May-01 views -
+their seams lean too far off the rows, which is the instrument saying so and is
+the same condition the registry warns about before quoting a step there - and
+the one view it does read is the shimmer view, **whose flight's field this arm
+refuses at 1.582 degrees**. So there is no view in this corpus where `--bin
+shear` can read and a per-session field is applied.
+
+**The pooled arm's steadiness win does not transfer.** It was measured on the
+pooled term at the shimmer view and it is a fact about that term; nothing here
+establishes that a per-session term is steady, and the whole lesson of this
+stage is that a number measured in one domain does not carry into another. What
+would settle it is a capture whose field passes the bound and whose seam
+`--bin shear` will read, and this corpus has none.
+
+### 11.5 The verdict, and what it is not
+
+**The mechanism is confirmed and the source is settled: a session's own field is
+what the term needs, and a corpus's mean is not.** On every crossing whose field
+the guards accepted, the delivered ramp falls to the perceptual floor or under
+it, both May-01 crossings improve from one field with nothing traded, and the
+band ends up carrying a third of what it did.
+
+**Three things this does NOT say.**
+
+1. **It is not a shipping candidate.** Three fields of seven are refused by a
+   bound whose exact value has never been measured, the steadiness half of the
+   acceptance has no view it can be run on, and the offline harvest is a
+   `--bin epifield` run per file that nothing in the app does or could do.
+2. **No eye has seen any of it.** `scratch/epiramp/panel-bad-session.png` is the
+   BAD crossing off above on, cut from clean renders. The owner's blind A/B
+   against `main` is the gate this has to clear when it earns one, and 9.3 is
+   the record of an owner disagreeing with a battery that was measuring the
+   wrong picture.
+3. **The far gate is a hypothesis with a delivered result behind it, not a
+   proof.** Nothing separates a camera's own term from a far object's parallax
+   at one azimuth; what the gate removes is content that *wandered*. That the
+   result improves the picture is evidence the gate keeps mostly camera - it is
+   not evidence that it keeps only camera.
+
+**What a shipping form would have to answer**, in the order the evidence puts
+them:
+
+- **Where does the bound go?** 0.7 degrees keeps 96 of 128 directions and 2.5
+  leaves 64; the three refused fields sit at 1.104, 1.582 and 2.155. Measuring
+  the band's evidence against a planted term at those sizes is one afternoon and
+  it decides three of nine rows.
+- **Can the app harvest this itself?** `--bin epifield` reads 24 places by 6
+  frames off a file before it draws anything, which is not something a player
+  does. The band already reads this quantity live, per direction, per frame -
+  what it does wrong for far content is apply it as a corridor ramp instead of a
+  displacement - so a live form has no corpus problem and a feedback-stability
+  problem instead.
+- **Does it survive a moving picture?** Unanswered, and 11.4 says why.
+
+### 11.6 The gates, and the paused window with the term applied
+
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings`,
+`cargo test --workspace` (42 suites, green), `scripts/name-check.sh`.
+
+`scripts/uitest.sh` **with a per-session field applied for the whole run**
+(`KJERAG_EPI_TERM=session:…may01.txt`, on the May-01 file the field was
+harvested from) reads **47 checks, 2 failed** - the same two `main` fails on
+this box, and no others.
+
+That is the **paused-window byte check** answered, and it is the probe worth
+naming: the applied along-seam field's withdrawn form left 716790 pixels of
+716800 differing between two captures of a paused window, against 10996 on
+`main`, and this harness is what caught it. Nothing of the sort happens here.
+
+The two failures are `a toast is drawn clear of the controls` and `ctrl+v goes
+back to the copied view`, both of which a checkout of `main` at 75a03cc fails on
+this box as well (10.14).
+
+## 12. The blinding curve: it is not the term's size, it is the residual
+
+11 refused three fields of seven on `EPI_LIMIT_RAD`, and that bound rested on
+one observation: a 2.5 degree term took the band from 96 of 128 directions with
+evidence down to 64. **That term was both large and wrong, and nothing separated
+the two.** This separates them.
+
+### 12.1 The method
+
+Nothing can change the disagreement a capture actually has, so the sweep changes
+the term instead. A gain `k` on a field that is **right** at `k = 1` gives a term
+of `k|D|` and leaves the band a residual of `(k - 1)|D|`. So the pairs
+
+- `k = 0` and `k = 2` carry the **same residual** at `|T| = 0` and `2|D|`,
+- `k = -1` and `k = 3` carry the same residual again at `|D|` and `3|D|`,
+- `k = -2` and `k = 4` do it once more,
+
+and if the band's evidence tracks `|T|` the members of a pair differ, while if it
+tracks the residual they match. The May-01 field is the one that is right: it
+takes the delivered ramp at the BAD crossing from 19.94 view px to 0.89 and the
+band's own epipolar mean from 0.554 degrees to 0.190.
+
+`KJERAG_EPI_TERM=plant:<field>:<gain>` is that, and it is **exempt from the rail
+and says so on every run**, because putting a term past the bound on purpose is
+the entire experiment. `--bin step` at the BAD crossing, band live and warm.
+
+### 12.2 The curve
+
+| gain | term, worst | residual | directions with evidence | epipolar mean |
+| ---: | ---: | ---: | ---: | ---: |
+| -2 | 1.870 deg | 3D | **66** of 128 | 0.676 deg |
+| -1 | 0.935 | 2D | **79** | 0.692 |
+| -0.5 | 0.468 | 1.5D | **89** | 0.662 |
+| **0** | **0** | **1D** | **96** | **0.554** |
+| 0.5 | 0.468 | 0.5D | **96** | 0.361 |
+| **1** | **0.935** | **0** | **96** | **0.190** |
+| 1.5 | 1.403 | 0.5D | **96** | 0.267 |
+| 2 | 1.870 | 1D | **95** | 0.432 |
+| 3 | 2.806 | 2D | **95** | 0.823 |
+| 4 | 3.741 | 3D | **91** | 1.134 |
+| 5 | 4.676 | 4D | **83** | 1.171 |
+
+**Read the pairs.** At residual `1D`: `k = 0` keeps 96 with no term at all and
+`k = 2` keeps **95** with a term of **1.870 degrees**, nearly twice the bound
+that refused three fields. At residual `2D`: `k = -1` keeps **79** at 0.935
+degrees - *inside* the old bound - and `k = 3` keeps **95** at 2.806. At residual
+`3D`: `k = -2` keeps **66** at 1.870 and `k = 4` keeps **91** at 3.741.
+
+**In every pair the larger term keeps more of the ring.** `|T|` is not what
+blinds the band. It is not even weakly what blinds the band: the correlation
+between the two runs backwards.
+
+**And the asymmetry is the band's own window.** The search runs `FAR_DEG` to
+`NEAR_DEG`, **-1.2 to +2.6** degrees. A negative residual runs out of room at
+half the magnitude a positive one does, which is exactly what the two sides of
+the table do: the negative gains fall away from `k = -0.5` while the positive
+ones hold to `k = 3` and only give at `k = 4` and `k = 5`, where the residual
+finally passes +2.6. **The hypothesis was that a wrong term blinds when the error
+it leaves exceeds the window's near edge, and that is what the numbers say.**
+
+### 12.3 What that changes, and the guard it does NOT provide
+
+`EPI_LIMIT_RAD` is now **2.8 degrees**, the largest term the sweep measured to
+leave the band's evidence intact, and its docstring says what it is: a rail
+against a field that is not a calibration at all. The three fields 11 refused -
+April at 1.104, July-14 at 1.582, August at 2.155 - are all inside the range
+where a correct-sign term costs one direction of 128, and they were refused for
+no measured reason. 12.4 re-reads those crossings.
+
+**The safety question is not `|T|` and it never was: it is `|T - truth|`, and
+nothing knows `truth` before the band has measured through the term.** So there
+is no compose-time test that can tell a right field from a wrong one, and no
+static bound can be the guard. What can: a **staged walk-in** that applies the
+term in steps, each small enough that the residual it leaves stays inside the
+window even if the whole field is wrong, with the band re-measuring at each step
+and the walk aborting when its evidence falls or its residual grows step over
+step. The curve is what says that would work - a wrong step of walk size is
+visible in the evidence count long before a wrong field of full size is - and it
+is what says the abort has a signal to fire on.
+
+**It is not implemented.** This section is the measurement that makes it the
+right design and the record of it being the next thing, not a description of
+something that exists.
+
+### 12.4 The table with the three rows filled in
+
+The crossings 11 refused, re-read with the rail on the quantity 12.2 measured.
+Nothing else changed: same fields, same instrument, same drawn pose.
+
+| crossing | its field | off | per-session, **before** | per-session, **now** |
+| --- | ---: | ---: | ---: | ---: |
+| Apr 10 | 1.104 deg | 1.72 | refused | **0.47** |
+| Jul 14 | 1.582 deg | 8.99 | refused | **1.62** |
+| Jul 14 shimmer | 1.582 deg | 5.47 | refused | **0.63** |
+| Aug 02 | 2.155 deg | 1.66 | refused | **0.20** |
+
+**Every one of them lands under the floor**, and the shimmer view - whose lens 1
+line could not describe its own points at either arm before (rms 12.37 off, 5.06
+pooled) - now reads 0.16 and 0.40 rms on the two sides. A row that was not
+quotable became quotable, which is the ramp actually going away rather than a
+number moving.
+
+The coordinator's prediction was that July-14, the flight the pooled table
+collapsed 89 percent, should reach the floor on its own field. It does: **8.99 to
+1.62**.
+
+### 12.5 The steadiness half, run at last
+
+11.4 could not run it: `--bin shear` reads only the shimmer view and that
+flight's field was refused. It is admitted now. `--bin shear` at the shimmer
+view, 90 frames, `warm=6.0`, band live, same drawn pose:
+
+| | off | **per-session** |
+| --- | ---: | ---: |
+| band state, frame to frame, 360 directions | 0.0444 deg rms | **0.0349** |
+| applied step rms / worst at -150 px | 0.0035 / 0.0102 | **0.0016 / 0.0057** |
+| at the seam | 0.0129 / 0.0698 | **0.0022 / 0.0059** |
+| at +60 px | 0.0995 / 0.2565 | **0.0039 / 0.0106** |
+| at +150 px | 0.0113 / 0.0681 | **0.0013 / 0.0038** |
+| **frame pairs stepping over a view pixel at +60** | **21 of 87** | **0 of 87** |
+
+**Steadier at every band, and the one band where the shipped build steps over a
+view pixel on a quarter of its frame pairs stops entirely.** The band's own state
+settles too. What the term leaves for the band to carry at those four bands is
+-0.007, +0.026, -0.007 and +0.003 degrees, against -0.604, -3.479, +1.617 and
++2.534 with it off.
+
+This is the half a difference metric cannot stand in for and the half that was
+outstanding. It passes.
+
+### 12.6 The nine-row table, final form
+
+| crossing | off | **per-session** | |
+| --- | ---: | ---: | --- |
+| **May 01 BAD** | 19.94 px, 0.363 deg | **0.89 px, 0.016** | **-96%** |
+| **May 01 GOOD** | 1.98 px, 0.031 deg | **0.35 px, 0.006** | **-82%** |
+| Apr 10 | 1.72 px, 0.018 deg | **0.47 px, 0.005** | -73% |
+| May 26 | 1.73 px, 0.029 deg | **0.68 px, 0.011** | -61% |
+| Jul 14 | 8.99 px, 0.149 deg | **1.62 px, 0.027** | **-82%** |
+| Aug 02 | 1.66 px, 0.027 deg | **0.20 px, 0.003** | **-88%** |
+| Jul 14 shimmer | 5.47 px, 0.029 deg | **0.63 px, 0.003** | **-88%** |
+| Jul 25, cloud top | 10.85 px, 0.180 deg | **0.57 px, 0.010** | **-95%** |
+| Oct 18 ONE X2 | 3.55 px, 0.059 deg | **2.26 px, 0.037** | -36% |
+
+**Nine of nine improve. Every one lands under the four view pixel floor.** The
+two May-01 crossings are the same instant of the same file and one field serves
+both. Two cameras, seven captures, a treeline, a cloud top and a beach.
+
+For the record's sake, the pooled column those nine replaced: -26%, **+472%**,
++110%, -70%, -89%, -55%, -52%, -56%, 0%.
+
+### 12.7 Readiness for the owner's blind A/B, and what is still missing
+
+**What this now has** that 10 and 11 did not: nine of nine crossings improved
+with none traded, the band keeping every direction it had and carrying a third
+of what it did, the steadiness half run and passed, the paused-window byte check
+answered, and a bound that is a measurement rather than a guess.
+
+**What it still does not have, and none of it is small.**
+
+1. **No eye has seen any of it.** That is the gate, and 9.3 is the record of an
+   owner disagreeing with a battery that was measuring the wrong picture. The
+   crops are `scratch/epiramp/panel-bad-session.png` and
+   `scratch/epiramp/panel-jul14-session.png`.
+2. **The staged walk-in is not implemented.** 12.3 is the design and the
+   evidence for it; the rail at 2.8 degrees is not a substitute, because the
+   quantity that decides safety is `|T - truth|` and nothing knows `truth`
+   before the band has measured through the term. **A wrong field inside the
+   rail would be applied whole**, and 12.2 measures what that costs: a
+   wrong-sign term of 0.935 degrees takes 17 of 128 directions out.
+3. **The harvest is offline.** `--bin epifield` reads 24 places by 6 frames off
+   a file before anything is drawn. A player does not do that, and the form that
+   could - the band already reads this quantity live, per direction, per frame -
+   has the feedback-stability question instead, unmeasured.
+4. **One flight, one crossing per flight.** Nine moments across seven captures.
+
+**So the honest statement is:** the design question is answered - a session's own
+far-gated field, applied as a whole-picture displacement, removes this defect -
+and the engineering to ship it is the walk, the live harvest, and the owner's
+eye, in that order.

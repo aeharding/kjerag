@@ -3509,3 +3509,136 @@ release lands on the exact frame every time either way.
 - Vulkan Video decode (drops VA-API plumbing; blocked on wgpu exposure
   and Rust HEVC support anyway).
 - Batch screenshot/export queue across multiple files.
+
+- 2026-08-07 **The across-seam research term: the delivered ramp is real, the
+  sign and the mechanism are right, and the POOLED static table is not the fix.
+  Nothing is applied; `KJERAG_EPI_TERM` is a research toggle, off by default,
+  byte-identical off** (issue #103, the epi fork, docs/research/stage9.md 10).
+
+  **The defect.** The band shares its epipolar reading across the handover, so
+  where the two lenses disagree by more than parallax can explain the delivered
+  picture draws far content with a bend in it: zero at the corridor's edge, half
+  the disagreement at the contour, the other half the same way on the other
+  lens. `--bin epiramp` measures that in the delivered domain and nowhere else -
+  the app's own path with the band live and warm, photographed at the shipped
+  handover and again at 0.1 degrees, the far content correlated between them
+  along the seam normal and the ramp fitted to the contour.
+
+  **What was built.** `seam::epi_term` composes the pose's own across-seam
+  displacement (`seam::moved`'s second component, pure geometry from the five
+  knobs) with a pooled static reading of six flights, and applies the sum to
+  lens 1's whole picture before projection, with the band's own measurement pass
+  reading through it. `Reframe::epi` carries it to both halves of the shader.
+
+  **What it measures.** Nine crossings, one per flight plus the registry's
+  paired May-01 GOOD and BAD, the shimmer view, a cloud-top crossing on the
+  July-25 flight and a ONE X2 ground capture, each read with the term off and
+  with the pooled term on, both arms at the pose the app draws. The delivered
+  swing `E` falls at six of nine and **rises at two**: May-01 GOOD **1.98 to
+  11.32 view px** and April **1.72 to 3.61**, while BAD improves only 19.94 to
+  14.70.
+
+  **The verdict is the trade.** The acceptance battery's first rule is improve
+  both May crossings without trading one for the other; this improves BAD by a
+  quarter and costs GOOD five and a half times its whole reading on the same
+  instant of the same file. The pooled static form is refused, and the reason is
+  one number: the six flights disagree at a given azimuth by **0.597 deg at the
+  median and 1.531 at worst** against a pooled table whose own amplitude is
+  **0.229 rms**.
+
+  **What is not refused is the mechanism.** The sign is right at every crossing
+  but one, the band does not fight the term (the same 96 of 128 directions carry
+  evidence either way), and where the number happens to be near the flight's own
+  answer the ramp goes to nothing: **July-14 reads 8.99 to 0.95 view px, both
+  sides, every line describing its own points**. An across-seam displacement of
+  lens 1's whole picture is the right SHAPE for this defect; the pooled number
+  put into it is wrong.
+
+  **Two things worth carrying forward.** A term larger than the band's own
+  epipolar search window (-1.2 to +2.6 deg) takes the band's eyes out - the
+  `pose` arm drops it from 96 of 128 directions with evidence to 64 - and
+  nothing in the code enforces that bound. And no eye has seen any of this:
+  there was no blind A/B, because there is no applied claim to gate.
+
+- 2026-08-07 **The per-session across-seam field: the same mechanism with the
+  flight's own number in it collapses the delivered ramp on every crossing the
+  guards accept, including BOTH May-01 crossings from one field. Still not a
+  shipping candidate** (issue #103, the epi fork, docs/research/stage9.md 11).
+
+  **What changed is one input.** `seam::epi_term` still composes the drawn pose's
+  own across-seam displacement with a reading; the reading is now the capture's
+  own, harvested by `--bin epifield` off its own frames. `seam::measure` is split
+  into `seam::moments` and a reduction so the per-moment readings are reachable,
+  with neither half's answer changed.
+
+  **The delivered table**, nine crossings, off -> pooled -> per-session, in view
+  pixels of corridor swing: May-01 **BAD 19.94 -> 14.70 -> 0.89**, **GOOD 1.98 ->
+  11.32 -> 0.35**, July-25's cloud top **10.85 -> 4.74 -> 0.57**, the ONE X2 with
+  its own session's field **3.55 -> 3.55 -> 2.26**, May-26 1.73 -> 0.52 -> 0.68.
+  Both May-01 crossings are the same instant of the same file and one field
+  serves both, which is the acceptance battery's first rule satisfied rather
+  than traded - the rule the pooled table was refused on. The band keeps all 96
+  of 128 directions it had and its epipolar mean falls **0.554 -> 0.190 deg**.
+
+  **Three fields of seven are refused whole** by the band's own search window,
+  now enforced at one degree in `EPI_LIMIT_RAD` and no longer a paragraph: April
+  at 1.104, July-14 at 1.582, August at 2.155. Those crossings draw the untouched
+  picture and their rows equal their `off` rows to the last digit. **The cost is
+  real**: July-14 is the flight the pooled table collapsed by 89 percent and this
+  arm gives it nothing. **The bound's value sits in an unmeasured gap** - 0.7 deg
+  keeps 96 directions, 2.5 leaves 64, nothing between has been measured - and
+  moving it on the strength of the delivered table would be fitting a bound to
+  its own answer.
+
+  **Two traps worth carrying.** An unread direction must be identity on the
+  COMPOSED term and not on the reading: with a zero reading a direction still
+  draws the whole pose displacement, which is the arm that blinds the band, and
+  composed that way May-01's field reached 4.141 deg and was refused. And the far
+  gate belongs on the excursion, not the reading: the factory across-seam error
+  is positive over half the ring, so an absolute 60 m gate throws away 1829
+  moments of 3205 and calls a calibration a hedge.
+
+  **Not shipping, and the record says why**: the offline harvest is nothing a
+  player does, `--bin shear` has no view in this corpus where it can read AND a
+  field is applied, so the steadiness half of the acceptance is unrun, and no eye
+  has seen any of it. `scripts/uitest.sh` with a field applied for the whole run
+  reads 47 checks and the same 2 failures `main` has, which answers the
+  paused-window byte check and nothing beyond it.
+
+- 2026-08-07 **The bound was on the wrong quantity: a gain sweep separates the
+  term's SIZE from the residual it leaves, and the residual is what blinds the
+  band. With the rail moved onto what was measured, nine of nine crossings
+  collapse under the floor and the steadiness half passes** (issue #103, the epi
+  fork, docs/research/stage9.md 12).
+
+  **The curve.** A gain `k` on a field that is right at one gives a term of
+  `k|D|` leaving `(k - 1)|D|` of residual, so pairs of gains carry the same
+  residual at very different sizes. At the BAD crossing, band live and warm:
+  residual `1D` reads **96 of 128 directions at no term and 95 at 1.870 deg**;
+  residual `2D` reads **79 at 0.935 deg and 95 at 2.806**; residual `3D` reads
+  **66 at 1.870 and 91 at 3.741**. In every pair the larger term keeps more of
+  the ring. The asymmetry is the band's own `-1.2 to +2.6` search window: a
+  negative residual runs out of room at half the magnitude a positive one does.
+
+  **`EPI_LIMIT_RAD` is 2.8 degrees**, the largest term measured to leave the
+  band's evidence intact, and it is documented as a rail against a field that is
+  not a calibration rather than as a safety guard - the quantity that decides
+  safety is `|T - truth|` and nothing knows `truth` at compose time. The staged
+  walk-in that WOULD guard it is designed and evidenced in 12.3 and **is not
+  implemented**.
+
+  **The nine-row table, off -> per-session, in view pixels of corridor swing:**
+  May-01 BAD 19.94 -> **0.89**, GOOD 1.98 -> **0.35**, Apr-10 1.72 -> **0.47**,
+  May-26 1.73 -> **0.68**, Jul-14 8.99 -> **1.62**, Aug-02 1.66 -> **0.20**,
+  the shimmer view 5.47 -> **0.63**, Jul-25's cloud top 10.85 -> **0.57**, the
+  ONE X2 3.55 -> **2.26**. Nine of nine improved, every one under the four view
+  pixel floor, both May-01 crossings served by one field.
+
+  **The steadiness half, outstanding since the per-session arm was built**
+  because `--bin shear` reads only the shimmer view and that flight's field was
+  refused: band state **0.0444 -> 0.0349 deg rms** frame to frame, every band
+  steadier, and the band where the shipped build steps over a view pixel on **21
+  of 87** frame pairs steps on **0**.
+
+  **Still not shipping**: no eye has seen any of it, the walk is unbuilt, and the
+  harvest is an offline `--bin epifield` run per file that no player does.

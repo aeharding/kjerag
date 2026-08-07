@@ -479,6 +479,15 @@ pub struct Reframe {
     /// [`Reframe::project`] read what the picture is drawn with rather than
     /// what it would have been without.
     table: super::band::Table,
+    /// **RESEARCH** (`KJERAG_EPI_TERM`): what the two lenses disagree by
+    /// **across** the seam at each direction under the pose being drawn, in
+    /// radians ([`super::seam::epi_term`]). [`super::band::Table::REST`] unless
+    /// the toggle is on, and then this block is the one it ships with.
+    ///
+    /// Beside `table` and not folded into it: same vehicle, other axis, and the
+    /// two are applied by different laws. Sixteen-byte aligned in WGSL like the
+    /// one above, so it needs no padding of its own after it.
+    epi: super::band::Table,
 }
 
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
@@ -558,6 +567,13 @@ impl Landing {
     };
 }
 
+/// The seam circle's own normal in the body frame, which is the axis a reading
+/// taken by [`super::seam::measure`] across the seam is expressed along
+/// ([`super::seam::Where::across`]) and the axis the research term is applied
+/// on. Constant round the ring, because the seam circle is the body's `xy`
+/// plane.
+const ACROSS_SEAM: [f32; 3] = [0.0, 0.0, 1.0];
+
 /// What the band moves one ray by, in view space, on each of the seam's two
 /// axes (issue #103, stage 5).
 ///
@@ -576,6 +592,11 @@ pub struct Bend {
     /// flattened into the seam plane, which is the `cos(elevation)` a relative
     /// roll produces and what takes it to zero at both lens poles.
     pub along: [f32; 3],
+    /// **RESEARCH** (`KJERAG_EPI_TERM`): along [`Ring::epi`](super::band::Ring::epi)
+    /// and scaled the way the epipolar bend above is, but handed to lens 1
+    /// whole instead of shared across the handover, which is the whole of the
+    /// experiment. Zero unless the toggle is on.
+    pub still: [f32; 3],
 }
 
 /// How much of the picture at one output pixel comes from each lens, and
@@ -669,6 +690,7 @@ impl Reframe {
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
+            epi: super::band::Table::REST,
         };
         block.crossover = block.afforded();
         block
@@ -690,6 +712,19 @@ impl Reframe {
     /// The table this map is drawing with.
     pub fn table(&self) -> super::band::Table {
         self.table
+    }
+
+    /// **RESEARCH** (`KJERAG_EPI_TERM`): the same map with an across-seam term
+    /// on it ([`super::seam::epi_term`]). A step of its own for
+    /// [`Self::with_table`]'s reason, and one nothing in a shipped path calls.
+    pub fn with_epi(mut self, epi: super::band::Table) -> Self {
+        self.epi = epi;
+        self
+    }
+
+    /// The across-seam term this map is drawing with.
+    pub fn epi(&self) -> super::band::Table {
+        self.epi
     }
 
     /// How wide this camera can hand the picture over, in radians: what
@@ -740,6 +775,7 @@ impl Reframe {
             _pad: [0.0; 3],
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
+            epi: super::band::Table::REST,
         }
     }
 
@@ -850,8 +886,9 @@ impl Reframe {
             // and it is applied over the whole picture rather than across the
             // handover. See [`Self::bent`].
             let turn = f32::from(u8::from(lens == 1));
-            let bent =
-                std::array::from_fn(|c| view_ray[c] + carry * bend.epi[c] + turn * bend.along[c]);
+            let bent = std::array::from_fn(|c| {
+                view_ray[c] + carry * bend.epi[c] + turn * (bend.along[c] + bend.still[c])
+            });
             landings[lens] = self.project(lens, bent);
             if lens < self.lens_count as usize {
                 weights[lens] = claim(landings[lens], share);
@@ -1080,9 +1117,25 @@ impl Reframe {
         // the table has the pass's own five terms taken out of it so neither
         // of them corrects what the other already did.
         let along = (reading.along + self.table.at(body[0] / reach, body[1] / reach)) * reach;
+        // The research term, on the across-seam axis and at the epipolar scale,
+        // and NOT shared across the handover: the disagreement the band reads
+        // is carried by one displacement of lens 1's whole picture instead of
+        // by a ramp across the corridor, which is the one thing about it that
+        // is different from what the band already does. It cannot fold for the
+        // along-seam term's reason read one axis over: its displacement is
+        // across the seam and its gradient is along it, so the Jacobian it
+        // adds is off-diagonal and its determinant is exactly 1.
+        //
+        // [`ACROSS_SEAM`] and NOT `at.epi`, which is the baseline's own line
+        // and up to 3.6 degrees off it: what this term carries was measured
+        // along the seam circle's normal (`seam::Where::across`) and applying
+        // it a few degrees round would put a sixteenth of it on the along-seam
+        // axis, which is the size of the whole leftover that axis has.
+        let still = self.epi.at(body[0] / reach, body[1] / reach) * norm3(view_ray);
         Bend {
             epi: self.out(at.epi, epi),
             along: self.out(at.perp, along),
+            still: self.out(ACROSS_SEAM, still),
         }
     }
 
@@ -1111,7 +1164,7 @@ impl Reframe {
     /// The ray back unchanged on lens 0, on a map with no table, and straight
     /// down a lens's own axis, where there is no azimuth to look one up at.
     pub fn tabled(&self, lens: usize, view_ray: [f32; 3]) -> [f32; 3] {
-        if lens != 1 || self.table.is_rest() {
+        if lens != 1 || (self.table.is_rest() && self.epi.is_rest()) {
             return view_ray;
         }
         let Some(at) = self.seam_at(view_ray) else {
@@ -1119,11 +1172,10 @@ impl Reframe {
         };
         let body = self.body_ray(view_ray);
         let reach = body[0].hypot(body[1]);
-        let along = self.out(
-            at.perp,
-            self.table.at(body[0] / reach, body[1] / reach) * reach,
-        );
-        std::array::from_fn(|axis| view_ray[axis] + along[axis])
+        let (cos, sin) = (body[0] / reach, body[1] / reach);
+        let along = self.out(at.perp, self.table.at(cos, sin) * reach);
+        let still = self.out(ACROSS_SEAM, self.epi.at(cos, sin) * norm3(view_ray));
+        std::array::from_fn(|axis| view_ray[axis] + along[axis] + still[axis])
     }
 
     /// How far a ray is off one lens's axis, as an unnormalized cosine: one
@@ -1928,6 +1980,11 @@ struct Reframe {
   // by `table_at`, which the band's own half declares because the wrapping is
   // written in `AZIMUTHS` and that name is the band's.
   table: array<vec4<f32>, TABLE_LANES>,
+  // RESEARCH (`KJERAG_EPI_TERM`): what the two lenses disagree by ACROSS the
+  // seam at each direction under the pose being drawn, in radians, four to a
+  // lane. All zero unless the toggle is on. Rust twin: `Reframe::epi`. Read by
+  // `epi_at`, beside `table_at` and for the same reason.
+  epi: array<vec4<f32>, TABLE_LANES>,
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
@@ -4102,7 +4159,10 @@ pub(crate) mod tests {
         // directions after them (stage 9).
         let table = super::super::band::AZIMUTHS / 4 * 16;
         assert_eq!(std::mem::size_of::<super::super::band::Table>(), table);
-        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + table);
+        // Twice the table: the along-seam one and the research across-seam one
+        // beside it, which WGSL lays out back to back because both are arrays
+        // of `vec4` and the first is a whole number of them.
+        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + 2 * table);
         // The offset, not arithmetic that cannot fail: WGSL starts the table
         // at a multiple of sixteen and `repr(C)` does not have to, and
         // `min_binding_size` checks the block's size rather than any offset
@@ -4110,6 +4170,8 @@ pub(crate) mod tests {
         // picture rather than refuse a pipeline.
         assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
         assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
+        assert_eq!(std::mem::offset_of!(Reframe, epi) % 16, 0);
+        assert_eq!(std::mem::offset_of!(Reframe, epi), 288 + 48 + 16 + table);
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {
