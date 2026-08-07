@@ -579,6 +579,35 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-07 **An acceptance line names the pose instead of copying it**
+  (`seam=pool`, docs/research/reference-views.md). Three acceptance commands -
+  the shimmer line, the May-01 crossing pair, and the `--bin step` block under
+  seam-two-axis's "How to run the two instruments" - carried
+  `seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`. That string is
+  the knob-by-knob **median** of the owner's five-sample pool and no member of
+  it: roll and cx off one fit, yaw off a second, pitch and cy off a third. It is
+  the combination `SeamPool::answer` was changed to stop shipping on 2026-08-05,
+  so **those three commands ran a pose the app had not drawn for two days**;
+  every acceptance line written since then names the drawn one. The pose it
+  draws is
+  `roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91`, confirmed both by
+  `config`'s own fixture test and by a `--bin reframe seam=pool` run on the
+  owner's Jul-14 capture.
+
+  The durable half is `seam=pool`, which every instrument that takes a `seam=`
+  now takes: it reads this box's saved state through the app's own reader and
+  applies the app's own `SeamPool::answer`, so a line written with it cannot go
+  stale against the app at all. It refuses loudly rather than falling back when
+  the pool holds nothing for that camera. That needed one new edge in the
+  workspace, `spike -> app` (docs/ARCHITECTURE.md), because the alternative was
+  a second copy of the pool's format and rule in the instruments, which is the
+  shape of the defect itself. Six instruments shared one `enum Seam` in the
+  same change; there had been six copies of it and two of the knob parser.
+
+  **The recorded readings on those three lines were measured through the old
+  string and have not been re-read at the drawn pose.** They stay, flagged in
+  place. Re-reading them is a job of its own.
+
 - 2026-08-06 **The reference registry is re-derived into the world-fixed frame,
   and the seam ladder is re-baselined there** (`--bin carried`,
   docs/research/reference-views.md). Fourteen `lock=1` lines, one correction

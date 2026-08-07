@@ -456,12 +456,22 @@ cargo run --release -p kjerag-spike --bin step -- <file.insv> ... off=1
 
 # against a named calibration path rather than the config's
 cargo run --release -p kjerag-spike --bin step -- <file.insv> ... seam=factory
+cargo run --release -p kjerag-spike --bin step -- <file.insv> ... seam=pool
 cargo run --release -p kjerag-spike --bin step -- <file.insv> ... \
-  seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91
+  seam=roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91
 
 # the binned trace as a table, for reading a terrain rather than a number
 cargo run --release -p kjerag-spike --bin step -- <file.insv> ... trace=1
 ```
+
+**That `seam=` was wrong too, and was corrected on 2026-08-07.** It said
+`roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`, which is the
+knob-by-knob median of the owner's pool and no member of it: precisely the
+combination section 4 records `SeamPool::answer` being changed to stop shipping
+on 2026-08-05. The string above is the pose the app draws, and `seam=pool` is
+the same pose asked for by name rather than copied, which is what a command
+meant to stay true should use (docs/research/reference-views.md, the header).
+Nothing in this section has been re-read at it.
 
 **That `yaw` is from before 2026-08-06 and points somewhere else now.** The lock
 became world-fixed that day, so the frame a `lock=1` yaw is measured in no longer

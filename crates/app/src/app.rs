@@ -406,7 +406,7 @@ impl cosmic::Application for App {
     type Flags = Flags;
     type Message = Message;
 
-    const APP_ID: &'static str = "dev.harding.Kjerag";
+    const APP_ID: &'static str = crate::APP_ID;
 
     fn core(&self) -> &Core {
         &self.core

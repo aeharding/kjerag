@@ -56,7 +56,7 @@ use kjerag_render::Cue;
 use kjerag_render::{
     AZIMUTHS, Camera, Cell, Horizon, Reframe, Sampling, Scene, ScenePipeline, Size,
 };
-use kjerag_spike::{FORMAT, Gpu, Picture, Render, seam_fit};
+use kjerag_spike::{FORMAT, Gpu, Picture, Render, Seam};
 
 /// How many view pixels one degree is at the width the seam residuals are
 /// quoted in: 1920 across 90 degrees, at the centre of a rectilinear view
@@ -1118,32 +1118,6 @@ fn gradient(luma: &[f32], past: &[f64], width: usize, band: (f64, f64)) -> (f64,
 
 // ------------------------------------------------------------ options
 
-/// Which of the app's three seam paths the band is read through, and the same
-/// three words `--bin step` uses.
-///
-/// It is an argument because it has to be: the band's readings and a step
-/// measured on the picture are only comparable when both are taken through the
-/// same calibration, and until stage 6 this instrument always fitted the file
-/// while `--bin seam mode=residual` always took the factory numbers, so the two
-/// were read side by side across two different calibration paths
-/// (docs/research/seam-two-axis.md).
-#[derive(Clone)]
-enum Seam {
-    Factory,
-    File,
-    Stored(kjerag_render::SeamFit),
-}
-
-impl Seam {
-    fn hold(&self, scene: &Scene) {
-        match self {
-            Self::Factory => println!("seam:   factory calibration, no correction"),
-            Self::File => scene.fit_seam(true),
-            Self::Stored(fit) => scene.use_seam(*fit),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Options {
     input: PathBuf,
@@ -1167,6 +1141,13 @@ struct Options {
     /// pixels of the rendered view.
     region: [u32; 4],
     /// Which calibration the band is read through.
+    ///
+    /// It is an argument because it has to be: the band's readings and a step
+    /// measured on the picture are only comparable when both are taken through
+    /// the same calibration, and until stage 6 this instrument always fitted
+    /// the file while `--bin seam mode=residual` always took the factory
+    /// numbers, so the two were read side by side across two different
+    /// calibration paths (docs/research/seam-two-axis.md).
     seam: Seam,
 }
 
@@ -1189,6 +1170,7 @@ impl Options {
             region: [0, 0, 0, 0],
             seam: Seam::File,
         };
+        let mut seam = String::from("file");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
@@ -1213,13 +1195,7 @@ impl Options {
                 Some(("off", value)) => options.off = value.parse::<u32>()? != 0,
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("save", value)) => options.save = Some(PathBuf::from(value)),
-                Some(("seam", value)) => {
-                    options.seam = match value {
-                        "factory" => Seam::Factory,
-                        "file" => Seam::File,
-                        _ => Seam::Stored(seam_fit(value)?),
-                    }
-                }
+                Some(("seam", value)) => seam = value.to_string(),
                 Some(("box", value)) => {
                     let mut numbers = value.split(',').map(str::parse::<u32>);
                     let mut next = || numbers.next().transpose();
@@ -1236,6 +1212,11 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
+        // Deferred out of the loop because `seam=pool` is resolved against the
+        // file and the file may be named anywhere on the line, but resolved
+        // before the rest of the checks so a bad `seam=` is still the first
+        // thing a bad line is told about.
+        options.seam = Seam::parse(&seam, &options.input)?;
         Ok(options)
     }
 
@@ -1271,4 +1252,4 @@ impl Options {
 const USAGE: &str = "usage: band <file.insv> [mode=field|sequence|render] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
      [out=dir] [save=state.txt] [box=x,y,w,h] \
-     [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9]";
+     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";

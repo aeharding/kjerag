@@ -1581,7 +1581,22 @@ impl Options {
                 Some(("gain", value)) => options.gain = Some(value.parse()?),
                 Some(("patches", value)) => options.patches = value.parse()?,
                 Some(("keep", value)) => options.keep = value.parse()?,
-                Some(("seam", value)) => options.fit = value != "factory",
+                // Two paths only, and anything else is refused rather than
+                // read as one of them: `value != "factory"` took `seam=pool`
+                // and every typo for `file` and drew a pose nobody asked for.
+                Some(("seam", value)) => {
+                    options.fit = match value {
+                        "factory" => false,
+                        "file" => true,
+                        _ => {
+                            return Err(format!(
+                                "this instrument fits the file or leaves the factory \
+                                 calibration alone: seam=file or seam=factory, not {value}"
+                            )
+                            .into());
+                        }
+                    }
+                }
                 Some(("verbose", value)) => options.verbose = value.parse::<u32>()? != 0,
                 Some(("yaw", value)) => options.yaw = value.parse()?,
                 Some(("pitch", value)) => options.pitch = value.parse()?,
@@ -1629,5 +1644,5 @@ impl Options {
 }
 
 const USAGE: &str = "usage: expose <file.insv> [mode=field|annulus|render|trace] [from=seconds] \
-     [count=frames] [places=n] [gain=ln] [patches=n] [keep=r] [seam=factory] [verbose=1] [yaw=deg] [pitch=deg] \
+     [count=frames] [places=n] [gain=ln] [patches=n] [keep=r] [seam=file|factory] [verbose=1] [yaw=deg] [pitch=deg] \
      [fov=deg] [size=px] [lock=0] [out=dir] [tag=name]";

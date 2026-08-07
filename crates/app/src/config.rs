@@ -336,8 +336,7 @@ fn middle_of(fits: &[SeamFit]) -> Option<SeamFit> {
 pub struct ConfigState {
     pub recent_files: VecDeque<PathBuf>,
     /// What each camera's seam has been measured to be off by, under
-    /// [`CalibrationSet::camera_key`](kjerag_meta::CalibrationSet::camera_key)
-    /// in hex.
+    /// `CalibrationSet::camera_key` (`crates/meta/src/calibration.rs`) in hex.
     ///
     /// **State rather than config**, which is the same call cosmic-player
     /// makes for its recent files (docs/UI.md, "Persistence"): this is a
@@ -417,10 +416,7 @@ impl Stored {
     pub fn load(app_id: &str) -> Self {
         let (config_handler, config) =
             read("config", cosmic_config::Config::new(app_id, CONFIG_VERSION));
-        let (state_handler, state) = read(
-            "saved state",
-            cosmic_config::Config::new_state(app_id, CONFIG_VERSION),
-        );
+        let (state_handler, state) = saved_state(app_id);
         Self {
             config,
             state,
@@ -436,6 +432,25 @@ impl Stored {
     pub fn write_state(&self) {
         write("saved state", &self.state, self.state_handler.as_ref());
     }
+}
+
+/// What the app noticed, on its own: the saved state and the handler that
+/// writes it back.
+fn saved_state(app_id: &str) -> (Option<cosmic_config::Config>, ConfigState) {
+    read(
+        "saved state",
+        cosmic_config::Config::new_state(app_id, CONFIG_VERSION),
+    )
+}
+
+/// The saved state read-only, which is what a headless instrument drawing with
+/// `seam=pool` reads and all of what it reads (`crates/spike/src/seam.rs`).
+///
+/// The config entry beside it is the pilot's own preferences and none of an
+/// instrument's business, and this returns no handler, so nothing that calls
+/// it can write the pool back.
+pub fn state(app_id: &str) -> ConfigState {
+    saved_state(app_id).1
 }
 
 /// One entry, or the default if it is unreadable. A half-readable entry keeps
@@ -688,6 +703,13 @@ mod tests {
     /// at the end: the duplicates weight the sums and the answer is the same
     /// fit either way.
     ///
+    /// **The numbers are his `seam_pool` file to every digit it stores**, and
+    /// `crates/spike/src/seam.rs` holds the same five for the same reason at
+    /// the other end of `seam=pool`. Two copies because the crates cannot
+    /// share a `#[cfg(test)]` fixture and the app is not going to ship one;
+    /// they are kept identical, and the string asserted below is what pins
+    /// them together, because it is the string the registry quoted.
+    ///
     /// Re-read off the pixels of six of his flights, at the three places in
     /// each file the app's own fit reads, that combination leaves 0.28 to 0.49
     /// deg along the seam where the third fit leaves 0.20 to 0.41, and it is
@@ -698,34 +720,39 @@ mod tests {
         let camera = 0xd8a3_9338_9b7b_8639;
         let fits = [
             SeamFit {
-                roll_deg: 0.577,
-                yaw_deg: -1.694,
-                pitch_deg: -0.796,
-                cx_px: -9.53,
-                cy_px: -5.41,
+                roll_deg: 0.5770177572311984,
+                yaw_deg: -1.693547826643539,
+                pitch_deg: -0.796449725529272,
+                cx_px: -9.531358691231077,
+                cy_px: -5.414553495776632,
             },
             SeamFit {
-                roll_deg: 0.459,
-                yaw_deg: -2.077,
-                pitch_deg: -2.219,
-                cx_px: -14.79,
-                cy_px: -20.66,
+                roll_deg: 0.4592518809185011,
+                yaw_deg: -2.0772194092771397,
+                pitch_deg: -2.219459668631724,
+                cx_px: -14.786100683560385,
+                cy_px: -20.659845193073906,
             },
             SeamFit {
-                roll_deg: 0.795,
-                yaw_deg: -2.310,
-                pitch_deg: -0.936,
-                cx_px: -3.28,
-                cy_px: -11.91,
+                roll_deg: 0.7954311295817457,
+                yaw_deg: -2.309572216062777,
+                pitch_deg: -0.9358779752048013,
+                cx_px: -3.2814366126974686,
+                cy_px: -11.91227998928906,
             },
         ];
-        for fit in fits {
+        let reading = [
+            (27, 0.7979799684676536),
+            (12, 0.760502617023373),
+            (41, 0.49833332566304156),
+        ];
+        for (fit, (patches, residual_deg)) in fits.into_iter().zip(reading) {
             assert!(state.harvest(
                 camera,
                 Harvest {
                     fit,
-                    patches: 30,
-                    residual_deg: 0.6,
+                    patches,
+                    residual_deg,
                     along: None,
                 },
             ));
@@ -741,19 +768,42 @@ mod tests {
         assert!(fits.contains(&answer), "{answer:?} is nobody's fit");
         assert_eq!(answer, fits[2], "the pool agrees with the third fit most");
 
-        for fit in [fits[0], fits[2]] {
+        for (index, (patches, residual_deg)) in [(0, reading[0]), (2, reading[2])] {
             assert!(state.harvest(
                 camera,
                 Harvest {
-                    fit,
-                    patches: 30,
-                    residual_deg: 0.6,
+                    fit: fits[index],
+                    patches,
+                    residual_deg,
                     along: None,
                 },
             ));
         }
         assert_eq!(state.seam_pooled(camera), 5);
         assert_eq!(state.seam(camera), Some(fits[2]), "the owner's own pool");
+
+        // The string two acceptance lines and four copies of them quoted
+        // between 2026-08-05 and 2026-08-07, written out of this pool by the
+        // rule that stopped shipping. It is here so that the claim the
+        // registry now makes about it is checked and not asserted.
+        let five = knobwise_median(&state.seam_pool[&camera_name(camera)]);
+        assert_eq!(
+            knobs(five),
+            "roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91",
+        );
+        assert_eq!(
+            knobs(state.seam(camera).unwrap()),
+            "roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91",
+        );
+    }
+
+    /// A fit as a `seam=` argument spells one, which is the form the registry
+    /// and the instruments both carry it in.
+    fn knobs(fit: SeamFit) -> String {
+        format!(
+            "roll:{:.3},yaw:{:.3},pitch:{:.3},cx:{:.2},cy:{:.2}",
+            fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
+        )
     }
 
     /// A capture the fit cannot help is not pooled at all. The deck capture is

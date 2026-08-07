@@ -16,6 +16,10 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+# The shell, which the instruments depend on for one thing: the saved seam
+# pool and the rule that answers off it, so `seam=pool` draws what the app
+# draws rather than what a second reader of that file would think it says.
+kjerag = { path = "crates/app" }
 kjerag-media = { path = "crates/media" }
 kjerag-meta = { path = "crates/meta" }
 kjerag-render = { path = "crates/render" }

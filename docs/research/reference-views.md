@@ -10,6 +10,29 @@ expands a tilde, which makes such a paste a silent no-op (issue #157).
 Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 
+**A `seam=` on an acceptance line is `SeamPool::answer` over the pool this box held on the line's
+own date, and is never a knob-by-knob median of that pool.** The five knobs trade against each
+other inside one fit, so a middle taken knob by knob is a pose no capture ever asked for, and the
+app stopped drawing one on 2026-08-05 (docs/research/seam-two-axis.md 4). Two lines here went on
+quoting one until 2026-08-07, and so did four copies of them: the `--bin step` block in
+seam-two-axis and the doc headers of `crossing`, `shear` and `step`. That is what this rule is
+written down for.
+**Write new lines with `seam=pool`**, which reads this box's own saved state at run time and so
+cannot go stale against the app at all. Every instrument that takes a stored fit takes it: `band`,
+`crossing`, `reframe`, `shear`, `step` and `table` as `seam=pool`, and `proof` as `before=` and
+`after=`. Each prints the five knobs it applied, which is also how a literal string is re-derived
+when one is wanted:
+
+```sh
+cargo run --release -p kjerag-spike --bin reframe -- <file.insv> seam=pool size=256
+# seam:   roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91
+```
+
+Existing lines keep the literal they were measured through, with its date, because a reading is
+only a reading at the pose it was taken at. A literal that turns out not to be the pose the app
+drew is a defect in the line and is corrected in place, with the old string quoted and the
+readings flagged.
+
 **Every `lock=1` yaw below was re-derived on 2026-08-06, and every line says what it used to be.**
 The yaw in one of these lines is measured in the stabilized frame, and the owner's ruling that day
 made that frame world-fixed (#165): its zero used to follow the aircraft's slow heading and is now
@@ -49,7 +72,8 @@ caveat in the Motion section, which is the same trap at a smaller size.
   picture's. **The world-fixed lock did not stop that sweep and made it bigger**: the same run on
   67a4bcf at the old aim reads 329 px end to end and 483 of travel, because the body now turns
   under a parked view instead of carrying it round. The acceptance command is that
-  line plus `frames=90 warm=6.0 seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
+  line plus `frames=90 warm=6.0 seam=pool`, which on the owner's box on 2026-08-07 is
+  `seam=roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91`,
   and the `seam=` is not optional: fitted from the file instead, the same view reads 0.028 deg
   of total displacement at -150 px rather than 0.340, because what the band applies is what the
   calibration left it. **Two columns and they are not the same number**: `size` is the whole
@@ -84,6 +108,20 @@ caveat in the Motion section, which is the same trap at a smaller size.
   `+0` the usable step pairs go 71 to 89 and at `+60` 30 to 89, because fewer frames are refused
   for a seam past `TILT_LIMIT`; `+150` goes the other way, 83 to 76. That is the real result and
   it is a yield, not a floor.
+  CAVEAT, THE POSE, AND IT IS NOT A SMALL ONE (2026-08-07). This line said
+  `seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91` until today. That string is the
+  knob-by-knob median of the owner's five-sample pool and is no member of it - roll and cx off one
+  fit, yaw off a second, pitch and cy off a third - which is exactly the combination
+  `SeamPool::answer` was changed to stop shipping on 2026-08-05 (seam-two-axis 4). **The app has
+  not drawn it since.** How far apart the two poses put the picture, re-derived on #168's review by
+  sweeping `seam::mapped` and `seam::moved` round the ring over this file's own two lenses under
+  each pose: **0.397 deg peak to peak along the seam and 0.290 across**, the along figure being
+  12.4 source px. That is larger than several of the numbers this line reports. The first audit
+  put the same two at 0.394 and 0.294 and also quoted 4.9 source px across, which the re-derivation
+  could not reproduce by any obvious reduction; the across figure is left in degrees for that
+  reason. **Every reading above was measured through the old string and none has been re-read at
+  the drawn pose.** They stand as a record of what was measured, not as a claim about what the app
+  draws today; re-reading them is a job of its own.
   CAVEAT, THE HORIZON: everything above except the null, the plant and the band's own state is a
   reading about where the seam lands in THIS view, and under `lock=1` that is decided by the
   orientation track. #158 reseeded it and moved the seam 23 to 45 px down this window, a mean of
@@ -237,7 +275,8 @@ caveat in the Motion section, which is the same trap at a smaller size.
   horizon on the other side. Owner: "not blending - this is a seam mismatch issue." The cleanest
   demonstration yet that a global field fits one crossing at the other's expense.
   STATUS 2026-08-06, and the contrast is intact under the world-fixed lock. `--bin crossing` at
-  both re-derived views, `bins=180 seam=roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`:
+  both re-derived views, `bins=180 seam=pool`, which on the owner's box on 2026-08-07 is
+  `seam=roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91`:
   GOOD reads an epipolar median of -3.65 source px (magnitude 4.61, spread 2.20) over 19 accepted
   sites of 37, BAD -13.37 (magnitude 13.37, spread 1.91) over 37 of 41. The same views on 67a4bcf
   at the old yaws read -3.65 and -13.23, over 19 of 37 and 38 of 41, so **the lock change moved
@@ -245,6 +284,12 @@ caveat in the Motion section, which is the same trap at a smaller size.
   0.06 view px at a thousandth of a degree of dither either side of the change, which is this
   instrument's floor and not an improvement on it. The along-seam medians agree the same way:
   -6.48 against -6.47 at GOOD, -6.81 against -6.95 at BAD.
+  CAVEAT, THE POSE (2026-08-07): the `seam=` above was
+  `roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91` until today, which is the knob-by-knob
+  median of the pool and not the pose the app has drawn since 2026-08-05. The four medians on this
+  line were read through the old string and have not been re-read at the drawn pose. The verdict
+  they support is a contrast between two views measured the same way, which a shared pose change
+  moves both ends of; the numbers themselves are not current.
 
 ## Calibration starved (issue #130, X2) - fitted on fix/130-x2-fit, owner test pending
 - 2026-08-01 `VID_20251018_191318_00_002.insv time=77.978 yaw=5.62 pitch=-3.41 fov=70.80 lock=1`
