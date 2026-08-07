@@ -3500,3 +3500,33 @@ release lands on the exact frame every time either way.
   knobs) with a pooled static reading of six flights, and applies the sum to
   lens 1's whole picture before projection, with the band's own measurement pass
   reading through it. `Reframe::epi` carries it to both halves of the shader.
+
+  **What it measures.** Nine crossings, one per flight plus the registry's
+  paired May-01 GOOD and BAD, the shimmer view, a cloud-top crossing on the
+  July-25 flight and a ONE X2 ground capture, each read with the term off and
+  with the pooled term on, both arms at the pose the app draws. The delivered
+  swing `E` falls at six of nine and **rises at two**: May-01 GOOD **1.98 to
+  11.32 view px** and April **1.72 to 3.61**, while BAD improves only 19.94 to
+  14.70.
+
+  **The verdict is the trade.** The acceptance battery's first rule is improve
+  both May crossings without trading one for the other; this improves BAD by a
+  quarter and costs GOOD five and a half times its whole reading on the same
+  instant of the same file. The pooled static form is refused, and the reason is
+  one number: the six flights disagree at a given azimuth by **0.597 deg at the
+  median and 1.531 at worst** against a pooled table whose own amplitude is
+  **0.229 rms**.
+
+  **What is not refused is the mechanism.** The sign is right at every crossing
+  but one, the band does not fight the term (the same 96 of 128 directions carry
+  evidence either way), and where the number happens to be near the flight's own
+  answer the ramp goes to nothing: **July-14 reads 8.99 to 0.95 view px, both
+  sides, every line describing its own points**. An across-seam displacement of
+  lens 1's whole picture is the right SHAPE for this defect; the pooled number
+  put into it is wrong.
+
+  **Two things worth carrying forward.** A term larger than the band's own
+  epipolar search window (-1.2 to +2.6 deg) takes the band's eyes out - the
+  `pose` arm drops it from 96 of 128 directions with evidence to 64 - and
+  nothing in the code enforces that bound. And no eye has seen any of this:
+  there was no blind A/B, because there is no applied claim to gate.
