@@ -719,8 +719,8 @@ live, no keyframe UI ever.
   median moves 0.02 to 0.15 view px against a dither sensitivity of 0.01 to
   0.17: unmoved. A field off one other flight alone reaches 0.97 and 1.09,
   which is the density story again. At the shimmer view `--bin shear` reads the
-  band's own applied along-seam displacement falling from 0.348 to 0.009 deg at
-  `-150` px and its `+0` step rms from 0.0689 to 0.0130: **the correction moved
+  band's own applied along-seam displacement falling from 0.320 to 0.029 deg at
+  `-150` px and its `+0` step rms from 0.0690 to 0.0167: **the correction moved
   out of the per-session fit and into the calibration**, which is what carrying
   it between sessions means. `--bin colour`'s interior coherence over the whole
   support reads 0.01 percent against main's 0.03 with nothing regressed, and
@@ -736,7 +736,7 @@ live, no keyframe UI ever.
   refills it over the next five files, which is the path a new camera already
   takes.
 
-  **Cost.** `--bin playback` at 2560x1440, three runs: 7.95 / 8.01 / 7.99 ms
+  **Cost.** `--bin playback` at 2560x1440, three runs: 7.99 / 7.96 / 7.98 ms
   per redraw, against the 8.10 / 8.10 / 8.12 #164 recorded on `main` and the
   8.14 / 8.12 / 8.15 it recorded with the table mechanism at rest. The fragment
   shader is unchanged; what is new is one uniform load and one comparison per

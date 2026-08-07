@@ -716,10 +716,10 @@ the preflight branch read is density: that branch's field was fitted on 1200
 moments of the Jul-14 flight and this one on 48 frames.
 
 **The shear anchor, and the plateau does change.** At the shimmer view the
-band's own applied along-seam displacement falls from 0.3476 to 0.0093 degrees
-at `-150` px and from 0.3443 to 0.0078 at `+0`, and its `+0` step rms falls
-0.0689 to 0.0130 with the worst single step 0.4585 to 0.0551. That is the
-expected direction and it is the point: `--bin shear` measures what the **band**
+band's own applied along-seam displacement falls from 0.3204 to 0.0286 degrees
+at `-150` px and from 0.3189 to 0.0232 at `+0`, and its `+0` step rms falls
+0.0690 to 0.0167 with the worst single step 0.4475 to 0.0565. **Expected: the
+plateau falls by most of itself.** That is the point: `--bin shear` measures what the **band**
 applies, and the correction has moved out of the per-session fit and into the
 calibration, where it does not have to be re-derived from this session's content
 and cannot wobble with it.
@@ -737,8 +737,8 @@ step is dominated by its epipolar half, and its far-side line fit reads an rms
 of 27 px in both arms, which is the condition the registry entry warns about
 before any step is quoted from there.
 
-**Cost.** `--bin playback` at 2560x1440 on a quiet box, three runs: 7.95 / 8.01
-/ 7.99 ms per redraw, against the 8.10 / 8.10 / 8.12 recorded on `main` in 3 and
+**Cost.** `--bin playback` at 2560x1440 on a quiet box, three runs: 7.99 / 7.96
+/ 7.98 ms per redraw, against the 8.10 / 8.10 / 8.12 recorded on `main` in 3 and
 the 8.14 / 8.12 / 8.15 recorded with the table mechanism at rest. The fragment
 shader is byte for byte what it was; what is new is one uniform load and one
 comparison per workgroup, in a pass that already scores 171 candidates over 3120
@@ -762,7 +762,33 @@ unread, which is the call the previous discard made when the single-entry
 pool refills over the next few files, which is the path a camera the pool has
 never seen already takes.
 
-### 8.6 What section 8 did not answer
+### 8.6 What the headless harness caught, twice
+
+Worth recording because it is the whole justification for the recovery path in
+8.1 and neither reading came from an instrument built to look for it.
+
+The claim under test was the harness's own `a paused window holds its picture`
+and the toast check beside it, which compares two captures of a paused window
+and requires everything but the toast to be the same bytes.
+
+- **A refusal with no way out.** The seam correction walks in over a second at a
+  cold start, and each direction is read once every `stride` frames, so two
+  consecutive readings of one direction can be a tenth of a degree apart because
+  the correction moved between them. Refused, such a direction keeps a stale
+  answer and gives up evidence at `TAU_FAR` - and exponential decay never
+  reaches the `off_conf <= 0` that would let it relearn. Its bend faded for ever
+  and the whole picture kept changing under a paused window: 716790 of 716800
+  pixels differed between two captures against 10996 on `main`.
+- **A limit cycle when the way out was one eased step.** Letting a direction
+  under `KEEP` take an *eased* step does not close a tenth of a degree, and
+  `off_conf` climbs back over `KEEP` in one update, so the direction refuses
+  again. The picture kept changing at a period of about two thirds of a second.
+
+The escape that works is `unread_along`'s own: the reading whole, in one step.
+`band::reads` is the rule as a function so both halves are pinned by
+`cargo test` rather than by a harness run.
+
+### 8.7 What section 8 did not answer
 
 - **Whether the field is worth more than ten readings an azimuth buys.** The
   ladder above is measured at 372 and 190 readings; the preflight branch's

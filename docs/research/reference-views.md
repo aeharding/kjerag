@@ -150,9 +150,9 @@ caveat in the Motion section, which is the same trap at a smaller size.
   stage 9's estimator owns and a width cannot reach.
   WHAT THE POOLED FIELD DOES TO THIS LINE (2026-08-06, stage9.md 8): with a five-term field fitted
   on the five flights that are not this one and composed with the same `seam=`, the `along deg`
-  column reads 0.0093 / 0.0078 / 0.0033 / 0.0018 at -150 / +0 / +60 / +150, against 0.3476 /
-  0.3443 / 0.0858 / 0.0028 with no field, and the `+0` step rms falls 0.0689 to 0.0130 with the
-  worst single step 0.4585 to 0.0551. **That is not the picture's correction shrinking, it is the
+  column reads 0.0286 / 0.0232 / 0.0085 / 0.0019 at -150 / +0 / +60 / +150, against 0.3204 /
+  0.3189 / 0.0791 / 0.0008 with no field, and the `+0` step rms falls 0.0690 to 0.0167 with the
+  worst single step 0.4475 to 0.0565. **That is not the picture's correction shrinking, it is the
   correction moving**: this instrument measures what the BAND applies, and the band now reads
   through the table and applies what the table still leaves. Read a plateau from this line only
   together with whatever table the run was given.
