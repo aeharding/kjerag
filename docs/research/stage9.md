@@ -1242,3 +1242,87 @@ this density. Nothing here separates those.
   aim. The band's state is warm at 6 seconds and the reading is deterministic
   (the BAD row reproduces to the hundredth of a view pixel across runs), but a
   crossing is not a flight.
+
+### 10.8 The delivered table
+
+`E` is the swing the corridor delivers across itself, in view pixels of the
+render the row was taken at, lens 1's side doubled (10.6). Every row is one
+moment on one flight at one aim, band live, warm at 6 seconds, at the drawn
+pose of 10.4, both arms sharing everything but the toggle. The reading is
+deterministic: the BAD row reproduces to the hundredth of a view pixel across
+separate runs of the whole sweep.
+
+`l0` and `l1` are the two sides' own contour intercepts with the rms of each
+line about its own points, because a row whose line does not describe its points
+is not quotable and the reader has to be able to see that.
+
+| crossing | E off | E on | | l0 off / on (rms) | l1 off / on (rms) |
+| --- | ---: | ---: | --- | --- | --- |
+| **May 01 BAD** | **19.94 px, 0.363 deg** | **14.70 px, 0.268** | **-26%** | -3.59 / -3.02 (10.3, 8.2) | -9.97 / -7.35 (1.7, 1.3) |
+| **May 01 GOOD** | **1.98 px, 0.031 deg** | **11.32 px, 0.179** | **+472%** | +1.99 / +2.46 (0.3, 0.4) | +0.99 / +5.66 (1.9, **4.2**) |
+| Apr 10 | 1.72 px, 0.018 deg | 3.61 px, 0.037 | **+110%** | +1.91 / +4.53 (0.3, 0.8) | +0.86 / +1.80 (1.4, **3.3**) |
+| May 26 | 1.73 px, 0.029 deg | 0.52 px, 0.009 | -70% | -0.66 / -0.02 (0.1, 0.0) | -0.86 / -0.26 (0.4, 0.1) |
+| Jul 14 | 8.99 px, 0.149 deg | 0.95 px, 0.016 | **-89%** | +3.63 / +0.27 (0.3, 0.1) | -4.50 / +0.48 (0.4, 0.2) |
+| Aug 02 | 1.66 px, 0.027 deg | 0.74 px, 0.012 | -55% | -0.73 / +0.19 (0.2, 0.5) | +0.83 / -0.37 (0.1, 0.1) |
+| Jul 14 shimmer | 5.47 px, 0.029 deg | 2.65 px, 0.014 | -52% | **-13.90 / -5.12** (2.0, 0.8) | +2.74 / +1.32 (**12.4**, **5.1**) |
+| Jul 25, cloud top | 10.85 px, 0.180 deg | 4.74 px, 0.078 | -56% | +8.20 / +4.93 (0.9, 0.5) | -5.43 / -2.37 (3.3, 1.7) |
+
+| **Oct 18, ONE X2** | 3.55 px, 0.059 deg | **3.55 px, 0.059** | **0%** | +0.83 / +0.83 (0.5, 0.5) | -1.78 / -1.78 (3.2, 3.2) |
+
+**The X2 row is a zero and it is the guard working.** Both arms produce the
+same CSV to the last digit, which means the composed term came out
+`Table::REST` on that camera and the two builds drew one picture. `epi_term`
+refuses a table whole rather than in part - whole support or nothing, the rule
+stage 9 wrote after stage 5 scalloped - and on the X2 either the sum exceeded
+`EPI_LIMIT_RAD` or a direction of the ring left a lens's picture. **Which of the
+two is not established here**, and nothing in the run says so out loud, which is
+a gap in the instrument rather than a result. What the row does establish is
+that no X4 Air table reached the X2's picture, which is the right outcome for a
+table measured on another camera and the wrong way to have got it.
+
+Bold rms is a line that does not describe its own points and a column that
+should not be quoted. Three rows carry one: BAD's lens 0 side at both arms
+(near content in that stretch, which is why the run windows it), GOOD's and
+April's lens 1 side **only with the term on**, and the shimmer view's lens 1
+side at both arms - that view is `fov=20`, where 4.8 degrees off the seam is
+most of the frame and the outer samples have nowhere to sit. At the shimmer
+view the quotable side is lens 0, and it reads **-13.90 to -5.12 view px, a 63
+percent fall**.
+
+### 10.10 The verdicts
+
+**(a) It does not collapse everywhere.** The bar was under about 4 view pixels,
+the GOOD crossing's own floor. Four of the six X4 Air crossings land there
+(May 26, Jul 14, Aug 02, and the shimmer view on its quotable side). **BAD does
+not**: 19.94 to 14.70 view pixels, a quarter of the way, and 0.268 degrees is
+still four times the GOOD crossing's own reading before anything was applied.
+
+**(b) It collapses unevenly, and on two crossings it makes the picture worse.**
+GOOD goes **1.98 to 11.32 view pixels** and April **1.72 to 3.61**, and on both
+the lens 1 line stops describing its own points at the same moment (rms 1.9 to
+4.2, and 1.4 to 3.3), which says the term has put a shape into that side that a
+straight ramp no longer fits.
+
+**And GOOD is the one that matters most, because of what it is paired with.**
+The acceptance battery's first rule is *improve both May crossings without
+trading one for the other; a field that fixes one at the other's expense is the
+defect moved rather than removed*. This term improves BAD by a quarter and
+costs GOOD five and a half times its whole reading, on **the same instant of the
+same file**. That is the trade the rule names, and it is refused on it alone.
+
+**(c) It fails on a flight that is one sixth of the table.** May-01 is not held
+out - it is one of the six captures the pooled table is built from - and the
+table still leaves three quarters of BAD's ramp in the picture and multiplies
+GOOD's. 10.12 is the reason in one number: the six flights disagree at a given
+azimuth by 0.597 degrees at the median and 1.531 at worst, against a pooled
+table whose own amplitude is 0.229 rms. **The pooled static form of this term is
+refused.**
+
+**What is NOT refused, and this matters for what comes next.** The mechanism
+works. The sign is right at every crossing but one, the term moves the delivered
+ramp by about what it carries, the band does not fight it (10.9), and where the
+term happens to be near the flight's own answer the ramp goes to nothing:
+**Jul 14 reads 8.99 to 0.95 view pixels, an 89 percent fall, on both sides, with
+every line describing its own points.** A across-seam displacement of lens 1's
+whole picture *is* the right shape for this defect. What is wrong is the number
+being put in it.
