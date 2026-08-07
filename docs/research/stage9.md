@@ -927,3 +927,126 @@ about before any step is quoted - and the ONE X2 view answers "no horizon
 fitted on both sides of the seam". So this is the delivered-domain evidence for
 the one thing this PR still applies, on the one flight that could carry it, and
 it is the half a difference metric could not have supplied.
+
+## 10. Across the seam: a research term, and what the delivered picture did with it
+
+**This section is a research result and nothing here ships.** `KJERAG_EPI_TERM`
+is off by default, the picture with it off is `main`'s byte for byte, and the
+verdict below is that the pooled form of the term is not the fix.
+
+### 10.1 The defect, and why a table on this axis is a different animal
+
+Everything above is about the **along-seam** axis, where a leftover is the
+camera by construction because no distance can reach it. Across the seam a
+leftover is the camera plus the scene, and the band answers it per frame per
+direction. That is why 6 called the across-seam axis untouched by design.
+
+What reopened it is what the band does with a reading it cannot remove. The
+epipolar bend is shared across the handover: `Reframe::blend_bent` gives each
+lens the OTHER one's weight times the disagreement, so the two lenses are one
+whole disparity apart everywhere in the corridor and the picture is right where
+the disagreement is parallax. Where the disagreement is a **pose error** the
+same arithmetic draws far content with a bend in it - zero at the corridor's
+edge, half the disagreement at the contour, and the other half the same way on
+the other lens. At the registry's BAD May-01 crossing that is a horizon drawn
+as a shallow S.
+
+`--bin epiramp` measures exactly that, in the delivered domain and nowhere
+else: the app's own path with the band live and warm, photographed twice at two
+handover widths, the far content correlated between them along the seam normal.
+The 0.1 degree render is the reference because each side of it is drawn by one
+lens with no ramp on it, so the lag between the two renders at one distance
+from the contour is what the handover put there and nothing else.
+
+### 10.2 What the term is
+
+`seam::epi_term` composes, per direction of the band's ring:
+
+- **the pose's own across-seam displacement**, `seam::moved`'s second component
+  between the factory calibration and the pose being drawn. Pure geometry from
+  the five knobs, no reading in it, and it is large: the fit is made to null the
+  along-seam axis and nothing in it asks what it does to the other one, which on
+  this camera reaches **2.5 degrees**.
+- **the pooled static reading**, `EPI_STILL_DEG`: what the six X4 Air flights
+  read across the seam under the factory calibration, trimmed per azimuth, from
+  `docs/research/epi/epi-leftovers-x4.csv` on `research/epi-study`. Pose
+  invariant, which is the only reason six flights' readings are six
+  measurements of one thing.
+
+Their sum is what the two lenses still disagree by under the drawn pose, and it
+is applied as a displacement of lens 1's **whole picture** across the seam,
+before projection, on the unwarped ray - one displacement instead of a ramp.
+The band's own measurement pass reads lens 1 through it, so what the band then
+fits and applies is what the term still leaves.
+
+**It cannot fold**, for the along-seam term's reason read one axis over: the
+displacement is across the seam and its gradient is along it, so the Jacobian it
+adds is off-diagonal and its determinant stays exactly 1
+(`the_across_seam_term_displaces_lens_one_across_the_seam_and_nowhere_else`).
+
+### 10.3 The corpus: one seam crossing per flight
+
+The two May-01 crossings are the registry's. The rest were derived for this
+measurement on `research/crossing-views`, at this build, by tracing the 50/50
+contour on a `fov=250` render and reading where it crosses elevation zero. The
+derivation recovers the registry's own May-01 pair to about a degree
+(-79.9 and +100.0 against -80.28 and +101.13), which is what validated it. Every
+`lock=1` yaw here is a per-build quantity - the world-fixed lock's zero is the
+heading the file opened on - so none of these lines may be copied to an older
+commit without `--bin carried`.
+
+| flight | line (`lock=1`) | what is at the seam |
+| --- | --- | --- |
+| May 01 GOOD | `time=50.117 yaw=-80.28 pitch=0.06 fov=55.69` | the registry's matched crossing |
+| May 01 BAD | `time=50.117 yaw=101.13 pitch=0.75 fov=62.79` | the registry's mismatched crossing |
+| Apr 10 | `time=45.112 yaw=-86.05 pitch=3.18 fov=38.28` | floodplain, meandering river, distant ridge; nothing near |
+| May 26 | `clip 2/… time=600.000 yaw=-96.74 pitch=0.00 fov=58.00` | ploughed field, distant treeline, sun 25 deg off the crossing |
+| Jul 14 | `time=600.000 yaw=156.90 pitch=0.00 fov=58.00` | treeline horizon over a wooded valley |
+| Jul 14 (shimmer) | `time=36.303 yaw=162.31 pitch=5.44 fov=20.00` | the registry's motion view, on the same flight |
+| Aug 02 | `clip 1/… time=600.000 yaw=135.58 pitch=0.00 fov=58.00` | corn rows to a treeline horizon; the tightest reading in the set |
+
+**Two captures are their own rows and are never pooled with the six.** The
+July-25 flight (`time=200.000 yaw=-127.45 pitch=0.00 fov=58.00`) is above a
+**solid undercast for its whole length** - 200, 600, 1000 and 1500 s all are -
+so its far content is a cloud top with the sun five degrees above the crossing,
+which is a different target class from a treeline. The October ONE X2
+(`time=270.000 yaw=-58.99 pitch=0.00 fov=58.00`) is a **different camera and a
+ground capture**: the far stretch is a ridge crest down to mid-field, grass at 3
+to 10 m crosses the same seam at the bottom of the frame, and the pooled static
+table this term carries was measured on the X4 Air and not on it. The
+registry's own X2 line is not a far-content crossing at all - the seam there
+cuts a person 20 m off and the wing on the sand.
+
+**One line the corpus refused.** April's registry pair has a mismatched half
+(`time=43.143 yaw=93.36`) that reads the same order of disagreement as BAD, and
+it is **not** usable as a far-field crossing: the prop cage and its netting
+cross the seam over the last quarter of the arc and the first third is
+low-contrast haze, leaving one narrow band of far content. `--bin step` fits no
+horizon on its far side (rms 94.91) and `--bin crossing` withholds its gate.
+
+**And one thing the corpus cannot do, which bears on the verdict.** The large
+disagreement the BAD crossing carries sits at body arc +40 to +70, and on this
+rig that half of the seam circle is where the pilot and the prop cage are. The
+only other crossing measured in that band is April's refused line, whose narrow
+far-content core reads the same order (-13.6 to -14.6 source px against BAD's
+-13.37). Every other flight's clean far-field crossing is elsewhere on the ring
+and reads between 0.06 and 5.87. So **"the other flights do not show the
+defect" and "the other flights do not sample the arc where the defect lives"
+are not separated by this corpus**, and no verdict below may be read as if they
+were.
+
+### 10.4 The calibration every row is taken at
+
+The pose the app **draws** and not the registry's literal. The X4 Air rows are
+all at the pool's own answer for camera `d8a393389b7b8639`,
+`roll:0.795 yaw:-2.310 pitch:-0.936 cx:-3.28 cy:-11.91`, which is also the pose
+the epi study's leftovers are quoted under. The registry's
+`roll:0.577 … cx:-9.53` is a knob median that nothing draws, and a first pass of
+this whole measurement taken at it has been discarded rather than reported.
+The X2 row is at its own camera's pooled answer,
+`roll:-2.426 yaw:1.114 pitch:2.562 cx:1.58 cy:-9.70`, **which is five identical
+samples of one capture** - one fit wearing a pool's clothes (issue #156's
+duplicate shape) - and its row says so.
+
+Both arms of every pair share that calibration. The toggle is the only
+difference between them.

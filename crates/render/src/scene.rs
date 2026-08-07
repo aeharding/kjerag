@@ -858,7 +858,8 @@ impl Scene {
                 false,
                 self.sampling.get(),
             )
-            .with_table(view.table),
+            .with_table(view.table)
+            .with_epi(view.epi),
         )
     }
 
@@ -926,6 +927,7 @@ impl Show {
             },
             lenses: self.lenses(),
             table: self.table.get(),
+            epi: self.corrected.epi(frames.size),
             frames,
         })
     }
@@ -1153,6 +1155,10 @@ pub struct ScenePrimitive {
 #[derive(Clone, Debug)]
 struct View {
     lenses: Arc<[Lens]>,
+    /// **RESEARCH** (`KJERAG_EPI_TERM`): what the two lenses disagree by across
+    /// the seam under the pose above, direction by direction.
+    /// [`Table::REST`] with the toggle off, which is every shipped run.
+    epi: Table,
     /// What the along-seam axis still disagrees by after the pose, direction
     /// by direction (issue #103, stage 9). Part of this camera's calibration
     /// and carried with it, like the lenses above.
@@ -1469,7 +1475,8 @@ impl ScenePipeline {
                 self.linearize(),
                 primitive.sampling,
             )
-            .with_table(view.table),
+            .with_table(view.table)
+            .with_epi(view.epi),
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),

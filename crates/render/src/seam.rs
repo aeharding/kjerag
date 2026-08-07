@@ -304,7 +304,7 @@ fn sample(
     step: f64,
 ) -> Grid {
     let mut taps = Vec::with_capacity(((2 * half.0 + 1) * (2 * half.1 + 1)) as usize);
-    let moved = lens == 1 && !reframe.table().is_rest();
+    let moved = lens == 1 && !(reframe.table().is_rest() && reframe.epi().is_rest());
     for i in -half.0..=half.0 {
         for j in -half.1..=half.1 {
             let (a, b) = (i as f64 * step, j as f64 * step);
@@ -1335,6 +1335,252 @@ fn pose_terms(fit: SeamFit, lenses: &[Lens], frame: Size) -> Option<[f64; 5]> {
     least_squares(&rows)?.params.try_into().ok()
 }
 
+// -------------------------------------------------- the research epi term
+
+/// Which arm of the across-seam experiment this run draws
+/// (`KJERAG_EPI_TERM`), and [`Self::Off`] unless the variable says otherwise.
+///
+/// **A research switch and not a setting** (AGENTS.md, zero-config playback):
+/// an environment variable, read once, written nowhere, no key and no menu
+/// item. It stages one question the way `KJERAG_HANDOVER_DEG` staged the
+/// handover width, and for the same reason - the two arms differ by a rebuild,
+/// so a blind session takes an evening rather than a day.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EpiArm {
+    /// Nothing at all: the picture `main` draws, byte for byte.
+    #[default]
+    Off,
+    /// The five knobs' own across-seam displacement and nothing measured.
+    Pose,
+    /// That plus the pooled static reading ([`EPI_STILL_DEG`]).
+    Full,
+}
+
+/// The name of the variable that picks the arm.
+const EPI_TERM: &str = "KJERAG_EPI_TERM";
+
+/// Which arm this process draws, read once.
+///
+/// A value that names no arm is a typo and takes [`EpiArm::Off`] with a line
+/// saying so: the arms differ in the picture, and a run that silently drew the
+/// wrong one would be a measurement of nothing.
+pub fn epi_arm() -> EpiArm {
+    static ARM: std::sync::OnceLock<EpiArm> = std::sync::OnceLock::new();
+    *ARM.get_or_init(|| {
+        let Ok(asked) = std::env::var(EPI_TERM) else {
+            return EpiArm::Off;
+        };
+        let arm = match asked.trim() {
+            "" | "off" => EpiArm::Off,
+            "pose" => EpiArm::Pose,
+            "full" => EpiArm::Full,
+            _ => {
+                eprintln!(
+                    "kjerag: {EPI_TERM}={asked} names no arm, so the across-seam research term \
+                     stays off. The arms are pose and full"
+                );
+                EpiArm::Off
+            }
+        };
+        if arm != EpiArm::Off {
+            println!(
+                "seam:   research across-seam term on, {EPI_TERM}={asked}: lens 1's whole picture \
+                 is displaced across the seam by what the two lenses disagree by at each \
+                 direction, and the band measures through it. Not a shipped path"
+            );
+        }
+        arm
+    })
+}
+
+/// What the six X4 Air flights read **across** the seam under the FACTORY
+/// calibration, pooled per azimuth, in degrees: `read_deg` of
+/// `docs/research/epi/epi-leftovers-x4.csv` on `research/epi-study`, trimmed
+/// (drop the extreme capture at each end, mean the rest), one entry per 5
+/// degrees from 0.
+///
+/// **Pose-invariant, which is the only reason a pooled number means anything
+/// here.** A capture's ring is read through the factory map on every flight, so
+/// six flights' `read_deg` are six measurements of one quantity; the pose is
+/// then added back per azimuth by [`epi_term`], deterministically, from
+/// whichever pose the picture is actually drawn with. That split is
+/// `--bin epi`'s own (`left = read + shift`) and it is what lets a table
+/// measured under one pose be applied under another.
+///
+/// **Three azimuths have no reading and are not measured**: 80, 90 and 95
+/// degrees, where no capture's ring correlated. They take the kernel's reach
+/// from their neighbours in [`epi_term`], which is interpolation and not
+/// measurement, and it is the one place in this table that is. They sit where
+/// the field crosses zero, which is why the alternative - a hole at zero, the
+/// rule stage 9 wrote after stage 5 scalloped - would put a step of two
+/// degrees nowhere the readings say there is one.
+///
+/// This is a **research** table. Nothing ships reading it; the only caller is
+/// [`epi_term`], which the env toggle gates.
+const EPI_STILL_DEG: [(f64, f64); 69] = [
+    (0.0, 2.42124),
+    (5.0, 2.36562),
+    (10.0, 2.32912),
+    (15.0, 2.26291),
+    (20.0, 2.19010),
+    (25.0, 2.09797),
+    (30.0, 2.02975),
+    (35.0, 1.94468),
+    (40.0, 1.78961),
+    (45.0, 1.63283),
+    (50.0, 1.74742),
+    (55.0, 1.63495),
+    (60.0, 1.07902),
+    (65.0, 1.57072),
+    (70.0, 1.14448),
+    (75.0, 0.98460),
+    (85.0, 0.76460),
+    (100.0, 0.25405),
+    (105.0, -1.17040),
+    (110.0, -1.35620),
+    (115.0, -1.55096),
+    (120.0, -1.27005),
+    (125.0, -1.36502),
+    (130.0, -1.33996),
+    (135.0, -1.84365),
+    (140.0, -2.07243),
+    (145.0, -2.15817),
+    (150.0, -2.22280),
+    (155.0, -2.37553),
+    (160.0, -2.43254),
+    (165.0, -2.42475),
+    (170.0, -2.50504),
+    (175.0, -2.52819),
+    (180.0, -2.54776),
+    (185.0, -2.50576),
+    (190.0, -2.49879),
+    (195.0, -2.42662),
+    (200.0, -2.33515),
+    (205.0, -2.23262),
+    (210.0, -2.12887),
+    (215.0, -2.04879),
+    (220.0, -2.00035),
+    (225.0, -1.82000),
+    (230.0, -1.72972),
+    (235.0, -1.49154),
+    (240.0, -1.31362),
+    (245.0, -1.10172),
+    (250.0, -0.91040),
+    (255.0, -0.69094),
+    (260.0, -0.55784),
+    (265.0, -0.27643),
+    (270.0, -0.12753),
+    (275.0, 0.19469),
+    (280.0, 0.37771),
+    (285.0, 0.66174),
+    (290.0, 0.79278),
+    (295.0, 0.98095),
+    (300.0, 1.17551),
+    (305.0, 1.36316),
+    (310.0, 1.52858),
+    (315.0, 1.58342),
+    (320.0, 1.82344),
+    (325.0, 1.97459),
+    (330.0, 2.12362),
+    (335.0, 2.22953),
+    (340.0, 2.30609),
+    (345.0, 2.35550),
+    (350.0, 2.41974),
+    (355.0, 2.42585),
+];
+
+/// How wide a kernel resamples [`EPI_STILL_DEG`] onto the band's ring, in
+/// degrees of azimuth. The along study measured 3 to 5 and chose nothing inside
+/// it; this is the middle of that and it is a research constant, not a fitted
+/// one.
+const EPI_SMOOTH_DEG: f64 = 4.0;
+
+/// [`EPI_STILL_DEG`] at one azimuth, Gaussian-weighted over the readings within
+/// three kernel widths of it.
+fn epi_still(phi_deg: f64) -> f64 {
+    let mut sum = 0.0;
+    let mut weight = 0.0;
+    for (at, value) in EPI_STILL_DEG {
+        let mut apart = (at - phi_deg).abs() % 360.0;
+        if apart > 180.0 {
+            apart = 360.0 - apart;
+        }
+        if apart > 3.0 * EPI_SMOOTH_DEG {
+            continue;
+        }
+        let w = (-0.5 * (apart / EPI_SMOOTH_DEG).powi(2)).exp();
+        sum += w * value;
+        weight += w;
+    }
+    match weight > 0.0 {
+        true => sum / weight,
+        false => 0.0,
+    }
+}
+
+/// **RESEARCH ONLY** (`KJERAG_EPI_TERM`): what the two lenses still disagree by
+/// **across** the seam at each of the band's directions, under the pose the
+/// picture is drawn with, in radians.
+///
+/// Two terms, and the split is the whole idea:
+///
+/// - the **pose's own across-seam displacement**, [`moved`]'s second component
+///   between the factory calibration and `fit`. Pure geometry from the five
+///   knobs, no reading in it, and it is the dominant one: the five-knob fit is
+///   made to null the along-seam axis and nothing in it asks what it does to
+///   the other one, which on this camera is up to 2.5 degrees.
+/// - the **pooled static reading**, [`EPI_STILL_DEG`], which is what six
+///   flights read across the seam under the calibration the fit is a patch to.
+///
+/// Their sum is what the band reads at that direction and applies as a bend
+/// ramped across the handover. Applied instead to lens 1's whole picture it
+/// is the same disagreement carried by a displacement rather than by a shear,
+/// which is the experiment.
+///
+/// **Nothing here is established.** The pooled term is a mean over six flights
+/// that disagree with each other by more than its own amplitude, and whether
+/// this collapses the delivered ramp is the question the toggle exists to ask.
+/// `None` where any direction of the ring leaves a lens's picture, or where the
+/// sum is too large to be a calibration: whole support or nothing, like every
+/// other table here.
+pub fn epi_term(
+    arm: EpiArm,
+    fit: SeamFit,
+    lenses: &[Lens],
+    frame: Size,
+) -> Option<super::band::Table> {
+    if arm == EpiArm::Off {
+        return None;
+    }
+    let base = mapped(lenses, frame);
+    let corrected = mapped(&fit.applied(lenses), frame);
+    let ring = ring(super::band::AZIMUTHS);
+    let mut entries = [0.0f32; super::band::AZIMUTHS];
+    for (entry, at) in entries.iter_mut().zip(&ring) {
+        let shift = moved(&base, &corrected, 1, at)?[1];
+        let still = match arm {
+            EpiArm::Full => epi_still(at.phi.to_degrees()),
+            _ => 0.0,
+        };
+        *entry = (shift + still).to_radians() as f32;
+    }
+    entries
+        .iter()
+        .all(|entry| entry.is_finite() && entry.abs() <= EPI_LIMIT_RAD)
+        .then(|| super::band::Table::of_entries(entries))
+}
+
+/// How large an entry of [`epi_term`] may be before the whole table is refused,
+/// in radians.
+///
+/// **Not the along table's half degree, and for a measured reason.** That limit
+/// is what a *pose leftover* along the seam can plausibly be. Across the seam
+/// the two lenses of this camera disagree by a degree at the registry's BAD
+/// crossing and by two and a half under the factory calibration, and the band
+/// reads and applies exactly that every frame. A limit that refused a degree
+/// would refuse the field this term is built from.
+const EPI_LIMIT_RAD: f32 = 3.0 * std::f32::consts::PI / 180.0;
+
 /// The field this capture may be **pooled** for: its five terms, or `None`
 /// where composing them with this capture's own pose does not come out a
 /// calibration (issue #103, stage 9 layer 2).
@@ -1815,6 +2061,10 @@ struct Walking {
     /// redraw: a 144 Hz window must not correct five times faster than a
     /// 30 Hz one, and a paused window must not correct at all.
     walked: Option<Instant>,
+    /// **RESEARCH** (`KJERAG_EPI_TERM`): [`Correction::epi`]'s answer and the
+    /// pose and frame it was computed for. `None` until one is asked for, which
+    /// with the toggle off is never.
+    epi: (Option<(SeamFit, Size)>, super::band::Table),
 }
 
 impl Correction {
@@ -1831,6 +2081,7 @@ impl Correction {
                 shown: SeamFit::default(),
                 lenses: lenses.clone(),
                 walked: None,
+                epi: (None, super::band::Table::REST),
             }),
         }
     }
@@ -1861,6 +2112,27 @@ impl Correction {
         walking.asked = fit;
         walking.progress = 0.0;
         walking.walked = None;
+    }
+
+    /// **RESEARCH** (`KJERAG_EPI_TERM`): the across-seam term for the pose the
+    /// picture is being drawn with, or [`super::band::Table::REST`] with the
+    /// toggle off and wherever the ring leaves a lens's picture.
+    ///
+    /// Cached on the pose it was computed for, which is the same key
+    /// [`Self::lenses`] rebuilds on: a walk moves it every redraw and a settled
+    /// correction costs one lock and a compare.
+    pub fn epi(&self, frame: Size) -> super::band::Table {
+        let arm = epi_arm();
+        if arm == EpiArm::Off {
+            return super::band::Table::REST;
+        }
+        let mut walking = self.walking.lock().unwrap_or_else(|e| e.into_inner());
+        if walking.epi.0 != Some((walking.shown, frame)) {
+            let table = epi_term(arm, walking.shown, &self.factory, frame)
+                .unwrap_or(super::band::Table::REST);
+            walking.epi = (Some((walking.shown, frame)), table);
+        }
+        walking.epi.1
     }
 
     /// What the pass runs on this redraw, having taken one step of the walk.
@@ -2234,6 +2506,133 @@ mod tests {
             FRAME,
         );
         assert_eq!(wild, None, "two and a half degrees was accepted");
+    }
+
+    /// The research across-seam term displaces lens 1's ray by exactly itself,
+    /// across the seam and nowhere else, which is what every delivered number
+    /// taken through it rests on.
+    ///
+    /// Three claims, all on the projection because that is where they can be
+    /// checked with no GPU and no file:
+    ///
+    /// 1. **The size and the axis.** [`Reframe::tabled`] moves the ray by the
+    ///    table's own entry along [`Where::across`] and by nothing along
+    ///    [`Where::along`]. A term that leaked onto the along-seam axis would
+    ///    break the invariant the two-axis split is built on, and it is the
+    ///    first thing a wrong `Ring::epi` would do.
+    /// 2. **What the correlation then reads.** By [`moved`]'s own law - a
+    ///    change that moves lens 1's projection of a fixed direction moves the
+    ///    shift the content correlates at by the negative of it - a term of
+    ///    `+t` takes the across reading to `read - t`. That is the same sign the
+    ///    along-seam plant measured one axis over (docs/research/stage9.md 5),
+    ///    and it is why the band reading THROUGH the term and applying the rest
+    ///    leaves the two lenses exactly as far apart as they were.
+    /// 3. **It cannot fold.** The displacement is across the seam and the
+    ///    gradient is along it, so the map it adds is a shear whose Jacobian is
+    ///    off-diagonal, and the determinant of the whole tabled map stays 1 to
+    ///    the finite difference's own noise.
+    #[test]
+    fn the_across_seam_term_displaces_lens_one_across_the_seam_and_nowhere_else() {
+        let lenses = fixture_lenses();
+        // Half a degree, one cycle round the ring: an order the corridor could
+        // not hide and a size the corpus reaches.
+        let entries: [f32; crate::band::AZIMUTHS] = std::array::from_fn(|index| {
+            let phi = index as f64 / crate::band::AZIMUTHS as f64 * std::f64::consts::TAU;
+            (0.5 * phi.cos()).to_radians() as f32
+        });
+        let table = crate::band::Table::of_entries(entries);
+        let map = mapped(&lenses, FRAME).with_epi(table);
+        let step = 0.01f64.to_radians();
+        for at in ring(24) {
+            let want = f64::from(table.at(at.phi.cos() as f32, at.phi.sin() as f32));
+            let ray = at.centre.map(|c| c as f32);
+            let moved_by = |axis: [f64; 3]| {
+                let from = unit(std::array::from_fn(|c| at.centre[c] - step * axis[c]));
+                let to = unit(std::array::from_fn(|c| at.centre[c] + step * axis[c]));
+                let take = |v: [f64; 3]| {
+                    let v = v.map(|c| c as f32);
+                    let bent = map.tabled(1, v);
+                    std::array::from_fn::<f64, 3, _>(|c| f64::from(bent[c] - v[c]))
+                };
+                let (a, b) = (take(from), take(to));
+                std::array::from_fn::<f64, 3, _>(|c| (b[c] - a[c]) / (2.0 * step))
+            };
+            let bent = map.tabled(1, ray);
+            let put: [f64; 3] = std::array::from_fn(|c| f64::from(bent[c] - ray[c]));
+            let dot = |v: [f64; 3], w: [f64; 3]| (0..3).map(|c| v[c] * w[c]).sum::<f64>();
+            let (across, along) = (dot(put, at.across), dot(put, at.along));
+            assert!(
+                (across - want).abs() < 1e-6,
+                "at {:.0} deg a term of {want:+.5} rad displaced the ray by {across:+.5} across",
+                at.phi.to_degrees(),
+            );
+            assert!(
+                along.abs() < 1e-6,
+                "at {:.0} deg the across term moved the ray {along:+.5} rad ALONG the seam",
+                at.phi.to_degrees(),
+            );
+            // The two off-diagonal entries of the displacement's own Jacobian
+            // in the seam's frame. The determinant of `identity + J` is
+            // `1 - (across-by-along)(along-by-across)`, and the second factor
+            // is zero by the claim above, so nothing here can fold whatever the
+            // first one is.
+            let along_by_across = dot(moved_by(at.across), at.along);
+            let across_by_across = dot(moved_by(at.across), at.across);
+            assert!(
+                along_by_across.abs() < 1e-4 && across_by_across.abs() < 1e-4,
+                "at {:.0} deg the term has a gradient ACROSS the seam: {along_by_across:+.6}, \
+                 {across_by_across:+.6}",
+                at.phi.to_degrees(),
+            );
+        }
+    }
+
+    /// The composed term is the pose's own across-seam displacement plus the
+    /// pooled reading, and the first of those is the larger one.
+    ///
+    /// Not a claim that either is right - that is what the delivered
+    /// measurement is for - but that the split the docstring describes is the
+    /// arithmetic the code does.
+    #[test]
+    fn the_across_seam_term_is_the_pose_plus_the_pooled_reading() {
+        let lenses = fixture_lenses();
+        let fit = SeamFit {
+            roll_deg: 0.795,
+            yaw_deg: -2.310,
+            pitch_deg: -0.936,
+            cx_px: -3.28,
+            cy_px: -11.91,
+        };
+        let pose = epi_term(EpiArm::Pose, fit, &lenses, FRAME).expect("the pose arm");
+        let full = epi_term(EpiArm::Full, fit, &lenses, FRAME).expect("the full arm");
+        let (pose, full) = (pose.entries(), full.entries());
+        let apart: Vec<f64> = pose
+            .iter()
+            .zip(&full)
+            .enumerate()
+            .map(|(index, (a, b))| {
+                let phi = index as f64 / crate::band::AZIMUTHS as f64 * 360.0;
+                f64::from(b - a).to_degrees() - epi_still(phi)
+            })
+            .collect();
+        assert!(
+            rms(apart.into_iter()) < 1e-4,
+            "the full arm is not the pose arm plus the pooled reading",
+        );
+        let sizes = |entries: [f32; crate::band::AZIMUTHS]| {
+            rms(entries.iter().map(|e| f64::from(*e).to_degrees()))
+        };
+        assert!(
+            sizes(pose) > 1.0,
+            "the fixture pose barely moves the across-seam axis: {:.3} deg",
+            sizes(pose),
+        );
+        assert!(
+            sizes(full) < sizes(pose) / 2.0,
+            "the pooled reading is meant to take most of the pose back out: {:.3} against {:.3}",
+            sizes(full),
+            sizes(pose),
+        );
     }
 
     /// How much of a pose's own along-seam signature the five terms cannot say,

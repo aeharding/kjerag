@@ -3480,3 +3480,23 @@ release lands on the exact frame every time either way.
 - Vulkan Video decode (drops VA-API plumbing; blocked on wgpu exposure
   and Rust HEVC support anyway).
 - Batch screenshot/export queue across multiple files.
+
+- 2026-08-07 **The across-seam research term: the delivered ramp is real, the
+  sign and the mechanism are right, and the POOLED static table is not the fix.
+  Nothing is applied; `KJERAG_EPI_TERM` is a research toggle, off by default,
+  byte-identical off** (issue #103, the epi fork, docs/research/stage9.md 10).
+
+  **The defect.** The band shares its epipolar reading across the handover, so
+  where the two lenses disagree by more than parallax can explain the delivered
+  picture draws far content with a bend in it: zero at the corridor's edge, half
+  the disagreement at the contour, the other half the same way on the other
+  lens. `--bin epiramp` measures that in the delivered domain and nowhere else -
+  the app's own path with the band live and warm, photographed at the shipped
+  handover and again at 0.1 degrees, the far content correlated between them
+  along the seam normal and the ramp fitted to the contour.
+
+  **What was built.** `seam::epi_term` composes the pose's own across-seam
+  displacement (`seam::moved`'s second component, pure geometry from the five
+  knobs) with a pooled static reading of six flights, and applies the sum to
+  lens 1's whole picture before projection, with the band's own measurement pass
+  reading through it. `Reframe::epi` carries it to both halves of the shader.
