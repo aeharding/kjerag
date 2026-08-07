@@ -3575,3 +3575,41 @@ release lands on the exact frame every time either way.
   has seen any of it. `scripts/uitest.sh` with a field applied for the whole run
   reads 47 checks and the same 2 failures `main` has, which answers the
   paused-window byte check and nothing beyond it.
+
+- 2026-08-07 **The bound was on the wrong quantity: a gain sweep separates the
+  term's SIZE from the residual it leaves, and the residual is what blinds the
+  band. With the rail moved onto what was measured, nine of nine crossings
+  collapse under the floor and the steadiness half passes** (issue #103, the epi
+  fork, docs/research/stage9.md 12).
+
+  **The curve.** A gain `k` on a field that is right at one gives a term of
+  `k|D|` leaving `(k - 1)|D|` of residual, so pairs of gains carry the same
+  residual at very different sizes. At the BAD crossing, band live and warm:
+  residual `1D` reads **96 of 128 directions at no term and 95 at 1.870 deg**;
+  residual `2D` reads **79 at 0.935 deg and 95 at 2.806**; residual `3D` reads
+  **66 at 1.870 and 91 at 3.741**. In every pair the larger term keeps more of
+  the ring. The asymmetry is the band's own `-1.2 to +2.6` search window: a
+  negative residual runs out of room at half the magnitude a positive one does.
+
+  **`EPI_LIMIT_RAD` is 2.8 degrees**, the largest term measured to leave the
+  band's evidence intact, and it is documented as a rail against a field that is
+  not a calibration rather than as a safety guard - the quantity that decides
+  safety is `|T - truth|` and nothing knows `truth` at compose time. The staged
+  walk-in that WOULD guard it is designed and evidenced in 12.3 and **is not
+  implemented**.
+
+  **The nine-row table, off -> per-session, in view pixels of corridor swing:**
+  May-01 BAD 19.94 -> **0.89**, GOOD 1.98 -> **0.35**, Apr-10 1.72 -> **0.47**,
+  May-26 1.73 -> **0.68**, Jul-14 8.99 -> **1.62**, Aug-02 1.66 -> **0.20**,
+  the shimmer view 5.47 -> **0.63**, Jul-25's cloud top 10.85 -> **0.57**, the
+  ONE X2 3.55 -> **2.26**. Nine of nine improved, every one under the four view
+  pixel floor, both May-01 crossings served by one field.
+
+  **The steadiness half, outstanding since the per-session arm was built**
+  because `--bin shear` reads only the shimmer view and that flight's field was
+  refused: band state **0.0444 -> 0.0349 deg rms** frame to frame, every band
+  steadier, and the band where the shipped build steps over a view pixel on **21
+  of 87** frame pairs steps on **0**.
+
+  **Still not shipping**: no eye has seen any of it, the walk is unbuilt, and the
+  harvest is an offline `--bin epifield` run per file that no player does.
