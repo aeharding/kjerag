@@ -1221,3 +1221,24 @@ statement about this corpus and this reduction and not about the camera: it is
 consistent with the leftover being scene rather than camera (the study's own
 reading), with it being per-session, or with the readings being too noisy at
 this density. Nothing here separates those.
+
+### 10.13 What still needs the owner's eye, and what this stage did not do
+
+- **The owner's panel.** `scratch/epiramp/panel-bad.png` is the BAD crossing off
+  above on, cropped to the seam. It is cut from `--bin step` renders, so it
+  carries that instrument's own trace lines across the very stretch of seam the
+  question is about; `--bin epiramp png=` now writes the delivered frame with
+  nothing drawn on it and is what a clean panel should be cut from.
+- **No blind A/B was run.** 9.4's protocol has two halves and the owner's blind
+  verdict is the gate on an applied claim. Nothing here is an applied claim, so
+  the gate was not asked for - but that also means **no number in 10.8 has been
+  seen by an eye**, and the along field's whole lesson is that an eye disagreed
+  with a battery that was measuring the wrong thing.
+- **The paused-window byte check was not run.** It is `scripts/uitest.sh`'s
+  toast capture, and it is the probe that caught the GPU trim's snapping. With
+  the toggle off the picture is `main`'s byte for byte so there is nothing for
+  it to catch there; with the toggle on nobody has looked.
+- **One flight, one crossing.** Each row is one moment on one flight at one
+  aim. The band's state is warm at 6 seconds and the reading is deterministic
+  (the BAD row reproduces to the hundredth of a view pixel across runs), but a
+  crossing is not a flight.
