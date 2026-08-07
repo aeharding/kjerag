@@ -46,6 +46,10 @@ const GRID: usize = 129;
 /// covers with no rounding of its own worth arguing about.
 const ARC_BIN_DEG: f64 = 1.0;
 
+/// How thick a marked line is drawn, in output pixels either side, so that the
+/// same mark reads the same at any field of view.
+const LINE_PX: f64 = 1.5;
+
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
     let calibration = CalibrationSet::from_insv(&options.input)?;
@@ -97,6 +101,18 @@ fn main() -> Fallible<()> {
     report(&rows);
     if let Some(name) = &options.out {
         write(&rows, name)?;
+    }
+    if let Some((from, onto)) = options.mark.as_ref().zip(options.marked.as_ref()) {
+        mark(
+            &options,
+            &calibration,
+            &track,
+            timing,
+            frame,
+            half_deg,
+            from,
+            onto,
+        )?;
     }
     Ok(())
 }
@@ -166,6 +182,109 @@ fn sweep(
         true => Err("that window holds no frame of this file's exposure record".into()),
         false => Ok(rows),
     }
+}
+
+/// The corridor drawn onto a rendered view of the same line.
+///
+/// A picture of `--bin reframe`'s, marked rather than re-rendered: this
+/// instrument decodes nothing, and a second renderer here would be a second
+/// answer to what the pass draws. The two agree because they build the same
+/// [`Reframe`] from the same camera and the same frame instant, which is the
+/// one thing that has to hold and is asserted by the seam landing where the
+/// two lenses visibly hand over.
+#[allow(clippy::too_many_arguments)]
+fn mark(
+    options: &Options,
+    calibration: &CalibrationSet,
+    track: &OrientationTrack,
+    timing: kjerag_media::Timing,
+    frame: Size,
+    half_deg: f64,
+    from: &str,
+    onto: &str,
+) -> Fallible<()> {
+    let (mut pixels, width, height, channels) = read_png(&PathBuf::from("scratch").join(from))?;
+    let index = Cue::Time(Duration::from_secs_f64(options.time.max(0.0))).index(timing);
+    let at_us = calibration.exposure[0]
+        .frame_time_us(index)
+        .ok_or("that time is past the end of this file's exposure record")?;
+    let map = Reframe::new(
+        &calibration.lenses,
+        frame,
+        options.camera(),
+        Held {
+            body_from_world: match options.lock {
+                true => track.at(at_us).conjugate(),
+                false => Quat::IDENTITY,
+            },
+            rolling: None,
+        },
+        width as f32 / height as f32,
+        false,
+        Sampling::default(),
+    );
+    let past: Vec<f64> = (0..width * height)
+        .map(|cell| {
+            let uv = [
+                (cell % width) as f32 / width as f32,
+                (cell / width) as f32 / height as f32,
+            ];
+            map.view_ray(uv).map_or(f64::INFINITY, |ray| {
+                elevation(map.body_ray(ray).map(f64::from))
+            })
+        })
+        .collect();
+    // A line of constant PIXEL thickness rather than of constant angle, so
+    // the same mark reads the same at fov 20 and at fov 90. Painting where
+    // the field is within half a line of an edge, rather than where it
+    // changes sign between neighbours, is what stops a near-horizontal line
+    // coming out as scattered dots.
+    let thick = LINE_PX * f64::from(options.fov as f32) / width as f64;
+    for cell in 0..width * height {
+        if !past[cell].is_finite() {
+            continue;
+        }
+        for (edge, colour) in [
+            (0.0, [255u8, 40, 40]),
+            (half_deg, [255, 170, 0]),
+            (-half_deg, [255, 170, 0]),
+        ] {
+            if (past[cell] - edge).abs() <= thick {
+                let at = cell * channels;
+                pixels[at..at + 3].copy_from_slice(&colour);
+            }
+        }
+    }
+    let out = PathBuf::from("scratch").join(onto);
+    let mut png = png::Encoder::new(
+        std::io::BufWriter::new(std::fs::File::create(&out)?),
+        width as u32,
+        height as u32,
+    );
+    png.set_color(match channels {
+        4 => png::ColorType::Rgba,
+        _ => png::ColorType::Rgb,
+    });
+    png.set_depth(png::BitDepth::Eight);
+    png.write_header()?.write_image_data(&pixels)?;
+    println!("marked {} onto {}", from, out.display());
+    Ok(())
+}
+
+/// The rendered view to mark, as bytes, its shape, and how many channels a
+/// pixel is.
+fn read_png(path: &std::path::Path) -> Fallible<(Vec<u8>, usize, usize, usize)> {
+    let decoder = png::Decoder::new(std::fs::File::open(path)?);
+    let mut reader = decoder.read_info()?;
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels)?;
+    let channels = match info.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        other => return Err(format!("{} is {other:?}, not RGB or RGBA", path.display()).into()),
+    };
+    pixels.truncate(info.buffer_size());
+    Ok((pixels, info.width as usize, info.height as usize, channels))
 }
 
 /// Degrees off the seam plane at the middle of the picture.
@@ -335,6 +454,10 @@ struct Options {
     window: f64,
     aspect: f32,
     out: Option<String>,
+    /// A rendered view of the same line to draw the corridor onto, and where
+    /// to put the result.
+    mark: Option<String>,
+    marked: Option<String>,
 }
 
 impl Options {
@@ -349,6 +472,8 @@ impl Options {
             window: 5.0,
             aspect: 1.0,
             out: None,
+            mark: None,
+            marked: None,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -361,6 +486,8 @@ impl Options {
                 Some(("window", value)) => options.window = value.parse()?,
                 Some(("aspect", value)) => options.aspect = value.parse()?,
                 Some(("out", value)) => options.out = Some(value.to_string()),
+                Some(("mark", value)) => options.mark = Some(value.to_string()),
+                Some(("marked", value)) => options.marked = Some(value.to_string()),
                 Some((key, _)) => return Err(format!("no argument called {key}").into()),
             }
         }
@@ -380,7 +507,7 @@ impl Options {
 }
 
 const USAGE: &str = "usage: arcs <file.insv> [time=seconds] [yaw=deg] [pitch=deg] [fov=deg] \
-     [lock=0|1] [window=seconds] [aspect=ratio] [out=name.csv]";
+     [lock=0|1] [window=seconds] [aspect=ratio] [out=name.csv] [mark=view.png marked=name.png]";
 
 #[cfg(test)]
 mod tests {
