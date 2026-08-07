@@ -1372,7 +1372,9 @@ pose plus the pooled reading and not something else) and
 `scripts/uitest.sh` on real footage reads **47 checks, 2 failed**:
 `ctrl+v goes back to the copied view`, which `main` has failed on this box since
 before this branch (#167's own note), and `a toast is drawn clear of the
-controls`. The second is run against `main` as a control, because a branch whose
-delivered picture is `main`'s byte for byte cannot have moved a toast, and a
-failure that is not on `main` too would mean the null is wrong somewhere the
-byte compare did not look.
+controls`. **Both are on `main` too**: the same harness run in a
+checkout of 75a03cc, with its own `CARGO_TARGET_DIR` and its own app binary,
+fails `a toast is drawn clear of the controls` as well. That control was run
+because a branch whose delivered picture is `main`'s byte for byte cannot have
+moved a toast, and a failure that had NOT been on `main` would have meant the
+null was wrong somewhere the byte compare did not look. It was not.
