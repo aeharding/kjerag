@@ -1257,11 +1257,12 @@ this density. Nothing here separates those.
 
 ### 10.13 What still needs the owner's eye, and what this stage did not do
 
-- **The owner's panel.** `scratch/epiramp/panel-bad.png` is the BAD crossing off
-  above on, cropped to the seam. It is cut from `--bin step` renders, so it
-  carries that instrument's own trace lines across the very stretch of seam the
-  question is about; `--bin epiramp png=` now writes the delivered frame with
-  nothing drawn on it and is what a clean panel should be cut from.
+- **The owner's panel.** `scratch/epiramp/panel-bad-clean.png` is the BAD
+  crossing off above on, cut from `--bin epiramp png=` renders with nothing
+  drawn on them. `panel-bad.png` is the same crop from `--bin step` renders and
+  carries that instrument's trace lines across the very stretch of seam the
+  question is about; it is kept only because the band-evidence numbers came off
+  the same runs. **No eye has been over either.**
 - **No blind A/B was run.** 9.4's protocol has two halves and the owner's blind
   verdict is the gate on an applied claim. Nothing here is an applied claim, so
   the gate was not asked for - but that also means **no number in 10.8 has been
