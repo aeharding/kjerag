@@ -58,7 +58,7 @@ use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
 use kjerag_render::capture_set::{self, Missing};
-use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, SeamFit, Stall, Stats};
+use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, Stall, Stats};
 
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
@@ -1038,7 +1038,6 @@ impl App {
                 fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
             );
             scene.use_seam(fit);
-            self.hold_field(scene, camera, fit);
         }
         // The pool keeps growing until it has enough fits to choose between,
         // and this is the whole of "calibrate by watching": a camera with one
@@ -1048,33 +1047,6 @@ impl App {
         if pooled < config::POOL_ENOUGH {
             scene.fit_seam(pooled == 0);
         }
-    }
-
-    /// The other half of that calibration: what this camera reads along the
-    /// seam that its pose cannot describe (issue #103, stage 9).
-    ///
-    /// Composed with the pose here, at open, and never stored composed. The
-    /// pool's pose moves as it grows and what the camera reads above its
-    /// factory calibration does not, so the two are separate measurements of
-    /// one camera and this is where they become one correction.
-    ///
-    /// Nothing is said unless there is a field, and nothing is asked of the
-    /// pilot either way.
-    fn hold_field(&self, scene: &Scene, camera: u64, fit: SeamFit) {
-        let Some(terms) = self.stored.state.seam_field(camera) else {
-            return;
-        };
-        // A composition that does not come out a calibration says so, because
-        // silence here is indistinguishable from a camera that has no field
-        // and the two want different things done about them.
-        let Some(deg) = scene.use_field(terms, fit) else {
-            println!(
-                "seam:   this camera's along-seam field does not compose with that fit into a \
-                 calibration, so the pose is drawn alone"
-            );
-            return;
-        };
-        println!("seam:   and {deg:.3} deg rms along the seam that no pose of it can describe");
     }
 
     /// Say how wide this file hands the picture over, once, after its stored
@@ -1130,12 +1102,6 @@ impl App {
         // for seconds by now.
         if let Some(fit) = self.stored.state.seam(camera) {
             open.scene.aim_seam(fit);
-            // Not the field, and this is the one place the two halves part
-            // company: a pose walks in over a second and a table lands whole in
-            // the next frame ([`Scene::use_table`]), so re-composing here would
-            // step the picture by the whole of what the new sample changed. It
-            // is composed at open, where there is no picture to step, and the
-            // file this fit was measured on keeps the field it opened with.
         }
     }
 

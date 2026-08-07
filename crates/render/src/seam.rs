@@ -1244,8 +1244,19 @@ fn middle_of(values: impl Iterator<Item = f64>) -> f64 {
 /// below where it looked (docs/research/stage9.md 4.5). Fitted on other flights
 /// only, it takes the pooled along-seam leftover from 0.0536 to 0.0211 degrees
 /// on the owner's X4 Air and 0.0606 to 0.0249 on his ONE X2 - nine captures of
-/// nine improved, both cameras. `band::Along` computes the same five terms per
-/// session already; nothing carried them between sessions until this one.
+/// nine improved, both cameras.
+///
+/// **It is measured and stored and NOTHING APPLIES IT** (docs/research/stage9.md
+/// 9). Every number above is the **unbent** projection, which is what
+/// `seam::measure` and `--bin crossing` both read; in the **delivered** picture
+/// `band::Along` computes the same five terms per session and has already taken
+/// that leftover out, so a pooled field composed on top bought nothing at two
+/// reference views and cost about two view pixels at a third. What is left here
+/// is the reading, kept because the one regime the delivered finding does not
+/// cover is the first frames of a session, before the band has evidence - and
+/// because nine captures at a density the app does not reach is what it cost to
+/// get. **Anything that applies it has to clear a delivered-path comparison
+/// against `main` first, and no number in this docstring is that.**
 ///
 /// **Above the factory calibration and above no pose at all, and that is what
 /// makes it poolable.** A leftover is a quantity relative to whichever pose was
@@ -1393,15 +1404,12 @@ const FIELD_LIMIT: f64 = 1.2;
 /// the picture drawn with that pose still owes at each of the band's
 /// directions, in radians.
 ///
-/// **The one place the two halves of the answer are composed**, and they are
-/// not two layers. `terms` is what the camera does above its factory
-/// calibration; the pose takes most of it out and leaves the rest; the table
-/// carries the rest. A pool whose pose moves does not strand a field fitted
-/// under the old one, because no field here was ever fitted under a pose - the
-/// composition is redone from the same two stored numbers every time a file
-/// opens. That is why a refitted pose and this field do not stack: they are one
-/// answer written in two places, and held out they read 0.0208 and 0.0211
-/// degrees (docs/research/stage9.md 4.5).
+/// **Nothing in the app calls this to draw with.** It composed the pooled field
+/// into the picture until the delivered-path comparison took that out
+/// (docs/research/stage9.md 9); what still calls it is [`along_kept`], which
+/// uses the composition as its own guard, and the instruments. `terms` is what
+/// the camera does above its factory calibration; the pose takes most of it out
+/// and leaves the rest; this is the rest, at every direction of the ring.
 ///
 /// **Not [`super::band::Table::of`]**, which levels the five terms back out of
 /// its readings because what it was built for is what a pose and a five-term

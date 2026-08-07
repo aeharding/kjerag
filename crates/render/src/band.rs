@@ -556,15 +556,18 @@ pub struct Leftover {
 /// with no reading inside the kernel is exactly zero and its neighbours taper
 /// into it.
 ///
-/// **What the app writes here is a five-term field and not a per-azimuth
-/// table**, and the two are opposite constructions on one vehicle
-/// ([`super::seam::along_table`], stage 9 layer 2). This type is the uniform,
-/// the lookup and the application law; what fills it is whichever field has
-/// been measured, and the one that has is [`Along`]'s own shape pooled per
-/// camera. [`Self::of`] below is the per-azimuth constructor, which the corpus
-/// refused, and it is kept because the refusal has to stay checkable.
+/// **Nothing writes one and `Table::REST` ships**, and that survived a second
+/// attempt (stage 9 layer 2, docs/research/stage9.md 9). A five-term field
+/// pooled per camera was composed into this vehicle and withdrawn: it improves
+/// the **unbent** projection every instrument here measures and does nothing in
+/// the **delivered** picture, where the per-frame band already holds the
+/// along-seam axis, and at one reference view it made the delivered axis about
+/// two view pixels worse. Why the band does not simply absorb an applied table
+/// is measured in
+/// [`a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it`], and it
+/// binds anything that ever fills this uniform.
 ///
-/// **Nothing pooled per azimuth, and that is a measurement** (stage 9,
+/// **Nothing pooled per azimuth either, and that is a measurement** (stage 9,
 /// docs/research/stage9.md). Over nine captures of two cameras, held out on
 /// every arm: on the ONE X2 a table costs 4 to 6 percent under every reduction;
 /// on the X4 Air the effect runs -1 to +2 percent depending on the estimator,
@@ -584,9 +587,10 @@ pub struct Leftover {
 /// on 18 of 18 pairs of captures, and fitted on other flights only they take
 /// the pooled leftover from 0.0536 to 0.0211 degrees on the X4 and 0.0606 to
 /// 0.0249 on the X2, nine captures of nine improved. That is [`Along`]'s
-/// territory, computed per session already and now pooled per camera as well
-/// ([`super::seam::along_terms`]). What a per-azimuth table would carry is what
-/// is left over it, and there is a hundredth of a pixel of that.
+/// territory, computed per session already, and measured per camera by
+/// [`super::seam::along_terms`] whose answer the pool now stores without
+/// applying it. What a per-azimuth table would carry is what is left over it,
+/// and there is a hundredth of a pixel of that.
 ///
 /// The per-azimuth mechanism stays here because the refusal had to be
 /// checkable and because a camera that needs one may still turn up.
@@ -1516,7 +1520,7 @@ pub(crate) fn wgsl() -> String {
          const BACK_ALONG = {back_along}u;\n\
          const BACK_ACROSS = {back_across}u;\n\
          const TAU = {tau:?};\n\
-         {photometry}{CELL}{RING}{TABLE}{WGSL}",
+         {photometry}{CELL}{RING}{WGSL}",
         tau = std::f32::consts::TAU,
         step = STEP_DEG.to_radians(),
         perp_steps = PERP_STEPS,
@@ -1542,7 +1546,7 @@ pub(crate) fn lookup_wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\nconst FOLD = {FOLD:?};\nconst KEEP = {KEEP:?};\n\
          const WIDEST = {widest:?};\nconst TAU = {tau:?};\nconst LIMIT_LN = {LIMIT_LN:?};\n\
-         {CELL}{RING}{TABLE}{LOOKUP}",
+         {CELL}{RING}{LOOKUP}",
         widest = WIDEST_DEG.to_radians(),
         tau = std::f32::consts::TAU,
     )
@@ -1828,15 +1832,7 @@ fn table_at(low: i32, mix: f32) -> f32 {
   let b = table_entry(low + 1);
   return mix2(a, b, mix);
 }
-"#;
 
-/// One entry of the along-seam table, shared by both shaders.
-///
-/// Its own block because both stages read it and for opposite reasons: the
-/// fragment shader applies the table, and the compute pass **subtracts** it
-/// from where it looks, so that what the correlation answers is what is still
-/// wrong rather than what was wrong before the table was written.
-const TABLE: &str = r#"
 fn table_entry(index: i32) -> f32 {
   let at = u32(index + i32(AZIMUTHS)) % AZIMUTHS;
   return reframe.table[at / 4u][at % 4u];
@@ -1974,24 +1970,11 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   }
 
   // The back lens's grid: the patch widened by everywhere the search may
-  // slide it, about the direction the picture is DRAWN at rather than the
-  // direction the ring names.
-  //
-  // The two differ by the stored along-seam table, which the fragment shader
-  // adds to lens 1's ray and nothing else moves. Reading through it is what
-  // makes the two fields one answer instead of two: the band fits five terms to
-  // what this pass reports and applies them ON TOP of the table, so a pass that
-  // looked where the table was not applied would report the correction the
-  // table is already making and the picture would take it twice. The same rule,
-  // and the same sentence, as `seam::Plan::table`.
-  //
-  // Exactly the direction the ring names on a camera nothing is pooled for,
-  // because the entry is zero and a zero displacement is the zero vector.
-  let drawn = at.centre + table_entry(i32(cell)) * at.perp;
+  // slide it.
   for (var i = lane; i < BACK_ALONG * BACK_ACROSS; i += THREADS) {
     let a = f32(i32(i % BACK_ALONG) - HALF - PERP_STEPS * PERP_STEP) * STEP;
     let b = f32(i32(i / BACK_ALONG) - HALF + EPI_FAR) * STEP;
-    back[i] = tap(1u, aim1, drawn + a * at.perp + b * at.epi);
+    back[i] = tap(1u, aim1, at.centre + a * at.perp + b * at.epi);
   }
   workgroupBarrier();
 
@@ -2516,6 +2499,56 @@ mod tests {
         }
     }
 
+    /// **Why reading the table through the band does not make the band cancel
+    /// it**, which is the measurement that took the applied field out of
+    /// PR #167 (docs/research/stage9.md 9).
+    ///
+    /// If the pass applies a table `T` and the band measures the residual
+    /// through it, the delivered correction is `T + fit(L - T)` against `fit(L)`
+    /// with no table, so by linearity the two differ by exactly **`T - fit(T)`**.
+    /// That is zero only if the band's own five-term least squares can
+    /// reproduce `T`, and it cannot when the ring it is fitted over is an arc:
+    /// the fit is unconstrained where there is no evidence and the ridge pulls
+    /// it towards zero there, so the table's own value is delivered whole at
+    /// exactly the directions the session never read.
+    ///
+    /// The real pooled field, planted and put through `Along::fit` at each
+    /// coverage. On real footage `--bin step` reports 27 of 128 directions with
+    /// evidence.
+    #[test]
+    fn a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it() {
+        let planted: [f32; AZIMUTHS] = std::array::from_fn(|index| {
+            let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+            (0.20 + 0.10 * phi.cos() - 0.06 * (2.0 * phi).sin()).to_radians()
+        });
+        let left = |covered: usize| {
+            let cells: Vec<Cell> = (0..AZIMUTHS)
+                .map(|index| Cell {
+                    off_epi: -planted[index],
+                    off_conf: f32::from(u8::from(index < covered)) * 0.9,
+                    ..Cell::default()
+                })
+                .collect();
+            let fitted = Along::fit(&cells);
+            (0..AZIMUTHS).fold(0.0f32, |worst, index| {
+                let phi = index as f32 / AZIMUTHS as f32 * std::f32::consts::TAU;
+                let (sin, cos) = phi.sin_cos();
+                worst.max((planted[index] + fitted.at(cos, sin)).abs())
+            })
+        };
+        let whole = left(AZIMUTHS).to_degrees();
+        let arc = left(27).to_degrees();
+        assert!(
+            whole < 0.005,
+            "a ring with evidence everywhere left {whole:.4} deg of the table",
+        );
+        assert!(
+            arc > 10.0 * whole,
+            "an arc of 27 directions left {arc:.4} deg against {whole:.4} for the whole ring, \
+             so this test no longer shows what it is for",
+        );
+    }
+
     /// A table is accepted over its whole support or not at all.
     #[test]
     fn a_table_with_an_entry_larger_than_a_calibration_is_refused() {
@@ -2531,24 +2564,6 @@ mod tests {
         let mut broken = flat;
         broken[3] = f32::NAN;
         assert_eq!(Table::plausible(broken), None);
-    }
-
-    /// The band reads through the table it is drawn with, which is what keeps
-    /// the two along-seam fields one answer: the compute pass names
-    /// `table_entry` and the fragment shader names it too, out of one block
-    /// that both are built from.
-    #[test]
-    fn both_shaders_read_the_stored_table() {
-        for source in [wgsl(), lookup_wgsl()] {
-            assert!(
-                source.contains("fn table_entry("),
-                "a shader was built without the table block",
-            );
-        }
-        assert!(
-            wgsl().contains("at.centre + table_entry(i32(cell)) * at.perp"),
-            "the compute pass stopped reading through the table it is drawn with",
-        );
     }
 
     #[test]

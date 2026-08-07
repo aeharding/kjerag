@@ -190,9 +190,13 @@ caveat in the Motion section, which is the same trap at a smaller size.
   unmoved, and the BAD view 1.43 -> 1.06. That is a pose-order field pooled per camera, which is
   layer 2, not a per-azimuth table. stage9.md 4.5 withdraws that document's "does not reproduce"
   sentences: they were the mean reduction, not the camera.
-  **SHIPPED 2026-08-06, and re-read here through the shipped path** (stage9.md 8): the field is
-  learned by watching, pooled per camera beside `SeamFit`, and composed with the pool's pose at
-  open into `band::Table`. At these two views under `seam=roll:0.795,yaw:-2.310,pitch:-0.936,
+  **MEASURED 2026-08-06, NOT APPLIED, and the reason is 2026-08-07** (stage9.md 8 and 9): the
+  field is learned by watching and stored beside `SeamFit`, and nothing composes it into the
+  picture. THESE NUMBERS ARE THE UNBENT PROJECTION, which is all `--bin crossing` ever draws
+  (`Held::default()`). Photographed out of the app, the delivered along-seam axis at GOOD is
+  already at or under 0.6 view px on main and the field changed it by 0.2; at BAD main reads
+  -0.11 view px where this instrument reads 1.47, and the field made the delivered axis about two
+  view px WORSE. Read every line in this section as the projection and not as the picture. At these two views under `seam=roll:0.795,yaw:-2.310,pitch:-0.936,
   cx:-3.28,cy:-11.91`, with the field fitted on flights that are NOT May-01 and pooled through the
   shipped guard, the along-seam median magnitude reads **GOOD 1.29 -> 0.12 and BAD 1.47 -> 0.93
   view px**. Pooled WITHOUT the guard the same arm reads BAD 0.86; 0.93 is the number a shipped
