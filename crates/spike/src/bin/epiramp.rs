@@ -42,7 +42,7 @@
 //! it was handed is not a probe, and the number it reads back is printed beside
 //! what it was given.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kjerag_media::Fallible;
@@ -119,6 +119,14 @@ fn main() -> Fallible<()> {
     );
     let luma = Plane::of(&picture);
 
+    // The picture itself, for an eye rather than a correlator. No trace and no
+    // overlay on it: what the owner is asked to look at is the frame, and
+    // `--bin step`'s lines cross the very stretch of seam the question is
+    // about.
+    if let Some(path) = &options.png {
+        picture.save(&gpu, path)?;
+        println!("wrote:  {}", path.display());
+    }
     if let Some(path) = &options.write {
         luma.save(path)?;
         println!("wrote:  {} as the reference render", path.display());
@@ -370,7 +378,7 @@ impl Plane {
         }
     }
 
-    fn save(&self, path: &PathBuf) -> Fallible<()> {
+    fn save(&self, path: &Path) -> Fallible<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -384,7 +392,7 @@ impl Plane {
         Ok(())
     }
 
-    fn load(path: &PathBuf) -> Fallible<Self> {
+    fn load(path: &Path) -> Fallible<Self> {
         let bytes = std::fs::read(path)?;
         if bytes.len() < 8 {
             return Err(format!("{} is not a reference render", path.display()).into());
@@ -620,6 +628,9 @@ struct Options {
     write: Option<PathBuf>,
     against: Option<PathBuf>,
     csv: Option<PathBuf>,
+    /// Where to write the delivered picture itself, if a run wants to look at
+    /// it rather than measure it.
+    png: Option<PathBuf>,
 }
 
 /// Which of the app's seam paths this render draws with. `--bin step`'s three,
@@ -657,6 +668,7 @@ impl Options {
             write: None,
             against: None,
             csv: None,
+            png: None,
         };
         for arg in args {
             match arg.split_once('=') {
@@ -676,6 +688,7 @@ impl Options {
                 Some(("write", value)) => options.write = Some(PathBuf::from(value)),
                 Some(("against", value)) => options.against = Some(PathBuf::from(value)),
                 Some(("csv", value)) => options.csv = Some(PathBuf::from(value)),
+                Some(("png", value)) => options.png = Some(PathBuf::from(value)),
                 Some(("seam", value)) => {
                     options.seam = match value {
                         "factory" => SeamArg::Factory,
@@ -712,4 +725,4 @@ impl Options {
 const USAGE: &str = "usage: epiramp <file.insv> [time=seconds] [warm=seconds] [yaw=deg] \
      [pitch=deg] [fov=deg] [size=px] [lock=0] [plant=view px] \
      [window=low,high] [seam=factory|file|roll:0.6,yaw:-2.1,pitch:-0.9,cx:-9.5,cy:-11.9] \
-     write=reference.luma | against=reference.luma [csv=out.csv]";
+     write=reference.luma | against=reference.luma [csv=out.csv] [png=picture.png]";

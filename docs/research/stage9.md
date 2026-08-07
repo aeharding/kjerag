@@ -1112,7 +1112,7 @@ environment variables, the reference it read against, the plant, the scale and
 the window, because a CSV nobody can tell the provenance of is a CSV nobody can
 check.
 
-### 10.7 The `pose` arm, and why its numbers are not read as a result
+### 10.7 The `pose` arm takes the band's own eyes out, and it is measured
 
 `KJERAG_EPI_TERM=pose` applies the knobs' own across-seam displacement with no
 pooled reading taking it back out. That displacement reaches **2.5 degrees**,
@@ -1120,14 +1120,54 @@ and the band's own epipolar search runs `FAR_DEG` to `NEAR_DEG`, **-1.2 to
 +2.6**. So a term near the top of its range moves what the band is asked to
 correlate outside the window the band can search in.
 
-What that predicts is a band that finds nothing, gives up its evidence and
-stops bending - a picture that looks *steadier* because the correction went
-quiet rather than because the geometry got right. 10.9 measures whether that is
-what happens, with `--bin step`'s own count of how many of the 128 directions
-still have evidence.
+That is exactly what it does. `--bin step` at the BAD crossing, same file, same
+aim, same drawn pose, band live and warm at 6 seconds:
 
-Either way the arm's ramp numbers are not read as a result here, and the
-arithmetic above is a **constraint any later applied across-seam term
-inherits**: whatever such a term carries, the residual it leaves has to stay
-inside the band's own search window, or the thing measuring the residual is
-measuring nothing.
+| arm | directions with evidence | epipolar mean | worst |
+| --- | ---: | ---: | ---: |
+| off | **96 of 128** | 0.554 deg | 0.948 |
+| `full` | **96 of 128** | 0.518 deg | 0.995 |
+| `pose` | **64 of 128** | 1.172 deg | 1.939 |
+
+The `pose` arm loses a third of the ring's evidence, and what still correlates
+reads twice as far out - the term's own size rather than the camera's. A band
+that has gone quiet draws a *steadier* picture without the geometry having got
+any better, which is why that arm's ramp numbers are reported nowhere in 10.8.
+
+The `full` arm keeps every direction the shipped build keeps, which is what
+makes its rows readable at all.
+
+**A constraint any later applied across-seam term inherits.** Whatever such a
+term carries, the residual it leaves has to stay inside the band's own search
+window, or the thing measuring the residual is measuring nothing. Nothing in
+the code enforces that today.
+
+**And a number worth sitting with.** With `full` on, the band's epipolar mean
+across the ring goes **0.554 to 0.518 degrees**. The term took a fifteenth of
+what the band reads. That is the whole story of 10.8 in one row, measured
+somewhere else.
+
+### 10.9 T - fit(T), and whether the band fights the term
+
+The along field's failure was `T - fit(T)`: with a table applied and the band
+measuring through it, the delivered correction is `T + fit(L - T)` against
+`fit(L)` with none, and the two differ by exactly `T - fit(T)`. `Along::fit` is
+five terms over the whole circle, so it reproduces `T` only where the session's
+arc has evidence and delivers `T` whole everywhere else (9.2).
+
+**The across-seam channel is not that shape, and that is the one structural
+thing this term had going for it.** The band's epipolar channel is **per cell**:
+no five-term fit, no ridge, no arc. Where a direction has evidence the band
+reads the residual and applies it; where it has none it applies nothing. So
+`T - fit(T)` is `T` at the directions with no evidence and **zero** at the
+directions with evidence - and at the directions with evidence the term does
+not cancel either, because `T` and the band's own answer are applied by
+**different laws**: `T` displaces lens 1's whole picture, the band's answer is
+ramped across the corridor. That is the entire mechanism this experiment rests
+on and it is why the ramp moves at all.
+
+**Does the band fight it?** Measured, at the BAD crossing, band live and warm:
+the same **96 of 128** directions have evidence with the term on as with it off
+(10.7). The band does not lose the seam, does not re-open the crossover, and
+does not chase the term. What it does is read a slightly smaller residual:
+epipolar mean **0.554 to 0.518 degrees**.
