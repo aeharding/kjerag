@@ -745,9 +745,13 @@ live, no keyframe UI ever.
   band's own along-seam load 0.176 -> **0.159 deg** mean and 0.792 -> **0.498**
   worst, and `--bin shear`'s residuals smaller at all four bands with the
   steadiness unchanged, three runs each and deterministic; reproduced
-  independently at the registry's own step view at -21.97 -> -20.69 view px with
-  the band's load 0.227 -> 0.199 deg mean. A cleaner pose leaves less step at
-  the seam and less for the band to carry, and it does.
+  independently at the same aim from a different band state (no warm-up, 26 of
+  128 directions against 47 to 48) at -21.97 -> -20.69 view px with the band's
+  load 0.227 -> 0.199 deg mean. A cleaner pose leaves less step at the seam and
+  less for the band to carry, and it does. **The claim is one camera, one flight
+  (July-14), two views, two band states**: the two May-01 crossings cannot be
+  read this way (line fits at 51 to 54 px rms) and the X2 view answers "no
+  horizon fitted on both sides of the seam".
 
 - 2026-08-06 **No along-seam table is fitted: above the five terms the pass
   already applies, what is left is not a static function of azimuth this corpus

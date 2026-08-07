@@ -157,10 +157,12 @@ caveat in the Motion section, which is the same trap at a smaller size.
   composition made the delivered axis about two view px worse. So those four numbers describe a
   build that does not exist, and what they show is only where the correction MOVED to, not that
   the picture improved. The no-field column is main's number for number, band state and worst step
-  included, and it is the column that still stands. **That is not the picture's correction shrinking, it is the
-  correction moving**: this instrument measures what the BAND applies, and the band now reads
-  through the table and applies what the table still leaves. Read a plateau from this line only
-  together with whatever table the run was given.
+  included, and it is the column that still stands. Why the withdrawn column fell so far: this
+  instrument measures what the BAND applies, and on that build the band read through the table and
+  applied only what the table still left, so what the column shows is the correction moving out of
+  the band rather than the picture improving. **Nothing reads through anything today** - the
+  read-through went with the table it served (stage9.md 9.2) - so a plateau read from this line is
+  the band's whole correction, and it is the no-field figures above.
 
 ## Geometry: along-seam axis (stages 5+6, merged)
 - 2026-08-01 `VID_20260714_193252_00_006.insv time=2.836 yaw=111.83 pitch=4.12 fov=20.00 lock=1`

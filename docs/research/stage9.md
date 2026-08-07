@@ -905,14 +905,25 @@ second half of the comparison was run: `--bin step` and `--bin shear` with
 | the same, worst deg | 0.792 | **0.498** |
 
 and `--bin shear`'s residuals are smaller at all four bands with the steadiness
-unchanged. Reproduced here independently at the registry's own step view
-(`VID_20260714_193252_00_006.insv time=2.836 yaw=111.83 pitch=4.12 fov=20.00
-lock=1`), which is a different aim and gives different absolute numbers in the
-same direction: step at the seam **-21.97 to -20.69 view px**, its along-seam
-part -0.439 to -0.384 deg, and the band's along-seam load **0.227 to 0.199 deg**
-mean and **0.613 to 0.538** worst, over the same 26 directions of evidence.
+unchanged. Reproduced here independently, at the **same aim** - the registry's
+step view, `VID_20260714_193252_00_006.insv time=2.836 yaw=111.83 pitch=4.12
+fov=20.00 lock=1`, character for character - and from a **different band
+state**: this run gave the band no warm-up and read 26 of 128 directions with
+evidence where the reviewer's `warm=6.0` read 47 to 48. Step at the seam
+**-21.97 to -20.69 view px**, its along-seam part -0.439 to -0.384 deg, and the
+band's along-seam load **0.227 to 0.199 deg** mean and **0.613 to 0.538** worst.
 
-**The trimmed fit is the better one in the picture**: it leaves less step at the
-seam and it leaves the per-frame band less to carry, which is what a cleaner
-pose should do. That is the delivered-domain evidence for the one thing this PR
-still applies, and it is the half a difference metric could not have supplied.
+That the absolute numbers differ and the direction does not is the **stronger**
+reading, not the weaker one: the same aim seen through two band states, one with
+half the ring's evidence of the other, moves the same way.
+
+**The trimmed fit is the better one in the picture** - it leaves less step at
+the seam and less for the per-frame band to carry, which is what a cleaner pose
+should do - **and the claim is exactly as wide as its evidence**: one camera,
+one flight (the July-14 X4 Air capture), two views on it, two band states. The
+two May-01 crossings cannot be read this way at all - `--bin step`'s line fits
+there come out at 51 to 54 px rms, which is the condition the registry warns
+about before any step is quoted - and the ONE X2 view answers "no horizon
+fitted on both sides of the seam". So this is the delivered-domain evidence for
+the one thing this PR still applies, on the one flight that could carry it, and
+it is the half a difference metric could not have supplied.
