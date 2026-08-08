@@ -110,12 +110,22 @@ for the A/B, not a claim.
   each, per-site -45.48 to -48.79. At 51.2 px/deg that is **-0.906 degrees**.
   Measured. **Domain: the unbent projection.** The band's per-frame bend is a
   second layer and is not in those numbers (`crossing.rs:47-53`).
-- **The instrument's own controls.** The null reads exactly 0.0000 at every
-  site, ncc 1.00000. **But the yaw plant file for these runs is byte-identical
-  to the unplanted run** - a plant that moves nothing is not a positive
-  control, and it is flagged rather than repaired here. The `--bin ceiling`
-  plant *does* move (base -14.797 against v6 -20.251). Anyone quoting -0.906
-  as a positive-controlled number should re-run the plant first.
+- **The instrument's own controls, CORRECTED 2026-08-08.** The null reads
+  exactly 0.0000 at every site, ncc 1.00000. This memo said, until today, that
+  *"the yaw plant file for these runs is byte-identical to the unplanted run -
+  a plant that moves nothing is not a positive control"*, and asked for a
+  re-run before anyone quoted -0.906. **The re-run says the control was alive
+  the whole time and the memo was reading the wrong artifact.** `--bin
+  crossing` writes the CSV from the base readings and prints the plant's
+  readout on stdout (`plant_row`, and `report`'s `plant read [...] against
+  [...] predicted` line), so a plant CSV identical to an unplanted one is what
+  the instrument is built to produce and says nothing at all. Re-run at all
+  three downward views with `plant=yaw:0.10`, the medians read against
+  prediction: **-0.0360 against -0.0391 deg, -0.0351 against -0.0391, -0.0270
+  against -0.0310**, error medians **+0.0031, +0.0008 and +0.0002 deg** over 9,
+  9 and 8 sites. The plant moves the reading and it moves it where the map
+  says. **-0.906 degrees is positive-controlled and it stands**, and the base
+  medians re-read exactly: -46.39, -46.41, -48.00 view px.
 - **The structure.** Across-seam DC spans 0.666 deg over six flights against
   an along-seam floor of 0.119 (reference-views, measured). May-01 carries the
   second *smallest* DC of the six and the three clips he calls clean carry the
@@ -637,8 +647,107 @@ earned by a complaint that survives everything above it.
 - **Increment 3 answering "no"** kills C2 and leaves C4 as the only thing
   addressing the residual, which is a quarter of it. That is a real possible
   outcome and the memo does not hide it.
-- **The `--bin crossing` plant control being genuinely broken** (2.1) would
+- ~~**The `--bin crossing` plant control being genuinely broken** (2.1) would
   put a question mark on the -0.906 degree number that motivates all of this.
-  Re-running it is cheap and should happen regardless.
+  Re-running it is cheap and should happen regardless.~~ **Answered
+  2026-08-08: the control was never broken.** See the correction in 2.1.
 - **A committed record of the four-tier Studio session in his own words**
   would let its rankings be cited as evidence instead of as direction.
+
+---
+
+## 8. What was built, and what it measured (2026-08-08)
+
+Increments 1 and 2 are built behind their own research toggles, increment 3 is
+measured, and all of it is staged for the owner's playback A/B at
+`~/kjerag-ab/temporal-ab.sh` (three arms, six views, blind). Nothing is merged
+and nothing is on by default.
+
+**The corrections this round made to the memo above.** Two, and both matter.
+The plant control was never broken (2.1, corrected in place). And section C3's
+"6.4 degrees" is the crossfade measured on the **share** axis rather than in
+degrees of picture: the weights are cosines of two lens axes, so the delivered
+10-90 percent of an 8 degree handover is **4.89 degrees** and not 6.4
+(`the_along_seam_correction_hands_over_across_the_whole_crossover`, on record
+since 2026-08-05 at 0.61 of the width). An exponent chosen on the share axis to
+hit "3 to 4 degrees" would have been 2.35 and would have delivered 2.27.
+
+### 8.1 C3, `KJERAG_BLEND_CURVE=steep`
+
+`crossover()` keeps its support and re-spends the share on
+`s^n / (s^n + (1-s)^n)` at `n = 1.5`. Delivered 10-90 percent, swept on the
+calibration fixture over 24 azimuths at the shipped 8 degree support:
+
+| exponent | 1 | 1.3 | **1.5** | 1.8 | 2 | 2.35 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| delivered, deg | 4.89 | 3.93 | **3.46** | 2.93 | 2.65 | 2.27 |
+
+**A defect found on the way, and it had a failing case.** The fold guard is
+`gradient * disparity / band <= 1`, held at 0.9, and it was written where the
+gradient was 1 because a linear ramp's is. This curve's peak gradient is its
+exponent. At the ONE X2's 3.99 degree support against a search that reads out
+to 2.6 degrees the undivided shear is **over 1** - the steep arm folds a real
+camera. `band::carried` divides its limit by the exponent, which is 1 on every
+shipped run (`the_steep_curve_cannot_fold_the_narrowest_camera`).
+
+### 8.2 C1a, `KJERAG_TRUST=smooth`
+
+The gate on the way out becomes `Cell::trust`, filtered at `TAU_TRUST_S = 2 s`.
+`KEEP` still decides whether a reading may *enter* the state; this is how much
+of the state *leaves* it. Planted with no GPU and no footage, on his own -0.912
+degrees, eight visits correlating / eight refused / eight correlating:
+
+| | worst step, view px | steps over 10 px |
+| --- | ---: | ---: |
+| shipped gate | 46.69 | 3, after the arrival |
+| filtered gate | 1.27 | 0 |
+
+Delivered at the three banked downward views, `--bin band mode=trace`, 120
+frames, applied step counts including every direction's first arrival:
+
+| view | steps over 10 view px, main | with C1a | worst px, either |
+| --- | ---: | ---: | ---: |
+| down1 | 83 | 4 | 46.94 |
+| down2 | 67 | 2 | 47.37 |
+| down3 | 30 | 10 | 48.14 |
+
+The 83 reproduces this memo's own 84. The steps that survive are arrivals, one
+per direction, which C1a deliberately does not touch. **Excluding arrivals the
+worst applied step at down3 goes UP, 27.75 to 42.02 view px**, and that is not
+the gate: the band's own held reading steps 43.04 px there on every arm. C1a
+fixes a gate artifact and a state jump is a different defect.
+
+### 8.3 Increment 3: the C2 coverage gate answers yes
+
+`--bin band mode=coverage`. Per direction, the visits the band accepted a
+reading on, over 60 s of media time. His arc is azimuth 93 to 125 degrees,
+12 cells here where `--bin refusals` counted 11 and read **1** of them.
+
+| file | arc cells read | 10+ reads | 100+ reads | whole ring |
+| --- | ---: | ---: | ---: | ---: |
+| May-01, from his own 60 s | 10 of 12 | 10 | 8 | 91 of 128 |
+| May-01, from the harvest's place 0 | 10 of 12 | 10 | 6 | 89 of 128 |
+| Jul-25, bright undercast | 12 of 12 | 12 | 6 | 75 of 128 |
+| Jul-14, the shimmer anchor | 12 of 12 | 12 | 12 | 128 of 128 |
+
+**And it does not take minutes.** On May-01 eight of those cells are read
+inside the first second and the next fifty seconds add little. Two cells, 92.8
+and 95.6 degrees, are never read in any run of that file.
+
+**The domain, because it decides what this licenses.** These are the band's own
+`KEEP`. #171's accumulator stacked a far gate, a trimmed middle and a five-term
+shape gate on top, so these are the most a live accumulator could ever see and
+not what it would keep. A `no` would have killed C2; this `yes` licenses the
+next measurement and nothing else.
+
+### 8.4 Frame rate
+
+`--bin playback`, 30 s, on the owner-box-class build. `main` and all three arms:
+**898 redraws, 29.90 fps presented, 2 dropped, 0 starved**. No regression, and
+the arms are not distinguishable on this instrument.
+
+### 8.5 The null
+
+Both toggles unset renders **byte-identically to `main`**: md5-equal 1024 px
+frames at all three banked downward views through the unbent projection, and
+md5-equal with the band LIVE over 40 frames. Each toggle moves the picture.
