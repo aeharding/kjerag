@@ -298,6 +298,79 @@ caveat in the Motion section, which is the same trap at a smaller size.
   2.8x. The along axis is that capture's own repeatability, so the ratio is the part of the
   across residual the scene put there. A per-azimuth, per-site term and not a DC one.
 
+## Geometry: does the SINUSOID wander too, or only the constant (VERDICT: it is poolable)
+- 2026-08-08 `--bin constant <every X4 capture> seam=roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91`,
+  the same pose, plan and corpus as the constant table above, which reproduces off this build to
+  every digit printed. The table above printed the one-cycle **amplitude** and never its
+  **phase**, and the two questions do not follow from each other: six flights carrying 0.2 to 0.6
+  degrees at six different angles have the same column of amplitudes as six flights that agree,
+  and only the second can be carried by a pool. A one-cycle term on this axis is what a *pose*
+  puts there (seam-two-axis 1), so the phase is the test of whether the sinusoid is pose shaped.
+
+  | capture | across 1cyc deg | across phase deg | along 1cyc deg | along phase deg |
+  | --- | --- | --- | --- | --- |
+  | May-01 `..._183417_00_002` | 0.3088 +-0.1519 | **136.0 +-17.5** | 0.0883 +-0.0224 | 205.1 +-22.7 |
+  | Jul-14 `..._193252_00_006` | 0.4073 +-0.1047 | **97.3 +-12.4** | 0.0832 +-0.0640 | not pinned |
+  | Jul-25 `..._194424_00_001` | 0.5893 +-0.2031 | **47.9 +-17.8** | 0.3359 +-0.0808 | 251.5 +-9.0 |
+  | Apr-10 `..._185407_00_004` | 0.3388 +-0.1628 | **122.3 +-28.4** | 0.0921 +-0.0834 | not pinned |
+  | Aug-02 `..._191029_00_002` | 0.2038 +-0.1465 | **not pinned** | 0.1471 +-0.0703 | 348.9 +-33.7 |
+  | May-26 `..._191025_00_004` | 0.1984 +-0.0701 | **121.7 +-17.4** | 0.1052 +-0.0761 | not pinned |
+
+  Phase is where the term's maximum sits, in degrees of seam azimuth from the body's +x
+  (`seam::ring`). A phase is printed only where the amplitude clears twice its own bar, because
+  a vector at the origin points nowhere; Aug-02 does not clear it and says so instead of
+  printing an angle.
+
+  **VERDICT: POOLABLE, on five flights.** Four of the five phases land inside 97 to 136 degrees.
+  The cross-flight test is the constant's discipline on a two-vector - an inverse-variance pool,
+  the chi-square of the flights against it, and the along-seam column beside it as the floor -
+  and on the five flights excluding Jul-25 it reads **chi2/dof 1.11 across against 2.00 along**,
+  which is agreement inside the flights' own bars. The pooled vector is **0.2477 deg at 110.5
+  deg**, and applying it leaves at most **0.1756 deg (2.87 src px)** on the worst flight while
+  buying 0.078 to 0.232 deg on every one of the five:
+
+  | capture | carries | pool leaves | bought |
+  | --- | --- | --- | --- |
+  | May-01 | 0.3088 | 0.1364 | -0.1725 |
+  | Jul-14 | 0.4073 | 0.1756 | -0.2318 |
+  | Apr-10 | 0.3388 | 0.1089 | -0.2299 |
+  | Aug-02 | 0.2038 | 0.1257 | -0.0781 |
+  | May-26 | 0.1984 | 0.0655 | -0.1329 |
+
+  WHY JUL-25 IS OUT, and the number with it in. Jul-25 is the corpus's thinnest arc - 20 sites
+  over 195 degrees with a 165 degree hole - and stage9 10.3 already excludes it from pooling as
+  solid undercast over a cloud top. It is the worst flight on **both** axes, which is the
+  signature of the instrument and not of the seam. With it in, the six read chi2/dof **1.99
+  across against 2.77 along**, which is still POOLABLE by the along-axis floor but is no longer
+  agreement inside the bars, and the pool would leave 0.4899 deg (8.00 src px) on it. Quote the
+  five-flight numbers for design and the six-flight numbers for the corpus.
+
+  THE CONTROL, IN TWO HALVES, AND THE SECOND IS THE ONE THAT COUNTS.
+  (1) Recovery: `wave=0.400@250` plants a sinusoid on the across column of every capture and it
+  reads back at **0.4000 deg at 250.0 deg on all six**, with the along column unmoved to every
+  digit. That control is exact by linearity and therefore proves only that the plant arrives.
+  (2) Detection: `wave=<deg>@0 spin=72` turns each successive capture's plant, planting a
+  **per-session wander of known size**. On the five flights the across chi2/dof runs
+  **1.11 unplanted, 1.57 at 0.05 deg, 2.35 at 0.10, 3.44 at 0.15, 4.84 at 0.20**, crossing the
+  along-axis floor of 2.00 between 0.05 and 0.10 deg. **A per-session one-cycle wander of about
+  a tenth of a degree or more would have been found. The measured data sits below the smallest
+  plant tried.** That is the sentence the verdict is worth, and it is not "the phases agree".
+  INSTRUMENT NOTE: at plants of 0.10 and above the printed verdict reads UNDECIDABLE rather
+  than PER SESSION, because a spun plant interferes destructively with the real term on some
+  flights and drops the resolved count below three. The resolved gate is checked before the
+  chi-square and can mask one that has already flipped; read the two together.
+  WHAT THIS DOES NOT DISTINGUISH, exactly as with the constant: a flight's own near content and
+  a per-session geometry error both move the vector, and nothing here separates them. Nor does
+  it say the term is a *calibration* error - only that whatever it is, one number carries it on
+  five flights of one camera.
+  THE TWO-CYCLE TERM IS A DIFFERENT ANSWER AND IT IS THINNER. Under the five-term model the
+  six flights' two-cycle vectors read chi2/dof **3.65 against an along floor of 2.09**, which is
+  PER SESSION, and a pool would leave 0.9414 deg (15.37 src px) on its worst flight. But the
+  five-term fit is at the edge of what these arcs support - Jul-25's one-cycle amplitude comes
+  out 1.4960 +-0.8986 under it - and the five-term model's own constant and one cycle are not
+  the published ones. **Do not build on the two-cycle row.** What it is good for is saying that
+  the poolable finding is specific to the one-cycle order and does not extend upward.
+
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=93.36 pitch=-2.43 fov=33.95 lock=1`
   vs `VID_20260410_185407_00_004.insv time=45.112 yaw=-86.05 pitch=3.18 fov=38.28 lock=1`
