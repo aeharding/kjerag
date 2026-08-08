@@ -147,15 +147,39 @@
 //! accelerometer to about 2 degrees on all three unit B files. The picture
 //! disagrees with both by 21 degrees at the dip, and the lean MAGNITUDE it
 //! measures matches the file's own to 0.18 degrees - so what is misplaced is
-//! the direction that lean points round the camera's own vertical, by about
-//! 135 degrees. That is a composition between the file's inertial frame and
-//! the optical frame [`BODY`] lands in, not a handedness in the quaternion,
-//! and **which rotation it is has not been measured**: the corpus offers the
-//! instrument vertical structure over about a tenth of a capture and the
-//! instants that survived span 29 degrees of lean azimuth, which cannot tell
-//! a turned frame from a reflected one. Nothing here is changed on that,
-//! because a sign is not the fix and no other number is measured well enough
-//! to ship.
+//! the direction that lean points round the camera's own vertical. That is a
+//! composition between the file's inertial frame and the optical frame
+//! [`BODY`] lands in, not a handedness in the quaternion.
+//!
+//! **That rotation is now measured, and it is a knob rather than a default.**
+//! The same instrument, run over the whole corpus instead of one dip, states
+//! one turn per instant - it is the azimuth between two vectors, not a fit -
+//! and the SCATTER of those over instants that lean in different directions is
+//! what separates the families. Over 23 instants of the three unit B files and
+//! **177 degrees of lean azimuth**, only one of the four families leaves a
+//! constant behind: a mirror in `y` turned `+86.8` degrees, scatter 3.3 rms,
+//! against 61 to 66 rms for each of the other three. It is the same constant
+//! on each file alone (`+88.3`, `+84.5`, `+85.7`) and dropping any whole file
+//! moves it by at most 1.8 degrees. Through the owner's own dip that leaves
+//! **0.4 degrees of residual tilt where the shipped reading leaves 20.9 and no
+//! lock at all leaves 11.4**, and the app's own locked picture, read at the
+//! peak of the dip, comes out level to 0 to 2 degrees.
+//!
+//! **What it means is that the file's inertial frame is left handed against
+//! the optical one**, which is also why the heading looked settled while the
+//! tilt was not: a mirror reverses the heading exactly as a conjugate does, so
+//! the turn measurement that pinned the conjugate could not tell the two
+//! apart, and it picked the one that gets the tilt wrong. The file's own two
+//! streams agree with each other under the mirror as they did before, because
+//! the accelerometer is written in that same left-handed frame - which is what
+//! [`say_plumb`] prints, and why the mirror families miss the file's own
+//! gravity by 2 degrees on leaned frames where the conjugate families miss it
+//! by 9.3 against a null of 9.4.
+//!
+//! **None of it is the default.** [`MOUNT`] stages the candidates and unset is
+//! the shipped composition byte for byte, because what is measured here is one
+//! instrument on one corpus and the eye has not passed on it yet.
+//! `docs/ROADMAP.md` (2026-08-08) has the candidate table and every control.
 //!
 //! **Why the oracles that pinned this preferred the shipped reading**, so the
 //! next pass does not reuse them: neither measured a distance from level. The
@@ -208,6 +232,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::calibration::{
     CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Pose, Size,
@@ -216,6 +241,7 @@ use super::format::{Boxes, moov};
 use super::orientation::{OrientationSample, OrientationTrack};
 use super::rotation::Mat3;
 use super::rotation::Quat;
+use super::rotation::{dot, norm};
 use super::{Error, GyroTrack};
 
 /// How many lens entries this reads, which is one per video stream.
@@ -403,17 +429,61 @@ fn sample(file: &mut File, at: At) -> Result<Vec<u8>, Error> {
 /// stream is not there.
 fn orientation(file: &mut File, track: &Track) -> OrientationTrack {
     let mut samples = Vec::with_capacity(track.at.len());
+    // Only gathered when a mounting was asked for: unset, this reads and
+    // allocates exactly what it read before the knob existed.
+    let mut plumb = Vec::new();
     for (at, offset_us) in track.at.iter().zip(&track.offset_us) {
-        let Some(world_from_body) = sample(file, *at).ok().as_deref().and_then(pointing) else {
+        let Ok(record) = sample(file, *at) else {
             continue;
         };
+        let Some(world_from_body) = pointing(&record) else {
+            continue;
+        };
+        if let Some(mount) = mounting()
+            && let (Some(raw), Some(measured)) = (raw_pointing(&record), accelerometer(&record))
+        {
+            plumb.push((mount.read(raw).normalized(), measured));
+        }
         samples.push(OrientationSample {
             offset_us: *offset_us,
             world_from_body,
         });
     }
+    if let Some(mount) = mounting() {
+        say_plumb(mount, &leaned(&plumb, &track.offset_us));
+    }
     from_first_heading(samples)
 }
+
+/// Each frame's lean, its low-passed accelerometer and its reading, which is
+/// what [`say_plumb`] scores.
+fn leaned(plumb: &[(Quat, [f64; 3])], offset_us: &[i64]) -> Vec<(f64, [f64; 3], Quat)> {
+    let span = offset_us.last().unwrap_or(&0) - offset_us.first().unwrap_or(&0);
+    let rate_hz = match span > 0 {
+        true => plumb.len() as f64 / (span as f64 / 1e6),
+        false => 30.0,
+    };
+    let raw: Vec<[f64; 3]> = plumb.iter().map(|(_, a)| *a).collect();
+    low_passed(&raw, rate_hz, PLUMB_SECS)
+        .into_iter()
+        .zip(plumb)
+        .map(|(measured, (written, _))| {
+            // Every reading puts the same number in the third component of the
+            // body's own up, so the lean magnitude is one fact about the file.
+            let up = written.conjugate().rotate([0.0, 0.0, 1.0]);
+            (
+                up[2].clamp(-1.0, 1.0).acos().to_degrees(),
+                measured,
+                *written,
+            )
+        })
+        .collect()
+}
+
+/// How long the accelerometer is averaged over, in seconds: long enough that a
+/// stride cancels, short enough that a real lean survives. Measured: the
+/// instrument sharpens as the window grows and settles by 1 s.
+const PLUMB_SECS: f64 = 2.0;
 
 /// The same orientations with the first one's heading taken out, which is
 /// where the world frame's zero goes.
@@ -446,19 +516,294 @@ fn from_first_heading(mut samples: Vec<OrientationSample>) -> OrientationTrack {
 ///   bodies, so it goes on the right where a Kjerag body vector arrives and
 ///   its inverse on the left where the answer comes back.
 fn pointing(record: &[u8]) -> Option<Quat> {
+    let raw = raw_pointing(record)?;
+    let Some(mount) = mounting() else {
+        let written = raw.normalized().conjugate();
+        return Some(BODY_QUAT.conjugate().times(written).times(BODY_QUAT));
+    };
+    let written = mount.read(raw).normalized();
+    Some(
+        BODY_QUAT
+            .conjugate()
+            .times(written)
+            .times(BODY_QUAT)
+            .times(mount.turn()),
+    )
+}
+
+/// The four `f32`s of one frame's orientation, in the order they are written.
+fn raw_pointing(record: &[u8]) -> Option<Quat> {
     let state = message(message(record, field::FRAME)?, field::STATE)?;
     let quaternion = message(state, field::POINTING)?;
-    let written = Quat {
+    Some(Quat {
         w: f32s(quaternion, 1)?,
         v: [
             f32s(quaternion, 2)?,
             f32s(quaternion, 3)?,
             f32s(quaternion, 4)?,
         ],
+    })
+}
+
+/// One frame's accelerometer, in g, in the file's own inertial axes.
+///
+/// The plumb line the mounting is checked against, and read by nothing else.
+fn accelerometer(record: &[u8]) -> Option<[f64; 3]> {
+    let state = message(message(record, field::FRAME)?, field::STATE)?;
+    let block = message(state, field::ACCELEROMETER)?;
+    Some([f32s(block, 2)?, f32s(block, 3)?, f32s(block, 4)?])
+}
+
+/// Research only: which IMU-to-optical MOUNTING this run composes with, from
+/// `KJERAG_MOUNT`. Unset - which is every shipped run - is no mounting at all
+/// and the reading above, byte for byte.
+///
+/// **What the knob is for.** The lock's heading is proven and its lean is not:
+/// through a dip the shipped composition leaves nearly twice the tilt that
+/// switching the lock off leaves, and the picture says why - the lean
+/// magnitude is right to 0.18 degrees and the direction that lean points,
+/// round the camera's own vertical, is wrong by about 135. That is a constant
+/// rotation between the frame the file's inertial stream lives in and the
+/// optical frame [`BODY`] lands in, and no reading of the four components is
+/// it. This stages the candidates for that rotation as arms of one binary, so
+/// the eye can pick one on a dip without a rebuild per arm - the same reason
+/// `kjerag_render::projection`'s handover width is an environment variable.
+const MOUNT: &str = "KJERAG_MOUNT";
+
+/// A candidate mounting: which reading of the four components it is a family
+/// of, and how far round the camera's own vertical the optical frame sits from
+/// the inertial one.
+///
+/// **The two halves are one model and not two knobs.** A reading and a turn
+/// compose as `BODY^-1 . reading(q) . BODY . Rot(up, turn)`, and negating `x`
+/// and `y` together is conjugation by a half turn about the file's `z`, which
+/// splits into a world-side yaw - removed by [`from_first_heading`] - and a
+/// body-side half turn, which IS a mounting of 180 degrees. So the eight sign
+/// readings of the last session are four families sampled at 0 and 180 only,
+/// which is why none of its eight rows held the horizon: the answer is at 87.
+struct Mounting {
+    name: &'static str,
+    /// The signs the reading puts on `(x, y, z)`. `(-1, -1, -1)` is the
+    /// conjugate this file shipped with.
+    reading: [f64; 3],
+    /// The turn about Kjerag's own up axis, in degrees, applied on the body
+    /// side after the change of basis.
+    turn_deg: f64,
+    /// The signs the same reading puts on the accelerometer, which is a vector
+    /// in the same inertial frame and has to be carried through the same
+    /// reflection for [`say_plumb`] to be comparing two of one thing.
+    plumb: [f64; 3],
+    why: &'static str,
+}
+
+impl Mounting {
+    fn read(&self, raw: Quat) -> Quat {
+        Quat {
+            w: raw.w,
+            v: std::array::from_fn(|i| raw.v[i] * self.reading[i]),
+        }
     }
-    .normalized()
-    .conjugate();
-    Some(BODY_QUAT.conjugate().times(written).times(BODY_QUAT))
+
+    /// The turn as a quaternion. Kjerag's world vertical is `-y`, and
+    /// [`Quat::about_down`] turns about `+y`, so the angle goes in negated.
+    fn turn(&self) -> Quat {
+        Quat::about_down(-self.turn_deg.to_radians())
+    }
+}
+
+/// The candidates, derived from the picture over 23 instants of the three unit
+/// B files, and enumerated so one can be refused rather than assumed.
+///
+/// The instrument is the vertical vanishing point of a **lock off** render,
+/// which measures where the world's up sits in Kjerag's camera body from the
+/// picture alone and is identical whatever candidate is under test. Each
+/// instant states one turn on its own - it is the azimuth between two vectors,
+/// not a fit - and the SCATTER of those over instants that lean in different
+/// directions is what tells the families apart, because only the right family
+/// leaves a constant of the hardware behind. Pooled over unit B, weighted by
+/// each instant's own lean because an azimuth of a nearly upright vector is
+/// nearly undefined, over 177 degrees of lean azimuth:
+///
+/// ```text
+/// family                  turn      rms scatter    worst    walks with
+/// as written             -84.6           65.9      148.8    heading 0.69
+/// conjugate (shipped)   -107.1           62.1      133.2    azimuth 0.73
+/// mirror in y            +86.8            3.3       10.1    nothing 0.15
+/// mirror x, conjugated   -90.9           61.2      170.8    azimuth 0.89
+/// ```
+///
+/// **One of the four is a constant and the other three are not.** It is a
+/// constant on each file separately as well as pooled - `+88.3` on B003 over
+/// 11 instants, `+84.5` on B002 over 7, `+85.7` on B001 over 5 - and dropping
+/// any whole file moves it by at most 1.8 degrees (`+85.0`, `+87.6`, `+87.1`).
+/// What the others walk with says why they are wrong: the conjugate families
+/// track the body's own heading and the as-written one tracks the direction it
+/// leans, which is the signature of a reflection read as a rotation.
+///
+/// **So the file's inertial frame is left handed against the optical one**, and
+/// that is why the heading looked settled while the tilt was not: a mirror
+/// reverses the heading exactly as a conjugate does, so the turn measurement of
+/// 88d9f3c could not tell them apart and picked the one that got the tilt
+/// wrong. The accelerometer says the same from the other side, and
+/// [`say_plumb`] prints it per file.
+static CANDIDATES: [Mounting; 4] = [
+    Mounting {
+        name: "a",
+        reading: [-1.0, 1.0, -1.0],
+        turn_deg: 86.8,
+        plumb: [1.0, -1.0, 1.0],
+        why: "the measurement: mirror in y, the lean-weighted mean of 23 instants over \
+              three unit B files and 177 degrees of lean azimuth, scatter 3.3 rms",
+    },
+    Mounting {
+        name: "b",
+        reading: [-1.0, 1.0, -1.0],
+        turn_deg: 90.0,
+        plumb: [1.0, -1.0, 1.0],
+        why: "the same family at a quarter turn: 3.2 degrees off the measurement, inside \
+              its own 3.3 rms scatter, and it puts the mirror plane on the 45 degree \
+              diagonal between the two lenses, which is a mounting a screw could make",
+    },
+    Mounting {
+        name: "c",
+        reading: [-1.0, -1.0, -1.0],
+        turn_deg: -107.1,
+        plumb: [1.0, 1.0, 1.0],
+        why: "the shipped reading's own best turn - the turned-not-reflected alternative \
+              the last session could not rule out. It fits no constant at all, 62.1 rms",
+    },
+    Mounting {
+        name: "d",
+        reading: [-1.0, 1.0, 1.0],
+        turn_deg: -90.9,
+        plumb: [-1.0, 1.0, 1.0],
+        why: "the other reflection, 61.2 rms and heading inconsistent: the control that \
+              says the eye is not simply preferring whichever arm moved least",
+    },
+];
+
+/// Which mounting this run asked for, read once and written nowhere.
+fn mounting() -> Option<&'static Mounting> {
+    static CHOSEN: OnceLock<Option<&'static Mounting>> = OnceLock::new();
+    *CHOSEN.get_or_init(|| {
+        let asked = std::env::var(MOUNT).ok()?;
+        let found = CANDIDATES.iter().find(|c| c.name == asked.trim());
+        match found {
+            Some(mount) => {
+                eprintln!(
+                    "osmo:   research mounting on, {MOUNT}={}: the orientation is composed with \
+                     a turn of {:+.1} degrees about the camera's own vertical - {}",
+                    mount.name, mount.turn_deg, mount.why
+                );
+                Some(mount)
+            }
+            None => {
+                let names = CANDIDATES
+                    .iter()
+                    .map(|c| c.name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                eprintln!(
+                    "osmo:   {MOUNT}={asked} names no candidate ({names}); composing the \
+                     shipped reading with no mounting"
+                );
+                None
+            }
+        }
+    })
+}
+
+/// The per-file plumb check: the gravity the composition predicts against the
+/// gravity the file measured, in the file's own inertial axes.
+///
+/// **What it can see and what it cannot.** The accelerometer and the
+/// quaternion are two streams of one frame, so the mounting TURN cancels out
+/// of this - it rotates both - and the number below says nothing about the 87
+/// degrees. What it does say is whether the READING is the right family: the
+/// conjugate one misses the file's own plumb line by about 10 degrees on
+/// leaned frames where the mirror family misses it by about 2, against a null
+/// of about 10 for a camera assumed never to lean. It also catches a file
+/// whose stream is not gravity at all, which is what unit A's is not: its
+/// magnitude is 2.74 g with 1.29 sd.
+///
+/// Read on frames leaning more than [`LEANED_DEG`] because every reading
+/// predicts the same lean MAGNITUDE - `1 - 2(x^2 + y^2)` carries no sign - so
+/// they differ only in azimuth and only in proportion to the lean, and on an
+/// upright camera this instrument says nothing.
+fn say_plumb(mount: &Mounting, plumb: &[(f64, [f64; 3], Quat)]) {
+    let mut errors: Vec<f64> = Vec::new();
+    let mut nulls: Vec<f64> = Vec::new();
+    let mut magnitudes: Vec<f64> = Vec::new();
+    for (lean, measured, written) in plumb {
+        magnitudes.push(norm(*measured));
+        if *lean <= LEANED_DEG {
+            continue;
+        }
+        let predicted = written.conjugate().rotate([0.0, 0.0, 1.0]);
+        let mut up = [0.0; 3];
+        let length = norm(*measured);
+        if length <= 0.0 {
+            continue;
+        }
+        for axis in 0..3 {
+            up[axis] = -measured[axis] / length * mount.plumb[axis];
+        }
+        errors.push(between(predicted, up));
+        nulls.push(between([0.0, 0.0, 1.0], up));
+    }
+    if errors.is_empty() {
+        eprintln!(
+            "osmo:   plumb check: no frame leans more than {LEANED_DEG:.0} degrees, so the \
+             accelerometer cannot separate one reading from another here"
+        );
+        return;
+    }
+    eprintln!(
+        "osmo:   plumb check, mounting {}: the reading misses the file's own gravity by \
+         {:.1} degrees at the median over {} leaned frames, against {:.1} for a camera \
+         assumed upright. |a| is {:.2} g at the median (1.00 is gravity alone)",
+        mount.name,
+        median(&mut errors),
+        errors.len(),
+        median(&mut nulls),
+        median(&mut magnitudes),
+    );
+}
+
+/// Where the plumb check stops being blind, in degrees of lean.
+const LEANED_DEG: f64 = 8.0;
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values[values.len() / 2]
+}
+
+fn between(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let cosine = dot(a, b) / (norm(a) * norm(b));
+    cosine.clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// A centred box filter over `secs` of samples, which is what takes the
+/// wearer's stride out of the accelerometer.
+///
+/// A worn camera's accelerometer is gravity plus the wearer's stride, and on
+/// this corpus the stride is the bigger of the two at frame rate. A stride
+/// averages to zero over a step and gravity does not.
+fn low_passed(raw: &[[f64; 3]], rate_hz: f64, secs: f64) -> Vec<[f64; 3]> {
+    let half = ((rate_hz * secs * 0.5).round() as usize).max(1);
+    (0..raw.len())
+        .map(|at| {
+            let from = at.saturating_sub(half);
+            let upto = (at + half + 1).min(raw.len());
+            let mut sum = [0.0; 3];
+            for one in &raw[from..upto] {
+                for axis in 0..3 {
+                    sum[axis] += one[axis];
+                }
+            }
+            sum.map(|c| c / (upto - from) as f64)
+        })
+        .collect()
 }
 
 fn child<'a>(body: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
@@ -528,9 +873,13 @@ mod field {
     /// Inside `FRAME.STATE`: this frame's orientation, `w` first, in the same
     /// four-`f32` submessage shape as [`ORIENTATION`] above. Its neighbour at
     /// field 10 is the accelerometer in g, three `f32`s at fields 2 to 4,
-    /// which is the plumb line the frame convention was pinned against and is
-    /// read by nothing.
+    /// which is the plumb line the frame convention was pinned against.
     pub const POINTING: u32 = 9;
+    /// The accelerometer beside it, in g, three `f32`s at fields 2 to 4. Read
+    /// only by the mounting knob's plumb check ([`super::say_plumb`]), which
+    /// is the one thing in the file that can say a reading is the wrong family
+    /// without a picture to look at.
+    pub const ACCELEROMETER: u32 = 10;
 }
 
 fn from_record(record: &[u8]) -> Result<CalibrationSet, Error> {
@@ -1189,6 +1538,141 @@ mod tests {
         // nothing.
         let up = leaned.rotate([0.0, -1.0, 0.0]);
         near(up[1].acos().to_degrees(), 180.0 - lean.to_degrees(), 1e-4);
+    }
+
+    /// **A mounting turn cannot move the heading**, which is what lets the
+    /// proven half of this file stand while the tilt is worked on.
+    ///
+    /// The turn is about the camera's own up axis, so on an upright camera it
+    /// IS a turn about the world's vertical - a pure yaw, and
+    /// [`from_first_heading`] takes the first frame's yaw off every sample. So
+    /// a candidate changes an upright frame by a constant heading and by
+    /// nothing else, and a whole capture of upright frames comes out where it
+    /// came out before. What it does move, and is meant to, is the tilt, in
+    /// proportion to the lean.
+    #[test]
+    fn a_mounting_turn_is_a_pure_heading_on_an_upright_camera() {
+        for candidate in &CANDIDATES {
+            let turn = candidate.turn();
+            // The camera's own up in Kjerag's frame, which the turn is about.
+            let up = turn.rotate([0.0, -1.0, 0.0]);
+            near(up[0], 0.0, 1e-12);
+            near(up[1], -1.0, 1e-12);
+            near(up[2], 0.0, 1e-12);
+            // And it is exactly the yaw `from_first_heading` removes.
+            near(
+                turn.heading().to_degrees(),
+                -candidate.turn_deg,
+                1e-9 * candidate.turn_deg.abs().max(1.0),
+            );
+        }
+    }
+
+    /// The four sign readings of the last session are two of these families
+    /// sampled half a turn apart, which is why none of its eight rows held the
+    /// horizon: negating `x` and `y` together is conjugation by a half turn
+    /// about the file's `z`, and in this composition that is a mounting of 180
+    /// degrees plus a world yaw nobody can see.
+    #[test]
+    fn a_half_turn_of_mounting_is_the_other_sign_reading() {
+        let raw = Quat {
+            w: 0.83,
+            v: [0.21, -0.37, 0.35],
+        }
+        .normalized();
+        for (reading, other) in [
+            ([-1.0, -1.0, -1.0], [1.0, 1.0, -1.0]), // wXYZ / wxyZ
+            ([-1.0, 1.0, -1.0], [1.0, -1.0, -1.0]),
+        ]
+        // wXyZ / wxYZ
+        {
+            let sign = |signs: [f64; 3]| Quat {
+                w: raw.w,
+                v: std::array::from_fn(|i| raw.v[i] * signs[i]),
+            };
+            let compose = |written: Quat, turn_deg: f64| {
+                BODY_QUAT
+                    .conjugate()
+                    .times(written)
+                    .times(BODY_QUAT)
+                    .times(Quat::about_down(-turn_deg.to_radians()))
+            };
+            let half = compose(sign(reading), 180.0);
+            let named = compose(sign(other), 0.0);
+            // Equal up to a world yaw, which `from_first_heading` removes, so
+            // the two are compared with their headings taken off.
+            let bare = |q: Quat| Quat::about_down(q.heading()).conjugate().times(q);
+            assert!(
+                bare(half).angle_to(bare(named)).to_degrees() < 1e-9,
+                "{reading:?} at 180 is not {other:?}: {half:?} against {named:?}"
+            );
+        }
+    }
+
+    /// Unset, this file reads exactly what it read before the knob existed.
+    #[test]
+    fn no_mounting_asked_for_is_the_shipped_composition() {
+        assert!(
+            std::env::var(MOUNT).is_err(),
+            "the test run named a mounting"
+        );
+        let raw = Quat {
+            w: 0.83,
+            v: [0.21, -0.37, 0.35],
+        };
+        let record = frame_record([
+            raw.w as f32,
+            raw.v[0] as f32,
+            raw.v[1] as f32,
+            raw.v[2] as f32,
+        ]);
+        // Through an `f32` and back, because that is what the file holds.
+        let raw = Quat {
+            w: f64::from(raw.w as f32),
+            v: raw.v.map(|c| f64::from(c as f32)),
+        };
+        let want = BODY_QUAT
+            .conjugate()
+            .times(raw.normalized().conjugate())
+            .times(BODY_QUAT);
+        let got = pointing(&record).expect("no orientation in the record");
+        assert!(got.angle_to(want).to_degrees() < 1e-12, "{got:?}");
+    }
+
+    /// The accelerometer beside the quaternion is read, and it is the one
+    /// stream in the file that can refuse a reading without a picture.
+    #[test]
+    fn the_plumb_line_is_read_where_the_quaternion_is() {
+        let got = accelerometer(&frame_record([1.0, 0.0, 0.0, 0.0])).expect("no accelerometer");
+        near(got[0], 0.01, 1e-7);
+        near(got[1], -0.02, 1e-7);
+        near(got[2], -0.99, 1e-7);
+        // Gravity points down the camera's own `z`, so world up is the other
+        // way: a camera this nearly upright leans about a degree.
+        let lean = between([0.0, 0.0, 1.0], got.map(|c| -c));
+        assert!(lean < 2.0, "{lean}");
+    }
+
+    /// A box filter over a stride leaves gravity behind, which is the whole
+    /// reason the plumb check low passes at all.
+    #[test]
+    fn the_plumb_low_pass_takes_a_stride_out() {
+        let rate = 30.0;
+        let raw: Vec<[f64; 3]> = (0..300)
+            .map(|n| {
+                // Gravity, plus a 2 Hz stride half a g across.
+                let phase = std::f64::consts::TAU * 2.0 * n as f64 / rate;
+                [0.5 * phase.sin(), 0.5 * phase.cos(), -1.0]
+            })
+            .collect();
+        let smooth = low_passed(&raw, rate, PLUMB_SECS);
+        let worst = smooth[100..200]
+            .iter()
+            .map(|v| between(*v, [0.0, 0.0, -1.0]))
+            .fold(0.0, f64::max);
+        let before = between(raw[150], [0.0, 0.0, -1.0]);
+        assert!(worst < 1.0, "{worst} left of a stride that was {before}");
+        assert!(before > 20.0, "the fixture has no stride in it: {before}");
     }
 
     /// The world frame's zero heading is the first frame's, so a file opens
