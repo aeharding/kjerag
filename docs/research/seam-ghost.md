@@ -675,3 +675,219 @@ Knobs: `rate=` the readback Hz, `smooth=` the kernel half-width in degrees,
 `ridge=` the taper, `plant=` the control, `arc=low:high` the azimuths reported
 on. Every run prints its own servo line, so a number quoted from it can say what
 it was taken at.
+
+---
+
+## 8. Increment 1, as built (2026-08-08, `feat/ghost-field`)
+
+**Status:** built, gated, and staged for a blind A/B. Nothing merged. Everything
+in this section is **measured** on the delivered path unless it says otherwise;
+the loop is closed and no line of it is modelled any more.
+
+### 8.1 What is in the build
+
+246 lines of shipped code, 262 of test, and a 445 line instrument.
+
+| where | shipped code | what |
+| --- | ---: | --- |
+| `render/src/ghost.rs` | 96 | the servo, the azimuth smoothing, the taper, the far gate, the forgetting |
+| `render/src/scene.rs` | 91 | the non-blocking readback, the tick, the env switch |
+| `render/src/projection.rs` | 26 | #171's `Reframe::epi`, `Bend::still`, `ACROSS_SEAM`, `blend_bent` |
+| `render/src/band.rs` | 31 | #171's WGSL twin and the compute pass's read-through, plus one shared unpacker |
+| `render/src/lib.rs` | 2 | |
+
+The vehicle is #171's, adapted rather than invented, exactly as 4 predicted. Its
+no-fold test came with it (`seam.rs`, 48 lines) and passes unchanged.
+
+`--bin ghost` is no longer a probe. It drives the shipped `Ghost` through the
+shipped `ScenePipeline` with the field applied, so section 3.1's one modelled
+line is deleted rather than improved on.
+
+### 8.2 Three deviations from this memo, each forced by a measurement
+
+**1. The staging filter is outside the servo loop.** 2.3's servo integrates
+`disparity - applied`, which puts a two second lag inside an integrator. The loop
+is then second order with a damping ratio of `0.5 * sqrt(TAU_MEMORY / TAU_TRUST)`,
+so at the first reading's gain of 1 it is **0.065** and it rings for half a
+minute. Measured before the fix, on a -0.9 degree truth: overshot to **-1.29**
+and was still 0.29 degrees the wrong side of it four seconds later. The servo is
+now told where the picture is *heading* - the smoothing's own output - rather
+than where it has got to. The filter still walks the picture there, so 2.7's
+property is kept whole and the gain schedule is free to be an estimator's again.
+`the_servo_does_not_ring` is that failure kept as a test.
+
+**This is the answer to 6's question 2**, and it is the one thing that could have
+made increment 1 fail on its own gates. The loop is stable **once the filter is
+taken out of it** and was not before.
+
+**2. Forgetting is a floor under the gain, and the leak stops at one direction's
+support.** The gain is `(1/seen).clamp(forget, 1)` where `forget` is
+`ease(seconds, TAU_MEMORY_S)`, and `seen` leaks at the same constant but only
+down to `SUPPORT_FULL`. Two reasons, both measured:
+
+- a bound has to hold **whatever the value arrived with**, so it is the gain that
+  is floored and not the evidence. With the leak on `seen` alone, the `seen=655`
+  plant spent its first seconds throttled by its own false confidence.
+- the leak may not take a direction's support to nothing. The first cut did, and
+  at `down1` - whose arc goes dark seventeen seconds in - it gave the correction
+  back for no reason but the dark, **-0.776 to -0.412 degrees**. #172 measured
+  that a direction failing towards nothing is worse than one failing towards the
+  reading it held, and that binds here one level out.
+
+`TAU_MEMORY_S` is `2 * TAU_TRUST_S`, which is the relation rather than the
+number: what is learned is always an average over more film than the walk it is
+drawn through.
+
+**3. `lean` is deleted; the far gate is the hard sign gate alone.** The
+camera-vs-ground discriminator measured the blunt form strictly better on the
+hazard and indistinguishable at cruise. Two gates on one axis where one is
+measurably enough is a knob and not a design. The gate is asked about the
+**whole** disagreement - the band's reading plus what the field draws - because a
+distance is read off the whole and not off a remainder.
+
+**And `RIDGE` is 0.5, chosen in this axis's units** (2.4, question 4). A direction
+here carries eight readings of a cell that is already a two second average, so
+`TABLE_RIDGE`'s "one reading's worth" is the wrong unit. It costs arrival rate
+rather than value: the loop is closed, so the servo integrates until what is
+*applied* matches what the band reads.
+
+### 8.3 What the loop does, measured
+
+`--bin ghost`, 900 frames, `seam=pool`, field on and off, arc 93 to 125 degrees
+on the three downward views and the whole ring elsewhere. The corridor's load is
+pooled over every frame past 12 s that read anything, weighted by how much of the
+arc it read.
+
+| view | corridor today | with the field | taken off | 50% | 90% | overshoot | turns |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `down1` | 0.9057 | **0.1728** | **80.9%** | 2.04 s | 5.64 s | +0.58% | 0 |
+| `down3` | 0.9064 | **0.1608** | **82.3%** | 1.84 s | 5.51 s | +0.00% | 0 |
+| the `#171` refusal view | 0.9124 | **0.1124** | **87.7%** | 4.27 s | 18.28 s | +0.50% | 0 |
+| `shimmer` (July-14, whole ring) | 0.8445 | 0.9309 | **-10.2%** | 1.10 s | 2.17 s | +46% | 7 |
+| ONE X2 (whole ring) | 0.1481 | 0.1205 | 18.6% | 1.40 s | 2.84 s | +22% | 15 |
+
+**The arrival clock matches the probe's model almost exactly** (2.17 / 5.61
+modelled, 2.04 / 5.64 measured at `down1`), which is the strongest thing that can
+be said for 3.4 now that it can be checked.
+
+**Two rows are honest about what they are.** `shimmer` and the X2 are whole-ring
+means over views whose content changes while they play, so their "overshoot" and
+"turns" are the scene moving and not the loop oscillating: `shimmer`'s mean walks
+to -0.127 at 8 s and back to -0.088 as its covered set grows from 59 directions
+to 118. The stability columns are only interpretable where the truth is steady.
+
+**`shimmer` is a real worsened row and it is the design's own trade.** Past 12 s
+its seam is looking at content 1.1 to 1.5 m away. The field there is small (-0.09
+degrees mean) and the near disparity now sits **on top** of it, so the corridor
+ramps 1.69 degrees where it used to ramp 1.45. The two lenses still agree at full
+carry - the total correction is unchanged - but the corridor's gradient is
+steeper by the size of the field. That cost is bounded by the field and it is the
+principle stated as a number.
+
+**2.5's contract holds and `T - fit(T)` did not happen.** The band's own reading
+is what fell; it did not fight the term back.
+
+### 8.4 The far gate, measured on the delivered path
+
+Per direction over a whole run, a direction is called near-fed where the gate
+refused most of what it was offered. The counterfactual needs no second servo: an
+ungated `1/n` servo **is** a running mean of its input, so the mean of the whole
+readings is what one would have settled on.
+
+| view | refused | near-fed directions hold | with no gate they would hold |
+| --- | ---: | ---: | ---: |
+| `down1` | 4.2% | 0.147 | 0.541 |
+| `down3` | 4.8% | 0.141 | 0.481 |
+| the refusal view | 4.0% | 0.291 | 0.546 |
+| `shimmer` | 87.0% | **0.070** | 0.512 |
+| the landing, t=700 | 70.8% | **0.078** | 0.329 |
+| the touchdown, t=770 | 34.4% | **0.068** | 0.697 |
+
+A direction **every** reading of which is near learns exactly nothing, and that
+one is a test (`a_reading_past_zero_cannot_move_the_field`) rather than a
+measurement, because no stretch of real footage is that clean. What the live runs
+show is the same thing with the mixture in it: near-fed directions hold two to
+ten times less than they would with no gate, and what they do hold was learned in
+the intervals when they were reading far.
+
+The brief's landing chapter is at t = 700 to 776 of
+`VID_20260501_183417_00_003.insv`, not t = 600; at 600 only 2 of 10 readings are
+past zero and the aircraft is still up.
+
+### 8.5 The plants
+
+`--bin ghost plant= seen=`, whole ring, 30 s of real play at `down1`.
+
+| control | at 0 s | 8 s | 12 s | 20 s | 30 s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0.500 deg at `seen=8` | 0.500 | 0.343 | 0.281 | 0.166 | **0.083** |
+| 0.240 deg at `seen=655`, the poison | 0.240 | 0.177 | 0.136 | 0.038 | **-0.067** |
+
+The poison passes through zero and goes on to learn the real field, which is
+negative. Against the discriminator's measurement of the unbounded `1/n`
+schedule - **still 0.119 degrees after thirty seconds** - that is the forgetting
+bound doing its job.
+
+**A hazard the probe could not see, disclosed.** A large wrong field **suppresses
+the evidence that would correct it**: the band searches lens 1 through the term,
+so a term far from the truth breaks the correlation. Measured at `down1` over the
+whole ring, directions reading in the first seconds: **36 with no plant, 37 at a
+0.10 degree plant, 32 at 0.25, 19 at 0.50**, recovering to 32 by 20 s. It is
+self-limiting - the field walks out, the readings come back - and the servo
+cannot reach a 0.5 degree error on its own, because every step it takes is at
+most 0.25 degrees of a measured residual. But it is a real coupling and it is not
+in section 2.
+
+### 8.6 The gates
+
+- **The null.** `--bin band mode=render count=40 size=1024`, band live, md5 of
+  the rendered frame, at all six A/B views under `seam=pool` and again under
+  `seam=factory`: **identical at all twelve** against a `main` binary built in
+  its own target directory. The field-on arm differs at both fits at `down1`, so
+  the comparison is not reading one binary twice.
+- **Steadiness**, `--bin band mode=snap`, across-seam axis, the delivered step:
+
+  | view | rms off | rms on | 3+ px off | on | 10+ px off | on | combed off | on |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | `down1` | 0.49 | 0.82 | 15 | 26 | 1 | **6** | 40 | **38** |
+  | `down3` | 0.78 | 1.05 | 32 | 38 | 2 | **6** | 100 | **36** |
+  | `bad` | 0.30 | **0.23** | 7 | **2** | 0 | **0** | 256 | **40** |
+  | the refusal view | 2.43 | **2.14** | 72 | **44** | 14 | **12** | 136 | **36** |
+
+  **The two worsened rows are the arrival and nothing else.** Run at 900 frames
+  instead of 300 the counts do not move at all - 26 and 6 at `down1`, 38 and 6 at
+  `down3` - so every extra step is inside the first ten seconds and there are
+  none after it. And `mode=snap` reads the **corridor's** channel only: the
+  field rides in a different uniform, so what it reports as a step is the
+  corridor giving up load that the field is taking on at the same instant.
+  Disclosed rather than argued away.
+
+  **The comb is much better and was not aimed at.** The hole #172 deepened and
+  #173 failed to fix is a shape the corridor makes when it is spending most of a
+  degree; spending 0.17 instead, it mostly stops making it.
+- **Frame rate**, `--bin playback` 30 s, three reps with the order rotated, the
+  two contaminated reps discarded and re-run: off 29.47 / 29.90 / 29.94, on
+  29.94 / 29.94 / 29.90 fps presented. Not resolvable.
+- **The servo's own cost**: 4.5 to 4.8 us a frame mean, 7 to 13 p99, which is
+  **0.054 to 0.070 percent** of the 8.44 ms pass, against 3.2's estimate of
+  0.101. No new upload; one 4 kB copy a frame, non-blocking.
+- `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`,
+  `cargo test --workspace` (238 in `kjerag-render`, including nine on the servo),
+  `scripts/name-check.sh`.
+
+### 8.7 What is still open
+
+1. **The corridor is left with 0.16 to 0.17 degrees at the downward views, not
+   the 0.026 the probe modelled.** The probe compared a running mean against its
+   own input, which is a measure of how well a mean tracks, not of what the
+   corridor carries. 81 percent off is the honest number and 97 was never
+   available.
+2. **`shimmer` is worse by 10 percent on the corridor's load** (8.3), and the ONE
+   X2 gains only 18.6 percent. Both are whole-ring statistics on views dominated
+   by near content.
+3. **The evidence-suppression coupling** of 8.5.
+4. Questions 5, 6 and 7 of section 6 are untouched. The 6.3 percent cross-axis
+   leak was not separately measured; the along-seam channel's own leftover is
+   the thing that would show it.
+5. **Persistence is increment 2 and there is none here**, so every open pays the
+   six seconds. That is the row 3.3 says only increment 2 can move.
