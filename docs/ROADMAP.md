@@ -612,23 +612,33 @@ live, no keyframe UI ever.
   calibration. Far-field content joins cleanly; near-field shows a soft band at
   the handover. That is the accepted v1.
 
-  Measured on the target box with `--bin playback`, rendering 2560x1440, on a
-  box with nothing else running (VA-API, 10-bit; kjerag has no software decode
-  path). Decode at lookahead 4, then 20 to 30 s of paced playback:
+  Measured with `--bin playback`, rendering 2560x1440, VA-API, 20 to 30 s of
+  paced playback per row; kjerag has no software decode path. **Two columns for
+  every number, because this box was not this branch's alone**: a second agent
+  was running its own instruments out of another worktree for most of the
+  session, and the same command on the same build read 6.91 ms a redraw in a
+  lull and 21.05 ms beside that agent's run. So the best of five runs and the
+  worst are both here, and neither on its own is the box's answer.
 
-  | capture              | decode         | presented        | dropped | starved | pass    |
-  | -------------------- | -------------: | ---------------: | ------: | ------: | ------: |
-  | unit B 8k30p         | 2.56x realtime | 29.57 of 29.97   |      10 |       9 | 6.91 ms |
-  | unit B 8k50p         | 1.60x realtime | 49.45 of 50.00   |       4 |       3 | 5.11 ms |
-  | unit A 8k25p         | 3.00x realtime | 24.87 of 25.00   |       0 |       0 | 6.51 ms |
-  | X4 Air `.insv` 8k30p | 2.44x realtime | 29.94 of 29.97   |       1 |       0 | 7.90 ms |
+  | capture              | decode, best  | presented, best | dropped | pass, best | presented, worst | dropped | pass, worst |
+  | -------------------- | ------------: | --------------: | ------: | ---------: | ---------------: | ------: | ----------: |
+  | unit B 8k30p         | 2.56x         | 29.57 of 29.97  |      10 |    6.91 ms |   25.54 of 29.97 |     129 |    21.05 ms |
+  | unit B 8k50p         | 1.60x         | 49.45 of 50.00  |       4 |    5.11 ms |   24.43 of 50.00 |     242 |    38.46 ms |
+  | unit A 8k25p         | 3.00x         | 24.87 of 25.00  |       0 |    6.51 ms |   21.89 of 25.00 |      13 |    27.53 ms |
+  | X4 Air `.insv` 8k30p | 2.44x         | 29.94 of 29.97  |       1 |    7.90 ms |   27.24 of 29.97 |      82 |    20.00 ms |
 
-  So an `.OSV` plays at its own rate, and costs what the `.insv` in the last
-  row costs: **hardware decode is not the bottleneck at 8k30p on this box**,
-  which is worth saying because the scoping pass's ffmpeg software decode of
-  the same file ran at 487 percent CPU for realtime. A 5 s run taken while the
-  box was busy read 26.6 fps and 20.6 ms a redraw, and is what this line said
-  before; a number measured under contention is a number about the contention.
+  What survives the noise is the **comparison**, because the `.insv` control in
+  the last row was measured in the same conditions and moves with the rest: an
+  `.OSV` plays at its own rate when the box is free and falls short when it is
+  not, and it does so by about as much as an `.insv` does. **Decode is not what
+  runs out.** Even at its slowest the 10-bit VA-API pair decode ran at 1.17x
+  realtime and no row starved for more than 33 redraws; what moves is the
+  render pass, which is the same pass both formats draw through. That is worth
+  saying against the scoping pass's figure of 487 percent CPU for ffmpeg to
+  software-decode the same file at realtime. The app's own report, in a window
+  at 1280x720, presents 30.00 of 29.97 and 25.00 of 25.00 with nothing dropped
+  or starved on units B and A.
+
   D-Log M is out of scope: those files play with the log look, and no transform
   for it is in the container.
 
