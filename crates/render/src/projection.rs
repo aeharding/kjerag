@@ -1138,6 +1138,11 @@ impl Reframe {
     /// out of it when it is built, so adding them is not applying one
     /// correction twice.
     fn bent(&self, view_ray: [f32; 3], reading: super::band::Reading, band: f32) -> Bend {
+        // FLAT-SEAM EXPERIMENT: zero morphing, opacity-only crossfade.
+        // WGSL twin: `band_bend` returns `band_rest()` unconditionally.
+        if true {
+            return Bend::default();
+        }
         let Some(at) = self.seam_at(view_ray) else {
             return Bend::default();
         };

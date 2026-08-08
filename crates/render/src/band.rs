@@ -1917,6 +1917,9 @@ fn band_rest() -> Band {
 // and each is applied at its own channel's evidence. Only the epipolar one
 // can fold and only the epipolar one opens the band: see `band_width`.
 fn band_bend(ray: vec3<f32>) -> Band {
+  // FLAT-SEAM EXPERIMENT: zero morphing, opacity-only crossfade.
+  // Rust twin: `Reframe::bent` returns `Bend::default()` unconditionally.
+  return band_rest();
   let body = reframe.view_to_body * ray;
   let flat = vec2<f32>(body.x, body.y);
   let reach = length(flat);
