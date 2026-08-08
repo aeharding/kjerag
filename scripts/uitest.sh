@@ -1265,9 +1265,26 @@ returns_to_the_copied_view() {
 # ends up saying false. Reading the config rather than the picture is what
 # separates a key that landed from a key that was swallowed: the two views
 # differ by a rotation that one still frame need not show.
+#
+# A capture carrying no orientation record the app can use is the other case,
+# and the app says so at open. There the key is meant to do nothing, so the
+# same config read is the assertion with its sign flipped: a write would be
+# the defect. A DJI Osmo 360 `.OSV` is that capture today (`kjerag_meta`'s
+# `osmo`, "No IMU").
 flips_the_horizon() {
 	local locked=$session/config/cosmic/dev.harding.Kjerag/v1/horizon_lock
 	local try=0
+	if said 'horizon lock does nothing on it'; then
+		local check="h leaves the lock alone on a capture that cannot hold one"
+		key -k h
+		alive || lost "$check"
+		if [ -s "$locked" ]; then
+			fail "$check" "$locked says $(cat "$locked")"
+			return
+		fi
+		pass "$check"
+		return
+	fi
 	while [ "$try" -lt "$PRESSES" ]; do
 		key -k h
 		alive || lost "h flips the horizon lock"
@@ -2500,13 +2517,17 @@ foreign() {
 	fi
 	quit >/dev/null 2>&1 || teardown
 
-	# The other half of the rule: the bytes said nothing, so the name is what
-	# is left, and an `.osv` is DJI's.
+	# An `.osv` is not the other half of that rule any more. It used to be
+	# refused by name the way a `.360` still is; Kjerag plays one now, so a
+	# file with nothing in it gets as far as the demuxer and is refused by
+	# what actually failed there, which is the same line a broken `.insv`
+	# gets and what "errors are the error" asks for. What is checked is that
+	# it is refused at all, and in words the demuxer wrote.
 	boot dji "$dji"
-	if await 'not shown: a DJI capture' "$READY"; then
-		pass "an .osv with nothing in it is still named"
+	if await 'not shown: Invalid data found' "$READY"; then
+		pass "an .osv with nothing in it is refused in the demuxer's own words"
 	else
-		fail "an .osv with nothing in it is still named" \
+		fail "an .osv with nothing in it is refused in the demuxer's own words" \
 			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
 	fi
 	exits_clean
