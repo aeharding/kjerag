@@ -420,6 +420,18 @@ impl CalibrationSet {
     /// different key and gets its own calibration rather than one scaled
     /// wrong.
     ///
+    /// [`Lens::model`] and [`Lens::mounting`] are deliberately **not** in it.
+    /// They would not tell two cameras apart that the numbers above do not
+    /// already, because a model comes with its own numbers - an equidistant
+    /// lens carries no mirror parameter and a Mei one carries 2.31 - and a
+    /// mounting is the same measurement the angles beside it are. What
+    /// putting them in would do is change the key of every camera already in
+    /// a pilot's pool, and a seam correction filed under a key nobody asks
+    /// for again is a calibration thrown away. Measured on the owner's box:
+    /// stirring them in moved the X4 Air's key from `d8a393389b7b8639` to
+    /// `547a23074ff87e25` and `seam=pool` then answered that it had never
+    /// seen the camera.
+    ///
     /// 0 for a calibration with no lenses in it, which is not a camera.
     pub fn camera_key(&self) -> u64 {
         if self.lenses.is_empty() {
@@ -445,15 +457,6 @@ impl CalibrationSet {
                 eat(&number.to_le_bytes());
             }
             eat(&lens.lens_type.to_le_bytes());
-            eat(&[match lens.model {
-                Model::Mei => 0,
-                Model::Equidistant => 1,
-            }]);
-            for row in lens.mounting.map(Mat3::rows).unwrap_or_default() {
-                for number in row {
-                    eat(&number.to_le_bytes());
-                }
-            }
         }
         hash
     }
