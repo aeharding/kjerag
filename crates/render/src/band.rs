@@ -266,6 +266,76 @@ pub(crate) fn smooth_trust() -> bool {
     })
 }
 
+/// Research only: whether a direction's FIRST reading is walked in rather than
+/// applied whole, from `KJERAG_ARRIVE`. `stage` is the only value it takes.
+///
+/// **The defect it is aimed at** (the 2026-08-08 attribution at the owner's
+/// own banked views). Every other step the band delivers has been made small
+/// by now and the arrivals have not: a direction whose evidence is nothing
+/// takes its answer whole, and at `down1` and `down3` that is a single
+/// delivered step of **56.7 and 56.2 view px**, identical on all three arms
+/// of the last A/B and the largest step in either run. It is 58 percent of
+/// all delivered motion over 10 px on `main` at `down1` and 94 percent of it
+/// under [`smooth_trust`], which had made everything else small and left this
+/// alone.
+///
+/// It is not only the FIRST arrival. A direction that stops correlating gives
+/// up its evidence, its trust decays, and the same rule applies its next
+/// reading whole again: on dusk terrain a cell does that over and over, and
+/// the same line covers both because both are the same line.
+///
+/// **What it does NOT change.** The disparity and the confidence still arrive
+/// whole, so the state holds the right answer from the first frame it has one
+/// and nothing has to be learned twice; what walks is only how much of it
+/// reaches the picture. And a reset frame - a seek, a new file, the first
+/// frame - still applies whole on both arms: there is no picture behind a cut
+/// for a walk to be continuous with, and staging one would draw the first two
+/// seconds after every seek with a correction of nearly nothing (issue #103,
+/// stage 6, whose argument this keeps exactly where it was made).
+///
+/// Not a setting, not a key and not a menu item (AGENTS.md, zero-config
+/// playback): an environment variable, read once, written nowhere.
+const ARRIVAL_STAGING: &str = "KJERAG_ARRIVE";
+
+/// What `KJERAG_ARRIVE` has to say to get the walked-in arrival.
+const STAGE: &str = "stage";
+
+/// Whether this run walks an arrival in, from [`ARRIVAL_STAGING`].
+///
+/// **Inert without [`smooth_trust`], and that is the arithmetic and not a
+/// guard**: with the filter off the gate is assigned this frame's evidence
+/// whole and there is no filter for an arrival to be inside. So the run says
+/// so rather than pretending, and the A/B stacks it on the filtered arm.
+pub(crate) fn stage_arrivals() -> bool {
+    static STAGED: OnceLock<bool> = OnceLock::new();
+    *STAGED.get_or_init(|| {
+        let Ok(asked) = std::env::var(ARRIVAL_STAGING) else {
+            return false;
+        };
+        if asked != STAGE {
+            eprintln!(
+                "kjerag: {ARRIVAL_STAGING}={asked} is not {STAGE:?}, so a direction's first \
+                 reading is applied whole as it ships"
+            );
+            return false;
+        }
+        if !smooth_trust() {
+            eprintln!(
+                "kjerag: {ARRIVAL_STAGING}={STAGE} needs {TRUST_FILTER}={SMOOTH} to do anything: \
+                 with the instantaneous gate there is no filter for an arrival to walk in \
+                 through, and this run applies arrivals whole"
+            );
+            return false;
+        }
+        println!(
+            "band:   research staging on, {ARRIVAL_STAGING}={STAGE}: a direction's first reading \
+             reaches the picture over {TAU_TRUST_S} s instead of whole, and a seek still applies \
+             whole"
+        );
+        true
+    })
+}
+
 /// How much of the crossover the bend may spend, as a fraction of it.
 ///
 /// The bend varies from zero to the whole disparity across the band, so its
@@ -1127,18 +1197,27 @@ impl Cell {
     /// the first seconds of it with a correction of nearly nothing (issue
     /// #103, stage 6).
     ///
+    /// `stage` is [`stage_arrivals`], and it is that second clause and only
+    /// that one: the arrival stops being exempt from the filter and walks in
+    /// at [`TAU_TRUST_S`] like everything else, while a reset frame still
+    /// takes it whole. Mid-film there IS a picture behind an arriving
+    /// direction and it is the uncorrected one the owner has been looking at,
+    /// so a walk starts from what is on the screen; at a cut there is not, and
+    /// stage 6's argument is untouched where it was made.
+    ///
     /// `smooth` is an argument where the shader reads a constant, and that is
     /// the one place the two differ: [`smooth_trust`] is read once per process
     /// and a test process cannot be two arms at once, so the arm a claim is
     /// about is passed in. Nothing outside a test calls this - the pass runs
     /// its twin on the GPU - so no shipped path can pass the wrong one.
-    pub fn believe(&mut self, seconds: f32, fresh: bool, smooth: bool) {
+    pub fn believe(&mut self, seconds: f32, fresh: bool, smooth: bool, stage: bool) {
         let want = (self.confidence / KEEP).clamp(0.0, 1.0);
         if !smooth {
             self.trust = want;
             return;
         }
-        let learn = match fresh || self.trust <= 0.0 {
+        let arriving = self.trust <= 0.0 && !stage;
+        let learn = match fresh || arriving {
             true => 1.0,
             false => ease(seconds, TAU_TRUST_S),
         };
@@ -1657,6 +1736,7 @@ pub(crate) fn wgsl() -> String {
          const TAU_NEAR = {near_s:?};\n\
          const TAU_TRUST = {trust_s:?};\n\
          const SMOOTH_TRUST = {smooth};\n\
+         const STAGE_ARRIVALS = {stage};\n\
          const FOLD = {fold:?};\n\
          const PATCH = {patch}u;\n\
          const BACK_ALONG = {back_along}u;\n\
@@ -1673,6 +1753,7 @@ pub(crate) fn wgsl() -> String {
         near_s = TAU_NEAR_S,
         trust_s = TAU_TRUST_S,
         smooth = smooth_trust(),
+        stage = stage_arrivals(),
         fold = FOLD,
         patch = (2 * half + 1) * (2 * half + 1),
         back_along = (2 * half + 1) as isize + 2 * PERP_STEPS as isize * perp,
@@ -2304,13 +2385,21 @@ fn forget(cell: u32, at: Ring) {
 // has no picture behind it for an ease to hide, and creeping in from zero over
 // two seconds would draw the first seconds of a fresh direction with a
 // correction of nearly nothing (issue #103, stage 6).
+//
+// STAGE_ARRIVALS drops that exemption and only that one, so an arrival walks
+// in at TAU_TRUST like every other change to the gate. A RESET frame still
+// takes it whole on both arms: the exemption's argument is about there being
+// no picture behind the direction, which is true at a cut and false in the
+// middle of a shot, where what is behind an arriving direction is the
+// uncorrected picture the walk starts from.
 fn believe(held: ptr<function, Cell>) {
   let want = believed((*held).confidence);
   if !SMOOTH_TRUST {
     (*held).trust = want;
     return;
   }
-  let fresh = watch.reset != 0.0 || (*held).trust <= 0.0;
+  let arriving = (*held).trust <= 0.0 && !STAGE_ARRIVALS;
+  let fresh = watch.reset != 0.0 || arriving;
   let learn = select(ease(watch.seconds, TAU_TRUST), 1.0, fresh);
   (*held).trust += (want - (*held).trust) * learn;
 }
@@ -3971,7 +4060,7 @@ mod trust_tests {
     /// visit the gates refused, which is the shape the trace on his arc has:
     /// the content flickers the correlation across [`KEEP`] and the reading
     /// itself never moves.
-    fn plant(readings: &[Option<f32>], smooth: bool) -> (Vec<f32>, Cell) {
+    fn plant(readings: &[Option<f32>], smooth: bool, stage: bool) -> (Vec<f32>, Cell) {
         let mut cell = Cell {
             disparity: HIS_ARC_DEG.to_radians(),
             confidence: 0.0,
@@ -3999,7 +4088,7 @@ mod trust_tests {
                         cell.confidence * ease(VISIT_S, time_constant(cell.disparity));
                 }
             }
-            cell.believe(VISIT_S, visit == 0, smooth);
+            cell.believe(VISIT_S, visit == 0, smooth, stage);
             let now = cell.disparity.to_degrees() * cell.trust * VIEW_PX_PER_DEG;
             applied.push(now - last);
             last = now;
@@ -4016,6 +4105,32 @@ mod trust_tests {
         readings
     }
 
+    /// The OTHER plant: a direction that is sky for four visits and then
+    /// starts correlating, in the middle of a shot rather than on a reset
+    /// frame.
+    ///
+    /// **This is the shape of the largest step the band delivers.** At
+    /// `down1` the cell the owner is looking through first correlates on
+    /// frame 70 of 120 and at `down3` on frame 26, and each is one delivered
+    /// step of about 56 view px, on every arm of the last A/B. `flicker`
+    /// cannot show it: its first visit is a reset frame, where every arm
+    /// applies whole by design and always will.
+    ///
+    /// Long enough at the end to say what the walk arrives at as well as what
+    /// it leaves: [`TAU_TRUST_S`] is 2 s and a visit is 1/15 of one.
+    fn late_arrival(visits: usize) -> Vec<Option<f32>> {
+        let mut readings = vec![None; 4];
+        readings.extend(vec![Some(0.90); visits]);
+        readings
+    }
+
+    /// How much of a correction one visit of the filter may move, as a
+    /// fraction: the walk rate the staged arm's arrival is bounded by, and it
+    /// is [`TAU_TRUST_S`] and the visit interval and nothing else.
+    fn walk_rate() -> f32 {
+        ease(VISIT_S, TAU_TRUST_S)
+    }
+
     /// **The positive control, and it runs first.** With the gate as it ships,
     /// a planted confidence dropout snaps the correction off and back on: the
     /// defect the memo diagnosed, reproduced with no GPU and no footage.
@@ -4028,7 +4143,7 @@ mod trust_tests {
     /// coming back, three of them over 10.
     #[test]
     fn the_shipped_gate_snaps_a_planted_flicker() {
-        let (steps, cell) = plant(&flicker(), false);
+        let (steps, cell) = plant(&flicker(), false, false);
         let worst = steps
             .iter()
             .fold(0.0f32, |worst, step| worst.max(step.abs()));
@@ -4058,7 +4173,7 @@ mod trust_tests {
     /// first answer whole.
     #[test]
     fn the_filtered_gate_fades_a_planted_flicker() {
-        let (steps, cell) = plant(&flicker(), true);
+        let (steps, cell) = plant(&flicker(), true, false);
         let worst = steps
             .iter()
             .skip(1)
@@ -4078,7 +4193,7 @@ mod trust_tests {
     /// reading it holds**, one direction, never off it and back.
     #[test]
     fn a_filtered_gate_decays_monotonically_while_the_evidence_goes() {
-        let (steps, _) = plant(&flicker(), true);
+        let (steps, _) = plant(&flicker(), true, false);
         for (visit, step) in steps.iter().enumerate().skip(9).take(7) {
             assert!(
                 *step >= 0.0,
@@ -4105,7 +4220,7 @@ mod trust_tests {
         for _ in 0..30 {
             let learn = ease(VISIT_S, time_constant(cell.disparity));
             cell.disparity += (target - cell.disparity) * learn;
-            cell.believe(VISIT_S, false, true);
+            cell.believe(VISIT_S, false, true, false);
         }
         assert!(
             (cell.disparity - target).abs() < 0.1 * (HIS_ARC_DEG.to_radians() - target).abs(),
@@ -4113,6 +4228,142 @@ mod trust_tests {
             cell.disparity.to_degrees()
         );
         near(cell.trust, 1.0, 1e-3);
+    }
+
+    /// **The positive control for the staging, and it runs first.** With the
+    /// gate filtered but the arrival still exempt - the arm the owner ranked
+    /// last time - a direction that starts correlating mid-shot applies its
+    /// whole correction on one visit.
+    ///
+    /// This is the 56 px step at `down1` and `down3` reproduced with no GPU
+    /// and no footage. If it stops failing this way the test below has
+    /// stopped being evidence of anything.
+    ///
+    /// Measured: **-46.69 view px on the arriving visit**, and the same on
+    /// the shipped gate.
+    #[test]
+    fn the_filtered_gate_still_applies_a_late_arrival_whole() {
+        let (steps, _) = plant(&late_arrival(4), true, false);
+        near(steps[4], HIS_ARC_DEG * VIEW_PX_PER_DEG, 1e-2);
+        let (shipped, _) = plant(&late_arrival(4), false, false);
+        near(shipped[4], HIS_ARC_DEG * VIEW_PX_PER_DEG, 1e-2);
+    }
+
+    /// And with the arrival staged, the same arrival reaches the picture at
+    /// the walk rate: no visit of the whole plant moves it further than the
+    /// filter's own step, which is [`TAU_TRUST_S`] and the visit interval and
+    /// nothing else.
+    ///
+    /// The bound is computed rather than typed, so it cannot be a threshold
+    /// tuned on the answer: it is `full * ease(VISIT_S, TAU_TRUST_S)`, which
+    /// is **1.53 view px** against the control's 46.69.
+    #[test]
+    fn a_staged_arrival_walks_in_at_the_filter_rate() {
+        let (steps, _) = plant(&late_arrival(4), true, true);
+        let bound = (HIS_ARC_DEG * VIEW_PX_PER_DEG).abs() * walk_rate();
+        let worst = steps
+            .iter()
+            .fold(0.0f32, |worst, step| worst.max(step.abs()));
+        assert!(
+            worst <= bound + 1e-3,
+            "the staged arrival moves the picture {worst} view px in one visit, past the \
+             {bound} the walk rate allows"
+        );
+    }
+
+    /// Staging is a delay and not an attenuation: the correction still gets
+    /// all the way to the reading, on the constant it declares.
+    ///
+    /// One [`TAU_TRUST_S`] is 30 visits and must deliver over half of it;
+    /// three of them over nine tenths. A walk that stopped short would be the
+    /// stage 6 defect this is closest to and the thing to catch.
+    ///
+    /// The plain bars are there to be read; the line under them is the exact
+    /// one, and it says the walk is the filter's own geometry and not
+    /// something near it. [`ease`] is `dt / (tau + dt)`, so a visit leaves
+    /// `tau / (tau + dt)` of the gap and n of them leave that to the n-th:
+    /// **62.6 percent delivered after one time constant and 94.8 after
+    /// three**, which is what those two bars are under.
+    #[test]
+    fn a_staged_arrival_still_gets_all_the_way_there() {
+        let full = HIS_ARC_DEG * VIEW_PX_PER_DEG;
+        for (visits, share) in [(30, 0.5), (90, 0.9)] {
+            let (steps, cell) = plant(&late_arrival(visits), true, true);
+            let applied: f32 = steps.iter().sum();
+            assert!(
+                applied / full >= share,
+                "after {visits} visits the staged arrival has delivered {applied} view px of \
+                 {full}, which is short of the {share} its own time constant promises"
+            );
+            near(
+                applied / full,
+                1.0 - (1.0 - walk_rate()).powi(visits as i32),
+                1e-4,
+            );
+            // And what it walked in on is the whole reading, not a filtered
+            // one: the state took its answer whole as it always did.
+            near(cell.disparity.to_degrees(), HIS_ARC_DEG, 1e-4);
+        }
+    }
+
+    /// A **seek** takes the arrival whole on every arm, staged or not.
+    ///
+    /// Stated as a test because it is the one behaviour of this toggle a
+    /// reader could reasonably assume the other way: a walk after a cut would
+    /// draw the first two seconds of every seek with nearly no correction,
+    /// and there is no picture behind a cut for the walk to be continuous
+    /// with anyway.
+    #[test]
+    fn a_seek_applies_the_arrival_whole_on_every_arm() {
+        for stage in [false, true] {
+            let mut cell = Cell {
+                disparity: HIS_ARC_DEG.to_radians(),
+                confidence: 0.90,
+                reach_m: 0.033,
+                ..Cell::default()
+            };
+            cell.believe(VISIT_S, true, true, stage);
+            near(cell.trust, 1.0, 1e-6);
+        }
+    }
+
+    /// A direction that stops correlating for long enough to lose its trust
+    /// entirely **re-arrives**, and it is the same line and the same walk.
+    ///
+    /// The shipped rule is `trust <= 0`, not "has never been read", so a cell
+    /// whose evidence has gone all the way to nothing applies its next
+    /// reading whole however long it has been on screen. Staging covers both
+    /// because both are that one clause.
+    #[test]
+    fn a_re_arrival_is_staged_like_a_first_one() {
+        let cold = || Cell {
+            disparity: HIS_ARC_DEG.to_radians(),
+            confidence: 0.90,
+            reach_m: 0.033,
+            trust: 0.0,
+            ..Cell::default()
+        };
+        let mut whole = cold();
+        whole.believe(VISIT_S, false, true, false);
+        near(whole.trust, 1.0, 1e-6);
+        let mut staged = cold();
+        staged.believe(VISIT_S, false, true, true);
+        near(staged.trust, walk_rate(), 1e-6);
+    }
+
+    /// The staging is only ever inside the filter: with the gate
+    /// instantaneous, asking for it changes nothing at all.
+    ///
+    /// [`stage_arrivals`] refuses in that case and says so, and this is the
+    /// arithmetic behind the refusal rather than the message.
+    #[test]
+    fn staging_does_nothing_to_the_instantaneous_gate() {
+        let (whole, _) = plant(&late_arrival(8), false, false);
+        let (asked, _) = plant(&late_arrival(8), false, true);
+        assert_eq!(
+            whole, asked,
+            "the shipped gate moved under a research toggle"
+        );
     }
 
     fn near(read: f32, want: f32, tolerance: f32) {
