@@ -612,12 +612,23 @@ live, no keyframe UI ever.
   calibration. Far-field content joins cleanly; near-field shows a soft band at
   the handover. That is the accepted v1.
 
-  Measured on the target box, 8k30p unit B: decode 76.3 pairs/s, **2.55x
-  realtime** at lookahead 4 (VA-API, 10-bit; kjerag has no software decode
-  path), and 26.6 of 29.97 fps presented at 2560x1440 with 13 dropped and 0
-  starved over 5 s, the pass costing 20.6 ms a redraw. The same run on the
-  owner's X4 Air `.insv` presents 21.0 fps with 41 dropped and 14 starved, so
-  the render pass and not the new format is what the output size costs.
+  Measured on the target box with `--bin playback`, rendering 2560x1440, on a
+  box with nothing else running (VA-API, 10-bit; kjerag has no software decode
+  path). Decode at lookahead 4, then 20 to 30 s of paced playback:
+
+  | capture              | decode         | presented        | dropped | starved | pass    |
+  | -------------------- | -------------: | ---------------: | ------: | ------: | ------: |
+  | unit B 8k30p         | 2.56x realtime | 29.57 of 29.97   |      10 |       9 | 6.91 ms |
+  | unit B 8k50p         | 1.60x realtime | 49.45 of 50.00   |       4 |       3 | 5.11 ms |
+  | unit A 8k25p         | 3.00x realtime | 24.87 of 25.00   |       0 |       0 | 6.51 ms |
+  | X4 Air `.insv` 8k30p | 2.44x realtime | 29.94 of 29.97   |       1 |       0 | 7.90 ms |
+
+  So an `.OSV` plays at its own rate, and costs what the `.insv` in the last
+  row costs: **hardware decode is not the bottleneck at 8k30p on this box**,
+  which is worth saying because the scoping pass's ffmpeg software decode of
+  the same file ran at 487 percent CPU for realtime. A 5 s run taken while the
+  box was busy read 26.6 fps and 20.6 ms a redraw, and is what this line said
+  before; a number measured under contention is a number about the contention.
   D-Log M is out of scope: those files play with the log look, and no transform
   for it is in the container.
 
