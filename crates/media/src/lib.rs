@@ -43,6 +43,32 @@ pub use walk::{Chroma, Pair, Plane, Walk};
 
 const NANOS: u64 = 1_000_000_000;
 
+/// `AV_DISPOSITION_ATTACHED_PIC`, from libavformat's own header: the stream
+/// is a still attached to the file rather than a picture of it.
+const ATTACHED_PIC: i32 = ff::ffi::AV_DISPOSITION_ATTACHED_PIC;
+
+/// Whether a stream is one of the capture's lenses.
+///
+/// A still the camera attached to the container is not a lens. An Osmo 360
+/// writes one, a 344x612 MJPEG cover carrying `AV_DISPOSITION_ATTACHED_PIC`,
+/// and no `.insv` in the corpus carries one, so this drops nothing an
+/// Insta360 capture has.
+///
+/// One copy, because both deliveries need it and taking the cover costs each
+/// of them differently: [`reader`] fails the whole open on a time base nobody
+/// set, and [`walk`] pairs frames by "the same instant on every lane", which a
+/// lane holding one still can never reach again. Its queues then grow for as
+/// long as the file lasts. Measured on the corpus 2026-08-07, before this
+/// filter was on the walk: 19 GB resident in 33 seconds and the process
+/// killed, on the seam fit every first open of an Osmo capture runs.
+pub(crate) fn is_lens(stream: &ff::format::stream::Stream<'_>) -> bool {
+    stream.parameters().medium() == ff::media::Type::Video
+        // `Stream` hands out no accessor for the disposition, and the pointer
+        // is what the rest of this crate reaches for when the container's own
+        // struct is the only place an answer lives (`read_only`).
+        && unsafe { (*stream.as_ptr()).disposition } & ATTACHED_PIC == 0
+}
+
 /// Tell a container which of its streams are wanted, and discard the rest.
 ///
 /// A discarded stream is not read at all: libavformat's MP4 demuxer skips its

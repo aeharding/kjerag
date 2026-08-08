@@ -251,10 +251,6 @@ struct Video {
     samples: Samples,
 }
 
-/// `AV_DISPOSITION_ATTACHED_PIC`, from libavformat's own header: the stream
-/// is a still attached to the file rather than a picture of it.
-const ATTACHED_PIC: i32 = ff::ffi::AV_DISPOSITION_ATTACHED_PIC;
-
 /// How one video stream's samples are written, off the container's own two
 /// fields.
 ///
@@ -809,14 +805,11 @@ impl Opened {
         let mut input = ff::format::input(&path)?;
         let videos: Vec<Video> = input
             .streams()
-            .filter(|s| s.parameters().medium() == ff::media::Type::Video)
-            // A still the camera attached to the container is not a lens. An
-            // Osmo 360 writes one, a 688x344 MJPEG thumbnail carrying
-            // `AV_DISPOSITION_ATTACHED_PIC`, and taken as a third lens it
-            // fails the open on a time base nobody set: a cover has no frame
-            // rate to agree with the pictures about. No `.insv` in the corpus
-            // carries one, so this drops nothing an Insta360 capture has.
-            .filter(|s| unsafe { (*s.as_ptr()).disposition } & ATTACHED_PIC == 0)
+            // The cover an Osmo attaches to its container is not a lens, and
+            // taken as a third one it fails the open on a time base nobody
+            // set: a still has no frame rate to agree with the pictures about
+            // ([`super::is_lens`]).
+            .filter(super::is_lens)
             .map(|s| {
                 // `Parameters` hands out no accessors, and opening a decoder
                 // to read two integers before deciding whether this file is
