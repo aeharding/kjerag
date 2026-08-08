@@ -1100,7 +1100,7 @@ fn residual(readings: &[Reading], fit: &SeamFit, lenses: &[Lens], frame: Size) -
 /// gates on what the pose leaves may still want what the camera read before it
 /// ([`along_terms`]), and a map that drops the patches the projection cannot
 /// reach cannot be zipped back onto the readings it was given.
-fn predicted<'a>(
+pub fn predicted<'a>(
     readings: &'a [Reading],
     fit: &SeamFit,
     lenses: &[Lens],
