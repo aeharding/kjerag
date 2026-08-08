@@ -1928,8 +1928,8 @@ fn opposed(index: usize) -> Mat3 {
 /// the mid-sides, and out to about 2035 px on the diagonals, where the optical
 /// rim is) - so the circle's radius is half the frame's shorter side and its
 /// centre is the frame's, not the principal point's. The model says the same:
-/// it puts 1920 px at 99.0 to 99.6 degrees off axis on all four lenses of the
-/// two units, so 198.0 to 199.2 degrees of coverage, which is that camera's
+/// it puts 1920 px at 98.9 to 99.4 degrees off axis on all four lenses of the
+/// two units, so 197.9 to 198.8 degrees of coverage, which is that camera's
 /// published figure (`the_theta_model_covers_a_199_degree_lens`).
 ///
 /// Taking the inscribed circle about the **principal point** there is what
