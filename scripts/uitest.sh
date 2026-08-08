@@ -312,7 +312,16 @@ boot() {
 	# The sound out, and only the sound out: see the preflight above.
 	[ "$sound" = no ] || ln -s "/run/user/$(id -u)/pipewire-0" "$runtime/pipewire-0"
 
-	env \
+	# `--ignore-environment` is not what is wanted here (the build's own
+	# variables have to survive), so the two that name the developer's
+	# desktop are unset by name. `WLR_BACKENDS=headless` below is supposed to
+	# settle it on its own and does not always: a cage that can still see
+	# `WAYLAND_DISPLAY` and a runtime directory with a socket in it can come
+	# up as a client of the session instead of a backend of its own, and then
+	# the harness opens a window over whatever the owner was looking at
+	# (2026-08-08, on his screen). Unset, there is nothing for it to fall back
+	# to. `DISPLAY` goes with it for the same reason, one X server along.
+	env -u WAYLAND_DISPLAY -u DISPLAY \
 		HOME="$HOME_DIR" \
 		XDG_RUNTIME_DIR="$runtime" \
 		XDG_CONFIG_HOME="$session/config" \
