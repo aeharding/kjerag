@@ -123,16 +123,27 @@ pub struct Lens {
 /// (`kjerag_render::projection`). It is on the lens rather than on the
 /// [`CalibrationSet`] because it is a property of the numbers beside it, and
 /// a lens is where those are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Model {
     /// Mei/UCM with Brown-Conrady distortion on the normalized plane, which
     /// is what Insta360's `offset_v3` writes ([`Intrinsics`], [`Distortion`]).
     Mei,
-    /// Equidistant fisheye, `r = fx * theta`, with no distortion terms at all,
-    /// which is what a DJI Osmo 360's `djmd` calibration reduces to
-    /// (`super::osmo`, which has the measurement that refused the four
-    /// coefficients the file also carries).
-    Equidistant,
+    /// The angle off the axis straight onto a radius, through an odd
+    /// polynomial in that angle:
+    /// `r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8 + k5 t^10)`,
+    /// which is the Kannala-Brandt fisheye and what a DJI Osmo 360's `djmd`
+    /// calibration writes (`super::osmo`). All-zero coefficients are the plain
+    /// equidistant map `r = fx * theta`, which is what this camera's numbers
+    /// were read as until the fifth coefficient was found in field 15.
+    ///
+    /// **The five travel on the variant rather than in [`Distortion`]** because
+    /// they are not the same kind of number. Brown-Conrady's are a polynomial
+    /// in a radius on a normalized plane and these are one in an angle in
+    /// radians; a struct holding either, with a field somewhere else saying
+    /// which, is a struct whose contents cannot be read on their own. It also
+    /// keeps them out of [`CalibrationSet::camera_key`], which deliberately
+    /// hashes no part of the model.
+    Theta { k: [f64; 5] },
 }
 
 /// Mei/UCM intrinsics in delivered-frame pixels.
@@ -160,7 +171,7 @@ pub struct Intrinsics {
     /// The unified-camera-model mirror parameter, 2.31494 on the
     /// fixture. It is why rays past 90 degrees off-axis still project to
     /// finite coordinates, and therefore why the overlap region is
-    /// representable at all. Zero, and unread, under [`Model::Equidistant`].
+    /// representable at all. Zero, and unread, under [`Model::Theta`].
     pub xi: f64,
     pub fx: f64,
     pub fy: f64,
@@ -420,10 +431,13 @@ impl CalibrationSet {
     /// different key and gets its own calibration rather than one scaled
     /// wrong.
     ///
-    /// [`Lens::model`] and [`Lens::mounting`] are deliberately **not** in it.
-    /// They would not tell two cameras apart that the numbers above do not
-    /// already, because a model comes with its own numbers - an equidistant
-    /// lens carries no mirror parameter and a Mei one carries 2.31 - and a
+    /// [`Lens::model`] and [`Lens::mounting`] are deliberately **not** in it,
+    /// and since the theta polynomial's coefficients ride on the model
+    /// ([`Model::Theta`]) they are not in it either. They would not tell two
+    /// cameras apart that the numbers above do not already, because a model
+    /// comes with its own numbers - a theta-polynomial lens carries no mirror
+    /// parameter and a Mei one carries 2.31, and the focal length and
+    /// principal point beside them are per unit to four decimal places - and a
     /// mounting is the same measurement the angles beside it are. What
     /// putting them in would do is change the key of every camera already in
     /// a pilot's pool, and a seam correction filed under a key nobody asks

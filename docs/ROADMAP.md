@@ -752,6 +752,70 @@ live, no keyframe UI ever.
   Untouched: the roughly one degree across-seam residual on his downward arc,
   which is the expensive work.
 
+- 2026-08-08 **The `.OSV` lens model has five coefficients, and the fifth is
+  field 15.** The entry below shipped the plain equidistant map and called the
+  file's `k` coefficients decoration. They are not: the model is
+  Kannala-Brandt,
+  `r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8 + k5 t^10)`, and
+  four of its five coefficients sit together at fields 5 to 8 while the fifth
+  is at **field 15**, seven fields later, past the yaw/pitch/roll triple. The
+  reader was taking the run of four, and four of them fold the radius over
+  before 90 degrees, which is what the entry below measured and refused. With
+  the fifth the radius is monotone to half a turn on all four lenses of both
+  units.
+
+  **What it was worth: the seam tear.** The owner reported the picture "fixed
+  off everywhere" and a doubled tower. Measured through the app's own map with
+  `--bin crossing` at a 90 degree seam view, `seam=factory`, the two lenses
+  drew the same far content **241 source px apart across the seam on his own
+  camera, 13.1 degrees**, and 149 px on the sample unit; after, **3.2 px
+  (0.18 deg)** and **7.9 px (0.43 deg)**, both within a degree of the
+  `theta0 + theta1 = 180` that far content must satisfy, and what is left is
+  ordinary near parallax at the range of the content. The sites the instrument
+  can match at all go from 7 of 18 to 14 of 18 on unit B and 5 to 12 on unit A;
+  under the old model most of them railed against a 20 degree search or
+  correlated nothing.
+
+  **Coverage is the check anyone can redo.** The delivered 3840 px square holds
+  the image circle inscribed, so half the frame is half the coverage: the
+  five-term model puts 1920 px at 99.0 to 99.6 degrees off axis, i.e. **198.0
+  to 199.2 degrees**, which is the Osmo 360's published figure. Equidistant put
+  the same radius at 209 to 211, a lens nobody makes, and that surplus is the
+  tear. The refusal below leaned on fields 22 and 23, a fourteen-point
+  polyline, read as this lens's coverage rim; those 112 bytes are byte-identical
+  across all four lenses of both units, so they are a model constant - the arc
+  where the camera's own body cuts the bottom of the picture - and a constant
+  cannot measure a lens.
+
+  **`image_radius` on this format is now the image circle** rather than the
+  largest circle that fits around the principal point. That number moved from
+  1910.2 to 1916.7 px across four lenses purely because the principal point
+  wanders 10 px about the frame centre, and every delivered frame is lit past
+  it: measured on frames of both units, content runs to the frame edge at the
+  mid-sides and out to about 2035 px on the diagonals before the optical rim.
+
+  **The `.insv` path is untouched, byte for byte.** Sixteen rendered views over
+  three files - an X4 Air at eight views including the fitted and the stored-fit
+  paths, plus a seam zoom, the nadir, the 220 degree ball and a one-stream ONE
+  X2 - are identical to the branch's base at `a7b6930`, hash for hash. The
+  Mei arm of the map is the arithmetic it always was; what changed under it is
+  that the five coefficient slots of the uniform block are now named for the
+  model that reads them, and Mei reads the same five it always did.
+
+  **What is still open, and disclosed rather than fixed.** The per-file seam
+  fit remains structurally dead on this format: the pose knobs write
+  `lens.pose.*` and a DJI lens takes the mounting branch, so a fit cannot move
+  the picture. With the model corrected the fitter now finds enough azimuths to
+  try - the app's refusal moves from "only 2 of 72 azimuths" to "the seam
+  readings do not pin a correction" - and then hits that wall. Factory
+  calibration now joins at infinity without it. Near-field ghosting at metre
+  range remains and is parallax, not calibration.
+
+  Playback is unmoved: best of three 20 s runs each side on one box, 29.22 fps
+  presented and 8.90 ms a redraw in the pass before, 29.32 and 8.00 after, with
+  the box carrying another agent's work throughout (`--bin playback`, unit B
+  8k30p, 2560x1440).
+
 - 2026-08-07 **A DJI Osmo 360 `.OSV` plays, on an equidistant lens model and
   with no horizon lock** (branch `feat/osmo-osv`, MVP). `kjerag <file>.osv` is
   the whole of it. The calibration is in the file's own `djmd` telemetry track
@@ -760,7 +824,11 @@ live, no keyframe UI ever.
   scoping pass's independent table exactly, to the last digit of the `f32`.
 
   **Equidistant only, `r = fx * theta`, and the four `k` coefficients the file
-  carries are read past.** Each lens entry also writes a fourteen-point mask of
+  carries are read past.** *(Superseded 2026-08-08 by the entry above: there
+  are five coefficients, not four, and this paragraph's whole argument rests on
+  a polyline that turns out to be a model constant. It stays as written because
+  the arithmetic in it is right and only the premise is wrong.)* Each lens entry
+  also writes a fourteen-point mask of
   where the camera body cuts the picture, and on all four lenses of the two
   units it sits 1804 to 1860 px out. Equidistant puts that at 98.6 to 101.7
   degrees off axis, so 197 to 203 degrees of coverage, bracketing DJI's
@@ -783,7 +851,10 @@ live, no keyframe UI ever.
   recorded, so the parallax band switches off, and on both units the fitter
   found 0 of 72 azimuths with content it could match and kept the factory
   calibration. Far-field content joins cleanly; near-field shows a soft band at
-  the handover. That is the accepted v1.
+  the handover. That is the accepted v1. *(Corrected 2026-08-08: far-field
+  content did not join cleanly, it was 13 degrees out, and the fitter's refusal
+  was the lens model's doing rather than the content's. The refusal itself
+  stands, for a different reason: the fit is structurally dead on this format.)*
 
   Measured with `--bin playback`, rendering 2560x1440, VA-API, 20 to 30 s of
   paced playback per row; kjerag has no software decode path. **Two columns for
