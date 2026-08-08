@@ -189,7 +189,7 @@ pub(crate) const CROSSOVER_DEG: f32 = 8.0;
 /// this number, which is the one place the division happens and the five
 /// functions of the fold inequality all read. Without it this curve folds the
 /// ONE X2.
-pub(crate) const BLEND_POWER: f32 = 1.5;
+pub(crate) const BLEND_POWER: f32 = 1.0;
 
 /// Research only: what this run asks the handover for instead of
 /// [`CROSSOVER_DEG`], from `KJERAG_HANDOVER_DEG`, in degrees.
@@ -967,7 +967,9 @@ impl Reframe {
     ///
     /// WGSL twin: `band_width`.
     pub fn crossover_at(&self, disparity: f32) -> f32 {
-        super::band::width(disparity, self.crossover)
+        // FLAT2: frozen width — the fade never breathes. WGSL twin: band_width.
+        let _ = disparity;
+        self.crossover
     }
 
     /// A view-space ray in the camera body's own frame, which is where the

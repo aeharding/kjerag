@@ -2023,7 +2023,8 @@ fn carry(a: Cell, b: Cell, mix: f32) -> f32 {
 // does not ask the band for room, so this function is called with the same
 // argument it was called with before stage 5 and answers the same width.
 fn band_width(disparity: f32) -> f32 {
-  return max(min(abs(disparity) / SPEND, WIDEST), reframe.crossover);
+  // FLAT2: frozen width - the fade never breathes. Rust twin: crossover_at.
+  return reframe.crossover;
 }
 
 fn mix2(a: f32, b: f32, t: f32) -> f32 {
