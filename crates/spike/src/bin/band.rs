@@ -79,6 +79,7 @@ fn main() -> Fallible<()> {
         Mode::Sequence => sequence(&options),
         Mode::Render => render(&options),
         Mode::Cost => cost(&options),
+        Mode::Coverage => over_time(&options),
     }
 }
 
@@ -95,6 +96,9 @@ enum Mode {
     Render,
     /// What the measurement costs, with the decode taken out of the timing.
     Cost,
+    /// Which directions of the circle a normal play ever gets a reading at,
+    /// and how that fills in over minutes.
+    Coverage,
 }
 
 // ------------------------------------------------------------ the run
@@ -199,7 +203,10 @@ fn field(options: &Options) -> Fallible<()> {
 /// The same arithmetic `band_bend` does, on a cell rather than on a ray, and
 /// the number both the width and the clamp are decided from.
 fn applied(cell: &Cell) -> f32 {
-    cell.disparity * (cell.confidence / kjerag_render::KEEP).clamp(0.0, 1.0)
+    // Out of the cell rather than recomputed, so this reads the picture on
+    // both arms of `KJERAG_TRUST` and not a model of the shipped one
+    // (`Cell::trust`).
+    cell.disparity * cell.trust
 }
 
 /// What the band settled on, direction by direction, at the end of the run.
@@ -857,6 +864,183 @@ fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
     (0..AZIMUTHS).filter(|index| seen[*index]).collect()
 }
 
+// ------------------------------------------------------------ the coverage
+
+/// How long a stretch of coverage one column of the table covers, in seconds
+/// of media time.
+///
+/// A minute is the unit the question is asked in - "does live accumulation
+/// over minutes of playback close the arc" - and six columns of ten seconds
+/// says whether an arc that closes closes early or late.
+const COVERAGE_STEP_S: f64 = 10.0;
+
+/// The correlation the #171 harvest required of a reading before it would
+/// accumulate one, against this instrument's smoothed proxy for it.
+///
+/// **A proxy and not the number.** The harvest gated the raw peak of one
+/// probe; what a cell carries is [`Cell::confidence`], the same peak smoothed
+/// over that direction's own time constant. They are the same quantity at
+/// different lags, so a `firm` column here is neither an upper nor a lower
+/// bound on what the harvest would have taken, and it is here to say whether
+/// the arc is anywhere near the floor rather than to count what would pass it.
+const FIRM: f32 = 0.80;
+
+/// **The C2 coverage gate** (docs/research/seam-temporal.md, increment 3):
+/// which directions of the circle a normal play ever gets a reading at, and
+/// how that fills in over minutes.
+///
+/// The question is one specific one. A 6x4 harvest over the whole of the
+/// owner's May-01 file read **1 of the 11 cells his own downward arc sits on**
+/// (`scratch/refusals.log` on `research/v6-player`), and a per-session field
+/// that is identity where he is looking is #171's coverage failure again. The
+/// band already measures all 128 directions every frame while the film plays,
+/// so the memo's opening is that live accumulation might close what a harvest
+/// could not. This measures whether it does. **It builds nothing.**
+///
+/// **What counts as a reading, and the domain that puts on every number
+/// below.** The band writes a direction's disparity only on a visit where the
+/// correlation passed [`kjerag_render::KEEP`] and peaked inside the search
+/// window; a refused visit gives up evidence and leaves the measurement
+/// exactly where it was (`settle` and `forget` in the render crate's band).
+/// So a disparity that MOVED is a reading accepted, and that is what this
+/// counts. It is **the band's own gate and not the harvest's**: #171 stacked a
+/// far gate, a trimmed middle and a five-term shape gate on top, so these
+/// counts are the most a live accumulator could ever see and not what it would
+/// keep. A `no` here kills C2; a `yes` licenses only the next measurement.
+fn over_time(options: &Options) -> Fallible<()> {
+    let gpu = Gpu::open()?;
+    println!("gpu:    {}", gpu.name);
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut scene = Scene::still(&options.input, options.at())?;
+    scene.set_horizon(match options.lock {
+        true => Horizon::Locked,
+        false => Horizon::Free,
+    });
+    options.seam.hold(&scene);
+
+    let mut held = vec![f32::NAN; AZIMUTHS];
+    let mut read = vec![0usize; AZIMUTHS];
+    let mut firm = vec![0usize; AZIMUTHS];
+    let mut first = vec![f64::NAN; AZIMUTHS];
+    let mut columns: Vec<(f64, Vec<usize>)> = Vec::new();
+    let mut frames = 0usize;
+    let mut elapsed = 0.0;
+    let start = scene.frame().map(|(_, at)| at.as_secs_f64()).unwrap_or(0.0);
+
+    while let Some((_, at)) = scene.frame() {
+        Render {
+            gpu: &gpu,
+            scene: &scene,
+            pipeline: &mut pipeline,
+        }
+        .frame(options.camera(), Sampling::default(), options.size())?;
+        let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+        elapsed = at.as_secs_f64() - start;
+        for (index, cell) in cells.iter().enumerate() {
+            if held[index] == cell.disparity {
+                continue;
+            }
+            held[index] = cell.disparity;
+            // The first frame writes every direction's zero into `held`, and
+            // that is not a reading of anything.
+            if frames == 0 {
+                continue;
+            }
+            read[index] += 1;
+            if cell.confidence >= FIRM {
+                firm[index] += 1;
+            }
+            if first[index].is_nan() {
+                first[index] = elapsed;
+            }
+        }
+        frames += 1;
+        if elapsed >= (columns.len() + 1) as f64 * COVERAGE_STEP_S {
+            columns.push((elapsed, read.clone()));
+        }
+        if frames >= options.count || !scene.advance()? {
+            break;
+        }
+    }
+    columns.push((elapsed, read.clone()));
+
+    let arc = arc_cells(options);
+    println!(
+        "\nfile:   {}\nplayed: {frames} frames, {elapsed:.1} s of media time from {:.1} s\n\
+         arc:    cells {} to {} of {AZIMUTHS}, azimuth {:.1} to {:.1} deg, the owner's downward \
+         views\ngate:   a reading is a visit the band ACCEPTED, which is its own KEEP and not the \
+         harvest's stack",
+        options.input.display(),
+        options.from,
+        arc.start,
+        arc.end - 1,
+        arc.start as f64 / AZIMUTHS as f64 * 360.0,
+        (arc.end - 1) as f64 / AZIMUTHS as f64 * 360.0,
+    );
+
+    println!("\n  cell  phi deg   first s     firm   reads at each {COVERAGE_STEP_S:.0} s");
+    for cell in 0..AZIMUTHS {
+        let inside = arc.contains(&cell);
+        if !inside && read[cell] > 0 && cell % 8 != 0 {
+            continue;
+        }
+        let over_time: String = columns
+            .iter()
+            .map(|(_, counts)| format!("{:>6}", counts[cell]))
+            .collect();
+        println!(
+            "  {cell:>4} {:>8.1} {:>9} {:>8}  {over_time}{}",
+            cell as f64 / AZIMUTHS as f64 * 360.0,
+            match first[cell].is_nan() {
+                true => "never".to_string(),
+                false => format!("{:.1}", first[cell]),
+            },
+            firm[cell],
+            match inside {
+                true => "   <- his arc",
+                false => "",
+            },
+        );
+    }
+
+    let ever =
+        |counts: &[usize], want: usize| arc.clone().filter(|cell| counts[*cell] >= want).count();
+    let whole =
+        |counts: &[usize], want: usize| (0..AZIMUTHS).filter(|c| counts[*c] >= want).count();
+    println!(
+        "\narc:    {} of {} cells read at all, {} read 10 times or more, {} read 100 or more",
+        ever(&read, 1),
+        arc.len(),
+        ever(&read, 10),
+        ever(&read, 100),
+    );
+    println!(
+        "ring:   {} of {AZIMUTHS} directions read at all, {} read 10 times or more, {} 100 or more",
+        whole(&read, 1),
+        whole(&read, 10),
+        whole(&read, 100),
+    );
+    println!(
+        "firm:   {} of {} arc cells reached {FIRM} smoothed confidence on a read, {} of {AZIMUTHS} \
+         on the whole ring",
+        ever(&firm, 1),
+        arc.len(),
+        whole(&firm, 1),
+    );
+    Ok(())
+}
+
+/// The cells the arc the owner is looking at lands on.
+///
+/// His three banked downward views sit between 93 and 125 degrees of azimuth,
+/// which `--bin refusals` reported as cells 34 to 44 and read 1 of. Taken off
+/// the same azimuths here so the two are the same eleven cells.
+fn arc_cells(options: &Options) -> std::ops::Range<usize> {
+    let cell = |deg: f64| (deg / 360.0 * AZIMUTHS as f64).round() as usize;
+    let (low, high) = options.arc;
+    cell(low)..cell(high) + 1
+}
+
 // ------------------------------------------------------------ the cost
 
 /// What the band's measurement costs per redraw, with the decode outside the
@@ -1156,6 +1340,11 @@ struct Options {
     /// The screen region `mode=trace` reports on: x, y, width, height, in
     /// pixels of the rendered view.
     region: [u32; 4],
+    /// The azimuths `mode=coverage` calls the owner's arc, in degrees.
+    ///
+    /// 93 to 125 is where his three banked downward views sit, and it is what
+    /// `--bin refusals` reported 1 of 11 cells read on.
+    arc: (f64, f64),
     /// Which calibration the band is read through.
     ///
     /// It is an argument because it has to be: the band's readings and a step
@@ -1184,12 +1373,17 @@ impl Options {
             out: None,
             save: None,
             region: [0, 0, 0, 0],
+            arc: (93.0, 125.0),
             seam: Seam::File,
         };
         let mut seam = String::from("file");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
+                Some(("arc", value)) => {
+                    let (low, high) = value.split_once(':').ok_or("arc=<low deg>:<high deg>")?;
+                    options.arc = (low.parse()?, high.parse()?);
+                }
                 Some(("mode", value)) => {
                     options.mode = match value {
                         "field" => Mode::Field,
@@ -1197,6 +1391,7 @@ impl Options {
                         "sequence" => Mode::Sequence,
                         "render" => Mode::Render,
                         "cost" => Mode::Cost,
+                        "coverage" => Mode::Coverage,
                         _ => return Err(format!("no mode called {value}").into()),
                     }
                 }
@@ -1265,7 +1460,7 @@ impl Options {
     }
 }
 
-const USAGE: &str = "usage: band <file.insv> [mode=field|sequence|render] [from=seconds] \
+const USAGE: &str = "usage: band <file.insv> [mode=field|trace|sequence|render|cost|coverage] [arc=low:high] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
      [out=dir] [save=state.txt] [box=x,y,w,h] \
      [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
