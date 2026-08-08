@@ -1335,8 +1335,9 @@ impl Reframe {
         axis >= self.lenses[lens].axis_min * reach
     }
 
-    /// The forward map: a view ray, through one lens's extrinsics and the
-    /// Mei/UCM model, to a pixel of that lens's delivered frame.
+    /// The forward map: a view ray, through one lens's extrinsics and
+    /// whichever model its calibration is written in ([`lens_pixel`]), to a
+    /// pixel of that lens's delivered frame.
     ///
     /// **Where the rolling shutter is taken out (issue #9).** The lens saw
     /// this ray when it read the row the ray lands on, not when the frame
@@ -2779,9 +2780,10 @@ pub(crate) mod tests {
     }
 
     /// A ray 90 degrees off the axis lands inside the image circle, which is
-    /// the whole point of the mirror parameter: an equidistant fisheye model
-    /// cannot represent this ray at all. 1802 px of the 1913 px circle, so
-    /// the frame holds roughly 195 degrees across.
+    /// the whole point of the mirror parameter: a rectilinear model cannot
+    /// represent this ray at all, its radius running away to infinity there.
+    /// 1802 px of the 1913 px circle, so the frame holds roughly 195 degrees
+    /// across.
     #[test]
     fn a_ray_at_ninety_degrees_lands_inside_the_image_circle() {
         let reframe = fixture(Camera::default());
