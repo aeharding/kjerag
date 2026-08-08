@@ -504,6 +504,25 @@ pub struct Reframe {
     /// here - [`Reframe::crossover_at`] on this side and `band_width` on the
     /// shader's - so the two cannot disagree about it.
     crossover: f32,
+    /// SEAM-ANCHOR EXPERIMENT (`KJERAG_ANCHOR`): how far across the seam the
+    /// drawn 50/50 handover line is moved from where the pure geometry of the
+    /// two axis cosines puts it, in **radians**.
+    ///
+    /// Zero is the picture before the experiment, and zero is what every
+    /// caller that does not ask for the experiment gets, so the term is a
+    /// literal `+ 0.0` in both twins and the null is bit-exact.
+    ///
+    /// It is per frame and it is one number for the whole ring: the scene
+    /// picks one world direction near the view centre and holds the line on
+    /// it ([`SeamAnchor`]). Bounded by half the drawn fusion width, which is
+    /// the seam allowance the fade is drawn inside of.
+    ///
+    /// Sibling of [`Self::crossover`] and not a new field at the end: it takes
+    /// one of the three padding words the table's alignment already needed, so
+    /// the block is the size it was and the table has not moved.
+    ///
+    /// WGSL twin: `reframe.handover_shift`, read by `handover`.
+    handover_shift: f32,
     /// What puts the table below on a sixteen-byte offset.
     ///
     /// **WGSL's alignment and not this struct's.** Every member of this block
@@ -517,7 +536,10 @@ pub struct Reframe {
     /// way, so the shader would read the table shifted by twelve bytes and
     /// draw a picture rather than an error. The test
     /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it.
-    _pad: [f32; 3],
+    ///
+    /// Two words rather than three since the seam-anchor experiment took the
+    /// first of them ([`Self::handover_shift`]).
+    _pad: [f32; 2],
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -686,6 +708,165 @@ pub struct Rolling {
     pub axis: [f64; 2],
 }
 
+/// Research only (`KJERAG_ANCHOR`), from `KJERAG_ANCHOR`: whether the drawn
+/// handover line is held on world content instead of on the body's geometry.
+///
+/// Read once. Off is the picture the app draws without it, down to the byte.
+pub fn anchoring() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("KJERAG_ANCHOR").is_ok_and(|value| value != "0" && !value.is_empty());
+        if on {
+            println!(
+                "blend:  research seam anchor on, KJERAG_ANCHOR: the 50/50 handover line is held \
+                 on one world direction near the view centre instead of sliding across world \
+                 content with the body, inside +/- half the drawn fusion width, and re-anchored \
+                 with a {ANCHOR_FADE_SECS} s fade when it runs out of allowance"
+            );
+        }
+        on
+    })
+}
+
+/// Research only, from `KJERAG_ANCHOR_TRACE`: whether every redraw says what
+/// the held line is doing. Off in the app, on under the instrument that
+/// measures the hold.
+fn tracing() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KJERAG_ANCHOR_TRACE").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
+/// How long a re-anchor takes to walk the held offset onto the new anchor's,
+/// in seconds - the "held state, then a fade" the owner described Studio's OFF
+/// mode as.
+pub(crate) const ANCHOR_FADE_SECS: f32 = 0.5;
+
+/// What the fade is counted in frames at, because the state advances per
+/// redraw and not per second.
+///
+/// **A hack simplification, and the one place a wall clock would have gone.**
+/// A slew per redraw is the same ramp at the rate the app draws at and is the
+/// same ramp offscreen, where a wall clock would run the fade out inside two
+/// frames or stretch it over a hundred depending on how fast the decoder fed
+/// the renderer. At 30 fps it is 0.5 s exactly; at 60 it is a second.
+const ANCHOR_FADE_FPS: f32 = 30.0;
+
+/// How far along the seam the anchor may drift from the view centre's own
+/// nearest seam point before it stops standing for the piece of seam that is
+/// on screen, in degrees.
+///
+/// This is also what catches a pan and a seek without either having to be
+/// reported: both move the view centre's nearest seam point away from the
+/// anchor in one redraw, and past this the answer is a new anchor and a fade.
+const ANCHOR_REACH_DEG: f32 = 30.0;
+
+/// SEAM-ANCHOR EXPERIMENT: where the drawn handover line is being held, and
+/// what that costs the handover this redraw.
+///
+/// The owner's theory of why Insta360 Studio's seam is so much less visible in
+/// playback with everything off: the effective handover line does not slide
+/// continuously across world content as the body turns under a world-locked
+/// view. It sits on the content, holds, and re-anchors with a fade. Static
+/// misalignment still doubles the content either way; what this changes is
+/// whether the doubling swims.
+///
+/// One anchor and one offset for the whole ring, not one per azimuth: the line
+/// elsewhere on the seam circle still crawls, and that is deliberate for the
+/// experiment. What the owner is looking at is the piece of seam in front of
+/// him.
+///
+/// State lives here, on the CPU, and reaches the shader as one float
+/// ([`Reframe::handover_shift`]).
+#[derive(Clone, Copy, Debug)]
+pub struct SeamAnchor {
+    /// The world direction the 50/50 line is being held on.
+    world: [f64; 3],
+    /// What was delivered last redraw, in radians. Where a re-anchor's fade
+    /// starts from, and why a re-anchor is never a step.
+    shift: f32,
+    /// Whether a re-anchor is still walking onto its new anchor.
+    fading: bool,
+}
+
+impl SeamAnchor {
+    /// This redraw's offset, and the state that produced it.
+    ///
+    /// `held` is the pose the block was built for, so the world frame here is
+    /// the one the view is locked to. With the horizon free that frame IS the
+    /// body, the anchor never drifts, the offset stays zero, and the picture
+    /// is the one the toggle is off for - which is right: a body-fixed view
+    /// has no crawl to hold against.
+    ///
+    /// Four things end a hold, and all four end it the same way, with a fade:
+    /// the offset reaching the allowance, the anchor leaving the piece of seam
+    /// on screen, a pan, and a seek. The last two are not reported and do not
+    /// need to be; they are the second.
+    pub fn hold(state: Option<Self>, reframe: &Reframe, held: Held) -> Self {
+        if !reframe.has_seam() {
+            return Self { world: [0.0, 0.0, 1.0], shift: 0.0, fading: false };
+        }
+        let allowance = 0.5 * reframe.crossover_at(0.0);
+        let world_from_body = held.body_from_world.conjugate();
+        let body_of = |world: [f64; 3]| held.body_from_world.rotate(world).map(|c| c as f32);
+        // The anchor a re-anchor would choose: the 50/50 locus nearest the
+        // view centre, taken to the world frame so that it stops moving.
+        let centre = reframe.seam_nearest([0.0, 0.0, 1.0]);
+        let centre_world = world_from_body.rotate(reframe.body_ray(centre).map(f64::from));
+        // What the state on hand is still worth, if anything.
+        let kept = state.filter(|anchor| {
+            let view = reframe.view_ray_from_body(body_of(anchor.world));
+            let offset = reframe.across_seam(view);
+            let (view, centre) = (unit(view), unit(centre));
+            let along: f32 = (0..3).map(|c| view[c] * centre[c]).sum();
+            offset.abs() <= allowance && along >= ANCHOR_REACH_DEG.to_radians().cos()
+        });
+        let (world, fading) = match kept {
+            Some(anchor) => (anchor.world, anchor.fading),
+            // A re-anchor, or the first anchor of the run. The first is not a
+            // fade: nothing was held, so there is nothing to walk off.
+            None => (centre_world, state.is_some()),
+        };
+        let target = (-reframe.across_seam(reframe.view_ray_from_body(body_of(world))))
+            .clamp(-allowance, allowance);
+        let was = state.map_or(target, |anchor| anchor.shift);
+        let (shift, fading) = match fading {
+            false => (target, false),
+            true => {
+                let step = allowance / (ANCHOR_FADE_SECS * ANCHOR_FADE_FPS);
+                let walked = was + (target - was).clamp(-step, step);
+                (walked, walked != target)
+            }
+        };
+        if tracing() {
+            println!(
+                "anchor: {:+.4} deg {}, allowance +/-{:.3}",
+                shift.to_degrees(),
+                match (fading, kept.is_some()) {
+                    (true, _) => "fade",
+                    (false, true) => "hold",
+                    (false, false) => "anchor",
+                },
+                allowance.to_degrees(),
+            );
+        }
+        Self { world, shift, fading }
+    }
+
+    /// What the map is to draw the handover with, in radians.
+    pub fn shift(&self) -> f32 {
+        self.shift
+    }
+}
+
+/// A direction's own unit vector, or the direction where it has no length.
+fn unit(ray: [f32; 3]) -> [f32; 3] {
+    let reach = norm3(ray);
+    match reach > 0.0 {
+        true => ray.map(|c| c / reach),
+        false => ray,
+    }
+}
+
 impl Reframe {
     /// The block for one camera pose and the lenses of one file, in file
     /// order. Anything past [`MAX_LENSES`] is dropped.
@@ -718,7 +899,10 @@ impl Reframe {
             // Filled below, because it is read off the lenses this block has
             // just laid out and there is nowhere earlier to read them from.
             crossover: 0.0,
-            _pad: [0.0; 3],
+            // The experiment is off until a caller says otherwise
+            // ([`Self::with_shift`]), and off is the geometric handover.
+            handover_shift: 0.0,
+            _pad: [0.0; 2],
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
@@ -743,6 +927,88 @@ impl Reframe {
     /// The table this map is drawing with.
     pub fn table(&self) -> super::band::Table {
         self.table
+    }
+
+    /// SEAM-ANCHOR EXPERIMENT: the same map with the drawn handover line moved
+    /// `shift` radians across the seam ([`Self::handover_shift`]).
+    ///
+    /// Clamped here as well as by the caller that computes it, because the
+    /// allowance is the map's own property and a shift past half the drawn
+    /// fusion width would put the 50/50 line outside the fade it is supposed
+    /// to live inside.
+    ///
+    /// A step of its own, like [`Self::with_table`]: every caller that is not
+    /// running the experiment - every instrument, every test, the blank pane -
+    /// gets zero without saying so, and zero is the geometric handover.
+    pub fn with_shift(mut self, shift: f32) -> Self {
+        let allowance = 0.5 * self.crossover;
+        self.handover_shift = shift.clamp(-allowance, allowance);
+        self
+    }
+
+    /// How far the drawn handover line is moved across the seam, in radians.
+    pub fn handover_shift(&self) -> f32 {
+        self.handover_shift
+    }
+
+    /// Whether this map has two lens streams and so a seam to hand over at.
+    pub fn has_seam(&self) -> bool {
+        self.lens_count > 1.0
+    }
+
+    /// SEAM-ANCHOR EXPERIMENT: the unit normal of the 50/50 surface, in view
+    /// space.
+    ///
+    /// The handover reads `axis0 - axis1`, which is one fixed vector against
+    /// the ray ([`Self::axis_of`] is a dot product with a row of each
+    /// mounting), so the locus where the two lenses claim the ray equally is
+    /// the great circle perpendicular to the difference of those two rows.
+    /// This is that difference, normalized.
+    ///
+    /// Zero for a one-stream file, which has no seam.
+    pub fn seam_normal(&self) -> [f32; 3] {
+        let apart: [f32; 3] = std::array::from_fn(|c| {
+            self.lenses[0].view_to_lens[c][2] - self.lenses[1].view_to_lens[c][2]
+        });
+        let reach = norm3(apart);
+        match reach > 0.0 {
+            true => apart.map(|c| c / reach),
+            false => [0.0; 3],
+        }
+    }
+
+    /// SEAM-ANCHOR EXPERIMENT: how far a view ray is across the seam from the
+    /// 50/50 locus, in radians, positive on lens 0's side.
+    ///
+    /// **The handover's own measure and not a second one.** `crossover` reads
+    /// `apart / (2 * reach * band)`; this is that first quotient, so a shift
+    /// of exactly minus this value puts this ray at 50/50 by construction.
+    /// The two cosines stand in for the two angles the same way and to the
+    /// same accuracy the handover already relies on (see [`crossover`]).
+    pub fn across_seam(&self, view_ray: [f32; 3]) -> f32 {
+        let reach = norm3(view_ray);
+        match reach > 0.0 {
+            true => (self.axis_of(0, view_ray) - self.axis_of(1, view_ray)) / (2.0 * reach),
+            false => 0.0,
+        }
+    }
+
+    /// SEAM-ANCHOR EXPERIMENT: the point of the 50/50 locus nearest a view
+    /// ray, as a unit view-space direction.
+    ///
+    /// The locus is a great circle, so the nearest point on it is the ray with
+    /// its component along [`Self::seam_normal`] taken out. Down either lens's
+    /// own axis there is no nearest point and the ray comes back unchanged;
+    /// nothing there is near a seam anyway.
+    pub fn seam_nearest(&self, view_ray: [f32; 3]) -> [f32; 3] {
+        let normal = self.seam_normal();
+        let along: f32 = (0..3).map(|c| normal[c] * view_ray[c]).sum();
+        let flat: [f32; 3] = std::array::from_fn(|c| view_ray[c] - normal[c] * along);
+        let reach = norm3(flat);
+        match reach > 0.0 {
+            true => flat.map(|c| c / reach),
+            false => view_ray,
+        }
     }
 
     /// How wide this camera can hand the picture over, in radians: what
@@ -790,7 +1056,9 @@ impl Reframe {
             // One lens and no overlap, so nothing is ever handed over: the ask
             // itself, which is what a camera with room for it would get.
             crossover: crossover_deg().to_radians(),
-            _pad: [0.0; 3],
+            // No seam, so no line to hold anywhere.
+            handover_shift: 0.0,
+            _pad: [0.0; 2],
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -948,7 +1216,7 @@ impl Reframe {
     /// WGSL twin: `handover`.
     fn handover(&self, axis: [f32; MAX_LENSES], reach: f32, band: f32) -> f32 {
         match self.lens_count > 1.0 {
-            true => crossover(axis[0] - axis[1], reach, band),
+            true => crossover(axis[0] - axis[1], reach, band, self.handover_shift),
             false => 1.0,
         }
     }
@@ -1649,9 +1917,19 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// there does not matter. No trig anywhere, and one multiply fewer than the
 /// `cos^2(theta / 2)` preference this replaces.
 ///
+/// `shift` is the seam-anchor experiment's, in radians across the seam
+/// ([`Reframe::handover_shift`]): a whole term of its own, added rather than
+/// folded into the quotient beside it, so that at the zero every caller
+/// outside the experiment passes the arithmetic is the arithmetic that was
+/// here before it and the toggled-off picture is bit-exact.
+///
+/// It is divided by the same band, so a shift of half the band moves the
+/// 50/50 line to the edge of the fade and a shift of zero leaves it where the
+/// geometry put it.
+///
 /// WGSL twin: `crossover`.
-fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-    steepen((0.5 + apart / (2.0 * reach * band)).clamp(0.0, 1.0))
+fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
+    steepen((0.5 + apart / (2.0 * reach * band) + shift / band).clamp(0.0, 1.0))
 }
 
 /// The ramp's share, re-spent on a steeper curve inside the same support
@@ -2018,9 +2296,13 @@ struct Reframe {
   // How wide this camera hands the picture over, in radians. Rust twin:
   // `Reframe::crossover`. Read by `band_width` and `band_rest`.
   crossover: f32,
+  // SEAM-ANCHOR EXPERIMENT: how far across the seam the drawn 50/50 handover
+  // line is moved from where the geometry puts it, in radians. Zero is the
+  // picture before the experiment. Rust twin: `Reframe::handover_shift`. Read
+  // by `handover`.
+  handover_shift: f32,
   // What puts the table below on its own 16-byte boundary. Rust twin:
   // `Reframe::_pad`, which is what makes the two layouts agree.
-  pad0: f32,
   pad1: f32,
   pad2: f32,
   // What the along-seam axis still disagrees by after a pose, direction by
@@ -2187,14 +2469,15 @@ fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
   if reframe.lens_count <= 1.0 {
     return 1.0;
   }
-  return crossover(axis0 - axis1, reach, band);
+  return crossover(axis0 - axis1, reach, band, reframe.handover_shift);
 }
 
 // The front lens's share, from how far apart the two dot products are, across
-// a band this ray's own reading decided the width of (`band_width`). Rust
-// twin: `crossover`.
-fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-  return steepen(clamp(0.5 + apart / (2.0 * reach * band), 0.0, 1.0));
+// a band this ray's own reading decided the width of (`band_width`), and moved
+// across the seam by `shift` radians (the seam-anchor experiment, zero
+// everywhere else and a bit-exact no-op there). Rust twin: `crossover`.
+fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
+  return steepen(clamp(0.5 + apart / (2.0 * reach * band) + shift / band, 0.0, 1.0));
 }
 
 // The same share re-spent on a steeper curve inside the same support. Rust

@@ -40,7 +40,7 @@ use kjerag_meta::{
 
 use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
-use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
+use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Correction, Harvest, SeamFit};
 use super::stall::{Stall, Stalled};
@@ -1209,6 +1209,15 @@ pub struct ScenePipeline {
     /// reads back is what the compositor would have been handed.
     format: wgpu::TextureFormat,
     reported: bool,
+    /// SEAM-ANCHOR EXPERIMENT (`KJERAG_ANCHOR`): where the drawn handover line
+    /// is being held, carried from one redraw to the next because a held line
+    /// is a thing with a history and the block that carries it to the GPU is
+    /// rebuilt from nothing every frame.
+    ///
+    /// `None` until the first redraw with a seam in it, and left alone
+    /// entirely when the experiment is off, which is when nothing ever reads
+    /// it and the map is handed the zero it builds itself with.
+    anchor: Option<SeamAnchor>,
 }
 
 /// One frame on the GPU. The mapped frames must outlive the textures
@@ -1349,6 +1358,7 @@ impl ScenePipeline {
             live: VecDeque::new(),
             format,
             reported: false,
+            anchor: None,
         }
     }
 
@@ -1473,6 +1483,19 @@ impl ScenePipeline {
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
+        };
+        // SEAM-ANCHOR EXPERIMENT: the one place the held line becomes a
+        // number the shader can read. After the block is built, because the
+        // hold is measured against the very pose and lenses the draw will use,
+        // and before the write, because that is the copy the GPU sees.
+        let reframe = match projection::anchoring() {
+            false => reframe,
+            true => {
+                let held = showing.as_ref().map_or(Held::default(), |view| view.held);
+                let anchor = SeamAnchor::hold(self.anchor, &reframe, held);
+                self.anchor = Some(anchor);
+                reframe.with_shift(anchor.shift())
+            }
         };
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());
         // After the uniform write, because the band reads the same block: the
