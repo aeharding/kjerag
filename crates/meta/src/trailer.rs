@@ -102,6 +102,19 @@ pub(crate) struct ExtraMetadata {
     #[prost(string, tag = "54")]
     #[cfg_attr(test, serde(deserialize_with = "offset_v3_from_fixture"))]
     pub offset_v3: String,
+    /// The thirteen-coefficient calibration the X4 family also writes, and
+    /// the one `capture_offset_version` (tag 136, value 4 = `OFFSET_V6`)
+    /// declares describes the glass. Insta360 Studio reads this one.
+    ///
+    /// Empty on every camera that does not write it, which is what
+    /// [`CalibrationSet`] falls back to `offset_v3` on.
+    #[prost(string, tag = "111")]
+    pub offset_v6: String,
+    /// Which of the offset strings the camera says it was calibrated with.
+    /// 4 is `OFFSET_V6`. Read so a capture can be believed about itself
+    /// rather than sniffed.
+    #[prost(uint32, tag = "136")]
+    pub capture_offset_version: u32,
     #[prost(bool, tag = "62")]
     pub is_raw_gyro: bool,
     #[prost(message, optional, tag = "65")]
@@ -677,6 +690,75 @@ mod tests {
             .collect();
         captures.sort();
         captures.into_iter().next()
+    }
+
+    /// **The v6 arm, end to end, on the owner's own capture.** Ignored for
+    /// the same reason as the test below: it needs real footage.
+    ///
+    /// `KJERAG_TEST_INSV=~/Videos/Insta/VID_20260501_183417_00_002.insv
+    /// cargo test -p kjerag-meta -- --ignored --nocapture the_v6_arm`
+    ///
+    /// The numbers are that file's own `offset_v6`, read out of the trailer
+    /// by a second implementation (`/tmp/readv6.py` in the session that wrote
+    /// this) and put here by hand, so a slip in the thirteen-token mapping is
+    /// caught by something other than the mapping itself. **Lens 1's
+    /// tangential pair is the whole point**: token 6 is `p2` and token 7 is
+    /// `p1`, and reading them the other way round is worth 10 px at the seam.
+    #[test]
+    #[ignore = "needs real footage at ~/Videos/*.insv"]
+    fn the_v6_arm_reads_the_thirteen_the_camera_wrote() {
+        let Some(path) = test_capture() else {
+            eprintln!("no .insv found, skipping");
+            return;
+        };
+        let v6 = CalibrationSet::from_insv(&path).unwrap();
+        if v6.offset_version != 6 {
+            eprintln!("{} carries no offset_v6, skipping", path.display());
+            return;
+        }
+        // Lens 0's, in the delivered frame: cx 3841.910 / 2, cy 3858.900 / 2.
+        let zero = &v6.lenses[0];
+        assert!((zero.intrinsics.cx - 1920.955).abs() < 1e-3, "{zero:?}");
+        assert!((zero.intrinsics.cy - 1929.450).abs() < 1e-3, "{zero:?}");
+        assert!((zero.distortion.k1 - 0.96564066).abs() < 1e-9);
+        assert!((zero.distortion.p1 - -0.00078501).abs() < 1e-9, "token 7");
+        assert!((zero.distortion.p2 - 0.00176593).abs() < 1e-9, "token 6");
+        let pro = zero.distortion.pro.expect("a v6 lens carries eight more");
+        assert_eq!(pro.k4, -0.13278545);
+        assert_eq!(pro.k5, 0.0);
+        assert_eq!((pro.p2_r2, pro.p1_r2), (0.00636060, 0.00263606));
+        // `s1 s3 s2 s4` on the wire, `s1 s2 s3 s4` here.
+        assert_eq!(
+            (pro.s1, pro.s2, pro.s3, pro.s4),
+            (-0.00638099, -0.02387245, -0.00193177, -0.00347206),
+        );
+
+        // Lens 1: the pose and principal point the whole suspicion was about.
+        let one = &v6.lenses[1];
+        assert!((one.pose.yaw_deg - -0.113).abs() < 1e-9);
+        assert!((one.pose.pitch_deg - 0.051).abs() < 1e-9);
+        assert!((one.distortion.p2 - -0.00192407).abs() < 1e-9, "token 6");
+        assert!((one.distortion.p1 - -0.00334321).abs() < 1e-9, "token 7");
+        assert_eq!(one.distortion.pro.unwrap().k4, 9.31782722);
+
+        // The other arm of the A/B, off the same file, and the key that has
+        // to survive it so both arms draw with one seam pool.
+        // SAFETY: single threaded, before any other thread reads the env.
+        unsafe { std::env::set_var("KJERAG_OFFSET", "v3") };
+        let v3 = CalibrationSet::from_insv(&path).unwrap();
+        unsafe { std::env::remove_var("KJERAG_OFFSET") };
+        assert_eq!(v3.offset_version, 3);
+        assert!(v3.lenses[0].distortion.pro.is_none());
+        assert_eq!(v3.camera_key(), v6.camera_key(), "the arms share a pool");
+
+        // And the two arms really are different maps: v6 - v3 on lens 1 is
+        // the delta on record (cx -10.80, cy -4.15 canvas px, so half that
+        // delivered; pitch +0.244; yaw -0.152).
+        let (a, b) = (&v3.lenses[1], &v6.lenses[1]);
+        assert!((b.intrinsics.cx - a.intrinsics.cx - -5.400).abs() < 1e-3);
+        assert!((b.intrinsics.cy - a.intrinsics.cy - -2.075).abs() < 1e-3);
+        assert!((b.pose.pitch_deg - a.pose.pitch_deg - 0.244).abs() < 1e-9);
+        assert!((b.pose.yaw_deg - a.pose.yaw_deg - -0.152).abs() < 1e-9);
     }
 
     /// Ignored because the footage is 36 GB and lives on one box. Run it

@@ -16,6 +16,16 @@ use super::{Error, ExposureTrack, GyroTrack};
 /// p2, calib_w, calib_h, lensType`.
 const FIELDS_PER_LENS: usize = 19;
 
+/// The same grammar with `offset_v6`'s thirteen-coefficient distortion run
+/// in place of v3's five: `11 + 13 + 3`.
+const FIELDS_PER_LENS_V6: usize = 27;
+
+/// The eleven pose and intrinsic tokens every version of the string opens a
+/// lens block with, and the three (`calib_w, calib_h, lensType`) that close
+/// it. Only the distortion run between them changes length across versions.
+const POSE_TOKENS: usize = 11;
+const TAIL_TOKENS: usize = 3;
+
 /// FNV-1a, which is what [`CalibrationSet::camera_key`] is taken with.
 ///
 /// Written out rather than taken from `std::hash`, whose `DefaultHasher` is
@@ -89,6 +99,21 @@ pub struct CalibrationSet {
     /// conversion in [`Intrinsics`] stays auditable. Nothing downstream
     /// needs it.
     pub calibration_canvas: Size,
+    /// What [`Self::camera_key`] answers. **Taken over the `offset_v3` lens
+    /// set on every arm**, including a v6 one.
+    ///
+    /// HACK (the v6 A/B): `research/v6-player` keys a v6 arm separately, on
+    /// the argument that a different map of the same glass is a different
+    /// camera and must not inherit the seam fits learned through v3. That is
+    /// right for a shipping path and wrong for this build, whose whole job is
+    /// to show what changes when the calibration changes: a key that moved
+    /// would empty the pilot's seam pool at the same instant and confound the
+    /// two. Both arms of `KJERAG_OFFSET` therefore draw with the same stored
+    /// correction, and the only difference between them is the lens model.
+    pub key: u64,
+    /// Which offset string the lens set above was read out of, for the
+    /// instruments and the log line. `3` or `6`.
+    pub offset_version: u32,
 }
 
 /// One lens: a Mei/UCM camera model plus where the lens sits.
@@ -150,6 +175,67 @@ pub struct Distortion {
     pub k3: f64,
     pub p1: f64,
     pub p2: f64,
+    /// The eight terms `offset_v6` carries and `offset_v3` does not.
+    ///
+    /// `None` on a lens set read off `offset_v3`, which has no slots for
+    /// them, and on every camera that writes no v6 string.
+    pub pro: Option<Pro>,
+}
+
+/// The distortion terms `offset_v6` adds to `offset_v3`'s five.
+///
+/// **The form is Insta360 Studio's own**, read out of the projection method
+/// of `OmniProjection<RadtanDistortPro>` in `studio_worker.dll` 5.9.2
+/// (`.text` 0x3b8e210; its sibling `OmniProjection<RadtanDistort>` at
+/// 0x3b8dfc0 disassembles to [`Distortion`]'s five terms exactly, which is
+/// what says the reading is right). With `r2` the squared radius on the Mei
+/// normalized plane, the whole model is:
+///
+/// ```text
+/// radial = 1 + k1 r2 + k2 r2^2 + k3 r2^3 + k4 r2^4 + k5 r2^5
+/// xd = x radial + (p2 + p2_r2 r2)(r2 + 2 x^2) + 2 (p1 + p1_r2 r2) x y
+///               + s1 r2 + s2 r2^2
+/// yd = y radial + (p1 + p1_r2 r2)(r2 + 2 y^2) + 2 (p2 + p2_r2 r2) x y
+///               + s3 r2 + s4 r2^2
+/// ```
+///
+/// Set every field to zero and those two lines **are** [`Distortion`]'s,
+/// term for term. That is the null this model is read against, and
+/// `the_pro_terms_zeroed_are_the_v3_model` in `kjerag_render::projection`
+/// is where it is checked.
+///
+/// `offset_v6` writes its thirteen in the order
+/// `k1 k2 k3 k4 k5 p2 p1 p2_r2 p1_r2 s1 s3 s2 s4`. **The tangential pair is
+/// the other way round from `offset_v3`'s**, which is why this names its
+/// fields instead of carrying an index.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pro {
+    /// Radial orders `r2^4` and `r2^5`, past where v3's polynomial stops.
+    pub k4: f64,
+    pub k5: f64,
+    /// How far the two tangential coefficients themselves grow with `r2`.
+    pub p1_r2: f64,
+    pub p2_r2: f64,
+    /// Thin prism: `r2` then `r2^2`, on x (`s1`, `s2`) and on y (`s3`, `s4`).
+    pub s1: f64,
+    pub s2: f64,
+    pub s3: f64,
+    pub s4: f64,
+}
+
+impl Pro {
+    /// A v6 block carrying nothing v3 does not, which is what a null arm
+    /// loads.
+    pub const ZERO: Self = Self {
+        k4: 0.0,
+        k5: 0.0,
+        p1_r2: 0.0,
+        p2_r2: 0.0,
+        s1: 0.0,
+        s2: 0.0,
+        s3: 0.0,
+        s4: 0.0,
+    };
 }
 
 /// How one frame is read off the sensor: how long the whole readout takes,
@@ -390,31 +476,7 @@ impl CalibrationSet {
     ///
     /// 0 for a calibration with no lenses in it, which is not a camera.
     pub fn camera_key(&self) -> u64 {
-        if self.lenses.is_empty() {
-            return 0;
-        }
-        let mut hash = FNV_OFFSET;
-        let mut eat = |bytes: &[u8]| hash = fnv1a(hash, bytes);
-        eat(self.camera_model.as_bytes());
-        eat(&self.dimension.width.to_le_bytes());
-        eat(&self.dimension.height.to_le_bytes());
-        for lens in &self.lenses {
-            let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
-            let Distortion { k1, k2, k3, p1, p2 } = lens.distortion;
-            let Pose {
-                yaw_deg,
-                pitch_deg,
-                roll_deg,
-                translation_m: [tx, ty, tz],
-            } = lens.pose;
-            for number in [
-                xi, fx, fy, cx, cy, k1, k2, k3, p1, p2, yaw_deg, pitch_deg, roll_deg, tx, ty, tz,
-            ] {
-                eat(&number.to_le_bytes());
-            }
-            eat(&lens.lens_type.to_le_bytes());
-        }
-        hash
+        self.key
     }
 
     /// How one frame is read off this camera's sensor (issue #9): the span
@@ -457,42 +519,33 @@ impl CalibrationSet {
             }
         };
 
-        let tokens: Vec<f64> = metadata
-            .offset_v3
-            .split('_')
-            .map(|token| token.parse::<f64>().map_err(|_| Error::OffsetNotNumeric))
-            .collect::<Result<_, _>>()?;
+        // The v3 arm is read on every capture whatever is drawn with: it is
+        // the fallback, and it is what the camera key is taken over, so a v6
+        // arm does not move the pilot's seam pool out from under itself.
+        let (v3_lenses, v3_canvas) =
+            read_offset(&metadata.offset_v3, FIELDS_PER_LENS, dimension, crop)?;
+        let key = camera_key_of(&metadata.camera_type, dimension, &v3_lenses);
 
-        let lens_count = *tokens.first().ok_or(Error::MissingField("offset_v3"))? as usize;
-        let grammar_error = Error::OffsetGrammar {
-            lens_count,
-            tokens: tokens.len(),
+        let v6 = v6_arm(metadata).map(|text| read_offset(text, FIELDS_PER_LENS_V6, dimension, crop));
+        let (lenses, canvas, offset_version) = match v6 {
+            // A v6 string that does not parse is not worth failing an open
+            // over: the v3 arm is what every build before this one drew.
+            Some(Ok((lenses, canvas))) => (lenses, canvas, 6),
+            _ => (v3_lenses, v3_canvas, 3),
         };
-        if lens_count == 0 || tokens.len() != 2 + FIELDS_PER_LENS * lens_count {
-            return Err(grammar_error);
-        }
-
-        let blocks: Vec<LensBlock> = (0..lens_count)
-            .map(|index| LensBlock::read(&tokens, index))
-            .collect::<Option<_>>()
-            .ok_or(grammar_error)?;
-
-        let canvas = blocks[0].canvas;
-        if blocks.iter().any(|block| block.canvas != canvas) {
-            return Err(Error::CanvasMismatch);
-        }
-        // One lens's slot on the shared canvas. That slot, the canvas
-        // height and the delivered crop window are all divisors below.
-        let slot_width = canvas.width as f64 / lens_count as f64;
-        if slot_width == 0.0 || canvas.height == 0 || crop.width == 0 || crop.height == 0 {
-            return Err(Error::DegenerateCanvas);
-        }
-
-        let lenses = blocks
-            .iter()
-            .enumerate()
-            .map(|(index, block)| block.to_lens(index, dimension, slot_width, canvas.height, crop))
-            .collect();
+        // HACK build: which calibration the picture is about to be drawn
+        // with, said out loud, because it is the whole question this binary
+        // exists to ask and an A/B whose arm is assumed is not an A/B.
+        eprintln!(
+            "kjerag: drawing {} with offset_v{offset_version} \
+             (file carries v3{}, capture_offset_version={})",
+            metadata.camera_type,
+            match metadata.offset_v6.is_empty() {
+                true => "",
+                false => " and v6",
+            },
+            metadata.capture_offset_version,
+        );
 
         Ok(Self {
             camera_model: metadata.camera_type.clone(),
@@ -504,8 +557,120 @@ impl CalibrationSet {
             exposure: Default::default(),
             imu: GyroTrack::default(),
             calibration_canvas: canvas,
+            key,
+            offset_version,
         })
     }
+}
+
+/// The `offset_v6` string this build should draw with, or `None` for the v3
+/// arm.
+///
+/// `offset_v6` when the file carries one, which is what Insta360 Studio reads
+/// and what `capture_offset_version = 4` says describes the glass.
+/// `KJERAG_OFFSET=v3` forces the old arm, so one binary draws both sides of
+/// the A/B and the pilot's eye is the only thing that changes between them.
+fn v6_arm(metadata: &ExtraMetadata) -> Option<&str> {
+    let forced = std::env::var("KJERAG_OFFSET").unwrap_or_default();
+    if forced.eq_ignore_ascii_case("v3") {
+        return None;
+    }
+    match metadata.offset_v6.is_empty() {
+        true => None,
+        false => Some(&metadata.offset_v6),
+    }
+}
+
+/// What names the camera, over one lens set: pulled out of
+/// [`CalibrationSet::camera_key`] so the key can be taken over the v3 lenses
+/// while the v6 ones are drawn with.
+fn camera_key_of(camera_model: &str, dimension: Size, lenses: &[Lens]) -> u64 {
+    if lenses.is_empty() {
+        return 0;
+    }
+    let mut hash = FNV_OFFSET;
+    let mut eat = |bytes: &[u8]| hash = fnv1a(hash, bytes);
+    eat(camera_model.as_bytes());
+    eat(&dimension.width.to_le_bytes());
+    eat(&dimension.height.to_le_bytes());
+    for lens in lenses {
+        let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
+        let Distortion {
+            k1,
+            k2,
+            k3,
+            p1,
+            p2,
+            pro: _,
+        } = lens.distortion;
+        let Pose {
+            yaw_deg,
+            pitch_deg,
+            roll_deg,
+            translation_m: [tx, ty, tz],
+        } = lens.pose;
+        for number in [
+            xi, fx, fy, cx, cy, k1, k2, k3, p1, p2, yaw_deg, pitch_deg, roll_deg, tx, ty, tz,
+        ] {
+            eat(&number.to_le_bytes());
+        }
+        eat(&lens.lens_type.to_le_bytes());
+    }
+    hash
+}
+
+/// One whole offset string, cut into `per_lens`-token blocks and put into the
+/// delivered frame's own pixels.
+///
+/// The cut is told the block length rather than deriving it, because the
+/// caller knows which string it handed over and a v3 string that happened to
+/// divide by 27 would otherwise be read as a v6 one.
+fn read_offset(
+    text: &str,
+    per_lens: usize,
+    dimension: Size,
+    crop: Size,
+) -> Result<(Vec<Lens>, Size), Error> {
+    let tokens: Vec<f64> = text
+        .split('_')
+        .map(|token| token.parse::<f64>().map_err(|_| Error::OffsetNotNumeric))
+        .collect::<Result<_, _>>()?;
+
+    let lens_count = *tokens.first().ok_or(Error::MissingField("offset_v3"))? as usize;
+    let grammar_error = Error::OffsetGrammar {
+        lens_count,
+        tokens: tokens.len(),
+    };
+    if lens_count == 0 || tokens.len() != 2 + per_lens * lens_count {
+        return Err(grammar_error);
+    }
+
+    let blocks: Vec<LensBlock> = (0..lens_count)
+        .map(|index| LensBlock::read(&tokens, index, per_lens))
+        .collect::<Option<_>>()
+        .ok_or(grammar_error)?;
+
+    let canvas = blocks[0].canvas;
+    if blocks.iter().any(|block| block.canvas != canvas) {
+        return Err(Error::CanvasMismatch);
+    }
+    // One lens's slot on the shared canvas. That slot, the canvas
+    // height and the delivered crop window are all divisors below.
+    let slot_width = canvas.width as f64 / lens_count as f64;
+    if slot_width == 0.0 || canvas.height == 0 || crop.width == 0 || crop.height == 0 {
+        return Err(Error::DegenerateCanvas);
+    }
+
+    let lenses = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| block.to_lens(index, dimension, slot_width, canvas.height, crop))
+        .collect::<Option<_>>()
+        .ok_or(Error::OffsetGrammar {
+            lens_count,
+            tokens: tokens.len(),
+        })?;
+    Ok((lenses, canvas))
 }
 
 impl GyroConfig {
@@ -677,51 +842,43 @@ fn readout_sweep(camera_model: &str) -> Sweep {
     }
 }
 
-/// One 19-field lens block, still in canvas coordinates.
+/// One lens block, still in canvas coordinates, whichever version wrote it.
 struct LensBlock {
-    fields: [f64; FIELDS_PER_LENS],
+    /// The eleven every version opens with:
+    /// `xi, fx, fy, cx, cy, yaw, pitch, roll, tx, ty, tz`.
+    head: [f64; POSE_TOKENS],
+    /// Five tokens on a v3 block and thirteen on a v6 one, which is the only
+    /// part of the grammar that changes length.
+    distortion: Vec<f64>,
     canvas: Size,
+    lens_type: u32,
 }
 
 impl LensBlock {
-    fn read(tokens: &[f64], index: usize) -> Option<Self> {
-        let start = 1 + index * FIELDS_PER_LENS;
-        let fields: [f64; FIELDS_PER_LENS] = tokens
-            .get(start..start + FIELDS_PER_LENS)?
-            .try_into()
-            .ok()?;
+    fn read(tokens: &[f64], index: usize, per_lens: usize) -> Option<Self> {
+        let start = 1 + index * per_lens;
+        let block = tokens.get(start..start + per_lens)?;
         Some(Self {
-            fields,
+            head: block.get(..POSE_TOKENS)?.try_into().ok()?,
+            distortion: block.get(POSE_TOKENS..per_lens - TAIL_TOKENS)?.to_vec(),
             canvas: Size {
-                width: fields[16] as u32,
-                height: fields[17] as u32,
+                width: block[per_lens - 3] as u32,
+                height: block[per_lens - 2] as u32,
             },
+            lens_type: block[per_lens - 1] as u32,
         })
     }
 
-    fn to_lens(&self, index: usize, dimension: Size, slot: f64, canvas_h: u32, crop: Size) -> Lens {
-        let [
-            xi,
-            fx,
-            fy,
-            cx,
-            cy,
-            yaw,
-            pitch,
-            roll,
-            tx,
-            ty,
-            tz,
-            k1,
-            k2,
-            k3,
-            p1,
-            p2,
-            _,
-            _,
-            lens_type,
-        ] = self.fields;
-        Lens {
+    fn to_lens(
+        &self,
+        index: usize,
+        dimension: Size,
+        slot: f64,
+        canvas_h: u32,
+        crop: Size,
+    ) -> Option<Lens> {
+        let [xi, fx, fy, cx, cy, yaw, pitch, roll, tx, ty, tz] = self.head;
+        Some(Lens {
             intrinsics: Intrinsics {
                 xi,
                 fx: fx * dimension.width as f64 / crop.width as f64,
@@ -732,15 +889,52 @@ impl LensBlock {
                 cx: (cx - index as f64 * slot) * (dimension.width as f64 / slot),
                 cy: cy * (dimension.height as f64 / canvas_h as f64),
             },
-            distortion: Distortion { k1, k2, k3, p1, p2 },
+            distortion: named(&self.distortion)?,
             pose: Pose {
                 yaw_deg: yaw,
                 pitch_deg: pitch,
                 roll_deg: roll,
                 translation_m: [tx, ty, tz],
             },
-            lens_type: lens_type as u32,
-        }
+            lens_type: self.lens_type,
+        })
+    }
+}
+
+/// A block's distortion run, named.
+///
+/// The v6 arm is where the **known indexing trap** lives: `offset_v6` writes
+/// its tangential pair the other way round from `offset_v3`'s, so the sixth
+/// coefficient is `p2` and the seventh is `p1`. See [`Pro`] for where that
+/// order was read.
+fn named(run: &[f64]) -> Option<Distortion> {
+    match *run {
+        [k1, k2, k3, p1, p2] => Some(Distortion {
+            k1,
+            k2,
+            k3,
+            p1,
+            p2,
+            pro: None,
+        }),
+        [k1, k2, k3, k4, k5, p2, p1, p2_r2, p1_r2, s1, s3, s2, s4] => Some(Distortion {
+            k1,
+            k2,
+            k3,
+            p1,
+            p2,
+            pro: Some(Pro {
+                k4,
+                k5,
+                p1_r2,
+                p2_r2,
+                s1,
+                s2,
+                s3,
+                s4,
+            }),
+        }),
+        _ => None,
     }
 }
 
