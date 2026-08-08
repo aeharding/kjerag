@@ -752,8 +752,108 @@ live, no keyframe UI ever.
   Untouched: the roughly one degree across-seam residual on his downward arc,
   which is the expensive work.
 
+- 2026-08-08 **The `.OSV` horizon lock does not hold the horizon when the
+  camera leans, and the mirror that was left open is not what is wrong with
+  it.** The owner's report on the entry below: "OSV now stays still when guy
+  rotates in a circle, but when the camera dips the horizon is no longer
+  locked", with his own view line,
+  `time=139.806 yaw=-63.98 pitch=-15.06 fov=160.04 lock=1`. That instant sits
+  inside a real dip - the file's own quaternion puts the camera 8 to 15.9
+  degrees off vertical from 138.40 to 140.51 s - and the report reproduces.
+
+  **A new instrument, because every angle read off the picture so far was the
+  wrong angle.** A view whose axis is not horizontal makes vertical world
+  lines converge, so their apparent lean changes across the frame and is not
+  the view's roll: `lean.py`, a Hough vertical cluster and a shoreline fit
+  were all tried and all failed their own controls. The convergence is the
+  signal. Vertical world lines meet at the vertical VANISHING POINT, and the
+  direction that point sits in **is** the world's vertical in the frame of
+  whatever camera took the picture. Kjerag's own output map is a plain pinhole
+  up to `FOV_FLAT` (110 degrees), so at 65 degrees the fit is exact.
+
+  Measured on a **lock off** render, which applies no orientation at all: the
+  picture is then identical whatever candidate is under test, and every
+  candidate enters only as a PREDICTION of where world up should be. Three
+  controls hold it up:
+
+  - eight view directions 45 degrees apart, fitted independently at the same
+    instant, agree to **0.37 degrees at the median** (worst 2.4);
+  - the tilt it reads with the lock off is **1.02 times** the lean the file's
+    own quaternion states, correlation 0.99 - it measures the body's lean when
+    that is what it is looking at;
+  - the tilt of a LOCKED render matches what that lock-off measurement plus
+    the candidate's own arithmetic predicts, to **0.1 to 0.3 degrees**.
+
+  **The residual tilt each reading leaves**, in degrees, on the owner's dip (9
+  instants, 138.40 to 140.60 s, peak lean 15.9) and on a flat stretch of the
+  same walk (6 instants, 121.0 to 123.5 s, camera upright):
+
+  | reading of (w, x, y, z) | owner's dip | flat stretch |
+  | --- | ---: | ---: |
+  | **`wXYZ` conjugated (shipped)** | **21.94** | **5.00** |
+  | `wxYZ` mirrored in x | 16.77 | 4.21 |
+  | `wXyZ` mirrored in y | 16.38 | 4.90 |
+  | `wxyZ` z negated, otherwise as written | 8.51 | 4.21 |
+  | `wxyz` as written | 20.40 | 1.97 |
+  | `wXYz` mirrored in z | 11.58 | 6.28 |
+  | `wxYz` mirror y, conjugated | 18.73 | 5.98 |
+  | `wXyz` mirror x, conjugated | 16.16 | 2.08 |
+  | NO LOCK AT ALL (null control) | 11.88 | 3.44 |
+
+  **The shipped reading leaves nearly twice the tilt that switching the lock
+  off leaves.** So does each of the two mirrors that were the open question.
+  Only `wxyZ` beats the null and it still leaves 8.5 degrees, which is not a
+  held horizon. The deepest dip in the corpus - unit B file 1, 28.4 to 30.6 s,
+  peak lean 23 degrees - says the same where the scene gave the instrument
+  something to fit: shipped 21.1 against a null of 11.6.
+
+  **What the error tracks is the lean, not the clock.** Against the file's own
+  lean the shipped error fits a slope of 2.65 with correlation **0.987**, and
+  its median is **1.84 times the lean**; against the body's turn rate the
+  correlation is **0.102**. A lag would grow with rate and vanish at the
+  bottom of a dip, where the rate passes through zero; this is largest exactly
+  there. It is a standing frame error.
+
+  **Where it is.** Low pass the file's accelerometer over 2 s - which is what
+  takes the wearer's stride out of it - and the quaternion read AS WRITTEN
+  predicts it to 2.1, 2.1 and 2.8 degrees on the three unit B files, on the
+  frames leaning more than 8 degrees, against a null of about 10. So the
+  file's own two streams agree with each other and its frame is internally
+  consistent. The picture disagrees with both by about 21 degrees at the dip,
+  and **essentially all of it is azimuth**: the lean magnitude the picture
+  measures matches the file's own to 0.18 degrees at the median, while the
+  direction that lean points, taken round the camera's own vertical,
+  disagrees by about 135. The tilt is being applied the right amount the wrong
+  way round the vertical - a composition between the file's inertial frame and
+  the optical frame Kjerag renders in, not a handedness in the quaternion.
+  Which rotation it is was NOT pinned: the scene offers the instrument
+  vertical structure for only about a tenth of the capture, and the 4 to 9
+  instants that survived span 29 degrees of lean azimuth, which is not enough
+  to tell a turned frame from a reflected one. **So nothing was changed.** A
+  sign flip would not have fixed this and no other number here is measured
+  well enough to ship.
+
+  **Why the two oracles under the entry below preferred the shipped reading.**
+  Neither of them measured a distance from level. The tilt-pairs oracle scored
+  the worst angle BETWEEN two locked renders half a second apart, which is a
+  difference between candidates, so two readings that are wrong the same way
+  both score well and the reading that moves least wins whether or not it is
+  level. The accelerometer's 1.8 degrees was a median over every steady frame
+  of a capture whose median lean is 4 degrees, and all eight readings predict
+  the same lean MAGNITUDE - `1 - 2(x^2 + y^2)` has no sign in it - so they
+  differ only in azimuth and only in proportion to the lean. On those frames
+  every candidate scores within a degree of every other and of the null; read
+  on the frames that lean more than 8 degrees, with the stride low passed out,
+  the same instrument spreads them over 8 degrees. It was a real instrument
+  used at the one operating point where it says nothing.
+
+  Evidence, panels and the throwaway harness: `scratch/EVIDENCE_2026-08-08-osv-dip/`.
+
 - 2026-08-08 **Horizon lock works on a DJI `.OSV`, and the file's quaternion is
-  written the other way round.** The owner's report was "the camera rotates
+  written the other way round.** *(The "what is still open" paragraph at the
+  end of this entry is superseded by the entry above: the open question was
+  the wrong question, and both of the readings it weighed leave more tilt
+  through a dip than switching the lock off does.)* The owner's report was "the camera rotates
   when the wearer turns around", which on this format it did, because the lock
   was a designed refusal: the file's fused orientation was there and its frame
   was not pinned. It is pinned now, and the whole of it is

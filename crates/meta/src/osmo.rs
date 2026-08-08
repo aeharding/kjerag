@@ -125,19 +125,51 @@
 //! `docs/ROADMAP.md` (2026-08-08) has the whole candidate table and what each
 //! one scored.
 //!
-//! **What is still open, and how much it is worth.** A left-handed reading of
-//! the file's own frame flips the heading in the same way the conjugate does,
-//! and the two agree exactly for a camera held upright and differ by twice its
-//! lean when it is not. The conjugate wins the head to head on the frame pairs
-//! chosen to separate them - 5.8 degrees of residual against 11.4 and 10.8,
-//! and the only candidate of the three to beat the no-lock control - but the
-//! file's own accelerometer, which is field 3.2.10 in g at fields 2 to 4,
-//! agrees with the *unconjugated* reading to 1.8 degrees and so argues for the
-//! mirror. The picture is the oracle here and the accelerometer is the
-//! instrument that disagrees with it; the risk this carries is bounded by
-//! twice the camera's lean, which is 4.3 degrees at the median and 11 at the
-//! 95th percentile over the corpus. A Mimo export of one clip with lock on and
-//! off would settle it outright and nothing else in the corpus will.
+//! **The heading is what this holds, and the tilt is what it gets wrong.**
+//! The paragraphs above are about the heading and they stand: the wearer
+//! turns and the world stays. What they do not cover is the camera leaning,
+//! and the owner's next report was exactly that - "when the camera dips the
+//! horizon is no longer locked". It does not. Measured on the picture through
+//! the delivered path, on the dip his own view line sits in (138.40 to 140.51
+//! s of the 8k30p capture, the camera 8 to 15.9 degrees off vertical), **the
+//! lock leaves 21.9 degrees of tilt where switching it off leaves 11.9**. It
+//! is 1.84 times the camera's lean at the median, correlated 0.99 with that
+//! lean and 0.10 with the rate the body is turning, so it is a standing error
+//! in the frame and not a lag in the lookup.
+//!
+//! **The left-handed reading is not what is wrong.** It was the open question
+//! here and it is answered: a mirror in x leaves 16.8 degrees on that dip and
+//! a mirror in y 16.4, both of them also worse than no lock at all. All eight
+//! sign readings of the four components were scored and the best of them
+//! leaves 8.5, which is not a held horizon either. What the file itself says
+//! is consistent: low pass field 3.2.10 over 2 s, which takes the wearer's
+//! stride out of it, and the quaternion read as written predicts that
+//! accelerometer to about 2 degrees on all three unit B files. The picture
+//! disagrees with both by 21 degrees at the dip, and the lean MAGNITUDE it
+//! measures matches the file's own to 0.18 degrees - so what is misplaced is
+//! the direction that lean points round the camera's own vertical, by about
+//! 135 degrees. That is a composition between the file's inertial frame and
+//! the optical frame [`BODY`] lands in, not a handedness in the quaternion,
+//! and **which rotation it is has not been measured**: the corpus offers the
+//! instrument vertical structure over about a tenth of a capture and the
+//! instants that survived span 29 degrees of lean azimuth, which cannot tell
+//! a turned frame from a reflected one. Nothing here is changed on that,
+//! because a sign is not the fix and no other number is measured well enough
+//! to ship.
+//!
+//! **Why the oracles that pinned this preferred the shipped reading**, so the
+//! next pass does not reuse them: neither measured a distance from level. The
+//! tilt head to head scored the angle BETWEEN two locked renders, which two
+//! readings that are wrong the same way both do well on. The accelerometer's
+//! 1.8 degrees was a median over frames whose lean is 4 degrees, and every
+//! sign reading predicts the same lean magnitude - `1 - 2(x^2 + y^2)` carries
+//! no sign - so they differ only in proportion to the lean and at 4 degrees
+//! they all score within a degree of each other and of the null. The
+//! instrument that does separate them is the vertical VANISHING POINT of a
+//! lock-off render, which measures the world's vertical in the camera body
+//! from the picture alone: eight view directions agree to 0.37 degrees, and
+//! with the lock off it reads 1.02 times the lean the file states.
+//! `docs/ROADMAP.md` (2026-08-08) has the whole table and the controls.
 //!
 //! **Where the world frame's zero heading is:** the first frame's, the same
 //! convention `super::orientation` uses on an `.insv`. A gyroscope's absolute
