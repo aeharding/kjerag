@@ -947,3 +947,144 @@ It is flagged for the owner rather than buried here.
 The fold itself is still tested from both sides
 (`projection::tests::the_blend_curve_cannot_fold_the_narrowest_camera` measures
 the curve's peak gradient and shows the undivided limit folding that camera).
+
+## 10. The comb, closed (2026-08-08, `feat/comb-overlap`)
+
+Section 9.4 named the next build and named what it had to answer: the comb is
+both **more frequent** and **deeper** than main's, and a fix that only shortens
+how long the gate stays up would leave every remaining notch as deep as it is.
+This is that build. It is staged blind and nothing is merged.
+
+### 10.1 What it is, in one paragraph
+
+`KJERAG_COMB=share`. A cell's evidence reaches **two cells** instead of one, in
+the fragment shader's lookup and in its Rust twin and nowhere else. The value a
+ray takes is a hat-weighted average over the four cells within reach instead of
+the two either side; the gate is the **largest** of the trusts within reach,
+flat over the first cell and falling to nothing over the second.
+
+**Why both halves had to widen, which is the design and not a detail.** What
+ships lets a live cell assert its whole reading right up to a blind neighbour's
+centre - the value is normalized by evidence, so a lone contributor gives its
+whole answer - while gating it by a mix that reaches nothing at that centre. The
+two disagree about how far one cell's evidence goes and the disagreement **is**
+the comb. Three simpler designs were worked through and refused on paper before
+this one, each by a measurable consequence:
+
+| design | what it does to the comb | why it was refused |
+| --- | --- | --- |
+| gate weighted by evidence, reach unchanged | closes the notch | the value's own support ends at the neighbour's centre, so beside two blind cells the field falls off a **cliff** of the whole correction |
+| gate as a hat-weighted mean over two cells | - | dilutes a lone live cell by its blind neighbours: at a live cell's own centre the gate reads 0.5. That is the comb again |
+| gate as a clamped **sum** over two cells | closes the notch | a uniformly weak arc at trust 0.4 everywhere reads as 0.8. It manufactures trust out of coverage |
+
+The largest is the only operator that treats two cells covering one direction as
+that direction covered twice rather than as twice as much correction.
+
+**The refusal is not a second rule.** At a cell's own centre the gate is the
+largest of it and its two neighbours, so three blind cells in a row deliver
+exactly nothing at the middle one, and the evidence sum is zero there for the
+same reason: they reach zero at the same distance. One blind cell is bridged, a
+blind **arc** is refused, and both directions have a test
+(`projection::comb_tests`) and a footage control (`--bin band plant=blind:c:n`).
+
+**The evidence is `confidence * trust`.** With the raw confidence the `max`
+applied an arriving direction's first reading whole at its neighbour's gate,
+which is the arrival staging undone: measured at `down1`, 1 delivered step over
+10 view px became **10**, and the worst arrival step 7.2 px became **16.0**. A
+direction now walks INTO the average its neighbours were already drawing.
+
+**Two cells and not one and a half**, measured rather than chosen: at 1.5 the
+notch fills only half way and `bad` goes from 256 combed frames of 300 to
+**298**, which is worse than doing nothing.
+
+### 10.2 The null
+
+`--bin band mode=render count=40 size=1024`, the band live, md5 of the rendered
+frame, at all six A/B views under `seam=pool` (the prewarmed pool the A/B runs
+on) and again under `seam=factory`. **Identical at all twelve** against
+`origin/main` at 965bf5d, built in its own target directory. The counter-null:
+the same render with `KJERAG_COMB=share` differs at both views it was run at, so
+the comparison is not reading one binary twice.
+
+### 10.3 The comb, both halves
+
+`--bin band mode=snap count=300 size=1024`, 21 probes, staging active because it
+is default. **Frequency** is section 9.4's own count: frames whose delivered
+field peaks past 10 view px and comes back under 2 strictly inside its own
+reach. **Depth** is new and is measured in the ring: a BRIDGE is one blind cell
+with a live one either side, and the number is the correction delivered at its
+centre as a fraction of what the live edges hold. 1.00 is no hole; 0.00 is the
+correction switched off between two corrected directions.
+
+| view | combed, `seam=file` | | combed, `seam=pool` | | bridge depth (both) | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| | ship | share | ship | share | ship | share |
+| down1 | 40 | **31** | 89 | **67** | 0.000 | **1.003** |
+| down2 | 14 | *45* | 19 | *23* | 0.000 | **1.018** |
+| down3 | 100 | **49** | 104 | **48** | 0.000 | **1.003** |
+| shimmer | 36 | **3** | 52 | **16** | n/a | n/a |
+| good | 124 | **77** | 3 | *8* | 0.000 | **1.000** |
+| bad | 256 | *267* | 257 | **241** | 0.000 | **0.776** |
+
+The blind-arc row reads **0.000 on both arms at every view**: the refusal is
+where it was.
+
+`shimmer` has no bridge row because no cell on that arc is blind with live
+neighbours; its comb is a low-trust tail, and it is the view the reach helps
+most, 36 frames to 3.
+
+### 10.4 What got worse, disclosed and not buried
+
+**The delivered field is less steady, and it is not a metric artifact.**
+`--bin band mode=snap`, the same runs, `seam=file`:
+
+| view | 10+ px steps | | 3+ px steps | | frames with a 3+ px step | | rms, whole picture | | rms, over the corrected picture | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| | ship | share | ship | share | ship | share | ship | share | ship | share |
+| down1 | 1 | *7* | 32 | *77* | 15 | *22* | 0.49 | *0.81* | 1.02 | *1.41* |
+| down2 | 0 | *1* | 6 | *30* | 5 | *13* | 0.28 | *0.52* | 0.51 | *0.72* |
+| down3 | 2 | *16* | 85 | *173* | 32 | *38* | 0.78 | *1.17* | 1.33 | *1.68* |
+| bad | 0 | 0 | 7 | *12* | 7 | *11* | 0.30 | *0.38* | 0.32 | *0.38* |
+| good | 0 | 0 | 1 | 1 | 1 | 1 | 0.26 | 0.27 | 0.40 | **0.39** |
+
+Where it comes from, measured: the picture that carries a correction at all
+roughly doubles. At `down1` the median frame corrects 5 of the 21 probes on the
+ship binary and **10** on this one; at `down3`, 8 and 11. A step is counted per
+probe-frame, so a commit that moved two probes now moves five, and the picture a
+hole used to sit in now follows the band the way the rest of it always did.
+
+**The worst single step barely moves** - `down3` 12.5 px to 13.0, `down1` 11.5
+to 12.3 - and the frames carrying one over 10 px go 1 to 2 at `down1` and 2 to
+3 at `down3`. It is more picture moving, not bigger jumps.
+
+**It is a real regression against the acceptance this build was given** ("step
+counts must not regress") and it is not argued away here. The trade is: a hole
+that does not move, against corrected picture that does. Only the owner's eye
+can rule on it and it is the first thing the A/B briefing tells him to look for.
+
+Two comb rows also worsened and are in the table above: `down2` at both seam
+poses, and `bad` under `seam=file` only (256 to 267, while `seam=pool`, which is
+what the A/B actually runs on, improves 257 to 241). Both have the same cause as
+the steadiness rows: the reach widens, more of the picture carries a correction,
+and a fading tail that used to sit outside the measured reach is now inside it
+and is counted as an interior trough.
+
+### 10.5 The controls
+
+- `plant=blind:10:1` at `bad`: the bridge population grows by one per frame,
+  157 to 277, and the depth goes 0.000 to a median **0.889**.
+- `plant=blind:10:3` at the same view: the blind-arc population grows 5 to 125,
+  and both arms read **0.000** at the middle of every one of them.
+- The five plants that predate this build all still fire with the reach on:
+  `cell` stays sweep-dominant (84 percent), `commit` and `arrive` still land on
+  the frame they name, and `hold` and `still` still leave their own term at
+  nothing. `arrive`'s worst step falls 4.1 px to 1.4, which is the bridge
+  absorbing an arrival and is the mechanism rather than a broken control.
+
+### 10.6 Frame rate
+
+`cage`, headless, the prewarmed pool, 35 seconds a run, three reps an arm with
+the order rotated. Every settled five-second window on both arms reads **29.80
+to 30.04 fps presented**, and the two arms' ranges are the same range. Gate
+arithmetic and four cell loads a fragment instead of two; the band's state
+buffer is 4 kB.

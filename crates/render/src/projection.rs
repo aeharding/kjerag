@@ -1032,11 +1032,14 @@ impl Reframe {
         let turn = body[1].atan2(body[0]) / std::f32::consts::TAU * cells.len() as f32;
         let low = turn.floor();
         let mix = turn - low;
-        let cell =
-            |step: usize| cells[(low.rem_euclid(cells.len() as f32) as usize + step) % cells.len()];
+        let low = low.rem_euclid(cells.len() as f32) as usize;
+        let cell = |step: usize| cells[(low + step) % cells.len()];
         let (a, b) = (cell(0), cell(1));
         super::band::Reading {
-            epi: Self::channel(a, b, mix),
+            epi: match super::band::reach_cells() {
+                reach if reach > 1.0 => Self::channel_shared(cells, low, mix, reach),
+                _ => Self::channel(a, b, mix),
+            },
             // One fitted field over the whole circle rather than a cell
             // lookup: see `Along`. This azimuth's cosine and sine are the ray
             // flattened into the seam plane.
@@ -1078,6 +1081,79 @@ impl Reframe {
         }
         let strength = a.trust + (b.trust - a.trust) * mix;
         (ea * a.disparity + eb * b.disparity) / total * strength
+    }
+
+    /// The same channel with a cell's evidence reaching
+    /// [`SHARE_REACH`](super::band::SHARE_REACH) cells instead of one, which is
+    /// the shared arm of `KJERAG_COMB` and the answer to the comb.
+    ///
+    /// **What the comb is, in one line**: [`Self::channel`] lets a live cell
+    /// assert its whole reading right up to a blind neighbour's centre while
+    /// gating it by a mix that reaches nothing there, so the delivered field
+    /// has a hole in the middle of the patch it is correcting. The two halves
+    /// disagree about how far one cell's evidence goes, and this makes them
+    /// agree about it.
+    ///
+    /// Two weights, over the four cells within reach of the span:
+    ///
+    /// - `hat`, the evidence weight, is the same triangle [`Self::channel`]
+    ///   uses, widened: `1 - away / reach`. It is what the value is a weighted
+    ///   average over, so it decides what a ray READS.
+    /// - `gate`, `clamp(reach - away, 0, 1)`, is flat over the first cell and
+    ///   falls to nothing over the second. It is taken as a **largest** and not
+    ///   as a sum or an average, because two cells' evidence overlapping is one
+    ///   direction being covered twice and not twice as much correction: a mean
+    ///   dilutes a lone live cell by its dead neighbours, which is the comb
+    ///   again, and a sum reads a weakly-correlating arc as a fully trusted one.
+    ///
+    /// The two reach zero at the same distance, which is what keeps the field
+    /// continuous: with one live cell and nothing else in reach the value is
+    /// that cell's reading over the whole of its reach and the gate walks it
+    /// down to nothing at the end of it, so the correction fades out instead of
+    /// stepping off a cliff.
+    ///
+    /// **The evidence is `confidence * trust` and not `confidence`, and that is
+    /// what keeps the arrival staging alive.** A cell's own gate says how much
+    /// of its reading may reach the picture; a cell whose gate is still nothing
+    /// has a reading that may reach none of it, and weighing the average by the
+    /// raw confidence would let a neighbour's `max` apply that reading in full
+    /// on the frame it arrived. Measured before it was changed: with the raw
+    /// confidence the owner's `down1` went from 1 delivered step over 10 view px
+    /// to 10, and the worst arrival step from 7.2 px to 16.0. With this weight
+    /// an arriving direction walks INTO the average at its own filtered rate,
+    /// out of the bridge its neighbours were already drawing, and the two ends
+    /// of that walk are a picture rather than a zero.
+    ///
+    /// **The refusal is preserved and is not a separate rule.** At a cell's own
+    /// centre the gate is the largest of it and its two neighbours, so an arc of
+    /// three dead cells in a row delivers exactly nothing at the middle one, and
+    /// the evidence sum is zero there for the same reason. Nothing is
+    /// extrapolated into a region with no evidence near it; what is bridged is a
+    /// gap.
+    ///
+    /// **It carries no value past what the band could measure.** The value is a
+    /// convex combination of readings the search itself returned, so it stays
+    /// inside `FAR_DEG..NEAR_DEG` by construction, and it goes on through
+    /// [`Self::crossover_at`] and `band::carried` exactly as before.
+    ///
+    /// WGSL twin: `carry_shared`.
+    fn channel_shared(cells: &[super::band::Cell], low: usize, mix: f32, reach: f32) -> f32 {
+        let (mut evidence, mut value, mut gate) = (0.0, 0.0, 0.0f32);
+        // `step` runs -1 to 2 and the index is kept in `usize`, so the wrap is
+        // one addition rather than a signed remainder: the first cell of the
+        // window is the one BEFORE the span.
+        for ahead in 0..4 {
+            let cell = cells[(low + cells.len() - 1 + ahead) % cells.len()];
+            let away = (mix - (ahead as f32 - 1.0)).abs();
+            let hat = (1.0 - away / reach).max(0.0) * cell.confidence * cell.trust;
+            evidence += hat;
+            value += hat * cell.disparity;
+            gate = gate.max(cell.trust * (reach - away).clamp(0.0, 1.0));
+        }
+        match evidence > 0.0 {
+            true => value / evidence * gate,
+            false => 0.0,
+        }
     }
 
     /// The offset one lens's ray takes for a whole disparity, in view space,
@@ -4378,5 +4454,226 @@ pub(crate) mod tests {
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {
         let block = &reframe.lenses[lens];
         norm([landing.pixel[0] - block.cx, landing.pixel[1] - block.cy])
+    }
+}
+
+/// **The comb, and what closing it may not break** (`Reframe::channel_shared`,
+/// `KJERAG_COMB=share`, docs/research/seam-temporal.md 9.4).
+///
+/// Every one of these is asserted against the SHIP expression as well, because
+/// a claim that a mechanism fixes a defect is worth nothing without the defect:
+/// the first test fails on `Reframe::channel` by construction and that failure
+/// is the measurement of what was wrong.
+///
+/// The shader runs the twin of this arithmetic on a GPU where no test can reach
+/// it. What is claimed here is claimed about a function `cargo test` can call
+/// with no device and no footage, and the WGSL is a line-for-line twin named in
+/// both directions (`carry_shared`).
+#[cfg(test)]
+mod comb_tests {
+    use super::Reframe;
+    use crate::band::{AZIMUTHS, Cell, KEEP, SHARE_REACH};
+
+    /// A direction that correlates: a reading, full evidence and a full gate.
+    fn live(disparity_deg: f32) -> Cell {
+        Cell {
+            disparity: disparity_deg.to_radians(),
+            confidence: 0.95,
+            trust: 1.0,
+            ..Cell::default()
+        }
+    }
+
+    /// A ring of live cells with `blind` of them, from `at`, holding nothing:
+    /// the state a direction that has never correlated is in.
+    fn ring(at: usize, blind: usize) -> Vec<Cell> {
+        let mut cells: Vec<Cell> = (0..AZIMUTHS).map(|_| live(1.0)).collect();
+        for step in 0..blind {
+            cells[(at + step) % AZIMUTHS] = Cell::default();
+        }
+        cells
+    }
+
+    /// The delivered epipolar reading at a position measured in cells, which is
+    /// the axis the ring lives on: whole numbers are cell centres.
+    fn shared(cells: &[Cell], turn: f32) -> f32 {
+        let low = turn.floor();
+        Reframe::channel_shared(
+            cells,
+            low.rem_euclid(AZIMUTHS as f32) as usize,
+            turn - low,
+            SHARE_REACH,
+        )
+    }
+
+    /// The same through the expression that ships, for the same position.
+    fn ships(cells: &[Cell], turn: f32) -> f32 {
+        let low = turn.floor();
+        let index = |step: usize| (low.rem_euclid(AZIMUTHS as f32) as usize + step) % AZIMUTHS;
+        Reframe::channel(cells[index(0)], cells[index(1)], turn - low)
+    }
+
+    /// **The defect, and the fix, in one test.** One blind direction with a
+    /// live one either side: what ships delivers nothing at all in the middle
+    /// of a patch it is correcting on both sides, and the shared reach delivers
+    /// the neighbours' own answer there.
+    #[test]
+    fn a_blind_cell_between_two_live_ones_is_bridged() {
+        let cells = ring(40, 1);
+        let whole = live(1.0).disparity;
+        // The defect. This is the comb: full correction at 39 and 41, nothing
+        // at 40, and the owner's "hole in the middle of the correction".
+        assert!(
+            ships(&cells, 39.0).abs() > 0.9 * whole && ships(&cells, 40.0).abs() < 1e-6,
+            "the shipped expression is supposed to hole here: {} then {}",
+            ships(&cells, 39.0),
+            ships(&cells, 40.0),
+        );
+        // The fix, over the whole span rather than at the middle of it: nowhere
+        // between the two live directions may the correction fall away.
+        for step in 0..=40 {
+            let turn = 39.0 + step as f32 / 20.0;
+            let delivered = shared(&cells, turn).abs();
+            assert!(
+                delivered > 0.98 * whole,
+                "at {turn:.2} cells the bridge delivers {delivered} of {whole}",
+            );
+        }
+    }
+
+    /// **And the other direction, which is what makes the first one a fix
+    /// rather than an extrapolation.** Three blind directions in a row is an
+    /// arc with no evidence in reach of its middle, and the correction there
+    /// must be exactly nothing on both arms.
+    #[test]
+    fn a_blind_arc_still_refuses() {
+        for blind in [3, 4, 7, 40] {
+            let cells = ring(40, blind);
+            let middle = 40.0 + (blind - 1) as f32 / 2.0;
+            assert_eq!(
+                shared(&cells, middle),
+                0.0,
+                "{blind} blind cells and the middle of them still delivers something",
+            );
+            assert_eq!(ships(&cells, middle), 0.0, "{blind} blind, shipped");
+        }
+    }
+
+    /// A lone reading in a blind ring fades out over its own reach instead of
+    /// stepping off the end of it.
+    ///
+    /// The cliff this refuses is the one that killed three simpler designs: a
+    /// normalized average delivers a lone cell's whole answer right up to the
+    /// edge of its support and zero past it, so raising the gate without
+    /// widening the value would have traded a notch for a step.
+    #[test]
+    fn a_lone_reading_fades_out_and_does_not_step() {
+        let mut cells: Vec<Cell> = (0..AZIMUTHS).map(|_| Cell::default()).collect();
+        cells[40] = live(1.0);
+        let whole = cells[40].disparity;
+        let mut last = 0.0;
+        let mut worst: f32 = 0.0;
+        for step in 0..=200 {
+            let turn = 37.0 + step as f32 / 25.0;
+            let now = shared(&cells, turn);
+            worst = worst.max((now - last).abs());
+            last = now;
+        }
+        // A whole correction over a hundredth of a cell would be the cliff.
+        assert!(
+            worst < 0.06 * whole,
+            "the field steps {worst} of {whole} between adjacent samples",
+        );
+        assert!(shared(&cells, 40.0).abs() > 0.99 * whole, "peak");
+        assert_eq!(shared(&cells, 38.0), 0.0, "two cells out is out of reach");
+        assert_eq!(shared(&cells, 42.0), 0.0, "and on the other side");
+    }
+
+    /// The shared reach carries no value the search could not have reported: it
+    /// is a convex combination of readings the cells hold, so it stays inside
+    /// them however the evidence is spread.
+    #[test]
+    fn the_bridge_carries_no_reading_the_band_did_not_take() {
+        let mut cells = ring(40, 1);
+        cells[39] = live(2.4);
+        cells[41] = live(-1.0);
+        for step in 0..=200 {
+            let turn = 36.0 + step as f32 / 25.0;
+            let delivered = shared(&cells, turn).to_degrees();
+            assert!(
+                (-1.0 - 1e-4..=2.4 + 1e-4).contains(&delivered),
+                "at {turn:.2} cells the bridge delivers {delivered} degrees",
+            );
+        }
+    }
+
+    /// **The arrival staging survives the bridge**, which the first version of
+    /// this mechanism broke: with the evidence weighed by the raw confidence, a
+    /// direction arriving beside a trusted one had its first reading applied
+    /// whole at the neighbour's gate, and the owner's `down1` went from 1
+    /// delivered step over 10 view px to 10.
+    ///
+    /// A direction part way through its walk contributes its own reading in
+    /// exactly that proportion and no more.
+    #[test]
+    fn an_arriving_direction_walks_into_the_bridge_at_its_own_rate() {
+        let mut cells = ring(40, 1);
+        // The arriving direction reads something quite different from its
+        // neighbours, so its share of the answer is visible in the answer.
+        let arriving = Cell {
+            disparity: 2.5f32.to_radians(),
+            confidence: KEEP,
+            trust: 0.0,
+            ..Cell::default()
+        };
+        cells[40] = arriving;
+        let bridged = shared(&cells, 40.0);
+        assert!(
+            (bridged.to_degrees() - 1.0).abs() < 1e-4,
+            "a direction whose gate is still nothing put {} degrees into the answer",
+            bridged.to_degrees(),
+        );
+        // And it does arrive, monotonically, as the gate walks up: at a full
+        // gate its own reading is the largest share of the answer at its own
+        // centre, and the rest is the two neighbours it is being averaged with.
+        let mut last = bridged;
+        for tenth in 1..=10 {
+            cells[40].trust = tenth as f32 / 10.0;
+            let now = shared(&cells, 40.0);
+            assert!(
+                now > last,
+                "the walk went backwards at trust {tenth}0 percent"
+            );
+            last = now;
+        }
+        assert!(
+            (1.5..2.5).contains(&last.to_degrees()),
+            "a fully arrived direction reads {} degrees of its own 2.5 at its own centre",
+            last.to_degrees(),
+        );
+    }
+
+    /// Where every direction is live and equally trusted the gate is whole, so
+    /// the bridge spends nothing on the picture it was not aimed at.
+    #[test]
+    fn a_fully_evidenced_ring_is_delivered_whole() {
+        let cells = ring(0, 0);
+        let whole = cells[0].disparity;
+        for step in 0..=40 {
+            let turn = 40.0 + step as f32 / 20.0;
+            assert!(
+                (shared(&cells, turn) - whole).abs() < 1e-5,
+                "at {turn:.2} cells a live ring delivers {} of {whole}",
+                shared(&cells, turn),
+            );
+        }
+    }
+
+    /// The reach is two cells and not three, and this is the line that says so:
+    /// at three the middle of a three-cell blind arc would be inside a live
+    /// cell's reach and the refusal above would be a different assertion.
+    #[test]
+    fn the_reach_is_what_the_refusal_is_measured_against() {
+        assert_eq!(SHARE_REACH, 2.0);
     }
 }
