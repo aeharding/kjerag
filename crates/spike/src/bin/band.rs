@@ -944,6 +944,13 @@ enum Plant {
     /// One cell held empty until a named frame, so its own real reading
     /// arrives whole there.
     Arrive(usize, usize),
+    /// The whole state frozen at one frame while the map runs: every step the
+    /// picture then takes is the sweep and nothing else, so this is both the
+    /// control for that term and the measurement of it on its own.
+    Hold(usize),
+    /// The map frozen at the first frame while the state runs: the mirror of
+    /// [`Self::Hold`], and the same two jobs on the other term.
+    Still,
 }
 
 impl Plant {
@@ -956,6 +963,8 @@ impl Plant {
             "cell" => Ok(Self::Cell(number()?.parse()?, number()?.parse()?)),
             "commit" => Ok(Self::Commit(number()?.parse()?, number()?.parse()?)),
             "arrive" => Ok(Self::Arrive(number()?.parse()?, number()?.parse()?)),
+            "hold" => Ok(Self::Hold(number()?.parse()?)),
+            "still" => Ok(Self::Still),
             _ => Err(format!("no plant called {what}").into()),
         }
     }
@@ -982,6 +991,24 @@ impl Plant {
                     read.cells[cell % AZIMUTHS] = Cell::default();
                 }
             }
+            Self::Hold(frame) => {
+                let (cells, along) = match reads.get(frame) {
+                    Some(read) => (read.cells.clone(), read.along),
+                    None => return,
+                };
+                for read in reads.iter_mut() {
+                    read.cells = cells.clone();
+                    read.along = along;
+                }
+            }
+            Self::Still => {
+                let Some(map) = reads.first().map(|read| read.mapped) else {
+                    return;
+                };
+                for read in reads.iter_mut() {
+                    read.mapped = map;
+                }
+            }
         }
     }
 
@@ -1000,6 +1027,13 @@ impl Plant {
                 "plant:  cell {cell} held empty until frame {frame}. it must show up as ARRIVAL, \
                  on frame {frame}"
             ),
+            Self::Hold(frame) => format!(
+                "plant:  the state frozen at frame {frame} while the map runs. every step must be \
+                 SWEEP, and what they measure is that term on its own"
+            ),
+            Self::Still => "plant:  the map frozen at the first frame while the state runs. every \
+                 step must be STATE"
+                .to_owned(),
         }
     }
 }
@@ -1054,6 +1088,13 @@ impl Class {
     }
 }
 
+/// The threshold the temporal memo counted its own steps at, in view px.
+///
+/// Printed beside [`STEP_PX`] so that a delivered count can be read against
+/// the cell count the A/B was staged on (83 at `down1` against 4 on the arm
+/// that filters the gate, docs/research/seam-temporal.md, C1a).
+const MEMO_PX: f64 = 10.0;
+
 /// One frame-to-frame step at one probe, decomposed.
 struct Step {
     frame: usize,
@@ -1094,8 +1135,16 @@ fn snap(options: &Options) -> Fallible<()> {
     println!("gpu:    {}", gpu.name);
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
     let mut reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
+    // Kept before the plant goes in, so the run can be attributed twice and
+    // the plant's own contribution read as the difference rather than as a
+    // change in a total the footage dominates.
+    let saved: Vec<(Vec<Cell>, kjerag_render::Along)> = reads
+        .iter()
+        .map(|read| (read.cells.clone(), read.along))
+        .collect();
     options.plant.into(&mut reads);
 
+    let opened = reads[0].mapped;
     let first = &reads[0];
     let last = reads.last().expect("play returns at least one frame");
     let size = options.size();
@@ -1136,7 +1185,18 @@ fn snap(options: &Options) -> Fallible<()> {
         let steps = attribute(&reads, &probes, px_per_deg, axis);
         verdict(&steps, &reads, probes.len(), axis);
     }
-    neighbours(last, &first.mapped, size, px_per_deg);
+    // The same run again with the plant taken back out, which is the only
+    // null worth having: one run's geometry, one run's decode, one run's
+    // footage, and the plant as the single difference between them.
+    let planted = attribute(&reads, &probes, px_per_deg, Axis::Epi);
+    for (read, (cells, along)) in reads.iter_mut().zip(saved) {
+        read.cells = cells;
+        read.along = along;
+    }
+    let null = attribute(&reads, &probes, px_per_deg, Axis::Epi);
+    plant_check(options.plant, &planted, &null);
+    let last = reads.last().expect("play returns at least one frame");
+    neighbours(last, &opened, size, px_per_deg);
     Ok(())
 }
 
@@ -1414,6 +1474,31 @@ fn attribute(reads: &[Read], probes: &[Probe], px_per_deg: f64, axis: Axis) -> V
     steps
 }
 
+/// How the steps of at least `floor` view px divide between the three classes.
+fn census(steps: &[Step], floor: f64) {
+    let counted: Vec<&Step> = steps
+        .iter()
+        .filter(|step| step.total.abs() >= floor)
+        .collect();
+    println!(
+        "\n  {:>9} {:>8} {:>10} {:>10} {:>10}   steps of {floor:.0} px or more",
+        "class", "steps", "share", "worst px", "sum px",
+    );
+    for class in [Class::Sweep, Class::Commit, Class::Arrival] {
+        let mine: Vec<&&Step> = counted.iter().filter(|step| step.class == class).collect();
+        let worst = mine.iter().map(|step| step.total.abs()).fold(0.0, f64::max);
+        let sum: f64 = mine.iter().map(|step| step.total.abs()).sum();
+        println!(
+            "  {:>9} {:>8} {:>9.1}% {:>10.1} {:>10.1}",
+            class.name(),
+            mine.len(),
+            100.0 * mine.len() as f64 / counted.len().max(1) as f64,
+            worst,
+            sum,
+        );
+    }
+}
+
 /// The verdict: how the steps divide between the three, and the largest few
 /// with their own numbers beside them.
 fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
@@ -1434,23 +1519,35 @@ fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
         steps.len(),
         reads.len(),
     );
+    census(steps, STEP_PX);
+    // The memo's own threshold as well as this instrument's, because that is
+    // the number the A/B was staged on: 83 steps of over ten view px at
+    // `down1`, counted at a CELL, against 4 on the arm that filters the gate.
+    census(steps, MEMO_PX);
+    let all = (steps
+        .iter()
+        .map(|step| step.total * step.total)
+        .sum::<f64>()
+        / steps.len().max(1) as f64)
+        .sqrt();
+    let busy = |floor: f64| {
+        let mut frames: Vec<usize> = steps
+            .iter()
+            .filter(|step| step.total.abs() >= floor)
+            .map(|step| step.frame)
+            .collect();
+        frames.sort_unstable();
+        frames.dedup();
+        frames.len()
+    };
     println!(
-        "  {:>9} {:>8} {:>10} {:>10} {:>10}",
-        "class", "steps", "share", "worst px", "sum px",
+        "\n  the pace: over every probe-frame, not only the counted ones, the delivered step is \n\
+         \t{all:.2} px rms. {} of {} frames carry a step of {STEP_PX:.0} px or more somewhere in \n\
+         \tthe picture, and {} carry one of {MEMO_PX:.0} px or more.",
+        busy(STEP_PX),
+        reads.len() - 1,
+        busy(MEMO_PX),
     );
-    for class in [Class::Sweep, Class::Commit, Class::Arrival] {
-        let mine: Vec<&&Step> = counted.iter().filter(|step| step.class == class).collect();
-        let worst = mine.iter().map(|step| step.total.abs()).fold(0.0, f64::max);
-        let sum: f64 = mine.iter().map(|step| step.total.abs()).sum();
-        println!(
-            "  {:>9} {:>8} {:>9.1}% {:>10.1} {:>10.1}",
-            class.name(),
-            mine.len(),
-            100.0 * mine.len() as f64 / counted.len().max(1) as f64,
-            worst,
-            sum,
-        );
-    }
 
     let mut largest: Vec<&&Step> = counted.iter().collect();
     largest.sort_by(|a, b| b.total.abs().partial_cmp(&a.total.abs()).expect("finite"));
@@ -1472,6 +1569,52 @@ fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
             step.class.name(),
         );
     }
+}
+
+/// Where the plant landed, as the difference between the run with it and the
+/// same run without.
+///
+/// **This is the positive control, and it is a difference and not a total.**
+/// The footage's own steps are large and busy at these views, so a plant read
+/// out of a summary is a plant read out of noise. Differenced step by step,
+/// against a null that shares its geometry and its decode exactly, what is
+/// left is the plant and nothing else, and the question is which of the two
+/// terms it went into.
+fn plant_check(plant: Plant, planted: &[Step], null: &[Step]) {
+    let mut sweep = 0.0;
+    let mut state = 0.0;
+    let mut worst = (0.0, 0usize, 0usize, 0.0, 0.0);
+    for (with, without) in planted.iter().zip(null) {
+        let (moved, held) = (with.sweep - without.sweep, with.state - without.state);
+        sweep += moved.abs();
+        state += held.abs();
+        if (moved + held).abs() > worst.0 {
+            worst = ((moved + held).abs(), with.frame, with.probe, moved, held);
+        }
+    }
+    let total = sweep + state;
+    if plant == Plant::None {
+        println!(
+            "\nnull:   no plant, so the run and its own null are the same run: {total:.2e} px of \n\
+             \tdifference over every probe-frame. a difference reported below a plant is the \n\
+             \tplant, and never the instrument reading one run twice."
+        );
+        return;
+    }
+    println!(
+        "\nplant:  what the plant moved, differenced against the same run without it: \n\
+         \t{:.1} px went into SWEEP and {:.1} px into STATE, which is {:.0}% and {:.0}%. \n\
+         \tits largest single step is {:.1} px at frame {}, probe {} ({:.1} sweep, {:.1} state).",
+        sweep,
+        state,
+        100.0 * sweep / total.max(1e-9),
+        100.0 * state / total.max(1e-9),
+        worst.0,
+        worst.1,
+        worst.2,
+        worst.3,
+        worst.4,
+    );
 }
 
 /// What one cell of the ring differs from the next by, in the state the run
@@ -2134,5 +2277,5 @@ impl Options {
 const USAGE: &str = "usage: band <file.insv> [mode=field|trace|sequence|render|cost|coverage|snap] [arc=low:high] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
      [out=dir] [save=state.txt] [box=x,y,w,h] \
-     [plant=none|cell:<cell>:<deg>|commit:<frame>:<deg>|arrive:<cell>:<frame>] \
+     [plant=none|cell:<cell>:<deg>|commit:<frame>:<deg>|arrive:<cell>:<frame>|hold:<frame>|still] \
      [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
