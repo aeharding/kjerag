@@ -140,17 +140,133 @@ fn main() -> Fallible<()> {
     let mut csv = String::from(
         "arm,site,arc_deg,view_x,view_y,epi_src_px,perp_src_px,epi_view_px,perp_view_px,ncc,status\n",
     );
+    let mut arms = arms;
     let mut summaries = Vec::new();
-    for arm in &arms {
+    let mut at = 0;
+    while at < arms.len() {
+        let arm = &arms[at];
         let map = map(&arm.lenses, frame, &options, held);
         let rows = read(&map, &options, &taken, &sites, arm);
         let summary = summarize(arm, &rows, &sites, options.bins);
         write_rows(&mut csv, arm, &sites, &rows)?;
         summaries.push(summary);
+        // The solved arm is appended once, off the first arm's own readings,
+        // and then measured by the same loop as any other: what the solve
+        // asked for and what the pixels then say are two different claims and
+        // only the second is in the table.
+        if at == 0
+            && options.solve
+            && let Some(asked) = solve(&map, arm, &options, &taken, &sites, &rows)
+        {
+            arms.push(asked);
+        }
+        at += 1;
     }
     table(&options, &summaries, &arms);
     write_csv(&options, &csv)?;
     Ok(())
+}
+
+// ------------------------------------------------------------ the solve
+
+/// The smallest rigid pose that would take this view's across-seam reading
+/// to zero, solved through the map's own response at the sites that read.
+///
+/// **Two knobs, and that is a measurement rather than a simplification.**
+/// `--bin downweight`'s reach table asks each of the five what one unit of it
+/// does to the across-seam axis round the ring: yaw is one cosine, pitch is
+/// one sine, `cx` and `cy` are the same two shapes at 0.06 per pixel, and
+/// roll reaches 0.003. So the whole reachable space on this axis is
+/// `a cos(phi) + b sin(phi)`, two dimensional, and yaw and pitch span it.
+/// Solving five knobs on one arc instead put 6.9 degrees of roll into a
+/// direction that moves nothing, and the pixels read it back at the opposite
+/// sign.
+///
+/// **Minimum norm, because the question is a ceiling.** One arc twenty
+/// degrees wide barely separates a cosine from a sine, so the fit has a long
+/// flat valley and any point of it nulls the arc. The smallest pose in that
+/// valley is the fairest one to charge the other azimuths for, and a small
+/// ridge on both knobs is what selects it.
+///
+/// The columns are [`crossing::response`], the same arithmetic the plant
+/// control reads back, so the solve is positive-capable before it is
+/// believed. Whether it worked is not this function's claim either: the
+/// solved pose goes into the table as one more arm and the pixels answer.
+fn solve(
+    map: &Reframe,
+    arm: &Arm,
+    options: &Options,
+    taken: &Taken<'_>,
+    sites: &[Site],
+    rows: &[Row],
+) -> Option<Arm> {
+    /// Yaw and pitch, which span what a rigid pose can do across the seam.
+    const REACHING: [usize; 2] = [1, 2];
+    /// How hard the solve is held towards the smallest pose that nulls the
+    /// arc, in degrees of penalty per degree of knob.
+    const MINIMUM_NORM: f64 = 0.05;
+    let probe = kjerag_render::seam::Knob::Yaw.probe();
+    let turned: Vec<Reframe> = REACHING
+        .iter()
+        .map(|knob| {
+            let mut fit = SeamFit::default();
+            turn(&mut fit, *knob, probe);
+            self::map(&fit.applied(&arm.lenses), taken.frame, options, taken.held)
+        })
+        .collect();
+    let mut design: Vec<(Vec<f64>, f64)> = Vec::new();
+    for (site, row) in sites.iter().zip(rows) {
+        let Ok(reading) = &row.reading else { continue };
+        let mut columns = Vec::with_capacity(REACHING.len());
+        for probed in &turned {
+            let Ok(response) = crossing::response(map, map, probed, 1, *site, probe / 2.0) else {
+                columns.clear();
+                break;
+            };
+            columns.push(response.epi.to_degrees());
+        }
+        if columns.len() != REACHING.len() {
+            continue;
+        }
+        design.push((columns, -reading.shift_rad.epi.to_degrees()));
+    }
+    let read = design.len();
+    for index in 0..REACHING.len() {
+        let mut basis = vec![0.0; REACHING.len()];
+        basis[index] = MINIMUM_NORM;
+        design.push((basis, 0.0));
+    }
+    let solved = kjerag_render::seam::least_squares(&design)?;
+    let mut step = SeamFit::default();
+    for (index, amount) in solved.params.iter().enumerate() {
+        turn(&mut step, REACHING[index], *amount);
+    }
+    let held = arm.pose.unwrap_or_default();
+    let whole = SeamFit {
+        roll_deg: held.roll_deg + step.roll_deg,
+        yaw_deg: held.yaw_deg + step.yaw_deg,
+        pitch_deg: held.pitch_deg + step.pitch_deg,
+        cx_px: held.cx_px + step.cx_px,
+        cy_px: held.cy_px + step.cy_px,
+    };
+    println!(
+        "\nsolve:  {read} accepted sites of {} on this arc pin a step of \
+         yaw:{:+.3},pitch:{:+.3} on top of {}",
+        sites.len(),
+        step.yaw_deg,
+        step.pitch_deg,
+        arm.label,
+    );
+    println!(
+        "        the whole pose is seam=roll:{:.3},yaw:{:.3},pitch:{:.3},cx:{:.2},cy:{:.2}",
+        whole.roll_deg, whole.yaw_deg, whole.pitch_deg, whole.cx_px, whole.cy_px,
+    );
+    Some(Arm {
+        label: "solved".to_owned(),
+        lenses: step.applied(&arm.lenses),
+        pose: Some(whole),
+        basis: arm.basis.clone(),
+    })
 }
 
 // ------------------------------------------------------------ the strings
@@ -861,6 +977,9 @@ struct Options {
     agreement: f64,
     null: bool,
     plant: Option<(usize, f64)>,
+    /// Solve the first arm's own readings for the pose that would null them,
+    /// and measure that pose as one more arm.
+    solve: bool,
     arms: Vec<Asked>,
     out: Option<String>,
 }
@@ -885,6 +1004,7 @@ impl Options {
             agreement: 0.5,
             null: false,
             plant: None,
+            solve: false,
             arms: Vec::new(),
             out: None,
         };
@@ -904,6 +1024,7 @@ impl Options {
                 Some(("contrast", value)) => out.contrast = value.parse()?,
                 Some(("ncc", value)) => out.agreement = value.parse()?,
                 Some(("arm", value)) => out.arms.push(Asked::parse(value)?),
+                Some(("solve", value)) => out.solve = value.parse::<u32>()? != 0,
                 Some(("out", value)) => out.out = Some(value.to_owned()),
                 Some(("control", value)) => match value.split_once('=') {
                     None if value == "null" => out.null = true,
@@ -970,7 +1091,7 @@ impl Options {
 
 const USAGE: &str = "usage: ceiling <file.insv> [time=seconds] [yaw=deg] [pitch=deg] [fov=deg] \
      [lock=1] [size=px] [bins=n] [span=deg] [search=deg] [step=deg] [contrast=codes] [ncc=score] \
-     [arm=label=v3|v6+none|pool|roll:..,yaw:..,pitch:..,cx:..,cy:..] \
+     [arm=label=v3|v6+none|pool|roll:..,yaw:..,pitch:..,cx:..,cy:..] [solve=1] \
      [control=null | control=plant=knob:amount] [out=name.csv]";
 
 #[cfg(test)]
