@@ -7,7 +7,21 @@
 //!   from=45.5 count=900 yaw=-146.13 pitch=-37.35 fov=20 lock=1 seam=pool
 //! # the control: hand the servo a field that is wrong by a known amount
 //! cargo run --release -p kjerag-spike --bin ghost -- <file.insv> plant=0.5
+//! # the same wrong field, arriving with the evidence a minute of near content
+//! # would have given it, which is the gain the servo may walk it out at
+//! cargo run --release -p kjerag-spike --bin ghost -- <file.insv> plant=0.24 seen=655
+//! # what the gates are worth: the ungated arm, and the hard far gate
+//! cargo run --release -p kjerag-spike --bin ghost -- <file.insv> lean=1.0
+//! cargo run --release -p kjerag-spike --bin ghost -- <file.insv> far=0
 //! ```
+//!
+//! **Since 2026-08-08 it also prints the arc's evidence BY SIGN**, which is
+//! what a camera term and near ground differ by. Parallax on this axis is
+//! one-signed and positive - a near subject is displaced towards the front
+//! lens at every azimuth, and `Cell::metres` is `reach_m / disparity` for a
+//! positive disparity only (`band.rs:100-115`, `band.rs:1139`) - so a reading
+//! short of zero is a distance nothing can stand at, and the amount by which
+//! it is short is a lower bound on that direction's camera term.
 //!
 //! **This is a simulation on real evidence and it is not a build.** The field
 //! is never applied to the picture: what the pass draws on every frame here is
@@ -105,6 +119,14 @@ struct Servo {
     /// tapered to nothing where there is no support, and walked in through the
     /// staging filter.
     applied: [f32; AZIMUTHS],
+    /// What each direction was offered before any gate, so a run can say what
+    /// the gates cost rather than only what survived them. Added 2026-08-08
+    /// for the camera-term-or-near-ground question: the servo's input is one
+    /// number per direction per tick and the whole discrimination is in its
+    /// **sign**, which no aggregate of the old report could show.
+    offered: [Vec<f32>; AZIMUTHS],
+    /// The readings a gate refused, per direction.
+    refused: [usize; AZIMUTHS],
 }
 
 impl Servo {
@@ -113,15 +135,27 @@ impl Servo {
             field: [0.0; AZIMUTHS],
             seen: [0.0; AZIMUTHS],
             applied: [0.0; AZIMUTHS],
+            offered: std::array::from_fn(|_| Vec::new()),
+            refused: [0; AZIMUTHS],
         }
     }
 
     /// A field that is wrong by a known constant before a single reading, which
     /// is the control: a servo that cannot walk one out is not a servo.
-    fn planted(degrees: f32) -> Self {
+    ///
+    /// `seen` is how much evidence the wrong field arrives WITH, and it is the
+    /// difference between the easy control and the honest one. The gain
+    /// schedule is `1/seen`, so a field planted at rest is walked out at gain
+    /// 1 on its first reading and a field the servo spent a minute of near
+    /// content learning is walked out at gain 1/1800. Both are the same wrong
+    /// number in the picture. Added 2026-08-08: the near-content hazard is not
+    /// a field that arrives wrong, it is a field that was CORRECTLY learned
+    /// off content that has since left.
+    fn planted(degrees: f32, seen: f32) -> Self {
         let mut servo = Self::rest();
         servo.field = [degrees.to_radians(); AZIMUTHS];
         servo.applied = servo.field;
+        servo.seen = [seen; AZIMUTHS];
         servo
     }
 
@@ -129,7 +163,7 @@ impl Servo {
     ///
     /// `seconds` is the media time since the last tick, so the filter settles
     /// in the same wall time whatever the readback rate is.
-    fn tick(&mut self, cells: &[Cell], seconds: f32, smooth_deg: f32, ridge: f32) {
+    fn tick(&mut self, cells: &[Cell], seconds: f32, gates: Gates, smooth_deg: f32, ridge: f32) {
         let step = STEP_MAX_DEG.to_radians();
         let rail = RAIL_DEG.to_radians();
         for (index, cell) in cells.iter().enumerate().take(AZIMUTHS) {
@@ -139,13 +173,26 @@ impl Servo {
             if cell.confidence < KEEP || !cell.disparity.is_finite() {
                 continue;
             }
+            self.offered[index].push(cell.disparity);
+            // The hard far gate, which is `lean` taken to its limit: refuse a
+            // reading outright rather than weigh it less. `far=0` keeps only
+            // the readings NO distance can produce, because parallax on this
+            // axis is one-signed and positive (`band.rs:100-115`), so a
+            // reading past zero is the camera plus something near and a
+            // reading short of it is the camera alone. It is the bluntest
+            // instrument in the drawer and it is here to price the servo's
+            // exposure to near content, not to be proposed.
+            if cell.disparity > gates.far {
+                self.refused[index] += 1;
+                continue;
+            }
             self.seen[index] += 1.0;
             // THE CLOSED-LOOP MODEL, and the probe's one assumption: with the
             // field applied, this is what the band would be left to find.
             let residual = cell.disparity - self.applied[index];
             let gain = (1.0 / self.seen[index]).max(FLOOR_GAIN);
             let lean = match residual > 0.0 {
-                true => LEAN,
+                true => gates.lean,
                 false => 1.0,
             };
             let moved = self.field[index] + gain * lean * residual.clamp(-step, step);
@@ -197,6 +244,19 @@ impl Servo {
     }
 }
 
+/// What the servo is allowed to be moved by, which is the whole of its defence
+/// against near content and is therefore a run's to state.
+#[derive(Clone, Copy)]
+struct Gates {
+    /// What a residual pointing the near-field way is worth against one
+    /// pointing the other way. [`LEAN`] unless a run says otherwise; `1.0` is
+    /// the ungated arm and is what the far-gate question is asked against.
+    lean: f32,
+    /// The largest disparity, in radians, a reading may carry and still be
+    /// integrated. Infinite unless a run says otherwise.
+    far: f32,
+}
+
 /// The raised cosine `band::Table` smooths with: zero at and past its own edge.
 fn kernel(apart: f32, width: f32) -> f32 {
     match apart.abs() < width {
@@ -241,9 +301,18 @@ fn main() -> Fallible<()> {
         options.pose,
     );
     println!(
-        "servo:  rate={:.1} Hz smooth={:.1} deg ridge={:.2} lean={LEAN} step={STEP_MAX_DEG} deg \
-         tau={TAU_S} s plant={:.3} deg",
-        options.rate, options.smooth, options.ridge, options.plant,
+        "servo:  rate={:.1} Hz smooth={:.1} deg ridge={:.2} lean={:.2} far={} step={STEP_MAX_DEG} \
+         deg tau={TAU_S} s plant={:.3} deg at seen={:.0}",
+        options.rate,
+        options.smooth,
+        options.ridge,
+        options.lean,
+        match options.far.is_finite() {
+            true => format!("{:.2} deg", options.far),
+            false => "off".to_owned(),
+        },
+        options.plant,
+        options.plant_seen,
     );
 
     let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
@@ -256,7 +325,7 @@ fn main() -> Fallible<()> {
 
     let mut servo = match options.plant {
         0.0 => Servo::rest(),
-        degrees => Servo::planted(degrees),
+        degrees => Servo::planted(degrees, options.plant_seen),
     };
     let arc = arc_cells(options.arc);
     let mut steps: Vec<Step> = Vec::new();
@@ -283,7 +352,13 @@ fn main() -> Fallible<()> {
         if due {
             let seconds = last.map_or(0.0, |then| (at.saturating_sub(then)).as_secs_f32());
             let started = Instant::now();
-            servo.tick(&cells, seconds, options.smooth, options.ridge);
+            servo.tick(
+                &cells,
+                seconds,
+                options.gates(),
+                options.smooth,
+                options.ridge,
+            );
             cost.push(started.elapsed());
             last = Some(at);
             steps.push(measure(&servo, &cells, &arc, at));
@@ -478,6 +553,8 @@ fn report(
         );
     }
 
+    evidence(servo, settled, arc);
+
     if options.plant != 0.0 {
         println!(
             "\nthe control: the servo was handed {:.3} deg of field before it read anything. \n\
@@ -489,6 +566,74 @@ fn report(
     }
 
     cost_report(cost, steps.len(), frames, options.rate);
+}
+
+/// Every reading the arc offered the servo, by **sign**, which is the one
+/// column that tells a camera term from near ground.
+///
+/// Parallax on this axis is one-signed and positive: the baseline is along the
+/// lens axes, so a near subject is displaced towards the front lens at every
+/// azimuth and `Cell::metres` is `reach_m / disparity` for a positive
+/// disparity only (`band.rs:100-115`, `band.rs:1139`). A reading **short of
+/// zero** is therefore a distance no content can stand at, and the amount by
+/// which it is short is a lower bound on this direction's camera term. A
+/// reading past zero is that camera term plus whatever the scene put on top
+/// of it, and `nearest` is what the scene would have to be standing at for the
+/// whole reading to be parallax.
+///
+/// So the two columns to read are `near` - how many of a direction's readings
+/// could have had any content in them at all - and `min`, the far end of what
+/// it offered. A direction whose `near` is zero has been measured, all run,
+/// on content that no distance can reach.
+fn evidence(servo: &Servo, settled: &[Cell], arc: &[usize]) {
+    println!(
+        "\nwhat the arc OFFERED the servo, by sign. `near` is the readings past zero, which are \n\
+         the only ones any distance can produce; `nearest` is the distance the largest of them \n\
+         stands for. A reading short of zero is beyond infinity on this axis and is the camera."
+    );
+    println!(
+        "\n   phi  offered   near  refused        min        med        max      nearest      field"
+    );
+    let mut near_total = 0usize;
+    let mut offered_total = 0usize;
+    for &index in arc {
+        let mut sorted = servo.offered[index].clone();
+        if sorted.is_empty() {
+            println!(
+                "{:>6}        -      -        -",
+                index as f64 / AZIMUTHS as f64 * 360.0
+            );
+            continue;
+        }
+        sorted.sort_by(f32::total_cmp);
+        let near = sorted.iter().filter(|value| **value > 0.0).count();
+        near_total += near;
+        offered_total += sorted.len();
+        let peak = *sorted.last().expect("not empty");
+        // The geometry is the ring's own and not a constant: `reach_m` is
+        // written into the cell so an instrument reading the buffer back
+        // needs nothing else.
+        let reach = settled[index].reach_m;
+        let nearest = match peak > 0.0 && reach > 0.0 {
+            true => format!("{:.1} m", f64::from(reach / peak)),
+            false => "-".to_owned(),
+        };
+        println!(
+            "{:>6} {:>8} {near:>6} {:>8} {:>10.3} {:>10.3} {:>10.3} {nearest:>12} {:>10.3}",
+            index as f64 / AZIMUTHS as f64 * 360.0,
+            sorted.len(),
+            servo.refused[index],
+            f64::from(sorted[0].to_degrees()),
+            f64::from(sorted[sorted.len() / 2].to_degrees()),
+            f64::from(peak.to_degrees()),
+            f64::from(servo.field[index].to_degrees()),
+        );
+    }
+    println!(
+        "\n  over the arc: {near_total} of {offered_total} readings are past zero, so {:.1} percent \n\
+         of the servo's evidence there could have had any content in it at all.",
+        100.0 * near_total as f64 / offered_total.max(1) as f64,
+    );
 }
 
 /// What the servo costs, measured on the box that ran it.
@@ -572,6 +717,16 @@ struct Options {
     /// A constant field, in degrees, handed to the servo before it reads
     /// anything. The control.
     plant: f32,
+    /// How much evidence the planted field arrives with, which sets the gain
+    /// the servo is allowed to walk it out at.
+    plant_seen: f32,
+    /// What a residual pointing the near-field way is worth. An argument
+    /// because the far gate's whole value has to be measurable against its
+    /// own absence: `lean=1` is the ungated arm.
+    lean: f32,
+    /// The hard far gate, in degrees: refuse outright any reading above it.
+    /// `far=0` keeps only the readings no distance can produce.
+    far: f32,
     seam: Seam,
     /// The `seam=` line as it was written, so a run can say what pose it drew
     /// its numbers at.
@@ -594,6 +749,9 @@ impl Options {
             smooth: SMOOTH_DEG,
             ridge: RIDGE,
             plant: 0.0,
+            plant_seen: 0.0,
+            lean: LEAN,
+            far: f32::INFINITY,
             seam: Seam::File,
             pose: String::new(),
         };
@@ -612,6 +770,9 @@ impl Options {
                 Some(("smooth", value)) => options.smooth = value.parse()?,
                 Some(("ridge", value)) => options.ridge = value.parse()?,
                 Some(("plant", value)) => options.plant = value.parse()?,
+                Some(("seen", value)) => options.plant_seen = value.parse()?,
+                Some(("lean", value)) => options.lean = value.parse()?,
+                Some(("far", value)) => options.far = value.parse()?,
                 Some(("seam", value)) => seam = value.to_string(),
                 Some(("arc", value)) => {
                     let (low, high) = value.split_once(':').ok_or("arc=<low deg>:<high deg>")?;
@@ -626,6 +787,16 @@ impl Options {
         options.seam = Seam::parse(&seam, &options.input)?;
         options.pose = seam;
         Ok(options)
+    }
+
+    fn gates(&self) -> Gates {
+        Gates {
+            lean: self.lean,
+            far: match self.far.is_finite() {
+                true => self.far.to_radians(),
+                false => f32::INFINITY,
+            },
+        }
     }
 
     fn at(&self) -> Cue {
@@ -647,4 +818,5 @@ impl Options {
 
 const USAGE: &str = "usage: ghost <file.insv> [from=seconds] [count=frames] [yaw=deg] [pitch=deg] \
      [fov=deg] [size=px] [lock=0] [arc=low:high] [rate=hz] [smooth=deg] [ridge=n] [plant=deg] \
+     [seen=n] [lean=n] [far=deg] \
      [seam=factory|file|pool]";
