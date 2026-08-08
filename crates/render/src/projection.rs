@@ -461,6 +461,15 @@ pub struct Reframe {
     /// here - [`Reframe::crossover_at`] on this side and `band_width` on the
     /// shader's - so the two cannot disagree about it.
     crossover: f32,
+    /// The two planes hold 16-bit words rather than bytes, which the shader
+    /// puts back together itself (`kjerag_media::Samples::wide`,
+    /// `super::dmabuf::plane_format`). 1 for a P010 frame and 0 for NV12.
+    wide: f32,
+    /// Studio swing rather than the whole range
+    /// (`kjerag_media::Samples::limited`). 1 for a DJI capture and 0 for
+    /// every Insta360 one, which is the picture this pass drew before there
+    /// was a second answer.
+    limited: f32,
     /// What puts the table below on a sixteen-byte offset.
     ///
     /// **WGSL's alignment and not this struct's.** Every member of this block
@@ -474,7 +483,7 @@ pub struct Reframe {
     /// way, so the shader would read the table shifted by twelve bytes and
     /// draw a picture rather than an error. The test
     /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it.
-    _pad: [f32; 3],
+    _pad: [f32; 1],
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -677,13 +686,30 @@ impl Reframe {
             // Filled below, because it is read off the lenses this block has
             // just laid out and there is nowhere earlier to read them from.
             crossover: 0.0,
-            _pad: [0.0; 3],
+            // Eight bit, full range: what every `.insv` is, and what
+            // [`Self::with_samples`] is asked to say otherwise.
+            wide: 0.0,
+            limited: 0.0,
+            _pad: [0.0; 1],
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
         };
         block.crossover = block.afforded();
         block
+    }
+
+    /// The same map told how the planes it will sample are written.
+    ///
+    /// A step of its own rather than an argument to [`Self::new`], for
+    /// [`Self::with_table`]'s reason: every caller that asks this map about
+    /// geometry rather than about pixels would otherwise have to say
+    /// something, and the thing it would be saying is 8-bit full range, which
+    /// is what this defaults to and what every `.insv` in the corpus is.
+    pub fn with_samples(mut self, samples: kjerag_media::Samples) -> Self {
+        self.wide = f32::from(u8::from(samples.wide));
+        self.limited = f32::from(u8::from(samples.limited));
+        self
     }
 
     /// The same map with a camera's along-seam table in it (issue #103, stage
@@ -749,7 +775,9 @@ impl Reframe {
             // One lens and no overlap, so nothing is ever handed over: the ask
             // itself, which is what a camera with room for it would get.
             crossover: crossover_deg().to_radians(),
-            _pad: [0.0; 3],
+            wide: 0.0,
+            limited: 0.0,
+            _pad: [0.0; 1],
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -1997,11 +2025,15 @@ struct Reframe {
   // How wide this camera hands the picture over, in radians. Rust twin:
   // `Reframe::crossover`. Read by `band_width` and `band_rest`.
   crossover: f32,
+  // The planes hold 16-bit words rather than bytes. Rust twin:
+  // `Reframe::wide`, read by `plane_word`.
+  wide: f32,
+  // Studio swing rather than the whole range. Rust twin: `Reframe::limited`,
+  // read by `levels`.
+  limited: f32,
   // What puts the table below on its own 16-byte boundary. Rust twin:
   // `Reframe::_pad`, which is what makes the two layouts agree.
   pad0: f32,
-  pad1: f32,
-  pad2: f32,
   // What the along-seam axis still disagrees by after a pose, direction by
   // direction, in radians, four to a lane. Rust twin: `Reframe::table`. Read
   // by `table_at`, which the band's own half declares because the wrapping is

@@ -73,11 +73,29 @@ use super::calibration::{
     CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Pose, Size,
 };
 use super::format::{Boxes, moov};
+use super::rotation::Mat3;
 use super::rotation::Quat;
 use super::{Error, GyroTrack};
 
 /// How many lens entries this reads, which is one per video stream.
 const LENSES: usize = 2;
+
+/// A direction in Kjerag's camera body, expressed in the one the file's
+/// quaternions are written against.
+///
+/// **Measured off the file rather than assumed** (`scratch/osmo/`). Carried
+/// through each lens's own quaternion, the file's `+z` lands at `(0, -1, 0)`
+/// in both lenses' image frames, which is straight up the picture, so `+z` is
+/// the camera's vertical. The two optical axes land on `+y` and `-y` to
+/// within a hundredth, and the entry whose recorded yaw is about zero is the
+/// one on `+y`, so `+y` is where the camera calls forward. `+x` is what a
+/// right-handed frame has left over.
+///
+/// Kjerag's is `x` right, `y` down, `z` forward (`kjerag_render::projection`),
+/// so this sends `z` to the file's `y`, `y` to its `-z`, and `x` to its `x`.
+/// It is a rotation, which `the_body_frames_differ_by_a_rotation` checks: a
+/// reflection here would render the sphere inside out.
+const BODY: Mat3 = Mat3::new([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]);
 
 /// The calibration of the capture at `path`.
 pub(crate) fn read(path: &Path) -> Result<CalibrationSet, Error> {
@@ -295,7 +313,10 @@ fn lens(entry: &[u8], dimension: Size) -> Result<Lens, Error> {
             // and the parallax band has nothing to measure against.
             translation_m: [0.0; 3],
         },
-        mounting: Some(pointing.matrix()),
+        // `ray_lens = pointing * ray_file`, and Kjerag asks for
+        // `ray_lens = mounting * ray_body`, so the change of basis goes on
+        // the right where the body vector arrives.
+        mounting: Some(pointing.matrix().times(BODY)),
         // DJI writes no equivalent of Insta360's `lensType`.
         lens_type: 0,
     })
@@ -582,10 +603,12 @@ mod tests {
     }
 
     /// The two lenses point opposite ways, which is what a back-to-back pair
-    /// is, and each mounting is a rotation rather than a rotation with a
-    /// reflection in it.
+    /// is, and they point along Kjerag's own axes rather than the file's: the
+    /// entry whose recorded yaw is about zero looks **forward**, which is
+    /// `+z`, and the other looks back. That is [`BODY`] doing its job, and
+    /// without it both lenses point at the sky.
     #[test]
-    fn the_two_mountings_are_opposed_rotations() {
+    fn the_two_mountings_are_opposed_along_kjerags_own_axes() {
         let calibration = from_record(&record()).unwrap();
         let axis = |index: usize| {
             calibration.lenses[index]
@@ -594,15 +617,28 @@ mod tests {
                 .transpose()
                 .mul_vec([0.0, 0.0, 1.0])
         };
-        let (front, back) = (axis(0), axis(1));
-        let apart = super::super::rotation::dot(front, back)
-            .clamp(-1.0, 1.0)
-            .acos()
-            .to_degrees();
-        near(apart, 180.0, 1.0);
-        for index in 0..2 {
-            let mounting = calibration.lenses[index].mounting.unwrap();
-            near(mounting.determinant(), 1.0, 1e-9);
+        // Entry 1 is the one whose yaw is about 180 and entry 2 the one whose
+        // yaw is about 0, in that order, so lens 0 looks back.
+        let (back, front) = (axis(0), axis(1));
+        near(front[2], 1.0, 0.01);
+        near(back[2], -1.0, 0.01);
+        for pointing in [front, back] {
+            near(pointing[1], 0.0, 0.05);
+        }
+    }
+
+    /// [`BODY`] is a change of basis and not a reshuffle: a reflection here
+    /// would render the sphere inside out, and every mounting built through it
+    /// would carry the reflection too.
+    #[test]
+    fn the_body_frames_differ_by_a_rotation() {
+        near(BODY.determinant(), 1.0, 1e-12);
+        // The file's own vertical, `+z`, is up the picture, which in Kjerag's
+        // frame is `-y`.
+        let up = BODY.transpose().mul_vec([0.0, 0.0, 1.0]);
+        assert_eq!(up, [0.0, -1.0, 0.0]);
+        for lens in from_record(&record()).unwrap().lenses {
+            near(lens.mounting.unwrap().determinant(), 1.0, 1e-9);
         }
     }
 

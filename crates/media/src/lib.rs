@@ -81,6 +81,27 @@ pub(crate) fn media_time(pts: i64, start: i64, time_base: ff::Rational) -> Durat
 /// `Send + Sync`, so the plain `Box<dyn Error>` a binary would use will not do.
 pub type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// How one decoded frame's samples are written, which the shader needs and
+/// the pixels do not say.
+///
+/// Two facts, both read off the container rather than guessed from each
+/// other: an 8-bit stream decodes to NV12 and a 10-bit one to P010, and
+/// either can be written full range or studio swing. Insta360 writes 8-bit
+/// full range and DJI writes 10-bit studio swing, which is a coincidence of
+/// the corpus and not a rule, so neither flag is derived from the other.
+///
+/// [`Self::default`] is 8-bit full range, which is what every `.insv` in the
+/// corpus is and what the pass drew before this existed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Samples {
+    /// The two planes hold 16-bit little-endian words rather than bytes:
+    /// P010, whose ten bits sit at the top of each word.
+    pub wide: bool,
+    /// Studio swing: luma runs 64 to 940 of 1023 and chroma is centred on 512
+    /// with 448 either side, rather than either using the whole range.
+    pub limited: bool,
+}
+
 /// A frame size in pixels. NV12 chroma is half of luma in both axes, and
 /// getting that halving wrong is a silent half-image, so it has a name.
 /// `kjerag-render` turns one of these into a `wgpu::Extent3d`; that half

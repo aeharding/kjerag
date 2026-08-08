@@ -1670,7 +1670,18 @@ fn ring_at(centre: vec3<f32>) -> Ring {
   out.epi = select(vec3<f32>(0.0), -seen / out.reach_m, out.reach_m > 0.0);
   // `epi x centre`, which is the seam circle's own tangent towards increasing
   // azimuth and the sign `seam::ring` publishes. Rust twin: `Ring::at`.
-  out.perp = normalize(cross(out.epi, centre));
+  //
+  // The guard is the Rust twin's `unit` and it is not decoration: a camera
+  // whose file records no inter-lens translation has a zero baseline, no
+  // epipolar direction, and a zero cross product, and `normalize` of a zero
+  // vector is NaN. That NaN travels through `band_bend` into every ray lens 1
+  // is bent by, and lens 1 then lands nowhere at all: a DJI `.OSV`, which
+  // records no translation, drew its whole forward hemisphere black until
+  // this line matched the Rust it mirrors. `normalize` is kept for the
+  // ordinary case rather than replaced with a division, so nothing an
+  // Insta360 capture draws moves by a bit.
+  let tangent = cross(out.epi, centre);
+  out.perp = select(vec3<f32>(0.0), normalize(tangent), length(tangent) > 0.0);
   return out;
 }
 "#;

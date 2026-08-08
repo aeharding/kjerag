@@ -1469,6 +1469,7 @@ impl ScenePipeline {
                 self.linearize(),
                 primitive.sampling,
             )
+            .with_samples(view.frames.samples)
             .with_table(view.table),
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
@@ -2086,11 +2087,11 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   // with no reading behind it is the picture stage 2 drew.
   let tone = tone_split();
   if mix.weights[0] > 0.0 {
-    rgb += (mix.weights[0] * tone.x) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
+    rgb += (mix.weights[0] * tone.x) * ycbcr(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += (mix.weights[1] * tone.y) * nv12(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    rgb += (mix.weights[1] * tone.y) * ycbcr(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
     total += mix.weights[1];
   }
   // The room around the ball, written rather than painted: transparent black,
@@ -2100,21 +2101,71 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   return select(vec4<f32>(0.0), vec4<f32>(rgb, 1.0), total > 0.0);
 }
 
-// BT.709 full range: ffprobe reports bt709 and the camera writes yuvj420p.
-// DRM_FORMAT_GR88 is little endian G:R, so .r is Cb and .g is Cr.
+// BT.709, off whichever of the two plane layouts this capture decodes to.
+// The chroma plane is little endian and its first component is Cb.
 //
 // The two planes are handed the same magnification and reach their own
 // conclusions from it, because they are not the same size: `plane` scales the
 // ratio by the grid it is sampling (`sampling::plane_ratio`), so the chroma
 // plane upgrades an octave of zoom before the luma plane does.
-fn nv12(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f32) -> vec3<f32> {
-  let y = plane(luma, samp, uv, ratio, reframe.sharpen_luma).r;
-  let c = plane(chroma, samp, uv, ratio, reframe.sharpen_chroma).rg - vec2<f32>(0.5, 0.5);
+fn ycbcr(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f32) -> vec3<f32> {
+  let l = plane(luma, samp, uv, ratio, reframe.sharpen_luma);
+  let ch = plane(chroma, samp, uv, ratio, reframe.sharpen_chroma);
+  // NV12: one byte of luma, and a pair of bytes of chroma.
+  var raw = vec3<f32>(l.r, ch.r, ch.g);
+  if reframe.wide > 0.5 {
+    // P010, aliased two bytes at a time because the device cannot make a
+    // 16-bit normalized texture (`dmabuf::plane_format`).
+    raw = vec3<f32>(plane_word(l.rg), plane_word(ch.rg), plane_word(ch.ba));
+  }
+  let range = levels();
+  let y = raw.x * range.luma.x + range.luma.y;
+  let c = raw.yz * range.chroma.x + vec2<f32>(range.chroma.y);
   return vec3<f32>(
     y + 1.5748 * c.g,
     y - 0.1873 * c.r - 0.4681 * c.g,
     y + 1.8556 * c.r,
   );
+}
+
+// A 16-bit little endian word read back out of the two 8-bit components it
+// was imported as, against P010's own full scale.
+//
+// 255 puts each component back on its own byte, 256 puts the high one where
+// it belongs, and 65472 is 1023 shifted up by six, which is where P010 keeps
+// full scale: its ten bits sit at the top of the word and the low six are
+// zero. Interpolation is linear, so a filtered pair recombines into exactly
+// the filtered word.
+fn plane_word(pair: vec2<f32>) -> f32 {
+  return (pair.x + pair.y * 256.0) * 255.0 / 65472.0;
+}
+
+// A scale and an offset per channel, taking a sampled plane value to Y, Cb
+// and Cr.
+//
+// Full range is the identity on luma and a half off chroma, which is what
+// every Insta360 capture is and what this pass did before there was a second
+// answer. Studio swing is the other one, and its endpoints scale with the
+// plane's own depth: black is 16 of 255 at eight bits and 64 of 1023 at ten,
+// which is the same 16 shifted up rather than the same fraction.
+struct Levels {
+  luma: vec2<f32>,
+  chroma: vec2<f32>,
+};
+
+fn levels() -> Levels {
+  var out: Levels;
+  out.luma = vec2<f32>(1.0, 0.0);
+  out.chroma = vec2<f32>(1.0, -0.5);
+  if reframe.limited > 0.5 {
+    let full = select(255.0, 1023.0, reframe.wide > 0.5);
+    let step = select(1.0, 4.0, reframe.wide > 0.5);
+    let span = 219.0 * step;
+    let reach = 112.0 * step;
+    out.luma = vec2<f32>(full / span, -16.0 * step / span);
+    out.chroma = vec2<f32>(full / reach, -128.0 * step / reach);
+  }
+  return out;
 }
 
 fn linearize(c: vec3<f32>) -> vec3<f32> {
