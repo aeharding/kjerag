@@ -2160,6 +2160,20 @@ fn plane_word(pair: vec2<f32>) -> f32 {
 // answer. Studio swing is the other one, and its endpoints scale with the
 // plane's own depth: black is 16 of 255 at eight bits and 64 of 1023 at ten,
 // which is the same 16 shifted up rather than the same fraction.
+//
+// **Both rows carry a whole excursion, not half of one.** The full-range row
+// above sets the convention the matrix in `ycbcr` is written for: chroma
+// arrives as `raw - 0.5`, so it runs -1/2 to +1/2 across the whole plane. A
+// studio-swing chroma plane runs 16 to 240 at eight bits, which is 224 codes
+// end to end, so 224 is what takes it to that same -1/2 to +1/2 - the same way
+// 219 rather than 109.5 takes studio-swing luma to 0 to 1 one line up. Written
+// as 112 this doubled every colour a DJI capture had and left every Insta360
+// one alone, because only studio swing comes through here: greens went neon
+// and the owner's eye caught it on the first `.OSV` played (2026-08-08).
+// Measured on `1 8k30p standard 10bit iso max 800-003.OSV` frame 0, over 451
+// flat patches against swscale's own decode of the same frame: mean absolute
+// error per channel fell from 45.4 / 8.0 / 0.9 codes to 2.0 / 1.8 / 0.9, and
+// the mean chroma spread from 171.4 to 124.1 against swscale's 125.1.
 struct Levels {
   luma: vec2<f32>,
   chroma: vec2<f32>,
@@ -2173,7 +2187,7 @@ fn levels() -> Levels {
     let full = select(255.0, 1023.0, reframe.wide > 0.5);
     let step = select(1.0, 4.0, reframe.wide > 0.5);
     let span = 219.0 * step;
-    let reach = 112.0 * step;
+    let reach = 224.0 * step;
     out.luma = vec2<f32>(full / span, -16.0 * step / span);
     out.chroma = vec2<f32>(full / reach, -128.0 * step / reach);
   }
