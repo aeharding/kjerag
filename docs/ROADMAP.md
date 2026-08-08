@@ -579,6 +579,93 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-08 **Horizon lock works on a DJI `.OSV`, and the file's quaternion is
+  written the other way round.** The owner's report was "the camera rotates
+  when the wearer turns around", which on this format it did, because the lock
+  was a designed refusal: the file's fused orientation was there and its frame
+  was not pinned. It is pinned now, and the whole of it is
+  `world_from_body = BODY^-1 . conjugate(w, x, y, z) . BODY`
+  (`kjerag_meta::osmo`, which carries the evidence in its own doc).
+
+  **Everything the scoping pass concluded about the orientation was measured
+  under the four-coefficient lens model**, with 15 degrees of seam tear in the
+  picture, so "applying the quaternions made the stitch worse" settled nothing
+  and was re-derived from scratch under the five-term model above.
+
+  **The oracle is the picture, through the app's own pass** (`--bin reframe`,
+  `lock=1` against `lock=0`). Two measurements, on the owner's capture:
+
+  1. **World stability across a turn.** 12 renders 0.25 s apart over 120.90 to
+     123.65 s, during which the wearer turns 133 degrees, at yaw 0 and 90
+     degrees of view. The score is how much of the picture one render still
+     shares with the next, and how far the world has turned between them.
+  2. **The tilt head to head.** The candidates that reverse the heading agree
+     exactly for a camera held upright and differ by twice its lean when it is
+     not, so they are separated on the frame pairs, half a second apart, where
+     they predict the most different motion. The score is the worst of the
+     three angles between the two locked renders, which should be zero.
+
+  | candidate | hold, 133 deg turn | step yaw | max roll | tilt pairs, residual |
+  | --- | ---: | ---: | ---: | ---: |
+  | **`wxyz` conjugated (shipped)** | **0.718** | **0.46** | **0.89** | **5.8** |
+  | `wxYZ` mirrored in x | 0.677 | 0.49 | 1.29 | 11.4 |
+  | `wXyZ` mirrored in y | 0.694 | 0.86 | 1.99 | 10.8 |
+  | `wXYz` mirror z, conjugated | 0.680 | 1.34 | 2.11 | - |
+  | `wxyz` as written | 0.366 | - | - | - |
+  | `wXYz` mirrored in z | 0.361 | - | - | - |
+  | `xyzw` order | 0.224 | - | - | - |
+  | `xyzw` order, conjugated | 0.269 | - | - | - |
+  | LOCK OFF (null control) | 0.460 | 11.68 | - | 7.1 |
+
+  Angles in degrees; a dash is a candidate the picture had moved too far for
+  the fit to converge on, which is itself the finding. **Reading the
+  quaternion as written scores below the null**: it turns the picture twice as
+  far as the wearer instead of holding it, which is the defect the owner saw
+  made worse rather than fixed.
+
+  **The heading is pinned outright and needs no scoring.** With the lock off
+  the view rides the body, so the camera yaw that makes a later frame show
+  what an earlier one showed IS the body's turn, in the renderer's own sign.
+  Searched on the picture over three half-second pairs: -16, -22 and -10
+  degrees, where the file's own yaw changed by +15.7, +22.0 and +8.6. The same
+  turn to about a degree, the opposite way round.
+
+  **Cross file and cross unit.** The turn oracle on the two other unit B files
+  that carry one: conjugated 0.494 and 0.712 against nulls of 0.316 and 0.439
+  and an as-written 0.241 and 0.280. The tilt head to head on the same two:
+  conjugated 5.9 and 3.5 degrees against the mirrors' 9.0/6.9 and 10.3/7.7.
+  The conjugate wins every comparison it was scored in, on four runs across
+  three files. **Unit A cannot arbitrate**: its capture is a camera bolted to
+  a car driving straight down a motorway, 4 degrees of turn in the whole 23 s,
+  so the world-stability oracle has no signal in it and the road rushing past
+  swamps what there is.
+
+  **Controls.** The plant: `Scene::hold_at` forced with `about_down(20 deg)`
+  renders, at view yaw 0, the pixel-identical picture that the unlocked view
+  renders at yaw -20 (similarity 1.0000 against 0.40 and 0.26 for yaw 0 and
+  +20), so the scorer reads a known rotation back through the delivered path.
+  The null: with the lock off the same 12 renders track the wearer, 11.68
+  degrees a step and 133 over the segment, which is the turn the file states.
+  And `lock=0` against `lock=1` on an `.OSV` was a proven no-op before this
+  and now differs: that null is a counter-null.
+
+  **What is still open.** A left-handed reading of the file's own frame
+  reverses the heading the same way the conjugate does; the two are identical
+  for an upright camera and differ by twice its lean otherwise. The conjugate
+  wins the head to head above by about two to one and is the only one of the
+  three to beat the null, but the file's own accelerometer (field 3.2.10, in
+  g) agrees with the *unconjugated* reading to 1.8 degrees and so argues for
+  the mirror. The picture is the oracle and the accelerometer is the
+  instrument disagreeing with it. The exposure is bounded by twice the
+  camera's lean, 4.3 degrees at the median and 11 at the 95th percentile over
+  the corpus. **A Mimo export of one clip with lock on and off would settle it
+  outright**, and nothing else in this corpus will.
+
+  The menu item un-disables itself off `Scene::has_orientation`, which is the
+  same fact it was disabled by; the refusal stays for a capture that carries
+  no orientation. Playback is unmoved: 29.97 of 29.97 presented on the owner's
+  8k30p file, nothing dropped or starved.
+
 - 2026-08-08 **The `.OSV` lens model has five coefficients, and the fifth is
   field 15.** The entry below shipped the plain equidistant map and called the
   file's `k` coefficients decoration. They are not: the model is

@@ -85,6 +85,15 @@ pub struct CalibrationSet {
     /// that choice is made and where it can be overridden by a harness
     /// that wants to watch a wrong one fail.
     pub imu: GyroTrack,
+    /// An orientation the camera solved for itself, in Kjerag's own frames,
+    /// for a capture that records one instead of a raw IMU.
+    ///
+    /// Empty on an `.insv`, which writes the gyroscope and the accelerometer
+    /// and leaves the fusing to [`Self::orientation`]. A DJI `.OSV` writes the
+    /// answer rather than the readings ([`super::osmo`]), and there is no
+    /// filter setting that could change it, so it arrives already solved and
+    /// [`Self::orientation`] hands it back whatever it is asked for.
+    pub fused: OrientationTrack,
     /// The canvas the file's own numbers were expressed on, kept so the
     /// conversion in [`Intrinsics`] stays auditable. Nothing downstream
     /// needs it.
@@ -488,8 +497,17 @@ impl CalibrationSet {
     ///
     /// Empty for a file with no IMU record, which is what makes horizon
     /// lock a no-op on such a file rather than an error.
+    ///
+    /// `filter` is ignored on a capture that solved its own orientation
+    /// ([`Self::fused`]): there is no gyroscope and no accelerometer to mix,
+    /// so there is nothing for a time constant to be a time constant of, and
+    /// answering a filter setting with a track it did not produce would be a
+    /// worse lie than ignoring it.
     pub fn orientation(&self, filter: Filter) -> OrientationTrack {
-        filter.solve(&self.imu, self.body_from_imu())
+        match self.fused.is_empty() {
+            true => filter.solve(&self.imu, self.body_from_imu()),
+            false => self.fused.clone(),
+        }
     }
 
     /// Interpret the trailer's metadata record.
@@ -561,6 +579,7 @@ impl CalibrationSet {
             gyro: GyroConfig::from_metadata(metadata),
             exposure: Default::default(),
             imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
             calibration_canvas: canvas,
         })
     }

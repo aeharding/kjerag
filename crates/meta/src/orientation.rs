@@ -235,6 +235,13 @@ impl std::fmt::Debug for OrientationTrack {
 }
 
 impl OrientationTrack {
+    /// A track from orientations rather than from an IMU, which is what a
+    /// capture that solved its own hands over (`super::osmo`) and what a test
+    /// states a motion with. In time order; nothing here sorts it.
+    pub fn from_samples(samples: Vec<OrientationSample>) -> Self {
+        Self { samples }
+    }
+
     pub fn samples(&self) -> &[OrientationSample] {
         &self.samples
     }
