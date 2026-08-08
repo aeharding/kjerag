@@ -579,6 +579,130 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-08 **The `.OSV` lock's missing piece is the IMU-to-optical mounting,
+  it is measured, and it is a knob rather than a default.** *(The entry below
+  left this open: "which rotation it is was NOT pinned". It is pinned now.)*
+  The instrument is the one that entry built - the vertical vanishing point of a
+  **lock off** render, which measures where the world's up sits in Kjerag's
+  camera body from the picture alone and is the same picture whatever candidate
+  is under test - run over the whole corpus instead of one dip.
+
+  **The derivation is a measurement and not a fit.** A reading of
+  `(w, x, y, z)` plus a mounting turn about the camera's own vertical composes
+  as `BODY^-1 . reading(q) . BODY . Rot(up, turn)`, and setting the up it
+  predicts equal to the up the picture measures leaves the turn as a
+  DIFFERENCE OF TWO AZIMUTHS - one number per instant, no free parameters. The
+  lean magnitudes on the two sides agree to 0.18 degrees, which is the control
+  that says the mounting fixes the camera's vertical and is a rotation about
+  it.
+
+  **There are four families, not eight readings.** Negating `x` and `y`
+  together is conjugation by a half turn about the file's `z`, which splits
+  into a world-side yaw that `from_first_heading` removes and a body-side half
+  turn - a mounting of 180 degrees. So `wxyZ` IS the shipped `wXYZ` turned half
+  a circle, and `wxYZ` is `wXyZ` turned half a circle: **the eight-row sign
+  table of the entry below was two families sampled at 0 and 180 only**, which
+  is why none of its rows held the horizon. The answer is at 87.
+
+  **What separates them is scatter.** On the right family the turn is one
+  constant of the hardware; on a wrong one it walks with whatever that family
+  is not accounting for. Over **23 instants of the three unit B files spanning
+  177 degrees of lean azimuth**, weighted by each instant's own lean because an
+  azimuth of a nearly upright vector is nearly undefined:
+
+  | family | turn | rms scatter | worst | walks with |
+  | --- | ---: | ---: | ---: | --- |
+  | as written | -84.6 | 65.9 | 148.8 | heading 0.69 |
+  | conjugate (shipped) | -107.1 | 62.1 | 133.2 | azimuth 0.73 |
+  | **mirror in y** | **+86.8** | **3.3** | **10.1** | nothing 0.15 |
+  | mirror x, conjugated | -90.9 | 61.2 | 170.8 | azimuth 0.89 |
+
+  One of the four is a constant and the other three are not, by a factor of
+  nineteen. It is the same constant on each file alone - `+88.3` on B003 over
+  11 instants, `+84.5` on B002 over 7, `+85.7` on B001 over 5 - and **dropping
+  any whole file moves it by at most 1.8 degrees** (`+85.0`, `+87.6`, `+87.1`),
+  which is the leave-one-out that makes the owner-dip score below a held-out
+  one.
+
+  **Residual tilt of the horizon, degrees, median over each site**, on the same
+  lock-off instrument, gated on its own control - the lean the lock-off render
+  reads has to reproduce the file's own lean, which every reading agrees on
+  because `1 - 2(x^2 + y^2)` carries no sign, so the gate is candidate blind and
+  what it throws out is an instant where the fit found a false family of
+  parallel lines. On the owner's dip that control is met to 0.13 degrees at the
+  median, worst 0.53, at every consensus setting:
+
+  | candidate | owner's dip B003 | B001 leaned | B002 leaned | flat stretch B003 |
+  | --- | ---: | ---: | ---: | ---: |
+  | **`a` mirror y, turn +86.8** | **0.44** | **0.66** | **1.21** | **0.66** |
+  | `b` mirror y, turn +90.0 | 0.34 | 0.72 | 1.38 | 0.53 |
+  | the same family, held out at +85.0 | 0.78 | 0.75 | 1.20 | 0.74 |
+  | `c` conjugate, turn -107.1 | 5.06 | 5.57 | 11.63 | 1.72 |
+  | `d` mirror x-c, turn -90.9 | 1.20 | 15.89 | 3.23 | 1.92 |
+  | SHIPPED (conjugate, no turn) | 20.85 | 15.87 | 2.55 | 2.98 |
+  | NO LOCK AT ALL (null) | 11.36 | 8.33 | 7.65 | 2.61 |
+  | *instants / lean* | *9, 8.2-15.2* | *5, 7.2-11.1* | *7, 7.7-9.4* | *2, 2.1-3.2* |
+
+  **One candidate family collapses the residual at every site**, and no other
+  does: `a` and `b` stay under 1.4 degrees everywhere, where the shipped
+  reading is worse than no lock at all on two of the three dip sites and `c`
+  and `d` each blow up on a site the other survives. The row that matters most
+  is the third: `+85.0` is derived from B002 and B001 ONLY, and it scores 0.78
+  on the owner's B003 dip, which no instant of it ever saw. **The flat stretch
+  is the heading control and nothing regresses on it** - every candidate sits
+  within a couple of degrees of the null there, as it must, because a mounting
+  turn about the camera's own vertical is a pure world yaw on an upright camera
+  and `from_first_heading` takes a constant world yaw out
+  (`a_mounting_turn_is_a_pure_heading_on_an_upright_camera`).
+
+  **Unit A is a null result and is reported as one.** Its capture affords the
+  instrument nothing: 3 instants of 51 fitted at all and none of those passed
+  the lock-off control, and its own accelerometer is not a plumb line either
+  (2.74 g mean, 1.29 sd). Nothing here is claimed for the second camera.
+
+  **And the app's own picture agrees.** Locked renders at pitch 0 through the
+  peak of the owner's dip, read by the same vanishing point with the lock ON
+  and the candidate in the binary, come out level to **0 to 2 degrees** under
+  `a` and `b`, where the lock-off control reads the body's own 14 to 17 and the
+  shipped reading reads 30 and worse.
+
+  **What it means: the file's inertial frame is left handed against the optical
+  one.** That is also why the heading looked settled while the tilt was not - a
+  mirror reverses the heading exactly as a conjugate does, so the turn
+  measurement that pinned the conjugate could not tell the two apart and picked
+  the one that gets the tilt wrong. The file's own two streams still agree with
+  each other, because the accelerometer is written in that same frame: read
+  through the mirror it misses the file's own gravity by **2.0 degrees** on
+  leaned frames where the conjugate families miss it by **9.3**, against a null
+  of 9.4 for a camera assumed never to lean. That check is printed per file
+  whenever the knob is on, and it is the shipping verify this needs.
+
+  **What the file does NOT say.** An hour was spent looking for the constant
+  written down. The `camd` nested MP4 - a top-level box in all four captures,
+  never audited before - was dumped leaf by leaf: it is a self-contained
+  re-mux whose `mdat` is a **byte-identical copy of the outer `djmd` tracks**
+  (all 585+585, 4384+4384, 3590+3590 and 6606+6606 samples compared, zero
+  differing), and not one leaf carries a float constant. Fields 20 and 27 hold
+  the same two `f32`s as each other in every entry of both units and are 0.022
+  to 0.046 degrees as radians - three orders of magnitude short. Field 24 is
+  `8.0` as an **`f32`**, the same on both lenses of both units, so it is not an
+  octant index; 25 is the `-1000.0` sentinel beside it. Every non-`mdat` byte
+  of all four files was scanned at every offset as `f32`/`f64` in both
+  endiannesses for 45, 135, 225 and 315 degrees and their radian, cosine, sine
+  and half-angle-quaternion encodings: every hit is a per-frame varying
+  quantity (`.3.2.16.1` is a temperature, `.3.2.3.1` the ISO, `.3.2.15.2` a
+  photometric value that passes through 135). The 16 unexplained bytes at
+  `.1.3.1`, identical on two physical cameras, are not a unit quaternion and
+  not a rotation. **Verdict: the mounting angle is not written in any field
+  this audit could read**, and the HEVC/AAC payloads are the one place not
+  looked.
+
+  **Nothing is defaulted.** `KJERAG_MOUNT=a|b|c|d` selects a candidate and
+  prints which one and why on stderr; unset is the shipped composition **byte
+  for byte** - verified against a clean build of 61dc430 on both an `.OSV`
+  lock=0/lock=1 pair and the sixteen-view `.insv` null, all sixteen hashes
+  identical. Evidence and harness: `scratch/imu/{mount,solvemount,verify,plant}.py`.
+
 - 2026-08-08 **The `.OSV` horizon lock does not hold the horizon when the
   camera leans, and the mirror that was left open is not what is wrong with
   it.** The owner's report on the entry below: "OSV now stays still when guy
