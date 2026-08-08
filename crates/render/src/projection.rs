@@ -168,7 +168,7 @@ pub(crate) const CROSSOVER_DEG: f32 = 8.0;
 /// 2.35. An exponent picked on the share axis to hit the same aim would have
 /// been 2.35 and would have delivered 2.27.
 ///
-/// **That sweep is a prediction and the delivered figure at 1.5 is 3.88, not
+/// **That sweep is a prediction and the delivered figure at 1.5 is 3.85, not
 /// 3.46** (docs/research/seam-temporal.md 9.5). The sweep inverted a *linear*
 /// map to ask where it would have to be for the curve to deliver a tenth,
 /// which assumes the curve composes through the rest of the blend, and it does
@@ -186,7 +186,7 @@ pub(crate) const CROSSOVER_DEG: f32 = 8.0;
 /// **It is also the gradient**, exactly: the curve's peak slope in share per
 /// share is `n` at the seam, so it shears the epipolar bend `n` times harder
 /// than a ramp does and `super::band::SPEND` is `super::band::FOLD` divided by
-/// this number, which is the one place the division happens and the four
+/// this number, which is the one place the division happens and the five
 /// functions of the fold inequality all read. Without it this curve folds the
 /// ONE X2.
 pub(crate) const BLEND_POWER: f32 = 1.5;
@@ -2768,8 +2768,9 @@ pub(crate) mod tests {
                     .unwrap_or(-width)
             };
             let span = at(0.9) - at(0.1);
-            // The bracket is the measured spread and a hundredth either side of
-            // it, so a number that drifts is a failure and not a rounding.
+            // The bracket holds the measured 3.82 to 3.88 spread with a
+            // hundredth below and two above, so a number that drifts is a
+            // failure and not a rounding.
             assert!(
                 (3.81..3.90).contains(&span),
                 "the blend curve at {phi} spends {span} degrees of {width} going from nine \
@@ -2813,7 +2814,7 @@ pub(crate) mod tests {
     /// ramp, whose share walks one whole unit across one whole band, so the
     /// gradient was 1 and dropped out. This curve's peak gradient is its
     /// exponent, measured here rather than differentiated, and that is exactly
-    /// what `super::band::SPEND` has divided out of it once for all four
+    /// what `super::band::SPEND` has divided out of it once for all five
     /// functions that read the inequality.
     ///
     /// **Without that division the curve folds a real camera.** At the ONE

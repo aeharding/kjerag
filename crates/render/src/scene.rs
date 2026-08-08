@@ -967,7 +967,7 @@ fn fit_into(
         // handover is clamped by that overlap (`band::affordable`). So a
         // fallback fit can change how wide this file hands over, seconds after
         // the shell already said how wide it was: on the owner's ONE X2 the
-        // factory calibration affords 4.91 and this fit affords 4.18. Said only
+        // factory calibration affords 4.91 and this fit affords 4.15. Said only
         // when it moves, because it usually does not, and a line that repeats
         // itself is a line nobody reads.
         //

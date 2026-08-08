@@ -1063,7 +1063,8 @@ impl App {
     /// point and therefore the overlap. A camera with nothing pooled yet has no
     /// correction to land there, so what this prints on its first file is the
     /// **factory** calibration's width and a fallback fit moves it a second
-    /// later: 4.91 to 4.18 on the owner's X2. `kjerag_render`'s own fit path
+    /// later: 4.91 to 4.15 on the owner's X2 (its per-file fit; the pooled
+    /// fit affords 4.18). `kjerag_render`'s own fit path
     /// says that second line, and only when the width actually moved.
     fn say_handover(&self, scene: &Scene) {
         let Some(width) = scene.handover_deg() else {
