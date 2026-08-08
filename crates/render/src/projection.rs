@@ -2292,7 +2292,7 @@ fn texel_ratio(pixel: vec2<f32>) -> f32 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use kjerag_meta::{Distortion, Sweep};
+    use kjerag_meta::{Distortion, Pro, Sweep};
 
     use crate::sampling;
 
@@ -4194,21 +4194,124 @@ pub(crate) mod tests {
     /// disagreement between the two definitions surfaces.
     #[test]
     fn the_uniform_block_is_the_size_wgsl_lays_it_out() {
-        assert_eq!(std::mem::size_of::<LensBlock>(), 112);
+        // 144 since v6: nine more `f32` than the 112 this read until then,
+        // which is `offset_v6`'s eight extra terms and the flag that selects
+        // them. That lands on a whole number of sixteens by itself, so the
+        // pad which used to close the block is gone rather than resized.
+        assert_eq!(std::mem::size_of::<LensBlock>(), 144);
         assert_eq!(std::mem::size_of::<Screen>(), 16);
-        // 288 before the band's two fields, which add a padded mat3x3 and a
-        // padded vec3 (issue #103), and the table's own lane per four
-        // directions after them (stage 9).
+        // 352 before the band's two fields: two lens blocks, and then a
+        // padded mat3x3 and a padded vec3 (issue #103), with the table's own
+        // lane per four directions after them (stage 9).
         let table = super::super::band::AZIMUTHS / 4 * 16;
         assert_eq!(std::mem::size_of::<super::super::band::Table>(), table);
-        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + table);
+        assert_eq!(std::mem::size_of::<Reframe>(), 352 + 48 + 16 + table);
         // The offset, not arithmetic that cannot fail: WGSL starts the table
         // at a multiple of sixteen and `repr(C)` does not have to, and
         // `min_binding_size` checks the block's size rather than any offset
         // inside it, so a table that slid twelve bytes would draw a wrong
         // picture rather than refuse a pipeline.
         assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
-        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
+        assert_eq!(std::mem::offset_of!(Reframe, table), 352 + 48 + 16);
+    }
+
+    /// The fixture with a v6 distortion run on both lenses, which is what a
+    /// `pro` arm hands the pass.
+    fn pro_lenses(pro: Pro) -> Vec<Lens> {
+        let mut lenses = fixture_lenses();
+        for lens in &mut lenses {
+            lens.distortion.pro = Some(pro);
+        }
+        lenses
+    }
+
+    /// Rays over the whole sphere, which is more than either lens can see:
+    /// what a lens cannot see it still has to answer the same way on both
+    /// paths, and the two agree on `inside` as well as on the pixel.
+    fn sphere_rays() -> Vec<[f32; 3]> {
+        let mut rays = Vec::new();
+        for down in 0..36 {
+            for round in 0..72 {
+                let polar = (down as f32 + 0.5) * std::f32::consts::PI / 36.0;
+                let azimuth = round as f32 * std::f32::consts::TAU / 72.0;
+                rays.push([
+                    polar.sin() * azimuth.cos(),
+                    polar.sin() * azimuth.sin(),
+                    polar.cos(),
+                ]);
+            }
+        }
+        rays
+    }
+
+    /// **The null for the v6 model.** Its eight extra terms set to zero
+    /// leave the landing the pass produced before v6 existed, and not
+    /// approximately: the same bits, at every ray on the sphere, on both
+    /// lenses. Every number a v6 arm reports is a difference against a v3
+    /// arm, so a null that only held to a tolerance would put that
+    /// tolerance under every one of them.
+    #[test]
+    fn the_pro_terms_zeroed_are_the_v3_model() {
+        let camera = Camera::default();
+        let v3 = fixture_lenses();
+        let zeroed = pro_lenses(Pro::ZERO);
+        for index in 0..v3.len() {
+            let plain = LensBlock::new(&v3[index], index, FRAME, camera, Held::default());
+            let pro = LensBlock::new(&zeroed[index], index, FRAME, camera, Held::default());
+            assert_eq!(plain.pro, 0.0);
+            assert_eq!(pro.pro, 1.0);
+            for ray in sphere_rays() {
+                let was = mei(&plain, ray);
+                let now = mei(&pro, ray);
+                assert_eq!(
+                    was.pixel, now.pixel,
+                    "lens {index} moved at {ray:?} with nothing loaded",
+                );
+                assert_eq!(
+                    was.inside, now.inside,
+                    "lens {index} changed cover at {ray:?}"
+                );
+            }
+        }
+    }
+
+    /// The other half of the null, and the reason the one above counts: the
+    /// path can move. One thin-prism term of a known size displaces the
+    /// landing by exactly what the model says it does, `fx s1 r2` across and
+    /// nothing down, so "zero moved nothing" is a reading off a path that
+    /// ran rather than off one that was never reached.
+    #[test]
+    fn a_planted_prism_term_moves_the_landing_by_what_it_predicts() {
+        let camera = Camera::default();
+        let planted = 0.01;
+        let zeroed = pro_lenses(Pro::ZERO);
+        let plant = pro_lenses(Pro {
+            s1: planted,
+            ..Pro::ZERO
+        });
+        let block = LensBlock::new(&zeroed[0], 0, FRAME, camera, Held::default());
+        let moved = LensBlock::new(&plant[0], 0, FRAME, camera, Held::default());
+        let mut seen = 0;
+        for ray in sphere_rays() {
+            let was = mei(&block, ray);
+            if !was.inside {
+                continue;
+            }
+            seen += 1;
+            let now = mei(&moved, ray);
+            // The radius the term is evaluated at is the one the model put
+            // this ray at, recovered from the landing rather than assumed.
+            let normalized = normalize(ray);
+            let denom = normalized[2] + block.xi;
+            let r2 = (normalized[0] / denom).powi(2) + (normalized[1] / denom).powi(2);
+            near(
+                now.pixel[0] - was.pixel[0],
+                block.fx * planted as f32 * r2,
+                1e-3 * block.fx * planted as f32 * r2 + 1e-3,
+            );
+            near(now.pixel[1], was.pixel[1], 1e-4);
+        }
+        assert!(seen > 1_000, "only {seen} rays landed in the picture");
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {
