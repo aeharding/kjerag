@@ -1484,17 +1484,27 @@ impl ScenePipeline {
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
         };
-        // SEAM-ANCHOR EXPERIMENT: the one place the held line becomes a
-        // number the shader can read. After the block is built, because the
-        // hold is measured against the very pose and lenses the draw will use,
-        // and before the write, because that is the copy the GPU sees.
+        // SEAM-ANCHOR EXPERIMENT: the one place the two held lines and the
+        // dissolve between them become numbers the shader can read. After the
+        // block is built, because the hold is measured against the very pose
+        // and lenses the draw will use, and before the write, because that is
+        // the copy the GPU sees.
+        //
+        // The clock is the frame's own presentation time and not a wall clock
+        // and not a count of redraws: the dissolve is a stretch of FILM, so a
+        // redraw that arrives with the same frame behind it advances nothing
+        // and a run at 30 or at 300 fps dissolves over the same seconds of
+        // picture. flat4 counted redraws, and the owner flagged it.
         let reframe = match projection::anchoring() {
             false => reframe,
             true => {
                 let held = showing.as_ref().map_or(Held::default(), |view| view.held);
-                let anchor = SeamAnchor::hold(self.anchor, &reframe, held);
+                let at = showing
+                    .as_ref()
+                    .map_or(0.0, |view| view.frames.timestamp.as_secs_f64());
+                let anchor = SeamAnchor::hold(self.anchor, &reframe, held, at);
                 self.anchor = Some(anchor);
-                reframe.with_shift(anchor.shift())
+                reframe.with_handover(anchor.old(), anchor.new(), anchor.mix())
             }
         };
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());

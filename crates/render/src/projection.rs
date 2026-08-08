@@ -504,42 +504,50 @@ pub struct Reframe {
     /// here - [`Reframe::crossover_at`] on this side and `band_width` on the
     /// shader's - so the two cannot disagree about it.
     crossover: f32,
-    /// SEAM-ANCHOR EXPERIMENT (`KJERAG_ANCHOR`): how far across the seam the
-    /// drawn 50/50 handover line is moved from where the pure geometry of the
-    /// two axis cosines puts it, in **radians**.
+    /// SEAM-ANCHOR EXPERIMENT (`KJERAG_ANCHOR`), 1 of 3: where the 50/50
+    /// handover line is being drawn for the state that is FADING OUT, as an
+    /// offset across the seam from where the pure geometry of the two axis
+    /// cosines puts it, in **radians**.
     ///
     /// Zero is the picture before the experiment, and zero is what every
     /// caller that does not ask for the experiment gets, so the term is a
     /// literal `+ 0.0` in both twins and the null is bit-exact.
     ///
-    /// It is per frame and it is one number for the whole ring: the scene
-    /// picks one world direction near the view centre and holds the line on
-    /// it ([`SeamAnchor`]). Bounded by half the drawn fusion width, which is
-    /// the seam allowance the fade is drawn inside of.
+    /// WGSL twin: `reframe.handover_old`, read by `handover`.
+    handover_old: f32,
+    /// SEAM-ANCHOR EXPERIMENT, 2 of 3: the same for the state FADING IN, and
+    /// the only one of the two that is live while nothing is dissolving -
+    /// then it holds the same number as [`Self::handover_old`] and the mix
+    /// below is zero, which is one line drawn once.
     ///
-    /// Sibling of [`Self::crossover`] and not a new field at the end: it takes
-    /// one of the three padding words the table's alignment already needed, so
-    /// the block is the size it was and the table has not moved.
+    /// WGSL twin: `reframe.handover_new`, read by `handover`.
+    handover_new: f32,
+    /// SEAM-ANCHOR EXPERIMENT, 3 of 3: how far the dissolve between the two
+    /// has got, 0 at the old line and 1 at the new one.
     ///
-    /// WGSL twin: `reframe.handover_shift`, read by `handover`.
-    handover_shift: f32,
-    /// What puts the table below on a sixteen-byte offset.
+    /// **This is a crossfade of two SHARES and never a moved line.** The
+    /// handover is evaluated twice, once at each offset, and the two answers
+    /// are mixed by this: each of the two lines stays exactly where its own
+    /// world anchor puts it for the whole dissolve and only its opacity
+    /// changes. A single offset walked from one value to the other - which is
+    /// what flat4 did - is a line that travels, and a travelling line is the
+    /// thing the owner saw and refused.
     ///
-    /// **WGSL's alignment and not this struct's.** Every member of this block
-    /// is an `f32` or an array of them, so `repr(C)` gives the whole thing an
-    /// alignment of 4 and would happily start the table at 340. WGSL lays an
-    /// `array<vec4<f32>, N>` out at 16, so the two definitions would then
-    /// describe different bytes.
+    /// The three of them together are also **what puts the table below on a
+    /// sixteen-byte offset**, which is the job the three padding words they
+    /// replaced were doing, and it is WGSL's alignment and not this struct's:
+    /// every member here is an `f32` or an array of them, so `repr(C)` gives
+    /// the block an alignment of 4 and would happily start the table at 340,
+    /// while WGSL lays an `array<vec4<f32>, N>` out at 16. Nothing catches a
+    /// disagreement at run time - `min_binding_size` checks the block's total
+    /// size and not one offset in it, and the sizes would agree either way, so
+    /// the shader would read the table shifted by twelve bytes and draw a
+    /// wrong picture rather than refuse a pipeline. The test
+    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
+    /// it checks the offset as well as the size for exactly that reason.
     ///
-    /// **Nothing catches that at run time.** `min_binding_size` checks the
-    /// block's total size and not one offset in it, and the sizes agree either
-    /// way, so the shader would read the table shifted by twelve bytes and
-    /// draw a picture rather than an error. The test
-    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it.
-    ///
-    /// Two words rather than three since the seam-anchor experiment took the
-    /// first of them ([`Self::handover_shift`]).
-    _pad: [f32; 2],
+    /// WGSL twin: `reframe.handover_mix`, read by `handover`.
+    handover_mix: f32,
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -715,13 +723,15 @@ pub struct Rolling {
 pub fn anchoring() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        let on = std::env::var("KJERAG_ANCHOR").is_ok_and(|value| value != "0" && !value.is_empty());
+        let on =
+            std::env::var("KJERAG_ANCHOR").is_ok_and(|value| value != "0" && !value.is_empty());
         if on {
             println!(
                 "blend:  research seam anchor on, KJERAG_ANCHOR: the 50/50 handover line is held \
                  on one world direction near the view centre instead of sliding across world \
                  content with the body, inside +/- half the drawn fusion width, and re-anchored \
-                 with a {ANCHOR_FADE_SECS} s fade when it runs out of allowance"
+                 by DISSOLVING between two held lines over {ANCHOR_DISSOLVE_MIN_SECS} to \
+                 {ANCHOR_DISSOLVE_MAX_SECS} s of media time. Neither line ever travels."
             );
         }
         on
@@ -733,23 +743,66 @@ pub fn anchoring() -> bool {
 /// measures the hold.
 fn tracing() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("KJERAG_ANCHOR_TRACE").is_ok_and(|v| v != "0" && !v.is_empty()))
+    *ON.get_or_init(|| {
+        std::env::var("KJERAG_ANCHOR_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
 }
 
-/// How long a re-anchor takes to walk the held offset onto the new anchor's,
-/// in seconds - the "held state, then a fade" the owner described Studio's OFF
-/// mode as.
-pub(crate) const ANCHOR_FADE_SECS: f32 = 0.5;
-
-/// What the fade is counted in frames at, because the state advances per
-/// redraw and not per second.
+/// The shortest a dissolve is ever run for, in **seconds of media time**.
 ///
-/// **A hack simplification, and the one place a wall clock would have gone.**
-/// A slew per redraw is the same ramp at the rate the app draws at and is the
-/// same ramp offscreen, where a wall clock would run the fade out inside two
-/// frames or stretch it over a hundred depending on how fast the decoder fed
-/// the renderer. At 30 fps it is 0.5 s exactly; at 60 it is a second.
-const ANCHOR_FADE_FPS: f32 = 30.0;
+/// A floor rather than a fixed length because a dissolve that finishes inside
+/// two frames is a step with extra steps, and the eye reads a step at the seam
+/// as the seam. Under a turn fast enough that the new line would rail sooner
+/// than this, the dissolves chain nose to tail at exactly this length and the
+/// occasional retarget lands inside one, which is what the promote below is
+/// for.
+const ANCHOR_DISSOLVE_MIN_SECS: f32 = 0.1;
+
+/// The longest, in seconds of media time. Past a turn this slow the dissolve
+/// is over long before the allowance runs out and the rest of the time is a
+/// plain hold, which is the regime the owner said anchoring already wins in.
+const ANCHOR_DISSOLVE_MAX_SECS: f32 = 0.5;
+
+/// How quickly the across-seam drift rate estimate forgets, in seconds.
+///
+/// Short: the rate it has to answer for is the rate over the next tenth to
+/// half second, not the rate over the last few. It is the growth of the held
+/// offset itself, which is exactly the quantity the duration rule is about, so
+/// nothing here re-derives an angular velocity from the pose.
+const ANCHOR_RATE_TAU_SECS: f32 = 0.25;
+
+/// The largest media step the rate estimate will take at face value, in
+/// seconds. A seek, a stall or a repeated frame is not a turn; past this the
+/// estimate is left alone rather than fed a number that means nothing.
+const ANCHOR_STEP_CAP_SECS: f64 = 0.25;
+
+/// How much of the recent shake a new anchor is placed clear of, as a
+/// multiple of the measured swing.
+///
+/// **The leading edge of the allowance is not the edge of the allowance.** The
+/// placement rule is that a fresh line should have the whole width of travel
+/// in front of it before it rails, and on this corpus the offset does not only
+/// travel: the airframe shakes it by well over a degree at a couple of hertz
+/// on top of whatever the turn is doing. A line placed hard against the edge
+/// has that whole shake hanging off the wrong side of the allowance and rails
+/// again within three frames, which was measured before this existed - 37
+/// promotes against 9 retargets over thirty seconds. Placed clear of the shake
+/// it has the travel and the shake both.
+///
+/// Two swings rather than one because the swing is a mean deviation and the
+/// excursions are the tails of it.
+const ANCHOR_LEAD_SWINGS: f32 = 2.0;
+
+/// The most of the allowance the shake may take, as a fraction. Past this a
+/// camera that shakes harder than the whole allowance would place every new
+/// line at the centre, which is the right answer: there is no leading edge
+/// worth having when the shake is the whole of it.
+const ANCHOR_LEAD_MOST: f32 = 0.6;
+
+/// How quickly the shake estimate forgets, in seconds. Slower than the rate's
+/// ([`ANCHOR_RATE_TAU_SECS`]) because it is an amplitude over cycles and not a
+/// speed over frames.
+const ANCHOR_SWING_TAU_SECS: f32 = 0.5;
 
 /// How far along the seam the anchor may drift from the view centre's own
 /// nearest seam point before it stops standing for the piece of seam that is
@@ -757,7 +810,8 @@ const ANCHOR_FADE_FPS: f32 = 30.0;
 ///
 /// This is also what catches a pan and a seek without either having to be
 /// reported: both move the view centre's nearest seam point away from the
-/// anchor in one redraw, and past this the answer is a new anchor and a fade.
+/// anchor in one redraw, and past this the answer is a new anchor and a
+/// dissolve.
 const ANCHOR_REACH_DEG: f32 = 30.0;
 
 /// SEAM-ANCHOR EXPERIMENT: where the drawn handover line is being held, and
@@ -775,86 +829,379 @@ const ANCHOR_REACH_DEG: f32 = 30.0;
 /// experiment. What the owner is looking at is the piece of seam in front of
 /// him.
 ///
-/// State lives here, on the CPU, and reaches the shader as one float
-/// ([`Reframe::handover_shift`]).
+/// **What changed from flat4, and why.** flat4 held the same way but handed
+/// the shader ONE offset and slewed it from the old anchor's value to the new
+/// one over half a second. That is a line that TRAVELS, and travelling is the
+/// thing the eye catches: the owner's verdict was that the anchoring wins
+/// while it is steady and the slew loses while it moves. So there is no slew
+/// here. Two lines are held at once, each on its own world direction, each
+/// standing exactly still on the content it was placed on, and what changes
+/// between them is opacity ([`Reframe::handover_mix`]). One fades out where
+/// the other fades in and neither goes anywhere.
+///
+/// State lives here, on the CPU, and reaches the shader as three floats
+/// ([`Reframe::handover_old`], [`Reframe::handover_new`],
+/// [`Reframe::handover_mix`]).
 #[derive(Clone, Copy, Debug)]
 pub struct SeamAnchor {
-    /// The world direction the 50/50 line is being held on.
-    world: [f64; 3],
-    /// What was delivered last redraw, in radians. Where a re-anchor's fade
-    /// starts from, and why a re-anchor is never a step.
-    shift: f32,
-    /// Whether a re-anchor is still walking onto its new anchor.
-    fading: bool,
+    /// The world direction the live 50/50 line is held on - the one that is
+    /// fading IN during a dissolve and the only one there is otherwise.
+    live: [f64; 3],
+    /// The world direction the fading-OUT line is held on, while there is a
+    /// dissolve. `None` is a plain hold, which is most redraws.
+    ///
+    /// It is a world direction and not a frozen number for the reason the
+    /// whole change exists: a frozen offset is fixed in the VIEW, and under a
+    /// world-locked view the seam locus itself sweeps across the view as the
+    /// body turns, so a frozen offset would walk the old line across the
+    /// content while it faded. Re-derived from the world each redraw, the old
+    /// line stands still on the content for the whole fade.
+    leaving: Option<[f64; 3]>,
+    /// How far the dissolve has got, 0 at the old line and 1 at the new.
+    mix: f32,
+    /// How long this dissolve is to take, in seconds of MEDIA time
+    /// ([`Self::span_of`]).
+    span: f32,
+    /// The media instant this state was computed for, in seconds. What makes
+    /// the dissolve a duration rather than a count of redraws: a redraw that
+    /// arrives with no new frame behind it advances nothing, and a run at 30
+    /// or at 300 fps dissolves over the same stretch of film.
+    at: f64,
+    /// The live line's offset last redraw, in radians. The rate estimate's
+    /// other end, and re-seeded rather than carried across a retarget so that
+    /// the step a retarget makes never enters the estimate as a speed.
+    was: f32,
+    /// How fast the held offset is growing, in radians per second across the
+    /// seam, as a short EMA ([`ANCHOR_RATE_TAU_SECS`]). What the dissolve's
+    /// length is computed from.
+    rate: f32,
+    /// The held offset's own slow mean and how far it swings either side of
+    /// it, both in radians, both EMAs over [`ANCHOR_SWING_TAU_SECS`]. The
+    /// airframe's shake, measured rather than assumed, and what a new line is
+    /// placed clear of ([`ANCHOR_LEAD_SWINGS`]).
+    mean: f32,
+    swing: f32,
+    /// This redraw's two offsets, in radians, in the order the block wants
+    /// them. `old` is what fades out and `new` is what fades in; on a hold
+    /// they are the same number and [`Self::mix`] is zero.
+    ///
+    /// Held to the same bound [`Reframe::with_handover`] applies, so what the
+    /// trace says is what the shader draws. The bound only ever binds on a
+    /// line on its way out under a hard turn, where it is a couple of percent
+    /// of opacity from gone: past a whole fusion width the 50/50 line is
+    /// outside the fade either way and further is not a picture, it is a
+    /// number.
+    old: f32,
+    new: f32,
+    /// How many dissolves have started, and how many of those had to be cut
+    /// short because a retarget arrived while they were still running
+    /// ([`Self::hold`]). Both are for the trace: rule 2 is supposed to make
+    /// the second rare, and the only way to know it does is to count.
+    dissolves: u32,
+    promotes: u32,
+    /// What the trace calls this redraw.
+    doing: Doing,
+}
+
+/// What the held line is doing this redraw, for the trace and for nothing
+/// else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Doing {
+    /// No seam in this map, so no line to hold.
+    Blank,
+    /// The first anchor of the run. Nothing was held, so there is nothing to
+    /// fade off and no dissolve.
+    Anchor,
+    /// One line, standing still on its own piece of world.
+    Hold,
+    /// A retarget: a second line placed and a dissolve started.
+    Retarget,
+    /// A retarget that landed inside a dissolve. The one it landed in was
+    /// finished on the spot ([`Self::mix`] jumped to 1) and the new one
+    /// started from there.
+    Promote,
+    /// Two lines up, opacity moving between them, neither one moving.
+    Dissolve,
+}
+
+impl Doing {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Blank => "blank",
+            Self::Anchor => "anchor",
+            Self::Hold => "hold",
+            Self::Retarget => "retarget",
+            Self::Promote => "promote",
+            Self::Dissolve => "dissolve",
+        }
+    }
 }
 
 impl SeamAnchor {
-    /// This redraw's offset, and the state that produced it.
+    /// This redraw's two offsets and their mix, and the state that produced
+    /// them.
     ///
     /// `held` is the pose the block was built for, so the world frame here is
     /// the one the view is locked to. With the horizon free that frame IS the
-    /// body, the anchor never drifts, the offset stays zero, and the picture
+    /// body, the anchor never drifts, both offsets stay zero, and the picture
     /// is the one the toggle is off for - which is right: a body-fixed view
     /// has no crawl to hold against.
     ///
-    /// Four things end a hold, and all four end it the same way, with a fade:
-    /// the offset reaching the allowance, the anchor leaving the piece of seam
-    /// on screen, a pan, and a seek. The last two are not reported and do not
-    /// need to be; they are the second.
-    pub fn hold(state: Option<Self>, reframe: &Reframe, held: Held) -> Self {
+    /// `at` is the presentation time of the frame being drawn, in seconds.
+    ///
+    /// Four things end a hold, and all four end it the same way, with a
+    /// dissolve: the offset reaching the allowance, the anchor leaving the
+    /// piece of seam on screen, a pan, and a seek. The last two are not
+    /// reported and do not need to be; they are the second.
+    pub fn hold(state: Option<Self>, reframe: &Reframe, held: Held, at: f64) -> Self {
         if !reframe.has_seam() {
-            return Self { world: [0.0, 0.0, 1.0], shift: 0.0, fading: false };
+            return Self::rest(at);
         }
         let allowance = 0.5 * reframe.crossover_at(0.0);
         let world_from_body = held.body_from_world.conjugate();
         let body_of = |world: [f64; 3]| held.body_from_world.rotate(world).map(|c| c as f32);
-        // The anchor a re-anchor would choose: the 50/50 locus nearest the
-        // view centre, taken to the world frame so that it stops moving.
+        // What one world direction costs the handover right now: minus its
+        // across-seam angle is the offset that puts it back at 50/50.
+        let offset_of =
+            |world: [f64; 3]| -reframe.across_seam(reframe.view_ray_from_body(body_of(world)));
+        // The 50/50 locus nearest the view centre, which is the piece of seam
+        // the owner is looking at and what every new anchor is placed against.
         let centre = reframe.seam_nearest([0.0, 0.0, 1.0]);
-        let centre_world = world_from_body.rotate(reframe.body_ray(centre).map(f64::from));
-        // What the state on hand is still worth, if anything.
-        let kept = state.filter(|anchor| {
-            let view = reframe.view_ray_from_body(body_of(anchor.world));
-            let offset = reframe.across_seam(view);
-            let (view, centre) = (unit(view), unit(centre));
-            let along: f32 = (0..3).map(|c| view[c] * centre[c]).sum();
-            offset.abs() <= allowance && along >= ANCHOR_REACH_DEG.to_radians().cos()
-        });
-        let (world, fading) = match kept {
-            Some(anchor) => (anchor.world, anchor.fading),
-            // A re-anchor, or the first anchor of the run. The first is not a
-            // fade: nothing was held, so there is nothing to walk off.
-            None => (centre_world, state.is_some()),
+        let world_of =
+            |view: [f32; 3]| world_from_body.rotate(reframe.body_ray(view).map(f64::from));
+
+        let Some(was) = state.filter(|state| state.live != [0.0; 3]) else {
+            // The first anchor of the run: on the centre, at 50/50, and not a
+            // dissolve, because nothing was held to fade off.
+            return Self {
+                live: world_of(centre),
+                leaving: None,
+                mix: 0.0,
+                span: ANCHOR_DISSOLVE_MAX_SECS,
+                at,
+                was: 0.0,
+                rate: 0.0,
+                mean: 0.0,
+                swing: 0.0,
+                old: 0.0,
+                new: 0.0,
+                dissolves: 0,
+                promotes: 0,
+                doing: Doing::Anchor,
+            }
+            .traced(allowance);
         };
-        let target = (-reframe.across_seam(reframe.view_ray_from_body(body_of(world))))
-            .clamp(-allowance, allowance);
-        let was = state.map_or(target, |anchor| anchor.shift);
-        let (shift, fading) = match fading {
-            false => (target, false),
+        // MEDIA time, and only forwards. A seek backwards, a stall or a
+        // redraw with the same frame behind it all arrive as a step this
+        // rejects, and none of them is a stretch of film the dissolve should
+        // be charged for.
+        let step = (at - was.at).clamp(0.0, ANCHOR_STEP_CAP_SECS) as f32;
+
+        let live = offset_of(was.live);
+        // The drift rate, off the held offset's own growth. Not fed across a
+        // retarget: `was.was` is re-seeded to the new anchor's offset there,
+        // so the only steps this ever sees are one frame of turn.
+        let (rate, quick, mean, swing) = match step > 0.0 {
+            false => (was.rate, was.rate, was.mean, was.swing),
             true => {
-                let step = allowance / (ANCHOR_FADE_SECS * ANCHOR_FADE_FPS);
-                let walked = was + (target - was).clamp(-step, step);
-                (walked, walked != target)
+                let now = (live - was.was) / step;
+                let alpha = 1.0 - (-step / ANCHOR_RATE_TAU_SECS).exp();
+                // The shake, on its own slower clock: a mean the offset wanders
+                // about and how far either side it wanders.
+                let beta = 1.0 - (-step / ANCHOR_SWING_TAU_SECS).exp();
+                let mean = was.mean + (live - was.mean) * beta;
+                let swing = was.swing + ((live - mean).abs() - was.swing) * beta;
+                (was.rate + (now - was.rate) * alpha, now, mean, swing)
             }
         };
-        if tracing() {
-            println!(
-                "anchor: {:+.4} deg {}, allowance +/-{:.3}",
-                shift.to_degrees(),
-                match (fading, kept.is_some()) {
-                    (true, _) => "fade",
-                    (false, true) => "hold",
-                    (false, false) => "anchor",
-                },
-                allowance.to_degrees(),
+        // What the duration rule is charged at: the faster of the smoothed
+        // growth and this one frame's, both of them "delta's recent growth".
+        // The EMA lags a turn that is still winding on, and a dissolve costed
+        // off a lagging rate outlives the hold it was cut for, which is a
+        // promote. Never the slower of the two, so this can only ever shorten
+        // a dissolve.
+        let charged = rate.abs().max(quick.abs());
+
+        // Is the live line still standing for the piece of seam on screen?
+        let railed = live.abs() > allowance;
+        let strayed = {
+            let (view, centre) = (
+                unit(reframe.view_ray_from_body(body_of(was.live))),
+                unit(centre),
             );
+            let along: f32 = (0..3).map(|c| view[c] * centre[c]).sum();
+            along < ANCHOR_REACH_DEG.to_radians().cos()
+        };
+        if railed || strayed {
+            // A retarget. The line that is live becomes the line that leaves,
+            // at full opacity: if a dissolve was still running, THIS is the
+            // promote, and finishing it on the spot costs one bounded pop of
+            // whatever opacity the outgoing line had left. Rule 2 is what
+            // makes it rare, and the count is what proves it.
+            let promote = was.leaving.is_some();
+            // The leading edge of the allowance, so the new line has the WHOLE
+            // width to travel before it rails and not half of it - held clear
+            // of the shake it has been measuring, because a line placed hard
+            // against the edge spends the shake outside the allowance rather
+            // than inside it and rails again inside three frames.
+            //
+            // Which edge is what the line that just went says it is: it ran out
+            // on the side it ran out on. Not the drift rate's sign, which on a
+            // shaking airframe is the shake's sign as often as the turn's.
+            let lead = allowance - (ANCHOR_LEAD_SWINGS * swing).min(ANCHOR_LEAD_MOST * allowance);
+            let target = match railed {
+                true => -live.signum() * lead,
+                // A pan or a seek: nothing established about the new piece of
+                // seam, so the centre, which is the leading edge of nothing in
+                // particular and the trailing edge of nothing in particular.
+                false => 0.0,
+            };
+            let placed = reframe.seam_ray_at(centre, -target);
+            let settled = offset_of(world_of(placed));
+            return Self {
+                live: world_of(placed),
+                leaving: Some(was.live),
+                mix: 0.0,
+                // What the line just placed has in front of it: from where it
+                // was put to the far rail, which is the whole allowance plus
+                // however far back from the near one it was held.
+                span: Self::span_of(charged, allowance + target.abs()),
+                at,
+                was: settled,
+                rate,
+                mean: settled,
+                swing,
+                old: Self::bounded(live, allowance),
+                new: Self::bounded(target, allowance),
+                dissolves: was.dissolves + 1,
+                promotes: was.promotes + u32::from(promote),
+                doing: match promote {
+                    true => Doing::Promote,
+                    false => Doing::Retarget,
+                },
+            }
+            .traced(allowance);
         }
-        Self { world, shift, fading }
+
+        // No retarget: hold, or carry a dissolve along. The mix is the only
+        // thing that moves; both offsets are re-derived from world directions
+        // that have not changed, so both lines are exactly where they were on
+        // the content.
+        let mix = (was.mix + step / was.span.max(f32::EPSILON)).min(1.0);
+        let leaving = was.leaving.filter(|_| mix < 1.0);
+        Self {
+            live: was.live,
+            leaving,
+            mix: match leaving {
+                Some(_) => mix,
+                None => 0.0,
+            },
+            span: was.span,
+            at,
+            was: live,
+            rate,
+            mean,
+            swing,
+            old: Self::bounded(leaving.map_or(live, offset_of), allowance),
+            new: Self::bounded(live, allowance),
+            dissolves: was.dissolves,
+            promotes: was.promotes,
+            doing: match leaving {
+                Some(_) => Doing::Dissolve,
+                None => Doing::Hold,
+            },
+        }
+        .traced(allowance)
     }
 
-    /// What the map is to draw the handover with, in radians.
-    pub fn shift(&self) -> f32 {
-        self.shift
+    /// The state a map with no seam in it leaves behind: no line, no dissolve
+    /// and the zero the block builds itself with.
+    fn rest(at: f64) -> Self {
+        Self {
+            live: [0.0; 3],
+            leaving: None,
+            mix: 0.0,
+            span: ANCHOR_DISSOLVE_MAX_SECS,
+            at,
+            was: 0.0,
+            rate: 0.0,
+            mean: 0.0,
+            swing: 0.0,
+            old: 0.0,
+            new: 0.0,
+            dissolves: 0,
+            promotes: 0,
+            doing: Doing::Blank,
+        }
+    }
+
+    /// **The duration rule.** How long a dissolve started now is to take: how
+    /// long the line being placed has before it rails at the rate the seam is
+    /// drifting across at, floored at [`ANCHOR_DISSOLVE_MIN_SECS`] and capped
+    /// at [`ANCHOR_DISSOLVE_MAX_SECS`].
+    ///
+    /// `travel` is what the new line has in front of it, in radians across the
+    /// seam: from where it was placed to the far rail, which is the whole
+    /// allowance and then whatever the placement held back from the near one.
+    ///
+    /// A still camera divides by nothing and gets the cap, which is right: a
+    /// line that will never rail can take the longest fade there is. A turn
+    /// fast enough to spend the travel inside the floor gets the floor, and
+    /// then the dissolves chain nose to tail, which is the regime the strip
+    /// shows.
+    fn span_of(rate: f32, travel: f32) -> f32 {
+        let until = travel / rate.abs();
+        match until.is_finite() {
+            true => until.clamp(ANCHOR_DISSOLVE_MIN_SECS, ANCHOR_DISSOLVE_MAX_SECS),
+            false => ANCHOR_DISSOLVE_MAX_SECS,
+        }
+    }
+
+    /// The same bound [`Reframe::with_handover`] puts on a delivered offset,
+    /// applied here as well so that the trace and the shader agree about what
+    /// was drawn. Twice the allowance is one whole fusion width.
+    fn bounded(offset: f32, allowance: f32) -> f32 {
+        offset.clamp(-2.0 * allowance, 2.0 * allowance)
+    }
+
+    /// One line per redraw under `KJERAG_ANCHOR_TRACE`, and the state
+    /// unchanged. Parseable on purpose: the instruments that measure the hold
+    /// read this and nothing else.
+    fn traced(self, allowance: f32) -> Self {
+        if tracing() {
+            println!(
+                "anchor: t={:.4} {:8} old={:+.4} new={:+.4} mix={:.4} span={:.3} rate={:+.4} \
+                 swing={:.4} allow={:.4} dissolves={} promotes={}",
+                self.at,
+                self.doing.word(),
+                self.old.to_degrees(),
+                self.new.to_degrees(),
+                self.mix,
+                self.span,
+                self.rate.to_degrees(),
+                self.swing.to_degrees(),
+                allowance.to_degrees(),
+                self.dissolves,
+                self.promotes,
+            );
+        }
+        self
+    }
+
+    /// The fading-out line's offset, in radians.
+    pub fn old(&self) -> f32 {
+        self.old
+    }
+
+    /// The fading-in line's offset, in radians. The only live one on a hold,
+    /// when it is also [`Self::old`].
+    pub fn new(&self) -> f32 {
+        self.new
+    }
+
+    /// How far the dissolve between them has got, 0 to 1. Zero on a hold.
+    pub fn mix(&self) -> f32 {
+        self.mix
     }
 }
 
@@ -900,9 +1247,12 @@ impl Reframe {
             // just laid out and there is nowhere earlier to read them from.
             crossover: 0.0,
             // The experiment is off until a caller says otherwise
-            // ([`Self::with_shift`]), and off is the geometric handover.
-            handover_shift: 0.0,
-            _pad: [0.0; 2],
+            // ([`Self::with_handover`]), and off is the geometric handover:
+            // two lines at the same zero offset with no dissolve between them
+            // is one line where the geometry put it.
+            handover_old: 0.0,
+            handover_new: 0.0,
+            handover_mix: 0.0,
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
@@ -929,26 +1279,36 @@ impl Reframe {
         self.table
     }
 
-    /// SEAM-ANCHOR EXPERIMENT: the same map with the drawn handover line moved
-    /// `shift` radians across the seam ([`Self::handover_shift`]).
+    /// SEAM-ANCHOR EXPERIMENT: the same map with the handover drawn at TWO
+    /// offsets across the seam and dissolved between them - `old` fading out,
+    /// `new` fading in, `mix` from 0 to 1 ([`Self::handover_old`],
+    /// [`Self::handover_new`], [`Self::handover_mix`]).
     ///
-    /// Clamped here as well as by the caller that computes it, because the
-    /// allowance is the map's own property and a shift past half the drawn
-    /// fusion width would put the 50/50 line outside the fade it is supposed
-    /// to live inside.
+    /// The allowance a HELD line lives inside is half the drawn fusion width,
+    /// and [`SeamAnchor`] is what keeps the live one there. The clamp here is
+    /// wider - the whole fusion width - because it is a different job: the
+    /// line on its way OUT has already reached the allowance, which is why it
+    /// is going, and it keeps standing on its own content for the rest of its
+    /// fade rather than being dragged back inside a bound. What this clamp
+    /// stops is a number with no picture behind it, and it is the map's own
+    /// property, so it belongs to the map.
     ///
     /// A step of its own, like [`Self::with_table`]: every caller that is not
     /// running the experiment - every instrument, every test, the blank pane -
-    /// gets zero without saying so, and zero is the geometric handover.
-    pub fn with_shift(mut self, shift: f32) -> Self {
-        let allowance = 0.5 * self.crossover;
-        self.handover_shift = shift.clamp(-allowance, allowance);
+    /// gets the zero the block was built with, and that zero is the geometric
+    /// handover bit for bit.
+    pub fn with_handover(mut self, old: f32, new: f32, mix: f32) -> Self {
+        let bound = self.crossover;
+        self.handover_old = old.clamp(-bound, bound);
+        self.handover_new = new.clamp(-bound, bound);
+        self.handover_mix = mix.clamp(0.0, 1.0);
         self
     }
 
-    /// How far the drawn handover line is moved across the seam, in radians.
-    pub fn handover_shift(&self) -> f32 {
-        self.handover_shift
+    /// The two offsets the drawn handover is being crossfaded between, in
+    /// radians, and how far that crossfade has got.
+    pub fn handover_pair(&self) -> (f32, f32, f32) {
+        (self.handover_old, self.handover_new, self.handover_mix)
     }
 
     /// Whether this map has two lens streams and so a seam to hand over at.
@@ -967,14 +1327,34 @@ impl Reframe {
     ///
     /// Zero for a one-stream file, which has no seam.
     pub fn seam_normal(&self) -> [f32; 3] {
-        let apart: [f32; 3] = std::array::from_fn(|c| {
-            self.lenses[0].view_to_lens[c][2] - self.lenses[1].view_to_lens[c][2]
-        });
+        let apart = self.seam_apart();
         let reach = norm3(apart);
         match reach > 0.0 {
             true => apart.map(|c| c / reach),
             false => [0.0; 3],
         }
+    }
+
+    /// The un-normalized difference of the two mounting rows the handover
+    /// reads, in view space. [`Self::seam_normal`]'s direction and
+    /// [`Self::seam_spread`]'s length, in one place so the two cannot
+    /// disagree.
+    fn seam_apart(&self) -> [f32; 3] {
+        std::array::from_fn(|c| {
+            self.lenses[0].view_to_lens[c][2] - self.lenses[1].view_to_lens[c][2]
+        })
+    }
+
+    /// How long that difference is: the scale between an angle off the seam
+    /// plane and what [`Self::across_seam`] reports for it.
+    ///
+    /// For a unit ray, `across_seam(ray)` is `spread / 2` times the ray's
+    /// component along [`Self::seam_normal`], so with the two lenses of a
+    /// 360 camera back to back the spread is very near 2 and the report is
+    /// very near the angle itself. This is what
+    /// [`Self::seam_ray_at`] inverts.
+    pub fn seam_spread(&self) -> f32 {
+        norm3(self.seam_apart())
     }
 
     /// SEAM-ANCHOR EXPERIMENT: how far a view ray is across the seam from the
@@ -1009,6 +1389,32 @@ impl Reframe {
             true => flat.map(|c| c / reach),
             false => view_ray,
         }
+    }
+
+    /// SEAM-ANCHOR EXPERIMENT: a unit view direction beside `view_ray`'s piece
+    /// of seam whose [`Self::across_seam`] is exactly `across`.
+    ///
+    /// The inverse of [`Self::across_seam`] restricted to the great circle
+    /// through [`Self::seam_nearest`] and [`Self::seam_normal`]: take the
+    /// nearest point on the 50/50 locus and tilt it off the seam plane by
+    /// `asin(2 * across / spread)`. That is how a new anchor gets PLACED
+    /// rather than merely found - the two-state dissolve wants the incoming
+    /// line at the leading edge of the allowance, which is a chosen
+    /// across-seam angle and not wherever the view centre happens to be.
+    ///
+    /// Past what the spread can reach, and on a one-stream file, it clamps to
+    /// the seam plane's own pole rather than returning a direction that is not
+    /// one.
+    pub fn seam_ray_at(&self, view_ray: [f32; 3], across: f32) -> [f32; 3] {
+        let spread = self.seam_spread();
+        if spread <= 0.0 {
+            return unit(view_ray);
+        }
+        let normal = self.seam_normal();
+        let base = self.seam_nearest(view_ray);
+        let rise = (2.0 * across / spread).clamp(-1.0, 1.0);
+        let run = (1.0 - rise * rise).max(0.0).sqrt();
+        std::array::from_fn(|c| base[c] * run + normal[c] * rise)
     }
 
     /// How wide this camera can hand the picture over, in radians: what
@@ -1056,9 +1462,10 @@ impl Reframe {
             // One lens and no overlap, so nothing is ever handed over: the ask
             // itself, which is what a camera with room for it would get.
             crossover: crossover_deg().to_radians(),
-            // No seam, so no line to hold anywhere.
-            handover_shift: 0.0,
-            _pad: [0.0; 2],
+            // No seam, so no line to hold anywhere and nothing to dissolve.
+            handover_old: 0.0,
+            handover_new: 0.0,
+            handover_mix: 0.0,
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -1213,10 +1620,23 @@ impl Reframe {
     /// degrees past where a seam would have been
     /// (`one_stream_keeps_the_whole_of_its_picture`).
     ///
+    /// SEAM-ANCHOR EXPERIMENT: this is where the TWO held lines become one
+    /// share. The handover is evaluated at each of the two offsets and the
+    /// answers are mixed - a crossfade of two shares, so each line stays
+    /// exactly where its own anchor put it and only its weight changes. At
+    /// the zeros every caller outside the experiment passes, the two
+    /// evaluations are the same evaluation and the mix of a number with
+    /// itself is that number, which is the arithmetic that was here.
+    ///
     /// WGSL twin: `handover`.
     fn handover(&self, axis: [f32; MAX_LENSES], reach: f32, band: f32) -> f32 {
         match self.lens_count > 1.0 {
-            true => crossover(axis[0] - axis[1], reach, band, self.handover_shift),
+            true => {
+                let apart = axis[0] - axis[1];
+                let old = crossover(apart, reach, band, self.handover_old);
+                let new = crossover(apart, reach, band, self.handover_new);
+                old + (new - old) * self.handover_mix
+            }
             false => 1.0,
         }
     }
@@ -1918,10 +2338,12 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// `cos^2(theta / 2)` preference this replaces.
 ///
 /// `shift` is the seam-anchor experiment's, in radians across the seam
-/// ([`Reframe::handover_shift`]): a whole term of its own, added rather than
-/// folded into the quotient beside it, so that at the zero every caller
-/// outside the experiment passes the arithmetic is the arithmetic that was
-/// here before it and the toggled-off picture is bit-exact.
+/// ([`Reframe::handover_old`], [`Reframe::handover_new`]): a whole term of its
+/// own, added rather than folded into the quotient beside it, so that at the
+/// zero every caller outside the experiment passes the arithmetic is the
+/// arithmetic that was here before it and the toggled-off picture is
+/// bit-exact. Called twice per ray under the experiment, once at each of the
+/// two held lines' offsets ([`Reframe::handover`]).
 ///
 /// It is divided by the same band, so a shift of half the band moves the
 /// 50/50 line to the edge of the fade and a shift of zero leaves it where the
@@ -2296,15 +2718,24 @@ struct Reframe {
   // How wide this camera hands the picture over, in radians. Rust twin:
   // `Reframe::crossover`. Read by `band_width` and `band_rest`.
   crossover: f32,
-  // SEAM-ANCHOR EXPERIMENT: how far across the seam the drawn 50/50 handover
-  // line is moved from where the geometry puts it, in radians. Zero is the
-  // picture before the experiment. Rust twin: `Reframe::handover_shift`. Read
-  // by `handover`.
-  handover_shift: f32,
-  // What puts the table below on its own 16-byte boundary. Rust twin:
-  // `Reframe::_pad`, which is what makes the two layouts agree.
-  pad1: f32,
-  pad2: f32,
+  // SEAM-ANCHOR EXPERIMENT, 1 of 3: where the 50/50 handover line is drawn
+  // for the state fading OUT, as an offset across the seam from where the
+  // geometry puts it, in radians. Zero is the picture before the experiment.
+  // Rust twin: `Reframe::handover_old`. Read by `handover`.
+  handover_old: f32,
+  // 2 of 3: the same for the state fading IN, and the only live one while
+  // nothing is dissolving - then it equals `handover_old` and the mix is zero,
+  // which is one line drawn once. Rust twin: `Reframe::handover_new`.
+  handover_new: f32,
+  // 3 of 3: how far the dissolve between the two has got, 0 at the old line
+  // and 1 at the new. The handover is evaluated at BOTH offsets and the two
+  // shares are mixed by this, so neither line ever moves and only opacity
+  // does. Rust twin: `Reframe::handover_mix`.
+  //
+  // These three are also what put the table below on its own 16-byte
+  // boundary, which is the job the three padding words they replaced did and
+  // what makes the two layouts agree.
+  handover_mix: f32,
   // What the along-seam axis still disagrees by after a pose, direction by
   // direction, in radians, four to a lane. Rust twin: `Reframe::table`. Read
   // by `table_at`, which the band's own half declares because the wrapping is
@@ -2464,12 +2895,22 @@ fn claim(landing: Landing, share: f32) -> f32 {
 }
 
 // The front lens's share of the ray, and 1 for a one-stream file, which has
-// no seam to hand over at. Rust twin: `Reframe::handover`.
+// no seam to hand over at.
+//
+// SEAM-ANCHOR EXPERIMENT: this is where the two held lines become one share.
+// The handover is evaluated at each of the two offsets and the answers are
+// mixed - a crossfade of two shares, so each line stays exactly where its own
+// anchor put it and only its weight changes. At the zeros every caller outside
+// the experiment passes, the two evaluations are the same one and the mix of a
+// number with itself is that number. Rust twin: `Reframe::handover`.
 fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
   if reframe.lens_count <= 1.0 {
     return 1.0;
   }
-  return crossover(axis0 - axis1, reach, band, reframe.handover_shift);
+  let apart = axis0 - axis1;
+  let old = crossover(apart, reach, band, reframe.handover_old);
+  let fresh = crossover(apart, reach, band, reframe.handover_new);
+  return old + (fresh - old) * reframe.handover_mix;
 }
 
 // The front lens's share, from how far apart the two dot products are, across

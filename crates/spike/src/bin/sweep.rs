@@ -65,6 +65,7 @@ fn main() -> Fallible<()> {
 
     let mut previous: Option<Vec<f32>> = None;
     let mut rows: Vec<Row> = Vec::new();
+    let mut profile: Vec<Bins> = Vec::new();
     let mut kept = 0usize;
     while let Some((_, now)) = scene.frame() {
         let arrived = now >= target;
@@ -80,10 +81,13 @@ fn main() -> Fallible<()> {
         .frame(camera, Sampling::default(), size)?;
         if arrived {
             let luma = picture.luma();
-            let map = scene
-                .mapped(camera, aspect)
-                .ok_or("no map at that view")?;
+            let map = scene.mapped(camera, aspect).ok_or("no map at that view")?;
             let zones = zones(&map, size);
+            let across = across(&map, size);
+            let band = map.crossover_at(0.0).to_degrees() as f64;
+            if let Some(was) = previous.as_ref() {
+                profile.push(Bins::of(&luma, was, &across, band));
+            }
             let row = Row {
                 index: kept,
                 at: now.as_secs_f64(),
@@ -133,6 +137,25 @@ fn main() -> Fallible<()> {
         ));
     }
     std::fs::write(options.out.join("stats.csv"), csv)?;
+    // The profile is the discriminator's own file: WHERE across the seam the
+    // picture changed from one frame to the next, rather than by how much. A
+    // line that travels puts one moving lobe in here; two lines dissolving put
+    // two lobes that stay exactly where they are and trade height.
+    let mut wide = format!(
+        "frame,at,{}\n",
+        (0..BINS)
+            .map(|bin| format!("{:.4}", Bins::centre(bin)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for (row, bins) in rows.iter().skip(1).zip(&profile) {
+        wide.push_str(&format!("{},{:.4}", row.index, row.at));
+        for bin in 0..BINS {
+            wide.push_str(&format!(",{:.6}", bins.mean(bin)));
+        }
+        wide.push('\n');
+    }
+    std::fs::write(options.out.join("profile.csv"), wide)?;
     let mean = |pick: fn(&Row) -> Option<f64>| {
         let taken: Vec<f64> = rows.iter().filter_map(pick).collect();
         taken.iter().sum::<f64>() / taken.len().max(1) as f64
@@ -197,6 +220,91 @@ fn zones(map: &Reframe, size: Size) -> Vec<Zone> {
             } else {
                 Zone::Off
             };
+        }
+    }
+    out
+}
+
+/// How many bins the across-seam profile is cut into, over
+/// [`Bins::REACH`] band widths either side of the seam plane.
+const BINS: usize = 121;
+
+/// One frame's across-seam profile of what moved: the mean absolute luma step
+/// from the frame before, binned by how far the pixel is off the seam plane
+/// in the BODY's frame, which is where the seam plane stands still.
+///
+/// This is the measurement the whole change is for. The claim is that the
+/// handover never travels, and a claim about travel is a claim about WHERE
+/// the change is, not how much of it there is.
+struct Bins {
+    total: [f64; BINS],
+    count: [u64; BINS],
+}
+
+impl Bins {
+    /// How far out the profile reaches, in band widths either side.
+    const REACH: f64 = 1.5;
+
+    /// The middle of one bin, in degrees off the seam plane, on the same
+    /// signed axis `across` uses.
+    fn centre(bin: usize) -> f64 {
+        let span = 2.0 * Self::REACH / BINS as f64;
+        -Self::REACH + span * (bin as f64 + 0.5)
+    }
+
+    fn of(now: &[f32], was: &[f32], across: &[f32], band: f64) -> Self {
+        let mut bins = Self {
+            total: [0.0; BINS],
+            count: [0; BINS],
+        };
+        let span = 2.0 * Self::REACH / BINS as f64;
+        for index in 0..across.len().min(now.len()).min(was.len()) {
+            let at = f64::from(across[index]);
+            if !at.is_finite() || band <= 0.0 {
+                continue;
+            }
+            let widths = at / band;
+            let bin = ((widths + Self::REACH) / span).floor();
+            if bin < 0.0 || bin >= BINS as f64 {
+                continue;
+            }
+            let bin = bin as usize;
+            bins.total[bin] += f64::from((now[index] - was[index]).abs());
+            bins.count[bin] += 1;
+        }
+        bins
+    }
+
+    fn mean(&self, bin: usize) -> f64 {
+        match self.count[bin] {
+            0 => 0.0,
+            count => self.total[bin] / count as f64,
+        }
+    }
+}
+
+/// How far each pixel of the view is off the seam plane, in **degrees, with a
+/// sign**, in the body's own frame. [`zones`]'s measure without the absolute
+/// value and without the thresholding, which is what a profile needs.
+///
+/// `f32::NAN` where the ray misses the picture, which [`Bins::of`] drops.
+fn across(map: &Reframe, size: Size) -> Vec<f32> {
+    let mut out = vec![f32::NAN; (size.width * size.height) as usize];
+    for y in 0..size.height {
+        for x in 0..size.width {
+            let uv = [
+                (x as f32 + 0.5) / size.width as f32,
+                (y as f32 + 0.5) / size.height as f32,
+            ];
+            let Some(ray) = map.view_ray(uv) else {
+                continue;
+            };
+            let body = map.body_ray(ray);
+            let length = (body[0] * body[0] + body[1] * body[1] + body[2] * body[2]).sqrt();
+            if length <= 0.0 {
+                continue;
+            }
+            out[(y * size.width + x) as usize] = (body[2] / length).asin().to_degrees();
         }
     }
     out
