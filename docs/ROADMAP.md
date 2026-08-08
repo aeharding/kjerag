@@ -579,6 +579,39 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-08 **The seam's temporal bundle is the default behaviour, and its
+  three research toggles are deleted rather than defaulted**
+  (docs/research/seam-temporal.md 9, docs/research/reference-views.md). Three
+  changes the owner picked blind at six views on 2026-08-08 - a steeper blend
+  curve inside the same 8 degree support, a gate on the way out filtered at 2 s,
+  and a direction's first reading walked in through that filter instead of
+  switching on whole - shipped together, because that is the combination he
+  answered on. He said the bundle at `down1`, `down2`, `down3` and `shimmer`,
+  "same" at `good`, and at `bad` picked the middle arm and then added "I like 3
+  on F too"; of the round, "it actually perceptually distorts a bit less".
+  `down1` and `down3` flipped from the round before, and the only thing that
+  changed between them is the arrival staging.
+
+  **The toggles disappear.** `KJERAG_BLEND_CURVE`, `KJERAG_TRUST` and
+  `KJERAG_ARRIVE` are gone and so is the code they selected: an A/B harness
+  that wants the old picture builds the old commit, which it can always do, and
+  a configuration switch nothing reads is complexity with no reader. This is
+  not the same call as `KJERAG_HANDOVER_DEG`, which stays because it selects a
+  value on a continuum that the next A/B will want to sweep again; these three
+  selected a behaviour that has now been chosen.
+
+  **The null is not byte-identity against `main`.** This change moves the
+  picture on purpose. What was checked instead is byte-identity against the
+  ARM HE ANSWERED ON: md5-equal renders with the band live at all six A/B
+  views, under two calibration paths, against the same binary the blind session
+  used. What ships is what he saw.
+
+  Known and disclosed rather than fixed: the **comb** - a dead neighbour cell
+  zeroing a live cell's correction, so the corrected patch has a hole in the
+  middle - gets deeper, 217 to 256 frames of 300 at `bad`. It is the next build
+  and he was told about it before he answered. Untouched: the roughly one degree
+  across-seam residual on his downward arc, which is the expensive work.
+
 - 2026-08-07 **An acceptance line names the pose instead of copying it**
   (`seam=pool`, docs/research/reference-views.md). Three acceptance commands -
   the shimmer line, the May-01 crossing pair, and the `--bin step` block under

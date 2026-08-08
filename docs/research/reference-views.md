@@ -440,6 +440,73 @@ is stage 10 and near-field alignment. Far-field alignment answers to the absolut
 not to Studio.
 STATUS: two clips, one snap each, no measurement taken off either yet.
 
+## Motion: the seam over time, blind, round two (VERDICT: the bundle, and it SHIPPED)
+
+The six views of `~/kjerag-ab/temporal-ab.sh`, staged 2026-08-08 as three arms of one binary
+built from `feat/seam-temporal` at 69db6d2, six views, order balanced so each arm sat in each
+position at exactly two views. The arms were `baseline` (proven byte-identical to `main`),
+`c3c1a` (the steeper blend curve plus the filtered gate) and `c3c1astage` (that plus walking a
+direction's first reading in). The owner answered blind; the key is `temporal-ab-key.txt`.
+
+**VERDICT: `c3c1astage` won or tied at all six, and it is the app's default behaviour since
+this PR.** In his words the bundle "actually perceptually distorts a bit less". At `bad` he
+first picked `c3c1a` and then added "I like 3 on F too", which is the bundle, so the bundle is
+preferred-or-acceptable at every one of the six. Nothing here is a still: he asked for live
+video only ("we're at the point where live video is the only/best discriminator").
+
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=65.666 yaw=179.00 pitch=-36.97 fov=20.00 lock=1` down1
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=64.765 yaw=-179.66 pitch=-38.46 fov=20.00 lock=1` down2
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=69.403 yaw=175.14 pitch=-37.65 fov=20.00 lock=1` down3
+  The three banked downward views on May-01, the ones the whole round exists for: the seam
+  running down through the ground under the aircraft. OWNER VERDICT: the bundle at all three.
+  `down1` and `down3` FLIPPED from round one, where he had said "same" at `down1` and picked
+  baseline at `down3`; what changed between the rounds is the arrival staging and nothing else.
+- 2026-08-08 `VID_20260714_193252_00_006.insv time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1` shimmer
+  The July-14 anchor, the same aim as the Motion section at the top of this file, watched for
+  steadiness rather than sharpness while the seam sweeps 393 px down the picture.
+  OWNER VERDICT: the bundle.
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=50.117 yaw=-80.28 pitch=0.06 fov=55.69 lock=1` good
+  OWNER VERDICT: **same**. Nothing this round is aimed at the crossings; they were staged as the
+  thing that must not get worse, and they did not.
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=50.117 yaw=101.13 pitch=0.75 fov=62.79 lock=1` bad
+  The same instant, the other crossing, and the view he was decisive about in round one.
+  OWNER VERDICT: "1", then "I like 3 on F too" - `c3c1a` first and the bundle acceptable.
+
+STATUS 2026-08-08, on the SHIP binary rather than on the research one, which is the point of the
+row: `--bin band mode=render count=40 size=1024` renders **md5-identical** frames to the
+`c3c1astage` arm at all six views, under `seam=factory` and again under `seam=file`. What ships
+is what he answered on, checked by md5 and not by argument.
+
+STATUS 2026-08-08, delivered steadiness, `--bin band mode=snap count=300 size=1024 seam=file`,
+21 probes across the picture, counting every frame-to-frame step the correction delivers on the
+across-seam axis. `main` is the same instrument run against the A/B's baseline arm on the same
+box the same evening:
+
+  | view | steps of 10+ view px, main | ship | worst step, main | ship |
+  | --- | ---: | ---: | ---: | ---: |
+  | down1 | 73 | **1** | 56.4 | **11.5** |
+  | down3 | 115 | **2** | 56.4 | **12.5** |
+  | bad | 3 | **0** | 13.2 | **0** |
+
+  Every one of `main`'s largest steps is an arrival - 15 of the 73 at `down1` and 19 of the 115
+  at `down3`, all of them at 56.4 view px, which is one direction's whole correction switching on
+  in one frame. On the ship binary the arrival class contributes **no step over 10 px at any of
+  the three**. At 3 view px and over the same runs read 247 -> 32, 418 -> 85 and 71 -> 7.
+
+  WHAT GOT WORSE, and it is disclosed rather than fixed: the **comb**. A dead neighbour cell
+  zeroes a live cell's correction, so the corrected patch has a hole in the middle of it, and
+  holding the gate up for longer means more frames have one. Frames of 300 whose delivered field
+  peaks past 10 view px and comes back under 2 somewhere strictly inside its own reach:
+  **down1 24 -> 40, down3 45 -> 100, bad 217 -> 256**. The `bad` figure reproduces the 257 the
+  characterization measured. This is the next build and it is named as such; the owner was told
+  about it before he answered ("If what you see is a stripe across the corrected area rather than
+  a jump in time, that is this") and answered anyway.
+
+  UNTOUCHED, and on a separate line: the roughly 20 view px epipolar defect at `bad` itself. The
+  cells' own readings are identical on both arms to every digit - read rms 4.6, p99 19.7, worst
+  22.8 view px at `bad` and 17.9 / 56.4 at `down1` - because this PR changes how a measurement is
+  SPENT and not what is measured. The residual is the expensive work and it is not this.
+
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas
