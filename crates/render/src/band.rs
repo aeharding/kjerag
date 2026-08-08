@@ -223,6 +223,79 @@ const TAU_NEAR_S: f32 = 0.10;
 /// gate followed it whole.
 const TAU_TRUST_S: f32 = 2.0;
 
+/// Whether a cell's evidence reaches past its own two spans, from
+/// `KJERAG_COMB`. `share` is the only value it takes; anything else, and the
+/// unset every shipped run has, is the one-cell reach that ships.
+///
+/// **The defect it is aimed at is the comb** (docs/research/seam-temporal.md
+/// 9.4, and the owner on 2026-08-08: *"the seam snaps to snap points that are
+/// too far apart. Needs closer, maybe overlap?"*). A ray between two cells
+/// takes the live one's reading and the PAIR's mixed gate, so one blind
+/// neighbour drags a live cell's correction to nothing across their whole
+/// shared span and the delivered field has a hole in the middle of the patch
+/// it is correcting rather than a lobe at the edge of it.
+///
+/// Not a setting, not a key and not a menu item (AGENTS.md, zero-config
+/// playback): an environment variable, read once, written nowhere. It exists
+/// for one blind A/B and goes when that is answered, the way
+/// `KJERAG_BLEND_CURVE` did.
+const COMB_SHARE: &str = "KJERAG_COMB";
+
+/// What [`COMB_SHARE`] has to say to get the shared reach.
+const SHARE: &str = "share";
+
+/// How far a cell's evidence carries, in cells, on the shared arm.
+///
+/// **Two, because one is the number that cannot taper.** The value a ray takes
+/// is a hat-weighted average of the cells' readings and the gate is what says
+/// how much of it to apply; at a reach of one the hat's own weight is already
+/// zero at the neighbour's centre, so a live cell beside a blind one asserts
+/// its whole reading right up to that centre while the gate it is applied at
+/// falls to nothing over the same span. The two disagree, and the disagreement
+/// IS the comb. Widening both to two cells makes them agree: the value fades
+/// over the same distance the gate does, and they reach zero together.
+///
+/// It is also what decides the refusal, exactly. At a cell's own centre the
+/// gate is the largest of that cell's and its two neighbours', so an arc of
+/// **three** dead cells in a row still delivers nothing at the middle one, and
+/// the correction fades to it rather than stepping. One blind cell between two
+/// live ones is bridged; a blind ARC is still refused.
+///
+/// A third cell would carry a lone reading 8.4 degrees, which is past anything
+/// the band could have looked at: a patch is [`SPAN_DEG`] wide and the cells
+/// are 2.81 degrees apart, so two cells is already the outer edge of what the
+/// evidence either side of a gap can be said to cover.
+pub(crate) const SHARE_REACH: f32 = 2.0;
+
+/// How far this run lets a cell's evidence carry, in cells, which is 1 - the
+/// reach that ships - unless [`COMB_SHARE`] asked for the shared one.
+///
+/// Read once, like `projection::blend_power`, and read by both halves of the
+/// lookup: the Rust one calls it from `Reframe::reading_at` and the shader is
+/// given the same number as a constant by [`lookup_wgsl`]. One `OnceLock` and
+/// no second copy.
+pub(crate) fn reach_cells() -> f32 {
+    static REACH: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *REACH.get_or_init(|| {
+        let Ok(asked) = std::env::var(COMB_SHARE) else {
+            return 1.0;
+        };
+        if asked != SHARE {
+            eprintln!(
+                "kjerag: {COMB_SHARE}={asked} is not {SHARE:?}, so a cell's evidence keeps the \
+                 one-cell reach it ships with"
+            );
+            return 1.0;
+        }
+        println!(
+            "comb:   research reach on, {COMB_SHARE}={SHARE}: a cell's evidence carries \
+             {SHARE_REACH} cells instead of 1, so a blind cell between two live ones takes their \
+             answer instead of punching a hole through it"
+        );
+        SHARE_REACH
+    })
+}
+
 /// The most **shear** the crossover may be left with, as a fraction of 1.
 ///
 /// The bend varies from zero to the whole disparity across the band, so its
@@ -1733,9 +1806,11 @@ pub(crate) fn lookup_wgsl() -> String {
     format!(
         "const AZIMUTHS = {AZIMUTHS}u;\nconst SPEND = {SPEND:?};\nconst KEEP = {KEEP:?};\n\
          const WIDEST = {widest:?};\nconst TAU = {tau:?};\nconst LIMIT_LN = {LIMIT_LN:?};\n\
+         const REACH = {reach:?};\n\
          {CELL}{RING}{LOOKUP}",
         widest = WIDEST_DEG.to_radians(),
         tau = std::f32::consts::TAU,
+        reach = reach_cells(),
     )
 }
 
@@ -1940,7 +2015,18 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // is zero and `band_width` returns the shipped crossover, which is exactly
   // the picture before this existed: the fallback is stage 1 and it is reached
   // by arithmetic rather than by a branch. Rust twin: `Reframe::reading_at`.
-  let applied = carry(a, b, mix);
+  //
+  // On the shared arm the same lookup reads REACH cells either way instead of
+  // one, so a blind cell between two live ones takes their answer rather than
+  // punching a hole through it. REACH is a constant the pipeline is built with,
+  // so this branch is uniform over the whole draw. Rust twin: the `match` in
+  // `Reframe::reading_at`.
+  var applied = 0.0;
+  if REACH > 1.0 {
+    applied = carry_shared(low, mix);
+  } else {
+    applied = carry(a, b, mix);
+  }
   // The along-seam axis is NOT read cell by cell. It is one fitted field over
   // the whole circle, because the phenomenon is one - a relative pose error
   // with a constant, a one-cycle and a two-cycle term - and because a field
@@ -2009,6 +2095,42 @@ fn carry(a: Cell, b: Cell, mix: f32) -> f32 {
     return 0.0;
   }
   return (ea * a.disparity + eb * b.disparity) / total * mix2(a.trust, b.trust, mix);
+}
+
+// The same channel with a cell's evidence reaching REACH cells instead of one:
+// the shared arm of `KJERAG_COMB`, and the answer to the comb the function
+// above leaves. Rust twin: `Reframe::channel_shared`, which carries the whole
+// argument.
+//
+// Two weights over the four cells within reach of this span. `hat` is the
+// evidence triangle the value is averaged over, widened, and the evidence in it
+// is `confidence * trust` and not the confidence: a cell whose gate is still
+// nothing has a reading none of which may reach the picture, and weighing by
+// the raw confidence would let the `max` below apply an arriving direction's
+// first reading in full at its neighbour's trust, which is the arrival staging
+// undone. `gate` is flat over the first cell and falls to nothing over the
+// second, and it is taken as a LARGEST rather than as a mean or a sum, because
+// two cells covering one direction is that direction covered twice and not
+// twice as much correction. They reach zero at the same distance, which is what
+// stops the field walking off a cliff at the edge of a lone reading, and at a
+// cell's own centre the gate is the largest of it and its two neighbours, so
+// three dead cells in a row still deliver exactly nothing at the middle one.
+fn carry_shared(low: i32, mix: f32) -> f32 {
+  var evidence = 0.0;
+  var value = 0.0;
+  var gate = 0.0;
+  for (var ahead = 0; ahead < 4; ahead = ahead + 1) {
+    let cell = band.cells[u32(low - 1 + ahead + i32(AZIMUTHS)) % AZIMUTHS];
+    let away = abs(mix - f32(ahead - 1));
+    let hat = max(1.0 - away / REACH, 0.0) * cell.confidence * cell.trust;
+    evidence = evidence + hat;
+    value = value + hat * cell.disparity;
+    gate = max(gate, cell.trust * clamp(REACH - away, 0.0, 1.0));
+  }
+  if evidence <= 0.0 {
+    return 0.0;
+  }
+  return value / evidence * gate;
 }
 
 // How wide the handover has to be to carry this disparity without folding,
