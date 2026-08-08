@@ -14,6 +14,12 @@
 //! Hand rolled rather than through a parser crate: two flags, one path and
 //! five keys is the whole grammar, and a terminal user tries the flags before
 //! anything else.
+//!
+//! [`AB_SESSION`] is a third flag and is deliberately not in [`help`]. It is
+//! the research path (`crate::ab`), it is staged by an agent rather than
+//! typed by a pilot, and the same rule keeps `KJERAG_HANDOVER_DEG` out of the
+//! window: not a setting, not a key and not a menu item. `~/kjerag-ab/
+//! AGENTS-AB.md` is where it is written down.
 
 use std::path::PathBuf;
 
@@ -23,17 +29,58 @@ use kjerag_render::Framing;
 pub enum Args {
     /// The file to open, and where in it to land.
     Play(Option<PathBuf>, Option<Framing>),
+    /// A staged blind A/B session file, and nothing else: the file names its
+    /// own clips and its own views (`crate::ab`). Research path only.
+    Ab(PathBuf),
+    /// The same file, read and checked, and then nothing: no window, no
+    /// decode and no sound. What an agent staging a session runs to find out
+    /// whether it staged one.
+    AbCheck(PathBuf),
+    /// The same file, and the key it implies: which arm each position of each
+    /// trial is. The coordinator's, and the only thing that turns an answered
+    /// position into an arm.
+    AbKey(PathBuf),
     Help,
     Version,
 }
 
+/// The research path's three flags. One file, and what to do with it: run it,
+/// say its shape, or say its key.
+///
+/// The key is printed by the app and not derived by the runner script,
+/// because a second reader of this grammar is a key that can drift from the
+/// session it unblinds, and a blind A/B unblinded to the wrong arm is worse
+/// than one never run.
+const AB_SESSION: &str = "--ab-session";
+const AB_CHECK: &str = "--ab-check";
+const AB_KEY: &str = "--ab-key";
+
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut input = None;
     let mut view = Vec::new();
+    let mut session = None;
+    let mut about: fn(PathBuf) -> Args = Args::Ab;
     for arg in args {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Args::Help),
             "-V" | "--version" => return Ok(Args::Version),
+            flag if [AB_SESSION, AB_CHECK, AB_KEY]
+                .iter()
+                .any(|named| flag.starts_with(named)) =>
+            {
+                let (named, what): (_, fn(PathBuf) -> Args) = match flag {
+                    _ if flag.starts_with(AB_CHECK) => (AB_CHECK, Args::AbCheck),
+                    _ if flag.starts_with(AB_KEY) => (AB_KEY, Args::AbKey),
+                    _ => (AB_SESSION, Args::Ab),
+                };
+                let file = flag
+                    .strip_prefix(named)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .filter(|file| !file.is_empty())
+                    .ok_or_else(|| format!("{named} needs a file: {named}=<file>"))?;
+                session = Some(PathBuf::from(file));
+                about = what;
+            }
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
             // One of the view's five keys, and nothing else with an `=` in
             // it: a file whose name has one is still a file.
@@ -43,6 +90,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         }
     }
     let at = Framing::read(view.iter().map(String::as_str))?;
+    // Refused rather than resolved. A session names the clip and the view of
+    // every trial it has, so a file or a view beside it is two answers to one
+    // question and one of them would be quietly dropped.
+    if let Some(file) = session {
+        if input.is_some() || at.is_some() {
+            return Err(format!(
+                "{AB_SESSION} names its own clips and its own views, so nothing else goes on the \
+                 line with it"
+            ));
+        }
+        return Ok(about(file));
+    }
     if at.is_some() && input.is_none() {
         return Err("a view needs the file it is a view of".to_owned());
     }
@@ -135,6 +194,23 @@ mod tests {
         let (input, at) = played("/home/pilot/a=b.insv");
         assert_eq!(input, Some(PathBuf::from("/home/pilot/a=b.insv")));
         assert_eq!(at, None);
+    }
+
+    /// The research path: one flag, one file, and the file says the rest.
+    #[test]
+    fn a_session_is_the_whole_line() {
+        assert_eq!(
+            parse_words("--ab-session=/tmp/s.ab"),
+            Ok(Args::Ab(PathBuf::from("/tmp/s.ab")))
+        );
+        // Two answers to one question, one of which would be dropped.
+        assert!(parse_words("--ab-session=/tmp/s.ab a.insv").is_err());
+        assert!(parse_words("--ab-session=/tmp/s.ab time=1 yaw=0 pitch=0 fov=90 lock=1").is_err());
+        // A flag that names nothing names nothing.
+        assert!(parse_words("--ab-session").is_err());
+        assert!(parse_words("--ab-session=").is_err());
+        // Help and version still win wherever they are.
+        assert_eq!(parse_words("--ab-session=/tmp/s.ab -V"), Ok(Args::Version));
     }
 
     /// Loud, per the existing rule for anything the command line does not

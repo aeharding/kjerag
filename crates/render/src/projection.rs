@@ -39,6 +39,7 @@
 
 use std::f32::consts::PI;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
 
@@ -247,6 +248,74 @@ const OVERLAP_DEG: f32 = 14.0;
 /// after the stored calibration lands, and again by `fit_into` if a fallback
 /// fit moves it).
 fn crossover_deg() -> f32 {
+    match ASKED.load(Ordering::Relaxed) {
+        UNASKED => from_env(),
+        bits => f32::from_bits(bits),
+    }
+}
+
+/// What [`ask_handover`] last asked for, as bits, or [`UNASKED`].
+///
+/// An atomic and not a field on [`super::Scene`] because the value it stands
+/// in for is a process-wide environment variable and this is the same reach:
+/// one width, read by whichever map is being built. Plumbing it through the
+/// scene would be a second way to say one thing, and the CPU twin
+/// ([`Reframe::crossover_at`]) reads it from the same place the pass does.
+///
+/// Relaxed because there is nothing to order it against: one `f32`, written
+/// by the shell thread on a keypress, read by the same thread while it builds
+/// the block. A frame drawn with either width is a frame that was asked for.
+static ASKED: AtomicU32 = AtomicU32::new(UNASKED);
+
+/// No width asked for, so [`from_env`] has the answer.
+///
+/// All ones is a quiet NaN, and [`handover`] refuses anything not finite, so
+/// no width this ever stores can collide with it.
+const UNASKED: u32 = u32::MAX;
+
+/// Research only: draw the handover this many degrees wide from the next
+/// frame on, instead of what [`HANDOVER_DEG`] or [`CROSSOVER_DEG`] say.
+///
+/// The A/B harness's hook, and the reason it is here rather than in the
+/// harness: an arm has to reach the shader by the path the shipped width
+/// takes, or what is compared is the harness's own copy of the blend
+/// (`crates/app/src/ab.rs`, and the same rule as [`super::Scene::hold_at`]).
+///
+/// **It applies on the next redraw and costs nothing to apply.** The width
+/// is not in the shader and not in the pipeline: `ScenePipeline::prepare`
+/// rebuilds the whole uniform block every frame and writes it, so the store
+/// below is the entire cost of a swap and the first frame drawn after it
+/// carries the new width. Nothing is recompiled and no buffer is recreated.
+///
+/// Unset is unset: a run that never calls this reads the environment exactly
+/// as it did before, which is what keeps a session-free run the shipped
+/// player.
+pub fn ask_handover(width: f32) -> Result<(), String> {
+    let width = takes_handover(width)?;
+    ASKED.store(width.to_bits(), Ordering::Relaxed);
+    Ok(())
+}
+
+/// Whether [`ask_handover`] would take this width, **without asking for it**.
+///
+/// Two functions for one bound because the two happen at different times: a
+/// session file is checked before a window opens (`crates/app/src/ab.rs`) and
+/// a check that quietly set the width would leave the last arm of the file
+/// applied to the first frame of the first trial. The bound itself is written
+/// once, below.
+pub fn takes_handover(width: f32) -> Result<f32, String> {
+    match width.is_finite() && width > 0.0 && width <= OVERLAP_DEG {
+        true => Ok(width),
+        false => Err(format!(
+            "{width} is not a handover width between 0 and the {OVERLAP_DEG} degrees the two \
+             lenses overlap by"
+        )),
+    }
+}
+
+/// The width [`HANDOVER_DEG`] named, read once, which is what a run with no
+/// A/B session in it draws with.
+fn from_env() -> f32 {
     static WIDTH: OnceLock<f32> = OnceLock::new();
     *WIDTH.get_or_init(|| {
         let Ok(asked) = std::env::var(HANDOVER_DEG) else {
@@ -277,13 +346,12 @@ fn handover(asked: &str) -> Result<f32, String> {
     let width = asked
         .parse::<f32>()
         .map_err(|e| format!("{HANDOVER_DEG}={asked}: {e}"))?;
-    match width.is_finite() && width > 0.0 && width <= OVERLAP_DEG {
-        true => Ok(width),
-        false => Err(format!(
+    takes_handover(width).map_err(|_| {
+        format!(
             "{HANDOVER_DEG}={asked} is not a width between 0 and the {OVERLAP_DEG} degrees the two \
              lenses overlap by"
-        )),
-    }
+        )
+    })
 }
 
 /// How many lenses one pass can sample.

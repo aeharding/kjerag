@@ -167,6 +167,34 @@ CI does not run it and cannot: decode is VA-API against
 device every file is refused with `av_hwdevice_ctx_create: Input/output
 error` (measured), so a GPU-less runner would be checking nothing.
 
+## Blind A/B sessions (the owner's eye is the instrument)
+
+Quality questions this project cannot measure are answered by showing the
+owner two or more pictures with no labels on them. **Do not write another
+`*-ab.sh`.** There is one runner and one format:
+
+```sh
+cd ~/kjerag-ab
+./ab.sh --check sessions/<yours>.ab   # read and refuse it, open nothing
+./ab.sh --cage  sessions/<yours>.ab   # drive it yourself, headless
+./ab.sh --draw <arms> <trials>        # a balanced order, off /dev/urandom
+```
+
+`~/kjerag-ab/AGENTS-AB.md` is the whole of how to stage one and is written for
+you. The short version: a session file lists trials (a clip, a view line, a
+loop and the arms in the order to show them), `kjerag --ab-session=<file>`
+loops each segment and hands the picture from arm to arm on a digit **inside
+one playback**, and the answer is appended as a position that only the key
+file turns back into an arm. What an arm may set is `ab::KNOBS` in
+`crates/app/src/ab.rs`, which classifies a knob by where its value is read and
+refuses, by name and with the reason, anything the running pass cannot take
+mid-flight.
+
+**Never run the bare `./ab.sh <session>` yourself**: it opens a window on the
+owner's display, and that form exists for him. Agents use `--cage` or
+`--check`, and the same goes for every other way of starting the app. It is
+the sound etiquette rule with a screen instead of a speaker.
+
 ## Releasing
 
 `cargo release patch --execute` on `main`, and that is the whole of it

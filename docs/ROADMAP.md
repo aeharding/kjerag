@@ -579,6 +579,45 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-08 **A blind A/B is a file the app reads, and the arms hand over
+  inside one playback** (`crates/app/src/ab.rs`, `~/kjerag-ab/AGENTS-AB.md`).
+  `kjerag --ab-session=<file>` loops a segment of a clip and swaps between
+  named sets of research-config values on a digit; enter answers with whatever
+  is on screen, and the answer is appended to a tab separated results file as a
+  POSITION. Four hand rolled scripts had each rebuilt the same pattern
+  (`~/kjerag-ab/temporal-ab.sh` and its siblings); each of them launched the
+  player once per arm, so two arms of one view were two decodes, two seam
+  warm-ups and two walks to the same second of film, minutes apart, with the
+  comparison carried across the gap in the owner's memory. Now it is one
+  window, one decode, and a keypress.
+
+  **Measured: the swap is 2 microseconds and it lands on the frame already on
+  screen.** Paused, so the film is standing still and only an arm can move the
+  picture, two captures with nothing changed between them are md5-equal and
+  every arm press changes the capture; pressing back to the first arm returns
+  its exact bytes. Presented fps over 45 s with a swap every second is 29.80
+  against 29.96 for plain playback, 0 dropped frames either way. The session's
+  own 10 Hz loop timer is what the difference is, not the swap.
+
+  **What can be swapped is a property of where a value is read, and the table
+  is `ab::KNOBS`.** Live: the handover width and the sampling mode, because
+  `ScenePipeline::prepare` rebuilds and writes the whole uniform block every
+  frame. Not live, and refused **by name with the reason** before a window
+  opens: anything substituted into WGSL source, which is compiled once before
+  any file is open (the blend exponent and everything it derives, the azimuth
+  count, the band search's constants), and anything the seam fit consumes at
+  file open. A session that asks for one of those is turned away rather than
+  half applied.
+
+  **The one new hook is the handover width**, and it is a smaller change than
+  it sounds: `Reframe.crossover` was already rebuilt into the uniform block and
+  written to the GPU every frame, so the only thing holding it still was the
+  `OnceLock` around the environment read. That becomes an atomic with an
+  unasked sentinel, and a run that never asks reads the environment exactly as
+  it did before. Null: the band-live render is md5-identical to `main` at three
+  views under both calibration paths, six of six, and the same instrument
+  separates a 2 degree handover from the shipped 8.
+
 - 2026-08-08 **The seam's temporal bundle is the default behaviour, and its
   three research toggles are deleted rather than defaulted**
   (docs/research/seam-temporal.md 9, docs/research/reference-views.md). Three
