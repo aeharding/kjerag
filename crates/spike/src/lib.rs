@@ -20,6 +20,7 @@
 
 pub mod crossing;
 mod offscreen;
+pub mod offset;
 mod picture;
 pub mod registration;
 mod seam;
