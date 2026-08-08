@@ -16,15 +16,27 @@
 
 use std::process::ExitCode;
 
-use kjerag::{app, args};
+use kjerag::{ab, app, args};
 
 fn main() -> ExitCode {
+    let played = |input, at, session| match app::run(input, at, session) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("kjerag: {e}");
+            ExitCode::FAILURE
+        }
+    };
     match args::parse(std::env::args().skip(1)) {
-        Ok(args::Args::Play(input, at)) => match app::run(input, at) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("kjerag: {e}");
-                ExitCode::FAILURE
+        Ok(args::Args::Play(input, at)) => played(input, at, None),
+        // The session is read and checked here, before a window opens, and a
+        // session that asks for something the running pass cannot hand over
+        // is refused with the same exit code a bad command line gets. An A/B
+        // that half applied would be worse than one that never started.
+        Ok(args::Args::Ab(file)) => match ab::open(&file) {
+            Ok(session) => played(None, None, Some(session)),
+            Err(said) => {
+                eprintln!("kjerag: {said}");
+                ExitCode::from(2)
             }
         },
         Ok(args::Args::Help) => {

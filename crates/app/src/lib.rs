@@ -12,6 +12,7 @@
 //! which is the question an acceptance line exists to hold still
 //! (docs/research/reference-views.md).
 
+pub mod ab;
 pub mod app;
 pub mod args;
 pub mod config;

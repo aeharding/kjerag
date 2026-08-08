@@ -14,6 +14,12 @@
 //! Hand rolled rather than through a parser crate: two flags, one path and
 //! five keys is the whole grammar, and a terminal user tries the flags before
 //! anything else.
+//!
+//! [`AB_SESSION`] is a third flag and is deliberately not in [`help`]. It is
+//! the research path (`crate::ab`), it is staged by an agent rather than
+//! typed by a pilot, and the same rule keeps `KJERAG_HANDOVER_DEG` out of the
+//! window: not a setting, not a key and not a menu item. `~/kjerag-ab/
+//! AGENTS-AB.md` is where it is written down.
 
 use std::path::PathBuf;
 
@@ -23,17 +29,32 @@ use kjerag_render::Framing;
 pub enum Args {
     /// The file to open, and where in it to land.
     Play(Option<PathBuf>, Option<Framing>),
+    /// A staged blind A/B session file, and nothing else: the file names its
+    /// own clips and its own views (`crate::ab`). Research path only.
+    Ab(PathBuf),
     Help,
     Version,
 }
 
+/// The research path's one flag.
+const AB_SESSION: &str = "--ab-session";
+
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut input = None;
     let mut view = Vec::new();
+    let mut session = None;
     for arg in args {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Args::Help),
             "-V" | "--version" => return Ok(Args::Version),
+            flag if flag.starts_with(AB_SESSION) => {
+                let file = flag
+                    .strip_prefix(AB_SESSION)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .filter(|file| !file.is_empty())
+                    .ok_or_else(|| format!("{AB_SESSION} needs a file: {AB_SESSION}=<file>"))?;
+                session = Some(PathBuf::from(file));
+            }
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
             // One of the view's five keys, and nothing else with an `=` in
             // it: a file whose name has one is still a file.
@@ -43,6 +64,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         }
     }
     let at = Framing::read(view.iter().map(String::as_str))?;
+    // Refused rather than resolved. A session names the clip and the view of
+    // every trial it has, so a file or a view beside it is two answers to one
+    // question and one of them would be quietly dropped.
+    if let Some(file) = session {
+        if input.is_some() || at.is_some() {
+            return Err(format!(
+                "{AB_SESSION} names its own clips and its own views, so nothing else goes on the \
+                 line with it"
+            ));
+        }
+        return Ok(Args::Ab(file));
+    }
     if at.is_some() && input.is_none() {
         return Err("a view needs the file it is a view of".to_owned());
     }
@@ -135,6 +168,23 @@ mod tests {
         let (input, at) = played("/home/pilot/a=b.insv");
         assert_eq!(input, Some(PathBuf::from("/home/pilot/a=b.insv")));
         assert_eq!(at, None);
+    }
+
+    /// The research path: one flag, one file, and the file says the rest.
+    #[test]
+    fn a_session_is_the_whole_line() {
+        assert_eq!(
+            parse_words("--ab-session=/tmp/s.ab"),
+            Ok(Args::Ab(PathBuf::from("/tmp/s.ab")))
+        );
+        // Two answers to one question, one of which would be dropped.
+        assert!(parse_words("--ab-session=/tmp/s.ab a.insv").is_err());
+        assert!(parse_words("--ab-session=/tmp/s.ab time=1 yaw=0 pitch=0 fov=90 lock=1").is_err());
+        // A flag that names nothing names nothing.
+        assert!(parse_words("--ab-session").is_err());
+        assert!(parse_words("--ab-session=").is_err());
+        // Help and version still win wherever they are.
+        assert_eq!(parse_words("--ab-session=/tmp/s.ab -V"), Ok(Args::Version));
     }
 
     /// Loud, per the existing rule for anything the command line does not
