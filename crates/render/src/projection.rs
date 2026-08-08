@@ -40,7 +40,7 @@
 use std::f32::consts::PI;
 use std::sync::OnceLock;
 
-use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
+use kjerag_meta::{Intrinsics, Lens, Pose, Pro, Quat};
 
 use super::sampling::Sampling;
 use super::{Camera, Size};
@@ -499,6 +499,21 @@ struct LensBlock {
     k3: f32,
     p1: f32,
     p2: f32,
+    /// `offset_v6`'s eight extra terms, and the flag that says to read them.
+    ///
+    /// `pro` is 0 on every block built from a v3 calibration, which is what
+    /// keeps that block's landing bit for bit what it was before v6 existed:
+    /// the model branches on it, and the branch is uniform across the whole
+    /// pass because a calibration does not change per fragment.
+    k4: f32,
+    k5: f32,
+    p1_r2: f32,
+    p2_r2: f32,
+    s1: f32,
+    s2: f32,
+    s3: f32,
+    s4: f32,
+    pro: f32,
     image_radius: f32,
     /// The cosine of the widest angle off this lens's axis that can still be
     /// in its picture, widened by [`CAP_MARGIN_DEG`] and by whatever the
@@ -521,10 +536,13 @@ struct LensBlock {
     /// half turn apart, which is exactly why a readout displacement does not
     /// cancel between them at the seam.
     turn: [f32; 3],
-    /// A uniform array's element stride rounds up to the element's 16-byte
-    /// alignment. WGSL does that itself; `repr(C)` does not.
-    _pad: [f32; 1],
 }
+
+/// A uniform array's element stride rounds up to the element's 16-byte
+/// alignment. WGSL does that itself; `repr(C)` does not, so a block whose
+/// fields do not already fill a whole number of them would need a pad here,
+/// and this is what says whether they do.
+const _: () = assert!(size_of::<LensBlock>().is_multiple_of(16));
 
 /// Where a view ray lands in one lens's image, in delivered-frame pixels.
 ///
@@ -1364,9 +1382,16 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
     let y = p[1] / denom;
 
     let r2 = x * x + y * y;
-    let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
-    let xd = x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x);
-    let yd = y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y);
+    let [xd, yd] = match lens.pro == 0.0 {
+        true => {
+            let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
+            [
+                x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x),
+                y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y),
+            ]
+        }
+        false => radtan_pro(lens, x, y, r2),
+    };
 
     let offset = [lens.fx * xd, lens.fy * yd];
     // How far round the map can be believed, which is not as far as it
@@ -1390,6 +1415,28 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
         axis: p[2],
         depth,
     }
+}
+
+/// The thirteen coefficients `offset_v6` writes, evaluated the way Insta360
+/// Studio's `OmniProjection<RadtanDistortPro>` evaluates them
+/// ([`kjerag_meta::Pro`] carries where that was read).
+///
+/// It is a superset of the branch above in **arithmetic and not in code**:
+/// with the eight extra terms at zero this returns what that branch returns,
+/// term for term (`the_pro_terms_zeroed_are_the_v3_model`). The branch stays
+/// anyway, because equal arithmetic is not equal bits and an arm that reads
+/// v3 has to draw what main draws.
+///
+/// WGSL twin: `radtan_pro`.
+fn radtan_pro(lens: &LensBlock, x: f32, y: f32, r2: f32) -> [f32; 2] {
+    let radial =
+        1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * (lens.k3 + r2 * (lens.k4 + r2 * lens.k5))));
+    let p1 = lens.p1 + r2 * lens.p1_r2;
+    let p2 = lens.p2 + r2 * lens.p2_r2;
+    [
+        x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x) + r2 * (lens.s1 + r2 * lens.s2),
+        y * radial + 2.0 * p2 * x * y + p1 * (r2 + 2.0 * y * y) + r2 * (lens.s3 + r2 * lens.s4),
+    ]
 }
 
 /// The cosine of the widest angle off a lens's axis that can still be in its
@@ -1598,15 +1645,24 @@ impl LensBlock {
         k3: 0.0,
         p1: 0.0,
         p2: 0.0,
+        k4: 0.0,
+        k5: 0.0,
+        p1_r2: 0.0,
+        p2_r2: 0.0,
+        s1: 0.0,
+        s2: 0.0,
+        s3: 0.0,
+        s4: 0.0,
+        pro: 0.0,
         image_radius: 0.0,
         axis_min: 2.0,
         turn: [0.0; 3],
-        _pad: [0.0; 1],
     };
 
     fn new(lens: &Lens, index: usize, frame: Size, camera: Camera, held: Held) -> Self {
         let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
         let distortion = lens.distortion;
+        let pro = distortion.pro.unwrap_or(Pro::ZERO);
         let mut block = Self {
             view_to_lens: view_to_lens(&lens.pose, index, camera, held).columns(),
             xi: xi as f32,
@@ -1619,6 +1675,19 @@ impl LensBlock {
             k3: distortion.k3 as f32,
             p1: distortion.p1 as f32,
             p2: distortion.p2 as f32,
+            k4: pro.k4 as f32,
+            k5: pro.k5 as f32,
+            p1_r2: pro.p1_r2 as f32,
+            p2_r2: pro.p2_r2 as f32,
+            s1: pro.s1 as f32,
+            s2: pro.s2 as f32,
+            s3: pro.s3 as f32,
+            s4: pro.s4 as f32,
+            // The flag and not the terms: a v6 block whose eight happened to
+            // land on zero is still a v6 block, and it has to take the same
+            // branch as any other so that "v6 with the extras zeroed" is a
+            // reading of this path rather than of the one beside it.
+            pro: f32::from(u8::from(distortion.pro.is_some())),
             image_radius: image_radius(&lens.intrinsics, frame) as f32,
             // The body's turn across the readout, carried into this lens's
             // own frame, which is where the ray it corrects is expressed.
@@ -1632,7 +1701,6 @@ impl LensBlock {
             // has just been filled with, and the readout it widens by is the
             // `turn` above.
             axis_min: 2.0,
-            _pad: [0.0; 1],
         };
         // Half of it, because `readout_share` runs -1/2 to +1/2 and the model
         // is handed the ray turned by that share of the whole readout.
@@ -1869,6 +1937,17 @@ struct LensBlock {
   k3: f32,
   p1: f32,
   p2: f32,
+  // `offset_v6`'s eight extra terms and the flag that says to read them.
+  // Rust twin: `LensBlock::k4` and the eight fields after it.
+  k4: f32,
+  k5: f32,
+  p1_r2: f32,
+  p2_r2: f32,
+  s1: f32,
+  s2: f32,
+  s3: f32,
+  s4: f32,
+  pro: f32,
   image_radius: f32,
   // The cosine of the widest angle off this lens's axis that can still be in
   // its picture. Rust twin: `LensBlock::axis_min`.
@@ -2146,7 +2225,12 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
     2.0 * lens.p1 * n.x * n.y + lens.p2 * (r2 + 2.0 * n.x * n.x),
     2.0 * lens.p2 * n.x * n.y + lens.p1 * (r2 + 2.0 * n.y * n.y),
   );
-  let d = n * radial + tangential;
+  var d = n * radial + tangential;
+  // Uniform across the whole pass: a calibration does not change per
+  // fragment, so this costs the branch and not the divergence.
+  if lens.pro != 0.0 {
+    d = radtan_pro(lens, n, r2);
+  }
 
   let offset = vec2<f32>(lens.fx * d.x, lens.fy * d.y);
   // Past `cos(theta) = -1/xi` the map folds and lands rays from behind this
@@ -2159,6 +2243,19 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
   landing.axis = p.z;
   landing.depth = depth;
   return landing;
+}
+
+// `offset_v6`'s thirteen coefficients. Rust twin: `radtan_pro`.
+fn radtan_pro(lens: LensBlock, n: vec2<f32>, r2: f32) -> vec2<f32> {
+  let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * (lens.k3 + r2 * (lens.k4 + r2 * lens.k5))));
+  let p1 = lens.p1 + r2 * lens.p1_r2;
+  let p2 = lens.p2 + r2 * lens.p2_r2;
+  let tangential = vec2<f32>(
+    2.0 * p1 * n.x * n.y + p2 * (r2 + 2.0 * n.x * n.x),
+    2.0 * p2 * n.x * n.y + p1 * (r2 + 2.0 * n.y * n.y),
+  );
+  let prism = vec2<f32>(r2 * (lens.s1 + r2 * lens.s2), r2 * (lens.s3 + r2 * lens.s4));
+  return n * radial + tangential + prism;
 }
 
 // Pixel centres sit at integer coordinates in the camera model and at
@@ -2225,6 +2322,7 @@ pub(crate) mod tests {
                     k3: 3.57555127,
                     p1: -0.0007338,
                     p2: -0.00115458,
+                    pro: None,
                 },
                 pose: Pose {
                     yaw_deg: -0.103,
@@ -2248,6 +2346,7 @@ pub(crate) mod tests {
                     k3: 4.30578518,
                     p1: -0.0019249,
                     p2: 0.00054564,
+                    pro: None,
                 },
                 pose: Pose {
                     yaw_deg: 0.039,

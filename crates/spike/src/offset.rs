@@ -45,7 +45,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use kjerag_media::Fallible;
-use kjerag_meta::{Distortion, Intrinsics, Lens, Pose, Size};
+use kjerag_meta::{Distortion, Intrinsics, Lens, Pose, Pro, Size};
 
 /// The trailer footer: 32 reserved bytes, the trailer length, 4 more, and the
 /// magic. `kjerag_meta::trailer` is the authority on all three and it is
@@ -362,6 +362,14 @@ pub enum Carry<'a> {
     /// a v3 block by construction and **a guess about slot meaning** on any
     /// other, which is why nothing calls it on one.
     Written,
+    /// All thirteen of a v6 block, in the slots Insta360 Studio reads them
+    /// from ([`kjerag_meta::Pro`] carries where that was read and what the
+    /// thirteen do).
+    ///
+    /// Refuses a block that is not thirteen long rather than padding one:
+    /// the whole point of this arm is that the run is the run the camera
+    /// wrote.
+    Full,
     /// Another calibration's distortion, lens for lens: the honest subset,
     /// where a v6 block contributes its pose and its intrinsics and its
     /// distortion run is left out of the arm entirely.
@@ -377,7 +385,42 @@ impl Carry<'_> {
                     .get(..5)
                     .and_then(|run| <[f64; 5]>::try_from(run).ok())
                     .ok_or("this block carries fewer than five distortion coefficients")?;
-                Ok(Distortion { k1, k2, k3, p1, p2 })
+                Ok(Distortion {
+                    k1,
+                    k2,
+                    k3,
+                    p1,
+                    p2,
+                    pro: None,
+                })
+            }
+            Self::Full => {
+                // The order the string writes, which is v3's with the
+                // tangential pair the other way round and eight terms after
+                // it. Named on the way out so that nothing downstream has to
+                // remember an index.
+                let [k1, k2, k3, k4, k5, p2, p1, p2_r2, p1_r2, s1, s3, s2, s4] = block
+                    .distortion
+                    .get(..13)
+                    .and_then(|run| <[f64; 13]>::try_from(run).ok())
+                    .ok_or("this block does not carry thirteen distortion coefficients")?;
+                Ok(Distortion {
+                    k1,
+                    k2,
+                    k3,
+                    p1,
+                    p2,
+                    pro: Some(Pro {
+                        k4,
+                        k5,
+                        p1_r2,
+                        p2_r2,
+                        s1,
+                        s2,
+                        s3,
+                        s4,
+                    }),
+                })
             }
             Self::From(lenses) => Ok(lenses
                 .get(index)

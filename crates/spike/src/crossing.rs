@@ -917,6 +917,7 @@ mod tests {
             k3: 3.57555127,
             p1: 0.0,
             p2: 0.0,
+            pro: None,
         };
         let pose = |pitch_deg: f64, translation_m: [f64; 3]| Pose {
             yaw_deg: 0.0,

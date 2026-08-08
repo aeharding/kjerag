@@ -150,6 +150,67 @@ pub struct Distortion {
     pub k3: f64,
     pub p1: f64,
     pub p2: f64,
+    /// The eight terms `offset_v6` carries and `offset_v3` does not.
+    ///
+    /// `None` on everything [`CalibrationSet::from_insv`] reads, because it
+    /// reads `offset_v3` and a v3 string has no slots for them. A caller that
+    /// has read a v6 string fills it.
+    pub pro: Option<Pro>,
+}
+
+/// The distortion terms `offset_v6` adds to `offset_v3`'s five.
+///
+/// **The form is Insta360 Studio's own**, read out of the projection method
+/// of `OmniProjection<RadtanDistortPro>` in `studio_worker.dll` 5.9.2
+/// (`.text` 0x3b8e210; its sibling `OmniProjection<RadtanDistort>` at
+/// 0x3b8dfc0 disassembles to [`Distortion`]'s five terms exactly, which is
+/// what says the reading is right). With `r2` the squared radius on the Mei
+/// normalized plane, the whole model is:
+///
+/// ```text
+/// radial = 1 + k1 r2 + k2 r2^2 + k3 r2^3 + k4 r2^4 + k5 r2^5
+/// xd = x radial + (p2 + p2_r2 r2)(r2 + 2 x^2) + 2 (p1 + p1_r2 r2) x y
+///               + s1 r2 + s2 r2^2
+/// yd = y radial + (p1 + p1_r2 r2)(r2 + 2 y^2) + 2 (p2 + p2_r2 r2) x y
+///               + s3 r2 + s4 r2^2
+/// ```
+///
+/// Set every field to zero and those two lines **are** [`Distortion`]'s,
+/// term for term. That is the null this whole model is read against, and
+/// `the_pro_terms_zeroed_are_the_v3_model` is where it is checked.
+///
+/// `offset_v6` writes its thirteen in the order
+/// `k1 k2 k3 k4 k5 p2 p1 p2_r2 p1_r2 s1 s3 s2 s4`. **The tangential pair is
+/// the other way round from `offset_v3`'s**, which is why this names its
+/// fields instead of carrying an index.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pro {
+    /// Radial orders `r2^4` and `r2^5`, past where v3's polynomial stops.
+    pub k4: f64,
+    pub k5: f64,
+    /// How far the two tangential coefficients themselves grow with `r2`.
+    pub p1_r2: f64,
+    pub p2_r2: f64,
+    /// Thin prism: `r2` then `r2^2`, on x (`s1`, `s2`) and on y (`s3`, `s4`).
+    pub s1: f64,
+    pub s2: f64,
+    pub s3: f64,
+    pub s4: f64,
+}
+
+impl Pro {
+    /// A v6 block carrying nothing v3 does not, which is what a null arm
+    /// loads.
+    pub const ZERO: Self = Self {
+        k4: 0.0,
+        k5: 0.0,
+        p1_r2: 0.0,
+        p2_r2: 0.0,
+        s1: 0.0,
+        s2: 0.0,
+        s3: 0.0,
+        s4: 0.0,
+    };
 }
 
 /// How one frame is read off the sensor: how long the whole readout takes,
@@ -400,7 +461,34 @@ impl CalibrationSet {
         eat(&self.dimension.height.to_le_bytes());
         for lens in &self.lenses {
             let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
-            let Distortion { k1, k2, k3, p1, p2 } = lens.distortion;
+            let Distortion {
+                k1,
+                k2,
+                k3,
+                p1,
+                p2,
+                pro,
+            } = lens.distortion;
+            // A v6 lens set is a different map of the same glass, so it is a
+            // different camera to everything keyed off this: the seam fits
+            // learned through v3 are not reachable from a v6 arm and a v6
+            // arm's own fits are not written where a v3 one would find them.
+            // That isolation is this hash and not a special case anywhere.
+            if let Some(pro) = pro {
+                let Pro {
+                    k4,
+                    k5,
+                    p1_r2,
+                    p2_r2,
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                } = pro;
+                for number in [k4, k5, p1_r2, p2_r2, s1, s2, s3, s4] {
+                    eat(&number.to_le_bytes());
+                }
+            }
             let Pose {
                 yaw_deg,
                 pitch_deg,
@@ -732,7 +820,14 @@ impl LensBlock {
                 cx: (cx - index as f64 * slot) * (dimension.width as f64 / slot),
                 cy: cy * (dimension.height as f64 / canvas_h as f64),
             },
-            distortion: Distortion { k1, k2, k3, p1, p2 },
+            distortion: Distortion {
+                k1,
+                k2,
+                k3,
+                p1,
+                p2,
+                pro: None,
+            },
             pose: Pose {
                 yaw_deg: yaw,
                 pitch_deg: pitch,
