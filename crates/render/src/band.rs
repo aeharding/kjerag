@@ -194,6 +194,35 @@ const TAU_FAR_S: f32 = 2.0;
 /// frame.
 const TAU_NEAR_S: f32 = 0.10;
 
+/// How long the gate on the way out takes to answer a change in the evidence,
+/// in seconds.
+///
+/// **Its own constant, and seconds rather than [`TAU_NEAR_S`], is the whole
+/// point.** [`time_constant`] runs a direction fast when its disparity is
+/// near-field sized, because *the wing moves* and a near reading has to track
+/// it. The correlator losing the scene is not the wing moving: it is the same
+/// content, still there, momentarily not correlating. Those two want opposite
+/// responses and until 2026-08-08 they shared a knob. So the value follows the
+/// wing at [`TAU_NEAR_S`] and the belief in it fades at 2 s, and a direction
+/// that stops confirming its reading **fails towards the reading it held**
+/// instead of towards nothing.
+///
+/// It is [`TAU_FAR_S`]'s value and not [`TAU_FAR_S`] itself, because the two
+/// answer different questions and a later measurement may move one without the
+/// other. [`KEEP`] is untouched and stays the gate on whether a reading may
+/// *enter* the state; this is how much of the state *leaves* it, and those
+/// were one constant doing two jobs.
+///
+/// **The defect it is aimed at** (docs/research/seam-temporal.md 2.2 and 8.2).
+/// The state was smoothed and the gate on the way out was not: what reached
+/// the picture was [`Cell::disparity`] times `clamp(confidence / KEEP, 0, 1)`
+/// read that frame. On the owner's May-01 downward arc the held disparity sat
+/// at -0.912 degrees for four seconds while the applied value swung between
+/// 0.00 and -47.61 view pixels, **84 frame-to-frame steps over 10 view px and
+/// a worst of 46.74**, because the content flickers the correlation and the
+/// gate followed it whole.
+const TAU_TRUST_S: f32 = 2.0;
+
 /// How much of the crossover the bend may spend, as a fraction of it.
 ///
 /// The bend varies from zero to the whole disparity across the band, so its
@@ -885,11 +914,12 @@ pub fn basis(phi: f64) -> [f64; 5] {
 /// One direction's state, as the compute pass writes it and the fragment
 /// shader reads it.
 ///
-/// Seven floats and every one of them is read by something: the two axes and
-/// their two confidences by the pass, the reach only by an instrument, and the
-/// last two by the pooling that follows the measurement. Zero is the state a
-/// file opens in and the state a direction that has never correlated stays in,
-/// and a zero on either axis is no bend at all.
+/// Eight floats and every one of them is read by something: the two axes and
+/// their two confidences by the pass, the reach only by an instrument, the
+/// next two by the pooling that follows the measurement, and the last by the
+/// bend itself. Zero is the state a file opens in and the state a direction
+/// that has never correlated stays in, and a zero on either axis is no bend at
+/// all.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cell {
@@ -958,6 +988,20 @@ pub struct Cell {
     /// exposure, so a pooling that leans on the dark patches reads the part
     /// that is not.
     pub lit: f32,
+    /// **What the pass actually applies of [`Self::disparity`]**, 0 to 1: the
+    /// gate on the way out, filtered at [`TAU_TRUST_S`] and stored rather than
+    /// recomputed per fragment (docs/research/seam-temporal.md 8.2).
+    ///
+    /// It eases towards `clamp(confidence / KEEP, 0, 1)`, which is the whole
+    /// of what the fragment shader used to compute for itself every frame.
+    /// [`Self::believe`] is the one step, and the reason it is a field rather
+    /// than an expression is that a filter needs somewhere to keep yesterday.
+    ///
+    /// Last in the struct rather than beside [`Self::confidence`] where it
+    /// belongs, because [`Self::write`] is a file format two instruments hand
+    /// to each other, and appending leaves the seven columns they already read
+    /// where they are.
+    pub trust: f32,
 }
 
 impl Cell {
@@ -975,7 +1019,7 @@ impl Cell {
             .iter()
             .map(|cell| {
                 format!(
-                    "{} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {}\n",
                     cell.disparity,
                     cell.confidence,
                     cell.reach_m,
@@ -983,18 +1027,26 @@ impl Cell {
                     cell.off_conf,
                     cell.tone,
                     cell.lit,
+                    cell.trust,
                 )
             })
             .collect()
     }
 
-    /// The same, read back. `None` on any line that is not seven numbers.
+    /// The same, read back. `None` on any line that is not seven numbers or
+    /// eight.
+    ///
+    /// The eighth is [`Self::trust`] and a file written before it existed has
+    /// none. What such a file gets is the value that build applied,
+    /// `clamp(confidence / KEEP, 0, 1)`, rather than a zero: zero is "apply
+    /// nothing" and would quietly turn an old trace into a picture with no
+    /// band in it.
     pub fn read(text: &str) -> Option<Vec<Self>> {
         text.lines()
             .map(|line| {
                 let mut numbers = line.split_whitespace().map(str::parse::<f32>);
                 let mut next = || numbers.next()?.ok();
-                Some(Self {
+                let mut cell = Self {
                     disparity: next()?,
                     confidence: next()?,
                     reach_m: next()?,
@@ -1002,7 +1054,10 @@ impl Cell {
                     off_conf: next()?,
                     tone: next()?,
                     lit: next()?,
-                })
+                    trust: 0.0,
+                };
+                cell.trust = next().unwrap_or((cell.confidence / KEEP).clamp(0.0, 1.0));
+                Some(cell)
             })
             .collect()
     }
@@ -1013,6 +1068,45 @@ impl Cell {
     /// baseline is concerned.
     pub fn metres(&self) -> Option<f32> {
         (self.disparity > 0.0).then(|| self.reach_m / self.disparity)
+    }
+
+    /// One step of the gate on the way out, over `seconds` of media time.
+    ///
+    /// **WGSL twin of `believe`**, and a twin rather than a description: the
+    /// pass runs this on the GPU where no test can reach it, and what
+    /// [`TAU_TRUST_S`] claims about a confidence dropout is claimed about a
+    /// function `cargo test` can call with no device and no footage.
+    ///
+    /// `fresh` is a **reset frame** - a seek, a new file, the first frame -
+    /// and it takes the answer whole for the same reason the disparity and the
+    /// confidence do: there is no picture behind a cut for an ease to be
+    /// continuous with, and creeping in from zero over two seconds would draw
+    /// the first seconds after every seek with a correction of nearly nothing
+    /// (issue #103, stage 6, whose argument this keeps exactly where it was
+    /// made).
+    ///
+    /// **A direction arriving mid-shot is not a reset frame and walks in.**
+    /// That is the whole of the arrival staging: until 2026-08-08 a direction
+    /// whose trust was nothing took its answer whole wherever it was, and at
+    /// the owner's `down1` and `down3` that was a single delivered step of
+    /// **56.7 and 56.2 view px**, the largest the band delivers anywhere.
+    /// Mid-film there IS a picture behind an arriving direction - the
+    /// uncorrected one - so the walk starts from what is on the screen. It is
+    /// not only the first arrival: a direction that stops correlating gives up
+    /// its evidence and its next reading is an arrival again, and the same
+    /// line covers both because both are the same line.
+    ///
+    /// What this does **not** change: the disparity and the confidence still
+    /// arrive whole, so the state holds the right answer from the first frame
+    /// it has one and nothing is learned twice. What walks is only how much of
+    /// it reaches the picture.
+    pub fn believe(&mut self, seconds: f32, fresh: bool) {
+        let want = (self.confidence / KEEP).clamp(0.0, 1.0);
+        let learn = match fresh {
+            true => 1.0,
+            false => ease(seconds, TAU_TRUST_S),
+        };
+        self.trust += (want - self.trust) * learn;
     }
 }
 
@@ -1363,9 +1457,20 @@ pub fn pooled_gain(cells: &[Cell]) -> Option<(f32, f32)> {
 /// [`width`]'s answer for that same disparity rather than a constant. See
 /// [`FOLD`].
 ///
+/// **Divided by the blend curve's own peak gradient.** The inequality the
+/// clamp comes out of was written against a **linear** crossfade, whose share
+/// walks one whole unit across one whole band, so the gradient was 1 and
+/// dropped out of it. Since 2026-08-08 the crossfade is a power curve
+/// ([`super::projection::BLEND_POWER`]) whose peak slope at the seam is its
+/// exponent, so it walks the same unit that many times faster and the
+/// disparity that sits on the clamp is that many times smaller. Without this
+/// division the curve folds the ONE X2, whose support is 3.99 degrees against
+/// a search that reads out to 2.6
+/// (`projection::tests::the_blend_curve_cannot_fold_the_narrowest_camera`).
+///
 /// WGSL twin: `carried`.
 pub fn carried(disparity_rad: f32, band_rad: f32) -> f32 {
-    let limit = FOLD * band_rad;
+    let limit = FOLD * band_rad / super::projection::BLEND_POWER;
     disparity_rad.clamp(-limit, limit)
 }
 
@@ -1515,6 +1620,7 @@ pub(crate) fn wgsl() -> String {
          const NEAR_KNEE = {knee:?};\n\
          const TAU_FAR = {far_s:?};\n\
          const TAU_NEAR = {near_s:?};\n\
+         const TAU_TRUST = {trust_s:?};\n\
          const FOLD = {fold:?};\n\
          const PATCH = {patch}u;\n\
          const BACK_ALONG = {back_along}u;\n\
@@ -1529,6 +1635,7 @@ pub(crate) fn wgsl() -> String {
         knee = NEAR_KNEE_DEG.to_radians(),
         far_s = TAU_FAR_S,
         near_s = TAU_NEAR_S,
+        trust_s = TAU_TRUST_S,
         fold = FOLD,
         patch = (2 * half + 1) * (2 * half + 1),
         back_along = (2 * half + 1) as isize + 2 * PERP_STEPS as isize * perp,
@@ -1611,7 +1718,15 @@ struct Cell {
   off_conf: f32,
   tone: f32,
   lit: f32,
+  trust: f32,
 };
+
+// What the pass applies of a direction's reading, out of the evidence behind
+// it, before the filter on the way out gets to it. Rust twin: the `want` in
+// `Cell::believe`.
+fn believed(confidence: f32) -> f32 {
+  return clamp(confidence / KEEP, 0.0, 1.0);
+}
 
 struct Along {
   terms: array<f32, 5>,
@@ -1745,7 +1860,7 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // is zero and `band_width` returns the shipped crossover, which is exactly
   // the picture before this existed: the fallback is stage 1 and it is reached
   // by arithmetic rather than by a branch. Rust twin: `Reframe::reading_at`.
-  let applied = carry(a.disparity, a.confidence, b.disparity, b.confidence, mix);
+  let applied = carry(a, b, mix);
   // The along-seam axis is NOT read cell by cell. It is one fitted field over
   // the whole circle, because the phenomenon is one - a relative pose error
   // with a constant, a one-cycle and a two-cycle term - and because a field
@@ -1770,7 +1885,10 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // gradient cannot fold, however wide it opens. Rust twin: `Reframe::bent`.
   var out: Band;
   out.crossover = band_width(applied);
-  let limit = FOLD * out.crossover;
+  // Divided by the blend curve's peak gradient: the fold inequality was
+  // written against a linear crossfade, whose gradient was 1. Rust twin:
+  // `carried`.
+  let limit = FOLD * out.crossover / BLEND_POWER;
   let carried = clamp(applied, -limit, limit);
   // Back into view space: view_to_body is a rotation, so its transpose is its
   // inverse, and `v * m` is `transpose(m) * v`.
@@ -1784,8 +1902,8 @@ fn band_bend(ray: vec3<f32>) -> Band {
   return out;
 }
 
-// One channel of one ray: the two cells' values mixed at their own evidence,
-// then taxed by how much of that evidence reaches `KEEP`.
+// The epipolar channel of one ray: the two cells' values mixed at their own
+// evidence, then taxed by how much of that evidence has reached `KEEP`.
 //
 // `KEEP` is the correlation a single reading has to reach before it may move
 // the state at all, and a confidence is the smoothed value of that same
@@ -1793,15 +1911,19 @@ fn band_bend(ray: vec3<f32>) -> Band {
 // gate is applied proportionally less. No new constant: the threshold a
 // reading must pass is the threshold a smoothed reading is trusted at. Zero
 // evidence gives exactly zero, by arithmetic. Rust twin: `Reframe::channel`.
-fn carry(a: f32, wa: f32, b: f32, wb: f32, mix: f32) -> f32 {
-  let ea = wa * (1.0 - mix);
-  let eb = wb * mix;
+//
+// The tax is each cell's OWN filtered gate (`Cell.trust`), mixed - already
+// clamped, and clamped on the cell side of the mix rather than after it,
+// because a filter needs somewhere to keep yesterday and a fragment has
+// nowhere. Rust twin: `Reframe::strength`.
+fn carry(a: Cell, b: Cell, mix: f32) -> f32 {
+  let ea = a.confidence * (1.0 - mix);
+  let eb = b.confidence * mix;
   let total = ea + eb;
   if total <= 0.0 {
     return 0.0;
   }
-  let strength = clamp(mix2(wa, wb, mix) / KEEP, 0.0, 1.0);
-  return (ea * a + eb * b) / total * strength;
+  return (ea * a.disparity + eb * b.disparity) / total * mix2(a.trust, b.trust, mix);
 }
 
 // How wide the handover has to be to carry this disparity without folding,
@@ -2114,12 +2236,31 @@ fn has_picture() -> bool {
 fn forget(cell: u32, at: Ring) {
   var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0);
+    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0, 0.0);
   }
   held.reach_m = at.reach_m;
   held.confidence -= held.confidence * ease(watch.seconds, time_constant(held.disparity));
   held.off_conf -= held.off_conf * ease(watch.seconds, TAU_FAR);
+  believe(&held);
   band.cells[cell] = held;
+}
+
+// The gate on the way out, one step. Rust twin: `Cell::believe`.
+//
+// It eases towards this frame's evidence at TAU_TRUST, which is the constant
+// the belief in a reading fades at, deliberately not the constant the reading
+// itself tracks at. A RESET frame takes it whole: a seek, a new file or the
+// first frame has no picture behind it for an ease to be continuous with, and
+// creeping in from zero over two seconds would draw the first seconds after
+// every seek with a correction of nearly nothing (issue #103, stage 6).
+//
+// A direction ARRIVING mid-shot is not a reset frame and walks in like every
+// other change to the gate, because what is behind it there is the
+// uncorrected picture the owner has been looking at.
+fn believe(held: ptr<function, Cell>) {
+  let want = believed((*held).confidence);
+  let learn = select(ease(watch.seconds, TAU_TRUST), 1.0, watch.reset != 0.0);
+  (*held).trust += (want - (*held).trust) * learn;
 }
 
 // The peak, the gates, and one step of the filter. One thread, because it is
@@ -2127,7 +2268,7 @@ fn forget(cell: u32, at: Ring) {
 fn settle(cell: u32, at: Ring) {
   var held = band.cells[cell];
   if watch.reset != 0.0 {
-    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0);
+    held = Cell(0.0, 0.0, at.reach_m, 0.0, 0.0, 0.0, 0.0, 0.0);
   }
   held.reach_m = at.reach_m;
 
@@ -2220,6 +2361,7 @@ fn settle(cell: u32, at: Ring) {
   if !epi_pinned {
     read_photometry(&held);
   }
+  believe(&held);
   band.cells[cell] = held;
 }
 
@@ -2273,9 +2415,11 @@ fn read_photometry(held: ptr<function, Cell>) {
 //
 // One workgroup, dispatched straight after the measurement and in the same
 // pass, so what it pools is what was just written. A direction contributes at
-// the weight the bend already trusts it at (`band_bend`'s `strength`), so a
-// direction whose evidence has faded fades out of the exposure too and one
-// that never correlated was never in it.
+// the weight the bend trusts it at, so a direction whose evidence has faded
+// fades out of the exposure too and one that never correlated was never in it.
+// It is THIS FRAME's evidence and deliberately not the filtered `Cell.trust`
+// the bend applies: an exposure is not a geometry and nothing has measured
+// that it wants the same constant.
 @compute @workgroup_size(THREADS)
 fn pool(@builtin(local_invocation_index) lane: u32) {
   var weight = 0.0;
@@ -2754,6 +2898,7 @@ mod tests {
                 off_conf: 0.0,
                 tone: 0.0,
                 lit: 0.0,
+                trust: 0.0,
             };
             AZIMUTHS
         ];
@@ -2765,11 +2910,22 @@ mod tests {
         );
         // And with full confidence it is applied whole: the gate is a gate,
         // not a tax on every reading.
+        //
+        // The trust comes from `believe` on a reset frame rather than being
+        // typed, because since 2026-08-08 the gate the bend reads is the
+        // FILTERED one and a fixture that set it by hand would be asserting
+        // its own arithmetic. A reset frame is where a full reading is applied
+        // whole, and this checks that it is.
         let live: Vec<Cell> = dead
             .iter()
-            .map(|cell| Cell {
-                confidence: KEEP,
-                ..*cell
+            .map(|cell| {
+                let mut cell = Cell {
+                    confidence: KEEP,
+                    ..*cell
+                };
+                cell.believe(1.0 / 30.0, true);
+                assert_eq!(cell.trust, 1.0);
+                cell
             })
             .collect();
         let held = reframe.reading_at(ray, &live, Along::fit(&live)).epi;
@@ -2870,26 +3026,54 @@ mod tests {
     }
 
     /// Stage 4 in one line: the width and the clamp are the same inequality.
+    ///
+    /// **At the width the app ships**, which is where that line has to hold,
+    /// and which is not where this used to read it. Until 2026-08-08 the fold
+    /// limit was `FOLD * band` and this ran at the 2 degree fixture floor
+    /// above; the blend curve divides that limit by its own peak gradient
+    /// ([`super::projection::BLEND_POWER`]), so a floor of 2 now clamps at
+    /// 1.20 degrees and the promise is false there. It is true at 8, by a
+    /// margin: the limit is 4.80 degrees against a search that cannot return
+    /// more than [`NEAR_DEG`].
+    ///
+    /// **Where it is NOT true, and the number, because the ONE X2 is a real
+    /// camera and not a hypothetical**: at a 3.99 degree support the limit is
+    /// 2.394 degrees, so a reading between there and [`NEAR_DEG`] is cut. That
+    /// is measured below rather than left to a reader, and it is the price of
+    /// not folding that camera's picture
+    /// (`projection::tests::the_blend_curve_cannot_fold_the_narrowest_camera`).
     #[test]
     fn the_band_carries_every_disparity_the_search_can_report() {
-        let floor = FLOOR_DEG.to_radians();
+        let shipped = super::super::projection::CROSSOVER_DEG.to_radians();
         // The search refuses a peak against either edge of its window, so what
         // it can actually hand over is strictly inside [FAR_DEG, NEAR_DEG].
         for step in 0..=200 {
             let degrees = FAR_DEG + (NEAR_DEG - FAR_DEG) * step as f32 / 200.0;
             let radians = degrees.to_radians();
-            let carried = carried(radians, width(radians, floor));
+            let carried = carried(radians, width(radians, shipped));
             assert!(
                 (carried - radians).abs() < 1e-6,
-                "{degrees:.2} deg was cut to {:.2}",
+                "{degrees:.2} deg was cut to {:.2} at the shipped handover",
                 carried.to_degrees(),
             );
         }
-        // And stage 2's fixed band did not, which is what this stage is for.
-        let near = 2.4f32.to_radians();
-        let stage2 = carried(near, floor);
+        // The narrowest support in the corpus, where it stops being true, with
+        // the cut printed rather than described.
+        let x2 = 3.99f32.to_radians();
+        let limit = FOLD * x2 / super::super::projection::BLEND_POWER;
+        let near = NEAR_DEG.to_radians();
+        assert!(near > limit, "the X2's support no longer clamps the search");
+        assert_eq!(carried(near, width(near, x2)).to_bits(), limit.to_bits());
         assert!(
-            (near - stage2).to_degrees() > 0.5,
+            ((near - limit).to_degrees() - 0.206).abs() < 0.001,
+            "the X2 now gives up {:.3} deg at the near end",
+            (near - limit).to_degrees(),
+        );
+        // And stage 2's fixed band gave up more than either, which is what
+        // this stage is for.
+        let stage2 = carried(2.4f32.to_radians(), FLOOR_DEG.to_radians());
+        assert!(
+            (2.4f32.to_radians() - stage2).to_degrees() > 0.5,
             "the fixed band was already carrying {:.2} deg",
             stage2.to_degrees(),
         );
@@ -3099,6 +3283,7 @@ mod tests {
             off_conf: 0.0,
             tone: gain.ln(),
             lit: brightness,
+            trust: 1.0,
         }
     }
 
@@ -3278,6 +3463,7 @@ mod tests {
             off_conf: KEEP,
             tone: 0.0,
             lit: 0.0,
+            trust: 1.0,
         }
     }
 
@@ -3745,5 +3931,356 @@ mod tests {
         let seam = moved([1.0, 0.0, 0.0]);
         assert!(moved([0.1, 0.0, 1.0]) < 0.2 * seam, "the pole still moves");
         assert_eq!(reframe.tabled(1, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]);
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    /// The owner's May-01 downward arc, in the units the diagnosis quoted it
+    /// in: a held disparity of -0.912 degrees at 51.2 view px per degree, so
+    /// the whole correction is 46.7 view px (docs/research/seam-temporal.md
+    /// 2.2).
+    const HIS_ARC_DEG: f32 = -0.912;
+    const VIEW_PX_PER_DEG: f32 = 51.2;
+
+    /// A direction is visited every [`SLICES`] frames, so this is what one
+    /// step of the filter spans at 30 fps - the same 2/30 the diagnosis
+    /// recovered its readings through.
+    const VISIT_S: f32 = SLICES as f32 / 30.0;
+
+    /// **The law this PR replaced**, written out here rather than left behind
+    /// a branch in the pass.
+    ///
+    /// It is the positive control for everything below, and it has to live
+    /// somewhere: the shipped code no longer contains it, and a claim that the
+    /// filter fixes a defect is worth nothing without the defect. `main` at
+    /// a7b6930 computed exactly this expression per fragment, every frame.
+    fn as_main_did(cell: &mut Cell, _seconds: f32, _fresh: bool) {
+        cell.trust = (cell.confidence / KEEP).clamp(0.0, 1.0);
+    }
+
+    /// And the law that ships: [`Cell::believe`], with the same signature so
+    /// the two are interchangeable in [`plant`].
+    fn as_it_ships(cell: &mut Cell, seconds: f32, fresh: bool) {
+        cell.believe(seconds, fresh);
+    }
+
+    /// What the applied correction does over a planted confidence flicker, in
+    /// view px per visit: every step, and the state underneath at the end.
+    ///
+    /// `readings` is what the correlator returns on each visit, or `None` for
+    /// a visit the gates refused, which is the shape the trace on his arc has:
+    /// the content flickers the correlation across [`KEEP`] and the reading
+    /// itself never moves.
+    fn plant(readings: &[Option<f32>], gate: impl Fn(&mut Cell, f32, bool)) -> (Vec<f32>, Cell) {
+        let mut cell = Cell {
+            disparity: HIS_ARC_DEG.to_radians(),
+            confidence: 0.0,
+            reach_m: 0.033,
+            ..Cell::default()
+        };
+        let mut applied = Vec::new();
+        let mut last = 0.0;
+        for (visit, reading) in readings.iter().enumerate() {
+            match reading {
+                // The shipped law, both branches, out of `settle` and
+                // `forget`: a refused visit gives up the evidence and keeps
+                // the measurement; a read one eases both, and takes its first
+                // whole.
+                Some(best) => {
+                    let learn = match cell.confidence <= 0.0 {
+                        true => 1.0,
+                        false => ease(VISIT_S, time_constant(cell.disparity)),
+                    };
+                    cell.disparity += (HIS_ARC_DEG.to_radians() - cell.disparity) * learn;
+                    cell.confidence += (best - cell.confidence) * learn;
+                }
+                None => {
+                    cell.confidence -=
+                        cell.confidence * ease(VISIT_S, time_constant(cell.disparity));
+                }
+            }
+            gate(&mut cell, VISIT_S, visit == 0);
+            let now = cell.disparity.to_degrees() * cell.trust * VIEW_PX_PER_DEG;
+            applied.push(now - last);
+            last = now;
+        }
+        (applied, cell)
+    }
+
+    /// The plant itself: eight visits correlating well, eight the gates
+    /// refuse, eight correlating again. Nothing about the disparity moves.
+    fn flicker() -> Vec<Option<f32>> {
+        let mut readings = vec![Some(0.90); 8];
+        readings.extend(vec![None; 8]);
+        readings.extend(vec![Some(0.90); 8]);
+        readings
+    }
+
+    /// The OTHER plant: a direction that is sky for four visits and then
+    /// starts correlating, in the middle of a shot rather than on a reset
+    /// frame.
+    ///
+    /// **This is the shape of the largest step the band delivers.** At
+    /// `down1` the cell the owner is looking through first correlates on
+    /// frame 70 of 120 and at `down3` on frame 26, and each was one delivered
+    /// step of about 56 view px on every arm of the 2026-08-08 A/B.
+    /// [`flicker`] cannot show it: its first visit is a reset frame, where
+    /// every build applies whole by design and always will.
+    fn late_arrival(visits: usize) -> Vec<Option<f32>> {
+        let mut readings = vec![None; 4];
+        readings.extend(vec![Some(0.90); visits]);
+        readings
+    }
+
+    /// How much of a correction one visit of the filter may move, as a
+    /// fraction: the walk rate an arrival is bounded by, and it is
+    /// [`TAU_TRUST_S`] and the visit interval and nothing else.
+    fn walk_rate() -> f32 {
+        ease(VISIT_S, TAU_TRUST_S)
+    }
+
+    /// **The positive control, and it runs first.** With the gate `main`
+    /// applied, a planted confidence dropout snaps the correction off and back
+    /// on: the defect the memo diagnosed, reproduced with no GPU and no
+    /// footage.
+    ///
+    /// If this stops failing the way the trace failed, the test below has
+    /// stopped being evidence of anything.
+    ///
+    /// Measured, in view px per visit after the arrival: **+7.9, +15.5, +9.3,
+    /// +5.6, +3.4, +2.0, +1.2, +0.7** going out and **-25.4, -15.3, -4.9**
+    /// coming back, three of them over 10.
+    #[test]
+    fn the_gate_main_shipped_snaps_a_planted_flicker() {
+        let (steps, cell) = plant(&flicker(), as_main_did);
+        let worst = steps
+            .iter()
+            .fold(0.0f32, |worst, step| worst.max(step.abs()));
+        assert!(
+            worst > 10.0,
+            "the planted flicker moves the picture by at most {worst} view px on main's gate, \
+             so it is not the defect the trace measured"
+        );
+        // And the state underneath never moved, which is what makes it a gate
+        // artifact rather than a measurement.
+        near(cell.disparity.to_degrees(), HIS_ARC_DEG, 1e-4);
+    }
+
+    /// And with the gate filtered, the same plant moves the picture by under a
+    /// view pixel a visit while the state underneath still tracks.
+    ///
+    /// The bar is the memo's own statistic: 84 steps over **10 view px** in
+    /// four seconds is what the trace on his arc reported, so a step over 10
+    /// is the defect. This plant measures **1.27**, and the bar is set at 2 to
+    /// leave the number room to be a number rather than a threshold.
+    ///
+    /// Measured, in view px per visit after the arrival, against the control
+    /// above: **+0.25, +0.75, +1.02, +1.17, +1.24, +1.27, +1.26, +1.25** going
+    /// out and **+0.39, -0.12, -0.27, -0.26** coming back. **None over 10.**
+    #[test]
+    fn the_filtered_gate_fades_a_planted_flicker() {
+        let (steps, cell) = plant(&flicker(), as_it_ships);
+        let worst = steps
+            .iter()
+            .skip(1)
+            .fold(0.0f32, |worst, step| worst.max(step.abs()));
+        assert!(
+            worst < 2.0,
+            "the planted flicker still moves the picture by {worst} view px in one visit"
+        );
+        near(cell.disparity.to_degrees(), HIS_ARC_DEG, 1e-4);
+        // The first visit is the one that takes its answer whole, on both
+        // laws: it is a RESET frame, and a reset frame has no picture behind
+        // it for an ease to hide.
+        near(steps[0], HIS_ARC_DEG * VIEW_PX_PER_DEG, 1e-2);
+    }
+
+    /// During the dropout the applied correction only ever fades **towards the
+    /// reading it holds**, one direction, never off it and back.
+    #[test]
+    fn a_filtered_gate_decays_monotonically_while_the_evidence_goes() {
+        let (steps, _) = plant(&flicker(), as_it_ships);
+        for (visit, step) in steps.iter().enumerate().skip(9).take(7) {
+            assert!(
+                *step >= 0.0,
+                "visit {visit} of the dropout moves the correction {step} view px, which is \
+                 away from the held reading and not towards it"
+            );
+        }
+    }
+
+    /// The state underneath keeps measuring through all of it: a filtered gate
+    /// is a filter on what is applied and not on what is read.
+    #[test]
+    fn the_filtered_gate_does_not_stop_the_band_measuring() {
+        // A direction whose disparity really does change, with the evidence
+        // steady: the wing crossing rather than the correlator blinking.
+        let mut cell = Cell {
+            disparity: HIS_ARC_DEG.to_radians(),
+            confidence: 0.90,
+            reach_m: 0.033,
+            trust: 1.0,
+            ..Cell::default()
+        };
+        let target = 0.2f32.to_radians();
+        for _ in 0..30 {
+            let learn = ease(VISIT_S, time_constant(cell.disparity));
+            cell.disparity += (target - cell.disparity) * learn;
+            cell.believe(VISIT_S, false);
+        }
+        assert!(
+            (cell.disparity - target).abs() < 0.1 * (HIS_ARC_DEG.to_radians() - target).abs(),
+            "the state stopped tracking at {} degrees",
+            cell.disparity.to_degrees()
+        );
+        near(cell.trust, 1.0, 1e-3);
+    }
+
+    /// **The positive control for the staging, and it runs first.** With the
+    /// gate `main` applied, a direction that starts correlating mid-shot
+    /// applies its whole correction on one visit.
+    ///
+    /// This is the 56 px step at `down1` and `down3` reproduced with no GPU
+    /// and no footage. If it stops failing this way the test below has stopped
+    /// being evidence of anything.
+    ///
+    /// Measured: **-46.69 view px on the arriving visit**.
+    #[test]
+    fn the_gate_main_shipped_applies_a_late_arrival_whole() {
+        let (steps, _) = plant(&late_arrival(4), as_main_did);
+        near(steps[4], HIS_ARC_DEG * VIEW_PX_PER_DEG, 1e-2);
+    }
+
+    /// And as it ships, the same arrival reaches the picture at the walk rate:
+    /// no visit of the whole plant moves it further than the filter's own
+    /// step, which is [`TAU_TRUST_S`] and the visit interval and nothing else.
+    ///
+    /// The bound is computed rather than typed, so it cannot be a threshold
+    /// tuned on the answer: it is `full * ease(VISIT_S, TAU_TRUST_S)`, which
+    /// is **1.53 view px** against the control's 46.69.
+    #[test]
+    fn a_staged_arrival_walks_in_at_the_filter_rate() {
+        let (steps, _) = plant(&late_arrival(4), as_it_ships);
+        let bound = (HIS_ARC_DEG * VIEW_PX_PER_DEG).abs() * walk_rate();
+        let worst = steps
+            .iter()
+            .fold(0.0f32, |worst, step| worst.max(step.abs()));
+        assert!(
+            worst <= bound + 1e-3,
+            "the staged arrival moves the picture {worst} view px in one visit, past the \
+             {bound} the walk rate allows"
+        );
+    }
+
+    /// Staging is a delay and not an attenuation: the correction still gets
+    /// all the way to the reading, on the constant it declares.
+    ///
+    /// One [`TAU_TRUST_S`] is 30 visits and must deliver over half of it;
+    /// three of them over nine tenths. A walk that stopped short would be the
+    /// stage 6 defect this is closest to and the thing to catch.
+    ///
+    /// The plain bars are there to be read; the line under them is the exact
+    /// one, and it says the walk is the filter's own geometry and not
+    /// something near it. [`ease`] is `dt / (tau + dt)`, so a visit leaves
+    /// `tau / (tau + dt)` of the gap and n of them leave that to the n-th:
+    /// **62.6 percent delivered after one time constant and 94.8 after
+    /// three**, which is what those two bars are under.
+    #[test]
+    fn a_staged_arrival_still_gets_all_the_way_there() {
+        let full = HIS_ARC_DEG * VIEW_PX_PER_DEG;
+        for (visits, share) in [(30, 0.5), (90, 0.9)] {
+            let (steps, cell) = plant(&late_arrival(visits), as_it_ships);
+            let applied: f32 = steps.iter().sum();
+            assert!(
+                applied / full >= share,
+                "after {visits} visits the staged arrival has delivered {applied} view px of \
+                 {full}, which is short of the {share} its own time constant promises"
+            );
+            near(
+                applied / full,
+                1.0 - (1.0 - walk_rate()).powi(visits as i32),
+                1e-4,
+            );
+            // And what it walked in on is the whole reading, not a filtered
+            // one: the state took its answer whole as it always did.
+            near(cell.disparity.to_degrees(), HIS_ARC_DEG, 1e-4);
+        }
+    }
+
+    /// A **seek** takes the arrival whole, and that is BY DESIGN.
+    ///
+    /// Stated as a test because it is the one behaviour of this change a
+    /// reader could reasonably assume the other way: a walk after a cut would
+    /// draw the first two seconds of every seek with nearly no correction, and
+    /// there is no picture behind a cut for the walk to be continuous with
+    /// anyway (issue #103, stage 6).
+    #[test]
+    fn a_seek_applies_the_arrival_whole() {
+        let mut cell = Cell {
+            disparity: HIS_ARC_DEG.to_radians(),
+            confidence: 0.90,
+            reach_m: 0.033,
+            ..Cell::default()
+        };
+        cell.believe(VISIT_S, true);
+        near(cell.trust, 1.0, 1e-6);
+    }
+
+    /// A direction that stops correlating for long enough to lose its trust
+    /// entirely **re-arrives**, and it is the same line and the same walk.
+    ///
+    /// `main`'s rule was `trust <= 0`, not "has never been read", so a cell
+    /// whose evidence had gone all the way to nothing applied its next reading
+    /// whole however long it had been on screen. The staging covers both
+    /// because both were that one clause, and this is the half a reader is
+    /// least likely to notice.
+    #[test]
+    fn a_re_arrival_is_staged_like_a_first_one() {
+        let cold = || Cell {
+            disparity: HIS_ARC_DEG.to_radians(),
+            confidence: 0.90,
+            reach_m: 0.033,
+            trust: 0.0,
+            ..Cell::default()
+        };
+        let mut was = cold();
+        as_main_did(&mut was, VISIT_S, false);
+        near(was.trust, 1.0, 1e-6);
+        let mut now = cold();
+        now.believe(VISIT_S, false);
+        near(now.trust, walk_rate(), 1e-6);
+    }
+
+    /// An old trace, written before the eighth column existed, reads back
+    /// applying what the build that wrote it applied - not zero, which would
+    /// be a picture with no band in it.
+    #[test]
+    fn a_seven_column_trace_reads_back_the_gate_it_was_written_under() {
+        let mut cell = Cell {
+            disparity: 0.01,
+            confidence: 0.5 * KEEP,
+            reach_m: 0.033,
+            trust: 0.75,
+            ..Cell::default()
+        };
+        let eight = Cell::read(&Cell::write(std::slice::from_ref(&cell))).expect("eight columns");
+        assert_eq!(eight[0], cell);
+        let seven: String = Cell::write(std::slice::from_ref(&cell))
+            .split_whitespace()
+            .take(7)
+            .collect::<Vec<_>>()
+            .join(" ");
+        cell.trust = 0.5;
+        assert_eq!(Cell::read(&seven).expect("seven columns")[0], cell);
+    }
+
+    fn near(read: f32, want: f32, tolerance: f32) {
+        assert!(
+            (read - want).abs() <= tolerance,
+            "{read} is not within {tolerance} of {want}"
+        );
     }
 }

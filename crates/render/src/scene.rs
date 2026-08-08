@@ -1869,6 +1869,7 @@ impl Band {
                     off_conf: float(at + 16),
                     tone: float(at + 20),
                     lit: float(at + 24),
+                    trust: float(at + 28),
                 }
             })
             .collect();
