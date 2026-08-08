@@ -32,28 +32,54 @@ pub enum Args {
     /// A staged blind A/B session file, and nothing else: the file names its
     /// own clips and its own views (`crate::ab`). Research path only.
     Ab(PathBuf),
+    /// The same file, read and checked, and then nothing: no window, no
+    /// decode and no sound. What an agent staging a session runs to find out
+    /// whether it staged one.
+    AbCheck(PathBuf),
+    /// The same file, and the key it implies: which arm each position of each
+    /// trial is. The coordinator's, and the only thing that turns an answered
+    /// position into an arm.
+    AbKey(PathBuf),
     Help,
     Version,
 }
 
-/// The research path's one flag.
+/// The research path's three flags. One file, and what to do with it: run it,
+/// say its shape, or say its key.
+///
+/// The key is printed by the app and not derived by the runner script,
+/// because a second reader of this grammar is a key that can drift from the
+/// session it unblinds, and a blind A/B unblinded to the wrong arm is worse
+/// than one never run.
 const AB_SESSION: &str = "--ab-session";
+const AB_CHECK: &str = "--ab-check";
+const AB_KEY: &str = "--ab-key";
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut input = None;
     let mut view = Vec::new();
     let mut session = None;
+    let mut about: fn(PathBuf) -> Args = Args::Ab;
     for arg in args {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Args::Help),
             "-V" | "--version" => return Ok(Args::Version),
-            flag if flag.starts_with(AB_SESSION) => {
+            flag if [AB_SESSION, AB_CHECK, AB_KEY]
+                .iter()
+                .any(|named| flag.starts_with(named)) =>
+            {
+                let (named, what): (_, fn(PathBuf) -> Args) = match flag {
+                    _ if flag.starts_with(AB_CHECK) => (AB_CHECK, Args::AbCheck),
+                    _ if flag.starts_with(AB_KEY) => (AB_KEY, Args::AbKey),
+                    _ => (AB_SESSION, Args::Ab),
+                };
                 let file = flag
-                    .strip_prefix(AB_SESSION)
+                    .strip_prefix(named)
                     .and_then(|rest| rest.strip_prefix('='))
                     .filter(|file| !file.is_empty())
-                    .ok_or_else(|| format!("{AB_SESSION} needs a file: {AB_SESSION}=<file>"))?;
+                    .ok_or_else(|| format!("{named} needs a file: {named}=<file>"))?;
                 session = Some(PathBuf::from(file));
+                about = what;
             }
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
             // One of the view's five keys, and nothing else with an `=` in
@@ -74,7 +100,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                  line with it"
             ));
         }
-        return Ok(Args::Ab(file));
+        return Ok(about(file));
     }
     if at.is_some() && input.is_none() {
         return Err("a view needs the file it is a view of".to_owned());

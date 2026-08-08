@@ -292,6 +292,48 @@ impl Session {
         &self.arms[self.trials[trial].order[position]].knobs
     }
 
+    /// What was staged, in the shape the harness reads it, and **no arm
+    /// names**: how many arms, which knobs they move, and one line a trial.
+    ///
+    /// The check an agent runs to find out whether it staged a session
+    /// (`--ab-check`). It names no arm on purpose: the same command run in
+    /// the wrong terminal would otherwise hand the owner the key.
+    pub fn shape(&self) -> String {
+        let mut said = format!(
+            "session {}, {} arms over {} trials, answering into {}\n",
+            self.id,
+            self.arms.len(),
+            self.trials.len(),
+            self.results.display()
+        );
+        let _ = writeln!(
+            said,
+            "each arm sets {}",
+            self.arms[0]
+                .knobs
+                .iter()
+                .map(Knob::name)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        for trial in &self.trials {
+            let _ = writeln!(
+                said,
+                "  {:<10} {} arms, {:.1} to {:.1} s of {}",
+                trial.id,
+                trial.order.len(),
+                trial.from.as_secs_f64(),
+                trial.to.as_secs_f64(),
+                trial
+                    .clip
+                    .file_name()
+                    .unwrap_or(trial.clip.as_os_str())
+                    .to_string_lossy()
+            );
+        }
+        said
+    }
+
     /// The key: which arm each position of each trial is, for the
     /// coordinator, after the answers are in. Nothing calls this while the
     /// window is open.

@@ -26,6 +26,19 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     };
+    // The two research paths that open no window: they answer on stdout, and
+    // a session they will not take is refused with the code a bad command
+    // line gets, so a runner script can tell the two apart from a crash.
+    let said = |answer: Result<String, String>| match answer {
+        Ok(answer) => {
+            print!("{answer}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("kjerag: {e}");
+            ExitCode::from(2)
+        }
+    };
     match args::parse(std::env::args().skip(1)) {
         Ok(args::Args::Play(input, at)) => played(input, at, None),
         // The session is read and checked here, before a window opens, and a
@@ -39,6 +52,15 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        // The same read and the same refusal, and then nothing: no window, no
+        // decode, no sound. It says what it found rather than only what is
+        // wrong, because an agent that staged a session wants to see the
+        // shape of what it staged, and it says no arm names, because the same
+        // command run in the wrong terminal would unblind the session.
+        Ok(args::Args::AbCheck(file)) => said(ab::open(&file).map(|session| session.shape())),
+        // The key, off the same parse, because a second reader of the session
+        // grammar is a key that can drift from the session it unblinds.
+        Ok(args::Args::AbKey(file)) => said(ab::open(&file).map(|session| session.key())),
         Ok(args::Args::Help) => {
             println!("{}", args::help());
             ExitCode::SUCCESS
