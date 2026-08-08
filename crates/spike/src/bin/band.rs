@@ -1198,6 +1198,8 @@ fn snap(options: &Options) -> Fallible<()> {
     section(&reads, size, px_per_deg);
     reaches(&reads, &probes, px_per_deg);
     support(&reads, &first.mapped, size);
+    weight(&reads, &probes, &first.mapped, size, px_per_deg);
+    arrivals(&reads, &first.mapped, size);
     for axis in [Axis::Epi, Axis::Along] {
         let steps = attribute(&reads, &probes, px_per_deg, axis);
         verdict(&steps, &reads, probes.len(), axis);
@@ -1664,6 +1666,195 @@ fn support(reads: &[Read], reframe: &Reframe, size: Size) {
             last.trust,
         );
     }
+}
+
+/// How MUCH correction is delivered at his pixels, frame by frame, and how
+/// much of the reading it is.
+///
+/// Every other column in `mode=snap` is about the STEPS the delivered field
+/// takes; this one is about the SIZE of the thing that is stepping. Two arms
+/// can agree on every step and disagree on how much correction is on the
+/// screen the whole time, and that difference is invisible to a step census
+/// by construction. It is the column the arrival-staging question needs: what
+/// staging costs is not a jump, it is magnitude, and magnitude has to be
+/// measured over time to say whether the cost is transient or steady.
+///
+/// `epi mean` and `epi peak` are over the probes, in view px of this view.
+/// `gate` is the mean of [`Cell::trust`] over the cells this view stands on
+/// that hold evidence at some point in the run - a fixed denominator, so a
+/// gate that walks in is a column that rises rather than a mean over a
+/// changing set. `read px` is what those same cells would deliver with the
+/// gate wide open, so `epi mean / read px` is the fraction of its own measured
+/// answer the pass is actually spending.
+fn weight(reads: &[Read], probes: &[Probe], reframe: &Reframe, size: Size, px_per_deg: f64) {
+    let covered = covering(reframe, size, [0, 0, size.width, size.height]);
+    // The cells that ever hold evidence, fixed over the run: a mean taken over
+    // whichever cells happen to be live on a frame rises when cells drop out,
+    // which is the opposite of what it would be read as.
+    let ever: Vec<usize> = covered
+        .iter()
+        .copied()
+        .filter(|cell| reads.iter().any(|read| read.cells[*cell].confidence > 0.0))
+        .collect();
+    let each: Vec<(f64, f64, f64, f64, usize)> = reads
+        .iter()
+        .map(|read| {
+            let across: Vec<f64> = probes
+                .iter()
+                .map(|probe| deliver(read, read, probe, px_per_deg).epi_px.abs())
+                .collect();
+            let mean = across.iter().sum::<f64>() / across.len().max(1) as f64;
+            let peak = across.iter().copied().fold(0.0, f64::max);
+            let gate = match ever.is_empty() {
+                true => 0.0,
+                false => {
+                    ever.iter()
+                        .map(|cell| f64::from(read.cells[*cell].trust))
+                        .sum::<f64>()
+                        / ever.len() as f64
+                }
+            };
+            // The same probes with the gate taken out, which is the correction
+            // the band has MEASURED rather than the one it is spending.
+            let held = probes
+                .iter()
+                .map(|probe| {
+                    let at = deliver(read, read, probe, px_per_deg);
+                    let gate = 0.5 * f64::from(at.trust[0] + at.trust[1]);
+                    match gate > 0.0 {
+                        true => at.epi_px.abs() / gate,
+                        false => 0.0,
+                    }
+                })
+                .sum::<f64>()
+                / probes.len().max(1) as f64;
+            let live = ever
+                .iter()
+                .filter(|cell| read.cells[**cell].confidence > 0.0)
+                .count();
+            (mean, peak, gate, held, live)
+        })
+        .collect();
+    println!(
+        "\nthe correction's own SIZE at his pixels, frame by frame over {} probes. `epi mean` and \n\
+         \t`epi peak` are |across-seam| in view px; `gate` is the mean trust over the {} cells \n\
+         \tthis view stands on that ever hold evidence; `read px` is what those probes would \n\
+         \tdeliver with the gate wide open; `spent` is the first over the last.\n",
+        probes.len(),
+        ever.len(),
+    );
+    println!(
+        "  {:>6} {:>9} {:>10} {:>10} {:>8} {:>10} {:>8} {:>7}",
+        "frame", "at s", "epi mean", "epi peak", "gate", "read px", "spent", "live",
+    );
+    for (frame, (mean, peak, gate, held, live)) in each.iter().enumerate() {
+        println!(
+            "  {frame:>6} {:>9.3} {mean:>10.2} {peak:>10.2} {gate:>8.3} {held:>10.2} {:>7.1}% \
+             {live:>7}",
+            reads[frame].at.as_secs_f64(),
+            match *held > 0.0 {
+                true => 100.0 * mean / held,
+                false => 0.0,
+            },
+        );
+    }
+    // Windows of a second, so transient and steady state are two rows of the
+    // same table rather than an argument about a graph.
+    let window = 30;
+    println!(
+        "\n  and the same in {window}-frame (one second) windows, which is what a transient and a \n\
+         \tsteady state look like beside each other.\n"
+    );
+    println!(
+        "  {:>12} {:>10} {:>10} {:>8} {:>10}",
+        "window", "epi mean", "epi peak", "gate", "read px",
+    );
+    for start in (0..each.len()).step_by(window) {
+        let slice = &each[start..(start + window).min(each.len())];
+        let over = |of: fn(&(f64, f64, f64, f64, usize)) -> f64| {
+            slice.iter().map(of).sum::<f64>() / slice.len().max(1) as f64
+        };
+        println!(
+            "  {:>5}..{:<5} {:>10.2} {:>10.2} {:>8.3} {:>10.2}",
+            start,
+            (start + window).min(each.len()) - 1,
+            over(|row| row.0),
+            slice.iter().map(|row| row.1).fold(0.0, f64::max),
+            over(|row| row.2),
+            over(|row| row.3),
+        );
+    }
+}
+
+/// How often the cells this view stands on LOSE their evidence and get it
+/// back, and what their gate did while they were away.
+///
+/// [`support`] says how many frames a cell was live and which frame it first
+/// read on. Neither answers the question arrival staging raises, which is how
+/// many times a cell arrives: every one of those is a walk restarted on the
+/// staged arm and a whole correction switched on on the arm that does not
+/// stage. `up` is a dead-to-live transition after the first frame, `down` is
+/// the other way, and the frames the ups happened on are printed because a
+/// count cannot say whether they are spread over the run or bunched at one
+/// moment.
+///
+/// **The gate columns are the price.** `gate min` is the lowest trust the cell
+/// held on any frame it was live, and `under half` is how many of those frames
+/// it spent below half of the reading it holds. On the arm that applies an
+/// arrival whole those two are 1.000 and 0 by construction unless the
+/// confidence itself sags; on the staged arm they are what the walk costs.
+fn arrivals(reads: &[Read], reframe: &Reframe, size: Size) {
+    let covered = covering(reframe, size, [0, 0, size.width, size.height]);
+    println!(
+        "\nthe arrivals at the {} cells this view stands on, over {} frames. `up` counts the \n\
+         \tframes a cell went from no evidence to some AFTER the first, which is one restarted \n\
+         \twalk each on the staged arm; `down` is the other way.\n",
+        covered.len(),
+        reads.len(),
+    );
+    println!(
+        "  {:>5} {:>8} {:>6} {:>5} {:>6} {:>9} {:>10} {:>11}   up frames",
+        "cell", "phi", "live", "up", "down", "gate min", "gate last", "under half",
+    );
+    let (mut ups, mut sagged) = (0usize, 0usize);
+    for cell in covered {
+        let live: Vec<bool> = reads
+            .iter()
+            .map(|read| read.cells[cell].confidence > 0.0)
+            .collect();
+        let up: Vec<usize> = (1..live.len())
+            .filter(|f| !live[f - 1] && live[*f])
+            .collect();
+        let down = (1..live.len()).filter(|f| live[f - 1] && !live[*f]).count();
+        let gates: Vec<f64> = reads
+            .iter()
+            .enumerate()
+            .filter(|(frame, _)| live[*frame])
+            .map(|(_, read)| f64::from(read.cells[cell].trust))
+            .collect();
+        let under = gates.iter().filter(|gate| **gate < 0.5).count();
+        ups += up.len();
+        sagged += under;
+        println!(
+            "  {cell:>5} {:>7.1}d {:>6} {:>5} {:>6} {:>9.3} {:>10.3} {:>11}   {}",
+            cell as f64 / AZIMUTHS as f64 * 360.0,
+            live.iter().filter(|on| **on).count(),
+            up.len(),
+            down,
+            gates.iter().copied().fold(f64::INFINITY, f64::min),
+            f64::from(reads.last().expect("a run has frames").cells[cell].trust),
+            under,
+            up.iter()
+                .take(8)
+                .map(usize::to_string)
+                .collect::<Vec<String>>()
+                .join(","),
+        );
+    }
+    println!(
+        "\n  {ups} arrivals after the first frame over the whole arc, and {sagged} cell-frames \n\
+         \tspent live with the gate under half."
+    );
 }
 
 /// Every frame-to-frame step at every probe, decomposed and classed.
