@@ -437,6 +437,11 @@ impl Scene {
     /// Draw this file with what the pool knows about its camera. Applied here
     /// and now, with no walk, so it is in the first frame.
     pub fn use_seam(&self, fit: SeamFit) {
+        // HACK (flat-v6 loop): KJERAG_POSE=off draws pure factory calibration,
+        // no pooled/learned pose on top. Studio-parity discriminator.
+        if std::env::var("KJERAG_POSE").is_ok_and(|v| v == "off") {
+            return;
+        }
         let Some(show) = &self.show else {
             return;
         };
