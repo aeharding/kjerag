@@ -960,6 +960,15 @@ enum Plant {
     /// One cell held empty until a named frame, so its own real reading
     /// arrives whole there.
     Arrive(usize, usize),
+    /// A run of cells held empty for the WHOLE run, which is the comb's own
+    /// control ([`holes`]).
+    ///
+    /// At a run of one it is a gap between two live directions and the
+    /// mechanism has to bridge it; at three or more it is an arc with no
+    /// evidence in reach of its middle and the correction has to stay at
+    /// nothing there. The same plant answers both directions, and it has to,
+    /// because a bridge that cannot be shown to stop is an extrapolation.
+    Blind(usize, usize),
     /// The whole state frozen at one frame while the map runs: every step the
     /// picture then takes is the sweep and nothing else, so this is both the
     /// control for that term and the measurement of it on its own.
@@ -979,6 +988,7 @@ impl Plant {
             "cell" => Ok(Self::Cell(number()?.parse()?, number()?.parse()?)),
             "commit" => Ok(Self::Commit(number()?.parse()?, number()?.parse()?)),
             "arrive" => Ok(Self::Arrive(number()?.parse()?, number()?.parse()?)),
+            "blind" => Ok(Self::Blind(number()?.parse()?, number()?.parse()?)),
             "hold" => Ok(Self::Hold(number()?.parse()?)),
             "still" => Ok(Self::Still),
             _ => Err(format!("no plant called {what}").into()),
@@ -1005,6 +1015,13 @@ impl Plant {
             Self::Arrive(cell, frame) => {
                 for read in reads.iter_mut().take(frame) {
                     read.cells[cell % AZIMUTHS] = Cell::default();
+                }
+            }
+            Self::Blind(cell, run) => {
+                for read in reads.iter_mut() {
+                    for step in 0..run {
+                        read.cells[(cell + step) % AZIMUTHS] = Cell::default();
+                    }
                 }
             }
             Self::Hold(frame) => {
@@ -1042,6 +1059,11 @@ impl Plant {
             Self::Arrive(cell, frame) => format!(
                 "plant:  cell {cell} held empty until frame {frame}. it must show up as ARRIVAL, \
                  on frame {frame}"
+            ),
+            Self::Blind(cell, run) => format!(
+                "plant:  {run} cell(s) from {cell} held empty for the whole run. read it off the \
+                 hole table: at a run of 1 the BRIDGE row is what the mechanism has to lift, and \
+                 at 3 or more the BLIND ARC row is what it may not"
             ),
             Self::Hold(frame) => format!(
                 "plant:  the state frozen at frame {frame} while the map runs. every step must be \
@@ -1127,6 +1149,17 @@ struct Step {
     arrived: bool,
     phi_deg: f64,
     low: usize,
+    /// The larger of the two frames' delivered corrections at this probe, in
+    /// view px.
+    ///
+    /// **What a probe carrying nothing is doing in a steadiness number.** A
+    /// probe outside the correction delivers zero on both frames and steps by
+    /// zero, so it holds the whole-picture rms down, and a change that corrects
+    /// MORE of the picture is charged for every pixel it newly reaches even
+    /// where those pixels are steadier than the ones already corrected. This is
+    /// what lets the pace line be read a second way: over the picture that is
+    /// actually being corrected.
+    carried: f64,
 }
 
 /// **What the owner's snap points are made of** (the 2026-08-08 percept: "the
@@ -1212,6 +1245,7 @@ fn snap(options: &Options) -> Fallible<()> {
     profile(&reads, &probes, px_per_deg);
     section(&reads, size, px_per_deg);
     reaches(&reads, &probes, px_per_deg);
+    holes(&reads, &first.mapped, size, px_per_deg);
     support(&reads, &first.mapped, size);
     weight(&reads, &probes, &first.mapped, size, px_per_deg);
     arrivals(&reads, &first.mapped, size);
@@ -1617,6 +1651,128 @@ const COMB_PEAK_PX: f64 = 10.0;
 /// gone, and the picture either side of it has not.
 const COMB_TROUGH_PX: f64 = 2.0;
 
+/// **How DEEP the hole is, at the boundaries that make one, and whether a
+/// blind arc still refuses.**
+///
+/// [`reaches`] counts the frames that carry a comb. This says how much
+/// correction is left in the middle of one, which is the second half of the
+/// defect and the half a longer gate hold cannot touch
+/// (docs/research/seam-temporal.md 9.4: the clamp moved across the mix and each
+/// notch got 34 percent deeper).
+///
+/// Measured in the RING and not at the probes, because a probe lands where the
+/// view puts it and the question is about a cell boundary. The delivered
+/// epipolar correction is read at whole azimuths through
+/// [`Reframe::reading_at`], which is the shader's own lookup, at three places
+/// per hole: the blind cell's own centre and its two live neighbours' centres.
+///
+/// **Two rows, and they pull in opposite directions on purpose.**
+///
+/// - A **bridge** is one blind cell with a live one either side. The
+///   correction in the middle of it, as a fraction of the larger of its two
+///   neighbours', is the notch depth: 1.00 is no hole at all and 0.00 is the
+///   correction switched off between two directions that are both corrected.
+///   Higher is better.
+/// - A **blind arc** is three or more blind cells in a row. The correction at
+///   the middle of it, on the same scale, is the refusal: it must stay at
+///   nothing, because there is no evidence anywhere near the middle of such an
+///   arc and applying one there would be extrapolation and not sharing. Lower
+///   is better, and a change that lifts this has broken the refusal.
+///
+/// Only the cells this view actually stands on ([`covering`]), and only where
+/// the neighbours carry a correction worth measuring a fraction of.
+fn holes(reads: &[Read], reframe: &Reframe, size: Size, px_per_deg: f64) {
+    let covered = covering(reframe, size, [0, 0, size.width, size.height]);
+    // The delivered epipolar correction at one azimuth of the ring, in view px
+    // of this view: the shader's own lookup, asked through a body ray flattened
+    // into the seam plane, which is where an azimuth lives.
+    let at = |read: &Read, turn: f64| {
+        let phi = turn / AZIMUTHS as f64 * std::f64::consts::TAU;
+        let body = [phi.cos() as f32, phi.sin() as f32, 0.0];
+        let ray = read.mapped.view_ray_from_body(body);
+        let reading = read.mapped.reading_at(ray, &read.cells, read.along);
+        f64::from(reading.epi.to_degrees()).abs() * px_per_deg
+    };
+    let mut bridges: Vec<f64> = Vec::new();
+    let mut arcs: Vec<f64> = Vec::new();
+    for read in reads {
+        let blind = |cell: usize| read.cells[cell % AZIMUTHS].confidence <= 0.0;
+        for cell in &covered {
+            if !blind(*cell) {
+                continue;
+            }
+            // How long the blind run this cell sits in is, and where in it this
+            // cell sits: one blind cell is a gap to bridge and three is an arc
+            // to refuse, and the two are the same scan.
+            let mut back = 0;
+            while back < AZIMUTHS && blind(cell + AZIMUTHS - back - 1) {
+                back += 1;
+            }
+            let mut ahead = 0;
+            while ahead < AZIMUTHS && blind(cell + ahead + 1) {
+                ahead += 1;
+            }
+            let (run, place) = (back + ahead + 1, back);
+            // The scale is what the two live EDGES HOLD, not what they are
+            // delivered: `disparity * trust` is the same on both arms, because
+            // an arm changes the lookup and not the state, so the population
+            // and the denominator are identical and only the numerator moves.
+            // A delivered denominator would have compared two different sets of
+            // holes and called the difference a depth.
+            let held = |cell: usize| {
+                f64::from(applied(&read.cells[cell % AZIMUTHS]).to_degrees()).abs() * px_per_deg
+            };
+            let peak = held(cell + AZIMUTHS - back - 1).max(held(cell + ahead + 1));
+            if peak < 1.0 {
+                continue;
+            }
+            let depth = at(read, *cell as f64) / peak;
+            match run {
+                1 => bridges.push(depth),
+                _ if run >= 3 && place * 2 == run - 1 => arcs.push(depth),
+                _ => {}
+            }
+        }
+    }
+    let says = |over: &mut Vec<f64>| {
+        over.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        match over.is_empty() {
+            true => (0, 0.0, 0.0, 0.0),
+            false => (
+                over.len(),
+                over.iter().sum::<f64>() / over.len() as f64,
+                over[over.len() / 2],
+                over[0],
+            ),
+        }
+    };
+    let (bridged, bridge_mean, bridge_median, bridge_worst) = says(&mut bridges);
+    let (arced, arc_mean, arc_median, _) = says(&mut arcs);
+    let arc_worst = arcs.last().copied().unwrap_or_default();
+    println!(
+        "\nhow deep the hole is, over every frame and the {} cells this view stands on. a BRIDGE \n\
+         \tis one blind cell with a live one either side, and the number is the correction left \n\
+         \tin the middle of it as a fraction of its neighbours': 1.00 is no hole, 0.00 is the \n\
+         \tcorrection switched off between two corrected directions, HIGHER IS BETTER. a BLIND \n\
+         \tARC is three or more blind cells in a row, read at the middle one, where there is no \n\
+         \tevidence in reach and the correction MUST stay at nothing: LOWER IS BETTER, and a \n\
+         \tnumber that has lifted is a refusal that has broken.\n",
+        covered.len(),
+    );
+    println!(
+        "  {:>10} {:>8} {:>10} {:>10} {:>10}",
+        "what", "seen", "mean", "median", "worst",
+    );
+    println!(
+        "  {:>10} {bridged:>8} {bridge_mean:>10.3} {bridge_median:>10.3} {bridge_worst:>10.3}",
+        "bridge",
+    );
+    println!(
+        "  {:>10} {arced:>8} {arc_mean:>10.3} {arc_median:>10.3} {arc_worst:>10.3}",
+        "blind arc",
+    );
+}
+
 /// What the delivered field looks like ACROSS the picture on one frame: how
 /// much of the view it reaches at all, and how steeply it changes where it
 /// does.
@@ -1904,6 +2060,7 @@ fn attribute(reads: &[Read], probes: &[Probe], px_per_deg: f64, axis: Axis) -> V
                 arrived,
                 phi_deg: now.phi_deg,
                 low: now.low,
+                carried: axis.of(&now).abs().max(axis.of(&was).abs()),
             });
         }
     }
@@ -2033,6 +2190,24 @@ fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
         busy(STEP_PX),
         reads.len() - 1,
         busy(MEMO_PX),
+    );
+    // The same rms over the probe-frames that are being corrected at all. A
+    // change that closes a hole corrects picture that was not corrected before,
+    // and that picture then follows the band the way the rest of it always did:
+    // charged against every probe the first number falls, charged against the
+    // corrected ones it says whether the correction itself got less steady.
+    let carrying: Vec<&Step> = steps.iter().filter(|step| step.carried >= 1.0).collect();
+    let over = (carrying
+        .iter()
+        .map(|step| step.total * step.total)
+        .sum::<f64>()
+        / carrying.len().max(1) as f64)
+        .sqrt();
+    println!(
+        "  and over the {} probe-frames of {} that carry a correction of 1 px or more at all, \n\
+         \t{over:.2} px rms.",
+        carrying.len(),
+        steps.len(),
     );
 
     let mut largest: Vec<&&Step> = counted.iter().collect();
