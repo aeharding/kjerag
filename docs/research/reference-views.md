@@ -257,6 +257,47 @@ caveat in the Motion section, which is the same trap at a smaller size.
   only GOOD's Jul-14 arm (0.02 against 0.01) is marginal. Quote it range to range, never as
   "unmoved" per run.
 
+## Geometry: is the across-seam constant the camera or the session (VERDICT: the session)
+- 2026-08-07 `--bin constant <every X4 capture> seam=pool`, which on the owner's box that day is
+  `roll:0.795,yaw:-2.310,pitch:-0.936,cx:-3.28,cy:-11.91`. 3 places x 8 frames, 72 azimuths.
+  **`offset_v6` is byte identical on all six X4 Air captures** (one md5, six files), so a
+  calibration is the same number on every flight and can only carry an error that is the same
+  number on every flight. That makes this table the test of whether any fixed calibration - v6
+  included - can be the carrier of the across-seam constant.
+
+  | capture | sites | arc | across DC deg | along DC deg |
+  | --- | --- | --- | --- | --- |
+  | May-01 `..._183417_00_002` | 29 | 285 | **-0.0985** +-0.0811 | +0.0088 +-0.0188 |
+  | Jul-14 `..._193252_00_006` | 38 | 290 | **+0.5012** +-0.0623 | -0.0348 +-0.0411 |
+  | Jul-25 `..._194424_00_001` | 20 | 195 | **-0.1644** +-0.1709 | +0.0837 +-0.0602 |
+  | Apr-10 `..._185407_00_004` | 33 | 305 | **-0.0055** +-0.1191 | +0.0457 +-0.0592 |
+  | Aug-02 `..._191029_00_002` | 31 | 280 | **+0.3144** +-0.0943 | +0.0458 +-0.0556 |
+  | May-26 `..._191025_00_004` | 59 | 325 | **+0.3466** +-0.0467 | +0.0513 +-0.0543 |
+
+  Across-seam constants span **0.666 deg (10.9 src px)**; along-seam constants, on the axis no
+  distance can reach, span **0.119 deg (1.9 src px)** with a widest bar of 0.060. The across
+  spread is 5.6x the along spread and 3.9x the widest single bar, so it is not the instrument.
+  **The across-seam constant is a per-session quantity and no fixed calibration wrote it.**
+  Whether the per-session part is those flights' own parallax or their own geometry this does not
+  say, and it must not be read as saying.
+  THE CONTROL THAT MAKES THE NEGATIVE COUNT, and it is on the real footage rather than a
+  synthetic ring: the same run with `plant=0.49` reads May-01 at -0.0985 -> +0.3915 and Jul-14 at
+  +0.5012 -> +0.9912, both **exactly +0.4900**, with the along column, the error bars, the
+  one-cycle terms and the scatter all unmoved to every digit printed. A -0.49 deg constant on
+  May-01 is a thing this instrument finds when it is there. It is not there.
+  **This is not `--bin ceiling`'s -0.49 and does not refute it**: that number is what no rigid
+  pose could remove from traced crossing sites under a pose solved on May-01's own downward arc,
+  and this is the DC of the whole ring's residual through the pose the app draws, with the one
+  cycle taken out. Different sites, different pose, different reduction. What this table settles
+  is only the flight-to-flight question, which is the one a fixed calibration lives or dies on.
+  WHAT TRACKS THE OWNER'S EYE IS NOT THE CONSTANT. He reports May-01 "very obviously off" with a
+  building that jumps, and the other clips clean when he zooms into their seams. May-01 carries
+  the second *smallest* across-seam constant of the six, and the three clips he calls clean carry
+  the three largest. What May-01 does carry is the corpus's most across-specific scatter: its
+  across rms is 4.3x its own along rms (0.4214 against 0.0979) where the other five run 0.9x to
+  2.8x. The along axis is that capture's own repeatability, so the ratio is the part of the
+  across residual the scene put there. A per-azimuth, per-site term and not a DC one.
+
 ## Geometry: local vs pose field (VERDICT PENDING - the "optimizing some parts not others" family)
 - 2026-08-01 `VID_20260410_185407_00_004.insv time=43.143 yaw=93.36 pitch=-2.43 fov=33.95 lock=1`
   vs `VID_20260410_185407_00_004.insv time=45.112 yaw=-86.05 pitch=3.18 fov=38.28 lock=1`
