@@ -1,4 +1,4 @@
-//! Everything Kjerag reads out of an `.insv` file that is not pixels.
+//! Everything Kjerag reads out of a capture that is not pixels.
 //!
 //! The lens calibration, the two lenses' shutter tracks, and the IMU: its
 //! samples as the sensor wrote them, and the orientation those samples
@@ -25,13 +25,17 @@ mod exposure;
 mod format;
 mod gyro;
 mod orientation;
+/// The DJI Osmo 360 `.OSV` calibration, which is in the file's own telemetry
+/// track rather than in a trailer. Private like the rest; `CalibrationSet`
+/// routes to it.
+mod osmo;
 mod pair;
 mod rotation;
 mod trailer;
 
 pub use calibration::{
-    CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Pose, Readout, Size,
-    Sweep,
+    CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Pose, Readout,
+    Size, Sweep,
 };
 pub use exposure::{ExposureSample, ExposureTrack};
 pub use format::{Foreign, Format};
@@ -73,6 +77,11 @@ pub enum Error {
     CanvasMismatch,
     /// A canvas or crop dimension was zero, so no pixel scale exists.
     DegenerateCanvas,
+    /// A DJI capture with no `djmd` telemetry track in it, which is where an
+    /// Osmo 360 keeps its calibration.
+    NoTelemetry,
+    /// A field the telemetry record has to carry was not in it.
+    TelemetryField(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -90,6 +99,10 @@ impl std::fmt::Display for Error {
             ),
             Self::CanvasMismatch => write!(f, "lens blocks disagree about the calibration canvas"),
             Self::DegenerateCanvas => write!(f, "a canvas or crop dimension is zero"),
+            Self::NoTelemetry => write!(f, "file has no DJI telemetry track"),
+            Self::TelemetryField(name) => {
+                write!(f, "the DJI telemetry record carries no {name}")
+            }
         }
     }
 }
@@ -153,6 +166,8 @@ mod tests {
             },
             Error::CanvasMismatch,
             Error::DegenerateCanvas,
+            Error::NoTelemetry,
+            Error::TelemetryField("lens"),
         ];
         for e in &every {
             let named = match e {
@@ -165,6 +180,8 @@ mod tests {
                 Error::OffsetGrammar { .. } => "OffsetGrammar",
                 Error::CanvasMismatch => "CanvasMismatch",
                 Error::DegenerateCanvas => "DegenerateCanvas",
+                Error::NoTelemetry => "NoTelemetry",
+                Error::TelemetryField(_) => "TelemetryField",
             };
             let said = e.to_string();
             assert!(!said.contains('\u{2014}'), "em dash in {named}: {said}");

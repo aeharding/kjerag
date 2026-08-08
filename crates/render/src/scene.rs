@@ -1058,7 +1058,7 @@ type Harvested = Arc<Mutex<Option<Harvest>>>;
 fn ours(path: &Path) -> Fallible<()> {
     match Format::sniff(path) {
         Format::Foreign(foreign) => Err(Box::new(foreign)),
-        Format::Insta360 | Format::Unknown => Ok(()),
+        Format::Insta360 | Format::Osmo | Format::Unknown => Ok(()),
     }
 }
 

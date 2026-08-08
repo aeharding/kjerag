@@ -1,5 +1,15 @@
-//! The Mei/UCM forward map: one output ray to one lens pixel, for each lens
-//! of the camera, and how much of each is shown.
+//! The forward map: one output ray to one lens pixel, for each lens of the
+//! camera, and how much of each is shown.
+//!
+//! **Two lens models, chosen per lens** (`kjerag_meta::Model`). Insta360's
+//! `offset_v3` is Mei/UCM with Brown-Conrady distortion on the normalized
+//! plane; a DJI Osmo 360's `djmd` calibration is a plain equidistant fisheye,
+//! `r = fx * theta`, with no distortion terms at all
+//! (`kjerag_meta::osmo` has the measurement that refused the four the file
+//! carries). Both are one function of a unit ray in the lens's own frame and
+//! nothing else, so the model is a branch inside [`lens_pixel`] and the rest
+//! of the pass - the caps, the crossover, the band, the readout - does not
+//! know which one it is running.
 //!
 //! It exists twice on purpose. `WGSL` below is the copy the GPU runs, once
 //! per output pixel; [`Reframe::project`] is the same arithmetic in Rust, so
@@ -26,10 +36,10 @@
 //! measured per camera and the correction is switched off on any camera it
 //! has not been measured on (`kjerag_meta::Sweep`).
 //!
-//! Written from the model description in `docs/research/insv-format.md` 5.1
-//! (Mei and Rives 2007, as OpenCV's `cv::omnidir` states it). Nothing here
-//! is transcribed from Gyroflow's `insta360.wgsl`, so this file is plain
-//! AGPL-3.0 with no GPL header.
+//! The Mei half is written from the model description in
+//! `docs/research/insv-format.md` 5.1 (Mei and Rives 2007, as OpenCV's
+//! `cv::omnidir` states it). Nothing here is transcribed from Gyroflow's
+//! `insta360.wgsl`, so this file is plain AGPL-3.0 with no GPL header.
 //!
 //! The other half of the map is the **output** projection, [`Screen`]: how a
 //! point of the frame becomes the ray this file then projects. A flat window
@@ -40,7 +50,7 @@
 use std::f32::consts::PI;
 use std::sync::OnceLock;
 
-use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
+use kjerag_meta::{Intrinsics, Lens, Model, Quat};
 
 use super::sampling::Sampling;
 use super::{Camera, Size};
@@ -481,7 +491,7 @@ pub struct Reframe {
     table: super::band::Table,
 }
 
-/// One lens's half of the block: the Mei/UCM model, and where the lens is
+/// One lens's half of the block: the camera model, and where the lens is
 /// pointing after the camera's own rotation.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -521,9 +531,11 @@ struct LensBlock {
     /// half turn apart, which is exactly why a readout displacement does not
     /// cancel between them at the seam.
     turn: [f32; 3],
-    /// A uniform array's element stride rounds up to the element's 16-byte
-    /// alignment. WGSL does that itself; `repr(C)` does not.
-    _pad: [f32; 1],
+    /// Which model [`lens_pixel`] runs for this lens: [`MEI`] or
+    /// [`EQUIDISTANT`]. An `f32` because every member of this block is one,
+    /// and a uniform block with a mixed member type is a layout to get wrong
+    /// for nothing.
+    model: f32,
 }
 
 /// Where a view ray lands in one lens's image, in delivered-frame pixels.
@@ -1309,12 +1321,12 @@ impl Reframe {
     pub fn solve(&self, lens: usize, view_ray: [f32; 3], rounds: usize) -> Landing {
         let block = &self.lenses[lens];
         let aimed = block.lens_ray(view_ray);
-        let mut landing = self.mei(lens, normalize(aimed));
+        let mut landing = self.lens_pixel(lens, normalize(aimed));
         if self.is_rolling() {
             for _ in 0..rounds {
                 let share = self.readout_share(landing.pixel);
                 let turned = turned(aimed, block.turn.map(|axis| axis * share));
-                landing = self.mei(lens, normalize(turned));
+                landing = self.lens_pixel(lens, normalize(turned));
             }
         }
         landing
@@ -1339,19 +1351,77 @@ impl Reframe {
         (across * self.row_axis[0] + down * self.row_axis[1]).clamp(-0.5, 0.5)
     }
 
-    /// The Mei/UCM model itself, for one of this block's lenses.
+    /// The lens model itself, for one of this block's lenses.
     ///
-    /// WGSL twin: `mei`.
-    fn mei(&self, lens: usize, p: [f32; 3]) -> Landing {
-        mei(&self.lenses[lens], p)
+    /// WGSL twin: `lens_pixel`.
+    fn lens_pixel(&self, lens: usize, p: [f32; 3]) -> Landing {
+        lens_pixel(&self.lenses[lens], p)
     }
 }
 
-/// The Mei/UCM model itself: a unit ray in one lens's own frame, to a pixel
-/// of that lens's delivered frame.
+/// [`LensBlock::model`] for Mei/UCM, which is what every Insta360 capture is.
+const MEI: f32 = 0.0;
+
+/// [`LensBlock::model`] for the equidistant fisheye, which is what a DJI
+/// `.OSV` is.
+const EQUIDISTANT: f32 = 1.0;
+
+/// A unit ray in one lens's own frame, to a pixel of that lens's delivered
+/// frame, through whichever model that lens's calibration is written in.
 ///
-/// Free of [`Reframe`] because [`coverage_floor`] runs it against a block
-/// that is still being built, before there is a `Reframe` to index.
+/// Free of [`Reframe`] because [`coverage_floor`] runs it against a block that
+/// is still being built, before there is a `Reframe` to index.
+///
+/// WGSL twin: `lens_pixel`.
+fn lens_pixel(lens: &LensBlock, p: [f32; 3]) -> Landing {
+    match lens.model == EQUIDISTANT {
+        true => landed(lens, equidistant(lens, p), p[2], true),
+        false => mei(lens, p),
+    }
+}
+
+/// The equidistant fisheye: the angle off the axis, straight onto a radius.
+///
+/// `r = fx * theta`, and `fy / fx` squeezes the one axis against the other,
+/// which is the whole model. No distortion polynomial: the four coefficients a
+/// DJI `.OSV` carries do not describe this lens under any standard reading of
+/// them, and `kjerag_meta::osmo` has the measurement that refused them.
+///
+/// The offset in pixels, before the principal point. WGSL twin: `equidistant`.
+fn equidistant(lens: &LensBlock, p: [f32; 3]) -> [f32; 2] {
+    // The ray is a unit vector, so its z IS the cosine of the angle off the
+    // axis. `atan2` of the perpendicular reach against it rather than `acos`,
+    // because `acos` loses its precision exactly where this model is used
+    // most, which is the far half of a 199 degree lens.
+    let reach = p[0].hypot(p[1]);
+    let theta = reach.atan2(p[2]);
+    // Straight down the axis, where the azimuth is not defined and the
+    // radius is zero anyway.
+    let scale = match reach > 0.0 {
+        true => theta / reach,
+        false => 0.0,
+    };
+    [lens.fx * p[0] * scale, lens.fy * p[1] * scale]
+}
+
+/// One model's pixel offset, as the [`Landing`] the rest of the pass reads.
+///
+/// `injective` is whether the map can be believed this far round, which is a
+/// question the two models answer differently: Mei folds past a turning point
+/// it computes, and the equidistant map is monotone in `theta` over the whole
+/// sphere and never folds.
+fn landed(lens: &LensBlock, offset: [f32; 2], axis: f32, injective: bool) -> Landing {
+    let depth = lens.image_radius - norm(offset);
+    Landing {
+        pixel: [offset[0] + lens.cx, offset[1] + lens.cy],
+        inside: injective && depth > 0.0,
+        axis,
+        depth,
+    }
+}
+
+/// The Mei/UCM model: a unit ray in one lens's own frame, to a pixel of that
+/// lens's delivered frame.
 ///
 /// WGSL twin: `mei`.
 fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
@@ -1383,13 +1453,7 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
     // there, the radius runs away to infinity instead, and `denom` is the
     // limit that binds.
     let injective = p[2] * lens.xi > -1.0;
-    let depth = lens.image_radius - norm(offset);
-    Landing {
-        pixel: [offset[0] + lens.cx, offset[1] + lens.cy],
-        inside: denom > 0.0 && injective && depth > 0.0,
-        axis: p[2],
-        depth,
-    }
+    landed(lens, offset, p[2], denom > 0.0 && injective)
 }
 
 /// The cosine of the widest angle off a lens's axis that can still be in its
@@ -1458,7 +1522,7 @@ fn inside_anywhere(block: &LensBlock, axis: f32) -> bool {
     let rim = (1.0 - axis * axis).max(0.0).sqrt();
     (0..CAP_AZIMUTHS).any(|step| {
         let (sin, cos) = (step as f32 * std::f32::consts::TAU / CAP_AZIMUTHS as f32).sin_cos();
-        mei(block, [rim * cos, rim * sin, axis]).inside
+        lens_pixel(block, [rim * cos, rim * sin, axis]).inside
     })
 }
 
@@ -1601,14 +1665,14 @@ impl LensBlock {
         image_radius: 0.0,
         axis_min: 2.0,
         turn: [0.0; 3],
-        _pad: [0.0; 1],
+        model: MEI,
     };
 
     fn new(lens: &Lens, index: usize, frame: Size, camera: Camera, held: Held) -> Self {
         let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
         let distortion = lens.distortion;
         let mut block = Self {
-            view_to_lens: view_to_lens(&lens.pose, index, camera, held).columns(),
+            view_to_lens: view_to_lens(lens, index, camera, held).columns(),
             xi: xi as f32,
             fx: fx as f32,
             fy: fy as f32,
@@ -1626,13 +1690,16 @@ impl LensBlock {
             // axis by the mounting does, and it is why the two lenses'
             // corrections run opposite ways in the world.
             turn: held.rolling.map_or([0.0; 3], |rolling| {
-                lens_from_body(&lens.pose, index).mul_vec(rolling.turn.map(|axis| axis as f32))
+                lens_from_body(lens, index).mul_vec(rolling.turn.map(|axis| axis as f32))
             }),
             // Solved for below: the cap is a property of the model this block
             // has just been filled with, and the readout it widens by is the
             // `turn` above.
             axis_min: 2.0,
-            _pad: [0.0; 1],
+            model: match lens.model {
+                Model::Mei => MEI,
+                Model::Equidistant => EQUIDISTANT,
+            },
         };
         // Half of it, because `readout_share` runs -1/2 to +1/2 and the model
         // is handed the ray turned by that share of the whole readout.
@@ -1685,8 +1752,8 @@ pub(crate) fn world_ray(camera: Camera, ray: [f32; 3]) -> [f32; 3] {
 /// direction in that frame and solves for the view that puts it back there,
 /// and with lock on that frame is the world: the anchor stays on the world
 /// and the picture turns under it.
-fn view_to_lens(pose: &Pose, index: usize, camera: Camera, held: Held) -> Mat3 {
-    lens_from_body(pose, index).mul(body_from_view(camera, held))
+fn view_to_lens(lens: &Lens, index: usize, camera: Camera, held: Held) -> Mat3 {
+    lens_from_body(lens, index).mul(body_from_view(camera, held))
 }
 
 /// The same composition with the lens's own mounting left off: a view-space
@@ -1714,8 +1781,17 @@ fn camera_rotation(camera: Camera) -> Mat3 {
 /// in `kjerag_meta::Pose::lens_from_body`, because the IMU needs the same
 /// rotation to get out of the front lens's frame and into the body's, and one
 /// settled convention wants one definition.
-fn lens_from_body(pose: &Pose, index: usize) -> Mat3 {
-    Mat3::from(pose.lens_from_body().rows()).mul(opposed(index))
+///
+/// A file that records the **whole** rotation rather than a residual against
+/// the arrangement takes it verbatim and gets no [`opposed`] composed onto it:
+/// a DJI `.OSV`'s two quaternions already point opposite ways, and turning one
+/// of them a further half turn would point both lenses forward
+/// (`kjerag_meta::Lens::mounting`).
+fn lens_from_body(lens: &Lens, index: usize) -> Mat3 {
+    match lens.mounting {
+        Some(whole) => Mat3::from(whole.rows()),
+        None => Mat3::from(lens.pose.lens_from_body().rows()).mul(opposed(index)),
+    }
 }
 
 /// The nominal pose lens `index` is mounted in, which its extrinsics are a
@@ -1852,7 +1928,7 @@ pub(crate) fn wgsl() -> String {
     let lanes = super::band::AZIMUTHS / 4;
     format!(
         "const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n\
-         const TABLE_LANES = {lanes}u;\n{WGSL}"
+         const TABLE_LANES = {lanes}u;\nconst EQUIDISTANT = {EQUIDISTANT:?};\n{WGSL}"
     )
 }
 
@@ -1878,6 +1954,9 @@ struct LensBlock {
   turn_x: f32,
   turn_y: f32,
   turn_z: f32,
+  // Which model `lens_pixel` runs for this lens: MEI or EQUIDISTANT. Rust
+  // twin: `LensBlock::model`.
+  model: f32,
 };
 
 // How a point of the frame becomes a ray. Rust twin: `Screen`.
@@ -2107,13 +2186,47 @@ fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
 // test, so a file with no IMU record costs what it cost before issue #9.
 fn project(lens: LensBlock, ray: vec3<f32>) -> Landing {
   let aimed = lens.view_to_lens * ray;
-  var landing = mei(lens, normalize(aimed));
+  var landing = lens_pixel(lens, normalize(aimed));
   if reframe.row_axis_x != 0.0 || reframe.row_axis_y != 0.0 {
     let turn = vec3<f32>(lens.turn_x, lens.turn_y, lens.turn_z);
     for (var step = 0u; step < READOUT_STEPS; step += 1u) {
-      landing = mei(lens, normalize(turned(aimed, turn * readout_share(landing.pixel))));
+      landing = lens_pixel(lens, normalize(turned(aimed, turn * readout_share(landing.pixel))));
     }
   }
+  return landing;
+}
+
+// A unit ray in one lens's frame to a pixel, through whichever model that
+// lens's calibration is written in. Rust twin: `lens_pixel`.
+fn lens_pixel(lens: LensBlock, p: vec3<f32>) -> Landing {
+  if lens.model == EQUIDISTANT {
+    // The equidistant map is monotone in theta over the whole sphere, so
+    // unlike Mei's it has no turning point to stay behind.
+    return landed(lens, equidistant(lens, p), p.z, true);
+  }
+  return mei(lens, p);
+}
+
+// The equidistant fisheye: r = fx * theta, and no distortion polynomial. Rust
+// twin: `equidistant`.
+fn equidistant(lens: LensBlock, p: vec3<f32>) -> vec2<f32> {
+  let reach = length(p.xy);
+  let theta = atan2(reach, p.z);
+  // Straight down the axis, where the azimuth is not defined and the radius
+  // is zero anyway.
+  let scale = select(0.0, theta / reach, reach > 0.0);
+  return vec2<f32>(lens.fx * p.x, lens.fy * p.y) * scale;
+}
+
+// One model's pixel offset, as the Landing the rest of the pass reads. Rust
+// twin: `landed`.
+fn landed(lens: LensBlock, offset: vec2<f32>, axis: f32, injective: bool) -> Landing {
+  let depth = lens.image_radius - length(offset);
+  var landing: Landing;
+  landing.pixel = offset + vec2<f32>(lens.cx, lens.cy);
+  landing.inside = injective && depth > 0.0;
+  landing.axis = axis;
+  landing.depth = depth;
   return landing;
 }
 
@@ -2152,13 +2265,7 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
   // Past `cos(theta) = -1/xi` the map folds and lands rays from behind this
   // lens back inside its image circle. Rust twin: `injective`.
   let injective = p.z * lens.xi > -1.0;
-  let depth = lens.image_radius - length(offset);
-  var landing: Landing;
-  landing.pixel = offset + vec2<f32>(lens.cx, lens.cy);
-  landing.inside = denom > 0.0 && injective && depth > 0.0;
-  landing.axis = p.z;
-  landing.depth = depth;
-  return landing;
+  return landed(lens, offset, p.z, denom > 0.0 && injective);
 }
 
 // Pixel centres sit at integer coordinates in the camera model and at
@@ -2226,7 +2333,9 @@ pub(crate) mod tests {
                     p1: -0.0007338,
                     p2: -0.00115458,
                 },
-                pose: Pose {
+                model: Model::Mei,
+                mounting: None,
+                pose: kjerag_meta::Pose {
                     yaw_deg: -0.103,
                     pitch_deg: -0.07,
                     roll_deg: 90.534,
@@ -2249,7 +2358,9 @@ pub(crate) mod tests {
                     p1: -0.0019249,
                     p2: 0.00054564,
                 },
-                pose: Pose {
+                model: Model::Mei,
+                mounting: None,
+                pose: kjerag_meta::Pose {
                     yaw_deg: 0.039,
                     pitch_deg: -0.193,
                     roll_deg: 89.076,
@@ -3354,7 +3465,7 @@ pub(crate) mod tests {
             .map(|step| step as f32 * 0.01)
             .take_while(|theta| {
                 let (sin, cos) = theta.to_radians().sin_cos();
-                mei(block, [sin * cos_phi, sin * sin_phi, cos]).inside
+                lens_pixel(block, [sin * cos_phi, sin * sin_phi, cos]).inside
             })
             .last()
             .expect("the lens has no picture at all")
@@ -3754,7 +3865,7 @@ pub(crate) mod tests {
                 // answer does not move under.
                 let block = &reframe.lenses[0];
                 let share = reframe.readout_share(solved.pixel);
-                let again = reframe.mei(
+                let again = reframe.lens_pixel(
                     0,
                     normalize(turned(
                         block.lens_ray(ray),
@@ -3817,7 +3928,7 @@ pub(crate) mod tests {
                 let ray = direction(70.0, phi as f32);
                 assert_eq!(
                     reframe.project(lens, ray),
-                    reframe.mei(lens, normalize(reframe.lenses[lens].lens_ray(ray))),
+                    reframe.lens_pixel(lens, normalize(reframe.lenses[lens].lens_ray(ray))),
                 );
             }
         }
