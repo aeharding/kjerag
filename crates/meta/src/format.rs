@@ -25,7 +25,9 @@
 //!   a Fusion `.mp4`.
 //! - **DJI**: a track whose sample entry is `djmd` or `dbgi`, DJI's telemetry
 //!   and debug tracks. The Osmo 360 `.OSV` writes two of each; its handler
-//!   names and `©too` tag say `CAM` and `Osmo 360`, which are weaker.
+//!   names and `©too` tag say `CAM` and `Osmo 360`, which are weaker. That
+//!   arm refused until the `djmd` calibration could be read, and now it
+//!   accepts: [`super::osmo`] is what reads it.
 //! - **Spherical**: Google's spherical metadata, `st3d`/`sv3d` in the video
 //!   sample entry (v2) or the `GSpherical` `uuid` box on a track (v1). That
 //!   is a stitched equirectangular MP4, which is what an export from any of
@@ -50,6 +52,9 @@ use super::trailer::MAGIC;
 pub enum Format {
     /// An Insta360 capture, by the magic on the end of it.
     Insta360,
+    /// A DJI capture carrying a `djmd` telemetry track, which on an Osmo 360
+    /// is where the lens calibration lives ([`super::osmo`]).
+    Osmo,
     /// A 360 format Kjerag does not read, which is refused by name.
     Foreign(Foreign),
     /// Nothing this recognizes, which includes the second file of an
@@ -67,8 +72,6 @@ pub enum Format {
 pub enum Foreign {
     /// GoPro: a `.360` off a Max, or any other capture off a GoPro.
     GoPro,
-    /// DJI: an `.osv` off an Osmo 360, or another DJI camera's MP4.
-    Dji,
     /// An MP4 carrying spherical metadata: stitched equirectangular video,
     /// not the raw dual fisheye Kjerag reprojects.
     Spherical,
@@ -78,7 +81,6 @@ impl fmt::Display for Foreign {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let what = match self {
             Self::GoPro => "a GoPro capture",
-            Self::Dji => "a DJI capture",
             Self::Spherical => "a stitched 360 video",
         };
         write!(f, "{what}, not an Insta360 .insv")
@@ -104,7 +106,7 @@ impl Format {
             // wrote the container differently, or somebody renamed it. Naming
             // it beats the line a broken file gets, and the trailer check
             // above means no Insta360 capture can land here.
-            Self::Unknown => named(path).map_or(Self::Unknown, Self::Foreign),
+            Self::Unknown => named(path).unwrap_or(Self::Unknown),
             found => found,
         }
     }
@@ -143,7 +145,7 @@ fn read<S: Read + Seek>(source: &mut S) -> io::Result<Format> {
     let Some(moov) = moov(source, len)? else {
         return Ok(Format::Unknown);
     };
-    Ok(search(&moov, DEPTH, Parent::Anything).map_or(Format::Unknown, Format::Foreign))
+    Ok(search(&moov, DEPTH, Parent::Anything).unwrap_or(Format::Unknown))
 }
 
 /// The trailer footer's magic on the last 32 bytes (`super::trailer`).
@@ -162,7 +164,7 @@ fn insta360<S: Read + Seek>(source: &mut S, len: u64) -> io::Result<bool> {
 /// It is walked rather than looked for at the front: every camera in the
 /// corpus writes `mdat` first and `moov` after it, which is what a recorder
 /// that cannot know the file's length ahead of time has to do.
-fn moov<S: Read + Seek>(source: &mut S, len: u64) -> io::Result<Option<Vec<u8>>> {
+pub(crate) fn moov<S: Read + Seek>(source: &mut S, len: u64) -> io::Result<Option<Vec<u8>>> {
     let mut at = 0;
     while at + 8 <= len {
         source.seek(SeekFrom::Start(at))?;
@@ -206,7 +208,7 @@ enum Parent {
 }
 
 /// The first signature in this subtree, depth first.
-fn search(body: &[u8], depth: u8, parent: Parent) -> Option<Foreign> {
+fn search(body: &[u8], depth: u8, parent: Parent) -> Option<Format> {
     if depth == 0 {
         return None;
     }
@@ -224,14 +226,18 @@ fn search(body: &[u8], depth: u8, parent: Parent) -> Option<Foreign> {
 }
 
 /// One box, read as a maker's mark or not at all.
-fn signature(kind: &[u8; 4], payload: &[u8], parent: Parent) -> Option<Foreign> {
+fn signature(kind: &[u8; 4], payload: &[u8], parent: Parent) -> Option<Format> {
     match (parent, kind) {
         // The camera's firmware string, its GPMF telemetry, its serial and
         // its media id. Any one of them is GoPro's `udta` and nobody else's.
-        (Parent::Udta, b"FIRM" | b"GPMF" | b"CAME" | b"MUID") => Some(Foreign::GoPro),
-        (Parent::Stsd, b"djmd" | b"dbgi") => Some(Foreign::Dji),
-        (_, b"st3d" | b"sv3d") => Some(Foreign::Spherical),
-        (_, b"uuid") if payload.starts_with(&GSPHERICAL) => Some(Foreign::Spherical),
+        (Parent::Udta, b"FIRM" | b"GPMF" | b"CAME" | b"MUID") => {
+            Some(Format::Foreign(Foreign::GoPro))
+        }
+        (Parent::Stsd, b"djmd" | b"dbgi") => Some(Format::Osmo),
+        (_, b"st3d" | b"sv3d") => Some(Format::Foreign(Foreign::Spherical)),
+        (_, b"uuid") if payload.starts_with(&GSPHERICAL) => {
+            Some(Format::Foreign(Foreign::Spherical))
+        }
         _ => None,
     }
 }
@@ -253,13 +259,13 @@ fn inside<'a>(kind: &[u8; 4], payload: &'a [u8], parent: Parent) -> Option<(&'a 
 
 /// The boxes of one container, in order, stopping at the first one whose
 /// header does not fit what is left.
-struct Boxes<'a> {
+pub(crate) struct Boxes<'a> {
     body: &'a [u8],
     at: usize,
 }
 
 impl<'a> Boxes<'a> {
-    fn new(body: &'a [u8]) -> Self {
+    pub(crate) fn new(body: &'a [u8]) -> Self {
         Self { body, at: 0 }
     }
 }
@@ -289,11 +295,11 @@ impl<'a> Iterator for Boxes<'a> {
 }
 
 /// The maker a file name claims, for the file whose bytes claimed nothing.
-fn named(path: &Path) -> Option<Foreign> {
+fn named(path: &Path) -> Option<Format> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
-        "360" => Some(Foreign::GoPro),
-        "osv" => Some(Foreign::Dji),
+        "360" => Some(Format::Foreign(Foreign::GoPro)),
+        "osv" => Some(Format::Osmo),
         _ => None,
     }
 }
@@ -367,16 +373,18 @@ mod tests {
 
     /// DJI's telemetry track, as the Osmo 360 `.OSV` writes it: the maker is
     /// the sample entry's own format, because the handler names on that file
-    /// are the generic ones ffmpeg writes for anybody.
+    /// are the generic ones ffmpeg writes for anybody. It is a file Kjerag
+    /// plays, and [`super::super::osmo`] is what reads the calibration out of
+    /// that track.
     #[test]
-    fn djis_own_tracks_name_dji() {
+    fn djis_own_tracks_name_an_osmo() {
         for kind in [b"djmd", b"dbgi"] {
             let track = nest(
                 &[b"trak", b"mdia", b"minf", b"stbl"],
                 stsd(&[mp4box(kind, &[0; 12])]),
             );
             let bytes = file(b"pictures", mp4box(b"moov", &track));
-            assert_eq!(sniffed(&bytes), Format::Foreign(Foreign::Dji), "{kind:?}");
+            assert_eq!(sniffed(&bytes), Format::Osmo, "{kind:?}");
         }
     }
 
@@ -550,8 +558,11 @@ mod tests {
     /// The name is the last word and only where the bytes had none.
     #[test]
     fn the_extension_names_a_maker_the_container_did_not() {
-        assert_eq!(named(Path::new("holiday.360")), Some(Foreign::GoPro));
-        assert_eq!(named(Path::new("holiday.OSV")), Some(Foreign::Dji));
+        assert_eq!(
+            named(Path::new("holiday.360")),
+            Some(Format::Foreign(Foreign::GoPro))
+        );
+        assert_eq!(named(Path::new("holiday.OSV")), Some(Format::Osmo));
         assert_eq!(named(Path::new("VID_00_001.insv")), None);
         assert_eq!(named(Path::new("holiday.mp4")), None);
         assert_eq!(named(Path::new("no-extension")), None);

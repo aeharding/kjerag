@@ -91,16 +91,48 @@ pub struct CalibrationSet {
     pub calibration_canvas: Size,
 }
 
-/// One lens: a Mei/UCM camera model plus where the lens sits.
+/// One lens: a camera model, and where the lens sits.
 #[derive(Debug, Clone)]
 pub struct Lens {
     pub intrinsics: Intrinsics,
     pub distortion: Distortion,
+    /// Which family the numbers above belong to, because two cameras in the
+    /// corpus do not share one.
+    pub model: Model,
     pub pose: Pose,
+    /// The whole rotation from the camera body to this lens, for a file that
+    /// records one, and `None` for a file that records a residual instead.
+    ///
+    /// Insta360 writes the second kind: [`Pose`]'s three angles are a
+    /// tolerance against a back-to-back arrangement the file never states, so
+    /// the arrangement is the reader's to supply (`kjerag_render`'s
+    /// `opposed`). A DJI `.OSV` writes a unit quaternion per lens that already
+    /// holds the half turn, and composing an arrangement onto it a second time
+    /// would point both lenses the same way. There is no rotation that means
+    /// both things, so which one it is travels with the numbers.
+    pub mounting: Option<Mat3>,
     /// `lensType`, 131 on the X4 Air and 71 on the non-Air X4. No
     /// decoder table for this value exists anywhere; it is carried
     /// through so a future reader can match on it.
     pub lens_type: u32,
+}
+
+/// Which lens model one lens's numbers describe.
+///
+/// The pass runs whichever this names, in both of its halves
+/// (`kjerag_render::projection`). It is on the lens rather than on the
+/// [`CalibrationSet`] because it is a property of the numbers beside it, and
+/// a lens is where those are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Model {
+    /// Mei/UCM with Brown-Conrady distortion on the normalized plane, which
+    /// is what Insta360's `offset_v3` writes ([`Intrinsics`], [`Distortion`]).
+    Mei,
+    /// Equidistant fisheye, `r = fx * theta`, with no distortion terms at all,
+    /// which is what a DJI Osmo 360's `djmd` calibration reduces to
+    /// (`super::osmo`, which has the measurement that refused the four
+    /// coefficients the file also carries).
+    Equidistant,
 }
 
 /// Mei/UCM intrinsics in delivered-frame pixels.
@@ -128,7 +160,7 @@ pub struct Intrinsics {
     /// The unified-camera-model mirror parameter, 2.31494 on the
     /// fixture. It is why rays past 90 degrees off-axis still project to
     /// finite coordinates, and therefore why the overlap region is
-    /// representable at all.
+    /// representable at all. Zero, and unread, under [`Model::Equidistant`].
     pub xi: f64,
     pub fx: f64,
     pub fy: f64,
@@ -413,6 +445,15 @@ impl CalibrationSet {
                 eat(&number.to_le_bytes());
             }
             eat(&lens.lens_type.to_le_bytes());
+            eat(&[match lens.model {
+                Model::Mei => 0,
+                Model::Equidistant => 1,
+            }]);
+            for row in lens.mounting.map(Mat3::rows).unwrap_or_default() {
+                for number in row {
+                    eat(&number.to_le_bytes());
+                }
+            }
         }
         hash
     }
@@ -733,6 +774,10 @@ impl LensBlock {
                 cy: cy * (dimension.height as f64 / canvas_h as f64),
             },
             distortion: Distortion { k1, k2, k3, p1, p2 },
+            model: Model::Mei,
+            // `offset_v3` records a residual, so the arrangement it is a
+            // residual against is supplied by the pass and not by the file.
+            mounting: None,
             pose: Pose {
                 yaw_deg: yaw,
                 pitch_deg: pitch,
