@@ -853,6 +853,7 @@ mod tests {
             timestamp: NTSC * index as u32,
             lenses: Vec::new(),
             size: Size::new(3840, 3840),
+            samples: Default::default(),
         }
     }
 

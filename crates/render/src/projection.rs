@@ -503,24 +503,42 @@ pub struct Reframe {
     ///
     /// WGSL twin: `reframe.handover_shift`, read by `handover`.
     handover_shift: f32,
-    /// What puts the table below on a sixteen-byte offset.
+    /// The two planes hold 16-bit words rather than bytes, which the shader
+    /// puts back together itself (`kjerag_media::Samples::wide`,
+    /// `super::dmabuf::plane_format`). 1 for a P010 frame and 0 for NV12.
     ///
-    /// **WGSL's alignment and not this struct's.** Every member of this block
-    /// is an `f32` or an array of them, so `repr(C)` gives the whole thing an
-    /// alignment of 4 and would happily start the table at 340. WGSL lays an
-    /// `array<vec4<f32>, N>` out at 16, so the two definitions would then
-    /// describe different bytes.
+    /// **Sibling of [`Self::crossover`] and not a new field at the end**, for
+    /// [`Self::handover_shift`]'s reason: it takes the second of the three
+    /// padding words the table's alignment already needed, so the block is
+    /// the size it always was and the table has not moved.
+    wide: f32,
+    /// Studio swing rather than the whole range
+    /// (`kjerag_media::Samples::limited`). 1 for a DJI capture and 0 for
+    /// every Insta360 one, which is the picture this pass drew before there
+    /// was a second answer.
     ///
-    /// **Nothing catches that at run time.** `min_binding_size` checks the
-    /// block's total size and not one offset in it, and the sizes agree either
-    /// way, so the shader would read the table shifted by twelve bytes and
-    /// draw a wrong picture rather than refuse a pipeline. The test
-    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
-    /// it checks the offset as well as the size for exactly that reason.
-    ///
-    /// Two words rather than three since the seam anchor took the first of
-    /// them ([`Self::handover_shift`]).
-    _pad: [f32; 2],
+    /// The last of the three padding words, which is why there is no `_pad`
+    /// below it any more.
+    limited: f32,
+    // What used to sit here is what put the table below on a sixteen-byte
+    // offset: three padding words, all three of which are now numbers the
+    // shader reads (`handover_shift`, `wide`, `limited`), so the block reaches
+    // that offset on its own and there is nothing left to pad with.
+    //
+    // **WGSL's alignment and not this struct's.** Every member of this block
+    // is an `f32` or an array of them, so `repr(C)` gives the whole thing an
+    // alignment of 4 and would happily start the table at 340. WGSL lays an
+    // `array<vec4<f32>, N>` out at 16, so the two definitions would then
+    // describe different bytes.
+    //
+    // **Nothing catches that at run time.** `min_binding_size` checks the
+    // block's total size and not one offset in it, and the sizes agree either
+    // way, so the shader would read the table shifted by twelve bytes and draw
+    // a wrong picture rather than refuse a pipeline. The test
+    // `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
+    // it checks the offset as well as the size for exactly that reason. A
+    // fourth number added beside those three is what it will fail on, and the
+    // fix is another three words of padding, not a smaller table.
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -1160,13 +1178,29 @@ impl Reframe {
             // No line held until a caller says otherwise
             // ([`Self::with_shift`]), and no shift is the geometric handover.
             handover_shift: 0.0,
-            _pad: [0.0; 2],
+            // Eight bit, full range: what every `.insv` is, and what
+            // [`Self::with_samples`] is asked to say otherwise.
+            wide: 0.0,
+            limited: 0.0,
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
         };
         block.crossover = block.afforded();
         block
+    }
+
+    /// The same map told how the planes it will sample are written.
+    ///
+    /// A step of its own rather than an argument to [`Self::new`], for
+    /// [`Self::with_table`]'s reason: every caller that asks this map about
+    /// geometry rather than about pixels would otherwise have to say
+    /// something, and the thing it would be saying is 8-bit full range, which
+    /// is what this defaults to and what every `.insv` in the corpus is.
+    pub fn with_samples(mut self, samples: kjerag_media::Samples) -> Self {
+        self.wide = f32::from(u8::from(samples.wide));
+        self.limited = f32::from(u8::from(samples.limited));
+        self
     }
 
     /// The same map with a camera's along-seam table in it (issue #103, stage
@@ -1427,7 +1461,8 @@ impl Reframe {
             crossover: crossover_deg().to_radians(),
             // No seam, so no line to hold anywhere.
             handover_shift: 0.0,
-            _pad: [0.0; 2],
+            wide: 0.0,
+            limited: 0.0,
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -2642,10 +2677,15 @@ struct Reframe {
   // produces it has one and there is no event in it. Zero is the geometric
   // handover. Rust twin: `Reframe::handover_shift`. Read by `handover`.
   handover_shift: f32,
-  // What puts the table below on its own 16-byte boundary. Rust twin:
-  // `Reframe::_pad`, which is what makes the two layouts agree.
-  pad1: f32,
-  pad2: f32,
+  // The planes hold 16-bit words rather than bytes. Rust twin:
+  // `Reframe::wide`, read by `plane_word`.
+  wide: f32,
+  // Studio swing rather than the whole range. Rust twin: `Reframe::limited`,
+  // read by `levels`.
+  limited: f32,
+  // The three words above are what put the table below on its own 16-byte
+  // boundary; they were padding until each became a number the shader reads,
+  // so there is no `pad` member here any more and none in the Rust twin.
   // What the along-seam axis still disagrees by after a pose, direction by
   // direction, in radians, four to a lane. Rust twin: `Reframe::table`.
   //
@@ -5364,16 +5404,21 @@ pub(crate) mod tests {
         // picture rather than refuse a pipeline.
         assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
         assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
-        // The seam anchor's one number took the FIRST of the three padding
-        // words the table's alignment already needed, rather than being
-        // appended: the block is the size it was and the table has not moved,
-        // which is what the two assertions above would otherwise have to be
-        // rewritten to say.
-        assert_eq!(
-            std::mem::offset_of!(Reframe, handover_shift),
-            std::mem::offset_of!(Reframe, crossover) + 4
-        );
-        assert_eq!(std::mem::size_of_val(&Reframe::blank(1.0, false)._pad), 8);
+        // The three numbers that took the three padding words the table's
+        // alignment already needed, rather than being appended: the seam
+        // anchor's one, and the two that say how the planes are written. The
+        // block is the size it was and the table has not moved, which is what
+        // the two assertions above would otherwise have to be rewritten to
+        // say.
+        let after = |words: usize| std::mem::offset_of!(Reframe, crossover) + 4 * words;
+        assert_eq!(std::mem::offset_of!(Reframe, handover_shift), after(1));
+        assert_eq!(std::mem::offset_of!(Reframe, wide), after(2));
+        assert_eq!(std::mem::offset_of!(Reframe, limited), after(3));
+        // And the table starts the word after the last of them, with nothing
+        // padding it there: all three are spoken for, so the next number added
+        // beside them lands ON the table's boundary and this is the assertion
+        // that says so first.
+        assert_eq!(std::mem::offset_of!(Reframe, table), after(4));
     }
 
     /// **The anchor's null.** A map nobody has held a line on draws the
