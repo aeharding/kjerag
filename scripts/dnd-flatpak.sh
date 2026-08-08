@@ -99,7 +99,12 @@ EOF
 chmod +x "$launcher"
 
 log=$session/app.log
-env XDG_RUNTIME_DIR="$runtime" \
+# The two variables that name the developer's desktop are unset by name:
+# `WLR_BACKENDS=headless` is supposed to settle it and does not always, and a
+# cage that can still see `WAYLAND_DISPLAY` can come up as a client of the
+# session instead of a backend of its own (scripts/uitest.sh says what that
+# cost on 2026-08-08).
+env -u WAYLAND_DISPLAY -u DISPLAY XDG_RUNTIME_DIR="$runtime" \
 	XDG_CONFIG_HOME="$session/config" XDG_STATE_HOME="$session/state" \
 	XDG_DATA_HOME="$session/data" XDG_CACHE_HOME="$session/cache" \
 	WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
