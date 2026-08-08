@@ -1534,15 +1534,35 @@ fn section(reads: &[Read], size: Size, px_per_deg: f64) {
 /// of his view steps in a place he cannot look at. This says how many pixels
 /// were being moved at all while those steps were happening.
 fn reaches(reads: &[Read], probes: &[Probe], px_per_deg: f64) {
-    let width: Vec<usize> = reads
-        .iter()
-        .map(|read| {
-            probes
-                .iter()
-                .filter(|probe| deliver(read, read, probe, px_per_deg).epi_px.abs() >= 1.0)
-                .count()
-        })
-        .collect();
+    let mut width: Vec<usize> = Vec::with_capacity(reads.len());
+    // Frames whose delivered field comes back to nothing INSIDE its own
+    // corrected patch while carrying a real correction either side of the
+    // place it does. See `section`: a lobe has its small values at its edges
+    // and a comb has one in the middle, and only the second is two values a
+    // picture can snap between.
+    let mut combed = 0;
+    for read in reads {
+        let across: Vec<f64> = probes
+            .iter()
+            .map(|probe| deliver(read, read, probe, px_per_deg).epi_px)
+            .collect();
+        width.push(across.iter().filter(|value| value.abs() >= 1.0).count());
+        let live = |value: &&f64| value.abs() >= 1.0;
+        let (Some(low), Some(high)) = (
+            across.iter().position(|value| live(&value)),
+            across.iter().rposition(|value| live(&value)),
+        ) else {
+            continue;
+        };
+        let peak = across.iter().map(|value| value.abs()).fold(0.0, f64::max);
+        let trough = across[low + 1..high.max(low + 1)]
+            .iter()
+            .map(|value| value.abs())
+            .fold(f64::INFINITY, f64::min);
+        if peak >= COMB_PEAK_PX && trough <= COMB_TROUGH_PX {
+            combed += 1;
+        }
+    }
     let mut sorted = width.clone();
     sorted.sort_unstable();
     let changed = width.windows(2).filter(|pair| pair[0] != pair[1]).count();
@@ -1552,15 +1572,33 @@ fn reaches(reads: &[Read], probes: &[Probe], px_per_deg: f64) {
          \tcorrection runs {} at worst, {} in the middle and {} at best over the {} frames. \n\
          \t{dead} frames have NO corrected pixel at any probe at all, and the count changes on \n\
          \t{changed} of {} frame pairs. a step at a cell that is delivering nothing to any of \n\
-         \tthese probes is a step in a place the owner is not looking.",
+         \tthese probes is a step in a place the owner is not looking. \n\
+         \tand on {combed} of {} frames the field is COMBED: it peaks past {COMB_PEAK_PX:.0} px \n\
+         \tand comes back under {COMB_TROUGH_PX:.0} px somewhere strictly inside its own reach.",
         probes.len(),
         sorted.first().map_or(0, |count| *count),
         sorted[sorted.len() / 2],
         sorted.last().map_or(0, |count| *count),
         reads.len(),
         width.len() - 1,
+        reads.len(),
     );
 }
+
+/// What a delivered field has to peak at before the hole in the middle of it
+/// is worth counting, in view px.
+///
+/// Ten, which is the threshold the temporal memo counted its own steps at, so
+/// a combed frame here is a frame carrying a correction of the size that A/B
+/// was staged on.
+const COMB_PEAK_PX: f64 = 10.0;
+
+/// And what it has to fall back to for the hole to be a hole.
+///
+/// Two, which is under the 3 px this instrument is willing to call a step at
+/// all ([`STEP_PX`]): a correction that has fallen this far has effectively
+/// gone, and the picture either side of it has not.
+const COMB_TROUGH_PX: f64 = 2.0;
 
 /// What the delivered field looks like ACROSS the picture on one frame: how
 /// much of the view it reaches at all, and how steeply it changes where it
