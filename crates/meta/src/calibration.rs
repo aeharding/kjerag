@@ -210,6 +210,14 @@ pub struct Distortion {
 /// fields instead of carrying an index.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pro {
+    /// Which way the polynomial runs. `false` is forward, the ideal plane to
+    /// the distorted one, which is where v3 is evaluated and where every
+    /// model in this file was evaluated before the sweep. `true` reads the
+    /// same thirteen as a map from the distorted plane back to the ideal one,
+    /// which a projection has to **solve** rather than evaluate
+    /// ([`Reading::inverse`], and `radtan_pro_inverse` in
+    /// `kjerag_render::projection`).
+    pub inverse: bool,
     /// Radial orders `r2^4` and `r2^5`, past where v3's polynomial stops.
     pub k4: f64,
     pub k5: f64,
@@ -227,6 +235,7 @@ impl Pro {
     /// A v6 block carrying nothing v3 does not, which is what a null arm
     /// loads.
     pub const ZERO: Self = Self {
+        inverse: false,
         k4: 0.0,
         k5: 0.0,
         p1_r2: 0.0,
@@ -236,6 +245,187 @@ impl Pro {
         s3: 0.0,
         s4: 0.0,
     };
+}
+
+/// Which slot of `offset_v6`'s thirteen carries which coefficient, and which
+/// way the polynomial they build runs.
+///
+/// **This exists because the branch's reading was refuted by the owner's eye
+/// and none of its four choices had been measured.** The disassembly of
+/// `OmniProjection<RadtanDistortPro>` gives the *form* of the model - five
+/// radial orders, a tangential pair that grows with `r2`, four thin-prism
+/// terms - and the form is not in doubt. What was assumed is the mapping from
+/// the string's token positions onto that form, and the direction the whole
+/// thing is evaluated in. Each assumption is one field here, so a candidate
+/// reading is a value rather than an edit, and `--bin ceiling` measures every
+/// combination of them at one set of sites.
+///
+/// [`Self::BRANCH`] is what `hack/flat-v6` drew before the sweep, so a run
+/// naming it reproduces that build exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading {
+    /// Tokens 6 and 7. `true` reads them `p2, p1` - v3's pair the other way
+    /// round, which is what the branch assumed. `false` reads them `p1, p2`,
+    /// the same way round as `offset_v3`.
+    pub tangential_swapped: bool,
+    /// Tokens 8 and 9, the pair that grows with `r2`, under the same two
+    /// choices.
+    pub growing_swapped: bool,
+    /// Tokens 10 to 13. `true` reads them `s1, s3, s2, s4`, x and y
+    /// interleaved by order, which is what the branch assumed. `false` reads
+    /// them `s1, s2, s3, s4`, both of x's before both of y's, which is the
+    /// order OpenCV's thin-prism vector is written in.
+    pub inverse_prism: bool,
+    /// Whether the polynomial maps ideal to distorted (`false`) or distorted
+    /// back to ideal (`true`).
+    pub inverse: bool,
+}
+
+impl Reading {
+    /// What `hack/flat-v6` drew, and what the owner's eye refused: the
+    /// tangential pair swapped, the growing pair swapped with it, the prism
+    /// interleaved, forward.
+    pub const BRANCH: Self = Self {
+        tangential_swapped: true,
+        growing_swapped: true,
+        inverse_prism: true,
+        inverse: false,
+    };
+
+    /// v3's own conventions carried into the longer run: both pairs the way
+    /// round `offset_v3` writes them, the prism in OpenCV's order, forward.
+    pub const PLAIN: Self = Self {
+        tangential_swapped: false,
+        growing_swapped: false,
+        inverse_prism: false,
+        inverse: false,
+    };
+
+    /// A reading named the way `KJERAG_V6_READING` and `--bin ceiling`'s arms
+    /// both spell one: dot-separated words, each one overriding a default of
+    /// [`Self::BRANCH`].
+    ///
+    /// `tang=p1p2|p2p1`, `grow=p1p2|p2p1`, `prism=xxyy|xyxy`, `dir=fwd|inv`.
+    /// An unknown word is an error rather than a shrug: a misspelt candidate
+    /// that silently measured the default would put a duplicate row in the
+    /// table under another name.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut out = Self::BRANCH;
+        for word in spec.split('.').filter(|word| !word.is_empty()) {
+            match word {
+                "branch" => out = Self::BRANCH,
+                "plain" => out = Self::PLAIN,
+                "tang=p1p2" => out.tangential_swapped = false,
+                "tang=p2p1" => out.tangential_swapped = true,
+                "grow=p1p2" => out.growing_swapped = false,
+                "grow=p2p1" => out.growing_swapped = true,
+                "prism=xxyy" => out.inverse_prism = false,
+                "prism=xyxy" => out.inverse_prism = true,
+                "dir=fwd" => out.inverse = false,
+                "dir=inv" => out.inverse = true,
+                other => return Err(format!("no v6 reading word called {other}")),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The spec that names this reading, which is what a table row is
+    /// labelled with and what `KJERAG_V6_READING` would have to be set to to
+    /// reproduce it.
+    pub fn spec(self) -> String {
+        format!(
+            "tang={}.grow={}.prism={}.dir={}",
+            match self.tangential_swapped {
+                true => "p2p1",
+                false => "p1p2",
+            },
+            match self.growing_swapped {
+                true => "p2p1",
+                false => "p1p2",
+            },
+            match self.inverse_prism {
+                true => "xyxy",
+                false => "xxyy",
+            },
+            match self.inverse {
+                true => "inv",
+                false => "fwd",
+            },
+        )
+    }
+
+    /// Every combination of the four choices, which is the whole candidate
+    /// space and is sixteen rows.
+    pub fn every() -> Vec<Self> {
+        let mut out = Vec::new();
+        for &inverse in &[false, true] {
+            for &tangential_swapped in &[false, true] {
+                for &growing_swapped in &[false, true] {
+                    for &inverse_prism in &[false, true] {
+                        out.push(Self {
+                            tangential_swapped,
+                            growing_swapped,
+                            inverse_prism,
+                            inverse,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The reading the environment asks for, or [`Self::BRANCH`].
+    ///
+    /// Read here rather than in the app so that one function answers "what do
+    /// the thirteen mean" for the shipped path and for the instrument that
+    /// screens it, which is the whole reason [`name_v6`] takes a value.
+    pub fn from_env() -> Self {
+        match std::env::var("KJERAG_V6_READING") {
+            Ok(spec) => Self::parse(&spec).unwrap_or(Self::BRANCH),
+            Err(_) => Self::BRANCH,
+        }
+    }
+}
+
+/// `offset_v6`'s thirteen coefficients, named under one [`Reading`].
+///
+/// The single place the token order lives. `CalibrationSet` reads it for the
+/// picture and `kjerag_spike::offset` reads it for the table, so a candidate
+/// cannot be measured through one mapping and drawn through another.
+pub fn name_v6(run: [f64; 13], reading: Reading) -> Distortion {
+    let [k1, k2, k3, k4, k5, a, b, c, d, s1, s2, s3, s4] = run;
+    let (p1, p2) = match reading.tangential_swapped {
+        true => (b, a),
+        false => (a, b),
+    };
+    let (p1_r2, p2_r2) = match reading.growing_swapped {
+        true => (d, c),
+        false => (c, d),
+    };
+    // `xyxy` is x, y, x, y down the four slots; `xxyy` is both of x's first.
+    let (s1, s2, s3, s4) = match reading.inverse_prism {
+        true => (s1, s3, s2, s4),
+        false => (s1, s2, s3, s4),
+    };
+    Distortion {
+        k1,
+        k2,
+        k3,
+        p1,
+        p2,
+        pro: Some(Pro {
+            inverse: reading.inverse,
+            k4,
+            k5,
+            p1_r2,
+            p2_r2,
+            s1,
+            s2,
+            s3,
+            s4,
+        }),
+    }
 }
 
 /// How one frame is read off the sensor: how long the whole readout takes,
@@ -526,26 +716,66 @@ impl CalibrationSet {
             read_offset(&metadata.offset_v3, FIELDS_PER_LENS, dimension, crop)?;
         let key = camera_key_of(&metadata.camera_type, dimension, &v3_lenses);
 
-        let v6 = v6_arm(metadata).map(|text| read_offset(text, FIELDS_PER_LENS_V6, dimension, crop));
-        let (lenses, canvas, offset_version) = match v6 {
+        let v6 =
+            v6_arm(metadata).map(|text| read_offset(text, FIELDS_PER_LENS_V6, dimension, crop));
+        let (mut lenses, canvas, offset_version) = match v6 {
             // A v6 string that does not parse is not worth failing an open
             // over: the v3 arm is what every build before this one drew.
             Some(Ok((lenses, canvas))) => (lenses, canvas, 6),
-            _ => (v3_lenses, v3_canvas, 3),
+            _ => (v3_lenses.clone(), v3_canvas, 3),
         };
+        // The two halves of a v6 block, separable, because the sweep found
+        // they do not point the same way: v6's eleven pose and intrinsic
+        // tokens close the seam better than v3's and its thirteen distortion
+        // tokens do not. An arm that mixes them is what says which half
+        // carries the gain, and it is a whole calibration rather than an
+        // argument.
+        match half_arm() {
+            // v6's pose and intrinsics, v3's five-coefficient distortion.
+            Some(Half::Pose) => {
+                for (lens, v3) in lenses.iter_mut().zip(&v3_lenses) {
+                    lens.distortion = v3.distortion;
+                }
+            }
+            // v3's pose and intrinsics, v6's thirteen.
+            Some(Half::Distortion) => {
+                let v6_distortion: Vec<_> = lenses.iter().map(|lens| lens.distortion).collect();
+                lenses = v3_lenses;
+                for (lens, distortion) in lenses.iter_mut().zip(v6_distortion) {
+                    lens.distortion = distortion;
+                }
+            }
+            None => {}
+        }
         // HACK build: which calibration the picture is about to be drawn
         // with, said out loud, because it is the whole question this binary
         // exists to ask and an A/B whose arm is assumed is not an A/B.
         eprintln!(
-            "kjerag: drawing {} with offset_v{offset_version} \
+            "kjerag: drawing {} with {} \
              (file carries v3{}, capture_offset_version={})",
             metadata.camera_type,
+            match arm() {
+                Arm::V3 => "offset_v3".to_owned(),
+                Arm::V6Full => format!(
+                    "all of offset_v6, distortion read {} (REFUTED: worse than v3 \
+                     ring-wide, and the owner's eye said so first)",
+                    Reading::from_env().spec()
+                ),
+                Arm::V6Pose => "offset_v6's pose and intrinsics over offset_v3's \
+                                distortion (the measured arm)"
+                    .to_owned(),
+                Arm::V6Dist => format!(
+                    "offset_v3's pose over offset_v6's thirteen, read {}",
+                    Reading::from_env().spec()
+                ),
+            },
             match metadata.offset_v6.is_empty() {
                 true => "",
                 false => " and v6",
             },
             metadata.capture_offset_version,
         );
+        let _ = offset_version;
 
         Ok(Self {
             camera_model: metadata.camera_type.clone(),
@@ -571,13 +801,73 @@ impl CalibrationSet {
 /// `KJERAG_OFFSET=v3` forces the old arm, so one binary draws both sides of
 /// the A/B and the pilot's eye is the only thing that changes between them.
 fn v6_arm(metadata: &ExtraMetadata) -> Option<&str> {
-    let forced = std::env::var("KJERAG_OFFSET").unwrap_or_default();
-    if forced.eq_ignore_ascii_case("v3") {
+    if matches!(arm(), Arm::V3) {
         return None;
     }
     match metadata.offset_v6.is_empty() {
         true => None,
         false => Some(&metadata.offset_v6),
+    }
+}
+
+/// Which of a v6 block's two halves this build draws with.
+///
+/// **The halves are separable because the sweep found they do not point the
+/// same way.** `--bin seam mode=residual` closes the seam ring on the
+/// along-seam axis, which no subject's distance can reach, so what it leaves
+/// is the camera's geometry and nothing else; run over five disjoint windows
+/// of the owner's own May-01 capture and over three captures, the ordering
+/// came out the same every single time:
+///
+/// ```text
+///   arm      along (deg)   across (deg)   what it is
+///   v6pose      0.983          1.269      v6's eleven, v3's five
+///   v6          1.079          1.342      all of v6, best of 16 readings
+///   v3          1.080          1.810      what every build before this drew
+///   v6dist      1.170          1.913      v3's eleven, v6's thirteen
+/// ```
+///
+/// v6's **pose and intrinsic** tokens are worth half a degree across the seam
+/// and are the whole of what v6 buys. v6's **thirteen distortion** tokens are
+/// a regression against v3 on both axes, under every one of the sixteen
+/// [`Reading`]s, on every file. That is why [`Self::V6Pose`] is the default
+/// here and the full thirteen have to be asked for by name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    /// `offset_v3` alone, which is what every build before `hack/flat-v6`
+    /// drew and what `main` still draws.
+    V3,
+    /// All of `offset_v6`: its eleven and its thirteen. The arm the owner's
+    /// eye refused, kept reachable because a refuted arm that cannot be
+    /// re-run is a claim rather than a measurement.
+    V6Full,
+    /// v6's eleven pose and intrinsic tokens with v3's five-coefficient
+    /// distortion. The default: the only arm that beat v3 on both axes.
+    V6Pose,
+    /// v3's pose with v6's thirteen, which is the isolated regression.
+    V6Dist,
+}
+
+enum Half {
+    Pose,
+    Distortion,
+}
+
+fn arm() -> Arm {
+    match std::env::var("KJERAG_OFFSET").unwrap_or_default().as_str() {
+        v3 if v3.eq_ignore_ascii_case("v3") => Arm::V3,
+        "v6" => Arm::V6Full,
+        "v6dist" => Arm::V6Dist,
+        // Unset included: the measured arm is what a build draws by default.
+        _ => Arm::V6Pose,
+    }
+}
+
+fn half_arm() -> Option<Half> {
+    match arm() {
+        Arm::V6Pose => Some(Half::Pose),
+        Arm::V6Dist => Some(Half::Distortion),
+        Arm::V3 | Arm::V6Full => None,
     }
 }
 
@@ -903,10 +1193,10 @@ impl LensBlock {
 
 /// A block's distortion run, named.
 ///
-/// The v6 arm is where the **known indexing trap** lives: `offset_v6` writes
-/// its tangential pair the other way round from `offset_v3`'s, so the sixth
-/// coefficient is `p2` and the seventh is `p1`. See [`Pro`] for where that
-/// order was read.
+/// A v3 run has one reading and it is not in doubt. A v6 run has sixteen, and
+/// which one this draws with is [`Reading::from_env`]'s answer, so that one
+/// binary is every arm of the sweep and the picture a candidate draws is the
+/// picture `--bin ceiling` scored it on.
 fn named(run: &[f64]) -> Option<Distortion> {
     match *run {
         [k1, k2, k3, p1, p2] => Some(Distortion {
@@ -917,23 +1207,7 @@ fn named(run: &[f64]) -> Option<Distortion> {
             p2,
             pro: None,
         }),
-        [k1, k2, k3, k4, k5, p2, p1, p2_r2, p1_r2, s1, s3, s2, s4] => Some(Distortion {
-            k1,
-            k2,
-            k3,
-            p1,
-            p2,
-            pro: Some(Pro {
-                k4,
-                k5,
-                p1_r2,
-                p2_r2,
-                s1,
-                s2,
-                s3,
-                s4,
-            }),
-        }),
+        [..] if run.len() == 13 => Some(name_v6(run.try_into().ok()?, Reading::from_env())),
         _ => None,
     }
 }

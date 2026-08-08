@@ -30,8 +30,8 @@ mod rotation;
 mod trailer;
 
 pub use calibration::{
-    CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Pose, Pro, Readout,
-    Size, Sweep,
+    CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Pose, Pro, Reading,
+    Readout, Size, Sweep, name_v6,
 };
 pub use exposure::{ExposureSample, ExposureTrack};
 pub use format::{Foreign, Format};

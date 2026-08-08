@@ -534,6 +534,16 @@ pub struct Reframe {
     table: super::band::Table,
 }
 
+/// Which distortion model a [`LensBlock`] carries, as the shader reads it off
+/// one float. Not a bool since the sweep: the direction the v6 polynomial
+/// runs is one of the four things being screened, and it has to reach the
+/// shader as well as the mirror.
+///
+/// WGSL twin: the `lens.pro` tests in `mei`.
+const PRO_OFF: f32 = 0.0;
+const PRO_FORWARD: f32 = 1.0;
+const PRO_INVERSE: f32 = 2.0;
+
 /// One lens's half of the block: the Mei/UCM model, and where the lens is
 /// pointing after the camera's own rotation.
 #[repr(C)]
@@ -1459,15 +1469,16 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
     let y = p[1] / denom;
 
     let r2 = x * x + y * y;
-    let [xd, yd] = match lens.pro == 0.0 {
-        true => {
-            let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
-            [
-                x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x),
-                y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y),
-            ]
-        }
-        false => radtan_pro(lens, x, y, r2),
+    let [xd, yd] = if lens.pro == PRO_OFF {
+        let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
+        [
+            x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x),
+            y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y),
+        ]
+    } else if lens.pro == PRO_FORWARD {
+        radtan_pro(lens, x, y, r2)
+    } else {
+        radtan_pro_inverse(lens, x, y)
     };
 
     let offset = [lens.fx * xd, lens.fy * yd];
@@ -1514,6 +1525,46 @@ fn radtan_pro(lens: &LensBlock, x: f32, y: f32, r2: f32) -> [f32; 2] {
         x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x) + r2 * (lens.s1 + r2 * lens.s2),
         y * radial + 2.0 * p2 * x * y + p1 * (r2 + 2.0 * y * y) + r2 * (lens.s3 + r2 * lens.s4),
     ]
+}
+
+/// How many rounds the inverse arm solves for. Ten, because the residual of
+/// this iteration on the owner's own two lens sets is already below an f32's
+/// last bit by the sixth and the count is fixed so that the shader and this
+/// run the same loop; a solve that stopped on a tolerance would not.
+const PRO_ROUNDS: usize = 10;
+
+/// The same thirteen coefficients read the other way round: a map from the
+/// **distorted** plane back to the ideal one, which is the other half of the
+/// candidate space (`kjerag_meta::Reading::inverse`).
+///
+/// A projection needs distorted-from-ideal, so under this reading the model
+/// has to be solved rather than evaluated. The iteration is the standard one
+/// for a radial-tangential model: hold the ideal point fixed, and each round
+/// take the current guess's own tangential and prism terms off it and divide
+/// by its own radial multiplier. It is a contraction wherever the radial
+/// multiplier stays away from zero, which over this camera's field it does -
+/// it runs 1.00 to 1.16.
+///
+/// **Nothing here claims this is what Studio does.** It is the arm that lets
+/// the question be measured instead of argued, and `--bin ceiling` is what
+/// answers it.
+fn radtan_pro_inverse(lens: &LensBlock, x: f32, y: f32) -> [f32; 2] {
+    let (mut xd, mut yd) = (x, y);
+    for _ in 0..PRO_ROUNDS {
+        let r2 = xd * xd + yd * yd;
+        let radial =
+            1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * (lens.k3 + r2 * (lens.k4 + r2 * lens.k5))));
+        if radial.abs() < 1e-6 {
+            break;
+        }
+        let p1 = lens.p1 + r2 * lens.p1_r2;
+        let p2 = lens.p2 + r2 * lens.p2_r2;
+        let dx = 2.0 * p1 * xd * yd + p2 * (r2 + 2.0 * xd * xd) + r2 * (lens.s1 + r2 * lens.s2);
+        let dy = 2.0 * p2 * xd * yd + p1 * (r2 + 2.0 * yd * yd) + r2 * (lens.s3 + r2 * lens.s4);
+        xd = (x - dx) / radial;
+        yd = (y - dy) / radial;
+    }
+    [xd, yd]
 }
 
 /// The cosine of the widest angle off a lens's axis that can still be in its
@@ -1781,8 +1832,14 @@ impl LensBlock {
             // The flag and not the terms: a v6 block whose eight happened to
             // land on zero is still a v6 block, and it has to take the same
             // branch as any other so that "v6 with the extras zeroed" is a
-            // reading of this path rather than of the one beside it.
-            pro: f32::from(u8::from(distortion.pro.is_some())),
+            // reading of this path rather than of the one beside it. Three
+            // states rather than two since the sweep, because the direction
+            // the polynomial runs is a candidate and not a constant.
+            pro: match distortion.pro {
+                None => PRO_OFF,
+                Some(pro) if pro.inverse => PRO_INVERSE,
+                Some(_) => PRO_FORWARD,
+            },
             image_radius: image_radius(&lens.intrinsics, frame) as f32,
             // The body's turn across the readout, carried into this lens's
             // own frame, which is where the ray it corrects is expressed.
@@ -2333,9 +2390,12 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
   );
   var d = n * radial + tangential;
   // Uniform across the whole pass: a calibration does not change per
-  // fragment, so this costs the branch and not the divergence.
-  if lens.pro != 0.0 {
+  // fragment, so this costs the branch and not the divergence. 1 is the v6
+  // polynomial evaluated forward, 2 is the same thirteen solved backwards.
+  if lens.pro == 1.0 {
     d = radtan_pro(lens, n, r2);
+  } else if lens.pro == 2.0 {
+    d = radtan_pro_inverse(lens, n);
   }
 
   let offset = vec2<f32>(lens.fx * d.x, lens.fy * d.y);
@@ -2362,6 +2422,28 @@ fn radtan_pro(lens: LensBlock, n: vec2<f32>, r2: f32) -> vec2<f32> {
   );
   let prism = vec2<f32>(r2 * (lens.s1 + r2 * lens.s2), r2 * (lens.s3 + r2 * lens.s4));
   return n * radial + tangential + prism;
+}
+
+// The same thirteen solved backwards, for the reading where they map the
+// distorted plane to the ideal one. Rust twin: `radtan_pro_inverse`, and the
+// round count is `PRO_ROUNDS` there.
+fn radtan_pro_inverse(lens: LensBlock, n: vec2<f32>) -> vec2<f32> {
+  var d = n;
+  for (var round = 0u; round < 10u; round = round + 1u) {
+    let r2 = dot(d, d);
+    let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * (lens.k3 + r2 * (lens.k4 + r2 * lens.k5))));
+    if abs(radial) < 1e-6 {
+      break;
+    }
+    let p1 = lens.p1 + r2 * lens.p1_r2;
+    let p2 = lens.p2 + r2 * lens.p2_r2;
+    let off = vec2<f32>(
+      2.0 * p1 * d.x * d.y + p2 * (r2 + 2.0 * d.x * d.x) + r2 * (lens.s1 + r2 * lens.s2),
+      2.0 * p2 * d.x * d.y + p1 * (r2 + 2.0 * d.y * d.y) + r2 * (lens.s3 + r2 * lens.s4),
+    );
+    d = (n - off) / radial;
+  }
+  return d;
 }
 
 // Pixel centres sit at integer coordinates in the camera model and at
