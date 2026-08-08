@@ -599,9 +599,17 @@ impl cosmic::Application for App {
                 }
             }
             Message::LockHorizon => {
-                self.stored.config.horizon_lock = !self.stored.config.horizon_lock;
-                self.stored.write_config();
-                self.hold_horizon();
+                // The menu draws this disabled on a capture with no
+                // orientation record, but the key bind reaches it anyway, and
+                // flipping a stored setting that cannot change the picture is
+                // the silent no-op the disabled item exists to avoid. The
+                // reason was said once at open (`kjerag_render`'s `level:`
+                // line), so this says nothing and does nothing.
+                if self.can_lock() {
+                    self.stored.config.horizon_lock = !self.stored.config.horizon_lock;
+                    self.stored.write_config();
+                    self.hold_horizon();
+                }
                 self.show_controls(now);
             }
             Message::Look(nudge) => {
@@ -799,6 +807,7 @@ impl cosmic::Application for App {
             &self.key_binds,
             self.open.is_some(),
             self.stored.config.horizon_lock,
+            self.can_lock(),
         )]
     }
 
@@ -999,6 +1008,19 @@ impl App {
             }
             Err(e) => self.alert.raise(Failure::Open(path.to_path_buf(), e)),
         }
+    }
+
+    /// Whether horizon lock can do anything here: an open capture carrying the
+    /// orientation record it holds the picture against, or nothing open at
+    /// all, which leaves the setting a setting.
+    ///
+    /// A DJI Osmo 360 `.OSV` is the file that answers `false`: it records a
+    /// fused orientation whose frame is not pinned, and `kjerag_meta::osmo`
+    /// reads none rather than hold the picture with a guess.
+    fn can_lock(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_none_or(|open| open.scene.has_orientation())
     }
 
     /// Hand the horizon setting to the scene, which is where the picture is

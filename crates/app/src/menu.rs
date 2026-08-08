@@ -34,6 +34,7 @@ pub fn menu_bar<'a>(
     key_binds: &HashMap<KeyBind, Action>,
     has_file: bool,
     horizon_locked: bool,
+    can_lock: bool,
 ) -> Element<'a, Message> {
     responsive_menu_bar()
         .item_height(ItemHeight::Dynamic(40))
@@ -93,12 +94,29 @@ pub fn menu_bar<'a>(
                         // A checkbox rather than a pair of items, which is
                         // what cosmic-files does for every setting that is a
                         // state (`src/menu.rs`, "Show hidden files").
-                        Item::CheckBox(
-                            strings::LOCK_HORIZON.to_owned(),
-                            None,
-                            horizon_locked,
-                            Action::LockHorizon,
-                        ),
+                        //
+                        // Disabled on a capture that carries no orientation
+                        // record, because a checkbox that ticks and does
+                        // nothing is worse than one that cannot be reached: a
+                        // DJI Osmo 360 `.OSV` is exactly that file today
+                        // (`kjerag_meta::osmo`, "No IMU"). `ButtonDisabled`
+                        // rather than a disabled checkbox because libcosmic
+                        // has no such variant, and this module's own rule is
+                        // that a capability which is not there is a disabled
+                        // button.
+                        match can_lock {
+                            true => Item::CheckBox(
+                                strings::LOCK_HORIZON.to_owned(),
+                                None,
+                                horizon_locked,
+                                Action::LockHorizon,
+                            ),
+                            false => Item::ButtonDisabled(
+                                strings::LOCK_HORIZON.to_owned(),
+                                None,
+                                Action::LockHorizon,
+                            ),
+                        },
                         Item::Divider,
                         Item::Button(strings::FULLSCREEN.to_owned(), None, Action::Fullscreen),
                         Item::Divider,

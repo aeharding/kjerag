@@ -24,15 +24,12 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
-use super::{Fallible, HwDevice, Size, SwFrame, open_decoder};
+use super::{Fallible, HwDevice, Size, SwFrame, is_lens, open_decoder};
 
-/// Every video stream of one container, in container order.
+/// Every lens stream of one container, in container order
+/// ([`is_lens`](super::is_lens)).
 fn video_streams(input: &ff::format::context::Input) -> Vec<usize> {
-    input
-        .streams()
-        .filter(|s| s.parameters().medium() == ff::media::Type::Video)
-        .map(|s| s.index())
-        .collect()
+    input.streams().filter(is_lens).map(|s| s.index()).collect()
 }
 
 /// One frame of every stream, at one instant.

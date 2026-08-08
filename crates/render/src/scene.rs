@@ -1106,6 +1106,18 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
         orientation.samples().len(),
         calibration.gyro.imu_orientation,
     );
+    // Said out loud, because the alternative is a menu item that does nothing
+    // and a pilot who cannot tell that from a broken one. An Osmo 360 capture
+    // is the case: it carries a fused orientation at about 1 kHz whose frame
+    // is not pinned, so `kjerag_meta::osmo` reads none rather than guess at a
+    // rotation (that module's "No IMU"). The shell draws the item disabled off
+    // [`Scene::has_orientation`], which is the same fact.
+    if orientation.is_empty() {
+        println!(
+            "level:  this capture carries no orientation record Kjerag can use, so horizon \
+             lock does nothing on it and the view is yours to pan"
+        );
+    }
     let held = Motion {
         orientation,
         exposure: calibration.exposure[0].clone(),
