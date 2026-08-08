@@ -579,6 +579,48 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-07 **A DJI Osmo 360 `.OSV` plays, on an equidistant lens model and
+  with no horizon lock** (branch `feat/osmo-osv`, MVP). `kjerag <file>.osv` is
+  the whole of it. The calibration is in the file's own `djmd` telemetry track
+  rather than a trailer, as a protobuf with no `.proto` anywhere, read by field
+  number in `kjerag_meta::osmo`; both units' parsed intrinsics match the
+  scoping pass's independent table exactly, to the last digit of the `f32`.
+
+  **Equidistant only, `r = fx * theta`, and the four `k` coefficients the file
+  carries are read past.** Each lens entry also writes a fourteen-point mask of
+  where the camera body cuts the picture, and on all four lenses of the two
+  units it sits 1804 to 1860 px out. Equidistant puts that at 98.6 to 101.7
+  degrees off axis, so 197 to 203 degrees of coverage, bracketing DJI's
+  published 199. The Kannala-Brandt theta-polynomial reading of the same
+  coefficients turns over between 88.4 and 89.8 degrees at 1615 to 1640 px and
+  folds back, so it cannot reach that ring at any angle and would make a 199
+  degree lens a sub-hemisphere one. The inverse reading folds too. No candidate
+  form was kept, and the refusal is a forward check anyone can redo from the
+  file rather than an overlap score: the scoping pass's overlap scorer
+  preferred a known 20 px principal-point error, so its preference is not
+  evidence.
+
+  **Horizon lock is off on this format and says so.** The file carries a fused
+  orientation at about 1 kHz whose frame is not pinned, and applying it naively
+  made the scoping stitch worse, so none is read. The menu item draws disabled,
+  the key bind does nothing rather than flipping a setting that cannot move the
+  picture, and the app prints one `level:` line at open. Manual pan is v1.
+
+  **The seam is left to fit itself and refuses.** No inter-lens translation is
+  recorded, so the parallax band switches off, and on both units the fitter
+  found 0 of 72 azimuths with content it could match and kept the factory
+  calibration. Far-field content joins cleanly; near-field shows a soft band at
+  the handover. That is the accepted v1.
+
+  Measured on the target box, 8k30p unit B: decode 76.3 pairs/s, **2.55x
+  realtime** at lookahead 4 (VA-API, 10-bit; kjerag has no software decode
+  path), and 26.6 of 29.97 fps presented at 2560x1440 with 13 dropped and 0
+  starved over 5 s, the pass costing 20.6 ms a redraw. The same run on the
+  owner's X4 Air `.insv` presents 21.0 fps with 41 dropped and 14 starved, so
+  the render pass and not the new format is what the output size costs.
+  D-Log M is out of scope: those files play with the log look, and no transform
+  for it is in the container.
+
 - 2026-08-07 **An acceptance line names the pose instead of copying it**
   (`seam=pool`, docs/research/reference-views.md). Three acceptance commands -
   the shimmer line, the May-01 crossing pair, and the `--bin step` block under
