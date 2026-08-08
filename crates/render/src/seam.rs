@@ -2814,4 +2814,84 @@ mod tests {
             cy_px: from.cy_px + (to.cy_px - from.cy_px) * fraction,
         }
     }
+
+    /// The across-seam term displaces lens 1's ray by exactly itself, across
+    /// the seam and nowhere else, which is what every number taken through it
+    /// rests on.
+    ///
+    /// Three claims, all on the projection because that is where they can be
+    /// checked with no GPU and no file:
+    ///
+    /// 1. **The size and the axis.** [`Reframe::tabled`] moves the ray by the
+    ///    term's own entry along [`Where::across`] and by nothing along
+    ///    [`Where::along`]. A term that leaked onto the along-seam axis would
+    ///    break the invariant the two-axis split is built on, and it is the
+    ///    first thing a wrong axis would do.
+    /// 2. **What the correlation then reads.** By [`moved`]'s own law - a
+    ///    change that moves lens 1's projection of a fixed direction moves the
+    ///    shift the content correlates at by the negative of it - a term of
+    ///    `+t` takes the across reading to `read - t`. That is the same sign
+    ///    the along-seam plant measured one axis over
+    ///    (docs/research/stage9.md 5), and it is why the band reading THROUGH
+    ///    the term and applying the rest leaves the two lenses exactly as far
+    ///    apart as they were.
+    /// 3. **It cannot fold.** The displacement is across the seam and the
+    ///    gradient is along it, so the map it adds is a shear whose Jacobian is
+    ///    off-diagonal, and the determinant of the whole tabled map stays 1 to
+    ///    the finite difference's own noise.
+    #[test]
+    fn the_across_seam_term_displaces_lens_one_across_the_seam_and_nowhere_else() {
+        let lenses = fixture_lenses();
+        // Half a degree, one cycle round the ring: an order the corridor could
+        // not hide and a size the corpus reaches.
+        let entries: [f32; crate::band::AZIMUTHS] = std::array::from_fn(|index| {
+            let phi = index as f64 / crate::band::AZIMUTHS as f64 * std::f64::consts::TAU;
+            (0.5 * phi.cos()).to_radians() as f32
+        });
+        let table = crate::band::Table::of_entries(entries);
+        let map = mapped(&lenses, FRAME).with_epi(table);
+        let step = 0.01f64.to_radians();
+        for at in ring(24) {
+            let want = f64::from(table.at(at.phi.cos() as f32, at.phi.sin() as f32));
+            let ray = at.centre.map(|c| c as f32);
+            let moved_by = |axis: [f64; 3]| {
+                let from = unit(std::array::from_fn(|c| at.centre[c] - step * axis[c]));
+                let to = unit(std::array::from_fn(|c| at.centre[c] + step * axis[c]));
+                let take = |v: [f64; 3]| {
+                    let v = v.map(|c| c as f32);
+                    let bent = map.tabled(1, v);
+                    std::array::from_fn::<f64, 3, _>(|c| f64::from(bent[c] - v[c]))
+                };
+                let (a, b) = (take(from), take(to));
+                std::array::from_fn::<f64, 3, _>(|c| (b[c] - a[c]) / (2.0 * step))
+            };
+            let bent = map.tabled(1, ray);
+            let put: [f64; 3] = std::array::from_fn(|c| f64::from(bent[c] - ray[c]));
+            let dot = |v: [f64; 3], w: [f64; 3]| (0..3).map(|c| v[c] * w[c]).sum::<f64>();
+            let (across, along) = (dot(put, at.across), dot(put, at.along));
+            assert!(
+                (across - want).abs() < 1e-6,
+                "at {:.0} deg a term of {want:+.5} rad displaced the ray by {across:+.5} across",
+                at.phi.to_degrees(),
+            );
+            assert!(
+                along.abs() < 1e-6,
+                "at {:.0} deg the across term moved the ray {along:+.5} rad ALONG the seam",
+                at.phi.to_degrees(),
+            );
+            // The two off-diagonal entries of the displacement's own Jacobian
+            // in the seam's frame. The determinant of `identity + J` is
+            // `1 - (across-by-along)(along-by-across)`, and the second factor
+            // is zero by the claim above, so nothing here can fold whatever
+            // the first one is.
+            let along_by_across = dot(moved_by(at.across), at.along);
+            let across_by_across = dot(moved_by(at.across), at.across);
+            assert!(
+                along_by_across.abs() < 1e-4 && across_by_across.abs() < 1e-4,
+                "at {:.0} deg the term has a gradient ACROSS the seam: {along_by_across:+.6}, \
+                 {across_by_across:+.6}",
+                at.phi.to_degrees(),
+            );
+        }
+    }
 }

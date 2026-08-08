@@ -9,6 +9,10 @@ mod camera;
 mod capture;
 pub mod dmabuf;
 mod framing;
+/// The live across-seam field and the servo that learns it (issue #103, the
+/// epi fork). Public for `kjerag-spike --bin ghost`, which drives this very
+/// type through the shipped pass and reports what the loop does.
+pub mod ghost;
 mod projection;
 /// How a magnified picture is sampled, and where the upgrade engages
 /// (issue #11). Public for the instrument that measures it, like
@@ -29,6 +33,7 @@ pub use band::{
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;
+pub use ghost::Ghost;
 pub use kjerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
 /// Which files one capture is made of (issue #123), under a name that does
 /// not collide with this crate's own `capture`, which is the screenshot one.

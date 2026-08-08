@@ -30,6 +30,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,7 @@ use kjerag_meta::{
 
 use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
+use super::ghost::Ghost;
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Correction, Harvest, SeamFit};
@@ -1211,6 +1213,96 @@ pub struct ScenePipeline {
     reported: bool,
 }
 
+/// Whether this run draws the live across-seam field (issue #103, the epi
+/// fork).
+///
+/// **A research switch and not a setting.** It has no menu item, no key and no
+/// config entry, because AGENTS.md's zero-config rule says a menu item that
+/// gates quality is a design failure. It exists so one binary can be both arms
+/// of the owner's blind A/B, which is the only way an arm can differ from
+/// `main` by this and by nothing else, and it goes when he has answered.
+///
+/// Unset is off, and off renders `main` byte for byte.
+fn ghost_asked() -> bool {
+    std::env::var_os("KJERAG_GHOST").is_some_and(|value| value == "field")
+}
+
+/// The band's state copied back to the CPU **without waiting for it**, which
+/// is the one piece of new GPU work the field costs (issue #103, the epi
+/// fork).
+///
+/// [`Band::read`] exists already and no shipped path takes it, for one reason:
+/// it calls `poll(Wait)`, which is a stall. This is the same 4 kB copy with the
+/// wait deleted. A copy is submitted on one frame; a later frame finds the map
+/// finished and takes it. If it is not finished the tick is skipped and the
+/// buffer is left alone, so the servo runs at whatever rate the device can
+/// give it and never at the cost of a frame.
+///
+/// **One to two frames of latency against a two second filter is not a
+/// quantity**, which is why there is one buffer here rather than a ring of
+/// them.
+struct Tap {
+    buffer: wgpu::Buffer,
+    /// Set by wgpu's own map callback, on whatever thread the poll runs it on,
+    /// and cleared here. An atomic because that is the callback's only way
+    /// back.
+    ready: Arc<AtomicBool>,
+    /// Whether a copy is in flight. A buffer that is already mapped or already
+    /// being mapped may not be asked again.
+    flying: bool,
+}
+
+impl Tap {
+    fn new(device: &wgpu::Device) -> Self {
+        Self {
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("band tap"),
+                size: band::BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            ready: Arc::new(AtomicBool::new(false)),
+            flying: false,
+        }
+    }
+
+    /// The cells the last copy landed with, or `None` on a frame it has not.
+    ///
+    /// The poll is `PollType::Poll`, which checks once and returns: it is what
+    /// runs the map callback at all on this backend, and it is not the wait.
+    fn take(&mut self, device: &wgpu::Device) -> Option<Vec<band::Cell>> {
+        let _ = device.poll(wgpu::PollType::Poll);
+        if !self.flying || !self.ready.swap(false, Ordering::Acquire) {
+            return None;
+        }
+        let cells = {
+            let mapped = self.buffer.slice(..).get_mapped_range();
+            band::cells(&mapped)
+        };
+        self.buffer.unmap();
+        self.flying = false;
+        Some(cells)
+    }
+
+    /// Submit the next copy and ask for it to be mapped. A no-op while one is
+    /// already in flight.
+    fn arm(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, state: &wgpu::Buffer) {
+        if self.flying {
+            return;
+        }
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(state, 0, &self.buffer, 0, band::BYTES);
+        queue.submit([encoder.finish()]);
+        let ready = self.ready.clone();
+        self.buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                ready.store(result.is_ok(), Ordering::Release);
+            });
+        self.flying = true;
+    }
+}
+
 /// One frame on the GPU. The mapped frames must outlive the textures
 /// imported from them, and both must outlive the passes that read them,
 /// which is what [`RETAINED`] is about.
@@ -1256,6 +1348,18 @@ struct Band {
     /// under [`ScenePipeline::band_repeats`].
     repeats: u32,
     slice: u32,
+    /// The live across-seam field, or `None` where it is switched off, which
+    /// is `main`'s picture byte for byte: nothing is read back, nothing is
+    /// ticked, and the uniform's `epi` stays at [`Table::REST`], which
+    /// `Reframe` short-circuits on (issue #103, the epi fork).
+    ghost: Option<Ghost>,
+    /// Where the state is copied for the servo to read it, and how the copy
+    /// says it has landed.
+    tap: Tap,
+    /// Where in the film the servo last ticked, so it can be told how much
+    /// media time the field has aged by. Its own and not [`Self::at`], which
+    /// the measurement moves on a different rule.
+    ticked: Option<Duration>,
     /// Where the last measured frame sat in the film, so the next one knows
     /// how much media time the state has aged by, and whether what happened
     /// in between was play or a seek.
@@ -1469,7 +1573,12 @@ impl ScenePipeline {
                 self.linearize(),
                 primitive.sampling,
             )
-            .with_table(view.table),
+            .with_table(view.table)
+            // The live across-seam field (issue #103, the epi fork). Read off
+            // the pipeline and not off the view, because it is this session's
+            // own and not part of the camera's calibration: it is learned from
+            // the frames that have already been drawn.
+            .with_epi(self.band.field()),
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
@@ -1479,6 +1588,15 @@ impl ScenePipeline {
         // calibration it measures against has to be the one the draw will use,
         // or the two disagree by whatever the correction walked this redraw.
         self.measure(device, queue, showing.as_ref());
+        // And after the measurement, so the copy this arms is of the state the
+        // dispatch above has just written. The servo reads what the band found
+        // THROUGH the field, which is what makes the residual its input and
+        // the loop closed rather than modelled.
+        self.band.learn(
+            device,
+            queue,
+            showing.as_ref().map(|view| view.frames.timestamp),
+        );
 
         // After the uniform write, and only after it: the write lands at the
         // next submit on this queue, and the capture's own submit is that
@@ -1597,6 +1715,28 @@ impl ScenePipeline {
         self.live
             .front()
             .is_some_and(|live| Arc::ptr_eq(&live.frames, &view.frames))
+    }
+
+    /// Draw with the live across-seam field, or without it (issue #103, the
+    /// epi fork).
+    ///
+    /// The same instrument-only switch as [`Self::hold_band`], and the same
+    /// switch the environment sets for the blind A/B: one binary, two arms,
+    /// differing by this and by nothing else. Off is `main`'s picture byte for
+    /// byte and is what a session that has read nothing draws anyway.
+    pub fn use_ghost(&mut self, on: bool) {
+        self.band.ghost = on.then(Ghost::rest);
+    }
+
+    /// What the field holds, for an instrument. `None` with it switched off.
+    pub fn ghost(&self) -> Option<&Ghost> {
+        self.band.ghost.as_ref()
+    }
+
+    /// Start from a field that is already wrong, which is the control
+    /// (`Ghost::planted`). Instruments only; nothing in the player calls it.
+    pub fn plant_ghost(&mut self, ghost: Ghost) {
+        self.band.ghost = Some(ghost);
     }
 
     /// Stop measuring the band, which leaves its state where it is and, on a
@@ -1795,7 +1935,42 @@ impl Band {
             repeats: 1,
             slice: 0,
             at: None,
+            ghost: ghost_asked().then(Ghost::rest),
+            tap: Tap::new(device),
+            ticked: None,
         }
+    }
+
+    /// What the picture is drawn with across the seam: the field, or
+    /// [`Table::REST`] with it switched off, which is `main`'s picture byte for
+    /// byte because `Reframe` short-circuits on it.
+    fn field(&self) -> Table {
+        self.ghost.as_ref().map_or(Table::REST, Ghost::table)
+    }
+
+    /// Take whatever the last frame's copy landed with and step the servo by
+    /// it, then ask for the next copy.
+    ///
+    /// Nothing here waits: [`Tap::take`] answers `None` on a frame the map has
+    /// not finished on and the field simply does not move that frame. With the
+    /// field switched off this is one branch and no GPU work at all, which is
+    /// what makes the null exact.
+    fn learn(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, now: Option<Duration>) {
+        let Some(ghost) = self.ghost.as_mut() else {
+            return;
+        };
+        // Media time and not wall clock, for `Band::aged`'s reasons: a paused
+        // window does not age the field, a slow box does not settle faster
+        // than a quick one, and the same second of film settles the same way
+        // at 24 fps and at 60.
+        if let (Some(cells), Some(now)) = (self.tap.take(device), now) {
+            let seconds = self
+                .ticked
+                .replace(now)
+                .map_or(0.0, |then| now.as_secs_f32() - then.as_secs_f32());
+            ghost.tick(&cells, seconds);
+        }
+        self.tap.arm(device, queue, &self.state);
     }
 
     /// How much media time the state has aged by, or `None` for a frame it has
@@ -1858,21 +2033,7 @@ impl Band {
             std::array::from_fn(|term| float(band::ALONG_AT + 4 * term)),
             float(band::ALONG_AT + 20),
         );
-        let cells = (0..band::AZIMUTHS)
-            .map(|index| {
-                let at = band::CELLS_AT + index * std::mem::size_of::<band::Cell>();
-                band::Cell {
-                    disparity: float(at),
-                    confidence: float(at + 4),
-                    reach_m: float(at + 8),
-                    off_epi: float(at + 12),
-                    off_conf: float(at + 16),
-                    tone: float(at + 20),
-                    lit: float(at + 24),
-                    trust: float(at + 28),
-                }
-            })
-            .collect();
+        let cells = band::cells(&mapped);
         drop(mapped);
         readback.unmap();
         Ok((tone, along, cells))
