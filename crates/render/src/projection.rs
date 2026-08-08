@@ -170,6 +170,82 @@ const CROSSOVER_DEG: f32 = 8.0;
 /// zero-config playback): an environment variable, read once, written nowhere.
 const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
 
+/// Research only: the **shape** of the handover's crossfade, from
+/// `KJERAG_BLEND_CURVE`. `steep` is the only value it takes; anything else,
+/// and the unset every shipped run has, is the linear ramp that ships.
+///
+/// The width and the shape are two different questions and this is the second
+/// one. [`HANDOVER_DEG`] moves the **support** - how much picture the two
+/// lenses are mixed over at all. This moves how much of that support the eye
+/// sees mixing, and leaves the support exactly where the owner's blind A/B put
+/// it (docs/research/seam-temporal.md, C3).
+///
+/// **Why the support may not narrow instead.** The support is the subject of
+/// the per-file clamp, and the ONE X2 affords 3.99 degrees with nothing to
+/// spare ([`super::band::affordable`]). A design that narrowed the support
+/// would have no room on that camera at all.
+///
+/// Not a setting, not a key and not a menu item (AGENTS.md, zero-config
+/// playback): an environment variable, read once, written nowhere.
+const BLEND_CURVE: &str = "KJERAG_BLEND_CURVE";
+
+/// What `KJERAG_BLEND_CURVE` has to say to get the steep curve.
+const STEEP: &str = "steep";
+
+/// The exponent the steep arm raises each lens's share to.
+///
+/// The curve is `s^n / (s^n + (1-s)^n)` over the linear ramp's own share `s`,
+/// which is symmetric about the seam, exact at both ends, and exactly the
+/// linear ramp at `n = 1`. Its 10-90 percent transition is a closed form:
+/// `s` reaches 0.9 where `(s/(1-s))^n = 9`, so the transition spans
+/// `(9^(1/n) - 1) / (9^(1/n) + 1)` of the crossover's own share axis. At 1
+/// that is 0.80 and at 1.5 it is **0.585**.
+///
+/// **That share axis is not degrees, and choosing on it would have overshot.**
+/// The weights are cosines of the two lens axes rather than a distance, so the
+/// share walks its own 0.1 to 0.9 over 0.61 of an 8 degree crossover and not
+/// over 0.80 of it (`the_along_seam_correction_hands_over_across_the_whole_crossover`,
+/// measured 2026-08-05), and it walks faster near the seam than out at the
+/// edges of the corridor. So this is chosen against the **delivered** figure in
+/// degrees, swept on the calibration fixture at the shipped 8 degree support:
+/// 4.89 at power 1, 3.93 at 1.3, **3.46 at 1.5**, 2.65 at 2, 2.27 at 2.35. The
+/// memo asked for 3 to 4 degrees; an exponent picked on the share axis instead
+/// would have been 2.35 and would have delivered 2.27.
+///
+/// **It is also the gradient**, exactly: the curve's peak slope in share per
+/// share is `n` at the seam, so a steep arm shears the epipolar bend `n` times
+/// harder than the ramp does and [`super::band::carried`] divides its fold
+/// limit by this number.
+const STEEP_POWER: f32 = 1.5;
+
+/// The exponent this run's handover uses, which is 1 - the linear ramp that
+/// ships - unless [`BLEND_CURVE`] asked for the steep one.
+///
+/// Read once, like [`crossover_deg`], and read by both halves of the map: the
+/// Rust one calls it from [`crossover`] and the shader is given the same
+/// number as a constant by [`wgsl`]. One `OnceLock` and no second copy.
+pub(crate) fn blend_power() -> f32 {
+    static POWER: OnceLock<f32> = OnceLock::new();
+    *POWER.get_or_init(|| {
+        let Ok(asked) = std::env::var(BLEND_CURVE) else {
+            return 1.0;
+        };
+        if asked != STEEP {
+            eprintln!(
+                "kjerag: {BLEND_CURVE}={asked} is not {STEEP:?}, so the handover keeps the linear \
+                 ramp it ships with"
+            );
+            return 1.0;
+        }
+        println!(
+            "blend:  research curve on, {BLEND_CURVE}={STEEP}: the two lenses still mix across \
+             the whole handover, and the 10-90 percent of that mixing is concentrated into a \
+             power {STEEP_POWER} curve inside it"
+        );
+        STEEP_POWER
+    })
+}
+
 /// The widest width the research switch will take, in degrees: the whole
 /// overlap of the camera family it was written for.
 ///
@@ -1619,7 +1695,33 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 ///
 /// WGSL twin: `crossover`.
 fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-    (0.5 + apart / (2.0 * reach * band)).clamp(0.0, 1.0)
+    steepen(
+        (0.5 + apart / (2.0 * reach * band)).clamp(0.0, 1.0),
+        blend_power(),
+    )
+}
+
+/// The linear ramp's share, re-spent on a steeper curve inside the same
+/// support (docs/research/seam-temporal.md, C3).
+///
+/// `s^n / (s^n + (1-s)^n)`: symmetric about the seam, exactly 0 and 1 where the
+/// ramp is, and **exactly `share` at `power <= 1`, by the branch and not by the
+/// arithmetic**. That is deliberate and it is what the null proof rests on: a
+/// `powf(s, 1.0)` is the identity in IEEE and `pow(s, 1.0)` in WGSL is
+/// `exp2(1.0 * log2(s))`, which is not, so a shipped run must not reach the
+/// pow at all.
+///
+/// The denominator cannot be zero for a share the clamp above produced: it is
+/// smallest at the seam itself, where it is `2 * 0.5^n`.
+///
+/// WGSL twin: `steepen`.
+fn steepen(share: f32, power: f32) -> f32 {
+    if power <= 1.0 {
+        return share;
+    }
+    let front = share.powf(power);
+    let back = (1.0 - share).powf(power);
+    front / (front + back)
 }
 
 impl LensBlock {
@@ -1918,9 +2020,13 @@ pub(crate) fn wgsl() -> String {
     // the band's own name and is declared by the band's own half, which only
     // one of the two pipelines compiled from this file is given.
     let lanes = super::band::AZIMUTHS / 4;
+    // The blend curve's exponent IS here, unlike the crossover: it is a
+    // property of the run rather than of the file, it is read before any file
+    // is open, and the shader is compiled once ([`blend_power`]).
     format!(
         "const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n\
-         const TABLE_LANES = {lanes}u;\n{WGSL}"
+         const TABLE_LANES = {lanes}u;\nconst BLEND_POWER = {power:?};\n{WGSL}",
+        power = blend_power(),
     )
 }
 
@@ -2173,7 +2279,21 @@ fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
 // a band this ray's own reading decided the width of (`band_width`). Rust
 // twin: `crossover`.
 fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-  return clamp(0.5 + apart / (2.0 * reach * band), 0.0, 1.0);
+  return steepen(clamp(0.5 + apart / (2.0 * reach * band), 0.0, 1.0));
+}
+
+// The same share re-spent on a steeper curve inside the same support. At
+// BLEND_POWER 1, which is every shipped run, this returns its argument by the
+// branch and never reaches the `pow`: WGSL's `pow(s, 1.0)` is
+// `exp2(1.0 * log2(s))` and is not the identity, and the null proof is
+// byte-identity. Rust twin: `steepen`.
+fn steepen(share: f32) -> f32 {
+  if BLEND_POWER <= 1.0 {
+    return share;
+  }
+  let front = pow(share, BLEND_POWER);
+  let back = pow(1.0 - share, BLEND_POWER);
+  return front / (front + back);
 }
 
 // The forward map, with the readout taken out of it. Rust twin:
@@ -2693,6 +2813,147 @@ pub(crate) mod tests {
                 most - least,
             );
         }
+    }
+
+    /// How many degrees of the same support each arm's crossfade is visible
+    /// over: the number C3 exists to move (docs/research/seam-temporal.md).
+    ///
+    /// One sweep answers both arms, because [`steepen`] is monotone and its
+    /// inverse is closed: the steep arm shows nine tenths of the correction
+    /// exactly where the shipped ramp shows `unsteepen(0.9)` of it. So this
+    /// measures the map that ships, once, and reads two answers off it - which
+    /// also means the number for the steep arm cannot drift away from the
+    /// linear one through a second sweep's own grid.
+    ///
+    /// Measured on this fixture over 24 azimuths, at the shipped 8 degree
+    /// support: **4.85 degrees at power 1** (which is the same 0.61 of the
+    /// width the test above quotes) and **2.52 at power 2.35**.
+    ///
+    /// **The share axis and the degrees axis are not the same axis**, and this
+    /// is where that bites. `steepen` concentrates 0.80 of the share into 0.44
+    /// of it, a factor of 1.83; the delivered degrees fall by 1.92, because
+    /// the share already moves faster near the seam than it does at the edges
+    /// of the corridor. The memo predicted 3 to 4 degrees from the share axis
+    /// alone and the delivered answer is under it.
+    #[test]
+    fn the_steep_curve_spends_less_of_the_handover_in_view() {
+        let reframe = fixture(Camera::default());
+        let width = reframe.crossover_at(0.0).to_degrees();
+        // What the shipped ramp has to be showing for the steep curve to be
+        // showing `share`: `steepen`'s own arithmetic at `1 / power`, written
+        // out rather than called, because `steepen` answers `share` unchanged
+        // below power 1 and that guard is the null proof.
+        let unsteepen = |share: f32, power: f32| {
+            let (front, back) = (share.powf(1.0 / power), (1.0 - share).powf(1.0 / power));
+            front / (front + back)
+        };
+
+        for phi in (0..360).step_by(15) {
+            let phi = phi as f32;
+            let carried = |offset: f32| along_carried(&reframe, offset, phi);
+            let steps = 4000;
+            let at = |share: f32| {
+                (0..=steps)
+                    .map(|step| width - 2.0 * width * step as f32 / steps as f32)
+                    .find(|offset| carried(*offset) < share)
+                    .unwrap_or(-width)
+            };
+            let span = |power: f32| at(unsteepen(0.9, power)) - at(unsteepen(0.1, power));
+            let (ramp, steep) = (span(1.0), span(STEEP_POWER));
+            assert!(
+                (4.5..5.2).contains(&ramp),
+                "the shipped ramp at {phi} spends {ramp} degrees of {width} going from nine \
+                 tenths of the correction to one tenth, not the 4.85 on record"
+            );
+            assert!(
+                (2.0..4.0).contains(&steep),
+                "the steep curve at {phi} spends {steep} degrees of {width}, which is not \
+                 inside the handover it was supposed to concentrate"
+            );
+        }
+    }
+
+    /// The steep curve is exactly the ramp at power 1, bit for bit, which is
+    /// the whole of C3's null: an unset `KJERAG_BLEND_CURVE` draws `main`.
+    ///
+    /// Bit equality and not a tolerance, and by the branch rather than by the
+    /// arithmetic: `powf(s, 1.0)` happens to be the identity in IEEE but
+    /// WGSL's `pow` is `exp2(log2(s))` and is not, so what has to hold on both
+    /// sides of the map is that the pow is never reached.
+    #[test]
+    fn an_unasked_blend_curve_is_the_ramp_bit_for_bit() {
+        assert_eq!(blend_power(), 1.0, "a test process asked for a blend curve");
+        for step in 0..=10_000 {
+            let share = step as f32 / 10_000.0;
+            assert_eq!(steepen(share, 1.0).to_bits(), share.to_bits());
+            assert_eq!(steepen(share, blend_power()).to_bits(), share.to_bits());
+        }
+    }
+
+    /// The steep curve is symmetric about the seam, monotone, and exact at
+    /// both ends - the three things that make it a crossfade rather than a
+    /// shift of the seam.
+    #[test]
+    fn the_steep_curve_is_a_crossfade_and_not_a_moved_seam() {
+        assert_eq!(steepen(0.0, STEEP_POWER), 0.0);
+        assert_eq!(steepen(1.0, STEEP_POWER), 1.0);
+        near(steepen(0.5, STEEP_POWER), 0.5, 1e-6);
+        let mut last = -1.0;
+        for step in 0..=10_000 {
+            let share = step as f32 / 10_000.0;
+            let curved = steepen(share, STEEP_POWER);
+            assert!(curved.is_finite() && (0.0..=1.0).contains(&curved));
+            assert!(curved >= last, "the steep curve runs backwards at {share}");
+            near(curved + steepen(1.0 - share, STEEP_POWER), 1.0, 1e-6);
+            last = curved;
+        }
+    }
+
+    /// And it cannot fold the picture, which is the one thing a steeper ramp
+    /// could newly break.
+    ///
+    /// The fold guard is one inequality, `gradient * disparity / band <= 1`,
+    /// held at 0.9 by [`super::band::carried`]. It was written against a
+    /// **linear** ramp, whose share walks one whole unit across one whole
+    /// band, so the gradient was 1 and dropped out. The steep curve's peak
+    /// gradient is its exponent, measured here rather than differentiated, and
+    /// that is exactly what `carried` now divides its limit by.
+    ///
+    /// **Without that division the steep arm folds a real camera.** At the ONE
+    /// X2's 3.99 degree support against a search that reads out to 2.6
+    /// ([`super::band::WIDEST_DEG`] is what it may ask for), the undivided
+    /// shear is over 1. That is measured below, so the division is a fix with
+    /// a failing case behind it and not a precaution.
+    #[test]
+    fn the_steep_curve_cannot_fold_the_narrowest_camera() {
+        let floor = 3.99f32.to_radians();
+        // Wider than the search can ever return, on purpose: this is the
+        // widest the adaptive term may even ASK for, so the answer bounds
+        // every reading rather than the ones a corpus happened to produce.
+        let disparity = super::super::band::WIDEST_DEG.to_radians();
+        let band = super::super::band::width(disparity, floor);
+        // The share's own gradient across the band, measured rather than
+        // differentiated: the steepest secant the curve takes over a fine
+        // grid, which reads a shade above the true peak and never below it.
+        let steps = 100_000;
+        let mut peak: f32 = 0.0;
+        let mut last = steepen(0.0, STEEP_POWER);
+        for step in 1..=steps {
+            let share = step as f32 / steps as f32;
+            let curved = steepen(share, STEEP_POWER);
+            peak = peak.max((curved - last) * steps as f32);
+            last = curved;
+        }
+        near(peak, STEEP_POWER, 0.02);
+
+        let shear = |limit: f32| peak * disparity.clamp(-limit, limit) / band;
+        assert!(
+            shear(0.9 * band) > 1.0,
+            "the undivided limit no longer folds, so this test has stopped being a control"
+        );
+        // Back on the guard, at the 0.9 the linear ramp sits on, to within
+        // what the secant above overreads by.
+        near(shear(0.9 * band / STEEP_POWER), 0.9, 0.02);
     }
 
     /// A run that does not ask draws the width the owner validated, and an ask

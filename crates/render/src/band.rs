@@ -1363,9 +1363,19 @@ pub fn pooled_gain(cells: &[Cell]) -> Option<(f32, f32)> {
 /// [`width`]'s answer for that same disparity rather than a constant. See
 /// [`FOLD`].
 ///
+/// **Divided by the blend curve's own peak gradient**, which is 1 on every
+/// shipped run, so this is byte-identical there: `x / 1.0` is `x` in IEEE and
+/// in WGSL. The inequality the clamp comes out of was written against a
+/// **linear** ramp, whose share walks one whole unit across one whole band; a
+/// steeper crossfade walks the same unit `n` times faster at the seam
+/// ([`super::projection::blend_power`]), so the disparity that sits on the
+/// clamp is `n` times smaller. Without this the steep arm folds the ONE X2,
+/// whose support is 3.99 degrees against a search that reads out to 2.6
+/// (`projection::tests::the_steep_curve_cannot_fold_the_narrowest_camera`).
+///
 /// WGSL twin: `carried`.
 pub fn carried(disparity_rad: f32, band_rad: f32) -> f32 {
-    let limit = FOLD * band_rad;
+    let limit = FOLD * band_rad / super::projection::blend_power();
     disparity_rad.clamp(-limit, limit)
 }
 
@@ -1770,7 +1780,9 @@ fn band_bend(ray: vec3<f32>) -> Band {
   // gradient cannot fold, however wide it opens. Rust twin: `Reframe::bent`.
   var out: Band;
   out.crossover = band_width(applied);
-  let limit = FOLD * out.crossover;
+  // Divided by the blend curve's peak gradient, 1 on every shipped run: the
+  // fold inequality was written against a linear ramp. Rust twin: `carried`.
+  let limit = FOLD * out.crossover / BLEND_POWER;
   let carried = clamp(applied, -limit, limit);
   // Back into view space: view_to_body is a rotation, so its transpose is its
   // inverse, and `v * m` is `transpose(m) * v`.
