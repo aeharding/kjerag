@@ -23,28 +23,36 @@
 //! coefficients are not applied.** They read like Kannala-Brandt
 //! theta-polynomial terms and they are not: the file says so itself. Each
 //! entry's fields 22 and 23 are the fourteen points of that lens's body mask,
-//! which lies along the edge of the lens's stated coverage, and on the two
-//! cameras measured they sit 1817 to 1852 px from the principal point.
-//! Equidistant puts that ring at 99.5 to 101.4 degrees off axis, so 199.0 to
-//! 202.9 degrees of coverage, which is the Osmo 360's own published figure.
-//! Read as `r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8)` the same
-//! coefficients turn the radius over at **89.1 degrees** and 1627 px and bring
-//! it back down, so that ring is not reachable at any angle and the lens could
-//! not see past a hemisphere. The inverse reading folds as well, at about
-//! 1.55 radians. Neither is a 199 degree lens, so neither ships, and the
-//! coefficients are read past rather than stored: the form is unresolved and a
-//! field nothing can use is not evidence, it is decoration. The numbers above
-//! are `scratch/osmo/`'s and are quoted in the pull request.
+//! which lies along the edge of the lens's stated coverage. Over the four
+//! lenses of the two cameras measured, those points sit 1804 to 1860 px from
+//! the principal point. Equidistant puts that ring at 98.6 to 101.7 degrees
+//! off axis, so 197 to 203 degrees of coverage, which brackets the Osmo 360's
+//! own published 199. Read as
+//! `r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8)` the same
+//! coefficients turn the radius over between **88.4 and 89.8 degrees**, at
+//! 1615 to 1640 px, and bring it back down: on all four lenses the mask ring
+//! is then unreachable at any angle and the lens could not see past a
+//! hemisphere. The inverse reading folds as well, at about 1.55 radians.
+//! Neither is a 199 degree lens, so neither ships, and the coefficients are
+//! read past rather than stored: the form is unresolved and a field nothing
+//! can use is not evidence, it is decoration.
+//!
+//! Those are the file's own numbers and the arithmetic above them, so the
+//! check is repeatable from any `.OSV`: read fields 1, 22 and 23 of a lens
+//! entry and compare `hypot(x - cx, y - cy)` against each candidate model's
+//! radius. Re-measured on both units 2026-08-07.
 //!
 //! **Which entry pair.** The table holds 24 slots. Slots 1 and 2 are the two
 //! lenses and are what this reads; 3 to 10 are empty on every file in the
-//! corpus; 11 to 24 are six further pairs whose focal lengths walk downwards
-//! by about a tenth of a percent per pair and whose principal points barely
+//! corpus; 11 to 24 are seven further pairs whose focal lengths walk
+//! downwards by about 0.03 percent a rung and whose principal points barely
 //! move. What that ladder selects on is **not known** - a focus distance, a
 //! temperature, a stabilization crop are all consistent with it - so this
 //! takes the first pair, which is the one the two cameras' factory numbers
-//! agree in shape with, and the risk is that a file whose true rung is
-//! elsewhere is reprojected about 0.1 percent off in scale.
+//! agree in shape with. The risk it carries is the width of that ladder: on
+//! both cameras, slot 1's focal sits about 0.16 percent above its top rung and
+//! 0.35 percent above its bottom, so a file whose true rung is elsewhere is
+//! reprojected up to about a third of a percent off in scale.
 //!
 //! **Which entry is which stream** is taken as file order: entry 1 is stream
 //! 0 and entry 2 is stream 1. Entry 1's recorded yaw is about 180 degrees and
