@@ -579,6 +579,44 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-08 **The steady part of the across-seam disagreement is displaced, not
+  ramped, and it is staged for the owner's eye rather than merged**
+  (docs/research/seam-ghost.md 8, `feat/ghost-field`). His standing complaint is
+  that we "migrate/warp the bad stitches together" where Studio "just ghosts",
+  and defect (2) of docs/research/seam-temporal.md 0 is the one neither #172 nor
+  #173 touched. On his May-01 downward arc the two lenses disagree across the
+  seam by 0.9 degrees, steady over the whole file, which is the camera and not
+  the scene; spending a constant as a ramp across the handover is what bends
+  straight lines and sweeps the bend along with the seam. So the steady part is
+  learned live by a servo whose fixed point is the band reading nothing steady,
+  and drawn as one displacement of lens 1's whole picture - the along-seam
+  channel's own shape since stage 5. The corridor keeps ramping the instantaneous
+  remainder, which is parallax and is what a ramp is for.
+
+  **Measured on the delivered path**, band live, field applied and read through:
+  what the corridor is left to ramp over his arc falls 0.906 to 0.173 degrees at
+  `down1` (81 percent), 0.906 to 0.161 at `down3`, and 0.912 to 0.112 at the view
+  he refused #171 on (88 percent). It arrives at half in 2.0 s and nine tenths in
+  5.6 s against #171's 162 s, overshoots by 0.58 percent and never turns round.
+  The comb count, which #173 tried and failed to improve, falls 100 to 36 at
+  `down3` and 256 to 40 at `bad` as a side effect. Frame rate is unchanged and
+  the servo costs 0.06 percent of the pass.
+
+  **Three things in the design memo were wrong and only a closed loop could say
+  so**, which is why the memo's own section 6 ranked closed-loop stability first
+  among the things a build had to answer: the staging filter must be outside the
+  servo's integrator or the loop rings; the forgetting bound must floor the gain
+  rather than the evidence, and must not taper a dark direction's support away,
+  which #172 already measured; and one far gate is enough where the memo proposed
+  two. All three are in docs/research/seam-ghost.md 8.2.
+
+  **It is off by default and behind `KJERAG_GHOST=field`**, which is a research
+  switch and not a setting: with it unset the render is md5-identical to `main`
+  at all six A/B views under two calibrations, twelve of twelve. It ships as a
+  default or not at all, and which of those it is, is the owner's to say at
+  `~/kjerag-ab/ghost-ab.sh`. Persistence between opens is increment 2 and a
+  pooled prior is increment 3; neither is in this build.
+
 - 2026-08-08 **The seam's temporal bundle is the default behaviour, and its
   three research toggles are deleted rather than defaulted**
   (docs/research/seam-temporal.md 9, docs/research/reference-views.md). Three
