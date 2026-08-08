@@ -1101,19 +1101,25 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
     );
 
     let orientation = calibration.orientation(Filter::default());
-    println!(
-        "imu:    {} samples at {:.0} Hz, {} orientations, axes {}",
-        calibration.imu.samples().len(),
-        calibration.imu.rate_hz(),
-        orientation.samples().len(),
-        calibration.gyro.imu_orientation,
-    );
+    match calibration.fused.is_empty() {
+        true => println!(
+            "imu:    {} samples at {:.0} Hz, {} orientations, axes {}",
+            calibration.imu.samples().len(),
+            calibration.imu.rate_hz(),
+            orientation.samples().len(),
+            calibration.gyro.imu_orientation,
+        ),
+        // A camera that solved its own has no axis convention to name and no
+        // filter to have run: what it wrote is what is held.
+        false => println!(
+            "imu:    {} orientations the camera solved for itself, one a frame",
+            orientation.samples().len()
+        ),
+    }
     // Said out loud, because the alternative is a menu item that does nothing
-    // and a pilot who cannot tell that from a broken one. An Osmo 360 capture
-    // is the case: it carries a fused orientation at about 1 kHz whose frame
-    // is not pinned, so `kjerag_meta::osmo` reads none rather than guess at a
-    // rotation (that module's "No IMU"). The shell draws the item disabled off
-    // [`Scene::has_orientation`], which is the same fact.
+    // and a pilot who cannot tell that from a broken one. A capture whose
+    // telemetry carries no orientation at all is the case: the shell draws the
+    // item disabled off [`Scene::has_orientation`], which is the same fact.
     if orientation.is_empty() {
         println!(
             "level:  this capture carries no orientation record Kjerag can use, so horizon \

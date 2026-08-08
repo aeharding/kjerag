@@ -1014,9 +1014,10 @@ impl App {
     /// orientation record it holds the picture against, or nothing open at
     /// all, which leaves the setting a setting.
     ///
-    /// A DJI Osmo 360 `.OSV` is the file that answers `false`: it records a
-    /// fused orientation whose frame is not pinned, and `kjerag_meta::osmo`
-    /// reads none rather than hold the picture with a guess.
+    /// A DJI Osmo 360 `.OSV` answered `false` until 2026-08-08, because the
+    /// frame its fused orientation is written in was not pinned. It is now
+    /// (`kjerag_meta::osmo`), so what is left answering `false` is a capture
+    /// whose telemetry carries no orientation at all.
     fn can_lock(&self) -> bool {
         self.open
             .as_ref()

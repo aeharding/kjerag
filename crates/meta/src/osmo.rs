@@ -84,11 +84,72 @@
 //! is that ten px of principal point and a tenth of a percent of scale, at
 //! the seam.
 //!
-//! **No IMU.** The file carries a fused orientation at about 1 kHz and the
-//! frame it is written in is not pinned; applying it naively made a stitch
-//! worse rather than better. So none is read, [`CalibrationSet::imu`] is
-//! empty, and horizon lock is the no-op an empty track already makes it
-//! (`CalibrationSet::orientation`). Manual pan is the whole of the view.
+//! **The orientation, and which way round it is written.** Every `djmd`
+//! sample, not just the first, carries the camera's own answer for its frame:
+//! field 3.2.9, a unit quaternion in the same four-`f32` shape the lens
+//! entries use, `w` first. Field 3.3 beside it holds the same numbers at about
+//! 1 kHz, 33 or 40 a frame depending on the rate, and **the frame's own one is
+//! a member of that run** (index 8 of 33 on unit B, 20 of 40 on unit A), so
+//! the fast stream is read past: it says nothing the per-frame one does not,
+//! it needs an anchor the two units do not agree on, and nothing in the pass
+//! asks for an orientation between frames because this camera records no
+//! rolling-shutter readout to correct for. Reading one a frame costs a seek
+//! and about a kilobyte each: 4384 samples and 4.1 MB in 26 ms on the owner's
+//! 146 s capture, about a third of a second for a half-hour one.
+//!
+//! Until 2026-08-08 none of it was read, because the frame was not pinned and
+//! "applying the quaternions made the stitch worse" - which was measured under
+//! the four-coefficient lens model above, with 15 degrees of seam tear in the
+//! picture, so it settled nothing. Re-derived under the five-term model, the
+//! convention is:
+//!
+//! ```text
+//! world_from_body = BODY^-1 . conjugate(w, x, y, z) . BODY
+//! ```
+//!
+//! **The component order is (w, x, y, z)** and it is not a guess: carried
+//! through the file's own quaternion the camera's vertical holds still while
+//! the wearer turns 179 degrees, and every other order swings with him. **The
+//! world is `z` up**, solved for rather than assumed: the direction that best
+//! predicts the file's own accelerometer over 4326 steady frames of unit B is
+//! `(-0.002, -0.001, -1.000)`.
+//!
+//! **The conjugate is the measured half.** With the lock off, the view rides
+//! the body, so the camera yaw that makes a later frame show what an earlier
+//! one showed IS the body's turn, in the renderer's own sign. Searched on the
+//! picture over three half-second pairs of the owner's capture it comes to
+//! -16, -22 and -10 degrees where the file's own yaw changed by +15.7, +22.0
+//! and +8.6: the same turn to about a degree, the opposite way round. So what
+//! the file writes is `body_from_world` where Kjerag wants its inverse, and
+//! reading it as written turns the picture twice as far as the wearer.
+//! `docs/ROADMAP.md` (2026-08-08) has the whole candidate table and what each
+//! one scored.
+//!
+//! **What is still open, and how much it is worth.** A left-handed reading of
+//! the file's own frame flips the heading in the same way the conjugate does,
+//! and the two agree exactly for a camera held upright and differ by twice its
+//! lean when it is not. The conjugate wins the head to head on the frame pairs
+//! chosen to separate them - 5.8 degrees of residual against 11.4 and 10.8,
+//! and the only candidate of the three to beat the no-lock control - but the
+//! file's own accelerometer, which is field 3.2.10 in g at fields 2 to 4,
+//! agrees with the *unconjugated* reading to 1.8 degrees and so argues for the
+//! mirror. The picture is the oracle here and the accelerometer is the
+//! instrument that disagrees with it; the risk this carries is bounded by
+//! twice the camera's lean, which is 4.3 degrees at the median and 11 at the
+//! 95th percentile over the corpus. A Mimo export of one clip with lock on and
+//! off would settle it outright and nothing else in the corpus will.
+//!
+//! **Where the world frame's zero heading is:** the first frame's, the same
+//! convention `super::orientation` uses on an `.insv`. A gyroscope's absolute
+//! heading names nothing, so opening a file at `yaw 0` has to mean looking
+//! where the camera looked.
+//!
+//! No filter runs over any of it. There is no gyroscope and no accelerometer
+//! to mix, so [`CalibrationSet::imu`] stays empty and the answer lands in
+//! [`CalibrationSet::fused`], which [`CalibrationSet::orientation`] hands back
+//! whatever filter it is asked for. A capture whose telemetry carries no
+//! orientation at all still comes out empty, and horizon lock is still the
+//! no-op an empty track makes it.
 //!
 //! **What is still unread, and named so it can be asked about later.** An
 //! entry writes nothing at fields 9, 16 to 19 or 26, and these at the rest:
@@ -120,6 +181,7 @@ use super::calibration::{
     CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Pose, Size,
 };
 use super::format::{Boxes, moov};
+use super::orientation::{OrientationSample, OrientationTrack};
 use super::rotation::Mat3;
 use super::rotation::Quat;
 use super::{Error, GyroTrack};
@@ -144,62 +206,227 @@ const LENSES: usize = 2;
 /// reflection here would render the sphere inside out.
 const BODY: Mat3 = Mat3::new([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]);
 
-/// The calibration of the capture at `path`.
+/// The same change of basis as a quaternion, which is what the per-frame
+/// orientation is composed with. `the_body_quaternion_is_the_body_matrix`
+/// holds the two together.
+const BODY_QUAT: Quat = Quat {
+    w: std::f64::consts::FRAC_1_SQRT_2,
+    v: [-std::f64::consts::FRAC_1_SQRT_2, 0.0, 0.0],
+};
+
+/// The calibration of the capture at `path`, and the orientation it recorded.
 pub(crate) fn read(path: &Path) -> Result<CalibrationSet, Error> {
     let mut file = File::open(path)?;
     let len = file.seek(SeekFrom::End(0))?;
     let moov = moov(&mut file, len)?.ok_or(Error::NoTelemetry)?;
-    let at = telemetry_sample(&moov).ok_or(Error::NoTelemetry)?;
-    let mut record = vec![0u8; at.size];
-    file.seek(SeekFrom::Start(at.offset))?;
-    file.read_exact(&mut record)?;
-    from_record(&record)
+    let track = telemetry_track(&moov).ok_or(Error::NoTelemetry)?;
+    let zero = *track.at.first().ok_or(Error::NoTelemetry)?;
+    let mut set = from_record(&sample(&mut file, zero)?)?;
+    set.fused = orientation(&mut file, &track);
+    Ok(set)
 }
 
 /// Where one sample sits in the file.
+#[derive(Clone, Copy)]
 struct At {
     offset: u64,
     size: usize,
 }
 
-/// Sample 0 of the first `djmd` track.
+/// The whole sample table of the first `djmd` track.
 ///
 /// The first, not any: an `.OSV` writes two, and the second one's samples are
-/// a sixth the size and carry no header. Sample 0 is the first sample of the
-/// first chunk, so `stsc` is not needed to place it, only `stco` and `stsz`.
-fn telemetry_sample(moov: &[u8]) -> Option<At> {
+/// a sixth the size and carry neither the calibration nor an orientation.
+struct Track {
+    at: Vec<At>,
+    /// When each sample plays, in microseconds from the file's first frame,
+    /// which is the clock `kjerag_render` looks an orientation up on.
+    offset_us: Vec<i64>,
+}
+
+fn telemetry_track(moov: &[u8]) -> Option<Track> {
     Boxes::new(moov)
         .filter(|(kind, _)| *kind == b"trak")
-        .filter_map(|(_, trak)| sample_zero(trak))
+        .filter_map(|(_, trak)| track(trak))
         .next()
 }
 
-/// The first sample of one track, if that track is a `djmd` one.
-fn sample_zero(trak: &[u8]) -> Option<At> {
-    let stbl = child(child(child(trak, b"mdia")?, b"minf")?, b"stbl")?;
+/// One track's samples, if that track is a `djmd` one.
+fn track(trak: &[u8]) -> Option<Track> {
+    let mdia = child(trak, b"mdia")?;
+    let stbl = child(child(mdia, b"minf")?, b"stbl")?;
     // `stsd` is a full box: four bytes of version and flags, four of entry
     // count, then the entries, each of which opens with its own size and 4cc.
-    let stsd = child(stbl, b"stsd")?;
-    if stsd.get(12..16)? != b"djmd" {
+    if child(stbl, b"stsd")?.get(12..16)? != b"djmd" {
         return None;
     }
+    let at = places(stbl)?;
+    let offset_us = times(stbl, timescale(child(mdia, b"mdhd")?)?, at.len());
+    Some(Track { at, offset_us })
+}
+
+/// The media timescale, in ticks a second. `mdhd`'s two versions differ by
+/// the width of the two times before it.
+fn timescale(mdhd: &[u8]) -> Option<u32> {
+    match mdhd.first()? {
+        0 => be32(mdhd, 12),
+        _ => be32(mdhd, 20),
+    }
+}
+
+/// Where every sample of one track sits, from the three tables that say so.
+fn places(stbl: &[u8]) -> Option<Vec<At>> {
     // `stsz` is version and flags, one size for every sample or zero, the
     // sample count, and then the table.
     let stsz = child(stbl, b"stsz")?;
-    let size = match be32(stsz, 4)? {
-        0 => be32(stsz, 12)?,
-        every => every,
-    };
+    let uniform = be32(stsz, 4)?;
+    let count = be32(stsz, 8)? as usize;
     // `stco` is version and flags, the chunk count, then the offsets. `co64`
     // is the same with 64-bit ones, which a file over 4 GB needs.
-    let offset = match child(stbl, b"stco") {
-        Some(stco) => u64::from(be32(stco, 8)?),
-        None => be64(child(stbl, b"co64")?, 8)?,
+    let chunks: Vec<u64> = match child(stbl, b"stco") {
+        Some(stco) => (0..be32(stco, 4)? as usize)
+            .map(|index| be32(stco, 8 + 4 * index).map(u64::from))
+            .collect::<Option<_>>()?,
+        None => {
+            let co64 = child(stbl, b"co64")?;
+            (0..be32(co64, 4)? as usize)
+                .map(|index| be64(co64, 8 + 8 * index))
+                .collect::<Option<_>>()?
+        }
     };
-    Some(At {
-        offset,
-        size: size as usize,
-    })
+    // `stsc` says how many samples a chunk holds, as runs: an entry opens a
+    // run at its own chunk, numbered from one, and the run lasts until the
+    // next entry opens one. The entries are in chunk order, so writing each
+    // run over the tail of the table leaves every chunk on its own run.
+    let stsc = child(stbl, b"stsc")?;
+    let mut held = vec![0usize; chunks.len()];
+    for run in 0..be32(stsc, 4)? as usize {
+        let first = be32(stsc, 8 + 12 * run)? as usize;
+        let each = be32(stsc, 12 + 12 * run)? as usize;
+        for slot in held.iter_mut().skip(first.saturating_sub(1)) {
+            *slot = each;
+        }
+    }
+    let mut out = Vec::with_capacity(count);
+    for (chunk, each) in chunks.iter().zip(&held) {
+        let mut offset = *chunk;
+        for _ in 0..*each {
+            if out.len() >= count {
+                return Some(out);
+            }
+            let size = match uniform {
+                0 => be32(stsz, 12 + 4 * out.len())?,
+                every => every,
+            } as usize;
+            out.push(At { offset, size });
+            offset += size as u64;
+        }
+    }
+    Some(out)
+}
+
+/// When every sample plays, in microseconds from the first frame.
+///
+/// `stts` is a run-length table of per-sample durations. A `djmd` track
+/// writes one run of one sample per video frame, and the edit list on every
+/// file in the corpus shifts neither track, so a sample's media time is the
+/// matching video frame's.
+fn times(stbl: &[u8], timescale: u32, count: usize) -> Vec<i64> {
+    let mut out = Vec::with_capacity(count);
+    let (Some(stts), true) = (child(stbl, b"stts"), timescale > 0) else {
+        return out;
+    };
+    let mut ticks = 0u64;
+    for run in 0..be32(stts, 4).unwrap_or(0) as usize {
+        let (Some(each), Some(delta)) = (be32(stts, 8 + 8 * run), be32(stts, 12 + 8 * run)) else {
+            break;
+        };
+        for _ in 0..each {
+            if out.len() >= count {
+                return out;
+            }
+            out.push((ticks * 1_000_000 / u64::from(timescale)) as i64);
+            ticks += u64::from(delta);
+        }
+    }
+    out
+}
+
+fn sample(file: &mut File, at: At) -> Result<Vec<u8>, Error> {
+    let mut record = vec![0u8; at.size];
+    file.seek(SeekFrom::Start(at.offset))?;
+    file.read_exact(&mut record)?;
+    Ok(record)
+}
+
+/// Where the camera says it was pointing, one orientation a frame.
+///
+/// Reading all of them costs one seek and about a kilobyte a frame: measured
+/// on the owner's 146 s capture, 4384 samples and 4.1 MB, 26 ms, which is
+/// about a third of a second for a half-hour one.
+///
+/// A sample that cannot be read or that carries no orientation is skipped
+/// rather than fatal, and a file where that is every sample comes out empty,
+/// which is the refusal an `.OSV` had until 2026-08-08 and still has if the
+/// stream is not there.
+fn orientation(file: &mut File, track: &Track) -> OrientationTrack {
+    let mut samples = Vec::with_capacity(track.at.len());
+    for (at, offset_us) in track.at.iter().zip(&track.offset_us) {
+        let Some(world_from_body) = sample(file, *at).ok().as_deref().and_then(pointing) else {
+            continue;
+        };
+        samples.push(OrientationSample {
+            offset_us: *offset_us,
+            world_from_body,
+        });
+    }
+    from_first_heading(samples)
+}
+
+/// The same orientations with the first one's heading taken out, which is
+/// where the world frame's zero goes.
+///
+/// The same convention the `.insv` path's own zero is (`super::orientation`):
+/// a gyroscope's absolute heading names nothing, so opening a file at `yaw 0`
+/// has to mean looking where the camera looked. Left multiplication is the
+/// world side, so this moves the datum and leaves every tilt where it was.
+fn from_first_heading(mut samples: Vec<OrientationSample>) -> OrientationTrack {
+    let Some(first) = samples.first() else {
+        return OrientationTrack::default();
+    };
+    let zero = Quat::about_down(first.world_from_body.heading()).conjugate();
+    for sample in &mut samples {
+        sample.world_from_body = zero.times(sample.world_from_body);
+    }
+    OrientationTrack::from_samples(samples)
+}
+
+/// One sample's orientation, in Kjerag's frames.
+///
+/// Two steps, and the module doc has the evidence for both.
+///
+/// - **The quaternion is conjugated**, because what the file writes takes a
+///   direction from the world to the body and Kjerag's `world_from_body`
+///   takes one the other way. Read without it, the picture turns twice as far
+///   as the wearer instead of standing still.
+/// - **Then the change of basis, on both sides.** The file's world is `z` up
+///   and Kjerag's is `y` down, and [`BODY`] is the rotation between the two
+///   bodies, so it goes on the right where a Kjerag body vector arrives and
+///   its inverse on the left where the answer comes back.
+fn pointing(record: &[u8]) -> Option<Quat> {
+    let state = message(message(record, field::FRAME)?, field::STATE)?;
+    let quaternion = message(state, field::POINTING)?;
+    let written = Quat {
+        w: f32s(quaternion, 1)?,
+        v: [
+            f32s(quaternion, 2)?,
+            f32s(quaternion, 3)?,
+            f32s(quaternion, 4)?,
+        ],
+    }
+    .normalized()
+    .conjugate();
+    Some(BODY_QUAT.conjugate().times(written).times(BODY_QUAT))
 }
 
 fn child<'a>(body: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
@@ -259,6 +486,19 @@ mod field {
     /// field 21; this one is read because a submessage of named fields cannot
     /// be misread as a different length.
     pub const ORIENTATION: u32 = 28;
+
+    /// Top level, and in **every** sample rather than only the first: what
+    /// the camera was doing while this frame was taken.
+    pub const FRAME: u32 = 3;
+    /// Inside `FRAME`. Its own field 1 is a frame counter and a device clock,
+    /// and its field 3 is the kilohertz stream the module doc is about.
+    pub const STATE: u32 = 2;
+    /// Inside `FRAME.STATE`: this frame's orientation, `w` first, in the same
+    /// four-`f32` submessage shape as [`ORIENTATION`] above. Its neighbour at
+    /// field 10 is the accelerometer in g, three `f32`s at fields 2 to 4,
+    /// which is the plumb line the frame convention was pinned against and is
+    /// read by nothing.
+    pub const POINTING: u32 = 9;
 }
 
 fn from_record(record: &[u8]) -> Result<CalibrationSet, Error> {
@@ -300,9 +540,10 @@ fn from_record(record: &[u8]) -> Result<CalibrationSet, Error> {
             gyro_timestamp: None,
         },
         exposure: Default::default(),
-        // Deliberately empty: the frame the file's own orientation is written
-        // in is not pinned, and an unverified frame is worse than none.
+        // Empty because there is no raw IMU to read: this camera writes the
+        // fused answer, which lands in `fused` instead and needs no filter.
         imu: GyroTrack::default(),
+        fused: OrientationTrack::default(),
         calibration_canvas: dimension,
     })
 }
@@ -652,6 +893,25 @@ mod tests {
         out
     }
 
+    /// One per-frame telemetry sample, carrying the orientation this frame was
+    /// taken at, in the camera's own nesting: field 3, then 2, then 9.
+    fn frame_record(q: [f32; 4]) -> Vec<u8> {
+        let mut written = Vec::new();
+        for (number, value) in (1..).zip(q) {
+            written.extend(f32field(number, value));
+        }
+        let mut state = f32field(3, 800.0);
+        state.extend(submessage(field::POINTING, &written));
+        // The accelerometer beside it, which this reads past.
+        let mut accel = f32field(2, 0.01);
+        accel.extend(f32field(3, -0.02));
+        accel.extend(f32field(4, -0.99));
+        state.extend(submessage(10, &accel));
+        let mut frame = submessage(1, &varint_field(1, 20));
+        frame.extend(submessage(field::STATE, &state));
+        submessage(field::FRAME, &frame)
+    }
+
     /// The five coefficients of one lens of one record.
     fn coefficients(record: &[u8], lens: usize) -> [f64; 5] {
         match from_record(record).unwrap().lenses[lens].model {
@@ -803,6 +1063,140 @@ mod tests {
         assert_eq!(up, [0.0, -1.0, 0.0]);
         for lens in from_record(&record()).unwrap().lenses {
             near(lens.mounting.unwrap().determinant(), 1.0, 1e-9);
+        }
+    }
+
+    /// [`BODY_QUAT`] is [`BODY`], which is what lets the orientation be
+    /// composed as a quaternion and the mountings as a matrix without the two
+    /// drifting apart.
+    #[test]
+    fn the_body_quaternion_is_the_body_matrix() {
+        let (got, want) = (BODY_QUAT.matrix().rows(), BODY.rows());
+        for (row, (a, b)) in got.into_iter().zip(want).enumerate() {
+            for axis in 0..3 {
+                near(a[axis], b[axis], 1e-12);
+            }
+            let _ = row;
+        }
+        near(BODY_QUAT.matrix().determinant(), 1.0, 1e-12);
+    }
+
+    /// **The headline, and the owner's defect.** The wearer turns; the world
+    /// does not.
+    ///
+    /// The file states the turn the way this camera states one: a
+    /// `body_from_world` quaternion about a `z` up world, so a body that has
+    /// turned `psi` to the left writes `-psi`. Run through [`pointing`] and
+    /// then through the composition `kjerag_render` does with it, a direction
+    /// fixed in the world has to come back into the body turned by exactly
+    /// that much, which is what leaves it on the same pixel.
+    #[test]
+    fn a_wearer_who_turns_leaves_the_world_where_it_was() {
+        for turn_deg in [10.0f64, -35.0, 90.0, 133.0, 179.0] {
+            let turn = turn_deg.to_radians();
+            // What the camera writes: the world seen from a body that turned.
+            let (sin, cos) = (-turn * 0.5).sin_cos();
+            let written = frame_record([cos as f32, 0.0, 0.0, sin as f32]);
+            let world_from_body = pointing(&written).expect("no orientation in the record");
+            // Kjerag's world vertical is `-y`, and a turn about it is what
+            // `about_down` names, the other way round because down is `+y`.
+            let expected = Quat::about_down(-turn);
+            assert!(
+                world_from_body.angle_to(expected).to_degrees() < 1e-4,
+                "{turn_deg} degrees came out {world_from_body:?}, wanted {expected:?}"
+            );
+            // And what the pass then draws with: the picture's forward, held
+            // still, is the body direction the turn moved it to.
+            let body_from_world = world_from_body.conjugate();
+            // A tolerance of a millionth and not a billionth: the camera
+            // writes `f32`, so the fixture's turn is one too.
+            let ahead = body_from_world.rotate([0.0, 0.0, 1.0]);
+            near(ahead[0], turn.sin(), 1e-6);
+            near(ahead[1], 0.0, 1e-6);
+            near(ahead[2], turn.cos(), 1e-6);
+        }
+    }
+
+    /// The negative control for the same fact, which is the reading this file
+    /// shipped with until 2026-08-08: take the quaternion as written and the
+    /// picture turns **twice** as far as the wearer rather than standing
+    /// still. Measured on the owner's capture as a locked view that tracked
+    /// the turn worse than no lock at all.
+    #[test]
+    fn reading_the_quaternion_unconjugated_turns_the_picture_twice() {
+        let turn = 40.0f64.to_radians();
+        let (sin, cos) = (-turn * 0.5).sin_cos();
+        let written = Quat {
+            w: cos,
+            v: [0.0, 0.0, sin],
+        };
+        let wrong = BODY_QUAT.conjugate().times(written).times(BODY_QUAT);
+        let right = BODY_QUAT
+            .conjugate()
+            .times(written.conjugate())
+            .times(BODY_QUAT);
+        near(right.angle_to(wrong).to_degrees(), 2.0 * 40.0, 1e-9);
+    }
+
+    /// A camera held upright is upright, and one that leans leans the way it
+    /// leaned: the file's own vertical, carried through, is the world's.
+    #[test]
+    fn an_upright_camera_comes_out_upright() {
+        let level = pointing(&frame_record([1.0, 0.0, 0.0, 0.0])).expect("no orientation");
+        assert!(
+            level.angle_to(Quat::IDENTITY).to_degrees() < 1e-4,
+            "{level:?}"
+        );
+        // Leaned 20 degrees about the file's own `x`, which is the body
+        // rotation `body_from_world` writes negated.
+        let lean = 20.0f64.to_radians();
+        let (sin, cos) = (-lean * 0.5).sin_cos();
+        let leaned = pointing(&frame_record([cos as f32, sin as f32, 0.0, 0.0])).expect("none");
+        // The camera's own up is `-y` in Kjerag's body frame, and it has to
+        // land `lean` away from the world's own up, not twice that and not
+        // nothing.
+        let up = leaned.rotate([0.0, -1.0, 0.0]);
+        near(up[1].acos().to_degrees(), 180.0 - lean.to_degrees(), 1e-4);
+    }
+
+    /// The world frame's zero heading is the first frame's, so a file opens
+    /// looking where the camera looked rather than at whatever azimuth the
+    /// camera's gyroscope happened to have started counting from.
+    #[test]
+    fn the_world_frames_zero_heading_is_the_first_frame() {
+        let track = from_first_heading(
+            [0.0f64, 30.0, -95.0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, heading)| OrientationSample {
+                    offset_us: index as i64 * 33_000,
+                    world_from_body: Quat::about_down(140.0f64.to_radians())
+                        .times(Quat::about_down(heading.to_radians())),
+                })
+                .collect(),
+        );
+        let headings: Vec<f64> = track
+            .samples()
+            .iter()
+            .map(|sample| sample.world_from_body.heading().to_degrees())
+            .collect();
+        near(headings[0], 0.0, 1e-9);
+        near(headings[1], 30.0, 1e-9);
+        near(headings[2], -95.0, 1e-9);
+        assert!(from_first_heading(Vec::new()).is_empty());
+    }
+
+    /// A sample the camera wrote no orientation into is one this walks past,
+    /// and a capture where that is every sample is the refusal an `.OSV` had
+    /// before this file read any: an empty track, which horizon lock is a
+    /// no-op on rather than an error.
+    #[test]
+    fn a_sample_with_no_orientation_in_it_is_read_past() {
+        assert!(pointing(&[]).is_none());
+        assert!(pointing(&record()).is_none());
+        let whole = frame_record([1.0, 0.0, 0.0, 0.0]);
+        for cut in [1, 4, 9, whole.len() / 2, whole.len() - 1] {
+            assert!(pointing(&whole[..cut]).is_none(), "cut at {cut}");
         }
     }
 
