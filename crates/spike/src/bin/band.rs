@@ -1104,6 +1104,12 @@ struct Step {
     sweep: f64,
     state: f64,
     class: Class,
+    /// Whether either cell behind the probe had no evidence at all on the
+    /// frame before. Kept beside [`Self::class`] rather than folded into it,
+    /// because a class is decided by which TERM is larger and this is a fact
+    /// about the step whatever won that comparison: an arrival under a bigger
+    /// sweep is still an arrival, and [`terms`] has to be able to say so.
+    arrived: bool,
     phi_deg: f64,
     low: usize,
 }
@@ -1458,9 +1464,31 @@ fn section(reads: &[Read], size: Size, px_per_deg: f64) {
                 true => next,
                 false => held,
             });
+        // **The interior trough**, which is the whole of the owner's percept
+        // as a single number. A correction that ramps up at one edge of the
+        // corrected patch and down at the other has its smallest values at the
+        // edges and that is a lobe. One that comes back to nothing in the
+        // MIDDLE of the patch, with full-strength correction either side of
+        // the place it does, is a comb, and the depth of that trough is how
+        // far apart the two values the picture is snapping between are.
+        let inside: Vec<&(u32, Delivered)> = match (reached.first(), reached.last()) {
+            (Some(low), Some(high)) => at
+                .iter()
+                .filter(|(x, _)| x > low && x < high)
+                .collect::<Vec<&(u32, Delivered)>>(),
+            _ => Vec::new(),
+        };
+        let trough = inside
+            .iter()
+            .map(|(x, value)| (value.epi_px.abs(), *x))
+            .fold((f64::INFINITY, 0), |held, next| match next.0 < held.0 {
+                true => next,
+                false => held,
+            });
         println!(
             "  frame {frame} at {:.3} s: reach {} of {} columns ({} to {} px), peak {peak:.1} px, \n\
-             \tsteepest {steep:.1} px over the 100 columns {} to {}.",
+             \tsteepest {steep:.1} px over the 100 columns {} to {}. inside that reach the \n\
+             \tcorrection falls as low as {} px, at column {}.",
             read.at.as_secs_f64(),
             reached.len() * 2,
             size.width,
@@ -1468,6 +1496,11 @@ fn section(reads: &[Read], size: Size, px_per_deg: f64) {
             reached.last().map_or(0, |x| *x),
             edge.0,
             edge.1,
+            match trough.0.is_finite() {
+                true => format!("{:.1}", trough.0),
+                false => "-".to_owned(),
+            },
+            trough.1,
         );
         println!(
             "  {:>8} {:>9} {:>12} {:>12} {:>12}   the cell boundaries inside the view",
@@ -1624,6 +1657,7 @@ fn attribute(reads: &[Read], probes: &[Probe], px_per_deg: f64, axis: Axis) -> V
                 sweep,
                 state,
                 class,
+                arrived,
                 phi_deg: now.phi_deg,
                 low: now.low,
             });
@@ -1657,6 +1691,55 @@ fn census(steps: &[Step], floor: f64) {
     }
 }
 
+/// The two terms on their own, over every probe-frame, rather than the total
+/// of the steps a class won.
+///
+/// **The census above answers a different question from the one an attribution
+/// asks.** It sorts each step by which term was larger and then reports that
+/// step's TOTAL, so a 18.9 px step made of 12.8 px of sweep and 6.1 px of
+/// state is filed under sweep at 18.9 px and neither number in it is the
+/// sweep. This is the decomposition itself: how much of the delivered motion,
+/// summed over the run, each of the three hypotheses is actually carrying.
+///
+/// The state term is split by whether a cell behind the probe arrived on that
+/// frame, which is H3 against H2, and the split is by [`Step::arrived`] rather
+/// than by the class so that an arrival hiding under a larger sweep still
+/// counts as one.
+fn terms(steps: &[Step]) {
+    let sum = |over: &[&Step], of: fn(&Step) -> f64| -> (f64, f64) {
+        (
+            over.iter().map(|step| of(step).abs()).sum(),
+            over.iter().map(|step| of(step).abs()).fold(0.0, f64::max),
+        )
+    };
+    let all: Vec<&Step> = steps.iter().collect();
+    let arriving: Vec<&Step> = steps.iter().filter(|step| step.arrived).collect();
+    let holding: Vec<&Step> = steps.iter().filter(|step| !step.arrived).collect();
+    println!(
+        "\n  the three hypotheses as TERMS and not as classes: every probe-frame counted, each \n\
+         \tone contributing its own two numbers rather than its total to whichever won.\n"
+    );
+    println!(
+        "  {:>26} {:>10} {:>10} {:>10}",
+        "term", "steps", "sum px", "worst px",
+    );
+    for (name, over, of) in [
+        (
+            "H1 sweep (map moved)",
+            &all,
+            (|step: &Step| step.sweep) as fn(&Step) -> f64,
+        ),
+        ("H2 state, no arrival", &holding, |step: &Step| step.state),
+        ("H3 state, on arrival", &arriving, |step: &Step| step.state),
+    ] {
+        let (total, worst) = sum(over, of);
+        println!(
+            "  {name:>26} {:>10} {total:>10.1} {worst:>10.1}",
+            over.len()
+        );
+    }
+}
+
 /// The verdict: how the steps divide between the three, and the largest few
 /// with their own numbers beside them.
 fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
@@ -1682,6 +1765,7 @@ fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
     // the number the A/B was staged on: 83 steps of over ten view px at
     // `down1`, counted at a CELL, against 4 on the arm that filters the gate.
     census(steps, MEMO_PX);
+    terms(steps);
     let all = (steps
         .iter()
         .map(|step| step.total * step.total)
