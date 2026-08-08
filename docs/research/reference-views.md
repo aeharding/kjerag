@@ -182,8 +182,9 @@ caveat in the Motion section, which is the same trap at a smaller size.
   the coverage depth takes the weight over and steps it to zero at the rim, and a bent ray that
   lands off a lens's picture is weighed zero and never sampled (this line said "a sample from off
   the end of a fisheye circle" until 2026-08-06, which is not what the code does). Measured per
-  file with `--bin band`: six X4 Air files afford 9.36 to 9.82 degrees and the ONE X2 affords 3.99,
-  so the width is clamped per camera and 12 is refused everywhere.
+  file with `--bin band`: six X4 Air files afford 9.36 to 9.82 degrees and the ONE X2 affords 4.18
+  (3.99 until 2026-08-08; see seam-temporal.md 9.6), so the width is clamped per camera and 12 is
+  refused everywhere. On the X2 that clamp is a floor the near field opens 0.17 deg past.
   What the owner still sees at 8 ("def not perfect") is the un-shrunk 0.36 deg disagreement, which
   stage 9's estimator owns and a width cannot reach.
   WHAT A POOLED FIELD DID TO THIS LINE ON A BUILD THAT WAS WITHDRAWN (2026-08-06; read stage9.md 9
@@ -493,14 +494,27 @@ box the same evening:
   in one frame. On the ship binary the arrival class contributes **no step over 10 px at any of
   the three**. At 3 view px and over the same runs read 247 -> 32, 418 -> 85 and 71 -> 7.
 
-  WHAT GOT WORSE, and it is disclosed rather than fixed: the **comb**. A dead neighbour cell
-  zeroes a live cell's correction, so the corrected patch has a hole in the middle of it, and
-  holding the gate up for longer means more frames have one. Frames of 300 whose delivered field
+  WHAT GOT WORSE, and it is disclosed rather than fixed: the **comb**, in two ways rather than
+  one. A dead neighbour cell zeroes a live cell's correction, so the corrected patch has a hole in
+  the middle of it.
+
+  MORE FREQUENT, because the gate is held up for longer. Frames of 300 whose delivered field
   peaks past 10 view px and comes back under 2 somewhere strictly inside its own reach:
   **down1 24 -> 40, down3 45 -> 100, bad 217 -> 256**. The `bad` figure reproduces the 257 the
-  characterization measured. This is the next build and it is named as such; the owner was told
-  about it before he answered ("If what you see is a stripe across the corrected area rather than
-  a jump in time, that is this") and answered anyway.
+  characterization measured.
+
+  DEEPER, because the clamp on that gate moved across the mix: `main` mixed the two cells'
+  confidences and then clamped the result against `KEEP`, and this clamps each cell's own trust
+  and then mixes, so a live cell beside a dead one is taxed by the mean of a 1 and a 0 rather
+  than by the pair's mixed confidence. On a 0.95-beside-0.00 pair at the halfway ray the tax
+  falls **0.731 -> 0.500**, and the notch at the `down1` pair goes **0.62 -> 0.41** of the
+  correction, 34 percent deeper (docs/research/seam-temporal.md 9.4).
+
+  This is the next build and it is named as such, and it has to answer BOTH: a build that only
+  shortens how long the gate is held would leave every remaining notch as deep as it is now. The
+  owner was told about the stripe before he answered ("If what you see is a stripe across the
+  corrected area rather than a jump in time, that is this") and answered anyway; he was not told
+  the depth, because it was measured during this PR's review and not before the session.
 
   UNTOUCHED, and on a separate line: the roughly 20 view px epipolar defect at `bad` itself. The
   cells' own readings are identical on both arms to every digit - read rms 4.6, p99 19.7, worst

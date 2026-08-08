@@ -1055,7 +1055,7 @@ impl App {
     /// **The width is the camera's since 2026-08-05** and there is nowhere else
     /// a pilot or an agent could read it: the projection asks for 8 degrees and
     /// a camera whose lenses overlap by less draws less
-    /// (`kjerag_render::band::affordable`). The owner's ONE X2 draws 3.99, and
+    /// (`kjerag_render::band::affordable`). The owner's ONE X2 draws 4.18, and
     /// an A/B on the width was run once already with no line anywhere saying
     /// which width either arm actually drew.
     ///
@@ -1063,7 +1063,7 @@ impl App {
     /// point and therefore the overlap. A camera with nothing pooled yet has no
     /// correction to land there, so what this prints on its first file is the
     /// **factory** calibration's width and a fallback fit moves it a second
-    /// later: 4.91 to 3.99 on the owner's X2. `kjerag_render`'s own fit path
+    /// later: 4.91 to 4.18 on the owner's X2. `kjerag_render`'s own fit path
     /// says that second line, and only when the width actually moved.
     fn say_handover(&self, scene: &Scene) {
         let Some(width) = scene.handover_deg() else {

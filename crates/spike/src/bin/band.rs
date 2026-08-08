@@ -222,7 +222,7 @@ fn table(last: &Read) {
          stands for; `band` is how wide the crossover opened to carry the reading; `cut` is what \n\
          a band held at this camera's own floor would have thrown away, in view px, which is \n\
          the width of the doubled edge it would leave (the floor is 8 deg on an X4 Air and \n\
-         3.99 on a ONE X2, not the fixed 2 of stage 2); `off epi` is the axis a distance \n\
+         4.18 on a ONE X2, not the fixed 2 of stage 2); `off epi` is the axis a distance \n\
          CANNOT displace content along, which is measured and never applied.\n"
     );
     println!(
@@ -371,20 +371,36 @@ fn crossover(reads: &[Read]) {
     // camera's since 2026-08-05, so it is asked of the map rather than quoted
     // from `WIDEST_DEG`, which stopped being the widest the band opens the
     // moment the floor went above it.
+    //
+    // **And it does not always fit, since 2026-08-08.** `affordable` bounds
+    // the FLOOR and `width` may open past it, which nothing could while
+    // `WIDEST_DEG` was 2.89 and every camera's floor was over it. At 4.33 a
+    // camera overlapping by under 9.53 degrees is under the line and the ONE X2
+    // is one, so this says which side of it this file is on rather than
+    // asserting the answer.
     let widest = last
         .mapped
         .crossover_at(kjerag_render::band::WIDEST_DEG.to_radians());
     let reach = f64::from(kjerag_render::band::reach(widest).to_degrees());
     let half = f64::from(overlap.to_degrees()) * 0.5;
+    let spare = match half - reach >= 0.0 {
+        true => format!(
+            "stays inside the overlap with {:.2} deg to spare",
+            half - reach
+        ),
+        false => format!(
+            "reaches {:.2} deg PAST the overlap, where the coverage depth hands the picture \n\
+             over instead of the ramp",
+            reach - half,
+        ),
+    };
     println!(
         "           these two lenses overlap by {:.2} deg, {half:.2} a side, which affords a \n\
          handover of {:.2}. the widest this camera's band opens is {:.2} deg, and that band plus \n\
-         the whole bend it carries reaches {reach:.2} deg off the seam, so the handover stays \n\
-         inside the overlap with {:.2} deg to spare.",
+         the whole bend it carries reaches {reach:.2} deg off the seam, so the handover {spare}.",
         f64::from(overlap.to_degrees()),
         f64::from(kjerag_render::band::affordable(overlap).to_degrees()),
         f64::from(widest.to_degrees()),
-        half - reach,
     );
 }
 

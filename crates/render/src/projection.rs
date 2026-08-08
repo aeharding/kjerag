@@ -135,7 +135,7 @@ const CAP_AZIMUTHS: usize = 8;
 /// ([`Reframe::crossover`]), and since issue #103's stage 4 it is a **floor**
 /// rather than a width, so a near-field reading could open the band past it.
 /// At 8 that second one never happens, because the widest stage 4 can ask for
-/// is 2.89 ([`super::band::WIDEST_DEG`]).
+/// is 4.33 ([`super::band::WIDEST_DEG`]).
 pub(crate) const CROSSOVER_DEG: f32 = 8.0;
 
 /// The exponent the crossfade raises each lens's share to, inside that same
@@ -146,8 +146,9 @@ pub(crate) const CROSSOVER_DEG: f32 = 8.0;
 /// mixed over at all; this is how much of that the eye sees mixing. The
 /// support stays exactly where the owner's 2026-08-05 blind A/B put it, and
 /// the support may not narrow instead: it is the subject of the per-file
-/// clamp, and the ONE X2 affords 3.99 degrees with nothing to spare
-/// ([`super::band::affordable`]).
+/// clamp, and the ONE X2 affords 4.18 degrees with nothing to spare
+/// ([`super::band::affordable`], which since this curve landed is a floor that
+/// camera's near field opens past by 0.17 degrees).
 ///
 /// The curve is `s^n / (s^n + (1-s)^n)` over the linear ramp's own share `s`
 /// ([`steepen`]). Its 10-90 percent transition is a closed form: `s` reaches
@@ -167,10 +168,27 @@ pub(crate) const CROSSOVER_DEG: f32 = 8.0;
 /// 2.35. An exponent picked on the share axis to hit the same aim would have
 /// been 2.35 and would have delivered 2.27.
 ///
+/// **That sweep is a prediction and the delivered figure at 1.5 is 3.88, not
+/// 3.46** (docs/research/seam-temporal.md 9.5). The sweep inverted a *linear*
+/// map to ask where it would have to be for the curve to deliver a tenth,
+/// which assumes the curve composes through the rest of the blend, and it does
+/// not: a lens's claim is its share times its own `landing.depth`, the two
+/// depths are not equal, and the pair is renormalized after the curve
+/// ([`claim`]). Read off the weights the pass actually hands the fragment
+/// shader, the delivered 10-90 percent goes **4.85 -> 3.85 degrees**, the mean
+/// over 24 azimuths on the fixture, and the row above is kept only because it
+/// is what the exponent was picked on. The measurement, and the only figure to
+/// quote, is `tests::the_blend_curve_spends_less_of_the_handover_in_view`,
+/// which carries the per-azimuth spread as well. Still inside the 3 to 4
+/// degrees the memo asked for; the picture never moved, only the number
+/// describing it.
+///
 /// **It is also the gradient**, exactly: the curve's peak slope in share per
 /// share is `n` at the seam, so it shears the epipolar bend `n` times harder
-/// than a ramp does and [`super::band::carried`] divides its fold limit by
-/// this number. Without that division this curve folds the ONE X2.
+/// than a ramp does and `super::band::SPEND` is `super::band::FOLD` divided by
+/// this number, which is the one place the division happens and the four
+/// functions of the fold inequality all read. Without it this curve folds the
+/// ONE X2.
 pub(crate) const BLEND_POWER: f32 = 1.5;
 
 /// Research only: what this run asks the handover for instead of
@@ -211,7 +229,7 @@ const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
 /// A guard against a typo and not the bound that matters. What actually caps
 /// the handover is the file's own calibration, which is a smaller number on
 /// every camera in the corpus ([`super::band::affordable`]): 9.36 to 9.82
-/// degrees over six X4 Air files and 3.99 on the ONE X2.
+/// degrees over six X4 Air files and 4.18 on the ONE X2.
 const OVERLAP_DEG: f32 = 14.0;
 
 /// How wide the handover asks to be on this run, in degrees, which is
@@ -941,11 +959,11 @@ impl Reframe {
     /// [`Self::crossover`] wherever that already carries the reading without
     /// folding, and wider exactly where the reading would otherwise be
     /// clamped. At the 8 degrees this camera family hands over across, the
-    /// second half never happens: the widest stage 4 can ask for is 2.89
+    /// second half never happens: the widest stage 4 can ask for is 4.33
     /// ([`super::band::WIDEST_DEG`]) and the floor is above it, so this is a
     /// constant on every X4-class file. What keeps it here is that the floor
     /// is the camera's and not the picture's, and a camera whose overlap
-    /// forces it under 2.89 puts the reading back in charge.
+    /// forces it under 4.33 puts the reading back in charge.
     ///
     /// WGSL twin: `band_width`.
     pub fn crossover_at(&self, disparity: f32) -> f32 {
@@ -1038,6 +1056,19 @@ impl Reframe {
     /// ([`Cell::trust`](super::band::Cell::trust)), mixed - already clamped,
     /// and clamped on the cell side of the mix rather than after it, because a
     /// filter needs somewhere to keep yesterday and a fragment has nowhere.
+    ///
+    /// **That move of the clamp across the mix deepens the comb, and it is
+    /// disclosed rather than fixed** (docs/research/seam-temporal.md 9.4).
+    /// Until 2026-08-08 the tax was `clamp(mix(confidence) / KEEP, 0, 1)`, so a
+    /// live cell beside a dead one was taxed by the PAIR's mixed confidence;
+    /// now each side is clamped first and the mix is between a 1 and a 0.
+    /// Measured on the halfway ray at a confidence of 0.95 beside 0.00, the tax
+    /// falls 0.731 to 0.500, and at the owner's `down1` pair the notch in the
+    /// middle of the corrected patch goes from 0.62 of the correction to 0.41,
+    /// which is 34 percent deeper. It is the behaviour the owner picked blind
+    /// on 2026-08-08 and it is what the named next build has to answer, on
+    /// depth as well as on how many frames carry one.
+    ///
     /// WGSL twin: `carry`.
     fn channel(a: super::band::Cell, b: super::band::Cell, mix: f32) -> f32 {
         let (ea, eb) = (a.confidence * (1.0 - mix), b.confidence * mix);
@@ -2623,8 +2654,15 @@ pub(crate) mod tests {
     ///
     /// | crossover, deg | 2 | 4 | 6 | 8 | 12 |
     /// | --- | ---: | ---: | ---: | ---: | ---: |
-    /// | span, deg | 1.51 | 2.81 | 3.92 | 4.85 | 6.23 |
+    /// | span, deg, mean | 1.51 | 2.81 | 3.92 | 4.85 | 6.23 |
     /// | share of the width | 0.75 | 0.70 | 0.65 | 0.61 | 0.52 |
+    ///
+    /// Means over the 24, read at this test's own 400-step grid, which is
+    /// coarse enough that the spread it reports is mostly the grid: the 8
+    /// column is 4.80 to 4.92 here and 4.80 to 4.89 at ten times the
+    /// resolution, and the mean moves by 0.005
+    /// ([`the_blend_curve_spends_less_of_the_handover_in_view`], which is
+    /// where a figure should be quoted from).
     ///
     /// So a handover four times as wide spreads the correction over 3.2 times
     /// as much picture and not four times as much. It is a ramp over the whole
@@ -2638,7 +2676,7 @@ pub(crate) mod tests {
     /// answer.** Its whole job is to separate a ramp from a step, and the two
     /// are nowhere near each other: a step would put the two probes inside one
     /// grid step, which is 0.005 of the width, and the delivered figure is
-    /// 0.485 of it under the curve and 0.61 under the ramp before it. It was
+    /// 0.482 of it under the curve and 0.61 under the ramp before it. It was
     /// half the width while there was one shape; it is a quarter now that
     /// there have been two, so that the next shape does not have to move it
     /// again.
@@ -2698,13 +2736,22 @@ pub(crate) mod tests {
     ///
     /// | crossfade | linear (`main`) | power 1.5 (ships) |
     /// | --- | ---: | ---: |
-    /// | span, deg | 4.88 to 4.92 | 3.88 to 3.92 |
-    /// | share of the width | 0.61 | 0.485 |
+    /// | span, deg, mean | 4.85 | **3.85** |
+    /// | span, deg, per azimuth | 4.80 to 4.89 | 3.82 to 3.88 |
+    /// | share of the width | 0.61 | 0.482 |
     ///
-    /// The linear column is `main` at a7b6930 measured through this same
-    /// function on this same fixture, which is where the 4.85 in the table
-    /// above comes from and what says the support did not move underneath the
+    /// The linear column is this same function on this same fixture with
+    /// [`BLEND_POWER`] at 1, where `steepen` is the identity and the map is
+    /// `main`'s, and it is what says the support did not move underneath the
     /// change.
+    ///
+    /// **Both columns are means and the spread is a real 0.09 degrees**,
+    /// re-measured 2026-08-08 during PR #172's review after the branch had
+    /// carried "4.88 to 4.92" and "3.88 to 3.92", which are neither the means
+    /// nor the ranges. The 4.85 in the table above is this column's mean read
+    /// at that test's own 400-step grid rather than a different measurement:
+    /// coarsening the grid moves the mean by 0.005 and widens the reported
+    /// spread by a grid step, which is 0.04 degrees there and 0.004 here.
     #[test]
     fn the_blend_curve_spends_less_of_the_handover_in_view() {
         let reframe = fixture(Camera::default());
@@ -2721,17 +2768,20 @@ pub(crate) mod tests {
                     .unwrap_or(-width)
             };
             let span = at(0.9) - at(0.1);
+            // The bracket is the measured spread and a hundredth either side of
+            // it, so a number that drifts is a failure and not a rounding.
             assert!(
-                (3.6..4.2).contains(&span),
+                (3.81..3.90).contains(&span),
                 "the blend curve at {phi} spends {span} degrees of {width} going from nine \
-                 tenths of the correction to one tenth, not the 3.88 to 3.92 on record"
+                 tenths of the correction to one tenth, not the 3.82 to 3.88 on record"
             );
-            // And it is less than the ramp it replaced, at every azimuth, by
-            // the margin on record rather than by any margin at all.
+            // And it is less than the ramp it replaced at EVERY azimuth,
+            // against the narrowest the ramp ever spent rather than against its
+            // mean: the two do not overlap at all.
             assert!(
-                span < 0.85 * 4.88,
+                span < 4.80,
                 "the blend curve at {phi} spends {span} degrees, which is not less than the \
-                 4.88 the linear ramp spent"
+                 4.80 the linear ramp spent at its narrowest azimuth"
             );
         }
     }
@@ -2759,20 +2809,21 @@ pub(crate) mod tests {
     /// crossfade could newly break.
     ///
     /// The fold guard is one inequality, `gradient * disparity / band <= 1`,
-    /// held at 0.9 by [`super::band::carried`]. It was written against a
-    /// **linear** ramp, whose share walks one whole unit across one whole
-    /// band, so the gradient was 1 and dropped out. This curve's peak gradient
-    /// is its exponent, measured here rather than differentiated, and that is
-    /// exactly what `carried` divides its limit by.
+    /// held at 0.9 by `super::band::FOLD`. It was written against a **linear**
+    /// ramp, whose share walks one whole unit across one whole band, so the
+    /// gradient was 1 and dropped out. This curve's peak gradient is its
+    /// exponent, measured here rather than differentiated, and that is exactly
+    /// what `super::band::SPEND` has divided out of it once for all four
+    /// functions that read the inequality.
     ///
     /// **Without that division the curve folds a real camera.** At the ONE
-    /// X2's 3.99 degree support against a search that reads out to 2.6 degrees
+    /// X2's 4.18 degree support against a search that reads out to 2.6 degrees
     /// ([`super::band::WIDEST_DEG`] is what the adaptive term may even ask
     /// for), the undivided shear is over 1. That is measured below, so the
     /// division is a fix with a failing case behind it and not a precaution.
     #[test]
     fn the_blend_curve_cannot_fold_the_narrowest_camera() {
-        let floor = 3.99f32.to_radians();
+        let floor = super::super::band::affordable(9.19f32.to_radians());
         // Wider than the search can ever return, on purpose: this is the
         // widest the adaptive term may even ASK for, so the answer bounds
         // every reading rather than the ones a corpus happened to produce.
@@ -2791,14 +2842,20 @@ pub(crate) mod tests {
         }
         near(peak, BLEND_POWER, 0.02);
 
-        let shear = |limit: f32| peak * disparity.clamp(-limit, limit) / band;
+        let shear = |carried: f32| peak * carried / band;
         assert!(
-            shear(0.9 * band) > 1.0,
+            shear(disparity.clamp(-0.9 * band, 0.9 * band)) > 1.0,
             "the undivided limit no longer folds, so this test has stopped being a control"
         );
         // Back on the guard, at the 0.9 the linear ramp sat on, to within what
-        // the secant above overreads by.
-        near(shear(0.9 * band / BLEND_POWER), 0.9, 0.02);
+        // the secant above overreads by - asked through the shipped clamp
+        // rather than through a second copy of its arithmetic, so a limit that
+        // stopped dividing would be caught here and not merely described.
+        near(
+            shear(super::super::band::carried(disparity, band)),
+            0.9,
+            0.02,
+        );
     }
 
     /// A run that does not ask draws the width the owner validated, and an ask
@@ -3007,7 +3064,7 @@ pub(crate) mod tests {
     /// not the arithmetic that decided it.
     ///
     /// The floor is set here rather than taken from the fixture because the
-    /// fixture affords the 8 degrees the picture asks for, and above 2.89 no
+    /// fixture affords the 8 degrees the picture asks for, and above 4.33 no
     /// reading the search can return opens anything
     /// (`band::tests::the_adaptive_width_is_inert_under_the_shipped_floor`).
     /// Two degrees is what this camera family handed over across until

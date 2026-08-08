@@ -478,8 +478,9 @@ lands at **3 to 4 degrees**. Their shape, our width.
 
 **Why the support must stay 8.** The support is also the per-file clamp's
 subject: the ONE X2's floor is **3.99 degrees with nothing to spare**
-(`band.rs:228-240`, measured). A design that narrows the *support* rather than
-the *transition* would have no room on the X2 at all.
+(`band.rs:228-240`, measured; 4.18 once the curve shipped, 9.6). A design that
+narrows the *support* rather than the *transition* would have no room on the X2
+at all.
 
 **What C3 cannot fix.** Nothing about registration. It changes how a given
 error looks, not how big it is. It could plausibly make a *large* residual
@@ -688,10 +689,16 @@ calibration fixture over 24 azimuths at the shipped 8 degree support:
 **A defect found on the way, and it had a failing case.** The fold guard is
 `gradient * disparity / band <= 1`, held at 0.9, and it was written where the
 gradient was 1 because a linear ramp's is. This curve's peak gradient is its
-exponent. At the ONE X2's 3.99 degree support against a search that reads out
-to 2.6 degrees the undivided shear is **over 1** - the steep arm folds a real
-camera. `band::carried` divides its limit by the exponent, which is 1 on every
-shipped run (`the_steep_curve_cannot_fold_the_narrowest_camera`).
+exponent. At the ONE X2's support against a search that reads out to 2.6
+degrees the undivided shear is **over 1** - the steep arm folds a real camera
+(`the_blend_curve_cannot_fold_the_narrowest_camera`).
+
+**The division as written here was half of one**, and 9.6 has the rest: it went
+into `band::carried` and not into the four other functions that solve the same
+inequality, which is a defect this memo's own "one inequality, read two ways"
+would have caught. It ships as one derived constant, `band::SPEND`, which all
+five read. Section 8.1's delivered figure is also a prediction rather than a
+measurement; 9.5 has that.
 
 ### 8.2 C1a, `KJERAG_TRUST=smooth`
 
@@ -828,9 +835,36 @@ past 10 view px and comes back under 2 strictly inside its own reach:
 | bad | 217 | **256** |
 
 The `bad` figure reproduces the 257 the characterization measured with staging
-on. **This is the next build.** He was told about it in the A/B briefing
-before he answered - *"If what you see is a stripe across the corrected area
-rather than a jump in time, that is this"* - and answered anyway.
+on.
+
+**And it is DEEPER as well as more frequent, which is a second change and not
+a consequence of the first** (found in PR #172's review, 2026-08-08). The
+attribution matters because it decides what the fix has to do. The gate on the
+way out used to be `clamp(mix(confidence) / KEEP, 0, 1)` - the two cells'
+confidences mixed and THEN clamped - and it is now each cell's own already
+clamped `Cell.trust`, mixed. The clamp moved across the mix. So a live cell
+beside a dead one used to be taxed by the pair's mixed confidence, which a
+strong reading could carry over `KEEP` on its own, and is now taxed by the mean
+of a 1 and a 0:
+
+| the halfway ray, one cell at conf 0.95, its neighbour at 0.00 | main | ship |
+| --- | ---: | ---: |
+| tax applied | 0.731 | **0.500** |
+
+which is 31.6 percent less correction in the notch. At the owner's `down1` pair
+the notch measures 0.62 of the correction against 0.41, **34 percent deeper**.
+
+Holding the gate up for longer is what makes more frames have a notch; moving
+the clamp across the mix is what makes each notch deeper. **This is the next
+build and it has to answer both.** A build that only shortens how long the gate
+stays up would leave every remaining notch as deep as it is now. He was told
+about it in the A/B briefing before he answered - *"If what you see is a stripe
+across the corrected area rather than a jump in time, that is this"* - and
+answered anyway; what he was not told is the depth, because it had not been
+measured.
+
+Not changed here, deliberately: the deeper notch is in the arm he picked blind,
+so removing it would ship a picture he has not seen.
 
 ### 9.5 A correction to 8.1, found on the way in
 
@@ -846,27 +880,70 @@ calibration fixture over 24 azimuths at the shipped 8 degree support
 
 | crossfade | linear (`main`) | power 1.5 (ships) |
 | --- | ---: | ---: |
-| delivered 10-90, deg | 4.88 to 4.92 | 3.88 to 3.92 |
-| share of the support | 0.61 | 0.485 |
+| delivered 10-90, deg, mean | 4.85 | **3.85** |
+| delivered 10-90, deg, per azimuth | 4.80 to 4.89 | 3.82 to 3.88 |
+| share of the support | 0.61 | 0.482 |
 
-So the delivered transition is **4.88 -> 3.88 degrees**, not 4.89 -> 3.46. It
+So the delivered transition is **4.85 -> 3.85 degrees**, not 4.89 -> 3.46. It
 is still inside the 3 to 4 degrees the memo asked for, and the support is
 unmoved, which is what the exponent was chosen against. Nothing about the
 owner's verdict changes: he judged the picture and the picture is the same one
 this number describes.
 
+**Re-measured 2026-08-08 in PR #172's review, and the first correction was
+itself out by a spread.** This section shipped saying "4.88 to 4.92" and "3.88
+to 3.92"; run over the 24 azimuths at 400, 4000 and 40000 grid steps the answer
+converges to the table above and neither of those pairs is the mean or the
+range. The linear column is the same test with the exponent at 1, where
+`steepen` is the identity and the map is `main`'s.
+
 ### 9.6 The X2, which the A/B never exercised
 
-All six A/B views are X4 Air. The fold guard's division has a consequence on
-the **ONE X2** and it is a real one: at that camera's 3.99 degree support the
-fold limit falls from 3.59 to **2.394 degrees**, and the search can return up
-to 2.6, so a near-field reading past 2.394 degrees is now clamped where it was
-carried whole. That is content inside about 0.8 m.
+All six A/B views are X4 Air. The blend curve has a consequence on the **ONE
+X2** and it is a real one, and it is not the one this section shipped saying.
 
-The conservative choice was taken - clamping rather than folding, because a
-fold prints the picture back over itself - and it is tested both ways
-(`band::tests::the_band_carries_every_disparity_the_search_can_report` states
-the cut; `projection::tests::the_blend_curve_cannot_fold_the_narrowest_camera`
-shows the undivided limit folding). **Nobody has looked at an X2 under this
-change.** It is flagged for the reviewer and for the owner rather than
-buried here.
+**What shipped, and why it was wrong** (PR #172's review, 2026-08-08). The fold
+inequality is `BLEND_POWER * |disparity| <= FOLD * width`, and five things in
+`band.rs` solve it for different unknowns: `carried`, `width`, `WIDEST_DEG`,
+`reach` and `affordable`. The curve's gradient was divided into `carried`
+alone. That made the two halves of stage 4 disagree - the width opened to
+`|disparity| / FOLD` and the clamp only carried `FOLD * width / BLEND_POWER` -
+so alignment the band had opened for was thrown away with nothing saying so: at
+`KJERAG_HANDOVER_DEG=3` a 2.6 degree reading came out as 1.8, and at the X2's
+own support the limit was 2.394 against a search that reads 2.6.
+
+**What ships now: the division is in one derived constant, `SPEND = FOLD /
+BLEND_POWER`, and all five read it.** `WIDEST_DEG` becomes `NEAR_DEG / SPEND` =
+4.33 degrees, which is exactly the width at which the clamp equals the widest
+reading the search can return, so **nothing the search can report is cut on any
+camera at any handover width** and the clamp is back to being a guard on
+arithmetic (`band::tests::the_band_carries_every_disparity_the_search_can_report`,
+read at the shipped floor, the 2 degree fixture floor and the X2's own, with
+`a_width_that_forgets_the_curve_throws_the_near_field_away` as its positive
+control). The X4 Air family does not move at all: `affordable` answers
+`2 * (half - NEAR_DEG)` in the roomy regime, which has no `SPEND` in it, so the
+corpus's 9.24 to 9.82 are unchanged and so is every pixel of the six A/B views
+(md5, 12 of 12).
+
+**What the X2 pays instead, and it is a new disclosure.** `affordable` bounds
+the FLOOR and `width` may open past it. Nothing could while `WIDEST_DEG` was
+2.89, because the narrowest floor in the corpus was 3.99. At 4.33 a camera
+overlapping by less than 9.53 degrees is under the line, and the X2 overlaps by
+9.19 under its own fit: it affords 4.18, and a direction reading against the
+near edge of the search opens its band to 4.33, which reaches 4.77 degrees off
+the seam into 4.60 a side. The outer **0.17 degrees** of that corridor is
+handed over by the coverage depth rather than by the crossover's ramp
+(`band::affordable` says what that costs; it is not a fold and not a sample off
+the end of the fisheye circle). It is live only where a direction reads inside
+about 0.8 m.
+
+So the X2's trade is: it now carries every reading whole where it used to give
+up 0.206 degrees, and pays 0.17 degrees of corridor past its overlap at the
+same instants. The alternative - keep clamping that camera, at 2.506 degrees
+once `affordable` is consistent too - was available and was not taken, because
+a clamp is silent and this is not. **Nobody has looked at an X2 under either.**
+It is flagged for the owner rather than buried here.
+
+The fold itself is still tested from both sides
+(`projection::tests::the_blend_curve_cannot_fold_the_narrowest_camera` measures
+the curve's peak gradient and shows the undivided limit folding that camera).

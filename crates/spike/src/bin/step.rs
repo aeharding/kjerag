@@ -108,8 +108,9 @@ const CLOSE_MARGIN_DEG: f64 = 0.2;
 /// edge, so a fit that reached into it would be fitting the artifact it is
 /// measuring. What it has to clear is therefore the crossover the pass
 /// **draws**, and since 2026-08-05 that is 8 degrees on an X4-class file - 4
-/// either side - rather than the 2.89 of `kjerag_render::band` WIDEST_DEG the
-/// old value was derived from. This is that 4 plus the same
+/// either side - rather than the `kjerag_render::band` WIDEST_DEG the old
+/// value was derived from, which was 2.89 then and is 4.33 since the blend
+/// curve landed on 2026-08-08. This is that 4 plus the same
 /// [`CLOSE_MARGIN_DEG`] the close-in window clears the taper by.
 ///
 /// **Every number this instrument printed before that date was taken at 2.5**,
