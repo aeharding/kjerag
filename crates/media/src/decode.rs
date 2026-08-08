@@ -230,6 +230,21 @@ impl SwFrame {
         unsafe { (*self.0).format == ff::ffi::AVPixelFormat::AV_PIX_FMT_NV12 as i32 }
     }
 
+    /// Whether the transfer landed in P010, which is NV12's ten-bit twin: the
+    /// same two-plane arrangement, but every sample is a 16-bit little-endian
+    /// word with its ten bits at the **top** and the low six zero.
+    ///
+    /// Asked for the same reason [`Self::nv12`] is, and it is the sharper
+    /// version of that question: a caller that indexes a P010 plane by pixel
+    /// reads *half a sample* - the low byte of a neighbour - and what comes
+    /// back is not a colour wrong by a hue, it is noise that still looks like
+    /// a picture to an average and destroys every correlation taken on it.
+    /// That is exactly what the seam fit did to every `.OSV` until this
+    /// existed.
+    pub fn p010(&self) -> bool {
+        unsafe { (*self.0).format == ff::ffi::AVPixelFormat::AV_PIX_FMT_P010LE as i32 }
+    }
+
     /// Plane bytes and their stride, both straight from the frame.
     pub fn plane(&self, index: usize, rows: u32) -> (&[u8], u32) {
         unsafe {

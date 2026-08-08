@@ -980,6 +980,7 @@ mod tests {
             stride: size.width as usize,
             size,
             chroma: None,
+            wide: false,
         }
     }
 
@@ -1003,6 +1004,7 @@ mod tests {
             stride: size.width as usize,
             size,
             chroma: None,
+            wide: false,
         }
     }
 

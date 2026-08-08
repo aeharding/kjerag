@@ -45,12 +45,20 @@ pub struct Plane {
     pub stride: usize,
     pub size: Size,
     /// The interleaved Cb/Cr plane at half the resolution each way, or `None`
-    /// where the decoder handed over something that is not NV12.
+    /// where the decoder handed over a layout whose second plane is not one
+    /// interleaved Cb/Cr grid.
     ///
     /// Only an instrument that asks whether the two lenses disagree about
     /// **colour** reads this (issue #103, stage 3); everything else on this
     /// walk is geometry, and geometry is in the luma.
     pub chroma: Option<Chroma>,
+    /// Every sample in both planes is a 16-bit little-endian word rather than
+    /// a byte: P010, which is what a DJI `.OSV` decodes to.
+    ///
+    /// It is here because [`Self::luma`] is bytes either way and nothing in
+    /// them says which. A reader that guesses byte indexes the wrong sample,
+    /// and it does it silently.
+    pub wide: bool,
 }
 
 /// One frame's Cb/Cr, interleaved as NV12 writes them.
@@ -62,17 +70,56 @@ pub struct Chroma {
 impl Plane {
     fn of(frame: &SwFrame, size: Size) -> Self {
         let (bytes, stride) = frame.plane(0, size.height);
+        let wide = frame.p010();
         Self {
             luma: bytes.to_vec(),
             stride: stride as usize,
             size,
-            chroma: frame.nv12().then(|| {
+            // P010 is NV12's ten-bit twin and its second plane interleaves Cb
+            // and Cr exactly the same way, one word each instead of one byte
+            // each, so both layouts carry a chroma pair per position and
+            // neither is the planar case this refuses.
+            chroma: (frame.nv12() || wide).then(|| {
                 let (bytes, stride) = frame.plane(1, size.height / 2);
                 Chroma {
                     bytes: bytes.to_vec(),
                     stride: stride as usize,
                 }
             }),
+            wide,
+        }
+    }
+
+    /// One luma sample's byte offset in [`Self::luma`], and how wide it is.
+    ///
+    /// The whole of the ten-bit difference, in one place: a byte per sample or
+    /// a little-endian word per sample.
+    fn sample(&self, x: usize, y: usize) -> usize {
+        y * self.stride + x * self.step()
+    }
+
+    /// Bytes per sample: 1 for NV12, 2 for P010.
+    fn step(&self) -> usize {
+        match self.wide {
+            true => 2,
+            false => 1,
+        }
+    }
+
+    /// One sample at a byte offset, in the **8-bit code space** every reading
+    /// on this walk is expressed in.
+    ///
+    /// P010's ten bits sit at the top of a 16-bit word, so a word is 64 times
+    /// the ten-bit code and 256 times the eight-bit one. Dividing by 256
+    /// therefore puts a ten-bit capture on the same scale an eight-bit one
+    /// already used, with two fractional bits of it left over rather than
+    /// thrown away: every threshold downstream is written in codes
+    /// (`kjerag_render::seam`'s contrast floor among them) and stays worth
+    /// what it was measured to be worth.
+    fn code(&self, at: usize) -> f64 {
+        match self.wide {
+            true => f64::from(u16::from_le_bytes([self.luma[at], self.luma[at + 1]])) / 256.0,
+            false => f64::from(self.luma[at]),
         }
     }
 
@@ -90,9 +137,14 @@ impl Plane {
         if x < 0.0 || y < 0.0 {
             return None;
         }
-        let at = row * chroma.stride + 2 * column;
-        let pair = chroma.bytes.get(at..at + 2)?;
-        Some((f64::from(pair[0]) - 128.0, f64::from(pair[1]) - 128.0))
+        let step = self.step();
+        let at = row * chroma.stride + 2 * column * step;
+        let pair = chroma.bytes.get(at..at + 2 * step)?;
+        let code = |i: usize| match self.wide {
+            true => f64::from(u16::from_le_bytes([pair[2 * i], pair[2 * i + 1]])) / 256.0,
+            false => f64::from(pair[i]),
+        };
+        Some((code(0) - 128.0, code(1) - 128.0))
     }
 
     /// Bilinear, in delivered-frame pixels. `None` outside the picture, which
@@ -107,7 +159,7 @@ impl Plane {
             return None;
         }
         let (fx, fy) = (x - x.floor(), y - y.floor());
-        let code = |x: usize, y: usize| f64::from(self.luma[y * self.stride + x]);
+        let code = |x: usize, y: usize| self.code(self.sample(x, y));
         let upper = code(left, top) * (1.0 - fx) + code(left + 1, top) * fx;
         let lower = code(left, top + 1) * (1.0 - fx) + code(left + 1, top + 1) * fx;
         Some(upper * (1.0 - fy) + lower * fy)
@@ -392,5 +444,94 @@ impl Walk {
             let taken = SwFrame::transfer(&frame)?;
             self.queues[lane].push_back((pts, Plane::of(&taken, self.size)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A plane of one code, written the way the named depth writes it.
+    fn plane(code: u16, wide: bool, size: Size) -> Plane {
+        let step = if wide { 2 } else { 1 };
+        let stride = size.width as usize * step;
+        let mut luma = vec![0u8; stride * size.height as usize];
+        for row in 0..size.height as usize {
+            for column in 0..size.width as usize {
+                let at = row * stride + column * step;
+                match wide {
+                    // P010 keeps its ten bits at the top of the word.
+                    true => luma[at..at + 2].copy_from_slice(&(code << 6).to_le_bytes()),
+                    false => luma[at] = code as u8,
+                }
+            }
+        }
+        Plane {
+            luma,
+            stride,
+            size,
+            chroma: None,
+            wide,
+        }
+    }
+
+    /// The whole of the ten-bit bug in one assertion: a P010 plane indexed a
+    /// byte at a time reads the low half of a neighbouring sample, which for a
+    /// studio-swing black plane is zero on every other column and 16 on the
+    /// rest. Read as words it is the one code that was written, on the 8-bit
+    /// scale every threshold on this walk is expressed in.
+    #[test]
+    fn a_ten_bit_plane_reads_back_the_code_it_was_written_with() {
+        let size = Size::new(64, 64);
+        // Studio-swing black, which is 64 at ten bits and 16 at eight.
+        let wide = plane(64, true, size);
+        let narrow = plane(16, false, size);
+
+        assert_eq!(wide.at(10.0, 10.0), Some(16.0));
+        assert_eq!(narrow.at(10.0, 10.0), Some(16.0));
+
+        // And a code with something in both halves of the word, so a reader
+        // that dropped the high byte could not pass by luck.
+        let bright = plane(700, true, size);
+        assert_eq!(bright.at(4.0, 7.0), Some(700.0 / 4.0));
+    }
+
+    /// Bilinear still interpolates, and still in the 8-bit code space.
+    #[test]
+    fn a_ten_bit_plane_interpolates_between_two_codes() {
+        let size = Size::new(8, 8);
+        let mut plane = plane(0, true, size);
+        let set = |p: &mut Plane, x: usize, y: usize, code: u16| {
+            let at = y * p.stride + x * 2;
+            p.luma[at..at + 2].copy_from_slice(&(code << 6).to_le_bytes());
+        };
+        set(&mut plane, 2, 3, 400);
+        set(&mut plane, 3, 3, 800);
+
+        // Halfway along the row between them, in 8-bit codes.
+        let got = plane.at(2.5, 3.0).expect("inside the picture");
+        assert!((got - 600.0 / 4.0).abs() < 1e-9, "{got}");
+    }
+
+    /// The chroma pair is two words on a P010 frame and two bytes on an NV12
+    /// one, and both answer as a signed offset from neutral in 8-bit codes.
+    #[test]
+    fn ten_bit_chroma_reads_as_an_eight_bit_offset() {
+        let size = Size::new(8, 8);
+        let mut wide = plane(64, true, size);
+        wide.chroma = Some(Chroma {
+            // One row of Cb/Cr words: neutral 512, then 512 + 224.
+            bytes: {
+                let mut b = vec![0u8; 8 * 4];
+                b[0..2].copy_from_slice(&(512u16 << 6).to_le_bytes());
+                b[2..4].copy_from_slice(&(736u16 << 6).to_le_bytes());
+                b
+            },
+            stride: 8 * 4,
+        });
+
+        let (cb, cr) = wide.chroma_at(0.0, 0.0).expect("inside the picture");
+        assert!(cb.abs() < 1e-9, "{cb}");
+        assert!((cr - 56.0).abs() < 1e-9, "{cr}");
     }
 }
