@@ -48,6 +48,7 @@
 //! PNGs land in gitignored `scratch/`: these are frames of somebody's real
 //! flights and this repo is public.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1138,9 +1139,17 @@ fn snap(options: &Options) -> Fallible<()> {
     // Kept before the plant goes in, so the run can be attributed twice and
     // the plant's own contribution read as the difference rather than as a
     // change in a total the footage dominates.
-    let saved: Vec<(Vec<Cell>, kjerag_render::Along)> = reads
+    //
+    // **The map is saved with the cells.** It was not, and [`Plant::Still`] is
+    // the plant that moves the map: its null was built out of the frozen map
+    // it was meant to be a null of, so the difference came back exactly zero
+    // and the control read as a clean pass when it had measured nothing at
+    // all. A control that cannot fail is not a control, and this one could
+    // not: see `plant_check`, which now refuses a zero it was handed under a
+    // plant.
+    let saved: Vec<(Vec<Cell>, kjerag_render::Along, Reframe)> = reads
         .iter()
-        .map(|read| (read.cells.clone(), read.along))
+        .map(|read| (read.cells.clone(), read.along, read.mapped))
         .collect();
     options.plant.into(&mut reads);
 
@@ -1180,6 +1189,8 @@ fn snap(options: &Options) -> Fallible<()> {
 
     sweep_rate(&reads, &probes, px_per_deg);
     profile(&reads, &probes, px_per_deg);
+    section(&reads, size, px_per_deg);
+    reaches(&reads, &probes, px_per_deg);
     support(&reads, &first.mapped, size);
     for axis in [Axis::Epi, Axis::Along] {
         let steps = attribute(&reads, &probes, px_per_deg, axis);
@@ -1189,14 +1200,16 @@ fn snap(options: &Options) -> Fallible<()> {
     // null worth having: one run's geometry, one run's decode, one run's
     // footage, and the plant as the single difference between them.
     let planted = attribute(&reads, &probes, px_per_deg, Axis::Epi);
-    for (read, (cells, along)) in reads.iter_mut().zip(saved) {
+    for (read, (cells, along, mapped)) in reads.iter_mut().zip(saved) {
         read.cells = cells;
         read.along = along;
+        read.mapped = mapped;
     }
     let null = attribute(&reads, &probes, px_per_deg, Axis::Epi);
     plant_check(options.plant, &planted, &null);
     let last = reads.last().expect("play returns at least one frame");
     neighbours(last, &opened, size, px_per_deg);
+    spread(&reads, &opened, size, px_per_deg);
     Ok(())
 }
 
@@ -1207,10 +1220,17 @@ fn snap(options: &Options) -> Fallible<()> {
 /// weighted, which is where a disagreement is drawn twice at equal strength
 /// and where the owner is looking.
 fn probes(reframe: &Reframe, size: Size) -> Vec<Probe> {
+    probes_at(reframe, size, PROBES)
+}
+
+/// The same at any spacing, which is how [`section`] asks for one per column:
+/// [`PROBES`] is enough to attribute a step and nowhere near enough to say how
+/// far apart the places it steps BETWEEN are.
+fn probes_at(reframe: &Reframe, size: Size, count: usize) -> Vec<Probe> {
     let half = 0.5 * f64::from(reframe.crossover_at(0.0).to_degrees());
-    (0..PROBES)
+    (0..count)
         .filter_map(|index| {
-            let x = ((index as f32 + 0.5) / PROBES as f32 * size.width as f32) as u32;
+            let x = ((index as f32 + 0.5) / count as f32 * size.width as f32) as u32;
             let mut best: Option<Probe> = None;
             for y in 0..size.height {
                 let uv = [x as f32 / size.width as f32, y as f32 / size.height as f32];
@@ -1369,6 +1389,144 @@ fn profile(reads: &[Read], probes: &[Probe], px_per_deg: f64) {
         shape(&across, probes);
         println!();
     }
+}
+
+/// How far apart the places the correction steps BETWEEN are, in view px of
+/// his own picture, measured across the screen rather than across time.
+///
+/// **The owner's complaint is spatial and this is the column that answers it**
+/// ("the seam snaps to snap points that are too far apart. Needs closer, maybe
+/// overlap? idk"). Every other column here watches one pixel over many frames;
+/// this one watches every column of one frame. It builds one probe per two
+/// screen columns off THAT frame's own map, asks the shipped lookup what it
+/// delivers at each, and reports three things about the answer:
+///
+/// - **reach**: the run of columns corrected by a pixel or more, in screen px.
+///   That is how wide the corrected patch he is looking at actually is.
+/// - **the steepest hundred px**: the largest change in the delivered
+///   correction over any hundred columns, which is the gradient an eye reads
+///   as an edge.
+/// - **the cell boundaries inside the view**, with the delivered value either
+///   side of each. A boundary is where the lookup changes which pair of cells
+///   it is mixing, so it is the only place the field is allowed a corner, and
+///   the table says how big a corner each one actually has.
+///
+/// One cell of the ring is `360/AZIMUTHS` degrees, which at fov 20 across 1024
+/// px is 144 screen px: **that is the spacing his "too far apart" is a
+/// complaint about, and it is a number this prints rather than assumes.**
+fn section(reads: &[Read], size: Size, px_per_deg: f64) {
+    println!(
+        "\nthe delivered field ACROSS one frame, at one probe per two columns. `reach` is the \n\
+         columns corrected by 1 px or more; `steepest` is the largest change over any 100 \n\
+         columns. one of the ring's cells is {:.0} screen px of this view.\n",
+        360.0 / AZIMUTHS as f64 * px_per_deg,
+    );
+    for frame in [0, reads.len() / 2, reads.len() - 1] {
+        let read = &reads[frame];
+        let dense = probes_at(&read.mapped, size, size.width as usize / 2);
+        if dense.len() < 2 {
+            println!("  frame {frame}: nothing of this view is inside the handover.");
+            continue;
+        }
+        let at: Vec<(u32, Delivered)> = dense
+            .iter()
+            .map(|probe| (probe.x, deliver(read, read, probe, px_per_deg)))
+            .collect();
+        let reached: Vec<u32> = at
+            .iter()
+            .filter(|(_, value)| value.epi_px.abs() >= 1.0)
+            .map(|(x, _)| *x)
+            .collect();
+        let peak = at
+            .iter()
+            .map(|(_, value)| value.epi_px.abs())
+            .fold(0.0, f64::max);
+        // Over a hundred columns and not over one, because a gradient read at
+        // the sampling interval is a gradient read at the sampling interval:
+        // a hundred px is about a tenth of his picture and is the scale an
+        // edge is seen at.
+        let span = 100 / 2;
+        let (steep, edge) = at
+            .windows(span + 1)
+            .map(|run| {
+                (
+                    (run[span].1.epi_px - run[0].1.epi_px).abs(),
+                    (run[0].0, run[span].0),
+                )
+            })
+            .fold((0.0, (0, 0)), |held, next| match next.0 > held.0 {
+                true => next,
+                false => held,
+            });
+        println!(
+            "  frame {frame} at {:.3} s: reach {} of {} columns ({} to {} px), peak {peak:.1} px, \n\
+             \tsteepest {steep:.1} px over the 100 columns {} to {}.",
+            read.at.as_secs_f64(),
+            reached.len() * 2,
+            size.width,
+            reached.first().map_or(0, |x| *x),
+            reached.last().map_or(0, |x| *x),
+            edge.0,
+            edge.1,
+        );
+        println!(
+            "  {:>8} {:>9} {:>12} {:>12} {:>12}   the cell boundaries inside the view",
+            "at px", "phi", "left px", "right px", "corner px",
+        );
+        for pair in at.windows(2) {
+            if pair[0].1.low == pair[1].1.low {
+                continue;
+            }
+            println!(
+                "  {:>8} {:>8.2}d {:>12.2} {:>12.2} {:>12.2}",
+                pair[1].0,
+                pair[1].1.phi_deg,
+                pair[0].1.epi_px,
+                pair[1].1.epi_px,
+                pair[1].1.epi_px - pair[0].1.epi_px,
+            );
+        }
+        println!();
+    }
+}
+
+/// How much of the picture the correction reaches, frame by frame, over the
+/// whole run.
+///
+/// **The number the down1 divergence is about.** The temporal memo counted its
+/// steps at the ring's CELLS: ten directions of a hundred and twenty frames,
+/// and eighty-three of those pairs moved the applied value by more than ten
+/// view px at `down1`. What an eye sees is not a cell, it is a patch of
+/// screen, and a cell that steps while it is delivering nothing to any pixel
+/// of his view steps in a place he cannot look at. This says how many pixels
+/// were being moved at all while those steps were happening.
+fn reaches(reads: &[Read], probes: &[Probe], px_per_deg: f64) {
+    let width: Vec<usize> = reads
+        .iter()
+        .map(|read| {
+            probes
+                .iter()
+                .filter(|probe| deliver(read, read, probe, px_per_deg).epi_px.abs() >= 1.0)
+                .count()
+        })
+        .collect();
+    let mut sorted = width.clone();
+    sorted.sort_unstable();
+    let changed = width.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    let dead = width.iter().filter(|count| **count == 0).count();
+    println!(
+        "\nreach:  of the {} probes across the picture, the number carrying 1 view px or more of \n\
+         \tcorrection runs {} at worst, {} in the middle and {} at best over the {} frames. \n\
+         \t{dead} frames have NO corrected pixel at any probe at all, and the count changes on \n\
+         \t{changed} of {} frame pairs. a step at a cell that is delivering nothing to any of \n\
+         \tthese probes is a step in a place the owner is not looking.",
+        probes.len(),
+        sorted.first().map_or(0, |count| *count),
+        sorted[sorted.len() / 2],
+        sorted.last().map_or(0, |count| *count),
+        reads.len(),
+        width.len() - 1,
+    );
 }
 
 /// What the delivered field looks like ACROSS the picture on one frame: how
@@ -1583,16 +1741,28 @@ fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
 fn plant_check(plant: Plant, planted: &[Step], null: &[Step]) {
     let mut sweep = 0.0;
     let mut state = 0.0;
-    let mut worst = (0.0, 0usize, 0usize, 0.0, 0.0);
+    let mut worst: Option<(f64, &Step, f64, f64)> = None;
+    // Where the difference sits in TIME. A plant with a frame in its name is
+    // only caught if the frame it names is the frame that moved, and a total
+    // cannot say that.
+    let mut per_frame: BTreeMap<usize, f64> = BTreeMap::new();
     for (with, without) in planted.iter().zip(null) {
         let (moved, held) = (with.sweep - without.sweep, with.state - without.state);
+        let size = (moved + held).abs();
         sweep += moved.abs();
         state += held.abs();
-        if (moved + held).abs() > worst.0 {
-            worst = ((moved + held).abs(), with.frame, with.probe, moved, held);
+        *per_frame.entry(with.frame).or_default() += size;
+        if worst.is_none_or(|(largest, ..)| size > largest) {
+            worst = Some((size, with, moved, held));
         }
     }
     let total = sweep + state;
+    // What the PLANTED run's own two terms weigh, which is the freeze plants'
+    // whole point: [`Plant::Hold`] must leave zero state and [`Plant::Still`]
+    // zero sweep, exactly, and neither is a claim about a difference.
+    let (pure_sweep, pure_state) = planted.iter().fold((0.0, 0.0), |(a, b), step| {
+        (a + step.sweep.abs(), b + step.state.abs())
+    });
     if plant == Plant::None {
         println!(
             "\nnull:   no plant, so the run and its own null are the same run: {total:.2e} px of \n\
@@ -1601,20 +1771,66 @@ fn plant_check(plant: Plant, planted: &[Step], null: &[Step]) {
         );
         return;
     }
+    // A control that cannot fail is not a control. `Still` used to land here
+    // with an exact zero because the null was rebuilt out of the frozen map
+    // rather than the real one, so it reported a clean pass having measured
+    // nothing; the saved map fixed that, and this line is what would have said
+    // so at the time.
+    if total <= 0.0 {
+        println!(
+            "\nplant:  REFUSED. this run carries a plant and its difference against its own null \n\
+             \tis exactly zero, so the null is not a null: whatever the plant changed was \n\
+             \talso in the run it was differenced against. nothing below is a control."
+        );
+        return;
+    }
+    let mut busiest: Vec<(&usize, &f64)> = per_frame.iter().collect();
+    busiest.sort_by(|a, b| b.1.partial_cmp(a.1).expect("finite"));
+    let worst = worst.expect("a run has steps");
     println!(
         "\nplant:  what the plant moved, differenced against the same run without it: \n\
          \t{:.1} px went into SWEEP and {:.1} px into STATE, which is {:.0}% and {:.0}%. \n\
-         \tits largest single step is {:.1} px at frame {}, probe {} ({:.1} sweep, {:.1} state).",
+         \tits largest single step is {:.1} px at frame {}, probe {} ({:.1} sweep, {:.1} state), \n\
+         \tand the attribution called THAT step {}. the three frames carrying the most of it \n\
+         \tare {}.",
         sweep,
         state,
-        100.0 * sweep / total.max(1e-9),
-        100.0 * state / total.max(1e-9),
+        100.0 * sweep / total,
+        100.0 * state / total,
         worst.0,
-        worst.1,
+        worst.1.frame,
+        worst.1.probe,
         worst.2,
         worst.3,
-        worst.4,
+        worst.1.class.name(),
+        busiest
+            .iter()
+            .take(3)
+            .map(|(frame, px)| format!("{frame} ({px:.1} px)"))
+            .collect::<Vec<String>>()
+            .join(", "),
     );
+    // The freeze plants read out here and not above, because what they assert
+    // is about the planted run's own arithmetic and an exact zero in it, not
+    // about a difference against a null: `Hold` freezes the state, so every
+    // step it leaves is the map moving under it, and `Still` is the mirror.
+    // Their difference against the null is the term they REMOVED and is
+    // reported as such rather than as the term they went into.
+    match plant {
+        Plant::Hold(_) => println!(
+            "\t--- and the assertion this plant is here for: with the state frozen the planted \n\
+             \trun's own STATE term weighs {pure_state:.2e} px over every probe-frame, against \n\
+             \t{pure_sweep:.1} px of sweep. the {state:.1} px of state in the difference above is \n\
+             \tthe term the freeze TOOK OUT of the run, which is the null's and not the plant's."
+        ),
+        Plant::Still => println!(
+            "\t--- and the assertion this plant is here for: with the map frozen the planted \n\
+             \trun's own SWEEP term weighs {pure_sweep:.2e} px over every probe-frame, against \n\
+             \t{pure_state:.1} px of state. the {sweep:.1} px of sweep in the difference above is \n\
+             \tthe term the freeze TOOK OUT of the run, which is the null's and not the plant's."
+        ),
+        _ => {}
+    }
 }
 
 /// What one cell of the ring differs from the next by, in the state the run
@@ -1668,6 +1884,80 @@ fn neighbours(last: &Read, reframe: &Reframe, size: Size, px_per_deg: f64) {
                 true => "yes",
                 false => "",
             },
+        );
+    }
+}
+
+/// The same over EVERY frame of the run rather than the one it ended on, and
+/// as a distribution rather than a top ten.
+///
+/// The end state is one sample. What a probe crossing his arc actually
+/// collects is drawn from the whole run's worth of them, and the shape of that
+/// draw is the answer to "how big is one cell of quantization here".
+///
+/// **Two columns and not one, because they are two different questions.**
+/// `read` is what the correlation put in the cells; `applied` is that taxed by
+/// the gate the run is on ([`Cell::trust`], which holds the shipped
+/// `clamp(confidence / KEEP, 0, 1)` on the main arm and the filtered one under
+/// `KJERAG_TRUST=smooth`, so this reads the picture on either arm). A ring
+/// whose readings agree and whose gates do not still delivers a step, and only
+/// the second column can see it.
+fn spread(reads: &[Read], reframe: &Reframe, size: Size, px_per_deg: f64) {
+    let covered = covering(reframe, size, [0, 0, size.width, size.height]);
+    let mut read: Vec<f64> = Vec::new();
+    let mut applied: Vec<f64> = Vec::new();
+    let mut live: Vec<f64> = Vec::new();
+    for frame in reads {
+        for cell in &covered {
+            let (a, b) = (frame.cells[*cell], frame.cells[(cell + 1) % AZIMUTHS]);
+            let degrees = |value: f32| f64::from(value.to_degrees()) * px_per_deg;
+            read.push(degrees(b.disparity - a.disparity));
+            applied.push(degrees(b.disparity * b.trust - a.disparity * a.trust));
+            // A pair with nothing behind either cell delivers nothing whatever
+            // its readings say, and counting those in with the rest is how a
+            // distribution over a mostly-empty arc reports a zero it never
+            // drew. This column is the pairs where at least one side is live.
+            if a.confidence > 0.0 || b.confidence > 0.0 {
+                live.push(degrees(b.disparity * b.trust - a.disparity * a.trust));
+            }
+        }
+    }
+    let quantile = |over: &mut Vec<f64>, at: f64| {
+        if over.is_empty() {
+            return 0.0;
+        }
+        over.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        over[((over.len() - 1) as f64 * at) as usize]
+    };
+    let size_of = |over: &[f64]| {
+        let mut sizes: Vec<f64> = over.iter().map(|delta| delta.abs()).collect();
+        let count = sizes.len();
+        let rms = (sizes.iter().map(|d| d * d).sum::<f64>() / count.max(1) as f64).sqrt();
+        (
+            count,
+            rms,
+            quantile(&mut sizes, 0.5),
+            quantile(&mut sizes, 0.9),
+            quantile(&mut sizes, 0.99),
+            sizes.last().copied().unwrap_or_default(),
+        )
+    };
+    println!(
+        "\nthe adjacent-cell delta at HIS ARC, over every frame of the run and every one of the \n\
+         \t{} covered pairs, in view px of this view. `read` is what the cells hold; `applied` \n\
+         \tis that times the gate the run is on; `live` is `applied` over the pairs with \n\
+         \tevidence behind at least one side.\n",
+        covered.len(),
+    );
+    println!(
+        "  {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "column", "pairs", "rms", "median", "p90", "p99", "worst",
+    );
+    for (name, over) in [("read", &read), ("applied", &applied), ("live", &live)] {
+        let (count, rms, median, p90, p99, worst) = size_of(over);
+        println!(
+            "  {name:>9} {count:>8} {rms:>10.1} {median:>10.1} {p90:>10.1} {p99:>10.1} \
+             {worst:>10.1}",
         );
     }
 }
