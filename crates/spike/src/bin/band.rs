@@ -826,10 +826,17 @@ fn trace(options: &Options) -> Fallible<()> {
 /// It was a literal 1.5 degrees, which was half of a 2 degree crossover and
 /// stopped being half of anything when the handover went to 8 on 2026-08-05
 /// (issue #162): this reported the middle 3 degrees of an 8 degree corridor
-/// and called it the corridor, so every `mode=trace` run since has been
-/// missing most of the directions a box actually covers. `crossover_at(0.0)`
-/// is the width the file's own two lenses afford, which is the number the
-/// pass hands over across.
+/// and called it the corridor. `crossover_at(0.0)` is the width the file's own
+/// two lenses afford, which is the number the pass hands over across.
+///
+/// **How much it was costing, measured rather than assumed**, at the owner's
+/// first banked downward view on May-01 with the same stored fit: **9
+/// directions of 128 before and 10 after** at fov 20, and **34 either way** at
+/// fov 90. So it was a real defect and a small one at these views: a box
+/// narrow enough to matter is also narrow enough that its own azimuth span,
+/// not the corridor's width, is what decides. The diagnosis it was under
+/// (docs/research/seam-temporal.md 2.2) is one direction short and not
+/// wrong.
 fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
     let [x, y, width, height] = region;
     let half = 0.5 * reframe.crossover_at(0.0).to_degrees();
