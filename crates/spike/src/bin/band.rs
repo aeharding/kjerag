@@ -80,6 +80,7 @@ fn main() -> Fallible<()> {
         Mode::Render => render(&options),
         Mode::Cost => cost(&options),
         Mode::Coverage => over_time(&options),
+        Mode::Snap => snap(&options),
     }
 }
 
@@ -99,6 +100,9 @@ enum Mode {
     /// Which directions of the circle a normal play ever gets a reading at,
     /// and how that fills in over minutes.
     Coverage,
+    /// What the pass DELIVERS at the pixels of one view, frame by frame, and
+    /// which of three things moved it.
+    Snap,
 }
 
 // ------------------------------------------------------------ the run
@@ -871,6 +875,660 @@ fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
     (0..AZIMUTHS).filter(|index| seen[*index]).collect()
 }
 
+// ------------------------------------------------------------ the snap
+
+/// How many probes `mode=snap` lays across the view.
+///
+/// They sit on the seam's own centre line, one per evenly spaced column, and
+/// they are held fixed in the VIEW: under `lock=1` that is a fixed world
+/// direction, so the body turns under them and their azimuth sweeps. That
+/// sweep is the thing H1 is about.
+const PROBES: usize = 21;
+
+/// What counts as a step the attribution has to name, in view px.
+///
+/// The owner's percept is a jump in a picture he is looking at; three px of a
+/// 1024 px view is the floor this instrument is willing to call one, and it is
+/// the same floor the temporal memo counted its ten-px steps against.
+const STEP_PX: f64 = 3.0;
+
+/// One probe: a pixel of the view, held fixed while the body turns under it.
+struct Probe {
+    x: u32,
+    y: u32,
+    ray: [f32; 3],
+    /// How far off the seam plane it sits on the frame it was chosen at, in
+    /// degrees. Zero is the middle of the handover.
+    past_deg: f64,
+}
+
+/// What the pass delivers at one probe, out of one frame's map and one frame's
+/// state - which need not be the same frame, and that is the whole of the
+/// attribution: the sweep term reads this frame's geometry against last
+/// frame's state.
+struct Delivered {
+    /// The epipolar reading the shader applies there, in view px at this
+    /// view's own scale. The two lenses are moved apart by this much; each
+    /// one moves by the other's weight times it.
+    epi_px: f64,
+    /// The along-seam correction the shader applies there, same units. Lens 1
+    /// takes it whole.
+    along_px: f64,
+    phi_deg: f64,
+    low: usize,
+    mix: f64,
+    /// The two cells the lookup landed between, as evidence and as gate.
+    conf: [f32; 2],
+    trust: [f32; 2],
+    /// What each lens is weighted by there, so a reader can turn the epipolar
+    /// column into per-lens motion.
+    weight: [f32; 2],
+}
+
+/// A known defect put into the state a run already read back, so that the
+/// attribution below can be shown to catch the thing it claims to catch
+/// before it is believed about the things it found.
+#[derive(Clone, Copy, PartialEq)]
+enum Plant {
+    /// Nothing: the null, which says what the attribution reports off the
+    /// footage alone.
+    None,
+    /// One cell's held reading moved by a known amount on EVERY frame: a
+    /// discontinuity fixed in the ring, which a sweeping probe must meet as a
+    /// sweep step and never as a state one.
+    Cell(usize, f64),
+    /// Every cell's held reading moved by a known amount from one frame on: a
+    /// state re-commit, which every probe must meet on that frame and on no
+    /// other.
+    Commit(usize, f64),
+    /// One cell held empty until a named frame, so its own real reading
+    /// arrives whole there.
+    Arrive(usize, usize),
+}
+
+impl Plant {
+    fn parse(value: &str) -> Fallible<Self> {
+        let mut parts = value.split(':');
+        let what = parts.next().unwrap_or_default();
+        let mut number = || parts.next().ok_or("plant wants two numbers after its name");
+        match what {
+            "none" => Ok(Self::None),
+            "cell" => Ok(Self::Cell(number()?.parse()?, number()?.parse()?)),
+            "commit" => Ok(Self::Commit(number()?.parse()?, number()?.parse()?)),
+            "arrive" => Ok(Self::Arrive(number()?.parse()?, number()?.parse()?)),
+            _ => Err(format!("no plant called {what}").into()),
+        }
+    }
+
+    /// Put it into the state the run read back, which is what the attribution
+    /// then runs over.
+    fn into(self, reads: &mut [Read]) {
+        match self {
+            Self::None => {}
+            Self::Cell(cell, degrees) => {
+                for read in reads.iter_mut() {
+                    read.cells[cell % AZIMUTHS].disparity += degrees.to_radians() as f32;
+                }
+            }
+            Self::Commit(frame, degrees) => {
+                for read in reads.iter_mut().skip(frame) {
+                    for cell in &mut read.cells {
+                        cell.disparity += degrees.to_radians() as f32;
+                    }
+                }
+            }
+            Self::Arrive(cell, frame) => {
+                for read in reads.iter_mut().take(frame) {
+                    read.cells[cell % AZIMUTHS] = Cell::default();
+                }
+            }
+        }
+    }
+
+    fn says(self) -> String {
+        match self {
+            Self::None => "plant:  none, so this run is the null".to_owned(),
+            Self::Cell(cell, degrees) => format!(
+                "plant:  cell {cell} moved {degrees:+.3} deg on every frame. it must show up as \
+                 SWEEP, at the frames a probe crosses that cell"
+            ),
+            Self::Commit(frame, degrees) => format!(
+                "plant:  every cell moved {degrees:+.3} deg from frame {frame} on. it must show up \
+                 as STATE, on frame {frame} and on no other"
+            ),
+            Self::Arrive(cell, frame) => format!(
+                "plant:  cell {cell} held empty until frame {frame}. it must show up as ARRIVAL, \
+                 on frame {frame}"
+            ),
+        }
+    }
+}
+
+/// Which of the two axes a step is measured on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    /// Across the seam: the depth channel, read per CELL and interpolated
+    /// between two of them. The only axis with the ring's granularity in it.
+    Epi,
+    /// Along the seam: five harmonics over the whole circle, plus the stored
+    /// table where one is loaded. No cells unless that table is loaded.
+    Along,
+}
+
+impl Axis {
+    fn of(self, at: &Delivered) -> f64 {
+        match self {
+            Self::Epi => at.epi_px,
+            Self::Along => at.along_px,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Epi => "across the seam (per cell)",
+            Self::Along => "along the seam (five harmonics)",
+        }
+    }
+}
+
+/// Which class of the three the memo names a step belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// H1: the geometry moved under a state that did not. A probe crossing
+    /// the ring's own cells is this, and so is any other motion of the map.
+    Sweep,
+    /// H2: the state moved under a geometry that did not.
+    Commit,
+    /// H3: the same, where one of the two cells behind the probe had no
+    /// evidence at all on the frame before.
+    Arrival,
+}
+
+impl Class {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sweep => "sweep",
+            Self::Commit => "commit",
+            Self::Arrival => "arrival",
+        }
+    }
+}
+
+/// One frame-to-frame step at one probe, decomposed.
+struct Step {
+    frame: usize,
+    probe: usize,
+    total: f64,
+    sweep: f64,
+    state: f64,
+    class: Class,
+    phi_deg: f64,
+    low: usize,
+}
+
+/// **What the owner's snap points are made of** (the 2026-08-08 percept: "the
+/// seam snaps to snap points that are too far apart").
+///
+/// The question this answers is not what the band reads. It is what the pass
+/// **delivers** at the pixels he is looking at, frame by frame, and which of
+/// three things moved it: the map sweeping a fixed view direction across the
+/// ring's cells, the held state re-committing under it, or a direction with no
+/// picture behind it taking its first answer whole.
+///
+/// The decomposition is exact and not a model. The delivered value is
+/// `Q(geometry, state)`; a step is `Q(f, f) - Q(f-1, f-1)`; and the two terms
+/// below add to it by construction, because the middle evaluation `Q(f, f-1)`
+/// is subtracted once and added once:
+///
+/// ```text
+/// sweep = Q(f, f-1) - Q(f-1, f-1)      the map moved, the state did not
+/// state = Q(f, f)   - Q(f, f-1)        the state moved, the map did not
+/// ```
+///
+/// `Q` is [`Reframe::reading_at`], which is the shader's own lookup, called
+/// with one frame's map and another frame's cells. The closure line at the end
+/// prints the worst `total - (sweep + state)` over the whole run, which is
+/// float noise or the instrument is wrong.
+fn snap(options: &Options) -> Fallible<()> {
+    let gpu = Gpu::open()?;
+    println!("gpu:    {}", gpu.name);
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
+    options.plant.into(&mut reads);
+
+    let first = &reads[0];
+    let last = reads.last().expect("play returns at least one frame");
+    let size = options.size();
+    let px_per_deg = f64::from(size.width) / options.fov;
+    let probes = probes(&first.mapped, size);
+    println!(
+        "\nview:   {} px at yaw {:.2}, pitch {:.2}, fov {:.2}, lock={}. {:.1} view px per degree.\n\
+         run:    {} frames, {:.3} s to {:.3} s of media time.\n{}",
+        size.width,
+        options.yaw,
+        options.pitch,
+        options.fov,
+        u8::from(options.lock),
+        px_per_deg,
+        reads.len(),
+        first.at.as_secs_f64(),
+        last.at.as_secs_f64(),
+        options.plant.says(),
+    );
+    println!(
+        "table:  the stored along-seam table is {}. it is the ONLY per-cell field on the \n\
+         \talong-seam axis; the band's own along-seam term is five harmonics over the whole \n\
+         \tcircle and has no cells in it at all.",
+        match last.mapped.table().is_rest() {
+            true => "AT REST, so nothing on that axis is read per cell in this run",
+            false => "loaded",
+        },
+    );
+    if probes.is_empty() {
+        println!("nothing on this view is inside the handover, so the band delivers none of it.");
+        return Ok(());
+    }
+
+    sweep_rate(&reads, &probes, px_per_deg);
+    profile(&reads, &probes, px_per_deg);
+    support(&reads, &first.mapped, size);
+    for axis in [Axis::Epi, Axis::Along] {
+        let steps = attribute(&reads, &probes, px_per_deg, axis);
+        verdict(&steps, &reads, probes.len(), axis);
+    }
+    neighbours(last, &first.mapped, size, px_per_deg);
+    Ok(())
+}
+
+/// The probes: one per evenly spaced column, at the row nearest the middle of
+/// the handover, and only where the handover actually reaches.
+///
+/// On the seam's own centre line because that is where both lenses are half
+/// weighted, which is where a disagreement is drawn twice at equal strength
+/// and where the owner is looking.
+fn probes(reframe: &Reframe, size: Size) -> Vec<Probe> {
+    let half = 0.5 * f64::from(reframe.crossover_at(0.0).to_degrees());
+    (0..PROBES)
+        .filter_map(|index| {
+            let x = ((index as f32 + 0.5) / PROBES as f32 * size.width as f32) as u32;
+            let mut best: Option<Probe> = None;
+            for y in 0..size.height {
+                let uv = [x as f32 / size.width as f32, y as f32 / size.height as f32];
+                let Some(ray) = reframe.view_ray(uv) else {
+                    continue;
+                };
+                let past = past_deg(reframe, ray);
+                if past.abs() > half {
+                    continue;
+                }
+                if best
+                    .as_ref()
+                    .is_some_and(|held| held.past_deg.abs() <= past.abs())
+                {
+                    continue;
+                }
+                best = Some(Probe {
+                    x,
+                    y,
+                    ray,
+                    past_deg: past,
+                });
+            }
+            best
+        })
+        .collect()
+}
+
+/// How far past the seam plane a ray is, in degrees: the angle off the body's
+/// own xy plane, which is what the two lenses hand over across.
+fn past_deg(reframe: &Reframe, ray: [f32; 3]) -> f64 {
+    let body = reframe.body_ray(ray);
+    let length = (body[0] * body[0] + body[1] * body[1] + body[2] * body[2]).sqrt();
+    match length > 0.0 {
+        true => f64::from((body[2] / length).asin().to_degrees()),
+        false => f64::INFINITY,
+    }
+}
+
+/// What the pass delivers at one probe, out of `geometry`'s map and `state`'s
+/// cells.
+fn deliver(geometry: &Read, state: &Read, probe: &Probe, px_per_deg: f64) -> Delivered {
+    let reframe = &geometry.mapped;
+    let reading = reframe.reading_at(probe.ray, &state.cells, state.along);
+    let body = reframe.body_ray(probe.ray);
+    let reach = body[0].hypot(body[1]);
+    let turn = body[1].atan2(body[0]) / std::f32::consts::TAU * AZIMUTHS as f32;
+    let low = turn.floor();
+    let mix = f64::from(turn - low);
+    let index = |step: usize| (low.rem_euclid(AZIMUTHS as f32) as usize + step) % AZIMUTHS;
+    let table = match reach > 0.0 {
+        true => reframe.table().at(body[0] / reach, body[1] / reach),
+        false => 0.0,
+    };
+    let cells = [state.cells[index(0)], state.cells[index(1)]];
+    Delivered {
+        epi_px: f64::from(reading.epi.to_degrees()) * px_per_deg,
+        along_px: f64::from(((reading.along + table) * reach).to_degrees()) * px_per_deg,
+        phi_deg: f64::from(body[1].atan2(body[0]).to_degrees()).rem_euclid(360.0),
+        low: index(0),
+        mix,
+        conf: [cells[0].confidence, cells[1].confidence],
+        trust: [cells[0].trust, cells[1].trust],
+        weight: reframe.blend_bent(probe.ray, reading).weights[..2]
+            .try_into()
+            .expect("two lenses"),
+    }
+}
+
+/// How fast the world-fixed view sweeps the ring, which is what turns a field
+/// that varies round the circle into a picture that moves.
+fn sweep_rate(reads: &[Read], probes: &[Probe], px_per_deg: f64) {
+    let middle = &probes[probes.len() / 2];
+    let first = deliver(&reads[0], &reads[0], middle, px_per_deg);
+    let last = reads.last().expect("a run has frames");
+    let end = deliver(last, last, middle, px_per_deg);
+    let seconds = last.at.as_secs_f64() - reads[0].at.as_secs_f64();
+    let turned = (end.phi_deg - first.phi_deg + 540.0).rem_euclid(360.0) - 180.0;
+    let cell_deg = 360.0 / AZIMUTHS as f64;
+    // Frame to frame as well as end to end: a view that comes back where it
+    // started has a net drift of nothing and may still have crossed a cell
+    // boundary and come back on every frame in between.
+    let mut steps: Vec<f64> = Vec::new();
+    for frame in 1..reads.len() {
+        let now = deliver(&reads[frame], &reads[frame], middle, px_per_deg);
+        let was = deliver(&reads[frame - 1], &reads[frame - 1], middle, px_per_deg);
+        steps.push((now.phi_deg - was.phi_deg + 540.0).rem_euclid(360.0) - 180.0);
+    }
+    let rms =
+        (steps.iter().map(|step| step * step).sum::<f64>() / steps.len().max(1) as f64).sqrt();
+    let worst = steps.iter().map(|step| step.abs()).fold(0.0, f64::max);
+    let crossings = (1..reads.len())
+        .filter(|frame| {
+            let now = deliver(&reads[*frame], &reads[*frame], middle, px_per_deg);
+            let was = deliver(&reads[frame - 1], &reads[frame - 1], middle, px_per_deg);
+            now.low != was.low
+        })
+        .count();
+    println!(
+        "\nsweep:  the middle probe's own azimuth ran {:.2} to {:.2} deg over {seconds:.2} s, \n\
+         \twhich is {:.2} deg/s net, or one of the ring's {cell_deg:.2} deg cells every {:.1} s. \n\
+         \tframe to frame it moves {rms:.3} deg rms and {worst:.3} deg at worst, and it changed \n\
+         \twhich cell pair it reads on {crossings} of {} frames. one cell of azimuth is {:.0} \n\
+         \tview px of this picture.",
+        first.phi_deg,
+        end.phi_deg,
+        turned / seconds.max(1e-9),
+        cell_deg / (turned.abs() / seconds.max(1e-9)).max(1e-9),
+        steps.len(),
+        cell_deg * px_per_deg,
+    );
+}
+
+/// The delivered field ACROSS the picture on one frame, probe by probe.
+///
+/// This is the spatial half of the question and it is printed first, because a
+/// field that is flat across the view cannot snap however it moves, and a
+/// field with a shape in it snaps by the shape passing under a fixed pixel.
+fn profile(reads: &[Read], probes: &[Probe], px_per_deg: f64) {
+    println!(
+        "\nwhat the pass delivers across the picture. `epi px` is the across-seam correction at \n\
+         that pixel, in view px of THIS view; the two lenses are moved apart by it and each moves \n\
+         by the other's weight times it. `w0`/`w1` are those weights. `conf`/`trust` are the two \n\
+         cells the lookup landed between: a zero there is a direction with no picture behind it, \n\
+         and the correction goes to nothing over it whatever its neighbours read.\n"
+    );
+    for frame in [0, reads.len() / 2, reads.len() - 1] {
+        let read = &reads[frame];
+        println!("  frame {frame} at {:.3} s", read.at.as_secs_f64(),);
+        println!(
+            "  {:>5} {:>5} {:>8} {:>6} {:>5} {:>9} {:>10} {:>13} {:>13} {:>11}",
+            "x", "y", "phi", "cell", "mix", "epi px", "along px", "conf", "trust", "w0/w1",
+        );
+        let mut across: Vec<f64> = Vec::new();
+        for probe in probes {
+            let at = deliver(read, read, probe, px_per_deg);
+            across.push(at.epi_px);
+            println!(
+                "  {:>5} {:>5} {:>7.2}d {:>6} {:>5.2} {:>9.2} {:>10.2} {:>6.3}/{:<6.3} \
+                 {:>6.3}/{:<6.3} {:>5.2}/{:<5.2}",
+                probe.x,
+                probe.y,
+                at.phi_deg,
+                at.low,
+                at.mix,
+                at.epi_px,
+                at.along_px,
+                at.conf[0],
+                at.conf[1],
+                at.trust[0],
+                at.trust[1],
+                at.weight[0],
+                at.weight[1],
+            );
+        }
+        shape(&across, probes);
+        println!();
+    }
+}
+
+/// What the delivered field looks like ACROSS the picture on one frame: how
+/// much of the view it reaches at all, and how steeply it changes where it
+/// does.
+///
+/// The two numbers the owner's percept is about. A correction that is applied
+/// over part of the picture and not the rest has an edge in it, and the width
+/// of the part it reaches is how far apart the places it snaps to are.
+fn shape(across: &[f64], probes: &[Probe]) {
+    let reached = across.iter().filter(|value| value.abs() >= 1.0).count();
+    let peak = across.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let gap = probes
+        .windows(2)
+        .map(|pair| f64::from(pair[1].x - pair[0].x))
+        .fold(0.0, f64::max);
+    let (steepest, at) = across
+        .windows(2)
+        .enumerate()
+        .map(|(index, pair)| ((pair[1] - pair[0]).abs(), index))
+        .fold((0.0, 0), |held, next| match next.0 > held.0 {
+            true => next,
+            false => held,
+        });
+    println!(
+        "  shape: {reached} of {} probes are corrected by 1 px or more, the peak is {peak:.1} px, \
+         and the\n         steepest neighbouring pair is {steepest:.1} px over the {gap:.0} px \
+         between probes {at} and {}.",
+        across.len(),
+        at + 1,
+    );
+}
+
+/// Which of the ring's cells the view stands on, and what each one is holding
+/// over the run.
+fn support(reads: &[Read], reframe: &Reframe, size: Size) {
+    let covered = covering(reframe, size, [0, 0, size.width, size.height]);
+    println!(
+        "the {} cells this view stands on, over the {} frames of the run. `live` is the frames \n\
+         that cell had any evidence at all; `first` is the frame its evidence arrived on.\n",
+        covered.len(),
+        reads.len(),
+    );
+    println!(
+        "  {:>5} {:>8} {:>7} {:>7} {:>11} {:>11} {:>11} {:>11}",
+        "cell", "phi", "live", "first", "disp first", "disp last", "conf last", "trust last",
+    );
+    for cell in covered {
+        let live = reads
+            .iter()
+            .filter(|read| read.cells[cell].confidence > 0.0)
+            .count();
+        let arrived = reads
+            .iter()
+            .position(|read| read.cells[cell].confidence > 0.0);
+        let last = reads.last().expect("a run has frames").cells[cell];
+        println!(
+            "  {cell:>5} {:>7.1}d {live:>7} {:>7} {:>10.3}d {:>10.3}d {:>11.3} {:>11.3}",
+            cell as f64 / AZIMUTHS as f64 * 360.0,
+            arrived.map_or_else(|| "never".to_owned(), |frame| frame.to_string()),
+            f64::from(reads[0].cells[cell].disparity.to_degrees()),
+            f64::from(last.disparity.to_degrees()),
+            last.confidence,
+            last.trust,
+        );
+    }
+}
+
+/// Every frame-to-frame step at every probe, decomposed and classed.
+fn attribute(reads: &[Read], probes: &[Probe], px_per_deg: f64, axis: Axis) -> Vec<Step> {
+    let mut steps = Vec::new();
+    for frame in 1..reads.len() {
+        for (index, probe) in probes.iter().enumerate() {
+            let now = deliver(&reads[frame], &reads[frame], probe, px_per_deg);
+            let was = deliver(&reads[frame - 1], &reads[frame - 1], probe, px_per_deg);
+            // This frame's map, last frame's state: the one evaluation that
+            // splits the two, and the reason this is an attribution rather
+            // than a second opinion.
+            let cross = deliver(&reads[frame], &reads[frame - 1], probe, px_per_deg);
+            let sweep = axis.of(&cross) - axis.of(&was);
+            let state = axis.of(&now) - axis.of(&cross);
+            let arrived = [now.low, (now.low + 1) % AZIMUTHS].iter().any(|cell| {
+                reads[frame - 1].cells[*cell].confidence <= 0.0
+                    && reads[frame].cells[*cell].confidence > 0.0
+            });
+            let class = match (sweep.abs() >= state.abs(), arrived) {
+                (true, _) => Class::Sweep,
+                (false, true) => Class::Arrival,
+                (false, false) => Class::Commit,
+            };
+            steps.push(Step {
+                frame,
+                probe: index,
+                total: axis.of(&now) - axis.of(&was),
+                sweep,
+                state,
+                class,
+                phi_deg: now.phi_deg,
+                low: now.low,
+            });
+        }
+    }
+    steps
+}
+
+/// The verdict: how the steps divide between the three, and the largest few
+/// with their own numbers beside them.
+fn verdict(steps: &[Step], reads: &[Read], probes: usize, axis: Axis) {
+    let closure = steps
+        .iter()
+        .map(|step| (step.total - (step.sweep + step.state)).abs())
+        .fold(0.0, f64::max);
+    let counted: Vec<&Step> = steps
+        .iter()
+        .filter(|step| step.total.abs() >= STEP_PX)
+        .collect();
+    println!(
+        "\nthe steps on the axis {}, over {} probe-frames ({probes} probes across {} frames). a \n\
+         step is counted where the delivered correction moved {STEP_PX:.0} view px or more between \n\
+         two frames. closure, the worst |total - (sweep + state)| over every pair: \n\
+         {closure:.2e} px.\n",
+        axis.name(),
+        steps.len(),
+        reads.len(),
+    );
+    println!(
+        "  {:>9} {:>8} {:>10} {:>10} {:>10}",
+        "class", "steps", "share", "worst px", "sum px",
+    );
+    for class in [Class::Sweep, Class::Commit, Class::Arrival] {
+        let mine: Vec<&&Step> = counted.iter().filter(|step| step.class == class).collect();
+        let worst = mine.iter().map(|step| step.total.abs()).fold(0.0, f64::max);
+        let sum: f64 = mine.iter().map(|step| step.total.abs()).sum();
+        println!(
+            "  {:>9} {:>8} {:>9.1}% {:>10.1} {:>10.1}",
+            class.name(),
+            mine.len(),
+            100.0 * mine.len() as f64 / counted.len().max(1) as f64,
+            worst,
+            sum,
+        );
+    }
+
+    let mut largest: Vec<&&Step> = counted.iter().collect();
+    largest.sort_by(|a, b| b.total.abs().partial_cmp(&a.total.abs()).expect("finite"));
+    println!("\n  the twelve largest, with the two terms they are made of\n");
+    println!(
+        "  {:>6} {:>6} {:>8} {:>6} {:>10} {:>10} {:>10} {:>9}",
+        "frame", "probe", "phi", "cell", "total px", "sweep px", "state px", "class",
+    );
+    for step in largest.iter().take(12) {
+        println!(
+            "  {:>6} {:>6} {:>7.2}d {:>6} {:>10.2} {:>10.2} {:>10.2} {:>9}",
+            step.frame,
+            step.probe,
+            step.phi_deg,
+            step.low,
+            step.total,
+            step.sweep,
+            step.state,
+            step.class.name(),
+        );
+    }
+}
+
+/// What one cell of the ring differs from the next by, in the state the run
+/// ended in.
+///
+/// These are the sizes a sweeping probe collects as it crosses the ring, so if
+/// the sweep term above is what dominates, this table is what its steps are
+/// made of.
+fn neighbours(last: &Read, reframe: &Reframe, size: Size, px_per_deg: f64) {
+    let covered = covering(reframe, size, [0, 0, size.width, size.height]);
+    let applied = |cell: usize| {
+        let cell = last.cells[cell % AZIMUTHS];
+        f64::from((cell.disparity * cell.trust).to_degrees()) * px_per_deg
+    };
+    let deltas: Vec<(usize, f64)> = (0..AZIMUTHS)
+        .map(|cell| (cell, applied(cell + 1) - applied(cell)))
+        .collect();
+    let rms = |over: &[(usize, f64)]| match over.is_empty() {
+        true => 0.0,
+        false => (over.iter().map(|(_, d)| d * d).sum::<f64>() / over.len() as f64).sqrt(),
+    };
+    let arc: Vec<(usize, f64)> = deltas
+        .iter()
+        .filter(|(cell, _)| covered.contains(cell))
+        .copied()
+        .collect();
+    let mut worst = deltas.clone();
+    worst.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).expect("finite"));
+    println!(
+        "\nwhat one cell differs from the next by, in the state the run ended in, as the view px \n\
+         a probe crossing that pair collects. ring-wide rms {:.1} px over {} pairs; over the {} \n\
+         cells this view stands on, rms {:.1} px, worst {:.1} px.\n",
+        rms(&deltas),
+        deltas.len(),
+        arc.len(),
+        rms(&arc),
+        arc.iter().map(|(_, d)| d.abs()).fold(0.0, f64::max),
+    );
+    println!(
+        "  {:>10} {:>9} {:>10} {:>12}",
+        "pair", "phi", "delta px", "in view"
+    );
+    for (cell, delta) in worst.iter().take(10) {
+        println!(
+            "  {:>4} -> {:<4} {:>8.1}d {:>10.1} {:>12}",
+            cell,
+            (cell + 1) % AZIMUTHS,
+            *cell as f64 / AZIMUTHS as f64 * 360.0,
+            delta,
+            match covered.contains(cell) {
+                true => "yes",
+                false => "",
+            },
+        );
+    }
+}
+
 // ------------------------------------------------------------ the coverage
 
 /// How long a stretch of coverage one column of the table covers, in seconds
@@ -1352,6 +2010,9 @@ struct Options {
     /// 93 to 125 is where his three banked downward views sit, and it is what
     /// `--bin refusals` reported 1 of 11 cells read on.
     arc: (f64, f64),
+    /// The known defect `mode=snap` puts into the state it read back, so the
+    /// attribution can be shown to catch what it claims to catch.
+    plant: Plant,
     /// Which calibration the band is read through.
     ///
     /// It is an argument because it has to be: the band's readings and a step
@@ -1382,6 +2043,7 @@ impl Options {
             region: [0, 0, 0, 0],
             arc: (93.0, 125.0),
             seam: Seam::File,
+            plant: Plant::None,
         };
         let mut seam = String::from("file");
         for arg in args {
@@ -1399,6 +2061,7 @@ impl Options {
                         "render" => Mode::Render,
                         "cost" => Mode::Cost,
                         "coverage" => Mode::Coverage,
+                        "snap" => Mode::Snap,
                         _ => return Err(format!("no mode called {value}").into()),
                     }
                 }
@@ -1414,6 +2077,7 @@ impl Options {
                 Some(("out", value)) => options.out = Some(PathBuf::from(value)),
                 Some(("save", value)) => options.save = Some(PathBuf::from(value)),
                 Some(("seam", value)) => seam = value.to_string(),
+                Some(("plant", value)) => options.plant = Plant::parse(value)?,
                 Some(("box", value)) => {
                     let mut numbers = value.split(',').map(str::parse::<u32>);
                     let mut next = || numbers.next().transpose();
@@ -1467,7 +2131,8 @@ impl Options {
     }
 }
 
-const USAGE: &str = "usage: band <file.insv> [mode=field|trace|sequence|render|cost|coverage] [arc=low:high] [from=seconds] \
+const USAGE: &str = "usage: band <file.insv> [mode=field|trace|sequence|render|cost|coverage|snap] [arc=low:high] [from=seconds] \
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
      [out=dir] [save=state.txt] [box=x,y,w,h] \
+     [plant=none|cell:<cell>:<deg>|commit:<frame>:<deg>|arrive:<cell>:<frame>] \
      [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
