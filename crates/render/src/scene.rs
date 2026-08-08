@@ -420,13 +420,13 @@ impl Scene {
     /// **The width is the camera's and not the build's** since 2026-08-05: the
     /// projection asks for one number and this file's own overlap clamps it
     /// ([`Reframe::crossover_at`], `band::affordable`). An X4 Air takes the 8
-    /// asked for; the owner's ONE X2 draws 3.99, and nothing else the app says
+    /// asked for; the owner's ONE X2 draws 4.18, and nothing else the app says
     /// would ever mention it.
     ///
     /// Read off the lenses the pass will draw with **now**, correction and all,
     /// because a seam fit moves the principal point, which moves each lens's
     /// coverage boundary, which moves the overlap: on that X2 the factory
-    /// calibration affords 4.91 and its own pooled fit affords 3.99. So this is
+    /// calibration affords 4.91 and its own pooled fit affords 4.18. So this is
     /// a reading and not a property of the file, and a fit landing later moves
     /// it - which is why [`fit_into`] says it again when one does.
     pub fn handover_deg(&self) -> Option<f32> {
@@ -967,7 +967,7 @@ fn fit_into(
         // handover is clamped by that overlap (`band::affordable`). So a
         // fallback fit can change how wide this file hands over, seconds after
         // the shell already said how wide it was: on the owner's ONE X2 the
-        // factory calibration affords 4.91 and this fit affords 3.99. Said only
+        // factory calibration affords 4.91 and this fit affords 4.15. Said only
         // when it moves, because it usually does not, and a line that repeats
         // itself is a line nobody reads.
         //
@@ -1869,6 +1869,7 @@ impl Band {
                     off_conf: float(at + 16),
                     tone: float(at + 20),
                     lit: float(at + 24),
+                    trust: float(at + 28),
                 }
             })
             .collect();

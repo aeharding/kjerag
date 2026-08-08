@@ -579,6 +579,67 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-08 **The seam's temporal bundle is the default behaviour, and its
+  three research toggles are deleted rather than defaulted**
+  (docs/research/seam-temporal.md 9, docs/research/reference-views.md). Three
+  changes the owner picked blind at six views on 2026-08-08 - a steeper blend
+  curve inside the same 8 degree support, a gate on the way out filtered at 2 s,
+  and a direction's first reading walked in through that filter instead of
+  switching on whole - shipped together, because that is the combination he
+  answered on. He said the bundle at `down1`, `down2`, `down3` and `shimmer`,
+  "same" at `good`, and at `bad` picked the middle arm and then added "I like 3
+  on F too"; of the round, "it actually perceptually distorts a bit less".
+  `down1` and `down3` flipped from the round before, and the only thing that
+  changed between them is the arrival staging.
+
+  **The toggles disappear.** `KJERAG_BLEND_CURVE`, `KJERAG_TRUST` and
+  `KJERAG_ARRIVE` are gone and so is the code they selected: an A/B harness
+  that wants the old picture builds the old commit, which it can always do, and
+  a configuration switch nothing reads is complexity with no reader. This is
+  not the same call as `KJERAG_HANDOVER_DEG`, which stays because it selects a
+  value on a continuum that the next A/B will want to sweep again; these three
+  selected a behaviour that has now been chosen.
+
+  **The null is not byte-identity against `main`.** This change moves the
+  picture on purpose. What was checked instead is byte-identity against the
+  ARM HE ANSWERED ON: md5-equal renders with the band live at all six A/B
+  views, under two calibration paths, against the same binary the blind session
+  used. What ships is what he saw.
+
+  Known and disclosed rather than fixed: the **comb** - a dead neighbour cell
+  zeroing a live cell's correction, so the corrected patch has a hole in the
+  middle - gets both **more frequent and deeper**, and those are two changes
+  rather than one. More frequent, 217 to 256 frames of 300 at `bad`, because
+  the gate is held up for longer. Deeper because the clamp on that gate **moved
+  across the mix**: main mixed the two cells' confidences and then clamped, this
+  clamps each cell and then mixes, so a live cell beside a dead one is taxed by
+  the mean of a 1 and a 0 instead of by the pair's mixed confidence - 0.731 to
+  **0.500** on a 0.95-beside-0.00 pair, and the notch at the owner's `down1`
+  pair goes 0.62 to **0.41** of the correction, 34 percent deeper
+  (docs/research/seam-temporal.md 9.4). **The next build has to answer both**;
+  shortening the gate's hold alone would leave every remaining notch as deep as
+  it is. He was told about the stripe before he answered and not about its
+  depth, which had not been measured then.
+
+  Also disclosed, and it moved during review: the **fold inequality** is one
+  line five functions solve for different unknowns, and the blend curve's
+  gradient had been divided into one of them. It ships divided once, in
+  `band::SPEND = FOLD / BLEND_POWER`, which all five read
+  (docs/research/seam-temporal.md 9.6). **`band::WIDEST_DEG` is 4.33 degrees and
+  not the 2.89 the 2026-08-05 and 2026-08-06 entries below quote**, and it is
+  now exactly the width at which the clamp equals the widest reading the search
+  can return, so nothing the search reports is cut on any camera at any
+  handover width. No X4
+  pixel moves - `affordable` has no `SPEND` in it in the roomy regime and the
+  six A/B views are md5-identical either way - and the **ONE X2** changes twice
+  over: nothing the search reports is clamped any more, where 0.206 degrees was
+  being thrown away, and its band opens 0.17 degrees past its own overlap at the
+  near field, where the coverage depth hands the picture over instead of the
+  ramp. Nobody has looked at an X2 under either.
+
+  Untouched: the roughly one degree across-seam residual on his downward arc,
+  which is the expensive work.
+
 - 2026-08-07 **An acceptance line names the pose instead of copying it**
   (`seam=pool`, docs/research/reference-views.md). Three acceptance commands -
   the shimmer line, the May-01 crossing pair, and the `--bin step` block under

@@ -314,7 +314,7 @@ struct Field {
     ///
     /// Carried rather than quoted because the width is the **camera's** since
     /// 2026-08-05 (`kjerag_render::band::affordable`): an X4 Air draws 8
-    /// degrees and a ONE X2 draws 3.99, and the radial line below turns codes
+    /// degrees and a ONE X2 draws 4.18, and the radial line below turns codes
     /// per degree into codes end to end over exactly this.
     crossover_deg: f64,
 }

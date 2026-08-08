@@ -357,7 +357,11 @@ what the picture asks for; each file's own two lenses clamp it, because the
 handover reaches half its width off the seam plus the whole bend it carries and
 that has to stay inside the ring both lenses have a picture of
 (`band::affordable`). Six X4 Air captures afford 9.36 to 9.82 degrees and take
-the 8; a ONE X2 overlaps by 9.19 and hands over across **3.99**. The width
+the 8; a ONE X2 overlaps by 9.19 and hands over across **4.18**. That clamp is
+a **floor** and not a ceiling: since the blend curve landed on 2026-08-08 the
+adaptive term may open to 4.33 (`band::WIDEST_DEG`), so a camera affording less
+than that opens past its own overlap at the near field, and exactly one in the
+corpus does (docs/research/seam-temporal.md 9.6). The width
 travels in the uniform block rather than being written into the shader source,
 because the shader is compiled once before any file is open, and both halves of
 the map read it from there. The app says which width a file drew, on the
