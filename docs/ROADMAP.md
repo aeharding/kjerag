@@ -771,15 +771,18 @@ live, no keyframe UI ever.
   camera, 13.1 degrees**, and 149 px on the sample unit; after, **3.2 px
   (0.18 deg)** and **7.9 px (0.43 deg)**, both within a degree of the
   `theta0 + theta1 = 180` that far content must satisfy, and what is left is
-  ordinary near parallax at the range of the content. The sites the instrument
-  can match at all go from 7 of 18 to 14 of 18 on unit B and 5 to 12 on unit A;
-  under the old model most of them railed against a 20 degree search or
-  correlated nothing.
+  ordinary near parallax at the range of the content. **Both readings needed
+  the instrument's search opened to 20 degrees to take the before arm at all**:
+  at its own 1.4 degree default the old model accepts 0 of 18 sites on unit B,
+  railing or correlating nothing, against 13 of 18 after. Opened up, 7 of 18
+  before and 14 of 18 after on unit B, 5 and 12 on unit A. The along-seam
+  component is nothing either way, 0.6 px before and 0.05 px after, which is
+  what says the 241 px is the radial map and not a pose.
 
   **Coverage is the check anyone can redo.** The delivered 3840 px square holds
   the image circle inscribed, so half the frame is half the coverage: the
-  five-term model puts 1920 px at 99.0 to 99.6 degrees off axis, i.e. **198.0
-  to 199.2 degrees**, which is the Osmo 360's published figure. Equidistant put
+  five-term model puts 1920 px at 98.9 to 99.4 degrees off axis, i.e. **197.9
+  to 198.8 degrees**, which is the Osmo 360's published figure. Equidistant put
   the same radius at 209 to 211, a lens nobody makes, and that surplus is the
   tear. The refusal below leaned on fields 22 and 23, a fourteen-point
   polyline, read as this lens's coverage rim; those 112 bytes are byte-identical

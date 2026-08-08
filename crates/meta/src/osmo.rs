@@ -32,9 +32,9 @@
 //! The four do fold - between 88.4 and 89.8 degrees on the four lenses of the
 //! two units - and the fifth is what stops them: with it the radius is
 //! monotone in `theta` over the whole sphere on all four, and the model
-//! reaches half the delivered frame at 99.0 to 99.6 degrees off axis, so
-//! **198.0 to 199.2 degrees of coverage**, which is the Osmo 360's published
-//! 199. Equidistant puts that same radius at 209.0 to 210.7 degrees, which is
+//! reaches half the delivered frame at 98.9 to 99.4 degrees off axis, so
+//! **197.9 to 198.8 degrees of coverage**, which is the Osmo 360's published
+//! 199. Equidistant puts that same radius at 209.0 to 210.6 degrees, which is
 //! a lens nobody makes, and that surplus is the seam tear: far content that
 //! must satisfy `theta0 + theta1 = 180` came out at 194.8 under the shipped
 //! map and comes out at 179.4 +-0.6 under this one, which is 272 px of
