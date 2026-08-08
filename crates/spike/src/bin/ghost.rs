@@ -47,6 +47,10 @@ const DOWN_PX_PER_DEG: f64 = 51.2;
 /// this box class, which the servo's cost is quoted against.
 const PASS_MS: f64 = 8.44;
 
+/// How long the field is given to arrive before the contract is read, in
+/// seconds of media. Its own 99 percent at the owner's own view, rounded up.
+const SETTLED_S: f32 = 12.0;
+
 /// One tick's worth of what happened, kept so the report can read the run
 /// rather than the state it ended in.
 struct Step {
@@ -113,6 +117,17 @@ fn main() -> Fallible<()> {
     let mut settled: Vec<Cell> = Vec::new();
     let mut shadow = Ghost::rest();
     let mut last: Option<Duration> = None;
+    // What the far gate was offered and what it refused, per direction, over
+    // the WHOLE run. The end-of-run snapshot cannot answer this: a direction
+    // reads a handful of frames and the question is what it was reading while
+    // the field was being learned.
+    let mut offered = [0usize; AZIMUTHS];
+    let mut refused = [0usize; AZIMUTHS];
+    // And the sum of the WHOLE readings, which is what a servo with no gate at
+    // all would settle on. The counterfactual for nothing, and it needs no
+    // second copy of the servo to compute: an ungated `1/n` servo IS a running
+    // mean of its input.
+    let mut ungated = [0.0f64; AZIMUTHS];
 
     while let Some((_, at)) = scene.frame() {
         Render {
@@ -139,6 +154,19 @@ fn main() -> Fallible<()> {
         let applied = pipeline
             .ghost()
             .map_or([0.0; AZIMUTHS], |ghost| ghost.table().entries());
+        for (index, cell) in cells.iter().enumerate().take(AZIMUTHS) {
+            if cell.confidence < KEEP || !cell.disparity.is_finite() {
+                continue;
+            }
+            offered[index] += 1;
+            // The shipped gate's own arithmetic, on the shipped gate's own
+            // quantity: the band's reading plus what the field draws.
+            let whole = cell.disparity + applied[index];
+            ungated[index] += f64::from(whole.to_degrees());
+            if whole > 0.0 {
+                refused[index] += 1;
+            }
+        }
         steps.push(measure(&applied, &cells, &arc, at));
         settled = cells;
         if frames >= options.count || !scene.advance()? {
@@ -150,6 +178,7 @@ fn main() -> Fallible<()> {
     }
 
     report(&options, &steps, &pipeline, &settled, &arc, &cost, frames);
+    gate(&pipeline, &offered, &refused, &ungated);
     Ok(())
 }
 
@@ -267,27 +296,7 @@ fn report(
         f64::from(teeth.to_degrees()) * DOWN_PX_PER_DEG,
     );
 
-    println!(
-        "\nTHE CONTRACT: what the corridor is left to ramp over the arc. Read at the last frame \n\
-         the arc was above the band's gate on, because a dark arc has nothing to say:"
-    );
-    match steps.iter().rev().find(|step| step.read > 0) {
-        None => println!("  the arc never read above the gate in this run"),
-        Some(step) => {
-            println!(
-                "  at {:.2} s of media, over {} directions",
-                step.at.as_secs_f64(),
-                step.read
-            );
-            for (label, value) in [("today", step.today), ("with the field", step.left)] {
-                println!(
-                    "  {label:<33} {:.4} deg  ({:.1} view px at fov 20)",
-                    f64::from(value.to_degrees()),
-                    f64::from(value.to_degrees()) * DOWN_PX_PER_DEG,
-                );
-            }
-        }
-    }
+    contract(steps, arc.len());
 
     evidence(settled, &entries, arc);
 
@@ -363,6 +372,47 @@ fn trajectory(steps: &[Step]) {
     );
 }
 
+/// THE CONTRACT, pooled: what the corridor is left to ramp over the arc once
+/// the field has arrived.
+///
+/// Over every frame past [`SETTLED_S`] and weighted by how many directions were
+/// above the band's gate on it, because one frame with one direction reading is
+/// not a measurement of an arc and reading it off the last such frame was this
+/// instrument's own first bug. A frame the whole arc is dark on contributes
+/// nothing rather than a zero.
+fn contract(steps: &[Step], cells: usize) {
+    let from = steps[0].at + Duration::from_secs_f32(SETTLED_S);
+    let (mut left, mut today, mut weight, mut frames) = (0.0f64, 0.0f64, 0.0f64, 0usize);
+    let mut most = 0usize;
+    for step in steps.iter().filter(|step| step.at >= from && step.read > 0) {
+        let w = f64::from(step.read as u32);
+        left += w * f64::from(step.left.to_degrees());
+        today += w * f64::from(step.today.to_degrees());
+        weight += w;
+        frames += 1;
+        most = most.max(step.read);
+    }
+    println!(
+        "\nTHE CONTRACT: what the corridor is left to ramp over the arc, pooled over the {frames} \n\
+         frame(s) past {SETTLED_S:.0} s that read anything, weighted by how much of the arc each \n\
+         one read (up to {most} of {cells} directions):"
+    );
+    if weight <= 0.0 {
+        println!("  the arc never read above the gate after it settled");
+        return;
+    }
+    for (label, value) in [("today", today / weight), ("with the field", left / weight)] {
+        println!(
+            "  {label:<33} {value:.4} deg  ({:.1} view px at fov 20)",
+            value * DOWN_PX_PER_DEG,
+        );
+    }
+    println!(
+        "  the corridor's load falls by          {:.1} percent",
+        100.0 * (1.0 - (left / weight) / (today / weight).max(1e-9)),
+    );
+}
+
 /// Every reading the arc offered the servo, by **sign**, which is the one
 /// column that tells a camera term from near ground.
 ///
@@ -414,6 +464,71 @@ fn evidence(settled: &[Cell], applied: &[f32; AZIMUTHS], arc: &[usize]) {
     println!(
         "\n  over the arc: {near} of {seen} directions read past zero at the end, so that many \n\
          could have had any content in them at all and the field refuses to be moved by them."
+    );
+}
+
+/// THE FAR GATE, over the whole run rather than at one frame.
+///
+/// Parallax on this axis is one-signed and positive, so a reading past zero is
+/// near content by construction and the field refuses to be moved by one. The
+/// question this answers is the one the landing chapter asks: at the directions
+/// that were looking at NEAR content while the field was being learned, did the
+/// field learn anything?
+///
+/// A direction is called near-fed where the gate refused most of what it was
+/// offered. The acceptance is that those directions are at identity, and the
+/// number is the mean of what they actually hold.
+fn gate(
+    pipeline: &ScenePipeline,
+    offered: &[usize; AZIMUTHS],
+    refused: &[usize; AZIMUTHS],
+    ungated: &[f64; AZIMUTHS],
+) {
+    let Some(field) = pipeline.ghost().map(Ghost::table) else {
+        return;
+    };
+    let entries = field.entries();
+    let (mut near, mut near_field, mut near_worst) = (0usize, 0.0f64, 0.0f64);
+    let (mut near_ungated, mut near_ungated_worst) = (0.0f64, 0.0f64);
+    let (mut far, mut far_field) = (0usize, 0.0f64);
+    let (mut all, mut cut) = (0usize, 0usize);
+    for index in 0..AZIMUTHS {
+        all += offered[index];
+        cut += refused[index];
+        if offered[index] < 8 {
+            continue;
+        }
+        let held = f64::from(entries[index].to_degrees()).abs();
+        // Most of what it was offered was past zero: this direction was
+        // measured on content a distance can reach, for most of the run.
+        if refused[index] * 2 > offered[index] {
+            near += 1;
+            near_field += held;
+            near_worst = near_worst.max(held);
+            let would = (ungated[index] / offered[index] as f64).abs();
+            near_ungated += would;
+            near_ungated_worst = near_ungated_worst.max(would);
+        } else {
+            far += 1;
+            far_field += held;
+        }
+    }
+    println!(
+        "\nTHE FAR GATE over the whole run: {cut} of {all} readings were past zero and refused, \n\
+         which is {:.1} percent of everything the field was offered.",
+        100.0 * cut as f64 / all.max(1) as f64,
+    );
+    println!(
+        "  directions fed mostly NEAR content  {near}, holding {:.4} deg on average, worst {near_worst:.4}",
+        near_field / near.max(1) as f64,
+    );
+    println!(
+        "  the same with NO gate at all        would hold {:.4} deg on average, worst {near_ungated_worst:.4}",
+        near_ungated / near.max(1) as f64,
+    );
+    println!(
+        "  directions fed mostly far content   {far}, holding {:.4} deg on average",
+        far_field / far.max(1) as f64,
     );
 }
 
