@@ -2736,9 +2736,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// The curve is symmetric about the seam, monotone, and exact at both ends
-    /// - the three things that make it a crossfade rather than a shift of the
-    /// seam.
+    /// The curve is symmetric about the seam, monotone, and exact at both
+    /// ends: the three things that make it a crossfade rather than a shift of
+    /// the seam.
     #[test]
     fn the_blend_curve_is_a_crossfade_and_not_a_moved_seam() {
         assert_eq!(steepen(0.0), 0.0);
