@@ -1077,7 +1077,7 @@ impl Reframe {
             |step: usize| cells[(low.rem_euclid(cells.len() as f32) as usize + step) % cells.len()];
         let (a, b) = (cell(0), cell(1));
         super::band::Reading {
-            epi: Self::channel(a.disparity, a.confidence, b.disparity, b.confidence, mix),
+            epi: Self::channel(a, b, mix),
             // One fitted field over the whole circle rather than a cell
             // lookup: see `Along`. This azimuth's cosine and sine are the ray
             // flattened into the seam plane.
@@ -1085,21 +1085,36 @@ impl Reframe {
         }
     }
 
-    /// One channel of one ray, weighted by the evidence behind that channel in
+    /// The epipolar channel of one ray, weighted by the evidence behind it in
     /// each cell and taxed by how much of it reaches
     /// [`KEEP`](super::band::KEEP).
     ///
     /// A direction that has stopped correlating stops contributing, and with
     /// no evidence at all the answer is zero, which is the picture before the
     /// band existed. WGSL twin: `carry`.
-    fn channel(a: f32, wa: f32, b: f32, wb: f32, mix: f32) -> f32 {
-        let (ea, eb) = (wa * (1.0 - mix), wb * mix);
+    fn channel(a: super::band::Cell, b: super::band::Cell, mix: f32) -> f32 {
+        let (ea, eb) = (a.confidence * (1.0 - mix), b.confidence * mix);
         let total = ea + eb;
         if total <= 0.0 {
             return 0.0;
         }
-        let strength = ((wa + (wb - wa) * mix) / super::band::KEEP).clamp(0.0, 1.0);
-        (ea * a + eb * b) / total * strength
+        (ea * a.disparity + eb * b.disparity) / total * Self::strength(a, b, mix)
+    }
+
+    /// How much of that mixed reading reaches the picture.
+    ///
+    /// The two arms clamp on opposite sides of the mix and that is not a
+    /// detail: off, one number is mixed and then clamped, which is what ships;
+    /// on, each cell's own filtered gate is mixed, already clamped
+    /// ([`super::band::Cell::trust`]). The off branch is the shipped
+    /// expression written out unchanged, so the null is byte-identity and not
+    /// a tolerance. WGSL twin: `strength`.
+    fn strength(a: super::band::Cell, b: super::band::Cell, mix: f32) -> f32 {
+        let between = |x: f32, y: f32| x + (y - x) * mix;
+        match super::band::smooth_trust() {
+            true => between(a.trust, b.trust),
+            false => (between(a.confidence, b.confidence) / super::band::KEEP).clamp(0.0, 1.0),
+        }
     }
 
     /// The offset one lens's ray takes for a whole disparity, in view space,

@@ -767,8 +767,8 @@ fn trace(options: &Options) -> Fallible<()> {
             cell as f64 / AZIMUTHS as f64 * 360.0
         );
         println!(
-            "  {:>6} {:>10} {:>10} {:>9} {:>7} {:>7} {:>11}",
-            "frame", "held", "applied", "view px", "conf", "tau s", "read"
+            "  {:>6} {:>10} {:>10} {:>9} {:>7} {:>7} {:>7} {:>11}",
+            "frame", "held", "applied", "view px", "conf", "trust", "tau s", "read"
         );
         for (frame, at) in reads.iter().enumerate() {
             let held = at.cells[cell];
@@ -787,14 +787,20 @@ fn trace(options: &Options) -> Fallible<()> {
             // What the shader ACTUALLY applies, gate included, which is not
             // the same as what the cell holds: a direction whose evidence has
             // gone contributes proportionally less and eventually nothing.
-            let applied = f64::from(held.disparity)
-                * f64::from((held.confidence / kjerag_render::KEEP).clamp(0.0, 1.0));
+            //
+            // Read out of the cell rather than recomputed here, which is what
+            // makes this one column on both arms of `KJERAG_TRUST`: the pass
+            // stores the gate it applied (`Cell::trust`), so an arm that
+            // filters it is reported filtered instead of being reported as
+            // the arm it is not.
+            let applied = f64::from(held.disparity) * f64::from(held.trust);
             println!(
-                "  {frame:>6} {:>9.4}d {:>9.4}d {:>9.2} {:>7.3} {:>7.2} {:>10.4}d",
+                "  {frame:>6} {:>9.4}d {:>9.4}d {:>9.2} {:>7.3} {:>7.3} {:>7.2} {:>10.4}d",
                 f64::from(held.disparity).to_degrees(),
                 applied.to_degrees(),
                 applied.to_degrees() * px_per_deg,
                 held.confidence,
+                held.trust,
                 kjerag_render::time_constant(before.disparity),
                 read.to_degrees(),
             );
@@ -808,8 +814,18 @@ fn trace(options: &Options) -> Fallible<()> {
 ///
 /// A pixel is bent only where both lenses claim it, so a box outside the
 /// crossover has no directions at all and the band cannot be what moved it.
+///
+/// **The half-corridor is asked of the map and no longer written down here.**
+/// It was a literal 1.5 degrees, which was half of a 2 degree crossover and
+/// stopped being half of anything when the handover went to 8 on 2026-08-05
+/// (issue #162): this reported the middle 3 degrees of an 8 degree corridor
+/// and called it the corridor, so every `mode=trace` run since has been
+/// missing most of the directions a box actually covers. `crossover_at(0.0)`
+/// is the width the file's own two lenses afford, which is the number the
+/// pass hands over across.
 fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
     let [x, y, width, height] = region;
+    let half = 0.5 * reframe.crossover_at(0.0).to_degrees();
     let mut seen = [false; AZIMUTHS];
     for row in y..(y + height).min(size.height) {
         for column in x..(x + width).min(size.width) {
@@ -828,7 +844,7 @@ fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
             let body = reframe.body_ray(ray);
             let length = (body[0] * body[0] + body[1] * body[1] + body[2] * body[2]).sqrt();
             let past = (body[2] / length).asin().to_degrees().abs();
-            if past > 1.5 {
+            if past > half {
                 continue;
             }
             let turn =
