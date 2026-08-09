@@ -116,7 +116,11 @@ fn main() -> Fallible<()> {
         }
     }
     if frames == 0 {
-        return Err(format!("no frames between {:.3} and {:.3} s", options.from, options.to).into());
+        return Err(format!(
+            "no frames between {:.3} and {:.3} s",
+            options.from, options.to
+        )
+        .into());
     }
     println!(
         "\nnull:   {frames} frames, {:.3} s to {:.3} s\nsummary {}",
