@@ -787,6 +787,18 @@ fn clipped(plane: &Plane) -> f64 {
     }
 }
 
+/// The two facts about a frame that a READING needs and the sampling does not:
+/// where in the file it came from, and what was in it.
+///
+/// One value rather than two arguments, because [`harvest`] already takes
+/// everything else a frame is made of and a seventh loose scalar is how a
+/// signature stops being readable.
+#[derive(Clone, Copy)]
+struct Whence {
+    place: usize,
+    sun: Option<usize>,
+}
+
 /// Which lens had the sun in it on this frame, if either.
 ///
 /// One lens clipping a measurable share of its picture while the other clips
@@ -844,10 +856,13 @@ fn sweep(options: &Options, trials: &[Trial]) -> Fallible<Vec<Field>> {
                 &options.probe(),
                 &mut refused,
             );
-            let sun = sun(&pair);
+            let whence = Whence {
+                place,
+                sun: sun(&pair),
+            };
             for (trial, field) in trials.iter().zip(&mut fields) {
                 field.azimuths = ring.len();
-                harvest(&reframe, &pair, &ring, &found, sun, place, *trial, field);
+                harvest(&reframe, &pair, &ring, &found, whence, *trial, field);
             }
         }
     }
@@ -871,8 +886,7 @@ fn harvest(
     pair: &Pair,
     ring: &[Where],
     found: &[Option<seam::Found>],
-    sun: Option<usize>,
-    place: usize,
+    whence: Whence,
     trial: Trial,
     field: &mut Field,
 ) {
@@ -891,12 +905,12 @@ fn harvest(
         field.seen.push(Seen {
             azimuth: index,
             frame: field.frames - 1,
-            place,
+            place: whence.place,
             texture: held.texture(),
             columns,
             across: shift.1.abs(),
             correlated: hit.is_some(),
-            sun,
+            sun: whence.sun,
         });
     }
 }
@@ -1598,8 +1612,8 @@ fn pool(reads: &[&Read], weigh: Weigh) -> Option<Pooled> {
     for read in reads {
         let held = weigh.of(read.lit);
         weight += held;
-        for channel in 0..3 {
-            total[channel] += held * (read.m1[channel] / read.m0[channel]);
+        for (channel, sum) in total.iter_mut().enumerate() {
+            *sum += held * (read.m1[channel] / read.m0[channel]);
         }
     }
     if weight <= 0.0 {
@@ -1774,6 +1788,7 @@ fn chroma(options: &Options) -> Fallible<()> {
     if kept.is_empty() {
         return Ok(());
     }
+    local(&kept);
     fork(&kept);
     separate(truth);
     runaway(&kept, floor);
@@ -1825,7 +1840,10 @@ fn yields(field: &Field, options: &Options) {
         ("read AND the sun in one lens", sunny),
         ("read AND over the 8 code level floor", floored),
         ("far AND over the level floor: M1's population", far_floored),
-        ("blind AND over the level floor: what M5 would add", blind_floored),
+        (
+            "blind AND over the level floor: what M5 would add",
+            blind_floored,
+        ),
     ] {
         println!("  {name:<52} {held:>8} {:>8.1}%", share(held));
     }
@@ -2005,6 +2023,159 @@ fn split(fields: &[Field], truth: &Field, kept: &[&Read], class: Class) -> f64 {
         },
     );
     floor
+}
+
+/// Is the per-direction structure REAL, or is it the noise stage 8 painted?
+///
+/// **The decisive question for any correction whose support is local**, and it
+/// is not in the memo above because the memo was scoped to a constant. The ring
+/// leaves per-direction structure that no smooth model reaches (M1.5), and a
+/// seam-local field is exactly a thing that would fit it. Whether fitting it is
+/// estimation or is stage 5's scalloping reborn on the photometric axis turns
+/// on one measurement: **does the same direction read the same thing twice.**
+///
+/// Three numbers, and the third is the one that decides:
+///
+/// - **within**: the spread of one direction's readings over consecutive frames
+///   inside one place, where the content is the same and the two lenses have
+///   not moved. That is the instrument, in full.
+/// - **between**: the spread over directions of each direction's own mean,
+///   after the ring's constant is taken out. That is what a per-direction field
+///   would fit, and it contains the instrument's noise as well as any structure.
+/// - **corrected**: `between` with `within` divided out of it, which is the
+///   structure that is left when the noise is accounted for. A field can only
+///   honestly reach this much.
+///
+/// And then the test that noise cannot pass: the same directions read at two
+/// PLACES minutes apart in the same file, correlated against each other. Local
+/// structure that belongs to the lens pair reproduces; local structure that is
+/// the scene or the correlator does not.
+fn local(kept: &[&Read]) {
+    println!(
+        "\nlocal structure. what a smooth ring model leaves is fitted by anything with local \n\
+         \tsupport, so the question is whether it is real. `within` is one direction read on \n\
+         \tconsecutive frames of the same place, which is the instrument and nothing else; \n\
+         \t`between` is the spread over directions after the constant is removed; `corrected` \n\
+         \tis what survives dividing the first out of the second.\n"
+    );
+    println!(
+        "  {:<12} {:>10} {:>10} {:>11} {:>9} {:>26}",
+        "coordinate", "within", "between", "corrected", "real %", "same directions, 2 places"
+    );
+    for (coordinate, name) in [(0usize, "R-G"), (1, "B-G")] {
+        let value = |read: &Read| match coordinate {
+            0 => read.warm(),
+            _ => read.cool(),
+        };
+        // Group by place and direction, which is the only grouping where the
+        // content is genuinely the same thing read twice.
+        let mut groups: Vec<((usize, usize), Vec<f64>)> = Vec::new();
+        for read in kept {
+            let key = (read.place, read.azimuth);
+            match groups.iter_mut().find(|held| held.0 == key) {
+                Some(held) => held.1.push(value(read)),
+                None => groups.push((key, vec![value(read)])),
+            }
+        }
+        let mut error = 0.0;
+        let mut freedom = 0.0;
+        let mut sizes = 0.0;
+        let mut counted = 0.0;
+        for (_, values) in groups.iter().filter(|group| group.1.len() > 1) {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            for held in values {
+                error += (held - mean).powi(2);
+            }
+            freedom += (values.len() - 1) as f64;
+            sizes += values.len() as f64;
+            counted += 1.0;
+        }
+        if freedom < 1.0 || counted < 4.0 {
+            println!("  {name:<12} too few repeats to say");
+            continue;
+        }
+        let within = (error / freedom).sqrt();
+        let per_group = sizes / counted;
+        // The per-direction means, per place, with that place's own constant
+        // removed so what is measured is the SHAPE round the ring and not the
+        // DC M1 already reported.
+        let mut places: Vec<(usize, Vec<(usize, f64)>)> = Vec::new();
+        for ((place, azimuth), values) in &groups {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            match places.iter_mut().find(|held| held.0 == *place) {
+                Some(held) => held.1.push((*azimuth, mean)),
+                None => places.push((*place, vec![(*azimuth, mean)])),
+            }
+        }
+        let mut spread = 0.0;
+        let mut directions = 0.0;
+        let mut centred: Vec<(usize, Vec<(usize, f64)>)> = Vec::new();
+        for (place, rows) in &places {
+            if rows.len() < 4 {
+                continue;
+            }
+            let mean = rows.iter().map(|r| r.1).sum::<f64>() / rows.len() as f64;
+            let rows: Vec<(usize, f64)> = rows.iter().map(|r| (r.0, r.1 - mean)).collect();
+            for (_, held) in &rows {
+                spread += held * held;
+                directions += 1.0;
+            }
+            centred.push((*place, rows));
+        }
+        if directions < 4.0 {
+            println!("  {name:<12} too few directions to say");
+            continue;
+        }
+        let between = (spread / directions).sqrt();
+        let corrected = (between * between - within * within / per_group)
+            .max(0.0)
+            .sqrt();
+        // The test noise cannot pass: the same directions at two places.
+        let mut pairs: Vec<(f64, f64)> = Vec::new();
+        for first in 0..centred.len() {
+            for second in (first + 1)..centred.len() {
+                for (azimuth, held) in &centred[first].1 {
+                    if let Some((_, other)) = centred[second].1.iter().find(|r| r.0 == *azimuth) {
+                        pairs.push((*held, *other));
+                    }
+                }
+            }
+        }
+        let agreement = match pairs.len() > 8 {
+            true => {
+                let n = pairs.len() as f64;
+                let mx = pairs.iter().map(|p| p.0).sum::<f64>() / n;
+                let my = pairs.iter().map(|p| p.1).sum::<f64>() / n;
+                let mut sxy = 0.0;
+                let mut sxx = 0.0;
+                let mut syy = 0.0;
+                for (x, y) in &pairs {
+                    sxy += (x - mx) * (y - my);
+                    sxx += (x - mx).powi(2);
+                    syy += (y - my).powi(2);
+                }
+                match sxx > 0.0 && syy > 0.0 {
+                    true => format!(
+                        "r {:+.3} over {} pairs",
+                        sxy / (sxx * syy).sqrt(),
+                        pairs.len()
+                    ),
+                    false => "degenerate".to_owned(),
+                }
+            }
+            false => "too few shared directions".to_owned(),
+        };
+        println!(
+            "  {name:<12} {within:>10.5} {between:>10.5} {corrected:>11.5} {:>8.0}% {agreement:>26}",
+            100.0 * corrected / between.max(f64::MIN_POSITIVE),
+        );
+    }
+    println!(
+        "\n  a correlation near zero between two places says the per-direction structure is \n\
+         \tNOT a property of the lens pair, and a field that fits it paints the scene's own \n\
+         \tnoise along each direction's whole sweep. that is stage 8, and it is what the \n\
+         \towner rejected."
+    );
 }
 
 /// M3: the weighting fork, three columns, pre-registered rather than chosen.

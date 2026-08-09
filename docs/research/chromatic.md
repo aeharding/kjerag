@@ -990,3 +990,77 @@ needs no events, no states and no thresholds - which is the tone gain's filter
 and not the anchor's. The one thing to take from the anchor stands: a seek
 re-seeds rather than easing across.
 
+---
+
+## M-7. Is the per-direction structure REAL? (the question the steer makes central)
+
+M-1.5 leaves 0.011 to 0.020 ln of per-direction structure that no smooth ring
+model reaches, and a seam-local field is exactly a thing that would fit it.
+**Whether fitting it is estimation or is stage 5's scalloping reborn on the
+photometric axis turns on one measurement: does the same direction read the same
+thing twice.** This was not in the memo above, because the memo was scoped to a
+constant. It is the most important number in this run.
+
+Three quantities and one test. `within` is the spread of one direction's
+readings over consecutive frames **inside one place**, where the content is the
+same and the two lenses have not moved: that is the instrument, in full.
+`between` is the unweighted spread over directions of each direction's own mean,
+with the ring's constant removed. `corrected` is `between` with `within` divided
+out of it. And then the test noise cannot pass: the same azimuths - which are
+directions in the **body** frame, so the same part of the lens pair - read at two
+places minutes apart in the same file, correlated against each other.
+
+| instant | coord | within, ln | between, ln | corrected | real % | two places, r |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| May dirt | R-G | 0.0370 | 0.0650 | 0.0636 | 98% | **+0.587** |
+| May dirt | B-G | 0.0397 | 0.0828 | 0.0816 | 99% | **+0.566** |
+| May wide | R-G | 0.0275 | 0.0442 | 0.0431 | 98% | +0.194 |
+| May wide | B-G | 0.0282 | 0.0487 | 0.0476 | 98% | +0.301 |
+| April green a | R-G | 0.0406 | 0.0849 | 0.0837 | 99% | +0.298 |
+| April green a | B-G | 0.0374 | 0.0842 | 0.0832 | 99% | **-0.054** |
+| April green b | R-G | 0.0301 | 0.0717 | 0.0709 | 99% | +0.336 |
+| April green b | B-G | 0.0313 | 0.0870 | 0.0863 | 99% | +0.279 |
+| hard mode | R-G | 0.0273 | 0.1111 | 0.1107 | 100% | +0.197 |
+| hard mode | B-G | 0.0417 | 0.1101 | 0.1091 | 99% | +0.129 |
+| registry `_002` | R-G | 0.0277 | 0.0740 | 0.0733 | 99% | **+0.695** |
+| registry `_002` | B-G | 0.0301 | 0.0711 | 0.0703 | 99% | +0.459 |
+| shimmer | R-G | 0.0381 | 0.0545 | 0.0528 | 97% | +0.295 |
+| shimmer | B-G | 0.0505 | 0.0640 | 0.0614 | 96% | **-0.056** |
+| registry `_003` | R-G | 0.0318 | 0.0689 | 0.0680 | 99% | **+0.593** |
+| registry `_003` | B-G | 0.0356 | 0.0792 | 0.0782 | 99% | +0.536 |
+
+Three findings, and the third is the one that decides the estimator's shape.
+
+**One direction, one frame, cannot see this defect.** `within` is 0.027 to 0.051
+ln, which is **larger than the hemisphere split itself** (0.006 to 0.022). A
+single per-direction chroma reading has more noise in it than the whole signal.
+Any estimator that acts on one direction's one reading is acting on noise. This
+is the level floor and the trim earning their place: they are not fussiness.
+
+**Averaged over frames, the per-direction spread is not noise.** 96 to 100
+percent of `between` survives dividing `within` out of it, so at one place the
+ring really does have 0.044 to 0.111 ln of azimuth-to-azimuth structure, two to
+six times the DC. That is what a local field would have to fit, and it is large.
+
+**But it is largely NOT a property of the lens pair.** The same body-frame
+directions read at two places minutes apart correlate at only **r +0.13 to
++0.70**, positive on 14 of 16 rows but nowhere near 1, and on two captures the
+blue-amber structure does not persist at all (April green a, r -0.054; shimmer,
+r -0.056). At r = 0.5, three quarters of the per-direction shape at one moment
+is gone a few minutes later.
+
+**So a per-direction field fitted and held is the stage-8 failure, and this run
+measures it rather than remembering it.** The structure is real at an instant,
+mostly stale by the next one, and larger than the term it would be carried
+inside. A local correction that reads a table of per-direction values estimated
+over time paints yesterday's scene along each direction's whole sweep, which is
+exactly the dark streaks the owner rejected.
+
+**And it is a positive argument for the source-matching form.** A correction
+whose local value is the CURRENT frame's own local disagreement, halved and
+applied antisymmetrically, has no table, nothing to go stale, and cannot exceed
+what it just measured. The 0.044 to 0.111 ln of local disagreement above is not
+a nuisance to that form: it is its input, and it is measured to be real at the
+instant the correction is applied. The thing this table forbids is the *other*
+way of reaching local support, which is to fit and store one.
+
