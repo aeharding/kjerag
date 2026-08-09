@@ -579,6 +579,53 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-09 **Deterministic per-lens exposure normalization from the trailer's
+  shutter records is REFUSED, on nine of the owner's own reference views**
+  (issue #103, stage 10 step P.1; docs/research/seam-blending.md 17 to 23,
+  insv-format.md 6.3). The plan was to read the per-frame per-lens shutter the
+  `.insv` trailer carries, ratio-normalize the two lenses before fusion, and be
+  structurally unable to repeat stage 7/8's noise painting because nothing is
+  estimated from pixels. Built, measured, and switched off.
+
+  **The metadata does not describe the artifact.** Across five X4 Air captures
+  the shutter ratio says the two lenses are 33 to 57 percent apart; their
+  pictures of the same directions are 0.07 to 4.3 percent apart. The
+  correlation between the two runs **-0.74 to +0.51 and averages about -0.05**,
+  three of the nine views strongly negative, and the correction leaves **11 to
+  228 times** the artifact on every single view. At the dirt reference the
+  seam's step goes **2.14 to 15.26 codes** with the decoy circle unmoved,
+  against the 2.265 to 1.424 stage 3's far-field gain bought at the same view.
+
+  **The reason is physical and not a tuning miss.** The two lenses run
+  independent auto-exposure loops that trade shutter against sensor gain to
+  reach the same picture, so the shutter ratio measures how differently the two
+  hemispheres are LIT, not how differently they came OUT. Dividing by it does
+  not remove an error, it removes the camera's own correction. Closing the sum
+  needs a per-lens GAIN, and the trailer carries none: record 9 is one track for
+  the file, no key of the record-1 protobuf is an exposure, and the ONE X2 does
+  not even write the second shutter record. **The `.OSV` answer is the same:**
+  per-frame ISO, shutter and white balance are all there, one sample a frame,
+  and both `djmd` tracks carry the same block, so there is no per-lens exposure
+  in a DJI file either.
+
+  **What ships is the instrument and the record**, which is PR #138's ending and
+  deliberate. The application arm was built behind `KJERAG_EXPOSURE_NORM`,
+  measured off-by-default against `main` byte for byte at four registry views,
+  and then **deleted on the owner's ruling of 2026-08-09**: *"Feel free to
+  delete dead arm on 177, I always recommend deleting dead code so we can move
+  faster. It's in git history."* It was 352 lines of shipped mechanism that
+  nothing drew, and it is archived in commit **8107a23** on
+  `feat/exposure-normalization` - `git show 8107a23` reads it back. What is left
+  in the tree is `--bin expose mode=meta`, the new instrument, which is what any
+  future attempt should be pointed at first, and this record.
+
+  **One architectural finding falls out of it and is not about this step.** The
+  pooled stage-3 gain read `+0.00287` ln on both arms, unmoved, because the
+  band's compute pass measures the DECODED PLANES and both gains are applied in
+  the fragment shader: **anything applied at fusion is invisible to the band,
+  which measures the source and not the picture.** So the two corrections cannot
+  double-correct and cannot check each other either; they multiply blindly.
+
 - 2026-08-09 **The `.OSV` support is rebased onto the flat seam, the mounting is
   baked as a constant of the camera, and the horizon lock is gated on the file's
   own gravity** (docs/research/osv-format.md, which is this format's reference

@@ -674,6 +674,35 @@ other way would draw a visibly tilted horizon here and print the line a file tha
 The mounting was verified offline, on the picture, over 177 degrees of lean azimuth, and that is
 the instrument a second unit would need re-run.
 
+## Photometric: the DJI Osmo 360 reference line (REGISTERED - stage 10 gate)
+- 2026-08-09 `~/Downloads/"1 8k30p standard 10bit iso max 800-003.OSV" time=15.215 yaw=-178.05 pitch=-3.15 fov=249.43 lock=1`
+  A fourth line on the same unit-B capture as the three above, registered as a **photometry gate**
+  so that seam work on the second camera family has an aim with a name. `lock=1`; the Osmo writes
+  its own solved orientation a frame, so the world-fixed re-derivation rule above does not apply to
+  it - that rule is about Kjerag's own IMU filter and this file does not go through it. Not a
+  Ctrl+V target, for the section header's reason: the path has spaces in it.
+  **PROVENANCE.** The render described below was taken on the then-unmerged `feat/osmo-osv` at
+  343897f, `size=1024`, when `main` still refused every `.OSV` by name. #178 landed that reader on
+  2026-08-09, so the line renders on `main` now and the caveat is history rather than a live one.
+  WHAT IT SHOWS, on that render. A park under a tree canopy at head height, the camera worn: the
+  **sun is directly in frame** through the leaves a little above centre, with a chain of flare
+  ghosts running down and left of it across the grass, and the wearer's own head and shoulder
+  fill the bottom of the picture at arm's length. So the frame holds three of the hard classes at
+  once - **glare in one lens**, a **near-field subject** at the distance parallax is worst at,
+  and, at fov 249.43, **both coverage rims**, which close the picture as the darkened arcs in the
+  top-left, top-right and bottom-right corners. The dynamic range across it is the widest in
+  either registry: blown canopy against deep shadow on grass in one frame.
+  **UNMEASURED, and named as such**: no per-crossing photometric reading has been taken at this
+  line. `--bin colour` and `--bin expose` open a file through `CalibrationSet::from_insv`, which
+  has no `.OSV` path even now that the player has one, so they still refuse it; giving them one is
+  its own work and not this line's.
+  What IS settled at this line is the metadata question stage 10 asked of it (seam-blending.md
+  23): the file carries **per-frame ISO, shutter and white balance**, one sample per frame, in
+  both its `djmd` tracks - and **the two tracks carry the same block**, so there is no per-lens
+  exposure in an `.OSV` and nothing for a deterministic normalization to divide by.
+  STATUS: REGISTERED, renders on `main` since #178, photometrically unmeasured. Gates stage 10 on
+  the DJI side.
+
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas
