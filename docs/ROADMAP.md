@@ -646,10 +646,19 @@ live, no keyframe UI ever.
   (`crates/render/src/twin.rs`). A review planted a bend in the WGSL half alone
   and the whole workspace stayed green while the picture changed. The guard
   compiles the shipped shader with a probe entry after it and compares every
-  weight and landing against the Rust mirror; it fails on that mutation by 887
-  times its bar and is the only test that does. CI has no GPU and skips it;
+  weight and landing against the Rust mirror; a WGSL-only bend fails it by 221
+  times its bar and it is the only test that does. **The "887 times the bar"
+  this entry carried is 887 times the clean RESIDUE and 90 times the bar**, and
+  a ratio here now names its denominator. CI has no GPU and skips it;
   `KJERAG_REQUIRE_GPU=1` makes the skip a failure and `scripts/uitest.sh` runs
   it that way, so a release cannot be tagged without it.
+
+  **And a guard is only a guard where its fixture reaches**: the first version
+  of that probe was built on a pose with no rolling shutter, so the readout
+  half of `project` sat behind a uniform test that was false on both halves and
+  ran on neither, and the same review passed 226 of 226 tests with a WGSL-only
+  change to `readout_share` while the picture moved. The fixture rolls now and
+  the test asserts it (round 2, 2026-08-09).
 
   **THE ONE X2 NOW DRAWS 8.00 DEGREES WHERE IT DREW 3.94.** The bound on how
   wide a camera may hand over was its overlap minus the room a bend needed to

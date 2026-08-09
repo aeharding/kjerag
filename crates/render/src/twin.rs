@@ -21,8 +21,19 @@
 //! planes, which means real footage, which means the null instrument. The
 //! boundary this guards is the one the seam work keeps moving, which is every
 //! function of the map: `blend`, `handover`, `crossover`, `claim`, `share`,
-//! `within`, `axis_of`, `project` and `mei`, plus the layout of the uniform
-//! block they all read.
+//! `within`, `axis_of`, `project`, `readout_share`, `turned` and `mei`, plus
+//! the layout of the uniform block they all read.
+//!
+//! **A guarded function is only guarded at a fixture that reaches it, and
+//! this file learned that on 2026-08-09.** The list above was written while
+//! the fixture was built on `Held::default()`, whose `rolling` is `None`,
+//! whose `row_axis` is therefore zero, and past whose uniform test the whole
+//! readout half of `project` - `readout_share`, `turned`, and
+//! `READOUT_STEPS` more rounds of `mei` - never ran on
+//! either side. A review multiplied the WGSL `readout_share` by three, left
+//! the Rust twin alone, and 226 of 226 tests passed while the rendered
+//! picture moved (`down1` went `7d2200ea` to `10d51545`). The fixture rolls
+//! now, and the test asserts that it does.
 //!
 //! **It needs a GPU and says so.** `cargo test --workspace` on a box with a
 //! Vulkan device runs it; CI has no `/dev/dri/renderD128` and every runner
@@ -33,7 +44,7 @@
 
 #![cfg(test)]
 
-use crate::projection::{Held, MAX_LENSES, Reframe};
+use crate::projection::{Held, MAX_LENSES, Reframe, Rolling};
 use crate::sampling::Sampling;
 use crate::{Camera, Size, dmabuf};
 
@@ -309,33 +320,65 @@ fn probe_rays(reframe: &Reframe) -> Vec<[f32; 3]> {
 
 /// **The shipped shader and the Rust twin answer the same numbers.**
 ///
-/// The map is built at a turned camera and with the handover line held off the
-/// seam, because both of those are terms that reach the shader through the
-/// uniform block: a block whose fields slid would fail here as loudly as a
-/// function whose arithmetic did.
+/// The map is built at a turned camera, with the handover line held off the
+/// seam, and with the frame read out while the body turns, because all three
+/// of those are terms that reach the shader through the uniform block: a block
+/// whose fields slid would fail here as loudly as a function whose arithmetic
+/// did, and a term left at its default takes the code that reads it out of the
+/// comparison entirely (see the module doc, and the fixture below).
 ///
 /// **The bars, and where they come from.** Measured on RADV Phoenix
 /// 2026-08-09 over these 5930 rays, 1921 of them inside the handover and 7851
-/// landings that reach a pixel: every weight agrees to **2.1e-6**, every
-/// landing to **9.8e-4 px**, every coverage depth to **7.3e-4 px** and every
-/// landing axis to **1.2e-7**. The
-/// bars are ten times that, which still leaves them three orders under the
-/// smallest change either half could make and be doing anything: the bend a
-/// review planted in the WGSL `blend` alone moves a landing by whole pixels
-/// and a weight by hundredths.
+/// landings that reach a pixel: every weight agrees to **1.8e-6**, every
+/// landing to **7.3e-4 px**, every coverage depth to **8.5e-4 px** and every
+/// landing axis to **1.2e-7**. The bars are roughly ten times that, which
+/// still leaves them orders under the smallest change either half could make
+/// and be doing anything. Measured, both here on the same day:
+///
+/// | mutation, WGSL only | worst weight | of the bar | of the residue |
+/// | --- | ---: | ---: | ---: |
+/// | a bend inside `blend`, each lens sampled at a ray the other lens's share displaces | 4.4e-3 | 221x | 2400x |
+/// | `readout_share` multiplied by three | 2.0e-2 | 984x | 10700x |
+///
+/// Each was the **only** failing test in the workspace, and each was reverted.
 ///
 /// **Why the landings are compared where the weight is not zero, and not
 /// everywhere.** A lens the ray cannot reach is never projected, and its
 /// landing is whatever the slot held. WGSL says a `var` with no initializer is
 /// zeroed, and on this box it is not re-zeroed per iteration of `blend`'s
 /// loop: measured here 2026-08-09, a ray that only lens 0 has comes back with
-/// **lens 0's landing in lens 1's slot**, at a weight of exactly zero. It
-/// reaches no pixel - `fs` samples each lens behind `mix.weights[i] > 0.0`,
-/// and `texel_ratio` of a stale landing feeds only those branches - so it is a
-/// difference between the two halves that no picture can carry, and this test
-/// is written about the picture. Recorded rather than worked around: nothing
-/// in the shipped shader is changed for it, because changing the shader is
-/// changing the arm the owner approved.
+/// **lens 0's landing in lens 1's slot**, at a weight of exactly zero.
+///
+/// **Why that reaches no pixel, in full, because the short version is not
+/// enough.** `picture` samples each lens behind `mix.weights[i] > 0.0`, so the
+/// stale landing is never a texture coordinate. It is not never READ, though:
+/// `fs` computes `texel_ratio` for both lenses **outside** that gate
+/// (`scene.rs`, `fs`), and deliberately, because `texel_ratio` is `dpdx`/`dpdy`
+/// and a derivative has to be taken where every lane of the quad is running.
+/// So a stale landing does feed a derivative, and the question is whether a
+/// quad can straddle the boundary with some lanes sampling and some lanes
+/// stale.
+///
+/// **It cannot, and `CAP_MARGIN_DEG` is why.** What decides whether a landing
+/// is stale is `within`, and the cap it tests is the lens's own coverage
+/// boundary widened by half a degree - thirty times the 0.016 degrees the
+/// fixture's boundary actually needs
+/// (`the_cap_is_tight_against_the_support`). The weight, meanwhile, has
+/// already reached zero AT that coverage boundary, because `claim` multiplies
+/// the share by the landing's own coverage depth and the depth is the distance
+/// to the rim. So the ring where a landing is stale lies wholly outside the
+/// ring where that lens's weight is non-zero, with half a degree of world
+/// angle between the two, and a quad is two pixels of the view - 0.06 degrees
+/// at this fixture's 55 degree field over a 1920 px window. A quad that
+/// straddles the `within` boundary therefore has weight zero in every one of
+/// its four lanes, and the ratio it computes is multiplied by nothing.
+///
+/// **Checked rather than argued**, by the review that raised it: the re-zero
+/// this shader does not do was planted in it - `landing = Landing()` at the
+/// top of each iteration - and the null rendered **byte-identical** summaries
+/// at three views. Recorded rather than adopted: nothing in the shipped shader
+/// is changed for it, because changing the shader is changing the arm the
+/// owner approved.
 ///
 /// The residue is not zero and is not expected to be: WGSL's `normalize` is
 /// allowed a couple of ulps where the twin divides by its own `norm3`, and the
@@ -362,6 +405,36 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
     eprintln!("twin: {name}");
 
     let lenses = crate::projection::tests::fixture_lenses();
+    // **The frame is read out while the body turns, and that is not a
+    // decoration.** `Held::default()` leaves `rolling` at `None`, which leaves
+    // the block's `row_axis` at zero, which makes the WGSL test
+    // `reframe.row_axis_x != 0.0 || reframe.row_axis_y != 0.0` false and the
+    // Rust [`Reframe::is_rolling`] with it - and then the whole second half of
+    // `project` (`readout_share`, `turned`, and `READOUT_STEPS` more rounds
+    // of `mei`) runs on NEITHER side and this test compares a map that is not
+    // the shipped one. A review proved that on 2026-08-09 by multiplying the
+    // WGSL `readout_share` by three and nothing else: 226 of 226 tests passed
+    // while the rendered picture moved (`down1` went 7d2200ea to 10d51545).
+    let held = Held {
+        rolling: Some(Rolling {
+            // A roll about the lens axis with the other two turning as well,
+            // so a `turn` that reached the shader transposed, negated or short
+            // by a lane is a disagreement here rather than a coincidence. The
+            // rate is the one the readout tests use: 90 deg/s across the X4
+            // Air's 15.883 ms readout, 1.43 degrees from the first row of the
+            // sensor to the last.
+            turn: [
+                0.3 * crate::projection::tests::READOUT_TURN,
+                -0.6 * crate::projection::tests::READOUT_TURN,
+                crate::projection::tests::READOUT_TURN,
+            ],
+            // `Sweep::Right`, which is how the X4 Air delivers: the leftmost
+            // column is read first. Written out rather than imported so this
+            // file names the two numbers the shader actually reads.
+            axis: [1.0, 0.0],
+        }),
+        ..Held::default()
+    };
     let reframe = Reframe::new(
         &lenses,
         Size {
@@ -373,7 +446,7 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
             pitch: -31f32.to_radians(),
             fov: 55f32.to_radians(),
         },
-        Held::default(),
+        held,
         16.0 / 9.0,
         true,
         Sampling::default(),
@@ -382,6 +455,12 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
     // The block the shader is handed carries the held line, or this test would
     // be run on the one field the seam anchor added.
     assert!(reframe.handover_width() > 0.0);
+    // And it carries the readout, or `project`'s second half is dead on both
+    // halves and the boundary this file claims to guard is half a boundary.
+    assert!(
+        reframe.is_rolling(),
+        "the block's row axis is zero, so the readout branch of `project` runs on neither side",
+    );
 
     let rays = probe_rays(&reframe);
     let answers = on_the_gpu(&device, &queue, &reframe, &rays);

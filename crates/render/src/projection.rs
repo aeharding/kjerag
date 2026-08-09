@@ -1869,7 +1869,12 @@ impl Reframe {
     /// record, and then [`Self::project`] is what it was before issue #9.
     ///
     /// WGSL twin: the `reframe.row_axis` test in `project`.
-    fn is_rolling(&self) -> bool {
+    ///
+    /// `pub(crate)` for one reader, [`crate::twin`]: this is the test the
+    /// whole readout branch sits behind on both halves, so a fixture that
+    /// leaves it false compares a `project` with its second half deleted. The
+    /// twin asserts on it rather than assuming it.
+    pub(crate) fn is_rolling(&self) -> bool {
         self.row_axis != [0.0; 2]
     }
 
@@ -4744,7 +4749,11 @@ pub(crate) mod tests {
 
     /// 90 deg/s, a brisk but ordinary roll, across the X4 Air's 15.883 ms
     /// readout: 1.43 degrees from the first row of the sensor to the last.
-    const READOUT_TURN: f64 = 90.0 * 0.015_883 * std::f64::consts::PI / 180.0;
+    ///
+    /// `pub(crate)` because [`crate::twin`]'s fixture rolls at the same rate,
+    /// and one number with one derivation is better than the same number
+    /// written twice.
+    pub(crate) const READOUT_TURN: f64 = 90.0 * 0.015_883 * std::f64::consts::PI / 180.0;
 
     /// The whole of issue #9 as one analytic prediction: a camera rolling
     /// about a lens's own axis smears that lens's picture round the axis, by

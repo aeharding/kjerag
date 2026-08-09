@@ -474,6 +474,13 @@ against the Rust mirror. It needs a GPU, so CI skips it and
 `KJERAG_REQUIRE_GPU=1` turns that skip into a failure; `scripts/uitest.sh` runs
 it that way, which is the same seat the harness itself sits in.
 
+**A guard is only a guard at a fixture that reaches the code**, which the same
+review proved a second time on 2026-08-09: the probe was built on a pose with
+no rolling shutter in it, so `row_axis` was zero, so the readout half of
+`project` was behind a false test on both halves and ran on neither, and a
+WGSL-only change to `readout_share` passed 226 of 226 tests while the picture
+moved. The fixture rolls now and the test asserts that it does.
+
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
 

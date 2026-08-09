@@ -416,9 +416,40 @@ real footage, a GPU and a second build of the whole tree.
 `projection::wgsl()` - the same string `Scene` hands wgpu, not a copy - with a
 compute entry after it that calls `blend` on 5930 probe rays, and compares every
 weight and every landing against `Reframe::blend`. Clean, on RADV Phoenix, the
-two halves agree to **2.1e-6** of a weight and **9.8e-4** of a pixel; under the
-review's own planted bend they disagree by **1.8e-3** of a weight, 887 times the
-bar, and it is **the only test in the workspace that fails** (225 pass, 1 fails).
+two halves agree to **1.8e-6** of a weight and **7.3e-4** of a pixel, and the
+bar is 2e-5 of a weight.
+
+> **A GUARDED FUNCTION IS ONLY GUARDED AT A FIXTURE THAT REACHES IT**, and the
+> first version of this guard was built on `Held::default()`. That leaves
+> `rolling` at `None`, which leaves `row_axis` at zero, which makes the one
+> uniform test the whole readout half of `project` sits behind false on both
+> halves: `readout_share`, `turned` and the extra rounds of `mei` ran on
+> neither side, so the paragraph above named them and did not check them. A
+> second review proved it on 2026-08-09 by multiplying the WGSL
+> `readout_share` by three and leaving the Rust twin alone: **226 of 226 tests
+> passed while the picture moved** (`down1` went `7d2200ea` to `10d51545`).
+> **The fixture rolls now** - 90 deg/s across the X4 Air's 15.883 ms readout,
+> about all three body axes - and the test asserts `Reframe::is_rolling`
+> beside the assertion that the held line is in the block, so neither term can
+> quietly go back to its default.
+
+**The mutations, and what each is worth against what.** The commit that added
+this guard (`4c411a8`) recorded the review's planted bend as "1.8e-3 of a
+weight, 887 times the bar", and **887 is the wrong denominator**: 1.8e-3 is 887
+times the *residue* the two halves carry clean and **90 times the bar**. That
+commit message is not rewritten - this repository does not force-push - and
+this paragraph is the correction. The reviewer's own run of their own bend read
+235 times the bar; a plant is only as big as the constant in it, which is why
+every ratio here names its denominator. Both mutations re-measured on the
+rolling fixture, 2026-08-09:
+
+| mutation, WGSL only | worst weight | of the bar | of the clean residue |
+| --- | ---: | ---: | ---: |
+| a bend inside `blend` | 4.4e-3 | 221x | 2400x |
+| `readout_share` x3 | 2.0e-2 | 984x | 10700x |
+
+Under each of them the twin is **the only test in the workspace that fails**
+(225 pass, 1 fails), and each was reverted.
 
 It needs a device, so CI skips it and `KJERAG_REQUIRE_GPU=1` turns that skip into
 a failure; `scripts/uitest.sh` runs it that way, which puts it in the same seat
@@ -428,11 +459,33 @@ skippable on the way to a tag (release.toml).
 **What it found on its first run, reported rather than fixed.** WGSL says a
 `var` with no initializer is zeroed; on this driver it is not re-zeroed per
 iteration of `blend`'s loop, so a ray only lens 0 has comes back with lens 0's
-landing sitting in lens 1's slot. It reaches no pixel - `fs` samples each lens
-behind `mix.weights[i] > 0.0` and that weight is exactly zero - so the test
-compares landings where the weight is not zero and says why. Nothing in the
-shipped shader is changed for it: changing the shader is changing the arm the
-owner approved.
+landing sitting in lens 1's slot.
+
+**Why that reaches no pixel, in full.** `picture` samples each lens behind
+`mix.weights[i] > 0.0`, so a stale landing is never a texture coordinate. It is
+not never READ, though, and the short version of this argument stopped one step
+early: `fs` computes `texel_ratio` for **both** lenses outside that gate, on
+purpose, because `texel_ratio` is `dpdx`/`dpdy` and a derivative has to be taken
+where every lane of the quad is running. So a stale landing does feed a
+derivative, and the real question is whether a quad can straddle the boundary
+with some lanes sampling and some lanes stale.
+
+It cannot, and `CAP_MARGIN_DEG` is the reason. What decides whether a landing is
+stale is `within`, whose cap is the lens's own coverage boundary widened by half
+a degree - thirty times the 0.016 degrees the fixture's boundary needs. The
+weight has already reached zero AT that coverage boundary, because `claim`
+multiplies the share by the landing's own coverage depth and the depth is the
+distance to the rim. So the ring where a landing is stale lies wholly outside
+the ring where that lens's weight is non-zero, with half a degree of world angle
+between them, against a quad that is two pixels of the view (0.06 degrees at a
+55 degree field over a 1920 px window). **A straddling quad has weight zero in
+every one of its four lanes**, and the ratio it computes is multiplied by
+nothing.
+
+Checked rather than argued, by the review that raised it: the re-zero this
+shader does not do was planted in it and the null rendered **byte-identical**
+summaries at three views. Nothing in the shipped shader is changed for it:
+changing the shader is changing the arm the owner approved.
 
 **What it does not cover**, said plainly: the fragment half - the NV12 sampling,
 the colour transform, the write to the target - which needs decoded planes and
