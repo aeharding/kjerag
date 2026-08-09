@@ -94,6 +94,7 @@ fn main() -> Fallible<()> {
         Mode::Blend => blend(&options),
         Mode::Parity => parity(&options),
         Mode::Fit => fit(&options),
+        Mode::Solve => solve(&options),
     }
 }
 
@@ -110,6 +111,10 @@ enum Mode {
     /// What the shipped per-file fit reads on this file, and what it costs:
     /// the app's own path (issue #48 phase 2), timed and printed.
     Fit,
+    /// The inverse solve: which calibration would make our picture land where
+    /// a given reframed picture's does. Run it against a PLANT before ever
+    /// running it against an export (docs/research/parity-protocol.md).
+    Solve,
 }
 
 /// The inter-lens baseline in millimetres, which is what sets parallax and is
@@ -1060,6 +1065,60 @@ struct Options {
     /// The blend widths compared, in degrees, plus the shipped weights.
     bands: Vec<f64>,
     out: Option<PathBuf>,
+
+    // ---- mode=solve. Its own block because every one of them is about a
+    // picture drawn in somebody else's projection rather than about the ring.
+    /// The view's three angles in OUR frame, which is the frame the solve
+    /// answers in. Studio's pan/tilt is not this and is not converted:
+    /// `viewoff=` starts the solve away from here and the solve walks back.
+    view: [f64; 3],
+    /// The export's shape, so a plant with no export to read still draws the
+    /// picture the export would have been.
+    aspect: f64,
+    /// A known perturbation of lens 1, injected into OUR OWN render to make
+    /// the target. The only honest way to know what the solver can recover is
+    /// to give it an answer nobody can argue with.
+    plant: Option<kjerag_render::SeamFit>,
+    /// Where the solve starts from, which is not where the plant is.
+    start: kjerag_render::SeamFit,
+    /// How far the solve's starting view is from the true one, in degrees.
+    viewoff: [f64; 3],
+    /// The same for the view's field of view, which is the knob Studio's own
+    /// number does not give us.
+    fovoff: f64,
+    /// How many sites across the picture, how big a patch is, and how far the
+    /// correlation looks, all in pixels of the working shape.
+    ///
+    /// `search` is not a taste: the first round has to reach the whole of the
+    /// starting error, and a site whose true shift is past the search is
+    /// dropped rather than found. Measured 2026-08-08 at 60 degrees on a 640
+    /// wide picture, where one degree is 10.7 px: at `search=12` a start 1.2
+    /// deg and 3 deg of scale off kept 50 of 500 sites and the run refused,
+    /// and at `search=30` the same start solved to 0.013 px. If the aim is
+    /// uncertain by D degrees, `search` must exceed D times the picture's
+    /// pixels per degree.
+    sites: usize,
+    patch: usize,
+    search: usize,
+    rounds: usize,
+    /// The correlation a site has to reach to be kept.
+    floor: f64,
+    /// `source_time = export_time + lag`, from scripts/research/pair.py.
+    lag: f64,
+    /// Report the registration gradient instead of solving: how the agreement
+    /// falls away as the view is deliberately mis-aimed. The control that says
+    /// a registration score is a score and not a constant.
+    aim: bool,
+    /// Tikhonov damping, in output pixels of cost per [`KNOB_STEPS`] of step.
+    ///
+    /// It exists for one reason and it is not conditioning-in-general: a view
+    /// pointing straight down is a gimbal lock, where the view's own yaw and
+    /// its roll are the SAME rotation, and the normal equations there are
+    /// exactly singular. Damping lets the well-determined directions answer
+    /// and leaves the null one where it started, instead of refusing the run.
+    /// It is small against the noise floor on purpose, so a direction the data
+    /// does constrain is not pulled by it.
+    damp: f64,
 }
 
 impl Options {
@@ -1093,6 +1152,20 @@ impl Options {
             size: 1024,
             bands: vec![14.0, 8.0, 4.0, 2.0, 1.0, 0.0],
             out: None,
+            view: [0.0; 3],
+            aspect: 16.0 / 9.0,
+            plant: None,
+            start: kjerag_render::SeamFit::default(),
+            viewoff: [0.0; 3],
+            fovoff: 0.0,
+            sites: 40,
+            patch: 15,
+            search: 30,
+            rounds: 5,
+            floor: 0.5,
+            lag: 0.0,
+            damp: 0.002,
+            aim: false,
         };
         for arg in args {
             let (key, value) = arg.split_once('=').ok_or(USAGE)?;
@@ -1104,6 +1177,7 @@ impl Options {
                         "blend" => Mode::Blend,
                         "parity" => Mode::Parity,
                         "fit" => Mode::Fit,
+                        "solve" => Mode::Solve,
                         _ => return Err(format!("no mode called {value}. {USAGE}").into()),
                     };
                 }
@@ -1125,6 +1199,20 @@ impl Options {
                         .collect::<Result<Vec<f64>, _>>()?;
                 }
                 "fix" => options.fix = turns(value)?,
+                "view" => options.view = triple(value)?,
+                "viewoff" => options.viewoff = triple(value)?,
+                "fovoff" => options.fovoff = value.parse()?,
+                "aspect" => options.aspect = value.parse()?,
+                "plant" => options.plant = Some(kjerag_spike::seam_fit(value)?),
+                "start" => options.start = kjerag_spike::seam_fit(value)?,
+                "sites" => options.sites = value.parse()?,
+                "patch" => options.patch = value.parse()?,
+                "search" => options.search = value.parse()?,
+                "rounds" => options.rounds = value.parse()?,
+                "floor" => options.floor = value.parse()?,
+                "lag" => options.lag = value.parse()?,
+                "damp" => options.damp = value.parse()?,
+                "aim" => options.aim = value.parse::<u32>()? != 0,
                 "fit" => options.fit = value.parse::<u32>()? != 0,
                 "panini" => options.panini = value.parse()?,
                 "from" => options.from = value.parse()?,
@@ -1291,11 +1379,23 @@ fn turns(value: &str) -> Fallible<Vec<(Knob, f64)>> {
         .collect()
 }
 
-const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend|parity|fit] [also=<other.insv>] \
+/// `yaw,pitch,roll` in degrees, which is the order [`Look`] applies them in.
+fn triple(value: &str) -> Fallible<[f64; 3]> {
+    let parts: Vec<f64> = value.split(',').map(str::parse).collect::<Result<_, _>>()?;
+    match parts.len() {
+        3 => Ok([parts[0], parts[1], parts[2]]),
+        _ => Err("a view is yaw,pitch,roll in degrees".into()),
+    }
+}
+
+const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend|parity|fit|solve] [also=<other.insv>] \
      [fix=roll:0.8,yaw:-2] [fit=1] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [bands=14,8,4] [out=x.png] \
      [from=seconds] [count=frames] [patches=n] [panini=d] \
      [span=deg] [step=deg] [along=deg] [across=deg] [off=deg] [keep=r] [contrast=codes] \
-     [knobs=roll,cx,cy,...] [control=1]";
+     [knobs=roll,cx,cy,...] [control=1] \
+     mode=solve: [view=yaw,pitch,roll] [viewoff=yaw,pitch,roll] [aspect=1.7778] \
+     [plant=cx:8,pitch:0.2 | against=<export.mp4> lag=seconds] [start=roll:0,...] \
+     [sites=n] [patch=px] [search=px] [rounds=n] [floor=r]";
 
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
     let values: Vec<f64> = values.collect();
@@ -1824,7 +1924,7 @@ fn parity(options: &Options) -> Fallible<()> {
         &calibration.lenses,
         frame,
     );
-    let export = export_frame(&theirs, options)?;
+    let export = export_frame(&theirs, options.from)?;
     println!(
         "theirs: {} at {:.2} s, {}x{}",
         theirs.file_name().unwrap_or_default().to_string_lossy(),
@@ -1977,6 +2077,835 @@ fn parity(options: &Options) -> Fallible<()> {
     Ok(())
 }
 
+// ------------------------------------------------ the inverse solve
+
+/// How many numbers a solve turns: the view's own three angles, then lens 1's
+/// five.
+///
+/// The view's angles are in because Studio's pan/tilt frame is not ours and
+/// nobody has derived the map between them. Solving them beside the
+/// calibration is the honest alternative to assuming one, and it costs
+/// nothing that matters: a view rotation moves BOTH lenses' content and a
+/// lens 1 correction moves ONE lens's, so the two are separable by any set of
+/// sites that covers both hemispheres. `mode=solve` prints the conditioning
+/// that says whether the sites it actually kept did (`spread`, below), so a
+/// run that lands in the degenerate corner says so instead of answering.
+const SOLVED: usize = 9;
+
+const KNOB_NAMES: [&str; SOLVED] = [
+    "view yaw",
+    "view pitch",
+    "view roll",
+    "view fov",
+    "lens1 roll",
+    "lens1 yaw",
+    "lens1 pitch",
+    "lens1 cx",
+    "lens1 cy",
+];
+const KNOB_UNITS: [&str; SOLVED] = ["deg", "deg", "deg", "deg", "deg", "deg", "deg", "px", "px"];
+/// The step each knob's Jacobian column is taken with. Big enough to clear the
+/// projection's own arithmetic and small enough that the map is linear over
+/// it; `mode=solve control=1` is the check, and it is the plant.
+const KNOB_STEPS: [f64; SOLVED] = [0.05, 0.05, 0.05, 0.5, 0.05, 0.05, 0.05, 1.0, 1.0];
+/// The most any one round may move each knob: a trust region, in each knob's
+/// own units.
+///
+/// Not decoration. Without it a round that correlates badly -- a view half
+/// filled with sky, or a lens 1 hemisphere with nothing in it to match --
+/// takes one enormous step along the near-null direction the five knobs carry
+/// (`lens1 yaw` against `lens1 cx` runs to -0.99), and the run after it has no
+/// sites at all. Measured on 2026-08-08: an uncapped solve at 1500.0 s walked
+/// `cy` to -224 px. Capped, a round that cannot answer moves a little and the
+/// residual stays high, which is a failure that reports itself.
+const KNOB_CAPS: [f64; SOLVED] = [3.0, 3.0, 3.0, 5.0, 1.0, 1.0, 1.0, 20.0, 20.0];
+
+/// The eight numbers, as one thing that can be stepped and printed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Theta {
+    /// The view's pose, in [`Look`]'s own three angles.
+    view: [f64; 3],
+    /// The view's own field of view, solved and not assumed.
+    ///
+    /// Studio's FOV number is NOT this family's half angle -- told 150
+    /// literally, their tiny planet correlates worse than a guess (recorded in
+    /// ab097f8 on research/oracle-probe). Their slider is a label on their own
+    /// projection and the scale it means has to be measured like anything else.
+    fov: f64,
+    /// Lens 1's correction, in the five knobs the app stores per camera.
+    fit: kjerag_render::SeamFit,
+}
+
+impl Theta {
+    fn get(&self, k: usize) -> f64 {
+        match k {
+            0..=2 => self.view[k],
+            3 => self.fov,
+            4 => self.fit.roll_deg,
+            5 => self.fit.yaw_deg,
+            6 => self.fit.pitch_deg,
+            7 => self.fit.cx_px,
+            _ => self.fit.cy_px,
+        }
+    }
+
+    fn nudged(mut self, k: usize, step: f64) -> Self {
+        match k {
+            0..=2 => self.view[k] += step,
+            3 => self.fov += step,
+            4 => self.fit.roll_deg += step,
+            5 => self.fit.yaw_deg += step,
+            6 => self.fit.pitch_deg += step,
+            7 => self.fit.cx_px += step,
+            _ => self.fit.cy_px += step,
+        }
+        self
+    }
+
+    /// The projection this `Theta` draws through.
+    fn look(&self, base: Look) -> Look {
+        let mut look = base;
+        look.angles = self.view;
+        look.fov = self.fov;
+        look
+    }
+
+    fn shifted(self, step: &[f64]) -> Self {
+        (0..SOLVED).fold(self, |theta, k| theta.nudged(k, step[k]))
+    }
+}
+
+/// Our own pass at one `Theta`, drawn into the export's projection.
+fn drawn(
+    lenses: &[Lens],
+    frame: Size,
+    look: Look,
+    theta: Theta,
+    pair: &Pair,
+    shape: Shape,
+    cells: &[kjerag_render::Cell],
+) -> Vec<f64> {
+    looked(
+        &theta.fit.applied(lenses),
+        frame,
+        theta.look(look),
+        pair,
+        shape,
+        cells,
+    )
+}
+
+/// Zero-mean normalized cross-correlation of a patch of `target` into `ours`.
+///
+/// Returns the offset `u` with `target(p) ~ ours(p + u)`, the peak, and how
+/// far the peak stands above the best rival more than two pixels away. The
+/// rival is the ambiguity check: a patch of sky or of one straight edge
+/// correlates as well in a line of places, and a shift read off one of them is
+/// a number with no direction in it.
+fn correlate_patch(
+    target: &[f64],
+    ours: &[f64],
+    shape: Shape,
+    at: [usize; 2],
+    half: usize,
+    search: usize,
+) -> Option<([f64; 2], f64, f64)> {
+    let (width, height) = (shape.width as usize, shape.height as usize);
+    let margin = half + search + 1;
+    if at[0] < margin || at[1] < margin || at[0] + margin >= width || at[1] + margin >= height {
+        return None;
+    }
+    let span = 2 * half + 1;
+    let mut patch = Vec::with_capacity(span * span);
+    for dy in 0..span {
+        for dx in 0..span {
+            let index = (at[1] + dy - half) * width + at[0] + dx - half;
+            let code = target[index];
+            // A pixel no lens reached is not content, and a patch that
+            // straddles the edge of the picture correlates on that edge.
+            if code <= 0.0 {
+                return None;
+            }
+            patch.push(code);
+        }
+    }
+    let mean = patch.iter().sum::<f64>() / patch.len() as f64;
+    let patch: Vec<f64> = patch.iter().map(|c| c - mean).collect();
+    let energy: f64 = patch.iter().map(|c| c * c).sum();
+    // Texture floor: a flat patch has no shift in it and correlating one
+    // reports the noise. 4 codes rms over the patch, squared, times its area.
+    if energy < 16.0 * patch.len() as f64 {
+        return None;
+    }
+
+    let reach = search as isize;
+    let mut scores = vec![f64::NAN; (2 * search + 1) * (2 * search + 1)];
+    for oy in -reach..=reach {
+        for ox in -reach..=reach {
+            let mut other = Vec::with_capacity(span * span);
+            let mut clean = true;
+            for dy in 0..span {
+                for dx in 0..span {
+                    let x = (at[0] + dx - half) as isize + ox;
+                    let y = (at[1] + dy - half) as isize + oy;
+                    let code = ours[y as usize * width + x as usize];
+                    if code <= 0.0 {
+                        clean = false;
+                    }
+                    other.push(code);
+                }
+            }
+            if !clean {
+                continue;
+            }
+            let mean = other.iter().sum::<f64>() / other.len() as f64;
+            let mut covariance = 0.0;
+            let mut variance = 0.0;
+            for (a, b) in patch.iter().zip(&other) {
+                let b = b - mean;
+                covariance += a * b;
+                variance += b * b;
+            }
+            if variance <= 0.0 {
+                continue;
+            }
+            let index = (oy + reach) as usize * (2 * search + 1) + (ox + reach) as usize;
+            scores[index] = covariance / (energy * variance).sqrt();
+        }
+    }
+
+    let (mut best, mut peak) = (None, f64::MIN);
+    for (index, score) in scores.iter().enumerate() {
+        if score.is_nan() {
+            continue;
+        }
+        if *score > peak {
+            peak = *score;
+            best = Some(index);
+        }
+    }
+    let index = best?;
+    let (kx, ky) = (
+        (index % (2 * search + 1)) as isize - reach,
+        (index / (2 * search + 1)) as isize - reach,
+    );
+    // A peak on the edge of the search is a peak that was cut off, not found.
+    if kx.abs() == reach || ky.abs() == reach {
+        return None;
+    }
+    let rival = scores
+        .iter()
+        .enumerate()
+        .filter(|(other, score)| {
+            if score.is_nan() {
+                return false;
+            }
+            let (ox, oy) = (
+                (*other % (2 * search + 1)) as isize - reach,
+                (*other / (2 * search + 1)) as isize - reach,
+            );
+            (ox - kx).abs() > 2 || (oy - ky).abs() > 2
+        })
+        .map(|(_, score)| *score)
+        .fold(f64::MIN, f64::max);
+
+    let width_scores = 2 * search + 1;
+    let sub = |low: f64, mid: f64, high: f64| {
+        let curve = low - 2.0 * mid + high;
+        match curve == 0.0 || !curve.is_finite() {
+            true => 0.0,
+            false => (-0.5 * (high - low) / curve).clamp(-1.0, 1.0),
+        }
+    };
+    let get = |dx: isize, dy: isize| {
+        scores[((ky + dy + reach) as usize) * width_scores + (kx + dx + reach) as usize]
+    };
+    let (left, right) = (get(-1, 0), get(1, 0));
+    let (up, down) = (get(0, -1), get(0, 1));
+    if left.is_nan() || right.is_nan() || up.is_nan() || down.is_nan() {
+        return None;
+    }
+    Some((
+        [
+            kx as f64 + sub(left, peak, right),
+            ky as f64 + sub(up, peak, down),
+        ],
+        peak,
+        peak - rival,
+    ))
+}
+
+/// The five knobs on one line, in the form every other instrument takes them.
+fn knobs_line(fit: &kjerag_render::SeamFit) -> String {
+    format!(
+        "roll:{:.4},yaw:{:.4},pitch:{:.4},cx:{:.3},cy:{:.3}",
+        fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px
+    )
+}
+
+/// What one round of the solve read, kept so the report can say where the
+/// residual is rather than only how big it is.
+struct Displacements {
+    /// Displacement magnitude in output pixels, per kept site.
+    residuals: Vec<(f64, usize, f64)>,
+}
+
+impl Displacements {
+    /// Root mean square displacement over the sites a predicate keeps, and how
+    /// many that was.
+    fn rms(&self, keep: impl Fn(usize, f64) -> bool) -> (f64, usize) {
+        let picked: Vec<f64> = self
+            .residuals
+            .iter()
+            .filter(|(_, lens, past)| keep(*lens, *past))
+            .map(|(size, _, _)| size * size)
+            .collect();
+        match picked.is_empty() {
+            true => (f64::NAN, 0),
+            false => (
+                (picked.iter().sum::<f64>() / picked.len() as f64).sqrt(),
+                picked.len(),
+            ),
+        }
+    }
+}
+
+/// How much each pair of knobs is the same knob, as far as these rows can tell.
+///
+/// The correlation matrix of the fitted parameters: the inverse of the normal
+/// matrix, scaled to unit diagonal. A pair at 0.999 is a pair the data cannot
+/// separate, and reporting each of them with its own small 1 sigma would be a
+/// lie of exactly the kind this whole exercise exists to prevent.
+fn correlated(rows: &[(Vec<f64>, f64)]) -> Option<Vec<Vec<f64>>> {
+    let width = rows.first()?.0.len();
+    let mut normal = vec![vec![0.0; 2 * width]; width];
+    for (basis, _) in rows {
+        for i in 0..width {
+            for j in 0..width {
+                normal[i][j] += basis[i] * basis[j];
+            }
+        }
+    }
+    for (i, row) in normal.iter_mut().enumerate() {
+        row[width + i] = 1.0;
+    }
+    // Gauss-Jordan with partial pivoting.
+    for column in 0..width {
+        let pivot = (column..width)
+            .max_by(|a, b| {
+                normal[*a][column]
+                    .abs()
+                    .partial_cmp(&normal[*b][column].abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(column);
+        normal.swap(column, pivot);
+        let head = normal[column][column];
+        if head.abs() < 1e-18 {
+            return None;
+        }
+        for value in normal[column].iter_mut() {
+            *value /= head;
+        }
+        for row in 0..width {
+            if row == column {
+                continue;
+            }
+            let factor = normal[row][column];
+            if factor == 0.0 {
+                continue;
+            }
+            let pivot_row = normal[column].clone();
+            for (value, above) in normal[row].iter_mut().zip(&pivot_row) {
+                *value -= factor * above;
+            }
+        }
+    }
+    let inverse: Vec<Vec<f64>> = normal.iter().map(|row| row[width..].to_vec()).collect();
+    Some(
+        (0..width)
+            .map(|i| {
+                (0..width)
+                    .map(|j| {
+                        let scale = (inverse[i][i] * inverse[j][j]).sqrt();
+                        match scale > 0.0 {
+                            true => inverse[i][j] / scale,
+                            false => f64::NAN,
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// Fit lens 1's calibration by making our picture land where theirs does.
+///
+/// **The estimator is the same one on a plant and on a real export**, which is
+/// the whole point of the plant: what it recovers is what this can recover.
+/// A patch of the target picture is located in ours by normalized cross
+/// correlation, which is a GEOMETRIC reading and not a photometric one, so
+/// Studio's tone curve, their sharpening and our lack of either divide out of
+/// it. Every kept site's displacement is then written as a linear function of
+/// the eight numbers through the shipped map itself
+/// (`kjerag_render::Reframe`, the shader's own Rust twin) and the stack is
+/// solved by least squares, exactly as `mode=residual` fits the five.
+fn solve(options: &Options) -> Fallible<()> {
+    let (calibration, ours) = frame_at(options, &options.input)?;
+    let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
+    let lenses = options.corrected(
+        std::slice::from_ref(&options.input),
+        &calibration.lenses,
+        frame,
+    );
+    let shape = Shape {
+        width: options.size,
+        height: ((f64::from(options.size) / options.aspect).round() as u32).max(1),
+    };
+    let base = Look {
+        angles: options.view,
+        fov: options.fov,
+        compression: 1.0,
+        panini: options.panini,
+    };
+    println!(
+        "view:   {} fov {:.2}, {}x{}, at yaw {:.3}, pitch {:.3}, roll {:.3} deg (our frame)",
+        match options.panini >= 0.0 {
+            true => format!("panini d {:.2}", options.panini),
+            false => "rectilinear".to_owned(),
+        },
+        options.fov,
+        shape.width,
+        shape.height,
+        options.view[0],
+        options.view[1],
+        options.view[2],
+    );
+
+    // ---------------------------------------------------------- the target
+    let (target, truth, source) = match (&options.plant, &options.against) {
+        (Some(plant), _) => {
+            let truth = Theta {
+                view: options.view,
+                fov: options.fov,
+                fit: *plant,
+            };
+            let target = drawn(&lenses, frame, base, truth, &ours, shape, &options.band);
+            (
+                target,
+                Some(truth),
+                format!(
+                    "A PLANT, not Studio: our own render with {} on lens 1",
+                    knobs_line(plant)
+                ),
+            )
+        }
+        (None, Some(path)) => {
+            let at = options.from - options.lag;
+            let export = export_frame(path, at)?;
+            (
+                export.resampled(shape),
+                None,
+                format!(
+                    "{} at {:.4} s, which is source {:.4} s at lag {:+.5} s \
+                     (PIPELINE CALIBRATION ONLY on the July-14 exports: their \
+                     Stitching Optimization was ON, so their flow is in the picture)",
+                    path.display(),
+                    at,
+                    options.from,
+                    options.lag,
+                ),
+            )
+        }
+        (None, None) => return Err("solve wants plant=<knobs> or against=<export.mp4>".into()),
+    };
+    println!("target: {source}");
+
+    // ------------------------------------------------- the aim, and its gradient
+    // A registration number nobody has watched fall is not a measurement. This
+    // walks the view off the answer in each axis and prints what that costs, so
+    // the reader can see the peak rather than be told there is one.
+    if options.aim {
+        let truth_view = options.view;
+        let at = |view: [f64; 3]| {
+            let picture = drawn(
+                &lenses,
+                frame,
+                base,
+                Theta {
+                    view,
+                    fov: options.fov,
+                    fit: options.start,
+                },
+                &ours,
+                shape,
+                &options.band,
+            );
+            agree(&picture, &target)
+        };
+        println!(
+            "\n{:>9} {:>11} {:>11} {:>11}",
+            "off deg", "yaw", "pitch", "roll"
+        );
+        for off in [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0] {
+            let mut scores = [0.0; 3];
+            for (axis, score) in scores.iter_mut().enumerate() {
+                let mut view = truth_view;
+                view[axis] += off;
+                *score = at(view);
+            }
+            println!(
+                "{off:>9.2} {:>11.5} {:>11.5} {:>11.5}",
+                scores[0], scores[1], scores[2]
+            );
+        }
+        println!(
+            "\nzero-mean normalized cross correlation of our whole picture against the target. \n\
+             the row at 0.00 is the same number three times by construction; every row below it \n\
+             is the cost of aiming wrong by that many degrees about that axis."
+        );
+        return Ok(());
+    }
+
+    // ----------------------------------------------------------- the solve
+    let mut theta = Theta {
+        view: [
+            options.view[0] + options.viewoff[0],
+            options.view[1] + options.viewoff[1],
+            options.view[2] + options.viewoff[2],
+        ],
+        fov: options.fov + options.fovoff,
+        fit: options.start,
+    };
+    println!(
+        "start:  view yaw {:+.3}, pitch {:+.3}, roll {:+.3}, fov {:.3}; lens 1 {}",
+        theta.view[0],
+        theta.view[1],
+        theta.view[2],
+        theta.fov,
+        knobs_line(&theta.fit),
+    );
+    println!(
+        "\n{:>5} {:>7} {:>7} {:>9} {:>9} {:>9} {:>9}",
+        "round", "sites", "rows", "rms px", "lens0 px", "lens1 px", "seam px"
+    );
+
+    let du = 1.0 / f64::from(shape.width);
+    let dv = 1.0 / f64::from(shape.height);
+    let mut last = None;
+    let mut errors = vec![f64::NAN; SOLVED];
+    let mut correlations: Option<Vec<Vec<f64>>> = None;
+    for round in 0..=options.rounds {
+        // The search shrinks once the first round has taken out the bulk: a
+        // wide search is what finds a two degree error and a narrow one is
+        // what stops a repeating texture from being found in the wrong place.
+        let search = match round {
+            0 => options.search,
+            _ => (options.search / 3).max(3),
+        };
+        let picture = drawn(&lenses, frame, base, theta, &ours, shape, &options.band);
+        let build = |t: Theta| {
+            (
+                t.look(base),
+                Reframe::new(
+                    &t.fit.applied(&lenses),
+                    frame,
+                    Camera::default(),
+                    Held {
+                        body_from_world: orientation(t.view),
+                        rolling: None,
+                    },
+                    1.0,
+                    false,
+                    Sampling::default(),
+                ),
+            )
+        };
+        let here = build(theta);
+        let steps: Vec<((Look, Reframe), (Look, Reframe))> = (0..SOLVED)
+            .map(|k| {
+                (
+                    build(theta.nudged(k, -KNOB_STEPS[k])),
+                    build(theta.nudged(k, KNOB_STEPS[k])),
+                )
+            })
+            .collect();
+        // The ray comes out of THIS theta's own projection, so a step in the
+        // view's field of view moves the landing exactly as a step in a lens
+        // pose does, and the two are solved side by side.
+        let land = |at: &(Look, Reframe), uv: [f64; 2], lens: usize| -> Option<[f64; 2]> {
+            let ray = at.0.ray(uv, shape.aspect());
+            let (_, landings) = Weighting::Shipped.bent(&at.1, ray, &options.band);
+            landings[lens].inside.then(|| {
+                [
+                    f64::from(landings[lens].pixel[0]),
+                    f64::from(landings[lens].pixel[1]),
+                ]
+            })
+        };
+
+        let stride = (shape.width as usize / options.sites).max(1);
+        let mut rows: Vec<(Vec<f64>, f64)> = Vec::new();
+        let mut reading = Displacements {
+            residuals: Vec::new(),
+        };
+        let mut sites = 0usize;
+        let margin = options.patch + search + 2;
+        let mut y = margin;
+        while y + margin < shape.height as usize {
+            let mut x = margin;
+            while x + margin < shape.width as usize {
+                let at = [x, y];
+                x += stride;
+                let uv = [(at[0] as f64 + 0.5) * du, (at[1] as f64 + 0.5) * dv];
+                let ray = here.0.ray(uv, shape.aspect());
+                let (weights, _) = Weighting::Shipped.bent(&here.1, ray, &options.band);
+                let lens = usize::from(weights[1] > weights[0]);
+                // A site the two lenses share is not a site: the content there
+                // is a blend of two displacements and a correlation finds
+                // neither of them.
+                if weights[lens] < 0.999 {
+                    continue;
+                }
+                let past = past_seam(&here.1, ray);
+
+                let Some(right) = land(&here, [uv[0] + du, uv[1]], lens) else {
+                    continue;
+                };
+                let Some(left) = land(&here, [uv[0] - du, uv[1]], lens) else {
+                    continue;
+                };
+                let Some(down) = land(&here, [uv[0], uv[1] + dv], lens) else {
+                    continue;
+                };
+                let Some(up) = land(&here, [uv[0], uv[1] - dv], lens) else {
+                    continue;
+                };
+                let a = [
+                    [(right[0] - left[0]) / 2.0, (down[0] - up[0]) / 2.0],
+                    [(right[1] - left[1]) / 2.0, (down[1] - up[1]) / 2.0],
+                ];
+                let determinant = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+                if determinant.abs() < 1e-9 {
+                    continue;
+                }
+                let inverse = [
+                    [a[1][1] / determinant, -a[0][1] / determinant],
+                    [-a[1][0] / determinant, a[0][0] / determinant],
+                ];
+                let mut jacobian = [[0.0; SOLVED]; 2];
+                let mut whole = true;
+                for k in 0..SOLVED {
+                    let (Some(minus), Some(plus)) =
+                        (land(&steps[k].0, uv, lens), land(&steps[k].1, uv, lens))
+                    else {
+                        whole = false;
+                        break;
+                    };
+                    let b = [
+                        (plus[0] - minus[0]) / (2.0 * KNOB_STEPS[k]),
+                        (plus[1] - minus[1]) / (2.0 * KNOB_STEPS[k]),
+                    ];
+                    // A landing moved by b makes the content at this pixel the
+                    // content that was b away, so the picture moves by -A^-1 b.
+                    jacobian[0][k] = -(inverse[0][0] * b[0] + inverse[0][1] * b[1]);
+                    jacobian[1][k] = -(inverse[1][0] * b[0] + inverse[1][1] * b[1]);
+                }
+                if !whole {
+                    continue;
+                }
+
+                let Some((shift, peak, margin_over_rival)) =
+                    correlate_patch(&target, &picture, shape, at, options.patch, search)
+                else {
+                    continue;
+                };
+                if peak < options.floor || margin_over_rival < 0.03 {
+                    continue;
+                }
+                sites += 1;
+                reading
+                    .residuals
+                    .push((shift[0].hypot(shift[1]), lens, past));
+                // The picture has to move by -shift to land on the target.
+                rows.push((jacobian[0].to_vec(), -shift[0]));
+                rows.push((jacobian[1].to_vec(), -shift[1]));
+            }
+            y += stride;
+        }
+
+        let (whole, _) = reading.rms(|_, _| true);
+        let (zero, at_zero) = reading.rms(|lens, _| lens == 0);
+        let (one, at_one) = reading.rms(|lens, _| lens == 1);
+        let (seam, at_seam) = reading.rms(|_, past| past.abs() < 8.0);
+        println!(
+            "{round:>5} {sites:>7} {:>7} {whole:>9.4} {zero:>9.4} {one:>9.4} {seam:>9.4}",
+            rows.len(),
+        );
+        if at_zero == 0 || at_one == 0 {
+            println!(
+                "\nREFUSED: {at_zero} sites on lens 0 and {at_one} on lens 1. A view that \n\
+                 does not carry both lenses cannot separate the view's own pose from lens 1's \n\
+                 correction, and a number fitted here would be the two of them added together. \n\
+                 ({at_seam} sites within 8 degrees of the seam.)"
+            );
+            return Ok(());
+        }
+        last = Some((whole, zero, one, seam, at_zero, at_one, at_seam, sites));
+
+        if round == options.rounds {
+            break;
+        }
+        // See Options::damp: this is what stops a straight-down view from
+        // being a singular matrix rather than an answer.
+        for k in 0..SOLVED {
+            let mut basis = vec![0.0; SOLVED];
+            basis[k] = options.damp / KNOB_STEPS[k];
+            rows.push((basis, 0.0));
+        }
+        let Some(fit) = least_squares(&rows) else {
+            println!(
+                "\nREFUSED: the normal equations are singular on {} rows",
+                rows.len()
+            );
+            return Ok(());
+        };
+        errors = fit.errors.clone();
+        correlations = correlated(&rows);
+        let step: Vec<f64> = (0..SOLVED)
+            .map(|k| fit.params[k].clamp(-KNOB_CAPS[k], KNOB_CAPS[k]))
+            .collect();
+        theta = theta.shifted(&step);
+    }
+
+    // ---------------------------------------------------------- the answer
+    println!(
+        "\n{:<12} {:>11} {:>11} {:>11} {:>9}",
+        "knob", "solved", "planted", "error", "1 sigma"
+    );
+    let mut worst = 0.0_f64;
+    for k in 0..SOLVED {
+        let got = theta.get(k);
+        match truth {
+            Some(truth) => {
+                let want = truth.get(k);
+                let off = got - want;
+                if k >= 4 {
+                    worst = worst.max(off.abs());
+                }
+                println!(
+                    "{:<12} {got:>11.4} {want:>11.4} {off:>+11.4} {:>9.4}  {}",
+                    KNOB_NAMES[k], errors[k], KNOB_UNITS[k],
+                );
+            }
+            None => println!(
+                "{:<12} {got:>11.4} {:>11} {:>11} {:>9.4}  {}",
+                KNOB_NAMES[k], "-", "-", errors[k], KNOB_UNITS[k],
+            ),
+        }
+    }
+    if let Some((whole, _, _, seam, at_zero, at_one, at_seam, sites)) = last {
+        println!(
+            "\nresidual {whole:.4} px rms over {sites} sites ({at_zero} on lens 0, \
+             {at_one} on lens 1, {at_seam} within 8 deg of the seam at {seam:.4} px rms)"
+        );
+    }
+    if let Some(truth) = truth {
+        let mut angle = 0.0_f64;
+        let mut point = 0.0_f64;
+        for k in 4..SOLVED {
+            let off = (theta.get(k) - truth.get(k)).abs();
+            match k < 7 {
+                true => angle = angle.max(off),
+                false => point = point.max(off),
+            }
+        }
+        println!(
+            "PLANT: lens 1's three angles recovered to {angle:.4} deg and its principal \n\
+             point to {point:.3} px of what was planted. The view's own three are nuisance \n\
+             and are not scored."
+        );
+    }
+
+    // What the numbers above are allowed to be read as, one knob at a time.
+    if let Some(correlations) = &correlations {
+        println!(
+            "\ncorrelation between the five calibration knobs, as these sites constrain them:"
+        );
+        print!("{:<12}", "");
+        for name in KNOB_NAMES.iter().skip(4) {
+            print!(" {name:>11}");
+        }
+        println!();
+        for (name, row) in KNOB_NAMES.iter().zip(correlations).skip(4) {
+            print!("{name:<12}");
+            for value in row.iter().skip(4) {
+                print!(" {value:>11.4}");
+            }
+            println!();
+        }
+        let mut worst: Option<(f64, usize, usize)> = None;
+        for (i, row) in correlations.iter().enumerate().skip(4) {
+            for (j, value) in row.iter().enumerate().skip(i + 1) {
+                if worst.is_none_or(|(seen, _, _)| value.abs() > seen.abs()) {
+                    worst = Some((*value, i, j));
+                }
+            }
+        }
+        if let Some((value, i, j)) = worst {
+            println!(
+                "\nconditioning: of the five, this view separates {} and {} least, at {value:+.4}. \n\
+                 A pair past about 0.99 is one number wearing two names: their combination is \n\
+                 measured and each of them on its own is not, whatever the 1 sigma column says. \n\
+                 That is why the match criterion in docs/research/parity-protocol.md is the \n\
+                 residual and the picture and not the five knobs. The view's own three angles \n\
+                 are exactly degenerate at a straight-down aim (yaw and roll are one rotation \n\
+                 there) and are damped rather than solved; they are nuisance either way.",
+                KNOB_NAMES[i], KNOB_NAMES[j],
+            );
+        }
+    }
+
+    // ------------------------------------------------------- what to look at
+    if let Some(out) = &options.out {
+        let picture = drawn(&lenses, frame, base, theta, &ours, shape, &options.band);
+        let difference: Vec<f64> = picture
+            .iter()
+            .zip(&target)
+            .map(|(a, b)| match *a > 0.0 && *b > 0.0 {
+                true => 128.0 + (a - b) * 4.0,
+                false => 0.0,
+            })
+            .collect();
+        write_gray(&target, shape, &out.join("theirs.png"))?;
+        write_gray(&picture, shape, &out.join("ours.png"))?;
+        write_gray(&difference, shape, &out.join("difference-4x.png"))?;
+        println!(
+            "wrote {}/theirs.png, ours.png and difference-4x.png (the difference is \
+             amplified 4x about mid grey)",
+            out.display(),
+        );
+    }
+    Ok(())
+}
+
+/// A rectangular luma picture, written where it can be looked at.
+fn write_gray(luma: &[f64], shape: Shape, path: &Path) -> Fallible<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let pixels: Vec<u8> = luma.iter().map(|c| c.clamp(0.0, 255.0) as u8).collect();
+    let mut png = png::Encoder::new(
+        std::io::BufWriter::new(std::fs::File::create(path)?),
+        shape.width,
+        shape.height,
+    );
+    png.set_color(png::ColorType::Grayscale);
+    png.set_depth(png::BitDepth::Eight);
+    png.write_header()?.write_image_data(&pixels)?;
+    Ok(())
+}
+
 /// Mean squared gradient over the pixels whose distance from the seam falls in
 /// `band`.
 /// How many pixels the statistic above was taken over.
@@ -2098,9 +3027,9 @@ impl Export {
     }
 }
 
-fn export_frame(path: &Path, options: &Options) -> Fallible<Export> {
+fn export_frame(path: &Path, from: f64) -> Fallible<Export> {
     let probe = ffprobe_size(path)?;
-    let mut walk = Walk::open(path, options.from, Size::new(probe.width, probe.height))?;
+    let mut walk = Walk::open(path, from, Size::new(probe.width, probe.height))?;
     let pair = walk
         .next_pair()?
         .ok_or("no frame decoded from the export")?;
