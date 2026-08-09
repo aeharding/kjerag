@@ -1064,3 +1064,281 @@ a nuisance to that form: it is its input, and it is measured to be real at the
 instant the correction is applied. The thing this table forbids is the *other*
 way of reaching local support, which is to fit and store one.
 
+---
+
+## M-8. The oracle, read for its SHAPE (owner steer, and the new pair)
+
+The owner supplied a second on/off pair mid-run,
+`~/Videos/studio_onoff/chromatic_calbration_2/{off,on}.jpg` (his spelling), and
+ruled that Studio's correction is seam-line aware. Both pairs are now the oracle
+set. The instrument is **`crates/spike/src/bin/oracle.rs`**, `--bin oracle`, and
+it reads a pair through the same ffmpeg rgb24 pipe `--bin colour`'s `studio`
+mode uses.
+
+```sh
+./target/release/oracle ~/Videos/studio_onoff/chromatic_calibration   tag=pair1 out=scratch/oracle places=11
+./target/release/oracle ~/Videos/studio_onoff/chromatic_calbration_2  tag=pair2 out=scratch/oracle places=11
+```
+
+### M-8.0 A premise this run had to refuse first
+
+**Neither pair is an equirectangular export.** 3840x2160 is 16:9 and a whole
+equirect is 2:1; both are Studio **reframed wide views**, of two different
+scenes on two different flights. So "one column is 360/3840 degrees" is the
+scale of nothing here, and every width measured in picture pixels is measured
+in a unit that changes along the seam. The instrument therefore fits the
+projection to the seam itself under the one thing a seam is known to be, **a
+great circle**, and scores the fit in pixels rather than in angle - an angular
+score is degenerate and the first version of it duly chose a focal length of
+845 000 px and reported a seam a third of a degree long.
+
+Pair 1 fits stereographic at f = 674.4 px, 8.9 px rms over a 229.8 degree arc,
+and the focal is identified (122.0 px rms at half f, 62.4 at twice). **Across
+that arc the scale runs 38.6, 11.8 and 42.2 pixels per degree: it varies by
+3.6 times inside one picture.** Pair 2's reframe barely stretches, 29.0 to 32.8
+px/deg, 13 percent, and it is the control that makes the next section an
+argument rather than an assertion.
+
+### M-8.1 Both pairs are clean single-variable A/Bs, with their own floors
+
+Far-field blocks more than 40 degrees from the fitted seam, bucketed by their
+own brightness so the ends are never pooled. Pair 2, ON over OFF: **1.0002 to
+0.9976** across four brightness buckets from 34 to 94 codes; worst single block
+1.40 codes over 142 blocks. Pair 1 re-measured the same way: worst 0.82 codes
+over 192 blocks. Away from the seam Studio changes nothing, on both.
+
+JPEG noise, re-measured: pair 1 **32.4 percent** of pixels bit-identical, sd
+2.01 / 1.34 / 1.93 codes, which reproduces section 2's 32 percent and 2.2 / 1.3
+/ 2.0. Pair 2 is a quieter encode: 61.8 percent identical, sd 1.19 / 1.23 / 1.55.
+
+**The instrument's own floor**, which every amplitude below is judged against,
+is the DECOY: the real pair read about a great circle a quarter turn from the
+seam, same machinery, where there is no handover. **0.886 codes rms on pair 1,
+0.779 on pair 2.** An azimuth gets a verdict only if its peak clears four times
+that.
+
+### M-8.2 O1: the correction is ODD about the line, and cancels ON it
+
+Three rival definitions of "the line" are traced independently and each is fitted
+with its own great circle. On pair 1 the **zero crossing** fits to 8.9 px and the
+**dark line** - the minimum of `|ON - OFF|` - fits to 9.8 px, and **those two
+great circles are 0.09 degrees apart over the whole 229.8 degree arc**. Two
+independent features of the difference, traced separately across the picture, are
+the same plane through the camera to about one pixel.
+
+| | pair 1 | pair 2 |
+| --- | --- | --- |
+| even energy over odd, projected profile | 0.003 to 0.023 | 0.009 to 0.107 |
+| correlation with its own negated mirror | 0.918 to 0.972 | 0.875 to 0.980 |
+| zero crossing offset from the fitted line | -0.15 to +0.49 deg (-3 to +7 px) | -0.45 to +0.11 deg (-14 to +3 px) |
+| `\|d\|` at the line over `\|d\|` at the larger lobe | 0.043 to 0.29 | 0.024 to 0.224 |
+
+**O1 PASSES.** The even part carries 0.3 to 4 percent of the odd part's energy on
+pair 1; the change is odd about a line placed by a two-parameter global fit, to
+within a few pixels; and the size of the change has a **deep minimum** at that
+line rather than a maximum, everywhere on both pairs.
+
+That is the algebraic fingerprint of an antisymmetric source-matching correction
+under a crossfade, and it is the fingerprint because of what it cancels:
+`(l0 + d)/2 + (l1 - d)/2` is the uncorrected average wherever the mix is 50/50,
+which is on the line. **Viewed** and not just tabulated: `pair1-size.png` is the
+amplified `|ON-OFF|` with the fitted circle drawn on it, and it is a broad bright
+band running corner to corner with a **sharp black line down its exact centre**,
+the red circle lying on that black line the whole way across; the band is
+visibly wider in pixels at the ends than in the middle. `pair1-signed.png` shows
+the far field as flat grey with no structure anywhere, green above the line and
+pink below at the dirt end, **reversing** to orange above and blue below at the
+sky end, which is section 2.3's hue turn seen rather than tabulated.
+
+### M-8.3 O2: THE DISCRIMINATOR. It collapses, and it collapses in DEGREES
+
+Each azimuth's odd profile normalized by its own peak, then compared on three
+axes. The rms spread of the normalized curves about their own mean:
+
+| | pair 1 (scale varies 3.6x) | pair 2 (scale varies 13%) |
+| --- | ---: | ---: |
+| on the **degree** axis | **0.0650** | **0.0601** |
+| on the **pixel** axis | 0.2221 | 0.0664 |
+| on each curve's own width, the floor of the comparison | 0.0642 | 0.0533 |
+| 1/e half-width, degrees | 13.60 to 19.78, mean **16.65**, sd 11% | 12.78 to 15.15, mean **14.27**, sd 6% |
+| half-max half-width, degrees | 11.85 to 17.05, mean **13.30**, sd 12% | 10.75 to 12.93, mean **11.82**, sd 6% |
+| the same half-max width, **pixels** | 144.7 to 470.8, sd **44%**, factor **3.25** | 313.7 to 384.0, sd 6% |
+
+**VERDICT: FIXED SHAPE times VARYING AMPLITUDE, and the fixed axis is the
+camera's own angle.** On pair 1 the degree-axis spread (0.0650) is equal to the
+floor of the comparison (0.0642) and 3.4 times better than the pixel axis
+(0.2221); the pixel widths vary by 3.25 times and the angular widths by 1.44,
+and the ratio between those is the reframe's own 3.6x scale variation. Pair 2 is
+the control: its reframe barely stretches, so degrees and pixels agree there
+(0.0601 against 0.0664) exactly as they must if the axis is what makes the
+difference. **Viewed:** `pair1-profiles.png` has ten normalized curves lying on
+top of each other - a near-vertical rise through zero at the line, a peak three
+to seven degrees out, a long decay to zero by thirty - with one black outlier
+that wanders, and the outlier is the azimuth that crosses the pilot's own body.
+
+Two different scenes and two different exports give half-max half-widths of
+**13.30 and 11.82 degrees**. The kernel is about **12 to 13 degrees of
+half-width, reaching zero by 30 degrees**.
+
+**The owner's observation is right about pixels and wrong about the sphere.**
+"Doesn't seem to be a fixed distance from the seam" is exactly what a fixed
+angular kernel looks like on a render whose scale changes 3.6 times along the
+seam: 145 px wide at one end and 471 px at the other.
+
+Amplitude, by contrast, varies enormously and that is where the along-seam
+freedom lives: 4.88 codes on 29-code dirt (**16.9 percent**) at one end and 0.83
+to 3.47 codes on 155 to 188 code sky (**0.5 to 2.1 percent**) at the other, with
+the hue axis walking from +0.72/+0.29/+0.63 (R and B together against G) to
+-0.75/-0.36/+0.55 (R against B). Section 2.3, re-measured on a fitted sphere.
+
+### M-8.4 O3: half answered, and the half it cannot answer is said plainly
+
+The symmetric-split half passes: the two lobes of the correction are the same
+size, min over max **0.80 worst and 0.92 mean on pair 1**, 0.54 and 0.80 on
+pair 2.
+
+The bound half is **not settleable from a stitched output and is not claimed**.
+`l1 - l0` is not in the file: both frames are already crossfaded, and because
+the support is a dozen degrees wide there is no band that is both outside the
+correction and still one piece of scene. The instrument prints the scene's own
+slope beside every step it measures and that column is what refuses the
+question: on pair 1's azimuth 294.4 the apparent step is 38 codes on a scene
+slope of 2.5 codes per degree. No ratio of correction to disagreement is
+reported, and none should be quoted from these files.
+
+### M-8.5 Controls
+
+- **NULL**, OFF against OFF through the same code path: profile rms **0.00000**,
+  largest value 0.00000, both pairs.
+- **DECOY**, the real pair about a circle a quarter turn away: 0.886 and 0.779
+  codes rms. That is JPEG noise plus scene gradient with no handover in it, and
+  it is the floor every amplitude is judged against.
+- **PLANT**, a known odd lobe of 6.0 codes peak and 1.50 degrees width added to
+  R in a copy of OFF, about a circle **tilted 5 degrees off the real seam** so
+  the tracer has to find it rather than be told: recovered at **6.000 codes**,
+  peak at 1.436 against 1.500 planted, 1/e at 3.125 against 3.188, even/odd
+  energy **0.000**, and the tracer's circle 0.20 degrees from the planted one and
+  5.00 from the real seam. The width rows check the decay RULE and not only the
+  reading, because 2.125 and 1.925 are the planted lobe's own algebra.
+
+---
+
+## M-9. What the seam-local field's estimator needs, and what refuses it
+
+The memo above pre-registered a GO/REFUSED on a constant per lens. The owner's
+mid-run steer replaced that question, so this section answers the one he asked
+instead: **what the seam-local estimator needs, component by component, with a
+measurement behind each and the stage-8 discipline stated as the gates it has to
+clear.**
+
+### M-9.1 The recommendation
+
+**GO, on the seam-local source-matching form, and REFUSED on both alternatives
+that were live before this run.** Specifically:
+
+| component | what the measurements say | which |
+| --- | --- | --- |
+| **the form** | local antisymmetric source matching, each lens pulled toward the local weighted mean before the mix | O1 (odd about the line, cancels ON it, deep minimum in `\|d\|`) plus M-7 (a stored per-direction table goes stale in minutes) |
+| **the DC term** | keep one. B-G is -0.006 to -0.022 ln on all eight instants and 50 to 56 percent of the ring's variance on the strongest four. R-G carries no stable DC and should not get one | M-1.4, M-1.5 |
+| **the spreading rule** | a FIXED ANGULAR kernel, about 12 to 13 degrees half-width, zero by 30, measured from the seam great circle. All the along-seam freedom goes into the AMPLITUDE. Never measure or apply a width in output pixels | M-8.3 |
+| **the transfer function** | gain AND offset, and the offset is the bigger half: it wins 23 of 24 channel fits and offset-alone beats gain-alone on 19 of 24, at 2 to 7 codes, not one-signed across flights | M-2 |
+| **the weighting** | `lit` squared for any pooled term. The fork does not decide, and the reason is that its whole disagreement is the dark half's own noise | M-3 |
+| **the refusal rule** | 4.3's change is required, not optional. The pass pools 0.1 to 13 percent of the ring; the directions it reads nothing on agree with it to 0.002 to 0.007 ln | M-5 |
+| **the temporal class** | the tone gain's: a first-order ease at `TAU_GAIN_S`, no events, no states, no thresholds, a seek re-seeds | M-6 |
+| **the guard** | `LIMIT_CHROMA_LN = 0.19`, from the widest fit over the corpus times four. 0.087 if the estimator uses `lit` squared alone | M-4 |
+
+### M-9.2 The two things this run refuses
+
+**A constant per lens as the build target: REFUSED, and demoted.** It reaches
+about half of one chroma coordinate and none of the other (M-1.5), it changes
+both hemispheres where Studio changes nothing away from the seam (section 2.4,
+now confirmed on a second pair at M-8.1), and the residue it cannot reach is the
+same size as the part it can. It survives as **the DC term of the field**, which
+is where the steer put it.
+
+**A per-direction field fitted and stored: REFUSED, on a measurement rather than
+on memory.** M-7 is the number stage 8 never had: the same body-frame directions
+read minutes apart in the same file correlate at only r +0.13 to +0.70, and on
+two of eight captures the blue-amber structure does not persist at all. Fitting
+and holding a table paints the previous minute's scene along each direction's
+whole sweep. **This is not the same refusal as "local support is too free."**
+Local support estimated from the current frame is fine; local support estimated
+over time and stored is what the owner rejected.
+
+### M-9.3 Why source matching is the form the evidence points at
+
+Four measurements converge and none of them was taken looking for this.
+
+1. **O1's dark line.** The correction cancels exactly on the handover line and
+   peaks in the flanks. `(l0 + d)/2 + (l1 - d)/2` is the uncorrected average at
+   50/50, and that is the only reason a correction would have a minimum where
+   the defect is largest. Even-over-odd energy 0.003 to 0.023 on pair 1.
+2. **The bound comes for free.** A correction whose value is half the local
+   disagreement it just measured cannot exceed what it measured. Stage 8's
+   additive per-direction field had no such bound and that is how it painted
+   noise. M-7 says the local disagreement is real at the instant it is read
+   (96 to 100 percent of the azimuth-to-azimuth spread survives the noise
+   correction), which is exactly the input this form needs and the input a
+   stored table does not have.
+3. **The support is the band by construction.** A correction applied to each
+   lens's contribution inside the mix cannot reach outside the mix, so "zero at
+   both frame corners" is structural rather than a fitted rolloff. Studio's own
+   kernel is wider than our crossover - 12 to 13 degrees of half-width against
+   our 4-degree half-crossover - so the widths are a design question and the
+   SHAPE is settled.
+4. **It is the one form that carries M-2's offset without a family change.**
+   Pulling a lens toward a local mean is neither multiplicative nor additive in
+   the abstract; it is whatever the local disagreement is, in codes. M-2 says
+   the disagreement is 2 to 7 codes of offset plus a small gain, and a
+   source-matching correction expressed in codes reproduces both without being
+   told which it is.
+
+### M-9.4 The gates the build must clear, restated for the new form
+
+Section 6's list stands, with three changes this run forces.
+
+- **Gate 2 grows teeth it did not have.** Per-channel interior coherence is now
+  a real instrument (M-0.1) and a chroma-only stripe no longer reads zero on it.
+  A seam-local field is far more able to stripe than a constant was, so the
+  P.1 caveat that made gate 2 "structural and worth nothing as evidence" for a
+  constant **no longer applies**: for this form the gate is live evidence and it
+  is the one the owner's rejection was about. Bar: main's class, ROUGH under
+  about 0.03 percent, **in all four channels**, with the per-channel plants
+  beside it.
+- **A new gate, from M-7: the estimator must hold no per-direction state.** If
+  the build stores a per-azimuth chroma table and smooths it over time, M-7 says
+  what it will paint. The check is mechanical rather than statistical: the term
+  applied at a direction must be a function of the current frame's decoded
+  planes at that direction and of pooled quantities, and of nothing carried
+  per-direction across frames except through the DC.
+- **Gate 4 gets its number.** Hard mode was "OPEN, unmeasured". It is measured
+  now: B-G -0.0196 ln at 5.5 se, DC accounting for 38 percent, per-direction
+  structure the largest in the corpus at 0.11 ln, cross-place agreement the
+  weakest at r +0.13, **and a correlated far field of ONE direction**. Hard mode
+  is where a pooled estimator has almost no evidence and a local one has all of
+  it, and it stays registered as the falsifier.
+
+### M-9.5 What is still open, and what is owed to the owner
+
+- **The kernel's width is Studio's, not ours.** 12 to 13 degrees of half-width
+  is measured on their render; nothing here says our own handover wants the
+  same. Our crossover is 8 degrees wide in total. Whether the correction's
+  support should match the mix or exceed it is unmeasured and is a build
+  decision with an owner-visible consequence.
+- **O3's bound is not measurable from a stitched output** (M-8.4). It is
+  measurable on our own two lenses, and that measurement belongs in the build's
+  first increment rather than in this phase.
+- **The far-field question from section 8.7 is now sharper, not softer.**
+  Studio changes nothing more than about 1.4 codes anywhere away from the seam,
+  on both pairs, and a source-matching correction inside the band changes
+  nothing outside it either - so this form does NOT carry the accepted tradeoff
+  the constant model did. If a DC term is added on top of the local field, it
+  does. **That is the owner question**, and it should be put to him as: the
+  local field alone leaves each hemisphere's own colour untouched, and a DC term
+  moves both by half the split to make them agree. Studio does the first.
+- **The dark half of the ring does not support a per-direction reading at this
+  instrument's precision** (M-3, M-7's `within` of 0.027 to 0.051 ln). More
+  samples per reading, not a different weight. If the build's estimator reads
+  the band's own 441 samples per direction it inherits this; a longer patch or
+  frame pooling before direction pooling is the way out.
+
