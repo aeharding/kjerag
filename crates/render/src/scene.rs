@@ -40,6 +40,7 @@ use kjerag_meta::{
 
 use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
+use super::chromatic;
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Correction, Harvest, SeamFit};
@@ -1272,6 +1273,11 @@ struct Band {
     /// The along-seam field fitted over the whole ring, dispatched beside the
     /// exposure pooling and over the same cells (issue #103, stage 5).
     pool_along: wgpu::ComputePipeline,
+    /// The chromatic field pooled over the ring's per-channel readings
+    /// (issue #103, stage 10). Only ever dispatched with the arm on
+    /// (`chromatic::arm`), so with it off the field keeps the zero the
+    /// buffer was created with and the draw's lookup answers by equality.
+    pool_chroma: wgpu::ComputePipeline,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1304,12 +1310,14 @@ impl ScenePipeline {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
             // In dependency order, so nothing is used before it is declared:
-            // the map and its uniform block, then the band's lookup into it,
-            // then the sampling, then this file's own entry points.
+            // the map and its uniform block, then the chromatic correction's
+            // pure functions, then the band's lookup into both, then the
+            // sampling, then this file's own entry points.
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{}\n{}\n{SHADER}",
+                    "{}\n{}\n{}\n{}\n{SHADER}",
                     projection::wgsl(),
+                    chromatic::wgsl(),
                     band::lookup_wgsl(),
                     sampling::wgsl(),
                 )
@@ -1409,9 +1417,15 @@ impl ScenePipeline {
         else {
             return;
         };
-        let Some(watch) = self.band.aged(view.frames.timestamp) else {
+        let Some(mut watch) = self.band.aged(view.frames.timestamp) else {
             return;
         };
+        // The chromatic arm, read once per process off KJERAG_CHROMATIC and
+        // carried to the pass in its own uniform (issue #103, stage 10). OFF
+        // is a zero the shader tests before any of stage 10's work runs, and
+        // the pooling below is then never dispatched at all, so the field
+        // keeps the zero the buffer was created with.
+        watch.chromatic = chromatic::arm();
         queue.write_buffer(&self.band.watch, 0, watch.bytes());
         let mut encoder = device.create_command_encoder(&Default::default());
         // Only ever more than one under `band_repeats`, and then each in a pass
@@ -1447,6 +1461,14 @@ impl ScenePipeline {
             }
             pass.set_pipeline(&self.band.pool_along);
             pass.dispatch_workgroups(1, 1, 1);
+            // After `pool`, in the same pass and therefore ordered behind it:
+            // the chromatic field takes the tone the draw will apply out of
+            // its differences, so it has to read the gain this frame just
+            // pooled (issue #103, stage 10).
+            if watch.chromatic != 0.0 {
+                pass.set_pipeline(&self.band.pool_chroma);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
         }
         queue.submit([encoder.finish()]);
     }
@@ -1782,9 +1804,17 @@ impl Band {
             label: Some("band"),
             // The same map the draw runs, so the band correlates directions
             // through the calibration the picture is drawn with rather than
-            // through a second copy of it.
+            // through a second copy of it - and the same chromatic emission,
+            // so the estimator converts its means through the very arithmetic
+            // the draw's lookup spreads them back out with.
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{}", projection::wgsl(), band::wgsl()).into(),
+                format!(
+                    "{}\n{}\n{}",
+                    projection::wgsl(),
+                    chromatic::wgsl(),
+                    band::wgsl()
+                )
+                .into(),
             ),
         });
         let layout = band_layout(device);
@@ -1807,6 +1837,7 @@ impl Band {
         let pipeline = compute("measure");
         let pool = compute("pool");
         let pool_along = compute("pool_along");
+        let pool_chroma = compute("pool_chroma");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1847,6 +1878,7 @@ impl Band {
             pipeline,
             pool,
             pool_along,
+            pool_chroma,
             state,
             watch,
             group,
@@ -2138,7 +2170,7 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 // `textureSample` computes its own level from derivatives and needs uniform
 // control flow to do it, and every one of these textures has a single level
 // anyway.
-fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
+fn picture(mix: Blend, ratio: vec2<f32>, ray: vec3<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
   // What the two lenses' exposures have to be brought together by, split
@@ -2154,6 +2186,18 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   if mix.weights[1] > 0.0 {
     rgb += (mix.weights[1] * tone.y) * ycbcr(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
     total += mix.weights[1];
+  }
+  // The chromatic seam correction (issue #103, stage 10): each lens pulled
+  // toward the local per-channel mean of the two, half the field each, equal
+  // and opposite - which through the normalized weights is one line, because
+  // `w0 * (+p) + w1 * (-p)` is `(w0 - w1) * p`. Zero at the 50/50 line by
+  // that same arithmetic whatever the field holds, which is the oracle's
+  // dark-line fingerprint; zero past thirty degrees by the kernel inside
+  // `chromatic_half`; and zero EVERYWHERE by equality with the arm off,
+  // where the early-out returns before this expression exists.
+  let pull = chromatic_half(ray);
+  if any(pull != vec3<f32>(0.0)) {
+    rgb += (mix.weights[0] - mix.weights[1]) * pull;
   }
   // The room around the ball, written rather than painted: transparent black,
   // which through the pass's premultiplied blend leaves what is under the
@@ -2267,7 +2311,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[0].pixel),
     texel_ratio(mix.landings[1].pixel),
   );
-  let lens = picture(mix, ratio);
+  let lens = picture(mix, ratio, look.xyz);
   return vec4<f32>(
     select(lens.rgb, linearize(lens.rgb), reframe.linearize > 0.5),
     lens.a,

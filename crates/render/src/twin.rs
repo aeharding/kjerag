@@ -121,7 +121,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 /// A Vulkan device with nothing on it, or why there is none.
-fn gpu() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
+pub(crate) fn gpu() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
