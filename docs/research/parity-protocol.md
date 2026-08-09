@@ -450,3 +450,247 @@ the failure is written down here instead.
 `scripts/research/register.sh`, and `--bin seam` modes `register` and `solve`
 on branch `research/parity-proof`. Outputs land in gitignored `scratch/`: they
 are frames of somebody's real flights and this repo is public.
+
+## 10. THE REAL RUN, 2026-08-09 — the result
+
+Two exports of `VID_20260501_183417_00_002.insv`, made with **Stitching
+Optimization OFF, Direction Lock OFF, Chromatic Calibration ON**, both 3840 x
+2160 at 30 fps and 176.6 s long, both told **FOV 60, Distortion 0, roll 0**.
+Run by `scripts/research/real.sh` at `a0366bd` and the reported answer at
+`c8c8e7f`; every output quoted is in gitignored `scratch/real/`.
+
+Nothing in sections 1 to 9 was changed after the data arrived. What follows is
+that criterion applied.
+
+### THE VERDICT: (b) NOT REPRODUCIBLE
+
+The solved residual is **3.92 to 12.39 px rms at the export's own pixel
+scale** against a criterion of 1.0, at every geometry, and the solved
+calibration beats the shipped factory one by **0.83x to 2.06x** against a
+criterion of 3x. It is not close and it is not a near miss dressed as one.
+
+| aim | instant | sites | near seam | azimuth | **solved px** | **factory px** | ratio |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| building | 160 s | 615 | 187 | 185.8 deg | **3.9173** | 8.0523 | 2.06x |
+| building | 55 s | 424 | 117 | 271.2 deg | **7.9601** | 11.2575 | 1.41x |
+| horizon | 160 s | 548 | 85 | 139.3 deg | **6.7069** | 5.5676 | **0.83x** |
+| horizon | 55 s | 268 | 62 | 315.3 deg | **12.3902** | 14.2736 | 1.15x |
+
+Three of criterion 3(a)'s four clauses pass everywhere — 268 to 615 kept sites
+against 100, 62 to 187 within 8 degrees of the seam against 40, and 139 to 315
+degrees of seam azimuth against 60. The fourth fails by a factor of four to
+twelve. Criterion 3(b) fails at all four, and at horizon 160 s the solved arm
+is **worse** than the factory one, which is the solver saying it had nothing to
+fit: that view keeps 2 sites on lens 1 out of 548 and returns `cx` = 107 px
+with a 1 sigma of 23.
+
+**The eye is not the thing that failed.** At 64 px per degree, 3.92 px is 0.061
+degrees, and the side-by-side pictures below are the same picture. What failed
+is the claim that we can name the reading.
+
+### What the residual is, which is the next diagnosis's input
+
+**Round the seam** (building 160 s, along-seam column, sites within 8 degrees):
+order 0 **0.0098 deg**, order 1 **0.0694**, order 2 **0.0426**, order 3
+**0.0220**. The roll term is nearly gone and the one- and two-cycle terms are
+not.
+
+**Against the field angle it is a radial law, and that is the finding.**
+
+| lens 0 field | 47.5 | 52.5 | 57.5 | 62.5 | 67.5 | 72.5 | 77.5 | 82.5 | 87.5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| radial, solved | -0.111 | -0.088 | -0.059 | -0.028 | -0.010 | +0.012 | +0.026 | +0.048 | +0.095 |
+| radial, factory | -0.110 | -0.087 | -0.057 | -0.024 | -0.002 | +0.022 | +0.040 | +0.066 | +0.088 |
+| tangential, solved | -0.030 | -0.015 | +0.009 | +0.026 | +0.029 | +0.026 | +0.010 | -0.017 | -0.037 |
+
+(degrees, horizon 160 s, 532 sites; lens 0 is 546 of that view's 548.)
+
+| lens 1 field | 62.5 | 67.5 | 72.5 | 77.5 | 82.5 | 87.5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| radial, solved | -0.033 | -0.026 | -0.014 | +0.003 | +0.034 | +0.046 |
+| tangential, solved | -0.012 | -0.013 | -0.009 | +0.005 | +0.004 | -0.000 |
+| radial, factory | +0.049 | +0.038 | +0.018 | +0.001 | -0.025 | -0.040 |
+| tangential, factory | -0.085 | -0.071 | -0.037 | +0.017 | +0.062 | +0.098 |
+
+(degrees, building 160 s, 488 sites.)
+
+Read those two tables together and they say one thing.
+
+- **The tangential column is what the solve removed.** On lens 1 it runs -0.085
+  to +0.098 deg with the factory calibration and -0.013 to +0.005 with the
+  solved one. A tangential term that changes sign across the field is a
+  ROTATION, and lens 1's three angles are exactly the knobs for it. The solve
+  worked.
+- **The radial column is what it could not touch, and it did not.** On lens 0
+  the profile is identical in both arms to the third decimal — as it must be,
+  because lens 0 is not in this model at all — and it is a smooth monotone
+  function of the field angle running **-0.111 deg at 47.5 to +0.095 at 87.5**,
+  crossing zero near 70. On lens 1 it is the same shape and the same size,
+  **-0.033 to +0.046**, and the solve moved `cx` by 25 px trying to reach it.
+- **A pose difference cannot make a net radial term at any field angle and a
+  focal-length difference cannot change its sign inside the field.** A radial
+  displacement that is zero at 70 degrees, negative inside it and positive
+  outside it is a **different radial polynomial** — and that is exactly the
+  question `offset_v6` is: thirteen distortion coefficients where we read five.
+
+So the reading Studio uses is not a pose and not a principal point. **It is the
+distortion law itself, on both lenses**, and this solve carries no knob that is
+one. That is why the residual will not come down and it is the shape of what to
+build next.
+
+### Which file is which, proved rather than guessed
+
+| file | told pan | told tilt | peak | prominence | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `Untitled38(8).mp4` | -204.2 | -31.4 | 0.7803 | +0.5048 | **the building area** |
+| `Untitled38(9).mp4` | -111.9 | -10.9 | 0.8262 | +0.5857 | **the horizon crossing** |
+| `Untitled38(8).mp4` | -111.9 | -10.9 | 0.1613 | +0.0030 | R1, R2, R3 all FAIL |
+| `Untitled38(9).mp4` | -204.2 | -31.4 | 0.2338 | +0.0195 | R1, R2 FAIL |
+
+The bottom two rows are the swap, run on the same frame with the same
+everything: each file given the other file's label. Neither registers, and the
+told sweep walks tilt over only four degrees against a twenty-degree gap
+between the two labels, so a wrong pairing could not have quietly succeeded.
+`(9)`'s world pitch came back **-10.930** for a told tilt of **-10.9**.
+
+### Pairing (G4)
+
+The exports are the first 176.6 s of the clip, not a middle cut, but the coarse
+stage was run anyway and gated: the trim stands **+0.1496** above the best
+rival more than one export-length away. The fine lag is **-0.02298 s** on all
+eight windows of **both** files, sd **0.00000 s**, peak 0.9865, every window
+beating its own +/-1 frame neighbours by at least **1.0302**, fitted drift
+**-0.0000 s** across the clip, and injected +/-1 and +/-4 frame shifts
+recovered to **0.0010 frames**. Identical to five decimals to the July-14
+pair's. **PASS.**
+
+### Registration
+
+`told=` pan/tilt/roll, projection pinned to the told rectilinear, scale swept
+12 deg to the projection's own pole. Instants declared before the run as a
+regular 35 s grid.
+
+| export | instant | peak | prominence | fov | world pitch | world roll | verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| building | 20 | 0.7327 | +0.5955 | 60.346 | -30.984 | -0.607 | FAIL R7 |
+| building | 55 | 0.5857 | +0.4296 | 60.378 | -30.158 | -0.492 | PASS |
+| building | 90 | 0.3603 | +0.1964 | 62.285 | -30.573 | -0.634 | PASS |
+| building | 125 | 0.6436 | +0.3661 | 60.391 | -30.320 | -0.622 | FAIL R3 |
+| building | 160 | 0.7803 | +0.5048 | 60.373 | -30.624 | -0.864 | PASS |
+| horizon | 20 | 0.7069 | +0.4856 | 59.817 | -10.988 | +0.474 | PASS |
+| horizon | 55 | 0.6069 | +0.3747 | 59.626 | -10.851 | -0.200 | PASS |
+| horizon | 90 | 0.6428 | +0.4031 | 59.920 | -10.890 | -0.530 | PASS |
+| horizon | 125 | 0.7061 | +0.4905 | 59.807 | -10.961 | -0.412 | PASS |
+| horizon | 160 | 0.8262 | +0.5857 | 59.798 | -10.962 | -0.090 | PASS |
+
+R0 3 of 5 and 5 of 5; R6 1.48 and **0.16** percent; R5 world tilt **0.467** and
+**0.137** deg, world roll 0.371 and 1.005. **Both REGISTERED.**
+
+Section 4b's mapping holds and gains a sign. Their FOV is our full horizontal
+field of view to a factor of **0.9966** on the horizon export (4b said 0.9985)
+and 1.0169 on the building one, which carries the 90 s outlier. Their tilt is
+our world pitch to **0.030 deg** and **0.948**. Their Distortion 0 is exactly
+rectilinear, told and found.
+
+**Their pan runs the OPPOSITE way to our heading.** Both July-14 exports were
+told the same pan, so the sign was invisible; these two are told pans 92.3 deg
+apart and land 90.9 deg apart the other way. With `heading = -pan + c`, the two
+files share one `c` at every instant to **0.72 degrees**: -8.08/-6.85,
++6.86/+8.31, +3.76/+4.52, -8.73/-7.25, -17.94/-16.64.
+
+### Direction Lock, which the pictures answer and the checkbox does not
+
+The checkbox said OFF. The data says their view is **gravity-referenced in tilt
+and roll and is not attached to the camera**:
+
+- `lock=body` — the view rigidly attached to the body — **loses outright**:
+  0.2141 against 0.5500 on the building export and 0.2040 against 0.6428 on the
+  horizon one, with its field of view walking to 12.4 and 162.5 deg for a told
+  60 where the world model returns 60.5 and 59.9.
+- The world tilt and roll then repeat to **0.137 and 1.005 deg** over five
+  instants 140 s apart, which is what horizon levelling looks like.
+- The world heading spans **24.8 and 25.0 deg** — but the file's own
+  orientation track only turns **3.9 to 9.7 deg** of azimuth over the same
+  instants, so the aim held in the camera's own frame spans **21 to 26 deg**.
+  A body-fixed heading is refuted, and refuted **immune to the track's drift**,
+  because the track's yaw error cancels out of that difference exactly.
+- What the heading does instead is the same on BOTH exports: their difference
+  is constant to **0.72 deg** at every instant. A wander common to two
+  independent registrations of two different pictures is the integration's and
+  not the search's — the camera has no magnetometer and section 4a's R5 said
+  this would happen.
+
+So the aim is fixed in a levelled frame whose heading our integration cannot
+hold to better than 25 degrees over 140 seconds, and matching Studio's aim in
+the player needs **Studio's heading integration**, not only its calibration.
+The solve is unaffected: it is per instant and starts from that instant's own
+registered body aim.
+
+### The plant gates (section 4), at the four real view geometries
+
+| geometry | G1 null rms | G1 worst lens-1 angle | G2 rms | G2 angle error | G2 cx | G2 pitch |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| building 160 s, 640 px | 0.0199 | **0.1031** | 0.0209 | 0.0093 | 8.157 | 0.1907 |
+| building 55 s, 640 px | 0.0137 | 0.0351 | 0.0135 | 0.0022 | 7.970 | 0.2010 |
+| horizon 160 s, 640 px | 0.0244 | 0.0206 | 0.0239 | 0.0090 | 8.081 | 0.2065 |
+| horizon 55 s, 640 px | 0.0234 | 0.0009 | 0.0183 | 0.0040 | 7.860 | 0.1960 |
+| building 160 s, **3840 px** | 0.0171 | 0.0001 | 0.0178 | 0.0001 | 7.999 | 0.2000 |
+| horizon 160 s, **3840 px** | 0.0285 | 0.0029 | 0.0271 | 0.0050 | 8.013 | 0.2050 |
+
+G2 is read null-referenced, as section 4 says to: planted `cx +8` comes back
+**7.860 to 8.157** and planted `pitch +0.2` comes back **0.1907 to 0.2065**,
+with every angle inside **0.0093 deg** of a 0.10 gate. G3 REFUSED at both
+one-lens views, in this build. G7's second clause holds on every solved arm
+(round 1 keeps more sites than round 0) and its first is 96 px of search
+against an aim the registration's ladder puts inside a quarter degree, which is
+16 px here.
+
+**One gate failed and it is written down rather than widened.** G1 asks every
+lens-1 angle back inside **0.08 deg of zero** and at building 160 s at 640 px
+`lens1 yaw` returned **0.1031**. At the same geometry at the width the answer
+is actually reported at, 3840 px, it returns **0.0001**. Both are above; the
+first is a FAIL of section 4 as written, and by section 3(c) that alone would
+deny a MATCH at that geometry. It does not change the verdict, which is (b) at
+every geometry by a factor of four or more on the residual alone.
+
+### The five knobs, as a family
+
+Building 160 s, the best-conditioned of the four:
+
+```
+lens1 roll    +0.1798  +/- 0.0180 deg
+lens1 yaw     -0.8132  +/- 0.0356 deg
+lens1 pitch   +0.1220  +/- 0.0225 deg
+lens1 cx     -25.6830  +/- 0.6763 px
+lens1 cy      -0.9097  +/- 0.4564 px
+
+              lens1 roll   lens1 yaw lens1 pitch    lens1 cx    lens1 cy
+lens1 roll        1.0000     -0.8854     -0.6311      0.9400     -0.6391
+lens1 yaw        -0.8854      1.0000      0.5527     -0.9201      0.4715
+lens1 pitch      -0.6311      0.5527      1.0000     -0.4723      0.9440
+lens1 cx          0.9400     -0.9201     -0.4723      1.0000     -0.4749
+lens1 cy         -0.6391      0.4715      0.9440     -0.4749      1.0000
+```
+
+No pair reaches 0.99, so G6 does not force a combination here — but three pairs
+sit past 0.92 and the numbers are a family, not five measurements. **They are
+not a reading and must not be shipped as one**: the same solve at 55 s on the
+same export returns roll +0.046, yaw -0.693, pitch +0.517, `cx` -24.209, and
+the two horizon geometries return `cx` -37.4 and +107.0 with 1 sigma of 6 and
+23 px. A calibration that does not repeat across four views of one camera is
+not a calibration, and the residual above says why: they are chasing a radial
+law with rotations.
+
+### What the owner is shown
+
+`scratch/real/deliver/{building-160,horizon-160}/{v3,solved}/` — `theirs.png`,
+`ours.png`, `difference-8x.png` and `side-by-side.png` at the export's own 3840
+x 2160, with half-scale copies of the pair in
+`scratch/real/deliver/preview/`.
+
+At the building aim the two pictures are indistinguishable over the whole frame
+except at the pilot's own harness on the left edge, which is a metre away and
+is where the two stitches place their seam differently. At the horizon aim the
+same is true except for the paramotor's cage strut, which our render draws hard
+and Studio's blends away. Neither is a calibration difference; both are what
+the near field does to two different seam placements.
