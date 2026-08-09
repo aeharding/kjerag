@@ -644,8 +644,10 @@ live, no keyframe UI ever.
   measured and reverted; the telling one is a tenth of a percent on the leading
   coefficient, far too small to see, at 22 times the bar.
 
-  **The `.insv` null holds.** All sixteen views of the class method render byte
-  for byte identical to main at 7ef59a3, and the four lock pairs inside them
+  **The `.insv` null holds.** All sixteen views of the standing null method
+  (six registry views plus lock on/off pairs at four of them, rendered by
+  `--bin reframe` against each build in its own target dir) render byte for
+  byte identical to main at 7ef59a3, and the four lock pairs inside them
   differ from each other, so the null is not vacuous.
 
   **Playback is unchanged within the noise, and the claim that it improved was

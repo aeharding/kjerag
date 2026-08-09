@@ -228,7 +228,7 @@ Over 23 instants of three unit B files and 177 degrees of lean azimuth:
 ```text
 family                  turn      rms scatter    worst    walks with
 as written             -84.6           65.9      148.8    heading 0.69
-conjugate (shipped)   -107.1           62.1      133.2    azimuth 0.73
+conjugate (pre-08-08) -107.1           62.1      133.2    azimuth 0.73
 mirror in y            +86.8            3.3       10.1    nothing 0.15
 mirror x, conjugated   -90.9           61.2      170.8    azimuth 0.89
 ```
@@ -307,13 +307,17 @@ and the table above says so if you count its columns: there are two distinct
 scores across the eight sign families, not eight.
 
 Both of the file's records are carried through the mounting on the way into the
-comparison - the quaternion by its reading, the accelerometer by the same change
-of basis - so anything the mounting does to one it does to the other. For a
-reading with signs `s` on the quaternion's vector part and `S = diag(s)`:
+comparison - the quaternion by its reading, the accelerometer by `plumb` - so
+anything the mounting does to one it does to the other. The accelerometer's
+signs are NOT the reading's own: the shipped constant is `reading = [-1, 1, -1]`
+with `plumb = [1, -1, 1]`, i.e. `plumb = s * s2`, because the `S z = s2 z`
+factor rides on both sides. For a reading with signs `s`, `S = diag(s)`:
 
 ```text
-predicted = R_s^T z = S R^T S z          up = -S a / |a|
-angle(predicted, up) = angle(R^T z, -a / |a|)      // S drops out
+S z = s2 z      predicted = R_s^T z = s2 . S R^T z
+up = -diag(s * s2) a / |a| = -s2 . S a / |a|
+angle(predicted, up) = angle(S R^T z, -S a/|a|) = angle(R^T z, -a / |a|)
+                                       // s2 cancels, then S drops out
 ```
 
 So the **mirror is invisible** to it, and so is the turn, which rotates both. The
