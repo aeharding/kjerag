@@ -355,10 +355,61 @@ thread. It is not paid at all while the arm is off.
 
 ---
 
+## 8.5 What the picture looks like, and the one that got WORSE
+
+Decoded stills, both arms, at four views, in gitignored `scratch/belt-stills/`.
+Looked at by eye. **All four pairs differ; none is byte identical.**
+
+| view | what changed |
+| --- | --- |
+| **gear** | **the headline, and it works.** The red glove and the strap below it go from a thin washed-out sliver half dissolved into the harness behind them to **solid, opaque and saturated**, with folds; a pale item at the top of the strap appears that the off arm had smeared away; the reflective stripe on his sleeve goes from a translucent ghost to a crisp band. This is what `~/Videos/studio_onoff/optical_flow_near/on.jpg` looks like against its own off. |
+| **bad** | **the far-field doubling closes, visibly.** The far ridgeline goes from a smeared doubled grey wash to one crisp ridge **with a water tower silhouette resolved on top of it that does not exist in the off arm at all**. That is the roughly 20 view px epipolar defect the registry documents. The risers at top right are identical on both arms, because they sit outside the strip. |
+| **good** | **no visible difference, which is the right answer for a control.** The belt does reposition band content by 3 to 7 px with no sharpening to show for it, which is invisible in a still and is worth watching in motion. |
+| **down1** | **MIXED, and the damage is worse than the gain.** |
+
+### The down1 regression, which is the largest open problem in this increment
+
+**The tree canopy is put through a liquify filter.** At `down1`'s fov 20 the
+belt draws wormy candle-wax ripples and dark curved streaks across fine
+repetitive foliage that are simply not in the off arm, and the parked cars in
+the same band go from distinct white blobs to diagonal smeared streaks. In the
+same picture the store's roof edge against the trees goes from a mushy
+transition to a defined straight line, and the roof units sharpen: the belt is
+displacing that roof by 23 px (0.45 degrees) at correlation 0.92, which is a
+confident and correct alignment move.
+
+**So the belt is right about strong high-contrast structure and destructive on
+fine self-similar texture**, in one frame, in one band.
+
+**The mechanism, and it is an inference.** The gate is per along-seam SEGMENT -
+one trust for a whole column of the strip - so a segment carrying mostly good
+matches passes as trusted while individual patches inside it, on foliage where
+the match is ambiguous, wander within the capture clamp and are densified into
+the field anyway. The 3x3 residual-weighted mean smooths them; it does not
+reject them. **A per-patch gate, or a smoothness term on the field, is what
+this is asking for, and neither is in this increment.**
+
+**It is the fault the owner refuses by name.** seam-temporal 1 is explicit:
+corrections displace, residuals ghost, and a correction that cannot be right
+everywhere should leave a double image and never a bent one. The canopy is a
+bent one. It is disclosed at the top of the PR, it is in the owner-facing
+briefing, and `down1` is a trial in the A/B session, so it is a picture he is
+shown rather than a paragraph he is told about.
+
+> **A metric that agreed with the good news and not the bad.** Gradient energy
+> inside the band reads +1.8 / +0.6 / +1.6 / **+3.1** percent at bad / good /
+> gear / down1, so it scores the view that visibly got WORSE highest of the
+> four, because wormy warping manufactures gradients. It is recorded here as a
+> metric that does not work for this question rather than quoted as evidence.
+
 ## 9. What this does not claim
 
-- **It does not claim the belt fixes the seam.** No eye has seen it. That is
+- **It does not claim the belt fixes the seam.** The stills in 8.5 are four
+  frames looked at by one pair of eyes that are not the owner's, and the whole
+  epic's record is that his eye has overruled the instruments before. That is
   the A/B and it is the next thing.
+- **It does not claim the picture is uniformly better.** 8.5 has one view where
+  it is clearly worse, and the mechanism named there is not fixed.
 - **It does not claim antisymmetric beats one-sided.** The argument in 2.2 is
   about peak gradient and it is not a measurement of a picture.
 - **It does not hold 30 fps to rung-0's own bar** (section 8).
