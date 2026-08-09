@@ -455,9 +455,11 @@ of the local-warp-versus-pose decision, and it is the campaign's next question.
 
 # Stage 10, step P.1: the deterministic normalization, measured and refused
 
-**Status:** measured verdict, application built, switched OFF by default, not
-recommended. **Date:** 2026-08-09. **Instrument:**
-`kjerag-spike --bin expose mode=meta`, which is new and is what this section is.
+**Status:** measured verdict, refused; the application was built, measured
+off-by-default, and then **deleted on the owner's ruling of 2026-08-09**
+(section 22 - it survives in commit 8107a23 and nowhere else). **Date:**
+2026-08-09. **Instrument:** `kjerag-spike --bin expose mode=meta`, which is new,
+which ships, and which is what this section is.
 
 The plan of record for stage 10's first step was a **deterministic per-lens
 exposure normalization from file metadata**: read the trailer's own per-frame
@@ -620,8 +622,9 @@ The shipped gain reads **`+0.00287` ln, evidence 0.032, on both arms, to five
 decimals**. It does not move when the normalization is switched on, and it will
 never move, because the band's `measure` and `pool` compute entry points sample
 the **decoded planes**, which is upstream of the fragment shader where both
-`tone_split` and the new `exposure_split` are applied. The pooled gain therefore
-cannot see the metadata term at all.
+`tone_split` and the arm's `exposure_split` were applied (that second function
+no longer exists in the tree - section 22 - and the finding below does not
+depend on it). The pooled gain therefore cannot see the metadata term at all.
 
 So the two do not double-correct. They **multiply blindly**: the pass applies
 0.287 percent of measured correction and then 33 percent of unmeasured one on
@@ -632,19 +635,46 @@ three times, and it is worth writing down as a property of the architecture
 rather than of this step: **anything applied in the fragment shader is invisible
 to the band, because the band measures the source and not the picture.**
 
-## 22. The verdict, and what ships
+## 22. The verdict, what ships, and where the arm went
 
-**The step is refused. The application is built and switched off; the
-instrument, the trailer verification and this record are what the branch is
-for.** That is PR #138's ending and it is deliberate: the numbers are the
-deliverable, and a number is worth more when the arm that produced it can be
-re-run.
+**The step is refused, and the arm that produced the refusal has been
+deleted.** The instrument, the trailer verification and this record are what the
+branch is for. That is PR #138's ending and it is deliberate: the numbers are
+the deliverable.
 
-`KJERAG_EXPOSURE_NORM=on` draws it. Off is the default, off is what an empty
-string reads as, and off is `main` byte for byte at four registry views
+**The deletion, and the ruling behind it.** The application was built behind
+`KJERAG_EXPOSURE_NORM`, measured on the nine views above, and then removed on
+the owner's ruling of **2026-08-09**: *"Feel free to delete dead arm on 177, I
+always recommend deleting dead code so we can move faster. It's in git
+history."* The branch had asked the opposite question - keep a dead arm so a
+future capture could falsify the refusal - and the ruling settled it the other
+way, which is simplest-design-first applied to a mechanism nothing draws.
+
+**Where the arm is.** Commit **8107a23** on `feat/exposure-normalization`
+carries it whole: the `exposure_ln` scalar in the `Reframe` uniform block and
+its WGSL twin field, the shader's `exposure_split` and the `Reframe::
+exposure_split` / `with_exposure` Rust twin, the `Motion::exposure_ln` lookup
+that read records 4 and 12 at the frame's own camera instant, the
+`KJERAG_EXPOSURE_NORM` toggle and its `--bin null` report line, and the
+twin-guard fixture that drove the shader against its Rust twin at a 0.12 ln
+ratio. **352 lines.** `git show 8107a23` reads it back and `git revert` would
+restore it; git history is the archive, which is why the tree is not.
+
+**What the arm proved on its way out, kept because it is the reason deleting it
+was safe.** Off by default it drew `main` byte for byte at four registry views
 (`down1` 7d2200ea, `down3` a19a9b80, `bad` f27874ed, `shimmer` 54fc67b7,
-`--bin null`); on moves `down1` to 7d2ef9bc, which is the positive control that
-the mechanism is live.
+`--bin null`), and `KJERAG_EXPOSURE_NORM=on` moved `down1` to 7d2ef9bc, which
+was the positive control that the mechanism was live rather than absent. A
+mechanism that was off by default deletes byte-inert by construction, and the
+same four views were re-checked against `main` after the deletion and read
+`main`'s own sums.
+
+**What is left in the tree is the instrument.** `--bin expose mode=meta` reads
+records 4 and 12 at each frame's own camera instant, prints `g` against the
+delivered annulus ratio and the residual the correction would leave, and refuses
+a file that has no second shutter record in those words. It needs none of the
+deleted arm: it reads `kjerag_meta`'s tracks directly and renders nothing. Point
+any future attempt at it before writing a line of application.
 
 **What would change the verdict, stated so nobody has to re-derive it.** A
 per-lens **gain** - ISO, analogue gain, digital gain, anything that closes

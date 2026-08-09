@@ -508,36 +508,9 @@ pub struct Reframe {
     /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
     /// it checks the offset as well as the size for exactly that reason.
     ///
-    /// The natural log of lens 1's exposure time over lens 0's, read from the
-    /// trailer's own per-lens shutter records at this frame (issue #103, stage
-    /// 10 step P.1; `kjerag_meta::ExposureTrack`).
-    ///
-    /// Zero is the picture with no normalization in it, and zero is what every
-    /// caller gets without asking: the toggle is off by default
-    /// ([`normalizing`]) and a file with no exposure record cannot produce a
-    /// number here anyway. At zero [`Self::exposure_split`] returns exactly
-    /// `[1.0, 1.0]` on an equality test, so the multiply below is the identity
-    /// and the drawn codes are `main`'s.
-    ///
-    /// **It is here rather than beside the measured gain in
-    /// [`super::band::Tone`], and the reason is that the band's half of the
-    /// draw is not guarded.** `Tone` lives in a storage buffer the compute pass
-    /// writes, which `super::twin` does not compile; this block is the one the
-    /// twin binds, so a scalar put here is compared against its Rust twin on
-    /// the device on every `cargo test` (`twin::the_shader_and_its_rust_twin_
-    /// answer_the_same_map`). A per-frame CPU scalar has no business in a
-    /// buffer only the GPU writes in any case.
-    ///
-    /// **Sibling of [`Self::handover_shift`] and not a new field at the end**,
-    /// for that field's own reason: it takes the second of the padding words
-    /// the table's alignment already needed, so the block is the size it always
-    /// was and the table has not moved.
-    ///
-    /// WGSL twin: `reframe.exposure_ln`, read by `exposure_split`.
-    exposure_ln: f32,
-    /// What is left of the three padding words the table's alignment needs,
-    /// after the anchor took the first and the exposure ratio the second.
-    _pad: f32,
+    /// Two words rather than three since the seam anchor took the first of
+    /// them ([`Self::handover_shift`]).
+    _pad: [f32; 2],
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -747,52 +720,6 @@ pub fn anchoring() -> bool {
 
 /// The variable [`anchoring`] reads.
 const ANCHOR: &str = "KJERAG_ANCHOR";
-
-/// Research only, from `KJERAG_EXPOSURE_NORM`: whether the draw divides each
-/// lens by its own shutter time before the two are fused (issue #103, stage 10
-/// step P.1).
-///
-/// **OFF by default, and the default is a measurement rather than caution**
-/// (docs/research/insv-format.md 6.3, re-derived on the owner's own dirt
-/// reference in docs/research/seam-blending.md 17). The shutter ratio measures
-/// how differently the two hemispheres are LIT, not how differently they came
-/// out: the camera's two auto-exposure loops have already traded shutter
-/// against sensor gain to make them agree, and the trailer carries no per-lens
-/// gain with which to undo half of that trade. Normalizing by shutter alone
-/// therefore puts the raw lighting difference back into the picture. It stays
-/// switchable because that claim is a number, and a number is worth being able
-/// to re-measure on a capture nobody has shot yet.
-///
-/// Read once, because a value that changed mid-run would change the picture
-/// between two frames of one pan.
-pub fn normalizing() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        let Ok(asked) = std::env::var(EXPOSURE_NORM) else {
-            return false;
-        };
-        if asked.is_empty() {
-            eprintln!(
-                "blend:  {EXPOSURE_NORM} is set to nothing, which is read as UNSET and leaves \
-                 exposure normalization OFF. To turn it on say {EXPOSURE_NORM}=on"
-            );
-            return false;
-        }
-        let on = asked != "0" && !asked.eq_ignore_ascii_case("off");
-        if on {
-            println!(
-                "blend:  research exposure normalization ON, {EXPOSURE_NORM}={asked}: each lens \
-                 is divided by its own shutter time from the trailer before the two are fused. \
-                 Measured to make the seam's brightness step WORSE, not better \
-                 (docs/research/seam-blending.md 17); this arm exists to re-measure that."
-            );
-        }
-        on
-    })
-}
-
-/// The variable [`normalizing`] reads.
-const EXPOSURE_NORM: &str = "KJERAG_EXPOSURE_NORM";
 
 /// Research only, from `KJERAG_ANCHOR_TRACE`: whether every redraw says what
 /// the held line is doing. Off in the app, on under the instruments that
@@ -1221,11 +1148,7 @@ impl Reframe {
             // No line held until a caller says otherwise
             // ([`Self::with_shift`]), and no shift is the geometric handover.
             handover_shift: 0.0,
-            // Nothing normalized until a caller says otherwise
-            // ([`Self::with_exposure`]), and zero is the picture with no
-            // normalization in it.
-            exposure_ln: 0.0,
-            _pad: 0.0,
+            _pad: [0.0; 2],
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
@@ -1283,57 +1206,6 @@ impl Reframe {
         let allowance = 0.5 * self.crossover;
         self.handover_shift = shift.clamp(-allowance, allowance);
         self
-    }
-
-    /// What the trailer says the two lenses' exposure times differed by at this
-    /// frame, as `ln(shutter1 / shutter0)` (issue #103, stage 10 step P.1).
-    ///
-    /// A step of its own, like [`Self::with_shift`]: every caller that has no
-    /// shutter record to offer - every instrument, every test, the blank pane -
-    /// gets zero without saying so, and zero draws `main`'s picture.
-    ///
-    /// **Clamped by the same [`super::band::LIMIT_LN`] the measured gain is**,
-    /// and the clamp is not a formality here the way it is there. A shutter
-    /// ratio is not a brightness ratio: the two lenses' auto-exposure loops
-    /// trade shutter against sensor gain to reach the same picture, so `g`
-    /// swings by a factor of 1.8 on footage whose two hemispheres came out 3
-    /// percent apart (docs/research/insv-format.md 6.3). Unclamped, this field
-    /// would routinely ask the draw for half a stop.
-    pub fn with_exposure(mut self, exposure_ln: f32) -> Self {
-        let limit = super::band::LIMIT_LN;
-        self.exposure_ln = match exposure_ln.is_finite() {
-            true => exposure_ln.clamp(-limit, limit),
-            false => 0.0,
-        };
-        self
-    }
-
-    /// What each lens is multiplied by to take the trailer's exposure
-    /// difference out, lens 0 first.
-    ///
-    /// The Rust twin of the shader's `exposure_split`, and deliberately the
-    /// same shape as [`super::band::Tone::split`]: half the log to each lens in
-    /// opposite directions, so the picture's own mean brightness is invariant
-    /// and neither hemisphere's black level moves. The exact `0.0` test is what
-    /// makes an unnormalized draw byte-identical rather than nearly so -
-    /// `exp(0.0)` is exactly 1.0 on both sides, but a multiply by a computed
-    /// 1.0 is still a multiply, and this returns the literal.
-    ///
-    /// Lens 1 having had the LONGER shutter means lens 1's picture is the
-    /// brighter one for the same scene, so lens 1 is the one darkened: the sign
-    /// matches [`super::band::Tone`], whose `log_gain` is lens 1's brightness
-    /// over lens 0's.
-    pub fn exposure_split(&self) -> [f32; 2] {
-        let half = 0.5 * self.exposure_ln;
-        match half == 0.0 {
-            true => [1.0, 1.0],
-            false => [half.exp(), (-half).exp()],
-        }
-    }
-
-    /// What this block was told the two lenses' shutters differed by.
-    pub fn exposure_ln(&self) -> f32 {
-        self.exposure_ln
     }
 
     /// The direction the 50/50 handover locus is perpendicular to, in view
@@ -1543,9 +1415,7 @@ impl Reframe {
             crossover: crossover_deg().to_radians(),
             // No seam, so no line to hold anywhere.
             handover_shift: 0.0,
-            // No file, so no shutter record and nothing to normalize by.
-            exposure_ln: 0.0,
-            _pad: 0.0,
+            _pad: [0.0; 2],
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -2693,15 +2563,9 @@ struct Reframe {
   // produces it has one and there is no event in it. Zero is the geometric
   // handover. Rust twin: `Reframe::handover_shift`. Read by `handover`.
   handover_shift: f32,
-  // The natural log of lens 1's shutter time over lens 0's at this frame, read
-  // from the trailer (issue #103, stage 10 step P.1). Zero is the picture with
-  // no normalization in it, which is what the player draws unless
-  // KJERAG_EXPOSURE_NORM says otherwise. Rust twin: `Reframe::exposure_ln`,
-  // read by `exposure_split`.
-  exposure_ln: f32,
-  // What is left of the padding that puts the table below on its own 16-byte
-  // boundary. Rust twin: `Reframe::_pad`, which is what makes the two layouts
-  // agree.
+  // What puts the table below on its own 16-byte boundary. Rust twin:
+  // `Reframe::_pad`, which is what makes the two layouts agree.
+  pad1: f32,
   pad2: f32,
   // What the along-seam axis still disagrees by after a pose, direction by
   // direction, in radians, four to a lane. Rust twin: `Reframe::table`.
@@ -2713,23 +2577,6 @@ struct Reframe {
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
-
-// What each lens is multiplied by to take the trailer's own exposure difference
-// out, lens 0 first (issue #103, stage 10 step P.1). Half the log to each lens
-// in opposite directions, so the picture's mean brightness is invariant and
-// neither hemisphere's black level moves - the same split
-// `band::tone_split` uses for the MEASURED gain, and the two multiply.
-//
-// The exact zero test is the byte-identity guarantee: an unnormalized draw
-// returns the literal 1.0 rather than a computed one. Rust twin:
-// `Reframe::exposure_split`.
-fn exposure_split() -> vec2<f32> {
-  let half = 0.5 * reframe.exposure_ln;
-  if half == 0.0 {
-    return vec2<f32>(1.0, 1.0);
-  }
-  return vec2<f32>(exp(half), exp(-half));
-}
 
 struct Landing {
   pixel: vec2<f32>,
@@ -5415,79 +5262,7 @@ pub(crate) mod tests {
             std::mem::offset_of!(Reframe, handover_shift),
             std::mem::offset_of!(Reframe, crossover) + 4
         );
-        // And stage 10's exposure ratio took the SECOND of them, for the same
-        // reason and with the same consequence: one word of padding is left,
-        // and every assertion above is unchanged by its arrival.
-        assert_eq!(
-            std::mem::offset_of!(Reframe, exposure_ln),
-            std::mem::offset_of!(Reframe, handover_shift) + 4
-        );
-        assert_eq!(std::mem::size_of_val(&Reframe::blank(1.0, false)._pad), 4);
-    }
-
-    /// **The exposure normalization's null, and it is the acceptance gate.**
-    /// A map nobody has handed a shutter ratio to multiplies both lenses by a
-    /// literal 1.0, which is not a multiply the arithmetic can round: it is
-    /// the same code the pass drew before this field existed.
-    ///
-    /// Every instrument, every test, every file with no exposure record, and
-    /// the player itself unless `KJERAG_EXPOSURE_NORM` says otherwise, get
-    /// this.
-    #[test]
-    fn no_shutter_ratio_is_a_multiplier_of_exactly_one_on_both_lenses() {
-        for reframe in [
-            Reframe::blank(1.0, false),
-            fixture(Camera::default()),
-            fixture(Camera::default()).with_exposure(0.0),
-            // Not a number is not a ratio: a file whose record answered with a
-            // zero shutter would otherwise reach the draw as an infinity.
-            fixture(Camera::default()).with_exposure(f32::NAN),
-            fixture(Camera::default()).with_exposure(f32::INFINITY),
-        ] {
-            assert_eq!(reframe.exposure_ln(), 0.0);
-            assert_eq!(reframe.exposure_split(), [1.0, 1.0]);
-        }
-    }
-
-    /// The split is symmetric and undoes exactly what it was told, which is
-    /// the same property [`super::super::band::Tone::split`] has and for the
-    /// same reason: neither hemisphere's own black level may move.
-    #[test]
-    fn the_exposure_split_is_symmetric_and_undoes_the_ratio_it_was_given() {
-        for ln in [-0.2f32, -0.05, 0.05, 0.12, 0.2] {
-            let split = fixture(Camera::default())
-                .with_exposure(ln)
-                .exposure_split();
-            // The picture's mean brightness is invariant: what one lens gains
-            // the other loses, to the last bit a product can carry.
-            assert!(
-                (split[0] * split[1] - 1.0).abs() < 1e-6,
-                "{ln}: {split:?} multiply to {}",
-                split[0] * split[1],
-            );
-            // And the pair takes the ratio out: lens 1 having had the longer
-            // shutter is lens 1 being darkened.
-            assert!(
-                ((split[1] / split[0]).ln() + ln).abs() < 1e-6,
-                "{ln}: {split:?} leaves {}",
-                (split[1] / split[0]).ln(),
-            );
-            assert_eq!(ln > 0.0, split[0] > 1.0, "{ln}: {split:?}");
-        }
-    }
-
-    /// A shutter ratio is not a brightness ratio and the clamp is what stands
-    /// between the two (docs/research/insv-format.md 6.3): `g` swings from
-    /// 0.54 to 1.81 across two X4 Air captures, which is 1.1 natural logs end
-    /// to end, on footage whose two hemispheres came out three percent apart.
-    #[test]
-    fn a_shutter_ratio_the_lenses_cannot_have_come_out_by_is_clamped() {
-        // 1.81 and 0.54, the widest ratio the corpus has ever carried.
-        for ln in [1.81f32.ln(), 0.54f32.ln()] {
-            let reframe = fixture(Camera::default()).with_exposure(ln);
-            assert_eq!(reframe.exposure_ln().abs(), super::super::band::LIMIT_LN);
-            assert_eq!(reframe.exposure_ln().signum(), ln.signum());
-        }
+        assert_eq!(std::mem::size_of_val(&Reframe::blank(1.0, false)._pad), 8);
     }
 
     /// **The anchor's null.** A map nobody has held a line on draws the

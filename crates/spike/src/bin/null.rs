@@ -60,17 +60,6 @@ fn main() -> Fallible<()> {
         "width:  KJERAG_HANDOVER_DEG={}",
         std::env::var("KJERAG_HANDOVER_DEG").unwrap_or_else(|_| "<unset>".to_owned())
     );
-    // The same reason as the anchor line above: an arm that asked for
-    // deterministic exposure normalization and got an empty string got the
-    // default, and the checksums below would say so in no other way.
-    println!(
-        "expose: KJERAG_EXPOSURE_NORM={} ({})",
-        std::env::var("KJERAG_EXPOSURE_NORM").unwrap_or_else(|_| "<unset>".to_owned()),
-        match kjerag_render::normalizing() {
-            true => "ON",
-            false => "off",
-        },
-    );
     println!(
         "file:   {} from {:.3} s to {:.3} s",
         options.input.display(),

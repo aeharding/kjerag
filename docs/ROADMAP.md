@@ -609,9 +609,15 @@ live, no keyframe UI ever.
   in a DJI file either.
 
   **What ships is the instrument and the record**, which is PR #138's ending and
-  deliberate. `KJERAG_EXPOSURE_NORM=on` draws the arm; off is the default and is
-  `main` byte for byte at four registry views. `--bin expose mode=meta` is the
-  new instrument and is what any future attempt should be pointed at first.
+  deliberate. The application arm was built behind `KJERAG_EXPOSURE_NORM`,
+  measured off-by-default against `main` byte for byte at four registry views,
+  and then **deleted on the owner's ruling of 2026-08-09**: *"Feel free to
+  delete dead arm on 177, I always recommend deleting dead code so we can move
+  faster. It's in git history."* It was 352 lines of shipped mechanism that
+  nothing drew, and it is archived in commit **8107a23** on
+  `feat/exposure-normalization` - `git show 8107a23` reads it back. What is left
+  in the tree is `--bin expose mode=meta`, the new instrument, which is what any
+  future attempt should be pointed at first, and this record.
 
   **One architectural finding falls out of it and is not about this step.** The
   pooled stage-3 gain read `+0.00287` ln on both arms, unmoved, because the
