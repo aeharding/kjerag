@@ -474,6 +474,10 @@ struct LensBlock {
     k1: f32,
     k2: f32,
     k3: f32,
+    /// Radial orders `r^8` and `r^10`. Zero on every calibration the file can
+    /// state; see [`kjerag_meta::Distortion::k4`].
+    k4: f32,
+    k5: f32,
     p1: f32,
     p2: f32,
     image_radius: f32,
@@ -499,8 +503,9 @@ struct LensBlock {
     /// cancel between them at the seam.
     turn: [f32; 3],
     /// A uniform array's element stride rounds up to the element's 16-byte
-    /// alignment. WGSL does that itself; `repr(C)` does not.
-    _pad: [f32; 1],
+    /// alignment. WGSL does that itself; `repr(C)` does not. Three since the
+    /// two v6 radial orders joined the block.
+    _pad: [f32; 3],
 }
 
 /// Where a view ray lands in one lens's image, in delivered-frame pixels.
@@ -1263,7 +1268,13 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
     let y = p[1] / denom;
 
     let r2 = x * x + y * y;
-    let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
+    // Five radial orders, not three. `k4` and `k5` are zero on everything
+    // `offset_v3` can state, so this is bit-for-bit the three-order Horner it
+    // replaces on a shipped calibration; they are non-zero only where a
+    // measured radial law has been put into them
+    // (docs/research/parity-protocol.md section 11).
+    let radial =
+        1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * (lens.k3 + r2 * (lens.k4 + r2 * lens.k5))));
     let xd = x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x);
     let yd = y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y);
 
@@ -1495,12 +1506,14 @@ impl LensBlock {
         k1: 0.0,
         k2: 0.0,
         k3: 0.0,
+        k4: 0.0,
+        k5: 0.0,
         p1: 0.0,
         p2: 0.0,
         image_radius: 0.0,
         axis_min: 2.0,
         turn: [0.0; 3],
-        _pad: [0.0; 1],
+        _pad: [0.0; 3],
     };
 
     fn new(lens: &Lens, index: usize, frame: Size, camera: Camera, held: Held) -> Self {
@@ -1516,6 +1529,8 @@ impl LensBlock {
             k1: distortion.k1 as f32,
             k2: distortion.k2 as f32,
             k3: distortion.k3 as f32,
+            k4: distortion.k4 as f32,
+            k5: distortion.k5 as f32,
             p1: distortion.p1 as f32,
             p2: distortion.p2 as f32,
             image_radius: image_radius(&lens.intrinsics, frame) as f32,
@@ -1531,7 +1546,7 @@ impl LensBlock {
             // has just been filled with, and the readout it widens by is the
             // `turn` above.
             axis_min: 2.0,
-            _pad: [0.0; 1],
+            _pad: [0.0; 3],
         };
         // Half of it, because `readout_share` runs -1/2 to +1/2 and the model
         // is handed the ray turned by that share of the whole readout.
@@ -1758,6 +1773,9 @@ struct LensBlock {
   k1: f32,
   k2: f32,
   k3: f32,
+  // Radial orders r^8 and r^10. Rust twins: `LensBlock::k4`, `LensBlock::k5`.
+  k4: f32,
+  k5: f32,
   p1: f32,
   p2: f32,
   image_radius: f32,
@@ -1769,6 +1787,11 @@ struct LensBlock {
   turn_x: f32,
   turn_y: f32,
   turn_z: f32,
+  // WGSL rounds this element's stride up to its own 16-byte alignment. Rust
+  // twin: `LensBlock::_pad`.
+  lens_pad0: f32,
+  lens_pad1: f32,
+  lens_pad2: f32,
 };
 
 // How a point of the frame becomes a ray. Rust twin: `Screen`.
@@ -2027,7 +2050,7 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
   let n = p.xy / denom;
 
   let r2 = dot(n, n);
-  let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
+  let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * (lens.k3 + r2 * (lens.k4 + r2 * lens.k5))));
   let tangential = vec2<f32>(
     2.0 * lens.p1 * n.x * n.y + lens.p2 * (r2 + 2.0 * n.x * n.x),
     2.0 * lens.p2 * n.x * n.y + lens.p1 * (r2 + 2.0 * n.y * n.y),
@@ -2111,6 +2134,8 @@ pub(crate) mod tests {
                     k3: 3.57555127,
                     p1: -0.0007338,
                     p2: -0.00115458,
+                    k4: 0.0,
+                    k5: 0.0,
                 },
                 pose: Pose {
                     yaw_deg: -0.103,
@@ -2134,6 +2159,8 @@ pub(crate) mod tests {
                     k3: 4.30578518,
                     p1: -0.0019249,
                     p2: 0.00054564,
+                    k4: 0.0,
+                    k5: 0.0,
                 },
                 pose: Pose {
                     yaw_deg: 0.039,
@@ -3981,11 +4008,14 @@ pub(crate) mod tests {
     /// disagreement between the two definitions surfaces.
     #[test]
     fn the_uniform_block_is_the_size_wgsl_lays_it_out() {
-        assert_eq!(std::mem::size_of::<LensBlock>(), 112);
+        // 112 before `k4` and `k5`, which add two f32s and push the tail
+        // padding from one f32 to three (section 11 of the parity protocol).
+        assert_eq!(std::mem::size_of::<LensBlock>(), 128);
         assert_eq!(std::mem::size_of::<Screen>(), 16);
         // 288 before the band's two fields, which add a padded mat3x3 and a
-        // padded vec3 (issue #103).
-        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16);
+        // padded vec3 (issue #103), and 32 more for each lens's two new
+        // radial orders and the padding they moved.
+        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + 32);
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {

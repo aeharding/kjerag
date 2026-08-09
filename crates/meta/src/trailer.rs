@@ -102,6 +102,18 @@ pub(crate) struct ExtraMetadata {
     #[prost(string, tag = "54")]
     #[cfg_attr(test, serde(deserialize_with = "offset_v3_from_fixture"))]
     pub offset_v3: String,
+    /// The thirteen-coefficient calibration the X4 family also writes, and
+    /// the one `capture_offset_version` declares describes the glass.
+    ///
+    /// **Nothing shipped draws with it.** `docs/research/offset-v6.md`
+    /// refused all sixteen readings of its distortion half against
+    /// `offset_v3`, and it is carried here only so that
+    /// `docs/research/parity-protocol.md` section 11's cross-check can
+    /// compare a radial law measured from pixels against the file's own
+    /// numbers. Empty on every camera that does not write one.
+    #[prost(string, tag = "111")]
+    #[cfg_attr(test, serde(default))]
+    pub offset_v6: String,
     #[prost(bool, tag = "62")]
     pub is_raw_gyro: bool,
     #[prost(message, optional, tag = "65")]

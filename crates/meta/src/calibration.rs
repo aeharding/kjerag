@@ -89,6 +89,14 @@ pub struct CalibrationSet {
     /// conversion in [`Intrinsics`] stays auditable. Nothing downstream
     /// needs it.
     pub calibration_canvas: Size,
+    /// The file's `offset_v6` string, exactly as written, or empty.
+    ///
+    /// Carried and never drawn with. See [`ExtraMetadata::offset_v6`].
+    pub offset_v6: String,
+    /// The file's `offset_v3` string, exactly as written. Kept beside the
+    /// parsed lenses only so an instrument can recover the crop ratio the
+    /// parse applied and scale another string the same way.
+    pub offset_v3: String,
 }
 
 /// One lens: a Mei/UCM camera model plus where the lens sits.
@@ -150,6 +158,18 @@ pub struct Distortion {
     pub k3: f64,
     pub p1: f64,
     pub p2: f64,
+    /// Radial orders `r^8` and `r^10`, past where `offset_v3`'s polynomial
+    /// stops and where `offset_v6`'s five-order head keeps going.
+    ///
+    /// **Zero on everything the file can say.** `offset_v3` has no slots for
+    /// them and nothing in the shipped path fills them; they exist so that a
+    /// radial law measured from pixels can be expressed in the same map the
+    /// shader draws through, which is what
+    /// `docs/research/parity-protocol.md` section 11 fits. A camera whose
+    /// calibration is read off `offset_v3` therefore draws exactly what it
+    /// drew before these two fields existed.
+    pub k4: f64,
+    pub k5: f64,
 }
 
 /// How one frame is read off the sensor: how long the whole readout takes,
@@ -400,7 +420,13 @@ impl CalibrationSet {
         eat(&self.dimension.height.to_le_bytes());
         for lens in &self.lenses {
             let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
-            let Distortion { k1, k2, k3, p1, p2 } = lens.distortion;
+            // `..` on purpose: the two v6 radial orders are NOT in the
+            // camera key. They are zero on everything read off `offset_v3`,
+            // and hashing them would change every existing pilot's key for a
+            // field that never varies.
+            let Distortion {
+                k1, k2, k3, p1, p2, ..
+            } = lens.distortion;
             let Pose {
                 yaw_deg,
                 pitch_deg,
@@ -504,6 +530,8 @@ impl CalibrationSet {
             exposure: Default::default(),
             imu: GyroTrack::default(),
             calibration_canvas: canvas,
+            offset_v6: metadata.offset_v6.clone(),
+            offset_v3: metadata.offset_v3.clone(),
         })
     }
 }
@@ -732,7 +760,16 @@ impl LensBlock {
                 cx: (cx - index as f64 * slot) * (dimension.width as f64 / slot),
                 cy: cy * (dimension.height as f64 / canvas_h as f64),
             },
-            distortion: Distortion { k1, k2, k3, p1, p2 },
+            distortion: Distortion {
+                k1,
+                k2,
+                k3,
+                p1,
+                p2,
+                // `offset_v3` has no slots for the two higher radial orders.
+                k4: 0.0,
+                k5: 0.0,
+            },
             pose: Pose {
                 yaw_deg: yaw,
                 pitch_deg: pitch,
