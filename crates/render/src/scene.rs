@@ -225,9 +225,16 @@ struct Show {
 /// What the trailer says about how the camera moved.
 struct Motion {
     orientation: OrientationTrack,
-    /// Lens 0's shutter track, read for its timestamps rather than its
-    /// shutters: `pts_type = 2` makes it the camera's own frame clock.
-    exposure: ExposureTrack,
+    /// Both lenses' shutter tracks, in lens order, from trailer records 4 and
+    /// 12.
+    ///
+    /// Lens 0's is read for its TIMESTAMPS rather than its shutters:
+    /// `pts_type = 2` makes it the camera's own frame clock. The shutters
+    /// themselves are read by one thing only, [`Self::exposure_ln`], and only
+    /// when `KJERAG_EXPOSURE_NORM` asks; read
+    /// `kjerag_meta::ExposureTrack`'s own note before reaching for them, which
+    /// says why a shutter ratio is not a brightness ratio.
+    exposure: [ExposureTrack; 2],
     /// How long one frame takes to come off the sensor and which way it
     /// comes, which is what issue #9's correction is measured against.
     readout: Readout,
@@ -241,11 +248,39 @@ impl Motion {
             // The camera's own timestamp, or the container's where the
             // exposure record does not reach: a file whose record is short is
             // a file that still plays.
-            FrameClock::Exposure => self
-                .exposure
+            FrameClock::Exposure => self.exposure[0]
                 .frame_time_us(frames.index)
                 .unwrap_or_else(container),
             FrameClock::Container => container(),
+        }
+    }
+
+    /// What the trailer says the two lenses' exposure times differed by at
+    /// `at`, as `ln(shutter1 / shutter0)` (issue #103, stage 10 step P.1).
+    ///
+    /// Zero where there is nothing to say: the toggle off, a file with no
+    /// exposure record for one of the lenses, or a shutter a division cannot be
+    /// done with. Zero is the picture with no normalization in it, so a file
+    /// this cannot answer for still plays and still plays the same.
+    ///
+    /// **The nearest sample and not an interpolation**, because
+    /// `ExposureTrack` carries one sample per frame and `at` is a frame's own
+    /// instant; and clamped at both ends by that method, so the eight pre-roll
+    /// frames the X4 Air writes are answered rather than refused.
+    fn exposure_ln(&self, at: i64) -> f32 {
+        if !projection::normalizing() {
+            return 0.0;
+        }
+        let when = Duration::from_micros(u64::try_from(at).unwrap_or(0));
+        let Some(front) = self.exposure[0].shutter_at(when) else {
+            return 0.0;
+        };
+        let Some(back) = self.exposure[1].shutter_at(when) else {
+            return 0.0;
+        };
+        match front > 0.0 && back > 0.0 {
+            true => (back / front).ln() as f32,
+            false => 0.0,
         }
     }
 
@@ -859,7 +894,8 @@ impl Scene {
                 false,
                 self.sampling.get(),
             )
-            .with_table(view.table),
+            .with_table(view.table)
+            .with_exposure(view.exposure_ln),
         )
     }
 
@@ -927,6 +963,7 @@ impl Show {
             },
             lenses: self.lenses(),
             table: self.table.get(),
+            exposure_ln: self.held.exposure_ln(at),
             frames,
         })
     }
@@ -1110,7 +1147,7 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
     );
     let held = Motion {
         orientation,
-        exposure: calibration.exposure[0].clone(),
+        exposure: calibration.exposure.clone(),
         readout: calibration.readout(),
     };
     Ok(Calibrated {
@@ -1163,6 +1200,14 @@ struct View {
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
     held: Held,
+    /// What the trailer says the two lenses' shutters differed by at this
+    /// frame, as `ln(shutter1 / shutter0)` (issue #103, stage 10 step P.1).
+    ///
+    /// Carried on the view rather than looked up at draw time because this is
+    /// where the frame's own camera instant is already in hand
+    /// ([`Show::view`]); the draw has the block and not the track. Zero unless
+    /// `KJERAG_EXPOSURE_NORM` asked, and zero is `main`'s picture.
+    exposure_ln: f32,
 }
 
 /// The last view the pass actually presented of one capture, which is what the
@@ -1481,7 +1526,8 @@ impl ScenePipeline {
                 self.linearize(),
                 primitive.sampling,
             )
-            .with_table(view.table),
+            .with_table(view.table)
+            .with_exposure(view.exposure_ln),
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
@@ -2119,7 +2165,13 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   // and exactly 1.0 on both sides until something has been measured, so the
   // weights below are the weights this pass has always used and a picture
   // with no reading behind it is the picture stage 2 drew.
-  let tone = tone_split();
+  let measured = tone_split();
+  // And what the FILE says the two lenses' shutters differed by at this frame
+  // (issue #103, stage 10 step P.1). Exactly 1.0 on both sides unless
+  // `KJERAG_EXPOSURE_NORM` asked for it, so the product below is `measured`
+  // itself and the drawn codes are the ones this pass has always drawn.
+  let deterministic = exposure_split();
+  let tone = measured * deterministic;
   if mix.weights[0] > 0.0 {
     rgb += (mix.weights[0] * tone.x) * nv12(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
     total += mix.weights[0];
@@ -2209,7 +2261,7 @@ mod tests {
     fn motion(orientation: OrientationTrack) -> Motion {
         Motion {
             orientation,
-            exposure: ExposureTrack::default(),
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
             readout: Readout {
                 seconds: 0.015_883,
                 sweep: Sweep::Right,

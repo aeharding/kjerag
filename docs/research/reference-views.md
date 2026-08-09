@@ -619,6 +619,36 @@ The six views, unchanged, and what they are for in this round:
   The wide band softens it and the belt is its fix. UNCHANGED and still roughly 20 view px; this
   architecture changes whether a measurement is SPENT, not what is measured.
 
+## Photometric: the DJI Osmo 360 reference line (owner 2026-08-0?, REGISTERED - stage 10 gate)
+- 2026-08-09 `~/Downloads/"1 8k30p standard 10bit iso max 800-003.OSV" time=15.215 yaw=-178.05 pitch=-3.15 fov=249.43 lock=1`
+  The owner's DJI line, registered here as a **photometry gate** so that seam work on the second
+  camera family has an aim with a name. `lock=1`; the Osmo writes its own solved orientation a
+  frame, so the world-fixed re-derivation rule above does not apply to it - that rule is about
+  Kjerag's own IMU filter and this file does not go through it.
+  **IT DOES NOT RENDER ON `main` AND THAT IS NOT A DEFECT IN THE LINE.** `main` refuses every
+  `.OSV` by name (`crates/meta/src/format.rs`; the pilot sees "That is a DJI video. Kjerag plays
+  Insta360 .insv only.") and `--bin reframe` answers `Error: Dji`. The reader that opens one is
+  the unmerged `feat/osmo-osv`, and the render below was taken there, at 343897f, `size=1024`.
+  Anything measured at this line before that branch merges is measured on a build the owner
+  cannot be handed.
+  WHAT IT SHOWS, on that render. A park under a tree canopy at head height, the camera worn: the
+  **sun is directly in frame** through the leaves a little above centre, with a chain of flare
+  ghosts running down and left of it across the grass, and the wearer's own head and shoulder
+  fill the bottom of the picture at arm's length. So the frame holds three of the hard classes at
+  once - **glare in one lens**, a **near-field subject** at the distance parallax is worst at,
+  and, at fov 249.43, **both coverage rims**, which close the picture as the darkened arcs in the
+  top-left, top-right and bottom-right corners. The dynamic range across it is the widest in
+  either registry: blown canopy against deep shadow on grass in one frame.
+  **UNMEASURED, and named as such**: no per-crossing photometric reading has been taken at this
+  line. `--bin colour` and `--bin expose` run against `Scene`, so they refuse the file for the
+  same reason `reframe` does, and porting them is the OSV branch's work and not this line's.
+  What IS settled at this line is the metadata question stage 10 asked of it (seam-blending.md
+  23): the file carries **per-frame ISO, shutter and white balance**, one sample per frame, in
+  both its `djmd` tracks - and **the two tracks carry the same block**, so there is no per-lens
+  exposure in an `.OSV` and nothing for a deterministic normalization to divide by.
+  STATUS: REGISTERED, rendered on `feat/osmo-osv`, photometrically unmeasured. Gates stage 10 on
+  the DJI side.
+
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas

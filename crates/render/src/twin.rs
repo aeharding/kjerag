@@ -79,11 +79,12 @@ fn twin(@builtin(global_invocation_id) id: vec3<u32>) {
     out.landings[0].axis,
     out.landings[1].axis,
   );
+  let split = exposure_split();
   answers[base + 3u] = vec4<f32>(
     f32(out.landings[0].inside),
     f32(out.landings[1].inside),
-    0.0,
-    0.0,
+    split.x,
+    split.y,
   );
 }
 "#;
@@ -130,6 +131,11 @@ struct Answer {
     depth: [f32; MAX_LENSES],
     axis: [f32; MAX_LENSES],
     inside: [bool; MAX_LENSES],
+    /// What the deterministic exposure normalization multiplies each lens by
+    /// (issue #103, stage 10 step P.1). Constant over the rays - it reads one
+    /// uniform and no ray at all - which is exactly why it is carried in the
+    /// two words lane 3 had spare rather than in a probe of its own.
+    exposure: [f32; MAX_LENSES],
 }
 
 /// Runs the shipped map on the GPU over `rays` and reads every landing and
@@ -273,6 +279,7 @@ fn on_the_gpu(
                 depth: [lane[8], lane[9]],
                 axis: [lane[10], lane[11]],
                 inside: [lane[12] != 0.0, lane[13] != 0.0],
+                exposure: [lane[14], lane[15]],
             }
         })
         .collect()
@@ -451,7 +458,15 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
         true,
         Sampling::default(),
     )
-    .with_shift(2.5f32.to_radians());
+    .with_shift(2.5f32.to_radians())
+    // **And the two lenses' shutters differ, or `exposure_split` returns its
+    // literal `[1.0, 1.0]` on both sides and the comparison below is two
+    // constants agreeing.** The value is a real one: 0.12 of a natural log is
+    // the two lenses 12.7 percent apart in exposure time, which is inside the
+    // 0.54-to-1.81 swing measured across two X4 Air captures
+    // (docs/research/insv-format.md 6.3) and inside the `LIMIT_LN` clamp, so
+    // this fixture reaches the arithmetic rather than the clamp.
+    .with_exposure(0.12);
     // The block the shader is handed carries the held line, or this test would
     // be run on the one field the seam anchor added.
     assert!(reframe.handover_width() > 0.0);
@@ -461,6 +476,13 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
         reframe.is_rolling(),
         "the block's row axis is zero, so the readout branch of `project` runs on neither side",
     );
+    // And it carries a shutter difference, or `exposure_split` takes its exact
+    // zero branch on both halves and a mutation of the arithmetic behind it
+    // would pass. This is the same lesson `is_rolling` above is written for.
+    assert!(
+        reframe.exposure_split() != [1.0, 1.0],
+        "the block's exposure ratio is zero, so `exposure_split` returns its literal on both          halves and the comparison is two constants agreeing",
+    );
 
     let rays = probe_rays(&reframe);
     let answers = on_the_gpu(&device, &queue, &reframe, &rays);
@@ -468,11 +490,20 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
 
     let (mut worst_weight, mut worst_pixel) = (0.0f32, 0.0f32);
     let (mut worst_depth, mut worst_axis) = (0.0f32, 0.0f32);
+    let mut worst_exposure = 0.0f32;
     let (mut mixed, mut landings) = (0usize, 0usize);
+    let split = reframe.exposure_split();
     for (ray, answer) in rays.iter().zip(&answers) {
         let mirror = reframe.blend(*ray);
         if mirror.weights.iter().all(|weight| *weight > 0.0) {
             mixed += 1;
+        }
+        // Checked on every ray rather than only where a lens draws: the split
+        // reads one uniform and no ray at all, so a disagreement is a
+        // disagreement everywhere, and the cheapest place to catch it is the
+        // loop that is already running.
+        for (drawn, mirrored) in answer.exposure.iter().zip(&split) {
+            worst_exposure = worst_exposure.max((drawn - mirrored).abs());
         }
         for lens in 0..MAX_LENSES {
             // The weight is compared everywhere, and it is the number that
@@ -529,10 +560,18 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
         worst_axis < 1e-6,
         "the two halves read the landing's own axis cosine {worst_axis} apart",
     );
+    // A gain multiplies a code, so the bar is in codes: 1e-6 of a multiplier is
+    // a four-thousandth of one code of 255 at full white, and the clean run
+    // reads 0.0 exactly because both sides evaluate one `exp` of one uniform.
+    assert!(
+        worst_exposure < 1e-6,
+        "the two halves normalize the exposure by multipliers {worst_exposure} apart",
+    );
     eprintln!(
         "twin: {} rays, {mixed} inside the handover, {landings} landings compared; worst \
          weight {worst_weight:.3e}, worst landing {worst_pixel:.3e} px, worst depth \
-         {worst_depth:.3e} px, worst axis {worst_axis:.3e}",
+         {worst_depth:.3e} px, worst axis {worst_axis:.3e}, worst exposure split \
+         {worst_exposure:.3e}",
         rays.len(),
     );
 }

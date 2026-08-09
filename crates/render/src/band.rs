@@ -281,7 +281,7 @@ const TAU_GAIN_S: f32 = TAU_FAR_S;
 /// What it is here for is the case none of those captures is: a seam
 /// correlating on content that is not the same content at all, which would
 /// otherwise reach the picture as a hemisphere washing out.
-const LIMIT_LN: f32 = 0.25;
+pub(crate) const LIMIT_LN: f32 = 0.25;
 
 /// The exposure the two lenses hand the same content over at, pooled over the
 /// whole ring, smoothed, and split between them (issue #103, stage 3).

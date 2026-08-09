@@ -450,3 +450,250 @@ pixel lags, while at the azimuth his own gear crosses the seam it is +5.87
 percent and turning the entire photometric stage on moved it from 5.94 to 5.94.
 **What still reads as a line at the seam is geometric.** That is the foundation
 of the local-warp-versus-pose decision, and it is the campaign's next question.
+
+---
+
+# Stage 10, step P.1: the deterministic normalization, measured and refused
+
+**Status:** measured verdict, application built, switched OFF by default, not
+recommended. **Date:** 2026-08-09. **Instrument:**
+`kjerag-spike --bin expose mode=meta`, which is new and is what this section is.
+
+The plan of record for stage 10's first step was a **deterministic per-lens
+exposure normalization from file metadata**: read the trailer's own per-frame
+per-lens shutter, ratio-normalize the two lenses before fusion, and be
+structurally unable to repeat stage 7/8's noise-painting because nothing is
+estimated from pixels. The attraction is real and the reasoning is sound as far
+as it goes. It is also, measured, **the largest single regression this campaign
+has produced**, and it is refused here on nine of the owner's own reference
+views.
+
+## 17. What the file actually carries
+
+Verified on the owner's own captures rather than quoted, because the "check
+whether an ISO is in there" was half the task.
+
+| record | what it is | per lens? |
+| --- | --- | --- |
+| **4 and 12** | `{u64 ts, f64 shutter_s}`, one sample per frame | **yes** - 4 is lens 0, 12 is lens 1 |
+| **9** (`AAAData`) | 48 bytes a sample, `ts_ms, 0, 0, 0, 0x02000000, a, b, 0, 0, 0, 0, 0` | **no** - one track for the file |
+| **1** (protobuf) | 55 keys, calibration and clocks | no exposure key at all |
+| 11, 22, 27, 28, 29 | undecoded | none has a second copy for a second lens |
+
+On the May file record 9 is 2077440 bytes, which at 48 is 43280 samples for a
+capture whose two shutter records hold 43959 each: one per frame, written once,
+`a` in 2040 to 2161 and `b` in 6343 to 6349. **There is no second `AAAData` for
+the second lens**, so whatever `a` and `b` are, they cannot complete a per-lens
+sum. That reproduces the 2026-07-31 reading (insv-format.md 2) on a different
+capture, three firmware generations along.
+
+**So the answer to "is there a per-lens ISO or gain" is no, and it is no by
+absence and not by ambiguity.** Shutter is the only per-lens exposure quantity
+the format carries.
+
+**And on the ONE X2 there is not even that.** `VID_20251018_191318_00_002.insv`
+writes record 4 (131696 bytes, 8231 samples) and **no record 12 at all**. One
+lens's shutter and nothing to divide it by: on that camera the step is not
+merely uninformative, it is unavailable, and `--bin expose mode=meta` refuses
+the file in those words.
+
+## 18. Does the shutter ratio predict the artifact? No, and it is not close
+
+`--bin expose mode=meta` asks the one question the whole design rests on. Per
+frame it reads `g`, the trailer's own `shutter1 / shutter0` at that frame's own
+camera instant, and the delivered ratio, the two lenses' mean luma over the
+overlap annulus - the same world directions in both, so a brightness and not a
+content difference, which is the 6.3 estimator kept deliberately so the two
+readings are comparable. A correction multiplies the lenses by `sqrt(g)` and
+`1/sqrt(g)`, so what it LEAVES is `ln(delivered) - ln(g)`, and that is the last
+column.
+
+Nine reference views, five X4 Air captures, 40 to 60 consecutive frames each:
+
+| view | `g` says | the lenses actually differ by | correlation | what the correction leaves |
+| --- | ---: | ---: | ---: | ---: |
+| the dirt reference, 488.855 | -34.9 to -32.9% | -2.4 to -1.1% | +0.51 | **+2038%** |
+| the May wide view, 630.763 | -37.4% | -3.6 to -3.2% | 0.00 | +1163% |
+| the fov 30.6 view, 669.369 | -36.7 to -32.8% | -4.3 to -1.5% | +0.19 | +1283% |
+| the green cast, 594.027 | +48.5 to +52.0% | +2.8 to +3.7% | **-0.34** | +1070% |
+| the green cast, 602.368 | +46.8 to +57.0% | +1.5 to +4.0% | **-0.67** | +1227% |
+| GOOD and BAD, 50.117 | +50.0 to +52.4% | +0.07 to +0.78% | **-0.74** | +7689% |
+| down1, 65.666 | +42.2% | -0.26 to +0.26% | 0.00 | +22686% |
+| the shimmer view, 36.303 | +39.1 to +47.1% | +0.07 to +4.3% | +0.34 | +1375% |
+| hard mode, 31.064 | +38.6 to +45.5% | -0.65 to +4.1% | +0.18 | +1780% |
+| the X2, 77.978 | *no record 12* | | | *refused* |
+
+Three readings and each is fatal on its own.
+
+1. **The size is wrong by a factor of twenty.** The metadata says the two lenses
+   are 33 to 57 percent apart. Their pictures of the same directions are 0.07 to
+   4.3 percent apart. A correction has to be the size of the artifact to be a
+   correction of it.
+2. **The sign is not even reliable.** The correlation over nine views runs -0.74
+   to +0.51 and averages about -0.05. **Three of the nine are strongly
+   negative**, which is metadata pointing the wrong way, and the two most
+   negative are the owner's own green-cast pair and the GOOD/BAD instant.
+3. **It never once helps.** The last column is never below 100 percent on any
+   view. The best case makes the artifact **eleven times** bigger and the worst
+   **two hundred and twenty-eight times**.
+
+**Why, and it is not a tuning problem.** The two lenses run independent
+auto-exposure loops that trade shutter against sensor gain to reach the same
+picture brightness. `g` therefore measures how differently the two hemispheres
+are **lit** - on a paraglider, sun against ground, and genuinely a factor of 1.8
+- and not how differently they came **out**, which is a percent or three because
+the camera has already corrected for the first thing. **Normalizing by shutter
+does not remove an error; it removes the camera's own correction and puts the
+raw lighting difference back into the picture.** Completing the sum would need
+the matching per-lens gain, and section 17 is the search for it.
+
+This is the 2026-07-31 finding (insv-format.md 6.3, ROADMAP the same day) with
+the same verdict and a wider corpus: it was 4 to 20 times worse on two captures
+then, and it is 11 to 228 times worse on nine views of five captures now, at the
+owner's own reference aims, on the flat-seam architecture he approved.
+
+## 19. What it does to the picture, at the view the complaint was made at
+
+The dirt reference, `time=488.855 yaw=-5.17 pitch=2.56 fov=218.99 lock=1`, eight
+frames, 1024 px. `off` is `main`'s picture, proven byte-identical (section 21).
+
+| | the seam's step, `--bin expose mode=render` | the decoy circle |
+| --- | ---: | ---: |
+| off | **-2.143 codes** | -2.164 |
+| on | **-15.261 codes** | -1.993 |
+
+**2.14 to 15.26 codes, seven times worse, and the decoy does not move**, so the
+thirteen codes are the correction's and not the scene's. For the ladder this
+line carries: stage 3's far-field gain took the same step **2.265 to 1.424
+codes**, and this step takes it to 15.26. What P.1 delivers on top of the pooled
+gain is **minus six code-lengths of it**.
+
+The eye's own metric, `--bin colour mode=profile`, same view, worst channel:
+
+| | step in codes | Weber, worst lag | 1 px excess | 2 px excess |
+| --- | ---: | ---: | ---: | ---: |
+| off | 4.359 | 25.67% (128 px) | +0.61% | -0.03% |
+| on | **17.109** | **48.58%** (128 px) | +0.97% | +0.76% |
+
+The standing bar is the one and two pixel excess at or under a one percent
+just-noticeable difference. Both arms are still under it, because **the
+correction is a step in LEVEL laid across an eight degree handover and an eight
+degree handover at fov 219 is 72 pixels wide**: what it makes worse is every lag
+from 8 pixels out, which is the ramp, and it makes the worst of them roughly
+twice as bad. It is not a defect the one-pixel bar can see, which is precisely
+the process finding of section 16 read from the other side.
+
+## 20. The interior, and what the instrument can and cannot say about it
+
+The binding area-acceptance rule (section 16): a field applied over an area is
+accepted on the area. `--bin colour`'s interior block, 7 to 60 degrees off the
+seam, same view:
+
+| build | interior roughness | worst neighbour step |
+| --- | ---: | ---: |
+| off | 0.07% | 0.69% |
+| **on** | **0.05%** | **0.29%** |
+| the rejected stage 8 build, for scale | 1.01% | 1.99% |
+| a planted 0.5 code ripple | 1.37 to 1.42% | 1.16 to 2.14% |
+
+**It passes, and the honest reason is that it cannot fail.** A metadata gain is
+one scalar for the whole frame, with no azimuthal structure of any kind, and the
+statistic is the residual after a five-term harmonic - which absorbs a constant
+exactly, at the zeroth term. **State the caveat with the number**: that
+instrument compares the band held against the band drawn, and both of its arms
+carry this term, so the term cancels inside it and the 0.05 above is a reading
+about the pooled gain and not about P.1. What says P.1 cannot stripe is the
+structure of P.1 and not this measurement.
+
+This is the one gate the step passes, and it passes it for a reason that makes
+the pass worth nothing: the failure mode it guards against is not the failure
+mode this step has.
+
+## 21. The pooled gain does not absorb it, and cannot
+
+The stage-10 plan expected the shipped stage-3 gain to have absorbed the static
+part of the exposure difference already, and asked for a re-fit so the two would
+not double-correct. **Measured, there is nothing to re-fit, and the reason is a
+finding of its own.**
+
+The shipped gain reads **`+0.00287` ln, evidence 0.032, on both arms, to five
+decimals**. It does not move when the normalization is switched on, and it will
+never move, because the band's `measure` and `pool` compute entry points sample
+the **decoded planes**, which is upstream of the fragment shader where both
+`tone_split` and the new `exposure_split` are applied. The pooled gain therefore
+cannot see the metadata term at all.
+
+So the two do not double-correct. They **multiply blindly**: the pass applies
+0.287 percent of measured correction and then 33 percent of unmeasured one on
+top of it, and nothing in the loop ever learns that the picture it produced is
+now a third of a stop out. A correction the measurement layer is structurally
+blind to is exactly the class of thing this campaign has now been burned by
+three times, and it is worth writing down as a property of the architecture
+rather than of this step: **anything applied in the fragment shader is invisible
+to the band, because the band measures the source and not the picture.**
+
+## 22. The verdict, and what ships
+
+**The step is refused. The application is built and switched off; the
+instrument, the trailer verification and this record are what the branch is
+for.** That is PR #138's ending and it is deliberate: the numbers are the
+deliverable, and a number is worth more when the arm that produced it can be
+re-run.
+
+`KJERAG_EXPOSURE_NORM=on` draws it. Off is the default, off is what an empty
+string reads as, and off is `main` byte for byte at four registry views
+(`down1` 7d2200ea, `down3` a19a9b80, `bad` f27874ed, `shimmer` 54fc67b7,
+`--bin null`); on moves `down1` to 7d2ef9bc, which is the positive control that
+the mechanism is live.
+
+**What would change the verdict, stated so nobody has to re-derive it.** A
+per-lens **gain** - ISO, analogue gain, digital gain, anything that closes
+`exposure = shutter * gain` for each lens separately. It is not in records 4, 9,
+12 or 1, it is not in the undecoded records in any per-lens shape, and it is not
+in the Osmo 360's telemetry either (section 23). Until it exists in a file,
+deterministic exposure normalization is not an under-tuned idea, it is an
+under-determined one.
+
+## 23. The Osmo 360 `.OSV`: per frame, yes; per lens, no
+
+The stage-10 plan asked the same question of DJI. **An `.OSV` carries per-frame
+exposure metadata, in more detail than an `.insv` does, and none of it is per
+lens.**
+
+Sample 0 of each `djmd` track is the calibration message (`crates/meta/src/osmo.rs`
+on `feat/osmo-osv`); every sample after it is a per-frame block, one per video
+frame, and inside it:
+
+| field | what it is | how that was established |
+| --- | --- | --- |
+| `3.2.3.1` | **ISO**, `f32` | tops out at exactly **800.0** on the four captures whose own filenames say "iso max 800" and at exactly **1600.0** on the one that says "iso maxed 1600" |
+| `3.2.4.1` | **shutter**, a `(numerator, denominator)` rational | the denominator bottoms out at exactly **100** on both captures whose filenames say "shutter max 1/100", and nowhere else |
+| `3.2.6.1` | white balance in kelvin | 4743 to 6443 across the corpus |
+| `3.2.16.1` | a temperature in degrees, 41 to 45 | unidentified |
+
+The identification is the corpus's own named caps and not a guess, which is why
+it is worth having: the owner shot those files with the caps written into their
+names.
+
+**But both `djmd` tracks carry the same block.** Over 584 to 899 consecutive
+frames of each of seven captures, the exposure product `ISO * shutter` between
+the two tracks reads a ratio of **0.99966 to 1.00067 mean, 0.00044 to 0.00288
+standard deviation, with 82 to 98 percent of frames identical to within a
+thousandth**. On the two Dlog-M captures they never differ at all.
+
+Where they do differ it is a **write-time race on one shared value and not two
+metering loops**, and the evidence is that the differences appear only while the
+value is moving: 56 of 58, 17 of 17 and 142 of 187 of them sit on a frame where
+the track's own value is changing, and the sign is one-way (one track lower on
+54 of 58 and on 140 of 187). One capture, `CAM_20250715191201_0003_D.OSV`, is
+the exception - 48 of its 95 differences are on steady frames and reach 3
+percent - and it is **not** explained here; it is the smallest and oldest file
+in the corpus and it is flagged rather than fitted.
+
+**So the answer for `.OSV` is the answer for `.insv` with one fewer step: there
+is no per-lens exposure to ratio, so there is nothing deterministic to
+normalize.** No implementation is proposed, and none would have been possible on
+this branch in any case: `main` does not play `.OSV` at all - it is refused by
+name (`crates/meta/src/format.rs`, "That is a DJI video. Kjerag plays Insta360
+.insv only.") - and the reader that would change that is the unmerged
+`feat/osmo-osv`.
