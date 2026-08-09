@@ -661,6 +661,61 @@ live, no keyframe UI ever.
   together say the box's own load moves this more than the rebase does. No
   playback claim is made for the rebase in either direction.
 
+- 2026-08-09 **The belt is built, off by default, and its estimator reads a
+  planted shift true to three thousandths of a degree** (docs/research/belt.md).
+  Studio's Optical Flow column, which docs/research/studio-parity.md 7 parked
+  behind its own switch, on the clock rung 0 took before a line of it existed.
+  Owner: *"You can start the belt. I wouldn't necessarily make the params
+  configurable for a lower end device though - lets try to get studio parity
+  first."* So there is ONE shape and no ladder of them: 4096x128, seeded from
+  the previous frame, every frame, and every number in `belt.rs` is a constant.
+
+  **What runs per frame**: both lenses' overlap rectified into one strip off a
+  body-frame map built once per file, a two-halving pyramid, inverse-
+  compositional Lucas-Kanade over 8x8 patches at stride 3 with no variational
+  refinement, a per-segment gate, DIS's own densification, and a field that
+  displaces what each lens is SAMPLED at before the crossfade mixes them. The
+  whole ladder runs on the first frame, after a seek past 0.25 s of film either
+  way, and on the frame the arm is switched on, because a cold search recovers
+  1.5 to 1.9 strip pixels of a plant and no more.
+
+  **THE PLANT TABLE IS THE INCREMENT'S OWN GATE and it passes.** rung-0 read
+  the field's along-seam median at -2.1 to -4.5 strip PIXELS across sizes whose
+  along sampling differs by 2.7 times, and called it an estimator bias it could
+  not separate from a seam. At the working shape, through the shipped code, a
+  plant of +-0.05 degrees reads back to **0.0004 degrees** and one of +-0.30
+  through the ladder to **0.0034**, the along axis reads zero where it has to,
+  and the zero-shift null reads EXACTLY zero with every patch kept. The control
+  caught the bug rung-0's own probe shipped with - lens 1's picture bound to
+  lens 0's planted coordinates - before it caught anything about the belt.
+
+  **An untrusted along-seam segment fails UPWARD**, which is Studio's own
+  measured behaviour and the anti-jump design: planted textureless, a segment
+  reads trust 0.000, takes 0.980 of the coarse pyramid's answer, and delivers
+  -3.184 of a -3.150 plant where a snapping gate would deliver zero.
+
+  **The weights are the geometry's and the belt does not touch them.**
+  `Blend::moved` is a second array beside `landings`: flow moves what is
+  sampled, the anchor moves where the crossfade sits, and neither reaches into
+  the other. That is what keeps the fade from breathing with the near field,
+  which is the fault the owner named on 2026-08-05.
+
+  **The null is byte identity** at six registry views and over a 180 frame
+  played segment, and every one of them moves with the arm on. **The twin guard
+  grew to cover the consuming path** and is mutation-proven twice, each the only
+  failing test in the workspace: lens 0's share the wrong way round reads 2315
+  times its bar and a bilinear that mixes wrong reads 26 times its own.
+
+  **THE CLOCK IS DISCLOSED AND IT MISSES ITS BAR.** 29.62 to 29.77 fps over
+  three rotated reps against the control's 29.82 to 29.87, 4 to 7 dropped per
+  20 s against 2 to 3, 0 starved and 0 underruns. rung-0's bar was 29.8. The
+  belt costs 5.7 ms a redraw and its consuming half is free (13.75 ms with the
+  field computed and not read against 13.82 with it read).
+
+  **No eye has seen it.** It is staged for the owner's playback A/B at
+  `~/kjerag-ab/sessions/belt-flow.ab`, two arms hot swapped inside one playback
+  at his standing views plus a gear crossing, and nothing is merged.
+
 - 2026-08-09 **The seam is flat, the handover line is held on the world, and
   the machinery that morphed the picture is deleted rather than switched off**
   (docs/research/studio-parity.md). The owner approved the architecture on
