@@ -355,6 +355,20 @@ fn probe_rays(reframe: &Reframe) -> Vec<[f32; 3]> {
 ///
 /// Each was the **only** failing test in the workspace, and each was reverted.
 ///
+/// **The theta arm calibrated the same way**, 2026-08-09, and both of these
+/// were caught by the DJI arm while the Insta360 arm stayed green to the last
+/// digit above - which is the check that the two arms are independent and not
+/// one fixture reported twice:
+///
+/// | mutation, WGSL `theta` only | worst weight | of the bar |
+/// | --- | ---: | ---: |
+/// | the tail coefficient read twice, `c5` written `c4` - the copy-paste a five-slot chain invites | 3.5e-1 | 17700x |
+/// | the leading coefficient out by a **tenth of a percent**, `c1 * 1.001` | 4.3e-4 | 22x |
+///
+/// The second is the one worth reading: an error far too small to see in a
+/// picture, on the term that does the most work, is still twenty times the
+/// bar. Both were reverted.
+///
 /// **Why the landings are compared where the weight is not zero, and not
 /// everywhere.** A lens the ray cannot reach is never projected, and its
 /// landing is whatever the slot held. WGSL says a `var` with no initializer is
