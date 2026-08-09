@@ -1298,6 +1298,19 @@ struct Options {
     /// Where the radial delta starts, and where it STAYS on a run that does
     /// not free it. This is what a cross-validated prediction is made with.
     startradial: Option<[[f64; RADIAL_ORDERS]; 2]>,
+    /// Whether our render corrects the ROLLING SHUTTER with the file's own
+    /// IMU, the way the shipped pass does (issue #9).
+    ///
+    /// Off by default, which is what every solve before it was written did, so
+    /// a run with it off is the run that was there before. It exists because
+    /// the residual against a real export turned out to be dominated by
+    /// site-to-site SCATTER rather than by anything smooth, and a readout is
+    /// the one thing in this pipeline that displaces content by tens of pixels
+    /// in a pattern that is smooth in the SENSOR's rows and scattered in
+    /// everything this instrument bins by. The turn across one readout is
+    /// printed for every arm whether or not this is on, because it is a
+    /// property of the flight and not of the correction.
+    rolling: bool,
     /// How much the difference picture is amplified about mid grey.
     ///
     /// Section 6 of the protocol says 4x and the owner asked for 8x on the
@@ -1378,6 +1391,7 @@ impl Options {
             told: Vec::new(),
             world: true,
             lock: Lock::World,
+            rolling: false,
             free: vec!["all".to_owned()],
             arms: Vec::new(),
             plantradial: None,
@@ -1431,6 +1445,7 @@ impl Options {
                 "lag" => options.lag = value.parse()?,
                 "damp" => options.damp = value.parse()?,
                 "aim" => options.aim = value.parse::<u32>()? != 0,
+                "rolling" => options.rolling = value.parse::<u32>()? != 0,
                 "instants" => {
                     options.instants = value
                         .split(',')
@@ -2292,7 +2307,7 @@ fn parity(options: &Options) -> Fallible<()> {
                         compression: 1.0,
                         panini: options.panini,
                     };
-                    let score = agree(&looked(&lenses, frame, look, &ours, coarse, &[]), &small);
+                    let score = agree(&looked(&lenses, frame, look, &ours, coarse, &[], None), &small);
                     if score > best.0 {
                         best = (score, look);
                     }
@@ -2305,7 +2320,7 @@ fn parity(options: &Options) -> Fallible<()> {
     let fine = export.shape.scaled(200);
     let small = export.resampled(fine);
     let scored =
-        |look: Look, pair: &Pair| agree(&looked(&lenses, frame, look, pair, fine, &[]), &small);
+        |look: Look, pair: &Pair| agree(&looked(&lenses, frame, look, pair, fine, &[], None), &small);
     let mut step = 8.0;
     let mut score = scored(best.1, &ours);
     while step > 0.005 {
@@ -2359,8 +2374,8 @@ fn parity(options: &Options) -> Fallible<()> {
     // corridor's outer 1.6 degrees while the outer window still starts clear
     // of it. The bias is one way: this understates a wide handover's cost
     // rather than inventing one.
-    let stage1 = looked(&lenses, frame, look, &ours, export.shape, &[]);
-    let banded_picture = looked(&lenses, frame, look, &ours, export.shape, &options.band);
+    let stage1 = looked(&lenses, frame, look, &ours, export.shape, &[], None);
+    let banded_picture = looked(&lenses, frame, look, &ours, export.shape, &options.band, None);
     let seam = seam_map(&lenses, frame, look, export.shape);
     println!(
         "\n{:<14} {:>13} {:>13} {:>9} {:>9} {:>9}",
@@ -2804,8 +2819,9 @@ fn drawn(
     pair: &Pair,
     shape: Shape,
     cells: &[kjerag_render::Cell],
+    rolling: Option<kjerag_render::Rolling>,
 ) -> Vec<f64> {
-    looked(lenses, frame, look, pair, shape, cells)
+    looked(lenses, frame, look, pair, shape, cells, rolling)
 }
 
 /// Zero-mean normalized cross-correlation of a patch of `target` into `ours`.
@@ -3294,6 +3310,8 @@ struct Arm {
     pair: Pair,
     target: Vec<f64>,
     aim: ViewAim,
+    /// This instant's own readout turn, or `None` where it is not corrected.
+    rolling: Option<kjerag_render::Rolling>,
     coverage: Displacements,
     last: Option<Reached>,
 }
@@ -3378,6 +3396,14 @@ fn solve(options: &Options) -> Fallible<()> {
         return Err("this file carries one lens, so it has no seam to solve".into());
     }
     let basis = [RadialBasis::build(&lenses[0]), RadialBasis::build(&lenses[1])];
+    // The readout, which is the camera's own motion inside one frame and not
+    // the display's (issue #9). Read whether or not it is corrected for: the
+    // turn across one readout is what says how much of the residual could
+    // possibly be the readout, and it is a property of the flight at that
+    // instant rather than of any calibration.
+    let track = calibration.orientation(Filter::default());
+    let readout = calibration.readout();
+    let span = (readout.seconds * 1e6) as i64;
     let shape = Shape {
         width: options.size,
         height: ((f64::from(options.size) / options.aspect).round() as u32).max(1),
@@ -3438,6 +3464,29 @@ fn solve(options: &Options) -> Fallible<()> {
     let mut arms: Vec<Arm> = Vec::new();
     for spec in &specs {
         let pair = pair_at(&options.input, spec.from, frame)?;
+        let at = pair.at.as_micros() as i64;
+        let turn = match track.is_empty() || span <= 0 {
+            true => [0.0; 3],
+            false => track.turn(at - span / 2, at + span / 2),
+        };
+        let sweep = readout.sweep.axis();
+        let rolling = match options.rolling && turn != [0.0; 3] && sweep != [0.0; 2] {
+            true => Some(kjerag_render::Rolling { turn, axis: sweep }),
+            false => None,
+        };
+        println!(
+            "readout: {} turns {:.4} deg across one {:.2} ms readout at {:.1} s, which is \
+             {:.1} px of \n         this picture edge to edge; the correction is {}",
+            spec.label,
+            norm(turn).to_degrees(),
+            readout.seconds * 1e3,
+            spec.from,
+            norm(turn).to_degrees() * f64::from(shape.width) / spec.fov,
+            match rolling.is_some() {
+                true => "ON",
+                false => "off",
+            },
+        );
         let aim = ViewAim {
             view: spec.view,
             fov: spec.fov,
@@ -3450,6 +3499,7 @@ fn solve(options: &Options) -> Fallible<()> {
                 &pair,
                 shape,
                 &options.band,
+                rolling,
             ),
             (None, Some(path)) => {
                 let at = spec.from - options.lag;
@@ -3472,6 +3522,7 @@ fn solve(options: &Options) -> Fallible<()> {
             pair,
             target,
             aim,
+            rolling,
             coverage: Displacements {
                 residuals: Vec::new(),
             },
@@ -3503,6 +3554,7 @@ fn solve(options: &Options) -> Fallible<()> {
                 &arm.pair,
                 shape,
                 &options.band,
+                arm.rolling,
             );
             agree(&picture, &arm.target)
         };
@@ -3573,6 +3625,7 @@ fn solve(options: &Options) -> Fallible<()> {
             for (at, k) in mine.iter().copied().enumerate() {
                 column_of[k] = Some(at);
             }
+            let arm_rolling = arm.rolling;
             let build = |calib: Calib, aim: ViewAim| {
                 let applied = calib.applied(&lenses, &basis);
                 (
@@ -3583,7 +3636,7 @@ fn solve(options: &Options) -> Fallible<()> {
                         Camera::default(),
                         Held {
                             body_from_world: orientation(aim.view),
-                            rolling: None,
+                            rolling: arm_rolling,
                         },
                         1.0,
                         false,
@@ -3599,6 +3652,7 @@ fn solve(options: &Options) -> Fallible<()> {
                 &arm.pair,
                 shape,
                 &options.band,
+                arm_rolling,
             );
             let here = build(calib, arm.aim);
             // Where the two lenses point in the body frame, read out of the
@@ -4133,6 +4187,7 @@ fn solve(options: &Options) -> Fallible<()> {
                 &arm.pair,
                 shape,
                 &options.band,
+                arm.rolling,
             );
             let difference: Vec<f64> = picture
                 .iter()
@@ -4622,6 +4677,7 @@ fn looked(
     pair: &Pair,
     shape: Shape,
     cells: &[kjerag_render::Cell],
+    rolling: Option<kjerag_render::Rolling>,
 ) -> Vec<f64> {
     let reframe = Reframe::new(
         lenses,
@@ -4629,7 +4685,7 @@ fn looked(
         Camera::default(),
         Held {
             body_from_world: orientation(view.angles),
-            rolling: None,
+            rolling,
         },
         1.0,
         false,
@@ -5168,7 +5224,7 @@ fn sphere_sweep(
                                 fov,
                                 d,
                             };
-                            let picture = looked(lenses, frame, aim.look(), ours, shape, cells);
+                            let picture = looked(lenses, frame, aim.look(), ours, shape, cells, None);
                             let score = agree_detail(
                                 &Detail::of(&picture, shape, hp, texture),
                                 theirs,
@@ -5452,7 +5508,7 @@ fn register(options: &Options) -> Fallible<()> {
         let theirs_fine = Detail::of(&export.averaged(fine), fine, options.hp, options.texture);
         let textured = theirs_fine.textured_pixels() as f64 / fine.pixels() as f64;
         let at_shape = |aim: Aim, shape: Shape, theirs: &Detail| {
-            let picture = looked(&lenses, frame, aim.look(), &ours, shape, &options.band);
+            let picture = looked(&lenses, frame, aim.look(), &ours, shape, &options.band, None);
             let pass = match shape.width <= coarse.width {
                 true => options.hpc,
                 false => options.hp,
@@ -5966,7 +6022,7 @@ fn register(options: &Options) -> Fallible<()> {
         // A registration nobody has looked at is a correlation coefficient.
         if let Some(out) = &options.out {
             let theirs = export.averaged(fine);
-            let picture = looked(&lenses, frame, aim.look(), &ours, fine, &options.band);
+            let picture = looked(&lenses, frame, aim.look(), &ours, fine, &options.band, None);
             let difference: Vec<f64> = picture
                 .iter()
                 .zip(&theirs)

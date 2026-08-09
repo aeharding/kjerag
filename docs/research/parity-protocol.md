@@ -830,3 +830,206 @@ aim after seeing the answer.
 aims, at the export's own resolution, drawn with the **fitted** model, in
 gitignored `scratch/`. Plus, only if the bar is met, one paragraph saying what
 the player must do differently.
+
+## 12. THE RADIAL STAGE — the result
+
+Section 11 was written and committed at `0738ec9`, before the radial model was
+fitted to anything. The instrument that fits it is `af7c5b9`; the diagnostics
+below it — the structure-against-scatter split and the per-geometry arm — are
+`e7f64b4`, and the readout report is the commit above this one. **Every run
+quoted was made on `e7f64b4` or later, and the five-knob answer of section 10
+reproduces on it to four decimals** (`each-v3-b160` returns 3.9173 px against
+section 10's 3.9173, and the other three geometries return 7.9601, 6.7069 and
+12.3902 against 7.9601, 6.7069 and 12.3902). Outputs are in gitignored
+`scratch/radial/`.
+
+### THE VERDICT: still NOT REPRODUCIBLE, and the residual has a new name
+
+**B1 fails by a factor of 4.5 to 12.7. B2 fails by a factor of 8 to 27.** The
+radial knob was built, proved on a plant, pointed at the exports, and it does
+not close the gap; and what it fits at one aim makes the *other* aim worse than
+fitting nothing at all. The new finding is what stops it, and it is not a
+calibration term.
+
+### The gates first, because they are what make the failure mean anything
+
+**B4 NULL — PASS.** All thirty-one numbers free against an unperturbed render
+of our own at the four geometries: residual **0.0171, 0.0183, 0.0285, 0.0289 px**
+against a floor of 0.06, and the largest fitted radial amplitude anywhere is
+**2e-5** against a gate of 1.0e-4.
+
+**B3 PLANT — PASS, and it is the load-bearing gate of this whole section.**
+The pre-registered radial perturbation, injected into our own render and
+solved for from a start 0.30/0.22/0.10 deg and 0.75 deg of scale off:
+
+| mode | planted | recovered | error |
+| --- | ---: | ---: | ---: |
+| l0 rad1 | +1.0e-3 | **+1.00e-3** | <0.5% |
+| l0 rad2 | −6.0e-4 | **−6.00e-4** | <0.5% |
+| l0 rad3 | +3.0e-4 | **+3.00e-4** | <0.5% |
+| l1 rad1 | −8.0e-4 | **−8.1e-4** | 1.3% |
+| l1 rad2 | +4.0e-4 | **+4.1e-4** | 2.5% |
+
+with `lens1 pitch` back at **0.20023** for a planted 0.2 and `lens1 cx` at
+**7.994** for a planted 8, and the residual at **0.0175 to 0.0336 px**, inside
+1.2x of the same geometries' own null. The gate asked for 15 percent and got
+under 3.
+
+**So the estimator can find a radial law of exactly this family, this shape and
+this size, at exactly these four geometries, to within a few percent.** Every
+sentence below is said with that behind it: what follows is not an instrument
+failing to see something.
+
+**B5 CONDITIONING — bites, and half of it was predicted.** In the four-geometry
+fit no pair reaches 0.99 but `l1 rad3` against `l1 rad4` runs **−0.9898** and
+`l1 rad2` against `l1 rad4` **+0.9858**: lens 1's five modes are three numbers
+at best, and are reported as a family. The degeneracy section 11.2 B5 predicted
+in advance — the lowest radial mode against the view's own scale — turned up
+against the view's **angles** instead: `l0 rad1` runs **0.887, 0.890, −0.917,
+−0.890** against the four arms' view yaws, and only 0.17 against `b160 view
+fov`. The prediction was the right shape and the wrong axis.
+
+### B1: the answer, at all four geometries
+
+| aim | instant | sites | near seam | azimuth | **v3, five knobs** | **+ radial, jointly** |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| building | 160 s | 619 | 186 | 182.6 deg | 3.9173 | **4.8995** |
+| building | 55 s | 414 | 122 | 291.5 deg | 7.9601 | **7.8673** |
+| horizon | 160 s | 480 | 65 | 154.0 deg | 6.7069 | **4.5274** |
+| horizon | 55 s | 253 | 59 | 307.7 deg | 12.3902 | **12.7263** |
+
+Ten more knobs, fitted over four geometries at once, move the residual by
+**−32 to +25 percent** and leave it four to thirteen times the criterion.
+Section 3(a)'s other three clauses pass everywhere, as they did at section 10.
+
+Given **one geometry at a time** — the most generous reading of B1, and the
+same freedom section 10's arms had — the ten knobs are not identifiable at all
+and the run says so: building 160 s and 55 s **diverge** to 25.2 and 27.0 px
+with the kept sites collapsing from 615 to 126, horizon 160 s **REFUSES** at
+round 3 when lens 1 runs out of sites, and only horizon 55 s answers, at 8.58
+against the factory arm's 12.39. No failure returned a small residual, which is
+section 7's own property and is why this is reportable rather than alarming.
+
+### B2: the cross-validation, which is the sharper failure
+
+The camera fitted on one aim's two geometries, held, and the other aim solved
+with nothing free but its own four view numbers:
+
+| fitted on | held at | own fit | **predicted** | section 10's factory arm there |
+| --- | --- | ---: | ---: | ---: |
+| building | horizon 160 s | 3.7666 | **24.4443** | 5.5676 |
+| building | horizon 55 s | 11.7608 | **25.2121** | 14.2736 |
+| horizon | building 160 s | 26.9886 | **21.9359** | 8.0523 |
+| horizon | building 55 s | 14.2427 | **23.5249** | 11.2575 |
+
+**Every prediction is worse than the shipped factory calibration at the same
+view.** Re-freeing lens 1's five at the predicted geometry (the diagnostic, not
+the gate) changes nothing that matters: 24.9, 25.7, 19.2, 23.3. The reduced
+three-mode model is the same story with smaller numbers — 8.1, 12.1, 22.7, 26.8
+— and it too is beaten by doing nothing at two of its four.
+
+The parameters say it more plainly than the residuals do. The same camera,
+fitted at two aims:
+
+| | `l0 rad1` | `l1 rad1` | `lens1 cx` | `lens1 roll` |
+| --- | ---: | ---: | ---: | ---: |
+| all four | −0.0127 | −0.0020 | −27.6 | +0.055 |
+| building only | **+0.0782** | +0.0157 | −68.5 | −0.141 |
+| horizon only | **+0.0011** | −0.0269 | −75.0 | −1.916 |
+
+A calibration is a property of a camera. These are properties of a view.
+
+### What actually stops it: the residual is SCATTER, not shape
+
+The instrument now splits each lens's residual into the part that is a smooth
+function of where the site sits — binned in **both** the field angle (5 deg) and
+the azimuth round the seam (30 deg), because a rotation has zero mean in the
+first alone — and the part that is site-to-site spread inside those cells. On
+section 10's own arms, unchanged:
+
+| geometry | lens 0 smooth | lens 0 **scatter** | lens 1 smooth | lens 1 **scatter** |
+| --- | ---: | ---: | ---: | ---: |
+| building 160 s | 3.96 | **2.87** | 1.86 | **2.84** |
+| building 55 s | 4.50 | **7.93** | 1.82 | **6.97** |
+| horizon 160 s | 5.48 | **3.35** | — | — |
+| horizon 55 s | 4.06 | **3.93** | 9.11 | **22.48** |
+
+**The scatter is never below 2.8 px and reaches 22.5.** It is what the two
+pictures disagree by at sites that sit in the same place, and **no calibration
+of any shape can reach it** — not a radial polynomial, not a tangential one,
+not a thin prism, not a pose. The criterion this protocol fixed at 1.0 px in
+section 3 is **three to twenty-two times below the floor these exports set**,
+and that was not knowable before section 10 produced sites to measure it on.
+
+That also disposes of B6 without an argument: adding tangential or thin-prism
+terms is adding smooth knobs, and the smooth part is already the smaller half
+at five of the seven columns above. There is nothing there for them to take.
+
+### Where the scatter comes from, as far as this run can say
+
+The camera is on a paramotor and the readout is not instantaneous. Read off the
+file's own IMU, the body turns **0.1011 deg across one 15.88 ms readout at
+160 s and 0.2338 deg at 55 s** — **6.4 and 15.0 px** of these exports, edge to
+edge. The scatter is 2.8 to 3.9 px at the 160 s instants and 7.0 to 22.5 at the
+55 s ones, on **both** files: it tracks the flight and not the aim.
+
+Switching our own readout correction on (`rolling=1`, off by default and off in
+every number above) moves the residual by **+2, −5, −10 and −4 percent**
+(3.9173 to 3.9854, 7.9601 to 7.5641, 6.7069 to 6.0190, 12.3902 to 11.9331) and
+leaves the scatter where it was. So our model of the readout is not their model
+of it, and the readout is not the whole of the scatter — but a frame in which
+the camera moves 6 to 15 px during its own exposure is not a frame on which a
+1.0 px calibration criterion can be decided, and that is the finding.
+
+### B7: the cross-check against the file's own `offset_v6`
+
+**No reading matches, and the interesting number is not that one.** The fitted
+delta sits 0.88 deg rms from the closest of the four compositions, which is 88
+times the gate — but the fitted delta is itself an artefact (it is ~1 percent of
+radial multiplier, ten times the residual it removes, bought by moving every
+arm's aim about a degree).
+
+What settles the old question is the **other** column, which is a property of
+the file and not of any fit: how far each composition of the file's own numbers
+moves a picture at all, against `offset_v3`, in degrees of field angle over 45
+to 90:
+
+| composition of the file's own `offset_v6` | lens 0 | lens 1 |
+| --- | ---: | ---: |
+| v6 radial over v6 intrinsics, forward | **0.0095** | **0.0084** |
+| v6 radial over v3 intrinsics, forward | 0.0066 | 0.0446 |
+| v6 intrinsics over v3 radial (`v6pose`) | 0.0031 | 0.0376 |
+| v6 radial, INVERSE direction | 12.06 | 11.90 |
+
+The radial head `k1..k5` is tokens 1 to 5 under **every one** of the sixteen
+readings `kjerag_meta::Reading` enumerates, so those four rows are the whole
+candidate space rather than a sample of it.
+
+**The largest displacement any reading of `offset_v6` can produce on lens 0 is
+0.0095 deg — 0.61 px of these exports.** Section 10 measured a lens-0 radial
+residual running from **−0.111 to +0.095 deg**, which is twelve times that, in
+a shape (sign-flipping about 70 degrees) that none of these rows has. The
+inverse direction is refuted by twelve degrees of nonsense, which is the same
+verdict `docs/research/offset-v6.md` reached from the inside.
+
+So the answer to "how does Studio read the calibration" is, from the outside as
+well as the inside: **not out of this string.** Whatever their reframe does
+differently, `offset_v6`'s thirteen cannot carry it — they are too small by an
+order of magnitude on the lens where section 10's residual is largest. This run
+cannot say what they do instead, and does not speculate past that sentence.
+
+### What the owner is shown
+
+`scratch/radial/deliver-radial/{b160,h160}/` — `theirs.png`, `ours.png`,
+`difference-8x.png` and `side-by-side.png` at the export's own 3840 x 2160,
+drawn with the four-geometry fitted radial model. They are the same pictures
+section 10 delivered, because a 4.9 px difference at 64 px per degree is 0.077
+degrees and the eye was never what failed.
+
+### What would have to change for this question to be decidable
+
+Not a bigger model. **A frame whose content is not moving during its own
+readout**: the same experiment from a camera on a tripod, or from a hover, with
+the same two exports made the same way. The instrument, the gates, the plant and
+the criterion are all built and all pass; what is missing is data on which 1.0
+px is above the floor rather than under it.
