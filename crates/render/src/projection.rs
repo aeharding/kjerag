@@ -739,10 +739,37 @@ const ANCHOR_FOLLOW_RATE: f32 = 10.0;
 /// fourteenth makes the settle out of a hard turn abrupt.
 const ANCHOR_FOLLOW_POWER: i32 = 10;
 
-/// The largest step of film the follow is charged for, in seconds. A seek, a
-/// stall or a repeated frame is not a stretch of picture the line should be
-/// pulled across; past this the step is taken at this and no more.
-const ANCHOR_STEP_CAP_SECS: f64 = 0.25;
+/// The longest step of film the hold is carried across, in seconds. Past this,
+/// in **either** direction, the redraw is a discontinuity and the hold starts
+/// again on the geometry ([`SeamAnchor::hold`]).
+///
+/// **Why there is one number here and not two.** This used to cap the step the
+/// follow was charged for - `(at - was.at).min(CAP)` - which is a blunting and
+/// not an answer: it still charged the follow with a target read off a world
+/// direction from wherever the film used to be. Capping the step is what a
+/// stale target needs least, because the leak at this step is already most of
+/// the way to that target (the divisor is `(1 + POWER * RATE * dt)^(1/POWER)`,
+/// which is 1.39 here, so a target a quadrant wide still slams the line to the
+/// rail). So the cap became the threshold, the `min` is gone, and every step
+/// the follow is charged with is now a step of film the picture actually ran.
+///
+/// **Why 0.25, honestly.** It has to be far above one frame and far below the
+/// smallest seek the app can be asked for, and it is both by a wide margin:
+///
+/// - one frame is 1/30 s on every file in the corpus, 1/24 on the slowest film
+///   anyone shoots and 1/120 on the modes both cameras have, so this is 7.5,
+///   6.0 and 30 frames of continuous play;
+/// - the jump keys and the jump buttons move `key_bind::JUMP`, which is 10
+///   seconds, forty times this;
+/// - the scrubber can ask for less, and a scrubber seek shorter than this is a
+///   step of film the follow can honestly be charged for.
+///
+/// Nothing in a presentation time distinguishes a seek from a stall this long
+/// or from a run of dropped frames, and this does not try to: all three are a
+/// stretch of film that went by without the picture being drawn, and on the
+/// far side of all three the content under the seam is not the content the
+/// line was held on.
+const ANCHOR_SEEK_SECS: f64 = 0.25;
 
 /// Where the drawn handover line is, and what it costs the handover this
 /// redraw.
@@ -861,35 +888,49 @@ impl SeamAnchor {
         // first redraw of a run has no line yet, and its target is the geometry
         // itself, which is where the line would have been anyway.
         //
-        // **A redraw whose film runs BACKWARDS starts the run again**, and that
-        // is the whole of the seek path. Film time only goes down when the
-        // pilot has seeked (or a loop has wrapped), and the content under the
-        // seam after a seek has nothing to do with the content the line was
-        // held on: `was.on` is a world direction from a different part of the
-        // flight, so reading it back through this pose answers a target that
-        // can be a quadrant wide. Charging the follow with that would slam the
-        // line to the rail on the seek frame and then walk it back over the
-        // next second, which is a lurch laid over the one frame where the whole
-        // picture already changed. Anchoring afresh puts the line on the
-        // geometry there instead, which is where it would have been if the file
-        // had been opened at that instant. It is an event, and it is the one
-        // event this mechanism has: a seek is already a discontinuity in every
-        // pixel, so there is no velocity in the picture for it to break.
+        // **A redraw whose film is DISCONTINUOUS starts the run again**, and
+        // that is the whole of the seek path. `was.on` is a world direction
+        // from wherever the film was last drawn, so reading it back through
+        // this pose after a seek answers a target that can be a quadrant wide.
+        // Charging the follow with that slams the line to the rail on the seek
+        // frame and then walks it back over the next second, which is a lurch
+        // laid over the one frame where the whole picture already changed.
+        // Anchoring afresh puts the line on the geometry there instead, which
+        // is where it would have been if the file had been opened at that
+        // instant. It is an event, and it is the one event this mechanism has:
+        // a seek is already a discontinuity in every pixel, so there is no
+        // velocity in the picture for it to break.
+        //
+        // **In EITHER direction, since 2026-08-09.** Until then only backward
+        // film took this arm, on the reasoning that film time can only go down
+        // if the pilot has seeked - which is true and is not the whole set. A
+        // FORWARD seek reuses the stale anchor exactly the way a backward one
+        // used to: measured on this fixture, a forward seek of six seconds
+        // lands the line 2.90 degrees off the geometry on the seek frame and
+        // then walks it back, which is the same defect with the same shape.
+        // The argument the backward arm was given - a seek is a discontinuity
+        // in every pixel - never mentioned which way the clock moved.
+        //
+        // What separates the two cases is therefore the SIZE of the step and
+        // not its sign ([`ANCHOR_SEEK_SECS`], which says how 0.25 s was
+        // picked). Nothing in a presentation time tells a seek from a stall
+        // that long or from a run of dropped frames, and nothing here tries
+        // to: on the far side of all three the content under the seam is not
+        // the content the line was held on.
         //
         // `at == was.at` is NOT that case and stays in the second arm: it is a
         // redraw with no new frame behind it, the step is zero, and the law at
         // a step of zero is exactly the identity (`Self::follow`).
-        let (target, step) = match state.filter(|state| state.on != [0.0; 3] && at >= state.at) {
+        let continuous = |was: &Self| {
+            let step = at - was.at;
+            (0.0..=ANCHOR_SEEK_SECS).contains(&step)
+        };
+        let (target, step) = match state.filter(|was| was.on != [0.0; 3] && continuous(was)) {
             None => (0.0, 0.0),
-            // `min` and not `clamp`, because the arm above is what makes the
-            // difference non-negative. A stall and a forward seek are the same
-            // number here and are both taken at the cap: neither is a stretch
-            // of picture the line should be pulled across, and nothing in a
-            // presentation time can tell them apart.
-            Some(was) => (
-                offset_of(was.on),
-                (at - was.at).min(ANCHOR_STEP_CAP_SECS) as f32,
-            ),
+            // Uncapped, because the arm above is now what bounds it: every
+            // step that reaches here is between zero and `ANCHOR_SEEK_SECS`,
+            // which is a stretch of film the picture really ran.
+            Some(was) => (offset_of(was.on), (at - was.at) as f32),
         };
         let (delta, gain) = Self::follow(target, step, allowance);
         // **Clamped HERE, and that is what makes the anchor and the picture
@@ -5469,8 +5510,7 @@ pub(crate) mod tests {
         near(again.shift(), anchor.shift(), 1e-6);
     }
 
-    /// **Film that runs backwards is a seek, and a seek starts the hold
-    /// again.**
+    /// **A seek starts the hold again, whichever way the film jumped.**
     ///
     /// The step used to be `(at - was.at).clamp(0.0, CAP)`, so a backward seek
     /// came out as a step of zero - and a step of zero is the identity, which
@@ -5480,38 +5520,115 @@ pub(crate) mod tests {
     /// the rail on the seek frame and walked back over the next second: a lurch
     /// laid over the one frame where every pixel already changed.
     ///
-    /// The three cases, and the middle one is the fix:
+    /// **The forward half of that was still there until 2026-08-09**, and this
+    /// test now carries it. A forward seek took the ordinary arm with the step
+    /// capped, which charges the follow with the same stale target - and the
+    /// size of that is a closed form rather than an accident. The follow's own
+    /// ceiling at a step of `dt` is `allowance / (POWER * RATE * dt)^(1/POWER)`
+    /// (see [`Self::follow`] and the frame-rate rail), so at the capped step of
+    /// 0.25 s **every** forward seek, of any length, drew the line **2.90 of
+    /// the 4.00 degrees** on the seek frame and then walked it back: 72 percent
+    /// of the whole allowance, laid over the one frame where the picture had
+    /// already changed. That is the identical defect the backward arm was
+    /// fixed for, and the argument it was given - a seek is already a
+    /// discontinuity in every pixel - never said which way the clock had moved.
+    /// So what separates a seek from a redraw is the SIZE of the step and not
+    /// its sign ([`ANCHOR_SEEK_SECS`]).
+    ///
+    /// The four cases, and the middle two are the fix:
     ///
     /// - film moving on: the follow runs, and the line is where the law puts
     ///   it;
     /// - film going backwards: the anchor is placed afresh on the geometry,
     ///   which is where the line would be if the file had been opened there;
+    /// - **film jumping forward past [`ANCHOR_SEEK_SECS`]**: the same;
     /// - **the same instant twice**: NOT a seek. It is a redraw with no new
     ///   frame behind it, it stays in the second arm, and the law at a step of
     ///   zero is the identity, which is the property that lets a 60 Hz window
     ///   and an offscreen instrument at one draw per frame hold the same line.
     #[test]
-    fn film_that_runs_backwards_starts_the_hold_again() {
+    fn a_seek_starts_the_hold_again_whichever_way_the_film_jumped() {
         let reframe = fixture(Camera::default());
         let was = standing(&reframe, 3.0, 10.0);
+        let held = |at| SeamAnchor::hold(Some(was), &reframe, Held::default(), at);
 
-        let onward = SeamAnchor::hold(Some(was), &reframe, Held::default(), 10.0 + 1.0 / 30.0);
+        let onward = held(10.0 + 1.0 / 30.0);
         assert!(
             onward.shift().to_degrees() > 2.0,
             "the follow gave up {} of a 3.00 degree hold in one frame",
             onward.shift().to_degrees(),
         );
 
-        let seeked = SeamAnchor::hold(Some(was), &reframe, Held::default(), 4.0);
+        // Backward, which is what the first half of this fix caught.
+        let back = held(4.0);
         assert_eq!(
-            seeked.shift(),
+            back.shift(),
             0.0,
             "a seek back to 4.0 s left the line {} deg off the geometry",
-            seeked.shift().to_degrees(),
+            back.shift().to_degrees(),
         );
-        assert_eq!(seeked.target, 0.0);
+        assert_eq!(back.target, 0.0);
 
-        let redrawn = SeamAnchor::hold(Some(was), &reframe, Held::default(), 10.0);
+        // Forward, which is what the second half of it caught. A seek moves
+        // the body as well as the clock, so the frame it lands on is held at a
+        // pose from another part of the flight, and `was.on` read back through
+        // THAT pose is the target the old code charged the follow with.
+        let elsewhere = Held {
+            body_from_world: Quat::from_rotation_vector([0.0, 0.9, 0.0]).conjugate(),
+            ..Held::default()
+        };
+        let forward = SeamAnchor::hold(Some(was), &reframe, elsewhere, 16.0);
+        assert_eq!(
+            forward.shift(),
+            0.0,
+            "a seek on to 16.0 s left the line {} deg off the geometry",
+            forward.shift().to_degrees(),
+        );
+        assert_eq!(forward.target, 0.0);
+
+        // And what that was worth, by running the arithmetic the old arm ran:
+        // the stale target at the step it capped to. The answer is the
+        // follow's own ceiling at that step - `allowance / (POWER * RATE *
+        // dt)^(1 / POWER)`, which is 2.90 of these 4.00 degrees at dt = 0.25 -
+        // so it is the same 2.90 for a forward seek of any length, and it is
+        // 72 percent of the whole allowance delivered on one frame.
+        let allowance = 0.5 * reframe.handover_width();
+        let stale = -reframe.across_seam(
+            reframe.view_ray_from_body(
+                elsewhere
+                    .body_from_world
+                    .rotate(was.on)
+                    .map(|axis| axis as f32),
+            ),
+        );
+        assert!(
+            stale.abs() > allowance,
+            "the stale target is only {} deg, so this is not the case the fix is about",
+            stale.to_degrees(),
+        );
+        let drawn = SeamAnchor::follow(stale, ANCHOR_SEEK_SECS as f32, allowance)
+            .0
+            .clamp(-allowance, allowance);
+        near(drawn.to_degrees(), 2.90, 0.01);
+        near(
+            drawn.to_degrees(),
+            (allowance
+                / (f32::from(ANCHOR_FOLLOW_POWER as i16)
+                    * ANCHOR_FOLLOW_RATE
+                    * ANCHOR_SEEK_SECS as f32)
+                    .powf(1.0 / ANCHOR_FOLLOW_POWER as f32))
+            .to_degrees(),
+            0.01,
+        );
+
+        // The two boundaries of the arm, so the constant is pinned and not
+        // decorative: a step of exactly `ANCHOR_SEEK_SECS` still follows, and
+        // anything past it does not.
+        assert_ne!(held(10.0 + ANCHOR_SEEK_SECS).target, 0.0);
+        assert_eq!(held(10.0 + ANCHOR_SEEK_SECS + 1e-6).target, 0.0);
+
+        // And the same instant twice is not a seek in either direction.
+        let redrawn = held(10.0);
         near(redrawn.shift(), was.delta, 1e-6);
     }
 

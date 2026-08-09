@@ -620,12 +620,19 @@ live, no keyframe UI ever.
   coverage depth, and the depths are fixed to the lenses. Measured over 24
   azimuths: **0.617 degrees drawn per degree commanded on the X4 Air and 0.510
   on an X2-class camera**, so the anchor reduces the seam's crawl by about 60
-  percent rather than removing it, and about 40 percent survives. Two real
-  defects were found inside the follow and fixed, neither of them reachable at
-  30 fps and so neither of them a byte of the approved picture: the anchor was
-  placed on the unclamped offset while the shader drew the clamped one, and a
-  backward seek came out as a step of zero, which pinned the line to a target
-  from another part of the flight. The follow's rail is the film rate's -
+  percent rather than removing it, and about 40 percent survives. Three real
+  defects were found inside the follow and fixed, none of them reachable by
+  continuous 30 fps play and so none of them a byte of the approved picture:
+  the anchor was placed on the unclamped offset while the shader drew the
+  clamped one, and a seek pinned the line to a target from another part of the
+  flight - backward, where the step came out as zero, and then forward too,
+  where the step was capped and the follow charged with the same stale target.
+  **A seek anchors afresh in either direction now**, and what separates a seek
+  from a redraw is the size of the step and not its sign: a step of film past
+  0.25 s, which is 7.5 frames of this corpus and a fortieth of the app's own 10
+  second jump. The forward half was worth 2.90 of the 4.00 degrees on the seek
+  frame, for a seek of any length, because that is the follow's own ceiling at
+  the step the old code capped to. The follow's rail is the film rate's -
   `allowance / (POWER * RATE * dt)^(1/POWER)`, 3.55 degrees at 30 fps, past the
   4.00 allowance above 100 fps - and both cameras have 120 fps modes, which is
   documented with its table rather than fixed, because a dt invariant law is a

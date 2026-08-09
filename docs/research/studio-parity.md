@@ -193,12 +193,28 @@ Four properties, and they are the four things he asked for:
   redraw with no new frame behind it moves nothing, and a run at 30 or 300 fps
   over the same film follows over the same picture. (This is also what lets an
   offscreen instrument at one draw per frame speak for a 60 Hz window - see §5.)
-  **A redraw whose film runs BACKWARDS is a seek, and a seek anchors afresh**,
+  **A redraw whose film is DISCONTINUOUS is a seek, and a seek anchors afresh**,
   which is the one event in the mechanism and sits on the one frame where every
-  pixel already changed. Before 2026-08-09 a backward seek came out as a step of
-  zero, which is the identity, so the line was pinned to a target read off a
-  world direction from a different part of the flight and slammed to the rail on
-  that frame.
+  pixel already changed. A step of film longer than `ANCHOR_SEEK_SECS` (0.25 s,
+  which is 7.5 frames of the 30 fps this corpus is and a fortieth of the 10
+  second jump the keys and the buttons make) is that discontinuity, in **either**
+  direction.
+
+  > **Both halves of that were defects, and the second was found on 2026-08-09
+  > by a second review.** Before that day a backward seek came out as a step of
+  > zero, which is the identity, so the line was pinned to a target read off a
+  > world direction from a different part of the flight and slammed to the rail
+  > on that frame; the first round of this review fixed that arm and left the
+  > forward one, which took the ordinary path with its step capped and charged
+  > the follow with the same stale target. What that was worth is a closed form
+  > rather than an accident: the follow's ceiling at a step of `dt` is
+  > `allowance / (POWER * RATE * dt)^(1/POWER)`, so at the capped 0.25 s
+  > **every** forward seek, of any length, drew the line **2.90 of the 4.00
+  > degrees** on the seek frame and walked it back over the next second - 72
+  > percent of the whole allowance, on the one frame where the picture had
+  > already changed. The rule is now the same rule in both directions, and it
+  > is one constant rather than two: the cap the follow was charged at *was*
+  > the blunting of this, and the `min` is gone.
 - **Standing still costs nothing, with no knee to click on.** The gain is a
   single even power, smooth everywhere including at zero and in every
   derivative. At a quarter of the allowance it is one hundred-thousandth per
