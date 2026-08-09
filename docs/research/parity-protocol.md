@@ -697,3 +697,136 @@ is where the two stitches place their seam differently. At the horizon aim the
 same is true except for the paramotor's cage strut, which our render draws hard
 and Studio's blends away. Neither is a calibration difference; both are what
 the near field does to two different seam placements.
+
+## 11. THE RADIAL STAGE, pre-registered 2026-08-09
+
+**Written before the radial model was fitted to anything.** Section 10 ended
+with a residual that names its own successor: a smooth monotone per-lens
+RADIAL displacement against the field angle, sign-flipping inside the field
+(lens 0, −0.111 deg at 47.5 to +0.095 at 87.5, zero near 70; lens 1, −0.033 to
++0.046), and **identical in the solved and the factory arms on lens 0**, which
+the five-knob model never touched. Section 10's own reading of that: a pose
+cannot make a net radial term and a focal length cannot change its sign inside
+the field, so only a different radial polynomial can. This section adds that
+knob and says, in advance, what it has to do.
+
+Nothing in sections 1 to 10 is relaxed. Section 3's 1.0 px is carried through
+unchanged and everything below is additional.
+
+### 11.1 The model, and why it is the smallest one that can be right
+
+Per lens, a **delta on the radial polynomial** of the shipped Mei/UCM map, in
+the v6 form's own radial orders — five:
+
+```text
+radial(r) = 1 + k1 r^2 + k2 r^4 + k3 r^6 + k4 r^8 + k5 r^10
+```
+
+on the **same normalized plane radius** `offset_v3`'s three are written on.
+That is not a choice made here: `docs/research/offset-v6.md` refuted the
+angle-polynomial reading before a pixel was read (a radial multiplier of 85 and
+788 at the rim against 1.156 and 1.152 for the plane radius), and the five-order
+radial head is what `OmniProjection<RadtanDistortPro>` disassembles to. `k4` and
+`k5` are new fields, zero on every capture until something fits them.
+
+**The coefficients are fitted from pixels, not read off tokens.** The form is
+borrowed; the numbers are the unknown.
+
+Fitted in an **orthogonalized basis**, never as five raw numbers. Gram-Schmidt
+of the five monomials `r^2 ... r^10` over a **fixed** window of field angle,
+**40 to 95 degrees**, under a measure uniform in field angle, each mode
+normalized to unit rms of the radial multiplier over that window. The basis
+depends only on the file's own mirror parameter and on that declared window,
+and **not** on which sites a run happened to keep — which is what 11.3's
+cross-validation needs in order to be a test at all: one geometry's
+coefficients have to mean the same thing at another geometry.
+
+Ten knobs, five per lens, on top of section 10's nine. **Nothing else is
+added.** The v6 form's tangential, growing-tangential and thin-prism halves are
+NOT fitted at this stage. They are considered only under 11.6, and an added
+knob with no argument in front of it is fitting the residual rather than the
+camera.
+
+### 11.2 THE BAR
+
+The stage answers **REPRODUCIBLE** only if B1 and B2 both pass with B3 and B4
+passing in the same run, on the same build and the same frames. Anything else
+is **NOT REPRODUCIBLE**, reported with the new residual's structure named.
+**There is no middle claim**: a residual that falls from 3.92 px to, say, 1.8 px
+is still NOT REPRODUCIBLE, and the fall is reported as a number and not as a
+verdict.
+
+- **B1 ABSOLUTE.** With the fitted radial model in place, the residual is
+  **≤ 1.0 px rms at the export's own pixel scale (3840 across)** at **all four**
+  geometries — building 160 s, building 55 s, horizon 160 s, horizon 55 s — with
+  section 3(a)'s other three clauses still met at each (≥ 100 kept sites, ≥ 40
+  of them within 8 degrees of the seam, ≥ 60 degrees of seam azimuth).
+- **B2 CROSS-VALIDATION, both directions.** The radial coefficients and lens 1's
+  five knobs are properties of **one camera** and are therefore fitted **jointly
+  over one aim's two geometries** and then **held fixed** while the other aim's
+  two geometries are solved with only their own four view numbers free — the
+  view genuinely differs per frame; the camera does not. Run both ways round:
+  fit on building, predict horizon; fit on horizon, predict building. **Every
+  predicted geometry must also reach ≤ 1.0 px rms.** A model that only
+  interpolates the sites it was fitted on is a failure of this stage, whatever
+  B1 says. A secondary arm that re-frees lens 1's five at the predicted
+  geometry is reported beside it as a diagnostic and **is not the gate**.
+- **B3 PLANT, in the same run.** A known radial perturbation is injected into
+  our own render, which is then used as a fake Studio export, and the whole
+  fit is pointed at it from the same start. Planted, declared now:
+  lens 0 amplitudes `(+1.0e-3, −6.0e-4, +3.0e-4, 0, 0)` and lens 1
+  `(−8.0e-4, +4.0e-4, 0, 0, 0)` in the orthonormal modes of 11.1. Each planted
+  amplitude must come back within **15 percent** of what was planted, read
+  null-referenced as section 4 says to read a plant, and the residual must
+  come back to within **1.5x** of the same geometry's own null. A mode whose
+  fitted 1 sigma exceeds a third of the planted amplitude is declared
+  **unconstrained by this geometry** and reported as such rather than scored —
+  that declaration is made from the printed 1 sigma, not from the error.
+- **B4 NULL, in the same run.** The same fit against an unperturbed render of
+  our own: residual at section 4's G1 floor (**≤ 0.06 px rms**) and **every**
+  fitted radial amplitude **≤ 1.0e-4** in magnitude, which is a third of the
+  smallest amplitude B3 plants.
+- **B5 CONDITIONING.** The full correlation matrix over every fitted knob is
+  printed beside every reported number, and section 4's G6 applies to it
+  unchanged: **any pair past 0.99 is reported as a combination and never as two
+  numbers.** One near-degeneracy is predicted here in advance so that finding it
+  is not a discovery: **the lowest radial mode against the view's own field of
+  view**, because a radial multiplier that is nearly constant over the observed
+  field is a scale, and a scale is what the field of view already is. If that
+  pair is past 0.99 the two are reported as the combination they are.
+- **B6 SMALLEST SUFFICIENT MODEL.** A tangential, growing-tangential or
+  thin-prism knob is added **only if** the radial fit fails B1 **and** the
+  remaining residual still carries named structure that such a term makes — the
+  tangential-against-field column running above 0.02 deg peak to peak, or an
+  along-seam harmonic of order 1 or 2 above 0.02 deg, both measured against the
+  same run's null. Every added knob is argued in writing before it is turned.
+- **B7 THE V6 CROSS-CHECK.** The fitted radial delta is compared against the
+  file's **own** `offset_v6` string, in the observable rather than in the
+  coefficients: the apparent displacement in **degrees of field angle**,
+  `theta' − theta` where the two models put the same image radius, tabulated
+  over 45 to 90 degrees. A reading of the file's numbers **matches** the fit if
+  its profile agrees to **≤ 0.01 deg rms** over that range, which is a third of
+  the smallest structure section 10 reported and well under a pixel at the
+  export's own scale. The candidate compositions are few and are named now: the
+  radial head `k1..k5` is tokens 1 to 5 under **every one** of the sixteen
+  readings `kjerag_meta::Reading` enumerates, so only four things can differ —
+  v6's radial over v6's own intrinsics, v6's radial over v3's intrinsics, v6's
+  intrinsics over v3's radial (the `v6pose` arm), and the inverse direction.
+  If one matches, **say which**. If none does, say that plainly: Studio would
+  then be computing a refinement of its own, and this protocol does not
+  speculate past that sentence.
+
+### 11.3 What the run is, and what it is run on
+
+The same two exports, the same lag `−0.02298 s`, the same four aims section 10
+registered and reported at, the same 3840-wide working picture, and the same
+build for the plant, the null and the answer. The aims are not re-registered:
+they are section 10's own table, and re-fitting them here would be choosing an
+aim after seeing the answer.
+
+### 11.4 What is delivered
+
+`theirs.png`, `ours.png`, `difference-8x.png` and `side-by-side.png` at both
+aims, at the export's own resolution, drawn with the **fitted** model, in
+gitignored `scratch/`. Plus, only if the bar is met, one paragraph saying what
+the player must do differently.
