@@ -1285,6 +1285,13 @@ struct Options {
     /// `free=view`: the four view numbers move and lens 1's five stay exactly
     /// where the file's own `offset_v3` put them.
     free: Vec<usize>,
+    /// How much the difference picture is amplified about mid grey.
+    ///
+    /// Section 6 of the protocol says 4x and the owner asked for 8x on the
+    /// real run, so it is an argument and the number is written into the file
+    /// name. A difference picture with no amplification stated is a picture
+    /// nobody can read a size off.
+    amp: f64,
 }
 
 /// Which frame Studio's told pan/tilt/roll is told in. See [`Options::lock`].
@@ -1359,6 +1366,7 @@ impl Options {
             world: true,
             lock: Lock::World,
             free: (0..SOLVED).collect(),
+            amp: 4.0,
         };
         for arg in args {
             let (key, value) = arg.split_once('=').ok_or(USAGE)?;
@@ -1443,6 +1451,7 @@ impl Options {
                 }
                 "texture" => options.texture = value.parse()?,
                 "world" => options.world = value.parse::<u32>()? != 0,
+                "amp" => options.amp = value.parse()?,
                 "lock" => {
                     options.lock = match value {
                         "world" | "on" => Lock::World,
@@ -3352,20 +3361,67 @@ fn solve(options: &Options) -> Fallible<()> {
             .iter()
             .zip(&target)
             .map(|(a, b)| match *a > 0.0 && *b > 0.0 {
-                true => 128.0 + (a - b) * 4.0,
+                true => 128.0 + (a - b) * options.amp,
                 false => 0.0,
             })
             .collect();
+        let amp = format!("{:.0}", options.amp);
         write_gray(&target, shape, &out.join("theirs.png"))?;
         write_gray(&picture, shape, &out.join("ours.png"))?;
-        write_gray(&difference, shape, &out.join("difference-4x.png"))?;
+        write_gray(&difference, shape, &out.join(format!("difference-{amp}x.png")))?;
+        let (beside, wide) = side_by_side(&target, &picture, shape);
+        write_gray(&beside, wide, &out.join("side-by-side.png"))?;
         println!(
-            "wrote {}/theirs.png, ours.png and difference-4x.png (the difference is \
-             amplified 4x about mid grey)",
+            "wrote {}/theirs.png, ours.png, difference-{amp}x.png (amplified {amp}x about \
+             mid grey) and side-by-side.png (theirs left, ours right, half scale)",
             out.display(),
         );
     }
     Ok(())
+}
+
+/// Two pictures of the same shape, halved and set beside each other.
+///
+/// Half scale on purpose: the thing this is for is a person looking at two
+/// pictures at once and saying whether they are the same picture, and a pair of
+/// 4K frames laid side by side is 7680 pixels of something nobody can see at
+/// once. The full-size pair is written beside it for anyone who wants to
+/// pixel-peep, and the difference picture is where the size of the
+/// disagreement is read off anyway.
+fn side_by_side(left: &[f64], right: &[f64], shape: Shape) -> (Vec<f64>, Shape) {
+    let half = Shape {
+        width: (shape.width / 2).max(1),
+        height: (shape.height / 2).max(1),
+    };
+    let shrink = |luma: &[f64]| -> Vec<f64> {
+        (0..half.pixels() as usize)
+            .map(|index| {
+                let (x, y) = (
+                    index % half.width as usize * 2,
+                    index / half.width as usize * 2,
+                );
+                let at = |dx: usize, dy: usize| {
+                    luma[(y + dy).min(shape.height as usize - 1) * shape.width as usize
+                        + (x + dx).min(shape.width as usize - 1)]
+                };
+                (at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1)) / 4.0
+            })
+            .collect()
+    };
+    let (left, right) = (shrink(left), shrink(right));
+    let wide = Shape {
+        width: half.width * 2 + 8,
+        height: half.height,
+    };
+    let mut both = vec![255.0; wide.pixels() as usize];
+    for y in 0..half.height as usize {
+        for x in 0..half.width as usize {
+            both[y * wide.width as usize + x] = left[y * half.width as usize + x];
+            both[y * wide.width as usize + x + half.width as usize + 8] =
+                right[y * half.width as usize + x];
+        }
+    }
+    (both, wide)
 }
 
 /// A rectangular luma picture, written where it can be looked at.
@@ -4291,6 +4347,10 @@ struct Registered {
     /// their stabilizer works in and the only frame two instants can be
     /// compared in.
     world: Option<Quat>,
+    /// The file's own orientation at this instant, in the same three angles.
+    /// What says whether their heading is fixed in the world or follows the
+    /// camera, which is what Direction Lock decides.
+    track: [f64; 3],
     ladder: Vec<(f64, [f64; 3])>,
     scale_ladder: Vec<(f64, f64)>,
     saturated: bool,
@@ -4886,6 +4946,24 @@ fn register(options: &Options) -> Fallible<()> {
                  IMU is taken out",
                 angles[0], angles[1], angles[2],
             );
+            // The file's own orientation at this instant, printed beside the
+            // two aims because it is the only thing that can tell them apart.
+            //
+            // A view whose HEADING is fixed in the world keeps `world` still
+            // while this moves. A view whose heading follows the camera --
+            // which is what Direction Lock OFF does, with the horizon still
+            // levelled -- keeps `world minus track` still instead. Neither is
+            // visible in one instant and both are visible in three, so the
+            // number is printed rather than the conclusion.
+            let track_angles = angles_of(track.at((ours.at.as_secs_f64() * 1e6).round() as i64));
+            println!(
+                "track:    yaw {:+8.3}, pitch {:+8.3}, roll {:+8.3} deg, the file's own \
+                 orientation here; world less track heading {:+8.3}",
+                track_angles[0],
+                track_angles[1],
+                track_angles[2],
+                angles[0] - track_angles[0],
+            );
         }
         println!(
             "\n{:>9} {:>11} {:>11} {:>11}",
@@ -4976,6 +5054,7 @@ fn register(options: &Options) -> Fallible<()> {
             peak,
             rival,
             world,
+            track: angles_of(track.at((ours.at.as_secs_f64() * 1e6).round() as i64)),
             ladder,
             scale_ladder,
             saturated,
@@ -5273,6 +5352,48 @@ fn report_registration(options: &Options, runs: &[Registered], ds: &[f64]) -> Fa
                     apart(2),
                     apart(0),
                 ),
+            );
+            // ---- and which of the two headings is the steady one
+            //
+            // Not a gate. It is the reading that says what Direction Lock did,
+            // out of the pictures rather than out of a checkbox: a heading
+            // fixed in the WORLD holds the first column still while the file's
+            // own track moves under it, and a heading that FOLLOWS THE CAMERA
+            // holds the second still instead. Both are printed because on a
+            // camera with no magnetometer the first column also carries the
+            // integration's drift, and a reader who is shown only the winner
+            // has been shown a conclusion.
+            let held: Vec<f64> = kept
+                .iter()
+                .zip(&angles)
+                .map(|(run, aim)| aim[0] - run.track[0])
+                .collect();
+            let span = |all: &[f64]| {
+                all.iter().copied().fold(f64::MIN, f64::max)
+                    - all.iter().copied().fold(f64::MAX, f64::min)
+            };
+            println!(
+                "\n{:>9} {:>12} {:>12} {:>12}   the two headings a reframe can hold",
+                "source s", "world yaw", "track yaw", "world - track",
+            );
+            for (run, aim) in kept.iter().zip(&angles) {
+                println!(
+                    "{:>9.3} {:>12.3} {:>12.3} {:>12.3}",
+                    run.at,
+                    aim[0],
+                    run.track[0],
+                    aim[0] - run.track[0],
+                );
+            }
+            println!(
+                "the world heading spans {:.3} deg and the heading held in the camera's own \n\
+                 heading spans {:.3}. WHICHEVER IS SMALLER IS THE ONE THEIR REFRAME HOLDS: \n\
+                 a direction-locked view is fixed in the world, and an unlocked one follows \n\
+                 the camera round while the horizon stays levelled. This is reported and not \n\
+                 gated, because this camera has no magnetometer and the integrated yaw drifts \n\
+                 under both of them.",
+                span(&angles.iter().map(|a| a[0]).collect::<Vec<_>>()),
+                span(&held),
             );
         }
     } else {
