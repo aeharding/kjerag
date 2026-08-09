@@ -531,6 +531,34 @@ pub struct Reframe {
     /// The last of the three padding words, which is why there is no `_pad`
     /// below it any more.
     limited: f32,
+    /// Whether the belt is running: 1 while Studio's Optical Flow arm is
+    /// selected and 0 otherwise, and there is nothing between the two
+    /// (docs/research/studio-parity.md: one mode at a time).
+    ///
+    /// **A live uniform word and not a compiled-in constant, on purpose.** The
+    /// A/B harness hands over between arms inside one playback by storing a
+    /// value that is rebuilt into this block on the next redraw, which is a
+    /// 2 microsecond flip and the established instrument for a question like
+    /// this one. A shader recompiled per arm could not answer it at all.
+    ///
+    /// WGSL twin: `reframe.belt`, read by `blend` and by `belt_look`.
+    belt: f32,
+    /// How wide the belt's strip is across the seam, in radians: the narrowest
+    /// azimuth's shared picture on this camera ([`super::belt::span`]).
+    ///
+    /// Zero until a map has been built, which is also a belt that reads
+    /// nothing, so the two words are one switch read twice.
+    ///
+    /// WGSL twin: `reframe.belt_span`.
+    belt_span: f32,
+    /// **The four words above are one sixteen-byte slot and that is what they
+    /// are for.** The three padding words the table's alignment needed were
+    /// spent on `handover_shift`, `wide` and `limited`, and the comment below
+    /// said what a fourth number would cost: the table slides twelve bytes and
+    /// nothing at run time catches it. So the belt takes a whole slot rather
+    /// than a word, and `the_uniform_block_is_the_size_wgsl_lays_it_out`
+    /// checks the table is still on its boundary.
+    _belt_pad: [f32; 2],
     // What used to sit here is what put the table below on a sixteen-byte
     // offset: three padding words, all three of which are now numbers the
     // shader reads (`handover_shift`, `wide`, `limited`), so the block reaches
@@ -671,6 +699,19 @@ pub struct Blend {
     /// One per lens, summing to 1 wherever any lens has the ray and all zero
     /// where none does.
     pub weights: [f32; MAX_LENSES],
+    /// Where each lens is actually **sampled**: its landing, displaced by that
+    /// lens's share of the belt's flow.
+    ///
+    /// **It is a second array rather than a field of [`Landing`] because the
+    /// two answer different questions and one of them must not move.** The
+    /// weight, the coverage depth and the magnification are the geometry's and
+    /// are read off `landings`; the texture coordinate is the belt's and is
+    /// read off this. Flow moves what is sampled; the anchor moves where the
+    /// crossfade sits; neither reaches into the other.
+    ///
+    /// Exactly `landings[i].pixel`, assigned and not recomputed, wherever the
+    /// belt is off - which is what makes the off arm byte-identical.
+    pub moved: [[f32; 2]; MAX_LENSES],
 }
 
 impl Blend {
@@ -1198,6 +1239,11 @@ impl Reframe {
             // [`Self::with_samples`] is asked to say otherwise.
             wide: 0.0,
             limited: 0.0,
+            // Off until a caller switches it on ([`Self::with_belt`]), which
+            // is every path that is not the belt's own arm.
+            belt: 0.0,
+            belt_span: 0.0,
+            _belt_pad: [0.0; 2],
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
@@ -1479,9 +1525,35 @@ impl Reframe {
             handover_shift: 0.0,
             wide: 0.0,
             limited: 0.0,
+            // No file, so no strip and nothing to read off one.
+            belt: 0.0,
+            belt_span: 0.0,
+            _belt_pad: [0.0; 2],
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
+    }
+
+    /// The same map told that the belt is running, and how wide its strip is
+    /// across the seam.
+    ///
+    /// A step of its own rather than an argument to [`Self::new`], the way
+    /// [`Self::with_table`] and [`Self::with_shift`] are: every caller that
+    /// builds a map gets the belt off, and exactly one place in the pipeline
+    /// switches it on, which is the place that knows a field has been
+    /// computed for the frame about to be drawn.
+    pub fn with_belt(mut self, span: f32) -> Self {
+        self.belt = 1.0;
+        self.belt_span = span;
+        self
+    }
+
+    /// Whether this block asks for the belt. Read by the twin guard's fixture,
+    /// which would otherwise compare a map with the belt's whole consuming
+    /// half dead on both halves - the mistake this file's guard has recorded
+    /// being made twice already.
+    pub fn is_belted(&self) -> bool {
+        self.belt > 0.5 && self.belt_span > 0.0
     }
 
     /// The block as the GPU reads it. Every field is an `f32` and `repr(C)`
@@ -1560,8 +1632,27 @@ impl Reframe {
     ///
     /// WGSL twin: `blend`.
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
+        // No field on this side of the boundary: `Reframe::blend` is the map
+        // as a caller with no GPU can ask it, and the belt's field is 2 MB of
+        // texture. A caller that has one calls [`Self::blended`], which is the
+        // twinned function and what the shader's own `blend` reduces to.
+        self.blended(view_ray, [0.0, 0.0], false)
+    }
+
+    /// The same, with the belt's own answer for this ray handed in.
+    ///
+    /// `flow` is in strip pixels, along the ring then across the seam, and
+    /// `on` is whether this ray is on the strip at all. The shader's `blend`
+    /// is exactly `blended(ray, belt_look(ray))`, and the split exists so that
+    /// the arithmetic can be compared on a GPU against this mirror with a
+    /// planted flow rather than against a texture two halves would have to
+    /// agree about (`super::twin`).
+    ///
+    /// WGSL twin: `blended`.
+    pub fn blended(&self, view_ray: [f32; 3], flow: [f32; 2], on: bool) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
+        let mut moved = [[0.0f32; 2]; MAX_LENSES];
         let reach = norm3(view_ray);
         // Both axis cosines, once: the crossover below needs them together
         // and the cap test needs them one at a time, and computing them here
@@ -1569,6 +1660,10 @@ impl Reframe {
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
         let front = self.handover(axis, reach, self.crossover);
+        let seat = match on && self.is_belted() {
+            true => self.belt_seat(self.body_ray(view_ray)),
+            false => None,
+        };
         for lens in 0..MAX_LENSES {
             if !self.covers(lens, axis[lens], reach) {
                 continue;
@@ -1581,6 +1676,17 @@ impl Reframe {
             if lens < self.lens_count as usize {
                 weights[lens] = claim(landings[lens], share);
             }
+            // The weight above is the geometry's and is not touched. What the
+            // belt moves is the sample.
+            moved[lens] = landings[lens].pixel;
+            if let Some(seat) = seat
+                && weights[lens] > 0.0
+            {
+                let gain = self.belt_gain(lens, seat[1]);
+                if gain != 0.0 {
+                    moved[lens] = self.project(lens, self.belt_ray(seat, flow, gain)).pixel;
+                }
+            }
         }
         let total: f32 = weights.iter().sum();
         if total > 0.0 {
@@ -1588,7 +1694,146 @@ impl Reframe {
                 *weight = share(*weight, total);
             }
         }
-        Blend { landings, weights }
+        Blend {
+            landings,
+            weights,
+            moved,
+        }
+    }
+
+    /// Where a camera-body direction sits on the belt's strip, in strip
+    /// texels, or `None` if it is off the strip.
+    ///
+    /// **This is the closed-form inverse of [`super::belt::direction`], and
+    /// having one is why the strip is parameterized the way it is.** It runs
+    /// per output pixel, so an iteration here would be an iteration in the
+    /// fragment shader; the ring's own epipolar axis has no closed-form
+    /// inverse because it is itself a function of the azimuth.
+    ///
+    /// WGSL twin: `belt_seat`.
+    fn belt_seat(&self, body: [f32; 3]) -> Option<[f32; 2]> {
+        let reach = norm3(body);
+        if reach <= 0.0 {
+            return None;
+        }
+        let unit: [f32; 3] = std::array::from_fn(|axis| body[axis] / reach);
+        let elevation = unit[2].clamp(-1.0, 1.0).asin();
+        if elevation.abs() >= 0.5 * self.belt_span {
+            return None;
+        }
+        let phi = unit[1].atan2(unit[0]);
+        let turns = phi / std::f32::consts::TAU;
+        let column = (turns - turns.floor()) * super::belt::COLUMNS as f32;
+        let row = (elevation / self.belt_span + 0.5) * super::belt::ROWS as f32;
+        Some([column, row])
+    }
+
+    /// The field at one strip seat, in strip pixels, off a field held in
+    /// memory rather than in a texture.
+    ///
+    /// Bilinear by hand on both halves, which is what makes them comparable:
+    /// hardware filtering is a rounding this side cannot reproduce, and four
+    /// loads and three mixes are arithmetic both sides can do exactly. Wraps
+    /// along the ring, clamps across the seam.
+    ///
+    /// WGSL twin: `belt_flow`.
+    #[cfg(test)]
+    pub(crate) fn belt_flow(seat: [f32; 2], field: &[[f32; 2]]) -> [f32; 2] {
+        let columns = super::belt::COLUMNS as i32;
+        let rows = super::belt::ROWS as i32;
+        let at = [seat[0] - 0.5, seat[1] - 0.5];
+        let base = [at[0].floor(), at[1].floor()];
+        let frac = [at[0] - base[0], at[1] - base[1]];
+        let x0 = base[0] as i32;
+        let a0 = ((x0 % columns) + columns) % columns;
+        let a1 = (((x0 + 1) % columns) + columns) % columns;
+        let y0 = (base[1] as i32).clamp(0, rows - 1);
+        let y1 = (base[1] as i32 + 1).clamp(0, rows - 1);
+        let at = |x: i32, y: i32| field[(y * columns + x) as usize];
+        let mix = |a: [f32; 2], b: [f32; 2], t: f32| -> [f32; 2] {
+            std::array::from_fn(|axis| a[axis] + t * (b[axis] - a[axis]))
+        };
+        mix(
+            mix(at(a0, y0), at(a1, y0), frac[0]),
+            mix(at(a0, y1), at(a1, y1), frac[0]),
+            frac[1],
+        )
+    }
+
+    /// What the belt says about one view ray, off a field held in memory: the
+    /// flow in strip pixels, and whether the ray is on the strip.
+    ///
+    /// WGSL twin: `belt_look`.
+    #[cfg(test)]
+    pub(crate) fn belt_look(&self, view_ray: [f32; 3], field: &[[f32; 2]]) -> ([f32; 2], bool) {
+        if !self.is_belted() {
+            return ([0.0, 0.0], false);
+        }
+        match self.belt_seat(self.body_ray(view_ray)) {
+            None => ([0.0, 0.0], false),
+            Some(seat) => (Self::belt_flow(seat, field), true),
+        }
+    }
+
+    /// How much of the flow one lens carries at one strip row, signed.
+    ///
+    /// [`super::belt::SPLIT`] of it goes to lens 0 and the rest to lens 1, in
+    /// opposite directions, so their relative displacement is the whole flow
+    /// and neither picture moves by more than its share. Each is taken back
+    /// out over the outer part of the strip on **that lens's own side**, which
+    /// is where the other lens's weight has already reached zero, so the run
+    /// of picture the correction is given up over carries nothing doubled.
+    ///
+    /// WGSL twin: `belt_gain`.
+    fn belt_gain(&self, lens: usize, row: f32) -> f32 {
+        let half = 0.5 * self.belt_span;
+        let elevation = (row / super::belt::ROWS as f32 - 0.5) * self.belt_span;
+        let outward = elevation * self.belt_side(lens);
+        let from = half * (1.0 - super::belt::FADE_SHARE);
+        let fade = 1.0 - smoothstep(from, half, outward);
+        let carried = match lens {
+            0 => -super::belt::SPLIT,
+            _ => 1.0 - super::belt::SPLIT,
+        };
+        carried * fade
+    }
+
+    /// Which way off the seam plane one lens's own picture runs, +1 or -1.
+    ///
+    /// Read off the mounting rather than assumed, because which lens sits on
+    /// which side of the body's elevation axis is the camera's business: an
+    /// `.OSV` takes a different branch of `lens_from_body` from an `.insv` and
+    /// a fixture that guessed would fade the correction into the wrong half of
+    /// the strip on one of them.
+    ///
+    /// WGSL twin: `belt_side`.
+    fn belt_side(&self, lens: usize) -> f32 {
+        let block = &self.lenses[lens];
+        let aim: [f32; 3] = std::array::from_fn(|row| block.view_to_lens[row][2]);
+        let body = self.body_ray(aim);
+        match body[2] >= 0.0 {
+            true => 1.0,
+            false => -1.0,
+        }
+    }
+
+    /// The ray one lens is sampled at once the belt has moved it: the strip
+    /// seat displaced by this lens's share of the flow, turned back into the
+    /// view's own frame.
+    ///
+    /// WGSL twin: `belt_ray`.
+    fn belt_ray(&self, seat: [f32; 2], flow: [f32; 2], gain: f32) -> [f32; 3] {
+        let column = seat[0] + gain * flow[0];
+        let row = seat[1] + gain * flow[1];
+        let phi = column / super::belt::COLUMNS as f32 * std::f32::consts::TAU;
+        let elevation = (row / super::belt::ROWS as f32 - 0.5) * self.belt_span;
+        // f32 throughout, because the shader is f32 throughout and this is the
+        // half that has to agree with it. `belt::direction` is the same three
+        // lines in f64, for the map built once on the CPU where the extra
+        // digits are free.
+        let (sin_e, cos_e) = elevation.sin_cos();
+        let (sin_p, cos_p) = phi.sin_cos();
+        self.view_ray_from_body([cos_e * cos_p, cos_e * sin_p, sin_e])
     }
 
     /// The front lens's share of this ray, which is what hands the picture
@@ -2366,6 +2611,20 @@ fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
     (0.5 + apart / (2.0 * reach * band) + shift / band).clamp(0.0, 1.0)
 }
 
+/// WGSL's own `smoothstep`, written out because this half has to compute the
+/// same number and Rust has none.
+///
+/// It is the profile the belt's correction is faded out on, and the reason it
+/// is this shape rather than a straight line is that both of its ends are flat:
+/// a linear taper has a corner where it starts and another where it stops, and
+/// a corner in a displacement is a line in the picture.
+///
+/// WGSL twin: `smoothstep`.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 impl LensBlock {
     /// A lens with no picture in it: `xi` of 1 keeps the denominator
     /// positive and a zero image radius puts every ray outside. What an
@@ -2679,10 +2938,22 @@ pub(crate) fn wgsl() -> String {
     // because it was a property of the map rather than of the file. There is
     // no exponent any more: the crossfade is the linear ramp, which is what
     // `crossover` computes and nothing re-spends.
+    // The belt's own four numbers, inlined here for the same reason every
+    // other constant above is: the strip's shape is `super::belt`'s to own and
+    // the shader's to read, and a second copy of either would be a second
+    // thing to keep in step.
     let lanes = super::band::AZIMUTHS / 4;
+    let columns = super::belt::COLUMNS as f32;
+    let rows = super::belt::ROWS as f32;
+    let split = super::belt::SPLIT;
+    let fade = super::belt::FADE_SHARE;
+    let tau = std::f32::consts::TAU;
     format!(
         "const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n\
-         const TABLE_LANES = {lanes}u;\nconst THETA = {THETA:?};\n{WGSL}"
+         const TABLE_LANES = {lanes}u;\nconst THETA = {THETA:?};\n\
+         const BELT_COLUMNS = {columns:?};\nconst BELT_ROWS = {rows:?};\n\
+         const BELT_SPLIT = {split:?};\nconst BELT_FADE = {fade:?};\n\
+         const BELT_TAU = {tau:?};\n{WGSL}"
     )
 }
 
@@ -2769,6 +3040,16 @@ struct Reframe {
   // Studio swing rather than the whole range. Rust twin: `Reframe::limited`,
   // read by `levels`.
   limited: f32,
+  // 1 while the belt is running and 0 otherwise, live in the block so an A/B
+  // can hand over between arms inside one playback. Rust twin: `Reframe::belt`.
+  belt: f32,
+  // How wide the belt's strip is across the seam, in radians. Rust twin:
+  // `Reframe::belt_span`.
+  belt_span: f32,
+  // The two words that keep the table on its sixteen-byte boundary now that
+  // the three the alignment already needed are spent. Rust twin:
+  // `Reframe::_belt_pad`.
+  belt_pad: vec2<f32>,
   // The three words above are what put the table below on its own 16-byte
   // boundary; they were padding until each became a number the shader reads,
   // so there is no `pad` member here any more and none in the Rust twin.
@@ -2783,6 +3064,15 @@ struct Reframe {
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
 
+// The belt's densified field: one flow vector per strip texel, in strip
+// pixels, along the ring then across the seam. Bound every redraw whether the
+// belt is running or not, because a bind group has to satisfy every entry its
+// layout declares; `reframe.belt` is what decides whether a pixel reads it.
+//
+// Binding 6 of group 0, after the sampler, which is the last free slot: iced's
+// device is asked for two bind groups and there is nowhere for a third.
+@group(0) @binding(6) var belt_field: texture_2d<f32>;
+
 struct Landing {
   pixel: vec2<f32>,
   inside: bool,
@@ -2793,6 +3083,11 @@ struct Landing {
 struct Blend {
   landings: array<Landing, MAX_LENSES>,
   weights: array<f32, MAX_LENSES>,
+  // Where each lens is SAMPLED once the belt has moved it, against
+  // `landings[i].pixel`, which is where the geometry alone puts it and is what
+  // the weight, the depth and the magnification are read off. Rust twin:
+  // `Blend::moved`.
+  moved: array<vec2<f32>, MAX_LENSES>,
 };
 
 // x right, y down, z forward, matching the lens frame the model projects in.
@@ -2835,10 +3130,118 @@ fn view_ray(uv: vec2<f32>) -> vec4<f32> {
 // puts it in scratch memory and costs more than the blend does; the numbers
 // are on the Rust twin. The array writes stay unconditional for the same
 // reason; what `within` skips is the model, not the bookkeeping.
+// Where a camera-body direction sits on the belt's strip, in strip texels, and
+// whether it is on the strip at all in `z`.
+//
+// **The closed-form inverse of `belt::direction`, and having one is why the
+// strip is parameterized this way.** This runs per output pixel: an iteration
+// here is an iteration in the fragment shader, and the ring's own epipolar
+// axis cannot be inverted in closed form because it is a function of the
+// azimuth it would have to solve for. Rust twin: `Reframe::belt_seat`.
+fn belt_seat(body: vec3<f32>) -> vec3<f32> {
+  let reach = length(body);
+  if reach <= 0.0 {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let aim = body / reach;
+  let elevation = asin(clamp(aim.z, -1.0, 1.0));
+  if abs(elevation) >= 0.5 * reframe.belt_span {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let turns = atan2(aim.y, aim.x) / BELT_TAU;
+  return vec3<f32>(
+    (turns - floor(turns)) * BELT_COLUMNS,
+    (elevation / reframe.belt_span + 0.5) * BELT_ROWS,
+    1.0,
+  );
+}
+
+// The field at one strip seat, in strip pixels.
+//
+// Bilinear by hand rather than through a sampler, and that is deliberate: the
+// two halves of this map are held to a bar on a real GPU, and hardware
+// filtering is a rounding one of them cannot reproduce, where four
+// `textureLoad`s and three mixes are arithmetic both of them can do exactly.
+// Wraps along the ring and clamps across the seam, which is the strip's own
+// topology. Rust twin: `Reframe::belt_flow`.
+fn belt_flow(seat: vec2<f32>) -> vec2<f32> {
+  let at = seat - vec2<f32>(0.5);
+  let base = floor(at);
+  let frac = at - base;
+  let wide = i32(BELT_COLUMNS);
+  let x0 = i32(base.x);
+  let a0 = ((x0 % wide) + wide) % wide;
+  let a1 = (((x0 + 1) % wide) + wide) % wide;
+  let y0 = clamp(i32(base.y), 0, i32(BELT_ROWS) - 1);
+  let y1 = clamp(i32(base.y) + 1, 0, i32(BELT_ROWS) - 1);
+  let f00 = textureLoad(belt_field, vec2<i32>(a0, y0), 0).xy;
+  let f10 = textureLoad(belt_field, vec2<i32>(a1, y0), 0).xy;
+  let f01 = textureLoad(belt_field, vec2<i32>(a0, y1), 0).xy;
+  let f11 = textureLoad(belt_field, vec2<i32>(a1, y1), 0).xy;
+  return mix(mix(f00, f10, frac.x), mix(f01, f11, frac.x), frac.y);
+}
+
+// Which way off the seam plane one lens's own picture runs, +1 or -1, read off
+// the mounting rather than assumed. Rust twin: `Reframe::belt_side`.
+fn belt_side(lens: LensBlock) -> f32 {
+  let aim = vec3<f32>(
+    lens.view_to_lens[0].z,
+    lens.view_to_lens[1].z,
+    lens.view_to_lens[2].z,
+  );
+  return select(-1.0, 1.0, (reframe.view_to_body * aim).z >= 0.0);
+}
+
+// How much of the flow one lens carries at one strip row, signed. Rust twin:
+// `Reframe::belt_gain`.
+fn belt_gain(index: u32, side: f32, row: f32) -> f32 {
+  let half = 0.5 * reframe.belt_span;
+  let elevation = (row / BELT_ROWS - 0.5) * reframe.belt_span;
+  let fade = 1.0 - smoothstep(half * (1.0 - BELT_FADE), half, elevation * side);
+  return select(1.0 - BELT_SPLIT, -BELT_SPLIT, index == 0u) * fade;
+}
+
+// The ray one lens is sampled at once the belt has moved it. Rust twin:
+// `Reframe::belt_ray`.
+fn belt_ray(seat: vec2<f32>, flow: vec2<f32>, gain: f32) -> vec3<f32> {
+  let moved = seat + gain * flow;
+  let phi = moved.x / BELT_COLUMNS * BELT_TAU;
+  let elevation = (moved.y / BELT_ROWS - 0.5) * reframe.belt_span;
+  let body = vec3<f32>(cos(elevation) * cos(phi), cos(elevation) * sin(phi), sin(elevation));
+  return transpose(reframe.view_to_body) * body;
+}
+
+// What the belt says about one view ray: the flow in strip pixels, and whether
+// the ray is on the strip. Split out from `blend` so that the arithmetic below
+// can be compared against its Rust mirror with a PLANTED flow rather than
+// against a texture two halves would have to agree about (`super::twin`).
+fn belt_look(ray: vec3<f32>) -> vec3<f32> {
+  if reframe.belt <= 0.5 {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let seat = belt_seat(reframe.view_to_body * ray);
+  if seat.z <= 0.5 {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let flow = belt_flow(seat.xy);
+  return vec3<f32>(flow.x, flow.y, 1.0);
+}
+
 fn blend(ray: vec3<f32>) -> Blend {
+  let look = belt_look(ray);
+  return blended(ray, look.xy, look.z > 0.5);
+}
+
+fn blended(ray: vec3<f32>, flow: vec2<f32>, on: bool) -> Blend {
   var out: Blend;
   var total = 0.0;
   let reach = length(ray);
+  // Where this ray sits on the strip, once for the pair: it is the same seat
+  // for both lenses and only the share each of them carries differs.
+  var seat = vec3<f32>(0.0, 0.0, 0.0);
+  if on && reframe.belt > 0.5 {
+    seat = belt_seat(reframe.view_to_body * ray);
+  }
   // Both axis cosines before the loop: the crossover needs them together,
   // the cap test needs them one at a time, and reading them back out of
   // `out` after the loop instead costs 5.5 ms a redraw against 3.6. Rust
@@ -2852,13 +3255,26 @@ fn blend(ray: vec3<f32>) -> Blend {
     // projected and its landing is never read.
     var landing: Landing;
     var claimed = 0.0;
+    var moved = vec2<f32>(0.0, 0.0);
     if within(lens, select(axis1, axis0, index == 0u), reach) {
       let share = select(1.0 - front, front, index == 0u);
       landing = project(lens, ray);
       claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
+      // The weight above is the geometry's and the belt does not touch it:
+      // flow moves what is SAMPLED, the anchor moves where the crossfade sits,
+      // and neither reaches into the other. Assigned rather than recomputed
+      // where the belt is off, which is what makes that arm byte-identical.
+      moved = landing.pixel;
+      if seat.z > 0.5 && claimed > 0.0 {
+        let gain = belt_gain(index, belt_side(lens), seat.y);
+        if gain != 0.0 {
+          moved = project(lens, belt_ray(seat.xy, flow, gain)).pixel;
+        }
+      }
     }
     out.landings[index] = landing;
     out.weights[index] = claimed;
+    out.moved[index] = moved;
     total += claimed;
   }
   if total > 0.0 {
@@ -5872,29 +6288,34 @@ pub(crate) mod tests {
         // directions after them (stage 9).
         let table = super::super::band::AZIMUTHS / 4 * 16;
         assert_eq!(std::mem::size_of::<super::super::band::Table>(), table);
-        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + table);
+        // 16 for the four words the crossover slot holds and 16 more for the
+        // belt's own slot, which is where the belt's two numbers and the two
+        // words that keep the table on its boundary live.
+        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + 16 + table);
         // The offset, not arithmetic that cannot fail: WGSL starts the table
         // at a multiple of sixteen and `repr(C)` does not have to, and
         // `min_binding_size` checks the block's size rather than any offset
         // inside it, so a table that slid twelve bytes would draw a wrong
         // picture rather than refuse a pipeline.
         assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
-        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
+        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16 + 16);
         // The three numbers that took the three padding words the table's
         // alignment already needed, rather than being appended: the seam
-        // anchor's one, and the two that say how the planes are written. The
-        // block is the size it was and the table has not moved, which is what
-        // the two assertions above would otherwise have to be rewritten to
-        // say.
+        // anchor's one, and the two that say how the planes are written.
         let after = |words: usize| std::mem::offset_of!(Reframe, crossover) + 4 * words;
         assert_eq!(std::mem::offset_of!(Reframe, handover_shift), after(1));
         assert_eq!(std::mem::offset_of!(Reframe, wide), after(2));
         assert_eq!(std::mem::offset_of!(Reframe, limited), after(3));
-        // And the table starts the word after the last of them, with nothing
-        // padding it there: all three are spoken for, so the next number added
-        // beside them lands ON the table's boundary and this is the assertion
-        // that says so first.
-        assert_eq!(std::mem::offset_of!(Reframe, table), after(4));
+        // **And the belt takes a WHOLE SLOT rather than a word.** The three
+        // above spent every padding word the table's alignment needed, so the
+        // fourth number added beside them lands ON the table's boundary and
+        // slides it by four bytes, which nothing at run time would catch. The
+        // belt's two numbers are followed by two words of padding for exactly
+        // that reason, and these four assertions are what say so.
+        assert_eq!(std::mem::offset_of!(Reframe, belt), after(4));
+        assert_eq!(std::mem::offset_of!(Reframe, belt_span), after(5));
+        assert_eq!(std::mem::offset_of!(Reframe, _belt_pad), after(6));
+        assert_eq!(std::mem::offset_of!(Reframe, table), after(8));
     }
 
     /// **The anchor's null.** A map nobody has held a line on draws the

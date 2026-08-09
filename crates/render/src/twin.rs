@@ -61,10 +61,14 @@ use crate::projection::{Held, MAX_LENSES, Reframe, Rolling};
 use crate::sampling::Sampling;
 use crate::{Camera, Size, dmabuf};
 
-/// Four `vec4`s of answer per probe, which is how the storage buffer is read
+/// Six `vec4`s of answer per probe, which is how the storage buffer is read
 /// back. A struct would need WGSL's own alignment rules agreed on twice; a
 /// lane of four floats needs none.
-const LANES: usize = 4;
+///
+/// Four were the map's; the fifth and sixth are the belt's - where each lens
+/// is actually sampled once the flow has moved it, and what the field read
+/// answered for this ray.
+const LANES: usize = 6;
 
 /// The compute half of this file: the probe entry the shipped map is
 /// concatenated in front of.
@@ -75,6 +79,17 @@ const LANES: usize = 4;
 const PROBE: &str = r#"
 @group(1) @binding(0) var<storage, read> probes: array<vec4<f32>>;
 @group(1) @binding(1) var<storage, read_write> answers: array<vec4<f32>>;
+// One planted flow per probe ray, in strip pixels, with `z` saying whether
+// this ray is to be treated as on the strip.
+//
+// **Planted rather than read, and that is what makes the belt's arithmetic
+// comparable at all.** `blend` reads its flow out of a 4096x128 texture; the
+// Rust mirror has no texture and a CPU-side copy of one would be a second
+// thing to keep in step. So the guard splits the question in two: `blended`
+// is asked about a flow both halves are simply HANDED, and `belt_look` - the
+// texture read itself - is asked separately against a field planted at values
+// f16 holds exactly, so that only the bilinear arithmetic is under test.
+@group(1) @binding(2) var<storage, read> flows: array<vec4<f32>>;
 
 @compute @workgroup_size(64)
 fn twin(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -82,8 +97,10 @@ fn twin(@builtin(global_invocation_id) id: vec3<u32>) {
   if index >= arrayLength(&probes) {
     return;
   }
-  let out = blend(probes[index].xyz);
-  let base = index * 4u;
+  let ray = probes[index].xyz;
+  let plant = flows[index];
+  let out = blended(ray, plant.xy, plant.z > 0.5);
+  let base = index * 6u;
   answers[base + 0u] = vec4<f32>(out.weights[0], out.weights[1], 0.0, 0.0);
   answers[base + 1u] = vec4<f32>(out.landings[0].pixel, out.landings[1].pixel);
   answers[base + 2u] = vec4<f32>(
@@ -98,6 +115,13 @@ fn twin(@builtin(global_invocation_id) id: vec3<u32>) {
     0.0,
     0.0,
   );
+  // Where each lens is SAMPLED, which is the belt's whole consuming path:
+  // `belt_seat`, `belt_side`, `belt_gain`, `belt_ray` and the second
+  // projection through them.
+  answers[base + 4u] = vec4<f32>(out.moved[0], out.moved[1]);
+  // And the field read itself, against the planted texture.
+  let look = belt_look(ray);
+  answers[base + 5u] = vec4<f32>(look.x, look.y, look.z, 0.0);
 }
 "#;
 
@@ -143,6 +167,11 @@ struct Answer {
     depth: [f32; MAX_LENSES],
     axis: [f32; MAX_LENSES],
     inside: [bool; MAX_LENSES],
+    /// Where each lens is sampled once the belt has moved it.
+    moved: [[f32; 2]; MAX_LENSES],
+    /// What the field read answered: the flow in strip pixels, and whether the
+    /// ray is on the strip.
+    look: ([f32; 2], bool),
 }
 
 /// Runs the shipped map on the GPU over `rays` and reads every landing and
@@ -152,23 +181,41 @@ fn on_the_gpu(
     queue: &wgpu::Queue,
     reframe: &Reframe,
     rays: &[[f32; 3]],
+    plants: &[([f32; 2], bool)],
+    field: &[[f32; 2]],
 ) -> Vec<Answer> {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("twin"),
         source: wgpu::ShaderSource::Wgsl(format!("{}\n{PROBE}", crate::projection::wgsl()).into()),
     });
+    // Group 0 is exactly what the draw binds, which now includes the belt's
+    // field at binding 6: `blend` reaches it through `belt_look`, and a
+    // pipeline whose layout is missing a binding its entry point reaches is
+    // refused outright (which is how this guard found out it had to grow).
     let block = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("twin block"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Reframe>() as u64),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Reframe>() as u64),
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: crate::scene::FIELD_BINDING,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
     });
     let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
         binding,
@@ -182,7 +229,7 @@ fn on_the_gpu(
     };
     let probes = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("twin probes"),
-        entries: &[storage(0, true), storage(1, false)],
+        entries: &[storage(0, true), storage(1, false), storage(2, true)],
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("twin"),
@@ -206,6 +253,68 @@ fn on_the_gpu(
         mapped_at_creation: false,
     });
     queue.write_buffer(&uniform, 0, reframe.bytes());
+
+    // The belt's field, uploaded as the shipped format holds it. Every value
+    // planted is a multiple of 1/64 no larger than 16, which `Rg16Float` keeps
+    // exactly, so both halves read the same numbers and what is compared is
+    // the bilinear arithmetic over them and not a rounding.
+    let texels: Vec<[u16; 2]> = field
+        .iter()
+        .map(|flow| [half(flow[0]), half(flow[1])])
+        .collect();
+    let belt = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("twin field"),
+        size: wgpu::Extent3d {
+            width: crate::belt::COLUMNS,
+            height: crate::belt::ROWS,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rg16Float,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &belt,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        // `[u16; 2]` has no padding and no invalid pattern.
+        unsafe {
+            std::slice::from_raw_parts(
+                texels.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(&texels[..]),
+            )
+        },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(crate::belt::COLUMNS * 4),
+            rows_per_image: Some(crate::belt::ROWS),
+        },
+        wgpu::Extent3d {
+            width: crate::belt::COLUMNS,
+            height: crate::belt::ROWS,
+            depth_or_array_layers: 1,
+        },
+    );
+    let belt_view = belt.create_view(&Default::default());
+
+    let planted: Vec<[f32; 4]> = plants
+        .iter()
+        .map(|(flow, on)| [flow[0], flow[1], f32::from(u8::from(*on)), 0.0])
+        .collect();
+    let plant_bytes = bytes_of(&planted);
+    let plant_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("twin plants"),
+        size: plant_bytes.len() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&plant_buffer, 0, plant_bytes);
 
     let padded: Vec<[f32; 4]> = rays.iter().map(|r| [r[0], r[1], r[2], 0.0]).collect();
     let ray_bytes = bytes_of(&padded);
@@ -234,10 +343,16 @@ fn on_the_gpu(
     let block_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("twin block"),
         layout: &block,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: crate::scene::FIELD_BINDING,
+                resource: wgpu::BindingResource::TextureView(&belt_view),
+            },
+        ],
     });
     let probe_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("twin probes"),
@@ -250,6 +365,10 @@ fn on_the_gpu(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: plant_buffer.as_entire_binding(),
             },
         ],
     });
@@ -286,15 +405,88 @@ fn on_the_gpu(
                 depth: [lane[8], lane[9]],
                 axis: [lane[10], lane[11]],
                 inside: [lane[12] != 0.0, lane[13] != 0.0],
+                moved: [[lane[16], lane[17]], [lane[18], lane[19]]],
+                look: ([lane[20], lane[21]], lane[22] != 0.0),
             }
         })
         .collect()
+}
+
+/// `f32` to the `Rg16Float` the field is held in.
+///
+/// Only ever handed a multiple of 1/64 no larger than 16, which is exactly
+/// representable, so there is no rounding to get right - and
+/// [`the_planted_field_survives_the_format`] is what says the plant stays
+/// inside that.
+fn half(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    if value == 0.0 {
+        return sign;
+    }
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mantissa = ((bits & 0x007f_ffff) >> 13) as u16;
+    sign | ((exponent as u16) << 10) | mantissa
+}
+
+/// The same the other way, so a test can prove the round trip rather than
+/// assume it.
+fn whole(bits: u16) -> f32 {
+    let sign = f32::from_bits(u32::from(bits & 0x8000) << 16);
+    let exponent = i32::from((bits >> 10) & 0x1f);
+    let mantissa = u32::from(bits & 0x03ff) << 13;
+    if exponent == 0 && mantissa == 0 {
+        return sign;
+    }
+    let out = f32::from_bits((((exponent - 15 + 127) as u32) << 23) | mantissa);
+    match bits & 0x8000 {
+        0 => out,
+        _ => -out,
+    }
 }
 
 fn bytes_of(rows: &[[f32; 4]]) -> &[u8] {
     // `[f32; 4]` has no padding and no invalid pattern, and this is the same
     // cast `Reframe::bytes` makes for the block itself.
     unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<u8>(), std::mem::size_of_val(rows)) }
+}
+
+/// The field the belt's own read is compared over.
+///
+/// **Every value is a multiple of 1/64 no larger than 16**, which `Rg16Float`
+/// holds exactly, so the two halves read the same numbers and what is under
+/// test is the bilinear arithmetic and not a rounding. It varies in both axes
+/// and at both scales, so a read that fetched the right texel and mixed it the
+/// wrong way, or wrapped the wrong axis, is a disagreement rather than a
+/// coincidence.
+fn planted_field() -> Vec<[f32; 2]> {
+    let columns = crate::belt::COLUMNS as usize;
+    let rows = crate::belt::ROWS as usize;
+    let quantized = |value: f32| (value * 64.0).round() / 64.0;
+    (0..columns * rows)
+        .map(|index| {
+            let x = (index % columns) as f32 / columns as f32;
+            let y = (index / columns) as f32 / rows as f32;
+            [
+                quantized(6.0 * (x * std::f32::consts::TAU * 5.0).sin() + 2.0 * y),
+                quantized(-4.0 * (x * std::f32::consts::TAU * 3.0).cos() + 3.0 * (y - 0.5)),
+            ]
+        })
+        .collect()
+}
+
+/// One planted flow per probe ray, in strip pixels.
+///
+/// Handed to `blended` on both halves rather than read out of the field, so
+/// that the displacement arithmetic is compared against a number and not
+/// against a second lookup. Every third ray is planted "off the strip", so the
+/// branch that leaves a sample where the geometry put it is compared too.
+fn planted_flow(index: usize) -> ([f32; 2], bool) {
+    let turn = index as f32 * 0.37;
+    (
+        [7.5 * turn.sin(), 4.5 * (turn * 1.7).cos()],
+        !index.is_multiple_of(3),
+    )
 }
 
 /// The rays the two halves are compared on: a fine walk straight across the
@@ -507,6 +699,14 @@ fn compare(
         Sampling::default(),
     )
     .with_shift(2.5f32.to_radians());
+    // **And it carries the belt, or the whole consuming half is dead on both
+    // halves.** This file has recorded that lesson twice - a fixture that did
+    // not roll took the readout out of the comparison, and a fixture that
+    // named one model took the other out - and the belt is the third place it
+    // applies: `blend` reads `reframe.belt` before it does anything, so a
+    // block that says zero compares a map with no belt in it and passes.
+    let span = crate::belt::span(&reframe, crate::band::AZIMUTHS);
+    let reframe = reframe.with_belt(span as f32);
     // The block the shader is handed carries the held line, or this test would
     // be run on the one field the seam anchor added.
     assert!(reframe.handover_width() > 0.0, "{camera}");
@@ -524,16 +724,42 @@ fn compare(
         theta,
         "{camera}: the blocks do not name the model this arm is meant to run",
     );
+    // And it says the belt is running, over a strip wide enough to be one.
+    assert!(
+        reframe.is_belted(),
+        "{camera}: the block says no belt, so its whole consuming half runs on neither side",
+    );
+    assert!(
+        span.to_degrees() > 8.0,
+        "{camera}: the strip is {} deg across, which is narrower than the handover",
+        span.to_degrees(),
+    );
 
     let rays = probe_rays(&reframe);
-    let answers = on_the_gpu(device, queue, &reframe, &rays);
+    let field = planted_field();
+    let plants: Vec<([f32; 2], bool)> = (0..rays.len()).map(planted_flow).collect();
+    let answers = on_the_gpu(device, queue, &reframe, &rays, &plants, &field);
     assert_eq!(answers.len(), rays.len());
 
     let (mut worst_weight, mut worst_pixel) = (0.0f32, 0.0f32);
     let (mut worst_depth, mut worst_axis) = (0.0f32, 0.0f32);
+    let (mut worst_moved, mut worst_flow, mut biggest) = (0.0f32, 0.0f32, 0.0f32);
     let (mut mixed, mut landings) = (0usize, 0usize);
-    for (ray, answer) in rays.iter().zip(&answers) {
-        let mirror = reframe.blend(*ray);
+    let (mut moves, mut looked) = (0usize, 0usize);
+    for ((ray, answer), plant) in rays.iter().zip(&answers).zip(&plants) {
+        // The field read, compared on its own against the same planted texels.
+        let (flow, on) = reframe.belt_look(*ray, &field);
+        assert_eq!(
+            on, answer.look.1,
+            "{camera}: the two halves disagree about whether {ray:?} is on the strip",
+        );
+        if on {
+            looked += 1;
+            for (axis, read) in flow.iter().enumerate() {
+                worst_flow = worst_flow.max((read - answer.look.0[axis]).abs());
+            }
+        }
+        let mirror = reframe.blended(*ray, plant.0, plant.1);
         if mirror.weights.iter().all(|weight| *weight > 0.0) {
             mixed += 1;
         }
@@ -563,10 +789,42 @@ fn compare(
             }
             worst_depth = worst_depth.max((answer.depth[lens] - mirror.landings[lens].depth).abs());
             worst_axis = worst_axis.max((answer.axis[lens] - mirror.landings[lens].axis).abs());
+            // And the belt's own answer: where this lens is actually sampled.
+            let shifted: f32 = (0..2)
+                .map(|axis| (mirror.moved[lens][axis] - mirror.landings[lens].pixel[axis]).abs())
+                .fold(0.0, f32::max);
+            if shifted > 0.0 {
+                moves += 1;
+                biggest = biggest.max(shifted);
+            }
+            for axis in 0..2 {
+                worst_moved =
+                    worst_moved.max((answer.moved[lens][axis] - mirror.moved[lens][axis]).abs());
+            }
         }
     }
     // The rays have to actually cross the seam, or the whole comparison is
     // about the far field where one lens takes everything at a weight of one.
+    assert!(
+        moves > 500,
+        "{camera}: the belt moved only {moves} samples, so its consuming half is barely compared",
+    );
+    assert!(
+        looked > 500,
+        "{camera}: only {looked} rays are on the strip, so the field read is barely compared",
+    );
+    assert!(
+        worst_moved < 1e-2,
+        "{camera}: the two halves sample {worst_moved} px apart once the belt has moved them",
+    );
+    assert!(
+        worst_flow < 2e-3,
+        "{camera}: the two halves read the field {worst_flow} strip px apart",
+    );
+    assert!(
+        biggest > 1.0,
+        "{camera}: the largest displacement the belt applied is {biggest} px, which is not a test",
+    );
     assert!(
         mixed > 500,
         "{camera}: only {mixed} of {} probes are inside the handover, so this compares the far \
@@ -598,5 +856,39 @@ fn compare(
          worst weight {worst_weight:.3e}, worst landing {worst_pixel:.3e} px, worst depth \
          {worst_depth:.3e} px, worst axis {worst_axis:.3e}",
         rays.len(),
+    );
+    eprintln!(
+        "twin: {camera}: belt on over {:.3} deg, {looked} rays on the strip, {moves} samples \
+         moved by up to {biggest:.2} px; worst moved landing {worst_moved:.3e} px, worst field \
+         read {worst_flow:.3e} strip px",
+        span.to_degrees(),
+    );
+}
+
+/// **The plant survives the format it is stored in.**
+///
+/// The field comparison above is only worth something if both halves read the
+/// same numbers, and one of them reads them back out of `Rg16Float`. Every
+/// planted value is a multiple of 1/64 no larger than 16, which that format
+/// holds exactly; this is what says so rather than assuming it, and it is a
+/// control that can fail - widen the plant past 16 and it does.
+#[test]
+fn the_planted_field_survives_the_format() {
+    let field = planted_field();
+    let mut biggest = 0.0f32;
+    for flow in &field {
+        for value in flow {
+            assert!(
+                value.abs() <= 16.0,
+                "{value} is past what f16 holds exactly"
+            );
+            assert_eq!(whole(half(*value)), *value, "{value} did not survive f16");
+            biggest = biggest.max(value.abs());
+        }
+    }
+    // And it is not a field of nothing.
+    assert!(
+        biggest > 4.0,
+        "the largest planted flow is {biggest} strip px"
     );
 }
