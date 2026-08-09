@@ -39,6 +39,7 @@ use kjerag_meta::{
 };
 
 use super::band::{self, Table};
+use super::belt;
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 use super::sampling::{self, Sampling};
@@ -48,6 +49,11 @@ use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
 const SAMPLER_BINDING: u32 = 1 + 2 * MAX_LENSES as u32;
+
+/// The belt's field, after the sampler. The last free slot of group 0, and
+/// group 0 is one of the only two this device has (`iced_wgpu` asks for
+/// `max_bind_groups: 2`), so a second belt texture would have nowhere to go.
+pub(crate) const FIELD_BINDING: u32 = SAMPLER_BINDING + 1;
 
 /// Frames kept alive behind the one being drawn.
 ///
@@ -1246,6 +1252,16 @@ pub struct ScenePipeline {
     /// `KJERAG_ANCHOR=off`, which is when nothing ever reads it and the map is
     /// handed the zero it builds itself with.
     anchor: Option<SeamAnchor>,
+    /// The belt: Studio's Optical Flow arm, dispatched from `prepare` beside
+    /// the band and consumed by the same draw (`super::belt`).
+    belt: belt::Belt,
+    /// Whether that arm is selected. A live value and not a compiled-in one,
+    /// because the A/B hands over between arms inside one playback.
+    flowing: bool,
+    /// Where in the film the belt last ran, so a seek can be told from a
+    /// redraw: the temporal hint is a hint about the frame before this one and
+    /// a seek means there was no such frame.
+    belt_at: Option<Duration>,
 }
 
 /// One frame on the GPU. The mapped frames must outlive the textures
@@ -1373,7 +1389,15 @@ impl ScenePipeline {
         });
         let blank = blank_planes(device);
         let band = Band::new(device, &layout);
-        let bind_group = bind(device, &layout, &uniforms, [&blank; MAX_LENSES], &sampler);
+        let belt = belt::Belt::new(device);
+        let bind_group = bind(
+            device,
+            &layout,
+            &uniforms,
+            [&blank; MAX_LENSES],
+            &sampler,
+            belt.field(),
+        );
 
         Self {
             pipeline,
@@ -1387,7 +1411,31 @@ impl ScenePipeline {
             format,
             reported: false,
             anchor: None,
+            belt,
+            flowing: belt_default(),
+            belt_at: None,
         }
+    }
+
+    /// Select the belt, or put it away. The A/B's own arm switch, and the one
+    /// live knob this feature has.
+    ///
+    /// **Mutually exclusive with nothing else, because there is nothing else**
+    /// (owner ruling, docs/research/studio-parity.md): Off is calibration plus
+    /// fusion plus the anchored line, Optical Flow is that plus the belt, and
+    /// Studio does not blend the two either.
+    ///
+    /// Switching it on makes the next frame run the whole ladder, because the
+    /// temporal hint from before it was switched on does not exist.
+    pub fn set_flowing(&mut self, on: bool) {
+        if self.flowing != on {
+            self.belt.chill();
+        }
+        self.flowing = on;
+    }
+
+    pub fn is_flowing(&self) -> bool {
+        self.flowing
     }
 
     /// The band, measured on the pair the bind group points at, before the
@@ -1535,6 +1583,11 @@ impl ScenePipeline {
                 reframe.with_shift(anchor.shift())
             }
         };
+        // The belt, before the uniform write, because whether the block says
+        // the belt is running depends on whether a field was computed for THIS
+        // frame - and because the passes below carry their own block and would
+        // otherwise land the scene's write on the wrong submit.
+        let reframe = self.flow(device, queue, showing.as_ref(), reframe, aspect);
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());
         // After the uniform write, because the band reads the same block: the
         // calibration it measures against has to be the one the draw will use,
@@ -1547,6 +1600,76 @@ impl ScenePipeline {
         // that has a device to render with.
         if let Some(request) = primitive.shutter.take() {
             self.shoot(device, queue, request, aspect, showing.as_ref());
+        }
+    }
+
+    /// One frame of the belt, and the block that says so.
+    ///
+    /// Returns the map unchanged when the arm is off, when the file has one
+    /// lens stream, or before a field has ever been computed - and "unchanged"
+    /// is the whole of the null: `Reframe::belt` stays at the zero
+    /// `Reframe::new` built it with and no shader reads a texel.
+    fn flow(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: Option<&View>,
+        reframe: Reframe,
+        aspect: f32,
+    ) -> Reframe {
+        if !self.flowing {
+            return reframe;
+        }
+        let Some(view) = view.filter(|view| view.lenses.len() > 1 && self.is_bound(view)) else {
+            return reframe;
+        };
+        // The map is a body-frame object and is built once per file
+        // (`belt::Map`). It is built HERE rather than at open because the arm
+        // is off by default and a build nothing reads is a hitch nobody asked
+        // for; the cost is reported so it can be argued with.
+        if !self.belt.is_loaded() {
+            let at = Reframe::new(
+                &view.lenses,
+                view.frames.size,
+                Camera::default(),
+                // No readout in the map: at the seam an X4 reads the same
+                // world direction down both lenses, so the rolling term is
+                // worth 0.000 degrees there (insv-format 6.7) and a map with
+                // one in it would be a map of one instant.
+                Held::default(),
+                aspect,
+                false,
+                Sampling::default(),
+            );
+            let span = belt::span(&at, band::AZIMUTHS);
+            let map = belt::Map::build(&at, span);
+            println!(
+                "belt:   {}x{} strip over {:.3} deg across the seam, map built in {:.0} ms",
+                belt::COLUMNS,
+                belt::ROWS,
+                span.to_degrees(),
+                map.built.as_secs_f64() * 1e3,
+            );
+            self.belt.load(queue, &map);
+        }
+        // A seek is a frame with nothing before it, and the hint is a hint
+        // about the frame before this one. The same 0.25 s of film the seam
+        // anchor calls a discontinuity, in either direction, and for the same
+        // reason (`projection::ANCHOR_SEEK_SECS`).
+        let at = view.frames.timestamp;
+        let seeked = self.belt_at.is_none_or(|was| {
+            let step = at.as_secs_f64() - was.as_secs_f64();
+            !(0.0..=0.25).contains(&step)
+        });
+        if seeked {
+            self.belt.chill();
+        }
+        self.belt_at = Some(at);
+        self.belt
+            .run(device, queue, view.frames.size, view.frames.samples.wide);
+        match self.belt.ready() {
+            true => reframe.with_belt(self.belt.span()),
+            false => reframe,
         }
     }
 
@@ -1750,7 +1873,19 @@ impl ScenePipeline {
                     // for every binding the layout declares.
                     std::array::from_fn(|lens| planes.get(lens).unwrap_or(&self.blank)),
                     &self.sampler,
+                    self.belt.field(),
                 );
+                // The belt rectifies off the same pair the draw is about to
+                // sample, so its own bind groups are rebuilt here and nowhere
+                // else.
+                if planes.len() > 1 {
+                    let luma: Vec<wgpu::TextureView> = planes
+                        .iter()
+                        .map(|planes| planes.luma.create_view(&Default::default()))
+                        .collect();
+                    self.belt
+                        .rebind(device, [&luma[0], &luma[1]], view.frames.samples.wide);
+                }
                 self.live.push_front(Live {
                     frames: view.frames.clone(),
                     _planes: planes,
@@ -1949,6 +2084,7 @@ fn bind(
     uniforms: &wgpu::Buffer,
     lenses: [&Planes; MAX_LENSES],
     sampler: &wgpu::Sampler,
+    field: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     // The views have to outlive the descriptor that borrows them, so they are
     // built before it rather than inside it.
@@ -1973,6 +2109,14 @@ fn bind(
     entries.push(wgpu::BindGroupEntry {
         binding: SAMPLER_BINDING,
         resource: wgpu::BindingResource::Sampler(sampler),
+    });
+    // The belt's field, always bound and read only where the block says so.
+    // It is the same texture for the life of the pipeline, so this entry does
+    // not change when the frame pair does; it is here because a bind group has
+    // to carry every binding its layout declares.
+    entries.push(wgpu::BindGroupEntry {
+        binding: FIELD_BINDING,
+        resource: wgpu::BindingResource::TextureView(field),
     });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scene"),
@@ -2015,6 +2159,20 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         binding: SAMPLER_BINDING,
         visibility: both,
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    });
+    // The belt's field. Not filterable, because nothing filters it: the map
+    // reads it with four `textureLoad`s and mixes them itself, so that the two
+    // halves of `belt_flow` can be held to a bar rather than to a driver's
+    // rounding.
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: FIELD_BINDING,
+        visibility: both,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         count: None,
     });
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2068,6 +2226,45 @@ fn band_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 count: None,
             },
         ],
+    })
+}
+
+/// Whether the belt starts selected, from `KJERAG_BELT`.
+///
+/// **Off is what ships, and this is increment 1 of a feature behind its own
+/// switch** (docs/research/studio-parity.md 7). `KJERAG_BELT=on` selects
+/// Studio's Optical Flow arm from the first frame; the A/B hands over between
+/// arms inside one playback and does not read this at all
+/// (`ScenePipeline::set_flowing`).
+///
+/// Read once, because a value that changed mid-run would change the picture
+/// between two frames of one pan, and the arm switch is what that is for.
+fn belt_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let Ok(asked) = std::env::var("KJERAG_BELT") else {
+            return false;
+        };
+        // Empty is unset and says so, which is the lesson `KJERAG_ANCHOR`
+        // learned the expensive way on 2026-08-09: a shell expanding a
+        // variable that is itself unset writes an empty one, and a silent
+        // reinterpretation of that cost a whole review pass.
+        if asked.is_empty() {
+            eprintln!(
+                "belt:   KJERAG_BELT is set to nothing, which is read as UNSET and leaves the \
+                 belt off. Use KJERAG_BELT=on to select it.",
+            );
+            return false;
+        }
+        let on = matches!(asked.as_str(), "on" | "1" | "flow");
+        eprintln!(
+            "belt:   KJERAG_BELT={asked}, so the belt is {}",
+            match on {
+                true => "on",
+                false => "off",
+            }
+        );
+        on
     })
 }
 
@@ -2148,11 +2345,11 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
   // with no reading behind it is the picture stage 2 drew.
   let tone = tone_split();
   if mix.weights[0] > 0.0 {
-    rgb += (mix.weights[0] * tone.x) * ycbcr(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
+    rgb += (mix.weights[0] * tone.x) * ycbcr(luma0, chroma0, frame_uv(mix.moved[0]), ratio.x);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += (mix.weights[1] * tone.y) * ycbcr(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    rgb += (mix.weights[1] * tone.y) * ycbcr(luma1, chroma1, frame_uv(mix.moved[1]), ratio.y);
     total += mix.weights[1];
   }
   // The room around the ball, written rather than painted: transparent black,

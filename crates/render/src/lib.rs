@@ -5,6 +5,11 @@
 /// the calibration, measured on the GPU and bent out (issue #103). Public for
 /// `kjerag-spike --bin band`, which reads the state back and reports it.
 pub mod band;
+/// The belt: Studio's Optical Flow tier. The seam's whole overlap rectified
+/// into one strip, matched densely every frame, and consumed as a source-UV
+/// correction (`src/belt.rs`). Public for `kjerag-spike --bin belt`, which
+/// reads the field back and plants known shifts through it.
+pub mod belt;
 mod camera;
 mod capture;
 pub mod dmabuf;
