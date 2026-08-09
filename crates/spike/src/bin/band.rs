@@ -219,61 +219,53 @@ fn table(last: &Read) {
     println!(
         "\nwhat the band settled on. `view px` is the disagreement a 1920-wide 90 degree view \n\
          would show, at {VIEW_PX_PER_DEG} px per degree; `metres` is the distance the disparity \n\
-         stands for; `band` is how wide the crossover opened to carry the reading; `cut` is what \n\
-         a band held at this camera's own floor would have thrown away, in view px, which is \n\
-         the width of the doubled edge it would leave (the floor is 8 deg on an X4 Air and \n\
-         4.18 on a ONE X2, not the fixed 2 of stage 2); `off epi` is the axis a distance \n\
-         CANNOT displace content along, which is measured and never applied.\n"
+         stands for; `applied` is the reading after its own filtered gate, which is what the \n\
+         belt would be seeded from; `off epi` is the axis a distance CANNOT displace content \n\
+         along.\n\
+         \n\
+         NONE OF IT REACHES THE PICTURE. Since the flat seam the pass draws the two lenses \n\
+         fused at the calibration and morphs nothing, so every column here is a measurement \n\
+         of what is still wrong and not a description of what was corrected. The `band` and \n\
+         `cut` columns went with the correction: there is no width that opens and no clamp \n\
+         that cuts.\n"
     );
-    println!(
-        "   phi  disparity    view px     metres       band        cut  confidence    off epi"
-    );
+    println!("   phi  disparity    view px     metres    applied  confidence    off epi");
     for (index, cell) in last.cells.iter().enumerate() {
         if cell.confidence <= 0.0 {
             continue;
         }
         let degrees = f64::from(cell.disparity.to_degrees());
-        let applied = applied(cell);
-        let floor = last.mapped.crossover_at(0.0);
-        let cut = applied - kjerag_render::band::carried(applied, floor);
         println!(
-            "{:>6.0} {:>9.3}d {:>10.2} {:>10} {:>9.3}d {:>10.2} {:>11.3} {:>9.3}d",
+            "{:>6.0} {:>9.3}d {:>10.2} {:>10} {:>9.3}d {:>11.3} {:>9.3}d",
             index as f64 / AZIMUTHS as f64 * 360.0,
             degrees,
             degrees * VIEW_PX_PER_DEG,
             cell.metres()
                 .map_or_else(|| "-".to_owned(), |m| format!("{m:.1}")),
-            f64::from(last.mapped.crossover_at(applied).to_degrees()),
-            f64::from(cut.to_degrees()) * VIEW_PX_PER_DEG,
+            f64::from(applied(cell).to_degrees()),
             cell.confidence,
             f64::from(cell.off_epi.to_degrees()),
         );
     }
 }
 
-/// How far the crossover opened, and what a band held at this camera's floor
-/// would be throwing away (issue #103, stage 4).
+/// How wide this camera hands the picture over, and how near the readings the
+/// belt will have to answer for get.
 ///
-/// The two columns are the same measurement read two ways: the width solves
-/// `|disparity| <= FOLD * width` for the width, and the clamp solves it for
-/// the disparity. Everything `cut` reports is alignment the pass had measured,
-/// believed, and then declined to apply because the band could not carry it -
-/// a doubled edge that much wide, on content that near.
+/// **This report used to be stage 4's acceptance** - how far the crossover
+/// opened past its floor to carry a near-field reading, and what a band held
+/// at the floor would have thrown away, in view pixels of doubled edge. Both
+/// columns are gone with the mechanism: the width is one number for the whole
+/// picture and the band cuts nothing because it applies nothing.
 ///
-/// **The floor is the camera's and not stage 2's fixed 2 degrees**, so what
-/// this recovers depends on the width the run is drawing: at 8 degrees the
-/// floor carries every reading the search can report and both columns are zero
-/// on every file in the corpus, and at `KJERAG_HANDOVER_DEG=2` the same file
-/// and stretch open the band - 2 direction-frames of 40 x 128 to 2.531 deg,
-/// recovering 8.0 view px on content at 0.84 m, on the owner's May-01 file at
-/// `from=550` (2026-08-06).
+/// What is left is worth more to the work that is coming. The width is a
+/// property of the camera and is reported per file; the near-field readings
+/// are still measured, still filtered, and are exactly the evidence the belt
+/// is meant to spend, so the near end of what this run saw is printed with the
+/// view line to go and look at it.
 fn crossover(reads: &[Read]) {
     let last = reads.last().expect("play returns at least one frame");
-    let floor = last.mapped.crossover_at(0.0);
-    // Over the whole run and not over the settled state, because a direction
-    // is near field for the second or two its own gear is crossing the seam
-    // and far field on either side of that. A table of where the circle ended
-    // up would miss exactly the frames this stage is for.
+    let width = last.mapped.handover_width();
     let seen: Vec<(usize, usize, f32)> = reads
         .iter()
         .enumerate()
@@ -284,66 +276,27 @@ fn crossover(reads: &[Read]) {
                 .map(move |(index, cell)| (frame, index, applied(cell)))
         })
         .collect();
-    let cut = |applied: f32| {
-        f64::from((applied.abs() - kjerag_render::band::carried(applied, floor).abs()).to_degrees())
-    };
-    let open = seen
-        .iter()
-        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied) > floor)
-        .count();
-    let frames = reads.len();
-    let widest = seen
-        .iter()
-        .map(|(_, _, applied)| last.mapped.crossover_at(*applied))
-        .fold(floor, f32::max);
-    let worst = seen
-        .iter()
-        .map(|(_, _, applied)| cut(*applied))
-        .fold(0.0, f64::max);
-    // The direction the worst cut happened at, so the distance below is that
-    // reading's own geometry rather than a representative one.
-    let reach_m = seen
-        .iter()
-        .find(|(_, _, applied)| cut(*applied) >= worst)
-        .map_or(0.0, |(frame, index, _)| reads[*frame].cells[*index].reach_m);
     println!(
-        "\ncrossover: over {frames} frames of {AZIMUTHS} directions, {open} direction-frames \n\
-         asked for more than the {:.2} deg floor, which is {:.2} percent of them, and the widest \n\
-         band any of them asked for is {:.3} deg. what a band held at that floor would have cut \n\
-         from those: {:.3} deg at worst, which is {:.1} view px of doubled edge on content at \n\
-         {}. this stage cuts nothing the search can report, so that is what it recovers.",
-        f64::from(floor.to_degrees()),
-        100.0 * open as f64 / seen.len() as f64,
-        f64::from(widest.to_degrees()),
-        worst,
-        worst * VIEW_PX_PER_DEG,
-        match worst > 0.0 {
-            // The reading a cut that size came off, back through the geometry.
-            true => format!(
-                "{:.2} m",
-                f64::from(reach_m) / (f64::from(floor.to_degrees()) * 0.9 + worst).to_radians()
-            ),
-            false => "no distance, because nothing was cut".to_owned(),
-        },
+        "\nhandover: {:.2} deg, every direction, every frame. the seam is flat: what the band \n\
+         reads below is measured and not applied, so no reading widens this and none is cut.",
+        f64::from(width.to_degrees()),
     );
-    // Where it happened, so a render can be pointed at it rather than hunted
-    // for: the widest few, with the frame and the azimuth each was read at.
-    let mut widest_first: Vec<&(usize, usize, f32)> = seen
-        .iter()
-        .filter(|(_, _, applied)| last.mapped.crossover_at(*applied) > floor)
-        .collect();
-    widest_first.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
-    if !widest_first.is_empty() {
+    // Where the near field is, so a render can be pointed at it rather than
+    // hunted for: the largest readings, with the frame and the azimuth each
+    // was read at. This is the belt's own worklist.
+    let mut nearest: Vec<&(usize, usize, f32)> = seen.iter().collect();
+    nearest.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
+    if nearest.first().is_some_and(|(_, _, a)| a.abs() > 0.0) {
         println!(
-            "\n           the widest of them, to point a render at. `at` is seconds into the \n\
+            "\n           the nearest of them, to point a render at. `at` is seconds into the \n\
              file. `view` is where to stand to see that azimuth: the seam circle runs through \n\
              the zenith, because the two lens axes are horizontal, so it is reached by PITCH \n\
              and not by yaw (measured 2026-08-01 with mode=trace, which is what to check it \n\
              with again).\n\n\
-             \x20          {:>7} {:>8} {:>7} {:>10} {:>9} {:>9}   view (lock=0)",
-            "frame", "at", "phi", "applied", "band", "cut px",
+             \x20          {:>7} {:>8} {:>7} {:>10} {:>9}   view (lock=0)",
+            "frame", "at", "phi", "applied", "view px",
         );
-        for (frame, index, applied) in widest_first.iter().take(8) {
+        for (frame, index, applied) in nearest.iter().take(8) {
             let phi = *index as f64 / AZIMUTHS as f64 * 360.0;
             // phi = -pitch at yaw 90, and the half of the circle a pitch
             // cannot reach is the same view turned round.
@@ -352,55 +305,31 @@ fn crossover(reads: &[Read]) {
                 false => (90.0, -phi),
             };
             println!(
-                "           {frame:>7} {:>7.2}s {phi:>6.0}d {:>9.3}d {:>8.3}d {:>9.1}   \
+                "           {frame:>7} {:>7.2}s {phi:>6.0}d {:>9.3}d {:>8.1}   \
                  yaw {yaw:.0} pitch {pitch:.0}",
                 reads[*frame].at.as_secs_f64(),
                 f64::from(applied.to_degrees()),
-                f64::from(last.mapped.crossover_at(*applied).to_degrees()),
-                cut(*applied) * VIEW_PX_PER_DEG,
+                f64::from(applied.to_degrees()) * VIEW_PX_PER_DEG,
             );
         }
     }
     let Some(overlap) = last.mapped.overlap() else {
-        println!("\n           one lens stream: no seam, no overlap, and no band to open.",);
+        println!("\n           one lens stream: no seam and no overlap.");
         return;
     };
-    // The ceiling's own safety, measured on this camera rather than assumed
-    // from the fixture: the widest band plus the whole bend it carries has to
-    // sit inside the ring both lenses have a picture of. The width is the
-    // camera's since 2026-08-05, so it is asked of the map rather than quoted
-    // from `WIDEST_DEG`, which stopped being the widest the band opens the
-    // moment the floor went above it.
-    //
-    // **And it does not always fit, since 2026-08-08.** `affordable` bounds
-    // the FLOOR and `width` may open past it, which nothing could while
-    // `WIDEST_DEG` was 2.89 and every camera's floor was over it. At 4.33 a
-    // camera overlapping by under 9.53 degrees is under the line and the ONE X2
-    // is one, so this says which side of it this file is on rather than
-    // asserting the answer.
-    let widest = last
-        .mapped
-        .crossover_at(kjerag_render::band::WIDEST_DEG.to_radians());
-    let reach = f64::from(kjerag_render::band::reach(widest).to_degrees());
+    // Measured on this camera rather than assumed from the fixture: the band
+    // reaches half its own width off the seam, and the picture both lenses
+    // have runs half the overlap off it.
+    let reach = f64::from(kjerag_render::band::reach(width).to_degrees());
     let half = f64::from(overlap.to_degrees()) * 0.5;
-    let spare = match half - reach >= 0.0 {
-        true => format!(
-            "stays inside the overlap with {:.2} deg to spare",
-            half - reach
-        ),
-        false => format!(
-            "reaches {:.2} deg PAST the overlap, where the coverage depth hands the picture \n\
-             over instead of the ramp",
-            reach - half,
-        ),
-    };
     println!(
-        "           these two lenses overlap by {:.2} deg, {half:.2} a side, which affords a \n\
-         handover of {:.2}. the widest this camera's band opens is {:.2} deg, and that band plus \n\
-         the whole bend it carries reaches {reach:.2} deg off the seam, so the handover {spare}.",
+        "\n           these two lenses overlap by {:.2} deg, {half:.2} a side. the handover \n\
+         reaches {reach:.2} deg off the seam, so it stays inside the overlap with {:.2} deg \n\
+         to spare. before the flat seam the bend the band carried had to fit in that margin \n\
+         too, and on a camera whose overlap could not pay for it the width was cut to what \n\
+         it could.",
         f64::from(overlap.to_degrees()),
-        f64::from(kjerag_render::band::affordable(overlap).to_degrees()),
-        f64::from(widest.to_degrees()),
+        half - reach,
     );
 }
 
@@ -583,24 +512,23 @@ fn flicker(reads: &[Read], options: &Options) {
         along.0 * VIEW_PX_PER_DEG,
         along.1,
     );
-    // The band's WIDTH is the second thing a reading decides (stage 4), and it
-    // moves the weights of every pixel of the crossover, so it has to be as
-    // steady as the bend. It has no filter of its own: it is a function of the
-    // same smoothed reading, so this column is the temporal design's own
-    // consequence rather than a second design.
-    let opened = stepped_width(reads, 0.0);
-    let open = (0..WATCHED)
-        .filter(|direction| {
-            let last = reads.last().expect("play returns at least one frame");
-            last.mapped.crossover_at(held(last, *direction) as f32) > last.mapped.crossover_at(0.0)
-        })
-        .count();
+    // The band's WIDTH used to be the second thing a reading decided (stage
+    // 4), and it moved the weights of every pixel of the crossover, so it had
+    // to be as steady as the bend. It is a constant now, so the column is a
+    // zero by construction rather than by measurement, and a zero that cannot
+    // be otherwise is not a reading. It is printed anyway, because a reader of
+    // this report is entitled to know the number is not missing.
     println!(
-        "\nwidth:   {:.4} deg rms frame to frame at the same {WATCHED} directions, worst single \n\
-         step {:.4} deg. {open} of them have the band open past its floor at the end of the run; \n\
-         the rest sit on the floor exactly, where the width cannot move at all, which is what \n\
-         holds this column down and is also what keeps the far field the picture it was.",
-        opened.0, opened.1,
+        "\nwidth:   0.0000 deg rms, exactly, at every direction and every frame. the handover \n\
+         is {:.2} deg for the whole picture and nothing the band reads can move it.",
+        f64::from(
+            reads
+                .last()
+                .expect("play returns at least one frame")
+                .mapped
+                .handover_width()
+                .to_degrees()
+        ),
     );
     if !options.control {
         println!("         (control=1 puts a known step in and reads it back.)");
@@ -611,17 +539,15 @@ fn flicker(reads: &[Read], options: &Options) {
          frame has to come back at 2s, added in quadrature to what the file already had. a \n\
          flicker column is a negative result and means nothing until it is shown able to read \n\
          a positive one.\n\
-         \n             step        bend    expected       along    expected       width    expected"
+         \n             step        bend    expected       along    expected"
     );
     for step in [0.05f64, 0.20] {
         println!(
-            "         {step:>8.2}d {:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
+            "         {step:>8.2}d {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
             stepped(reads, step.to_radians()).0,
             measured.0.hypot(2.0 * step),
             stepped_along(reads, step.to_radians()).0,
             along.0.hypot(2.0 * step),
-            stepped_width(reads, step.to_radians()).0,
-            opened.0.hypot(2.0 * step),
         );
     }
 }
@@ -700,23 +626,6 @@ fn stepped_along(reads: &[Read], shake: f64) -> (f64, f64) {
     stepped_by(reads, |read, frame, direction| {
         let (sin, cos) = (direction as f32 / WATCHED as f32 * std::f32::consts::TAU).sin_cos();
         f64::from(read.along.at(cos, sin)) + shaken(frame, shake)
-    })
-}
-
-/// The same for the crossover WIDTH that reading opens (issue #103, stage 4).
-///
-/// Watched at the same directions and reported in the same units, because it
-/// is the same kind of quantity: a number the shader reads off the band that
-/// moves every weight in the crossover if it moves. The shake goes into the
-/// width itself rather than into the disparity behind it, which is what stage
-/// 2's control does with the bend: what a control has to show is that the
-/// column can see a step of a size it is told, and a step put in one place and
-/// read in another would be measuring the rule instead (`band::width` has its
-/// own tests for that).
-fn stepped_width(reads: &[Read], shake: f64) -> (f64, f64) {
-    stepped_by(reads, |read, frame, direction| {
-        let opened = read.mapped.crossover_at(held(read, direction) as f32);
-        f64::from(opened) + shaken(frame, shake)
     })
 }
 
@@ -859,7 +768,7 @@ fn trace(options: &Options) -> Fallible<()> {
 /// wrong.
 fn covering(reframe: &Reframe, size: Size, region: [u32; 4]) -> Vec<usize> {
     let [x, y, width, height] = region;
-    let half = 0.5 * reframe.crossover_at(0.0).to_degrees();
+    let half = 0.5 * reframe.handover_width().to_degrees();
     let mut seen = [false; AZIMUTHS];
     for row in y..(y + height).min(size.height) {
         for column in x..(x + width).min(size.width) {
@@ -1250,7 +1159,7 @@ fn probes(reframe: &Reframe, size: Size) -> Vec<Probe> {
 /// [`PROBES`] is enough to attribute a step and nowhere near enough to say how
 /// far apart the places it steps BETWEEN are.
 fn probes_at(reframe: &Reframe, size: Size, count: usize) -> Vec<Probe> {
-    let half = 0.5 * f64::from(reframe.crossover_at(0.0).to_degrees());
+    let half = 0.5 * f64::from(reframe.handover_width().to_degrees());
     (0..count)
         .filter_map(|index| {
             let x = ((index as f32 + 0.5) / count as f32 * size.width as f32) as u32;
@@ -1317,7 +1226,7 @@ fn deliver(geometry: &Read, state: &Read, probe: &Probe, px_per_deg: f64) -> Del
         mix,
         conf: [cells[0].confidence, cells[1].confidence],
         trust: [cells[0].trust, cells[1].trust],
-        weight: reframe.blend_bent(probe.ray, reading).weights[..2]
+        weight: reframe.blend(probe.ray).weights[..2]
             .try_into()
             .expect("two lenses"),
     }

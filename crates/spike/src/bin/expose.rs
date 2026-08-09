@@ -706,7 +706,7 @@ fn harvest(
     field: &mut Field,
 ) {
     field.frames += 1;
-    field.crossover_deg = f64::from(reframe.crossover_at(0.0).to_degrees());
+    field.crossover_deg = f64::from(reframe.handover_width().to_degrees());
     for (index, at) in ring.iter().enumerate() {
         let Some(hit) = found[index].filter(|hit| hit.r >= options.keep) else {
             field.refused += 1;

@@ -40,7 +40,7 @@ use kjerag_meta::{
 
 use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
-use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling};
+use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 use super::sampling::{self, Sampling};
 use super::seam::{self, Correction, Harvest, SeamFit};
 use super::stall::{Stall, Stalled};
@@ -1015,7 +1015,7 @@ fn handover_deg(lenses: &[Lens], frame: Size) -> Option<f32> {
         false,
         Sampling::default(),
     );
-    Some(mapped.crossover_at(0.0).to_degrees())
+    Some(mapped.handover_width().to_degrees())
 }
 
 /// Where a fallback fit leaves its answer for the shell to pool. Shared,
@@ -1209,6 +1209,15 @@ pub struct ScenePipeline {
     /// reads back is what the compositor would have been handed.
     format: wgpu::TextureFormat,
     reported: bool,
+    /// Where the drawn handover line is being held ([`SeamAnchor`]), carried
+    /// from one redraw to the next because a held line is a thing with a
+    /// history and the block that carries it to the GPU is rebuilt from
+    /// nothing every frame.
+    ///
+    /// `None` until the first redraw, and left alone entirely when
+    /// `KJERAG_ANCHOR=off`, which is when nothing ever reads it and the map is
+    /// handed the zero it builds itself with.
+    anchor: Option<SeamAnchor>,
 }
 
 /// One frame on the GPU. The mapped frames must outlive the textures
@@ -1349,6 +1358,7 @@ impl ScenePipeline {
             live: VecDeque::new(),
             format,
             reported: false,
+            anchor: None,
         }
     }
 
@@ -1473,6 +1483,28 @@ impl ScenePipeline {
             // No frame yet, or none this pipeline has managed to bind: the
             // pane is all room, which the shell's backdrop shows through.
             _ => Reframe::blank(aspect, self.linearize()),
+        };
+        // The one place the drawn handover line's own offset becomes a number
+        // the shader can read. AFTER the block is built, because the follow is
+        // measured against the very pose and lenses the draw will use, and
+        // BEFORE the write, because that is the copy the GPU sees.
+        //
+        // The clock is the frame's own presentation time - not a wall clock
+        // and not a count of redraws. The follow is charged in FILM, so a
+        // redraw that arrives with the same frame behind it advances nothing,
+        // and a run at 30 or at 300 fps follows over the same seconds of
+        // picture.
+        let reframe = match projection::anchoring() {
+            false => reframe,
+            true => {
+                let held = showing.as_ref().map_or(Held::default(), |view| view.held);
+                let at = showing
+                    .as_ref()
+                    .map_or(0.0, |view| view.frames.timestamp.as_secs_f64());
+                let anchor = SeamAnchor::hold(self.anchor, &reframe, held, at);
+                self.anchor = Some(anchor);
+                reframe.with_shift(anchor.shift())
+            }
         };
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());
         // After the uniform write, because the band reads the same block: the
@@ -2132,7 +2164,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   // paints that. Nothing is sampled for it and no model is run.
   var mix: Blend;
   if look.w > 0.0 {
-    mix = blend(look.xyz, band_bend(look.xyz));
+    mix = blend(look.xyz);
   }
   // Here rather than inside the blend: a derivative has to be taken where
   // every lane of the quad is running, and the blend is all branches. What

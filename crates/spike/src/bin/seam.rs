@@ -1361,18 +1361,24 @@ impl Weighting {
     /// It has to come in as a table rather than being measured here because
     /// the camera maker's own export is in a projection family the app's pass
     /// does not draw, so the comparison is a CPU render through
-    /// `Reframe::blend_bent` and never goes near a window.
+    /// `Reframe::blend` and never goes near a window.
+    ///
+    /// **`cells` no longer reaches the render, and the argument is kept on
+    /// purpose.** Until the flat seam this took the ring's own readings and
+    /// asked the map what it drew WITH them; the map draws the same picture
+    /// with them and without them now, so the parity score this feeds is the
+    /// fused picture's and not a bent one's. The argument stays so that the
+    /// caller still measures the ring it is scoring against - and so that the
+    /// belt, when it lands, has the seat it needs here.
     fn bent(
         self,
         reframe: &Reframe,
         ray: [f64; 3],
         cells: &[kjerag_render::Cell],
     ) -> ([f64; 2], [Landing; 2]) {
+        let _ = cells;
         let ray32 = ray.map(|c| c as f32);
-        let shipped = reframe.blend_bent(
-            ray32,
-            reframe.reading_at(ray32, cells, kjerag_render::Along::fit(cells)),
-        );
+        let shipped = reframe.blend(ray32);
         let landings = shipped.landings;
         let covered = |lens: usize| landings[lens].inside;
         let weights = match self {
