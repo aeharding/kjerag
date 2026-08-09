@@ -579,6 +579,118 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-09 **The seam is flat, the handover line is held on the world, and
+  the machinery that morphed the picture is deleted rather than switched off**
+  (docs/research/studio-parity.md). The owner approved the architecture on
+  2026-08-08 after a nine-arm eyeball loop on his own flights: *"current
+  architecture approved. you can merge the existing stitch with a wide band."*
+
+  **The shape of it is Studio's, which is the picture he compares everything
+  to.** Off is calibration plus fusion plus an anchored line, and that is what
+  ships; Optical Flow is the belt, and it is a separate mode, later, behind its
+  own switch. One mode at a time. What shipped before was a third thing - a
+  permanently on, partially trusted, live estimated morph inside a narrow
+  corridor - and it is the thing he had been refusing one arm at a time since
+  2026-08-05.
+
+  **Three things come out of the render path and are deleted, not gated**: the
+  corridor bend, the adaptive fade width (stage 4), and the steep blend curve
+  (half of #172). The fold apparatus goes with them - `FOLD`, `SPEND`,
+  `WIDEST_DEG`, `band::carried`, `band::width`, `band::affordable` - because
+  every one of them existed to keep the bend from printing the picture over
+  itself.
+
+  **The band still measures and reaches no pixel.** The compute half is
+  untouched. Those readings are what the belt will be seeded from, and an
+  instrument that stops measuring cannot say what the belt has to fix.
+
+  **The line is held** (`SeamAnchor`, on by default, `KJERAG_ANCHOR=off` to
+  refuse). Under a world locked view the 50/50 locus sweeps across world content
+  at up to 21.8 deg/s, so every static defect the seam has travels with it. One
+  offset, one closed form update law, and not one event in it: the owner refused
+  the two line dissolve that came before it - *"every now and then it glitches.
+  We need it to be smooth, that is a requirement"* - and he was right about
+  which way was simpler. The simpler arm also measured smoother than the
+  picture it is drawn from, where the elaborate one was four times rougher.
+
+  **HELD IS PARTIAL, AND THE NUMBER IS 0.62** (adversarial review, 2026-08-09;
+  a correction to this record and not a change to the picture, which flat6 drew
+  the same way). The anchor holds the SHARE's 50/50 line exactly; the picture
+  draws the WEIGHTS' crossing, which is that share times each lens's own
+  coverage depth, and the depths are fixed to the lenses. Measured over 24
+  azimuths: **0.617 degrees drawn per degree commanded on the X4 Air and 0.510
+  on an X2-class camera**, so the anchor reduces the seam's crawl by about 60
+  percent rather than removing it, and about 40 percent survives. Three real
+  defects were found inside the follow and fixed, none of them reachable by
+  continuous 30 fps play and so none of them a byte of the approved picture:
+  the anchor was placed on the unclamped offset while the shader drew the
+  clamped one, and a seek pinned the line to a target from another part of the
+  flight - backward, where the step came out as zero, and then forward too,
+  where the step was capped and the follow charged with the same stale target.
+  **A seek anchors afresh in either direction now**, and what separates a seek
+  from a redraw is the size of the step and not its sign: a step of film past
+  0.25 s, which is 7.5 frames of this corpus and a fortieth of the app's own 10
+  second jump. The forward half was worth 2.90 of the 4.00 degrees on the seek
+  frame, for a seek of any length, because that is the follow's own ceiling at
+  the step the old code capped to. The follow's rail is the film rate's -
+  `allowance / (POWER * RATE * dt)^(1/POWER)`, 3.55 degrees at 30 fps, past the
+  4.00 allowance above 100 fps - and both cameras have 120 fps modes, which is
+  documented with its table rather than fixed, because a dt invariant law is a
+  different picture at 30 fps too.
+
+  **The width clamp was never the safety bound, and now something is.** The
+  handover's support is centred on the drawn line, so with the anchor it reaches
+  a whole band off the seam at the rail: over the July-14 fast segment 202 of
+  900 frames draw some of it past the coverage on his own X4 Air, and 866 of 900
+  would on a camera overlapping the way the ONE X2 does. What carries that is
+  each lens's
+  coverage depth inside `claim`. Measured over the ring at the rail on both
+  camera classes: the weights sum to one everywhere and the worst weight step is
+  0.0034 per hundredth of a degree, against a fade whose own slope is 0.0017;
+  a planted hole and a planted cliff are the controls.
+
+  **The two twins are checked against each other on a real GPU**
+  (`crates/render/src/twin.rs`). A review planted a bend in the WGSL half alone
+  and the whole workspace stayed green while the picture changed. The guard
+  compiles the shipped shader with a probe entry after it and compares every
+  weight and landing against the Rust mirror; a WGSL-only bend fails it by 221
+  times its bar and it is the only test that does. **The "887 times the bar"
+  this entry carried is 887 times the clean RESIDUE and 90 times the bar**, and
+  a ratio here now names its denominator. CI has no GPU and skips it;
+  `KJERAG_REQUIRE_GPU=1` makes the skip a failure and `scripts/uitest.sh` runs
+  it that way, so a release cannot be tagged without it.
+
+  **And a guard is only a guard where its fixture reaches**: the first version
+  of that probe was built on a pose with no rolling shutter, so the readout
+  half of `project` sat behind a uniform test that was false on both halves and
+  ran on neither, and the same review passed 226 of 226 tests with a WGSL-only
+  change to `readout_share` while the picture moved. The fixture rolls now and
+  the test asserts it (round 2, 2026-08-09).
+
+  **THE ONE X2 NOW DRAWS 8.00 DEGREES WHERE IT DREW 3.94.** The bound on how
+  wide a camera may hand over was its overlap minus the room a bend needed to
+  carry a sample past its own ray; nothing displaces a sample now, so the bound
+  is the bare overlap and the X2's 9.19 pays for the whole ask. This is the
+  largest deliberate picture change in the merge and the one thing that cannot
+  be byte identical to the arm he approved.
+
+  **The null is byte identity against the arm he approved**, not against `main`:
+  the same instrument source built against this branch and against the flat6
+  commit, playing real film offscreen at the six registry views under two
+  calibration paths. The X2 is the disclosed exception above.
+
+  Known and disclosed rather than fixed, in
+  docs/research/studio-parity.md 6: the honest doubling at the bad crossing
+  (the wide band softens it, the belt is its fix), the partial hold above, the
+  one sided fade truncation under sustained motion, the frame rate dependent
+  rail, the seam ring still crawling away from the view centre, and the far
+  field alignment the bend used to buy. That last one is the trade he made:
+  alignment that moves, for a seam that stands still.
+
+  Calibration stays v3; v6 was refused by his eye on 2026-08-08 and the parity
+  line continues elsewhere. `KJERAG_HANDOVER_DEG` stays live, because it selects
+  a value on a continuum the next A/B will want to sweep again.
+
 - 2026-08-08 **The seam's temporal bundle is the default behaviour, and its
   three research toggles are deleted rather than defaulted**
   (docs/research/seam-temporal.md 9, docs/research/reference-views.md). Three

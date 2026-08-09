@@ -1054,18 +1054,24 @@ impl App {
     ///
     /// **The width is the camera's since 2026-08-05** and there is nowhere else
     /// a pilot or an agent could read it: the projection asks for 8 degrees and
-    /// a camera whose lenses overlap by less draws less
-    /// (`kjerag_render::band::affordable`). The owner's ONE X2 draws 4.18, and
-    /// an A/B on the width was run once already with no line anywhere saying
-    /// which width either arm actually drew.
+    /// a camera whose two lenses overlap by less draws less
+    /// (`kjerag_render::Reframe::afforded`). An A/B on the width was run once
+    /// already with no line anywhere saying which width either arm drew.
+    ///
+    /// **Every camera in the corpus now draws the whole 8**, the ONE X2
+    /// included, and that changed with the flat seam. The bound is the
+    /// overlap, and it used to be the overlap minus the room a bend needed to
+    /// carry a sample past the ray it was taken on; the X2 overlaps by 9.19
+    /// and drew 4.18 under the old bound. Nothing displaces a sample now, so
+    /// the handover reaches half its own width and no further, and 9.19 pays
+    /// for the 8 the picture asks for with 0.60 a side to spare.
     ///
     /// After [`Self::hold_seam`], because a seam correction moves the principal
     /// point and therefore the overlap. A camera with nothing pooled yet has no
     /// correction to land there, so what this prints on its first file is the
-    /// **factory** calibration's width and a fallback fit moves it a second
-    /// later: 4.91 to 4.15 on the owner's X2 (its per-file fit; the pooled
-    /// fit affords 4.18). `kjerag_render`'s own fit path
-    /// says that second line, and only when the width actually moved.
+    /// **factory** calibration's width and a fallback fit can move it a second
+    /// later. `kjerag_render`'s own fit path says that second line, and only
+    /// when the width actually moved.
     fn say_handover(&self, scene: &Scene) {
         let Some(width) = scene.handover_deg() else {
             return;

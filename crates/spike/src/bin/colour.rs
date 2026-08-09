@@ -1444,7 +1444,7 @@ fn profile(options: &Options) -> Fallible<()> {
 /// the overlap always was.
 fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
     let seam = distances(reframe, size, 2, (0.0, 0.0, 1.0, 1.0));
-    let crossover = f64::from(reframe.crossover_at(0.0).to_degrees()) / 2.0;
+    let crossover = f64::from(reframe.handover_width().to_degrees()) / 2.0;
     let overlap = reframe.overlap().map_or(0.0, |o| f64::from(o.to_degrees())) / 2.0;
     let rgba = picture
         .rgba

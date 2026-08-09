@@ -521,6 +521,104 @@ box the same evening:
   22.8 view px at `bad` and 17.9 / 56.4 at `down1` - because this PR changes how a measurement is
   SPENT and not what is measured. The residual is the expensive work and it is not this.
 
+## Architecture: the flat seam, the width, and the held line (VERDICT: APPROVED, and it SHIPPED)
+
+The nine-arm eyeball loop of 2026-08-08, run on the owner's own flights at the same six views
+every blind session since 2026-08-06 has used, so the answers compose with the ones already
+banked. Binaries in `~/kjerag-ab/bin/`; the whole record, arm by arm, is
+docs/research/studio-parity.md. NO FOOTAGE-DERIVED IMAGE IS COMMITTED for any of it: the
+evidence is checksums, the owner's words, and the numbers below.
+
+**VERDICT: the architecture is approved and merged.** In his words:
+*"Current architecture approved. You can merge the existing stitch with a wide band."*
+The shape of it is Studio's own: Off is calibration plus fusion plus an anchored line, and that
+is what ships; Optical Flow is the belt, later, behind its own switch; one mode at a time.
+
+- 2026-08-08 THE FLAT SEAM, at all six views below. The corridor bend, the adaptive fade width
+  and the steep blend curve are OUT OF THE RENDER PATH and deleted rather than switched off.
+  The arm the owner kept is `flat`, and `flat2`/`flat3` (frozen width, linear curve) with it.
+  STATUS: APPROVED and merged. What the band measures is still measured and reaches no pixel;
+  the near-field alignment the bend used to buy is gone on purpose, and the accepted trade is
+  alignment that moves for a seam that stands still.
+- 2026-08-08 THE WIDTH: WIDE, and 8 degrees is what wide means here.
+  Asked twice and answered twice. 2026-08-05, two arms, label-blind: *"2 is way better. Def not
+  perfect but way better"* of the 8 degree arm. 2026-08-08, three arms hot-swapped inside one
+  playback at 3 / 8 / 12 (`~/kjerag-ab/sessions/handover-demo.ab`, key in
+  `handover-demo-key.txt`): *"somewhere between 1 and 2"*, which is between 3 and 8, and then
+  the merge word settled it at the wide end. STATUS: 8.00 degrees, unchanged, re-confirmed.
+  `KJERAG_HANDOVER_DEG` stays live because the width is a continuum the next A/B will sweep
+  again.
+  **What every camera in the corpus now DRAWS is 8.00, the ONE X2 included.** Measured through
+  the app itself on `VID_20251018_191318_00_002.insv`: the X2 drew 4.91 at open and 3.94 after
+  its per-file fit landed, and now draws 8.00 at both. The bound was the overlap minus the room
+  the bend needed; it is the bare overlap now, and the X2 overlaps by 9.19.
+  **That bound is about the width and NOT about safety** (review, 2026-08-09). The handover's
+  support is centred on the drawn line, so with the seam anchor's offset in it the ramp reaches
+  `band/2 + |shift|` off the seam, up to a whole band at the rail: 8.00 degrees against 7.22 a
+  side on the X4 Air and 4.59 on an X2-class camera. Read off the held line's own trace on his
+  own film: at `down1` the support never leaves the coverage (0 of 300 frames), over the July-14
+  fast segment it does on 202 of 900 by at most 0.09 degrees, and the same offsets on a camera
+  overlapping the way the X2 does would cross on 866 of 900 by up to 2.94. Nothing is narrowed
+  for it - narrowing is the breathing
+  width he refused - and what carries it is each lens's coverage depth inside `claim`, which
+  fades the outer lens out on its own rim. Measured over the whole ring at the rail on both
+  classes: the weights sum to 1 everywhere and the worst weight step is 0.0025 (X4 Air) and
+  0.0034 (X2-class) per hundredth of a degree, against a fade whose own slope is 0.0017.
+  docs/research/studio-parity.md 5.3.
+- 2026-08-08 THE HELD LINE (`SeamAnchor`, on by default; `KJERAG_ANCHOR=off` to refuse).
+  Three arms, in order, each refused until the last: `flat4` slewed the line to a new anchor and
+  the owner's word for it was **"lurching"**; `flat5` held two lines and dissolved between them
+  and he refused that too - *"every now and then it glitches. We need it to be smooth, that is a
+  requirement. Perhaps we just need the seam to be smoothly transitioning instead, probably
+  simpler too, with some fixing to prevent small movements when stopped at one position."*;
+  `flat6` is one line on one closed-form law with no events in it. STATUS: `flat6` APPROVED and
+  merged, on by default.
+  Measured at `down1` over the ten seconds he named: the **commanded** line moves at most
+  **0.0046 deg per frame** while the unanchored geometry sweeps at up to **21.8 deg/s**, and the
+  shake his paramotor puts through 3.0 of the 4.0 degrees of allowance at a couple of hertz
+  reaches none of it. On the July-14 fast segment, 900 redraws: `flat6` changes the drawn line's
+  velocity by at most 11.3 deg/s frame to frame, which is BELOW the 14.2 the geometry it is drawn
+  from changes by; `flat5` changed it by 59.2 with 29 retargets and 25 promotes.
+  **THE HOLD IS PARTIAL AND THE FIGURES ABOVE ARE ABOUT THE COMMANDED LINE** (found in review,
+  2026-08-09; not a change to the picture, and flat6 behaves identically). The anchor holds the
+  SHARE's 50/50 line exactly; the picture draws the WEIGHTS' crossing, which is that share times
+  each lens's own coverage depth, and the depths do not move with the line. Measured on the
+  calibration fixture over 24 azimuths: **0.617 degrees drawn per degree commanded on the X4 Air
+  and 0.510 on an X2-class camera**, so the anchor **reduces the crawl by about 60 percent** on
+  the camera he judged it on and by about half on the narrowest one, rather than removing it.
+  At `down1`'s worst the drawn line still crawls 0.32 deg per frame where unanchored it crawls
+  0.82. At the **3.53 degrees the fast segment actually reaches**, the drawn line sits **2.25 deg**
+  off the seam on the X4 Air and **1.89** on an X2-class camera, not 3.53; at the 3.5463 ceiling
+  the frame rate sets, which the segment approaches and does not touch, it is 2.258 and 1.901.
+  The rail itself is the film rate's: the follow's ceiling is
+  `allowance / (POWER * RATE * dt)^(1/POWER)`, which is 3.5463 of 4.00 degrees at 30 fps and passes
+  the allowance above 100 fps. Every file judged here is 30 fps; both cameras have 120 fps modes
+  and no such file has been looked at. docs/research/studio-parity.md 3.4 carries the table.
+- 2026-08-08 CALIBRATION v6: REFUSED BY HIS EYE. STATUS: calibration stays v3. The parity line
+  against the maker's own export continues separately and is not this PR's.
+- 2026-08-08 the `ghost` field arm (one displacement of the back lens's whole picture) and the
+  `comb` arm (a dead cell no longer punching a hole through a live neighbour's correction) were
+  staged and never ruled on. STATUS: SUPERSEDED, not refused. `ghost` is the belt's own idea and
+  goes there; `comb` fixed a hole in a correction that no longer exists.
+
+The six views, unchanged, and what they are for in this round:
+
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=65.666 yaw=179.00 pitch=-36.97 fov=20.00 lock=1` down1
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=64.765 yaw=-179.66 pitch=-38.46 fov=20.00 lock=1` down2
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=69.403 yaw=175.14 pitch=-37.65 fov=20.00 lock=1` down3
+  The three banked downward views on May-01: the seam running down through the ground under the
+  aircraft, which is where a line that swims is most obvious and where the anchor was tuned.
+  `down1` is also where the anchor's stillness figure above was measured.
+- 2026-08-08 `VID_20260714_193252_00_006.insv time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1` shimmer
+  The July-14 anchor. The 100 to 130 s stretch at this same aim is the **fast segment** the
+  anchor's smoothness figure is measured over, because it is the hardest motion in the corpus.
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=50.117 yaw=-80.28 pitch=0.06 fov=55.69 lock=1` good
+- 2026-08-08 `VID_20260501_183417_00_002.insv time=50.117 yaw=101.13 pitch=0.75 fov=62.79 lock=1` bad
+  The two crossing views. `bad` is the one that carries the disclosed cost: with no morphing the
+  epipolar misalignment there shows as **honest doubling** rather than as a smeared wrong shape.
+  The wide band softens it and the belt is its fix. UNCHANGED and still roughly 20 view px; this
+  architecture changes whether a measurement is SPENT, not what is measured.
+
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas

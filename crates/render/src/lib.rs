@@ -20,6 +20,11 @@ mod scene;
 /// attribution and the controls printed round it.
 pub mod seam;
 mod stall;
+/// The shader and its Rust mirror, asked the same question on a real GPU
+/// (`src/twin.rs`). Tests only: it exists because a change to one half and not
+/// the other used to pass the whole suite.
+#[cfg(test)]
+mod twin;
 mod widget;
 
 pub use band::{
@@ -34,7 +39,7 @@ pub use kjerag_media::{Accuracy, Cue, Fallible, MissingDecoder, Size, Stats};
 /// not collide with this crate's own `capture`, which is the screenshot one.
 pub use kjerag_meta::capture as capture_set;
 pub use kjerag_meta::{Foreign, Quat, Readout, Sweep};
-pub use projection::{Bend, Blend, Held, Landing, MAX_LENSES, Reframe, Rolling};
+pub use projection::{Blend, Held, Landing, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, Harvest, SeamFit};

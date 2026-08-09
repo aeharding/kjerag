@@ -1349,10 +1349,10 @@ impl Weighting {
     /// pass with the band pass live (2026-08-06, after a near-field
     /// measurement taken here understated the width's cost).
     fn at(self, reframe: &Reframe, ray: [f64; 3]) -> ([f64; 2], [Landing; 2]) {
-        self.bent(reframe, ray, &[])
+        self.given(reframe, ray, &[])
     }
 
-    /// The same with the per-frame band's own correction in it (issue #103).
+    /// The same, told which ring the picture is being scored against.
     ///
     /// `cells` is the state the shipped compute pass settled on, written out
     /// by `kjerag-spike --bin band save=`. Empty is the picture before stage 2,
@@ -1361,18 +1361,28 @@ impl Weighting {
     /// It has to come in as a table rather than being measured here because
     /// the camera maker's own export is in a projection family the app's pass
     /// does not draw, so the comparison is a CPU render through
-    /// `Reframe::blend_bent` and never goes near a window.
-    fn bent(
+    /// `Reframe::blend` and never goes near a window.
+    ///
+    /// **`cells` no longer reaches the render, and the argument is kept on
+    /// purpose.** Until the flat seam this took the ring's own readings and
+    /// asked the map what it drew WITH them; the map draws the same picture
+    /// with them and without them now, so the parity score this feeds is the
+    /// fused picture's and not a bent one's. The argument stays so that the
+    /// caller still measures the ring it is scoring against - and so that the
+    /// belt, when it lands, has the seat it needs here.
+    ///
+    /// **This was called `bent` until 2026-08-09**, which was true while there
+    /// was a bend and became a name for a mechanism the repository had deleted.
+    /// Renamed in review rather than left to read as a live feature.
+    fn given(
         self,
         reframe: &Reframe,
         ray: [f64; 3],
         cells: &[kjerag_render::Cell],
     ) -> ([f64; 2], [Landing; 2]) {
+        let _ = cells;
         let ray32 = ray.map(|c| c as f32);
-        let shipped = reframe.blend_bent(
-            ray32,
-            reframe.reading_at(ray32, cells, kjerag_render::Along::fit(cells)),
-        );
+        let shipped = reframe.blend(ray32);
         let landings = shipped.landings;
         let covered = |lens: usize| landings[lens].inside;
         let weights = match self {
@@ -2147,7 +2157,7 @@ fn looked(
                 view.compression,
                 shape.aspect(),
             );
-            let (weights, landings) = Weighting::Shipped.bent(&reframe, ray, cells);
+            let (weights, landings) = Weighting::Shipped.given(&reframe, ray, cells);
             let mut luma = 0.0;
             let mut total = 0.0;
             for lens in 0..2 {

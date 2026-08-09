@@ -117,7 +117,8 @@ const CAP_AZIMUTHS: usize = 8;
 /// 2 to 4.78 at 8, and that band's gradient energy against the front lens alone
 /// falls 12 percent over the same pixels, 1.309 to 1.150. What the sweep did
 /// settle is the other end: 12 is refused by the optics on every camera in the
-/// corpus ([`super::band::affordable`]).
+/// corpus (`Reframe::overlap`, which is what bounds it now that the fold
+/// apparatus is gone).
 ///
 /// What bounds it from below is **shear**, the two lenses' disagreement
 /// divided by the band: above 1 the crossover folds the picture rather than
@@ -130,66 +131,21 @@ const CAP_AZIMUTHS: usize = 8;
 /// times the width spreads the disagreement over 3.2 times as much picture,
 /// and the shear falls by that rather than by four.
 ///
-/// This is what the picture **asks for** and not always what it draws. Two
-/// things sit between: the camera's own overlap, which clamps it per file
-/// ([`Reframe::crossover`]), and since issue #103's stage 4 it is a **floor**
-/// rather than a width, so a near-field reading could open the band past it.
-/// At 8 that second one never happens, because the widest stage 4 can ask for
-/// is 4.33 ([`super::band::WIDEST_DEG`]).
+/// This is what the picture **asks for** and not always what it draws. One
+/// thing sits between: the camera's own overlap, which clamps it per file
+/// ([`Reframe::crossover`]). It used to be two - stage 4 made this a **floor**
+/// rather than a width, and a near-field reading could open the band past it -
+/// and since the flat seam it is a width again. Nothing the band measures
+/// changes how wide the handover is any more, because nothing the band
+/// measures reaches the picture at all: see [`Reframe::blend`].
+///
+/// **The owner re-confirmed the width on 2026-08-08**, live, at three widths
+/// in one window with the arms swapped on the frame he was looking at
+/// (`~/kjerag-ab/sessions/handover-demo.ab`, 3 / 8 / 12 degrees), and again
+/// when he authorized this architecture: *"you can merge the existing stitch
+/// with a wide band"*. Wide it is, and 8 is what wide has meant here since
+/// 2026-08-05.
 pub(crate) const CROSSOVER_DEG: f32 = 8.0;
-
-/// The exponent the crossfade raises each lens's share to, inside that same
-/// support (docs/research/seam-temporal.md 8.1).
-///
-/// **The width and the shape are two different questions and this is the
-/// second one.** [`CROSSOVER_DEG`] is how much picture the two lenses are
-/// mixed over at all; this is how much of that the eye sees mixing. The
-/// support stays exactly where the owner's 2026-08-05 blind A/B put it, and
-/// the support may not narrow instead: it is the subject of the per-file
-/// clamp, and the ONE X2 affords 4.18 degrees with nothing to spare
-/// ([`super::band::affordable`], which since this curve landed is a floor that
-/// camera's near field opens past by 0.17 degrees).
-///
-/// The curve is `s^n / (s^n + (1-s)^n)` over the linear ramp's own share `s`
-/// ([`steepen`]). Its 10-90 percent transition is a closed form: `s` reaches
-/// 0.9 where `(s/(1-s))^n = 9`, so the transition spans
-/// `(9^(1/n) - 1) / (9^(1/n) + 1)` of the crossover's own share axis. At 1
-/// that is 0.80 and at 1.5 it is 0.585.
-///
-/// **That share axis is not degrees, and choosing on it would have
-/// overshot.** The weights are cosines of the two lens axes rather than a
-/// distance, so the share walks its own 0.1 to 0.9 over 0.61 of an 8 degree
-/// crossover and not over 0.80 of it
-/// (`the_along_seam_correction_hands_over_across_the_whole_crossover`,
-/// measured 2026-08-05), and it walks faster near the seam than out at the
-/// edges of the corridor. So this was chosen against the **delivered** figure
-/// in degrees, swept on the calibration fixture at the shipped 8 degree
-/// support: 4.89 at power 1, 3.93 at 1.3, **3.46 at 1.5**, 2.65 at 2, 2.27 at
-/// 2.35. An exponent picked on the share axis to hit the same aim would have
-/// been 2.35 and would have delivered 2.27.
-///
-/// **That sweep is a prediction and the delivered figure at 1.5 is 3.85, not
-/// 3.46** (docs/research/seam-temporal.md 9.5). The sweep inverted a *linear*
-/// map to ask where it would have to be for the curve to deliver a tenth,
-/// which assumes the curve composes through the rest of the blend, and it does
-/// not: a lens's claim is its share times its own `landing.depth`, the two
-/// depths are not equal, and the pair is renormalized after the curve
-/// ([`claim`]). Read off the weights the pass actually hands the fragment
-/// shader, the delivered 10-90 percent goes **4.85 -> 3.85 degrees**, the mean
-/// over 24 azimuths on the fixture, and the row above is kept only because it
-/// is what the exponent was picked on. The measurement, and the only figure to
-/// quote, is `tests::the_blend_curve_spends_less_of_the_handover_in_view`,
-/// which carries the per-azimuth spread as well. Still inside the 3 to 4
-/// degrees the memo asked for; the picture never moved, only the number
-/// describing it.
-///
-/// **It is also the gradient**, exactly: the curve's peak slope in share per
-/// share is `n` at the seam, so it shears the epipolar bend `n` times harder
-/// than a ramp does and `super::band::SPEND` is `super::band::FOLD` divided by
-/// this number, which is the one place the division happens and the five
-/// functions of the fold inequality all read. Without it this curve folds the
-/// ONE X2.
-pub(crate) const BLEND_POWER: f32 = 1.5;
 
 /// Research only: what this run asks the handover for instead of
 /// [`CROSSOVER_DEG`], from `KJERAG_HANDOVER_DEG`, in degrees.
@@ -202,18 +158,13 @@ pub(crate) const BLEND_POWER: f32 = 1.5;
 /// Either way the camera's own overlap still has the last word
 /// ([`Reframe::crossover`]).
 ///
-/// **One knob and not two, because there can only be one.** The along-seam
-/// term is applied over a whole lens rather than across the band
-/// ([`Reframe::bent`]), so what ramps it from nothing to all of it in the
-/// picture is the handover itself, and it cannot be given a wider support of
-/// its own. The two lenses draw one piece of content in one place only while
-/// the share lens 1 takes and the share lens 0 takes differ by exactly the
-/// disagreement the fit measured, so wherever both lenses are in the picture
-/// that difference is pinned at one whole correction, and what the picture
-/// shows walks from none of it to all of it exactly as the weights do. A ramp
-/// spread wider than the weights is a ramp that un-corrects the seam over the
-/// width it spread. So the support of the along-seam handover **is** the
-/// crossover, and this widens the crossover.
+/// **One knob and not two, because there is only one support.** This used to
+/// carry a longer argument, about an along-seam term applied over a whole lens
+/// and ramped into the picture by the weights, which is why it could not be
+/// given a support of its own. Nothing is applied over a lens any more
+/// ([`Reframe::blend`]: the seam is flat), so the argument survives in its
+/// short form: the crossover is the only thing here with a width, and this is
+/// what sets it.
 ///
 /// **It stays because it is how this width was chosen.** The 8 above is one
 /// label-blind verdict at one pair of widths, staged as two arms of one binary
@@ -228,8 +179,10 @@ const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
 ///
 /// A guard against a typo and not the bound that matters. What actually caps
 /// the handover is the file's own calibration, which is a smaller number on
-/// every camera in the corpus ([`super::band::affordable`]): 9.36 to 9.82
-/// degrees over six X4 Air files and 4.18 on the ONE X2.
+/// every camera in the corpus ([`Reframe::overlap`]): 14.44 to 15.02 degrees
+/// over six X4 Air files and 9.19 on the ONE X2. Those figures were 9.36 to
+/// 9.82 and 4.18 until the flat seam, when the bound stopped being the overlap
+/// minus a bend's reach and became the bare overlap.
 const OVERLAP_DEG: f32 = 14.0;
 
 /// How wide the handover asks to be on this run, in degrees, which is
@@ -496,14 +449,50 @@ pub struct Reframe {
     sharpen: [f32; 2],
     /// How wide this camera hands the picture over, in **radians**: what
     /// [`CROSSOVER_DEG`] asks for, or what these two lenses' overlap can carry
-    /// if that is less ([`super::band::affordable`]).
+    /// if that is less ([`Self::afforded`]).
     ///
     /// In the block rather than written into the shader source, because it is
     /// a property of the file and the shader is compiled once before any file
     /// is open (`ScenePipeline::new`). Both halves of the map read it from
-    /// here - [`Reframe::crossover_at`] on this side and `band_width` on the
+    /// here - [`Reframe::handover_width`] on this side and `handover` on the
     /// shader's - so the two cannot disagree about it.
     crossover: f32,
+    /// How far across the seam the drawn 50/50 handover line is moved from
+    /// where the pure geometry of the two axis cosines puts it, in **radians**
+    /// ([`SeamAnchor`]).
+    ///
+    /// Zero is the geometric handover, which is the picture the player drew
+    /// before the anchor and what `KJERAG_ANCHOR=off` still draws. Every
+    /// caller that does not run the follow - every instrument, every test, the
+    /// blank pane - gets that zero without asking for it, and zero is a
+    /// literal `+ 0.0` in both twins.
+    ///
+    /// **It is one number because the law that produces it has one.** See
+    /// [`SeamAnchor`] for why there are no states, no dissolves and no events
+    /// behind it, and docs/research/studio-parity.md for the eye that ruled on
+    /// it.
+    ///
+    /// **Sibling of [`Self::crossover`] and not a new field at the end.** It
+    /// takes the first of the three padding words the table's alignment
+    /// already needed, so the block is the size it always was and the table
+    /// has not moved.
+    ///
+    /// **In radians, and not divided by the band it is about to be divided
+    /// by.** A review asked for `shift / crossover` to be folded into this
+    /// field, since the shader divides by the band anyway and the two are both
+    /// in the same block: one division per fragment for free. It is not free.
+    /// Measured on this box 2026-08-09, RADV's f32 divide is not the CPU's:
+    /// over 40000 pairs drawn from every width a camera can draw and every
+    /// shift the clamp allows, **11653 of them - 29 percent - differ, by up to
+    /// 2 ulp** (the Vulkan spec allows 2.5 for `FDiv`). Precomputing the
+    /// quotient would therefore feed the ramp a different number on about a
+    /// third of the frames, which is enough to flip an output code, and the
+    /// picture in this block is one the owner approved by eye and this branch
+    /// is byte-identical to. The division stays where it is until there is a
+    /// reason for it to move that is worth a re-approval.
+    ///
+    /// WGSL twin: `reframe.handover_shift`, read by `handover`.
+    handover_shift: f32,
     /// What puts the table below on a sixteen-byte offset.
     ///
     /// **WGSL's alignment and not this struct's.** Every member of this block
@@ -515,9 +504,13 @@ pub struct Reframe {
     /// **Nothing catches that at run time.** `min_binding_size` checks the
     /// block's total size and not one offset in it, and the sizes agree either
     /// way, so the shader would read the table shifted by twelve bytes and
-    /// draw a picture rather than an error. The test
-    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it.
-    _pad: [f32; 3],
+    /// draw a wrong picture rather than refuse a pipeline. The test
+    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
+    /// it checks the offset as well as the size for exactly that reason.
+    ///
+    /// Two words rather than three since the seam anchor took the first of
+    /// them ([`Self::handover_shift`]).
+    _pad: [f32; 2],
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -530,7 +523,16 @@ pub struct Reframe {
     /// that builds a map with a camera's correction in it gets this along with
     /// it, which is what lets an instrument reading the raw planes through
     /// [`Reframe::project`] read what the picture is drawn with rather than
-    /// what it would have been without.
+    /// what it would have been without ([`Reframe::tabled`]).
+    ///
+    /// **No shader reads it since the flat seam.** It was read by `band_bend`,
+    /// which applied it to lens 1 across the whole picture; that application
+    /// retired with the rest of the bend (#164 had already refused the table
+    /// on the evidence, and no shipped run ever set one). It stays in the
+    /// block, rather than being moved to a CPU-only field, because this struct
+    /// **is** the block: one definition, laid out once, checked against WGSL by
+    /// one test. Splitting it in two to save 512 bytes a redraw would trade
+    /// that invariant for nothing measurable.
     table: super::band::Table,
 }
 
@@ -611,26 +613,6 @@ impl Landing {
     };
 }
 
-/// What the band moves one ray by, in view space, on each of the seam's two
-/// axes (issue #103, stage 5).
-///
-/// Two vectors and not one, because the two are applied by different laws:
-/// the epipolar one across the handover with the other lens's weight, the
-/// along-seam one to lens 1 over its whole picture. [`Reframe::bent`] says
-/// why. `Default` is no bend on either, which is the picture stage 1 drew.
-///
-/// WGSL twin: the `Band` struct's `offset` and `along`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Bend {
-    /// Along [`Ring::epi`](super::band::Ring::epi), scaled by the ray's length
-    /// so that adding it turns the ray by the disparity in radians.
-    pub epi: [f32; 3],
-    /// Along [`Ring::perp`](super::band::Ring::perp), scaled by the ray
-    /// flattened into the seam plane, which is the `cos(elevation)` a relative
-    /// roll produces and what takes it to zero at both lens poles.
-    pub along: [f32; 3],
-}
-
 /// How much of the picture at one output pixel comes from each lens, and
 /// where in each lens's frame it comes from.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -686,6 +668,451 @@ pub struct Rolling {
     pub axis: [f64; 2],
 }
 
+/// Whether the drawn handover line is held on world content instead of being
+/// carried across it by the body's own turning, from `KJERAG_ANCHOR`.
+///
+/// **On is the shipped player.** `KJERAG_ANCHOR=off` (or `0`) is the research
+/// escape that puts the 50/50 line back on the raw geometry, which is the
+/// picture every build before 2026-08-08 drew and the arm every measurement of
+/// the follow is read against. It is a way to answer "is the anchor doing
+/// this?" in one run and it is not a setting: nothing in the window offers it,
+/// it is read once, and it is written nowhere.
+///
+/// **`KJERAG_ANCHOR=` with nothing after it is UNSET, and says so.** It used to
+/// mean off, on the reasoning that anything that is not a yes is a no, and that
+/// cost a review a whole pass on 2026-08-09: a harness wrote
+/// `env KJERAG_ANCHOR="$mode"` with `$mode` empty for its "leave it alone" arm,
+/// every run of that arm silently drew the unanchored picture, and the digests
+/// were compared against an anchored reference. An empty variable is what a
+/// shell produces when a variable it is expanding is itself unset, so it is
+/// overwhelmingly a mistake rather than a request; the way to ask for the
+/// default is to not set it, which is `env -u KJERAG_ANCHOR`. A line on stderr
+/// says which of the two happened, because a silent reinterpretation is the
+/// thing that cost the pass.
+///
+/// Read once, because a value that changed mid-run would change it between two
+/// frames of one pan.
+pub fn anchoring() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let Ok(asked) = std::env::var(ANCHOR) else {
+            return true;
+        };
+        if asked.is_empty() {
+            eprintln!(
+                "blend:  {ANCHOR} is set to nothing, which is read as UNSET and leaves the seam \
+                 anchor ON. To turn it off say {ANCHOR}=off; to ask for the default say \
+                 `env -u {ANCHOR}`"
+            );
+            return true;
+        }
+        let on = asked != "0" && !asked.eq_ignore_ascii_case("off");
+        if !on {
+            println!(
+                "blend:  research seam anchor OFF, {ANCHOR}={asked}: the 50/50 handover line sits \
+                 on the body's own geometry and is carried across the picture as the body turns, \
+                 which is what the player drew before 2026-08-08"
+            );
+        }
+        on
+    })
+}
+
+/// The variable [`anchoring`] reads.
+const ANCHOR: &str = "KJERAG_ANCHOR";
+
+/// Research only, from `KJERAG_ANCHOR_TRACE`: whether every redraw says what
+/// the held line is doing. Off in the app, on under the instruments that
+/// measure the hold.
+fn tracing() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("KJERAG_ANCHOR_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
+/// How hard the follow pulls the drawn line back toward the geometric handover
+/// when the line is sitting AT the allowance, in reciprocal seconds.
+///
+/// The reciprocal of the shortest time constant the follow ever has, which is
+/// a tenth of a second: at the rail the line is carried by the geometry with a
+/// lag of one tenth of a second and no more.
+const ANCHOR_FOLLOW_RATE: f32 = 10.0;
+
+/// How steeply that gain falls away as the line comes in from the allowance.
+///
+/// **This is the whole of the deadband, and it is one term.** The gain is
+/// `ANCHOR_FOLLOW_RATE * (delta / allowance)^ANCHOR_FOLLOW_POWER`, so at the
+/// rail it is ten per second, at three quarters of the way out it is a half
+/// per second, at half way out it is a hundredth, and at a quarter of the way
+/// out it is a hundred-thousandth - one part in ten million of a degree per
+/// frame, which is a line that does not move. There is no threshold in that
+/// and nothing to click on: it is a single even power of one number, so it is
+/// smooth everywhere including at zero, and so is every derivative of it.
+///
+/// Ten because that is what this corpus asks for. The owner's paramotor shakes
+/// the geometry through 3.0 degrees of a 4.0 degree allowance at a couple of
+/// hertz (measured at his `down1` line), so the deadband has to reach three
+/// quarters of the way out and still be dead there, and the gain has to be
+/// worth something by the time the line is at the rail. A tenth power does
+/// both; a sixth leaks 0.14 degrees a frame at the shake's peak, and a
+/// fourteenth makes the settle out of a hard turn abrupt.
+const ANCHOR_FOLLOW_POWER: i32 = 10;
+
+/// The longest step of film the hold is carried across, in seconds. Past this,
+/// in **either** direction, the redraw is a discontinuity and the hold starts
+/// again on the geometry ([`SeamAnchor::hold`]).
+///
+/// **Why there is one number here and not two.** This used to cap the step the
+/// follow was charged for - `(at - was.at).min(CAP)` - which is a blunting and
+/// not an answer: it still charged the follow with a target read off a world
+/// direction from wherever the film used to be. Capping the step is what a
+/// stale target needs least, because the leak at this step is already most of
+/// the way to that target (the divisor is `(1 + POWER * RATE * dt)^(1/POWER)`,
+/// which is 1.39 here, so a target a quadrant wide still slams the line to the
+/// rail). So the cap became the threshold, the `min` is gone, and every step
+/// the follow is charged with is now a step of film the picture actually ran.
+///
+/// **Why 0.25, honestly.** It has to be far above one frame and far below the
+/// smallest seek the app can be asked for, and it is both by a wide margin:
+///
+/// - one frame is 1/30 s on every file in the corpus, 1/24 on the slowest film
+///   anyone shoots and 1/120 on the modes both cameras have, so this is 7.5,
+///   6.0 and 30 frames of continuous play;
+/// - the jump keys and the jump buttons move `key_bind::JUMP`, which is 10
+///   seconds, forty times this;
+/// - the scrubber can ask for less, and a scrubber seek shorter than this is a
+///   step of film the follow can honestly be charged for.
+///
+/// Nothing in a presentation time distinguishes a seek from a stall this long
+/// or from a run of dropped frames, and this does not try to: all three are a
+/// stretch of film that went by without the picture being drawn, and on the
+/// far side of all three the content under the seam is not the content the
+/// line was held on.
+const ANCHOR_SEEK_SECS: f64 = 0.25;
+
+/// Where the drawn handover line is, and what it costs the handover this
+/// redraw.
+///
+/// **The problem.** Under a world-locked view the body turns and the view does
+/// not, so the seam locus itself sweeps across the picture: the 50/50 line
+/// walks over world content at whatever rate the aircraft is yawing, up to
+/// 21.8 degrees a second on this corpus. Everything the seam gets wrong -
+/// every doubled edge, every exposure step, every millimetre of misalignment -
+/// therefore travels, and a defect that travels reads as a defect where a
+/// defect that sits still reads as the picture. This is the owner's own theory
+/// of why Insta360 Studio's seam is so much less visible in playback with
+/// everything off, and it is what he judged this against.
+///
+/// **What it is not.** It does not make the seam more correct. Static
+/// misalignment still doubles content either way; what this changes is whether
+/// the doubling swims.
+///
+/// **One anchor and one offset for the whole ring**, not one per azimuth. The
+/// line elsewhere on the seam circle still crawls, and that is deliberate:
+/// what the owner is looking at is the piece of seam in front of him, and a
+/// per-azimuth offset is a field, and a field that varies along the seam is a
+/// warp of the picture rather than a slide of a line.
+///
+/// **What it cost to get here, and why there is no state in it.** flat4 held
+/// the line and slewed it to a new anchor when it ran out of allowance, which
+/// is a line that travels across the picture; the owner's word for it was
+/// lurching. flat5 held TWO lines and dissolved between them, so that nothing
+/// on screen ever travelled, and he refused that too: *"every now and then it
+/// glitches. We need it to be smooth, that is a requirement. Perhaps we just
+/// need the seam to be smoothly transitioning instead, probably simpler too,
+/// with some fixing to prevent small movements when stopped at one position."*
+///
+/// He is right, and he is right about which way it is simpler. A dissolve is
+/// an EVENT. An event has a first frame, a first frame is where a velocity
+/// changes, and a velocity that changes inside one frame is the thing the eye
+/// catches. The same goes for a promote, a retarget, a state and a clamp. So
+/// there is not one of them in here. There is [`Self::delta`], and every
+/// redraw it becomes one smooth function of what it was ([`Self::follow`]),
+/// and that is the whole of the machinery.
+///
+/// Measured against the two-line version over the same thirty seconds of the
+/// same film (the July-14 fast segment, 900 redraws): the drawn line's own
+/// velocity changes by at most 11.3 degrees a second from one frame to the
+/// next where the dissolving one changed by 59.2, and 11.3 is BELOW the 14.2
+/// the unanchored geometry changes by. **This line is never rougher than the
+/// picture it is drawn from.**
+///
+/// State lives here, on the CPU, and reaches the shader as one float
+/// ([`Reframe::handover_shift`]).
+#[derive(Clone, Copy, Debug)]
+pub struct SeamAnchor {
+    /// The world direction the drawn line stood on when this state was made.
+    ///
+    /// It is a world direction and not a number for the reason the whole
+    /// mechanism exists: a frozen offset is fixed in the VIEW, and under a
+    /// world-locked view the seam locus sweeps across the view as the body
+    /// turns, so a frozen offset would walk the line across the content. Read
+    /// back through the next redraw's pose it answers the one question the
+    /// follow is about - what would it cost to leave the line exactly where it
+    /// is on the content it is on - and that answer is [`Self::target`].
+    ///
+    /// Placed at the view centre's own piece of seam every redraw, which is
+    /// what a pan and a seek both look like and what neither needs to report:
+    /// [`Reframe::seam_ray_at`] inverts [`Reframe::across_seam`] exactly, so
+    /// re-placing the anchor at the same offset on a different azimuth is the
+    /// same offset and costs nothing.
+    on: [f64; 3],
+    /// Where the drawn 50/50 line is, as an offset across the seam from where
+    /// the pure geometry puts it, in radians. The one number that goes to the
+    /// GPU, and the one number that is state.
+    delta: f32,
+    /// The media instant this state was computed for, in seconds.
+    ///
+    /// What makes the follow a length of FILM and not a count of redraws: a
+    /// redraw that arrives with no new frame behind it advances the clock by
+    /// nothing, and [`Self::follow`] at a step of nothing is exactly the
+    /// identity, so a run at 30 or at 300 fps follows over the same stretch of
+    /// picture.
+    at: f64,
+    /// What the follow was aiming at and how hard it pulled this redraw, in
+    /// radians and in reciprocal seconds. For the trace, and for nothing else.
+    target: f32,
+    gain: f32,
+}
+
+impl SeamAnchor {
+    /// This redraw's offset, and the state that produced it.
+    ///
+    /// `held` is the pose the block was built for, so the world frame here is
+    /// the one the view is locked to. With the horizon free that frame IS the
+    /// body, the anchor never drifts, the offset stays zero, and the picture is
+    /// the one `KJERAG_ANCHOR=off` draws - which is right: a body-fixed view
+    /// has no crawl to hold against.
+    ///
+    /// `at` is the presentation time of the frame being drawn, in seconds.
+    pub fn hold(state: Option<Self>, reframe: &Reframe, held: Held, at: f64) -> Self {
+        let allowance = 0.5 * reframe.handover_width();
+        if reframe.lens_count <= 1.0 || allowance <= 0.0 {
+            return Self::rest(at);
+        }
+        let world_from_body = held.body_from_world.conjugate();
+        let body_of = |world: [f64; 3]| held.body_from_world.rotate(world).map(|c| c as f32);
+        // What one world direction costs the handover right now: minus its
+        // across-seam angle is the offset that puts it back at 50/50.
+        let offset_of =
+            |world: [f64; 3]| -reframe.across_seam(reframe.view_ray_from_body(body_of(world)));
+        // The 50/50 locus nearest the view centre, which is the piece of seam
+        // the owner is looking at and where the anchor is kept.
+        let centre = reframe.seam_nearest([0.0, 0.0, 1.0]);
+        let world_of =
+            |view: [f32; 3]| world_from_body.rotate(reframe.body_ray(view).map(f64::from));
+
+        // The geometric target: the offset that would leave the drawn line
+        // exactly where it is on the content it was drawn on last redraw. The
+        // first redraw of a run has no line yet, and its target is the geometry
+        // itself, which is where the line would have been anyway.
+        //
+        // **A redraw whose film is DISCONTINUOUS starts the run again**, and
+        // that is the whole of the seek path. `was.on` is a world direction
+        // from wherever the film was last drawn, so reading it back through
+        // this pose after a seek answers a target that can be a quadrant wide.
+        // Charging the follow with that slams the line to the rail on the seek
+        // frame and then walks it back over the next second, which is a lurch
+        // laid over the one frame where the whole picture already changed.
+        // Anchoring afresh puts the line on the geometry there instead, which
+        // is where it would have been if the file had been opened at that
+        // instant. It is an event, and it is the one event this mechanism has:
+        // a seek is already a discontinuity in every pixel, so there is no
+        // velocity in the picture for it to break.
+        //
+        // **In EITHER direction, since 2026-08-09.** Until then only backward
+        // film took this arm, on the reasoning that film time can only go down
+        // if the pilot has seeked - which is true and is not the whole set. A
+        // FORWARD seek reuses the stale anchor exactly the way a backward one
+        // used to: measured on this fixture, a forward seek of six seconds
+        // lands the line 2.90 degrees off the geometry on the seek frame and
+        // then walks it back, which is the same defect with the same shape.
+        // The argument the backward arm was given - a seek is a discontinuity
+        // in every pixel - never mentioned which way the clock moved.
+        //
+        // What separates the two cases is therefore the SIZE of the step and
+        // not its sign ([`ANCHOR_SEEK_SECS`], which says how 0.25 s was
+        // picked). Nothing in a presentation time tells a seek from a stall
+        // that long or from a run of dropped frames, and nothing here tries
+        // to: on the far side of all three the content under the seam is not
+        // the content the line was held on.
+        //
+        // `at == was.at` is NOT that case and stays in the second arm: it is a
+        // redraw with no new frame behind it, the step is zero, and the law at
+        // a step of zero is exactly the identity (`Self::follow`).
+        let continuous = |was: &Self| {
+            let step = at - was.at;
+            (0.0..=ANCHOR_SEEK_SECS).contains(&step)
+        };
+        let (target, step) = match state.filter(|was| was.on != [0.0; 3] && continuous(was)) {
+            None => (0.0, 0.0),
+            // Uncapped, because the arm above is now what bounds it: every
+            // step that reaches here is between zero and `ANCHOR_SEEK_SECS`,
+            // which is a stretch of film the picture really ran.
+            Some(was) => (offset_of(was.on), (at - was.at) as f32),
+        };
+        let (delta, gain) = Self::follow(target, step, allowance);
+        // **Clamped HERE, and that is what makes the anchor and the picture
+        // agree about where the line is.** `Reframe::with_shift` clamps on the
+        // way to the shader, so a `delta` past the allowance draws at the rail;
+        // placing `on` at the unclamped value would then record the line as
+        // standing somewhere it is not, and the next redraw's target would be
+        // read off that fiction. The error does not decay - it is re-made every
+        // frame the clamp fires - so it is a standing bias and not a transient.
+        //
+        // At film's 30 fps this cannot fire: the follow's own ceiling is
+        // `allowance / (POWER * RATE * dt)^(1/POWER)`, which is 3.55 of these
+        // 4.00 degrees at `dt = 1/30` whatever the drift
+        // (`Self::follow`), so the picture the owner approved is
+        // untouched by this line. It fires above 100 fps, where that ceiling
+        // passes the allowance, and both cameras in the corpus have 120 fps
+        // modes.
+        let delta = delta.clamp(-allowance, allowance);
+        Self {
+            on: world_of(reframe.seam_ray_at(centre, -delta)),
+            delta,
+            at,
+            target,
+            gain,
+        }
+        .traced(allowance)
+    }
+
+    /// **THE UPDATE LAW, and the whole of it.**
+    ///
+    /// `target` is where the line has to be put to stand exactly still on the
+    /// content it is on. `step` is how much film has gone by. The answer is
+    /// where the line is drawn, and how hard it was pulled to get there.
+    ///
+    /// It is the closed-form flow of one first-order equation,
+    ///
+    /// ```text
+    /// d(delta)/dt = -RATE * (delta / allowance)^POWER * delta
+    /// ```
+    ///
+    /// which says: the line is carried by the geometry, and leaks back toward
+    /// the geometric handover at a rate that is a very high power of how far
+    /// out it has got. Integrated over a step of `dt` from `target` that is
+    ///
+    /// ```text
+    /// delta = target / (1 + POWER * gain * dt)^(1 / POWER)
+    /// ```
+    ///
+    /// and this is that line of arithmetic. Four things follow from it, and
+    /// they are the four things the owner asked for.
+    ///
+    /// **It is one function and there is nothing else.** No states, no
+    /// dissolves, no promotes, no retargets, no branch that fires on one frame
+    /// and not the next. The only `match` in [`Self::hold`] is which of
+    /// `target` and `step` a run's very first redraw gets, and both of its arms
+    /// are numbers rather than behaviours.
+    ///
+    /// **It never jumps.** The flow is exact rather than a step of an
+    /// integrator, so no size of `dt` can overshoot: the divisor is at least
+    /// one, so `delta` is always between `target` and zero and never past
+    /// either. At `dt = 0` the divisor is exactly one and the law is exactly
+    /// the identity, which is why a redraw with no new frame behind it changes
+    /// nothing at all.
+    ///
+    /// **Standing still costs nothing.** The gain is a tenth power, so at a
+    /// quarter of the allowance it is one hundred-thousandth per second and the
+    /// line moves by a ten-millionth of a degree a frame. The knee that turns
+    /// that into a real follow is a single even power of one number: smooth
+    /// everywhere, smooth at zero, and smooth in every derivative, so motion
+    /// starting and motion stopping have nothing to click on.
+    ///
+    /// **The allowance is approached and not hit, AT 30 FPS.** The offset a
+    /// sustained drift of `w` can hold is `allowance * (w / (RATE *
+    /// allowance))^(1 / (POWER + 1))`, an eleventh root: 25 times the drift
+    /// buys 34 percent more offset. Over the two segments this was tuned on the
+    /// line reaches 3.53 of the 4.00 degrees it is allowed.
+    ///
+    /// **That eleventh root is the continuum answer and the law is applied per
+    /// frame, so the rail depends on the frame rate.** The geometry's sweep
+    /// arrives as a jump of `w * dt` and the leak is then charged at a gain
+    /// read AFTER that jump, which over-charges it, and the over-charge is
+    /// larger the coarser the step. Letting the drift run away gives the
+    /// ceiling in closed form: as `target` grows the divisor grows with it, and
+    ///
+    /// ```text
+    /// delta -> allowance / (POWER * RATE * dt)^(1 / POWER)
+    /// ```
+    ///
+    /// so the largest offset this law can hold at all is a property of the film
+    /// rate and nothing else. `POWER * RATE` is 100 per second, so it equals
+    /// the allowance at exactly `dt = 0.01 s`:
+    ///
+    /// | film fps | 24 | 30 | 60 | **100** | 120 | 240 |
+    /// | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    /// | ceiling, deg, of a 4.00 allowance | 3.47 | **3.55** | 3.80 | **4.00** | 4.07 | 4.37 |
+    ///
+    /// **Read as a known characteristic and not as a defect with a fix
+    /// pending.** Every file the owner has judged this on is 30 fps, where the
+    /// ceiling is 3.55 and the map's own clamp is unreachable; that is also why
+    /// [`Self::hold`]'s clamp is provably inert on the arm he approved. Both
+    /// cameras in the corpus shoot 120 fps modes, and there the rail is the
+    /// clamp rather than the law, which is a fade held one-sided at its widest
+    /// for as long as the drift lasts. Making the law dt-invariant is a
+    /// different picture at 30 fps as well, so it is not a change this merge
+    /// may make; it is written down here, pinned by
+    /// `tests::the_follow_has_a_ceiling_and_the_frame_rate_sets_it`, and it is
+    /// the belt's neighbour on the list.
+    fn follow(target: f32, step: f32, allowance: f32) -> (f32, f32) {
+        // An EVEN power, so this is the magnitude without an `abs` and without
+        // a branch, and the whole law is a polynomial in `target` divided by a
+        // root of one. `debug_assert` rather than a comment because an odd
+        // power here would silently push the line the wrong way on one side.
+        debug_assert_eq!(ANCHOR_FOLLOW_POWER % 2, 0);
+        let gain = ANCHOR_FOLLOW_RATE * (target / allowance).powi(ANCHOR_FOLLOW_POWER);
+        let power = ANCHOR_FOLLOW_POWER as f32;
+        (target / (1.0 + power * gain * step).powf(1.0 / power), gain)
+    }
+
+    /// The state a map with no seam in it leaves behind: no line, and the zero
+    /// the block builds itself with.
+    fn rest(at: f64) -> Self {
+        Self {
+            on: [0.0; 3],
+            delta: 0.0,
+            at,
+            target: 0.0,
+            gain: 0.0,
+        }
+    }
+
+    /// One line per redraw under `KJERAG_ANCHOR_TRACE`, and the state
+    /// unchanged. Parseable on purpose: the instruments that measure the follow
+    /// read this and nothing else.
+    fn traced(self, allowance: f32) -> Self {
+        if tracing() {
+            println!(
+                "anchor: t={:.4} delta={:+.4} target={:+.4} gain={:.5} allow={:.4}",
+                self.at,
+                self.delta.to_degrees(),
+                self.target.to_degrees(),
+                self.gain,
+                allowance.to_degrees(),
+            );
+        }
+        self
+    }
+
+    /// Where the drawn 50/50 line is, in radians across the seam.
+    pub fn shift(&self) -> f32 {
+        self.delta
+    }
+}
+
+/// A direction's own unit vector, or the direction where it has no length.
+fn unit(ray: [f32; 3]) -> [f32; 3] {
+    let reach = norm3(ray);
+    match reach > 0.0 {
+        true => ray.map(|c| c / reach),
+        false => ray,
+    }
+}
+
 impl Reframe {
     /// The block for one camera pose and the lenses of one file, in file
     /// order. Anything past [`MAX_LENSES`] is dropped.
@@ -718,7 +1145,10 @@ impl Reframe {
             // Filled below, because it is read off the lenses this block has
             // just laid out and there is nowhere earlier to read them from.
             crossover: 0.0,
-            _pad: [0.0; 3],
+            // No line held until a caller says otherwise
+            // ([`Self::with_shift`]), and no shift is the geometric handover.
+            handover_shift: 0.0,
+            _pad: [0.0; 2],
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
@@ -740,6 +1170,144 @@ impl Reframe {
         self
     }
 
+    /// The same map with the drawn handover line moved `shift` radians across
+    /// the seam ([`Self::handover_shift`]).
+    ///
+    /// Clamped here as well as by [`SeamAnchor`], because the allowance is the
+    /// map's own property and a shift past half the drawn fusion width would
+    /// put the 50/50 line outside the fade it is supposed to live inside.
+    ///
+    /// **It is also the only thing standing between the anchor and a hole in
+    /// the picture, which is worth writing down.** The handover's support is
+    /// centred on the drawn line, so with a shift the ramp closes at
+    /// `-band / 2 - shift` on one side and opens at `band / 2 - shift` on the
+    /// other ([`crossover`]). A lens weighed at exactly zero where the OTHER
+    /// lens has no picture either is a transparent pixel, and that needs the
+    /// closing end to fall outside the shared picture, which is
+    /// `|shift| > band / 2 + overlap / 2`. This clamp allows `band / 2`, so the
+    /// margin is the whole of `overlap / 2` - 7.22 degrees on the X4 Air
+    /// fixture and 4.59 on an X2-class camera - and the picture cannot have a
+    /// hole in it while it holds.
+    /// `tests::the_anchored_handover_leaves_no_hole_and_no_cliff` measures
+    /// both halves of that: no hole at every shift this clamp allows, and a
+    /// hole the moment a shift past it is planted straight into the block.
+    ///
+    /// In normal running it is a guard and not a mechanism: at film's 30 fps
+    /// the follow's own ceiling is 3.55 degrees of these 4.00
+    /// ([`SeamAnchor::follow`]), so no drift an aircraft can produce reaches
+    /// this clamp at all. Above 100 fps that stops being true, which is why
+    /// [`SeamAnchor::hold`] clamps as well and places its anchor on the clamped
+    /// value rather than on the raw one.
+    ///
+    /// A step of its own, like [`Self::with_table`]: every caller that is not
+    /// running the follow - every instrument, every test, the blank pane - gets
+    /// zero without saying so, and zero is the geometric handover.
+    pub fn with_shift(mut self, shift: f32) -> Self {
+        let allowance = 0.5 * self.crossover;
+        self.handover_shift = shift.clamp(-allowance, allowance);
+        self
+    }
+
+    /// The direction the 50/50 handover locus is perpendicular to, in view
+    /// space.
+    ///
+    /// The handover reads `axis0 - axis1`, which is one fixed vector against
+    /// the ray ([`Self::axis_of`] is a dot product with a row of each
+    /// mounting), so the locus where the two lenses claim the ray equally is
+    /// the great circle perpendicular to the difference of those two rows.
+    /// This is that difference, normalized.
+    ///
+    /// Zero for a one-stream file, which has no seam.
+    pub fn seam_normal(&self) -> [f32; 3] {
+        let apart = self.seam_apart();
+        let reach = norm3(apart);
+        match reach > 0.0 {
+            true => apart.map(|c| c / reach),
+            false => [0.0; 3],
+        }
+    }
+
+    /// The un-normalized difference of the two mounting rows the handover
+    /// reads, in view space. [`Self::seam_normal`]'s direction and
+    /// [`Self::seam_spread`]'s length, in one place so the two cannot
+    /// disagree.
+    fn seam_apart(&self) -> [f32; 3] {
+        std::array::from_fn(|c| {
+            self.lenses[0].view_to_lens[c][2] - self.lenses[1].view_to_lens[c][2]
+        })
+    }
+
+    /// How long that difference is: the scale between an angle off the seam
+    /// plane and what [`Self::across_seam`] reports for it.
+    ///
+    /// For a unit ray, `across_seam(ray)` is `spread / 2` times the ray's
+    /// component along [`Self::seam_normal`], so with the two lenses of a 360
+    /// camera back to back the spread is very near 2 and the report is very
+    /// near the angle itself. This is what [`Self::seam_ray_at`] inverts.
+    pub fn seam_spread(&self) -> f32 {
+        norm3(self.seam_apart())
+    }
+
+    /// How far a view ray is across the seam from the 50/50 locus, in radians,
+    /// positive on lens 0's side.
+    ///
+    /// **The handover's own measure and not a second one.** [`crossover`]
+    /// reads `apart / (2 * reach * band)`; this is that first quotient, so a
+    /// shift of exactly minus this value puts this ray at 50/50 by
+    /// construction. The two cosines stand in for the two angles the same way
+    /// and to the same accuracy the handover already relies on.
+    pub fn across_seam(&self, view_ray: [f32; 3]) -> f32 {
+        let reach = norm3(view_ray);
+        match reach > 0.0 {
+            true => (self.axis_of(0, view_ray) - self.axis_of(1, view_ray)) / (2.0 * reach),
+            false => 0.0,
+        }
+    }
+
+    /// The point of the 50/50 locus nearest a view ray, as a unit view-space
+    /// direction.
+    ///
+    /// The locus is a great circle, so the nearest point on it is the ray with
+    /// its component along [`Self::seam_normal`] taken out. Down either lens's
+    /// own axis there is no nearest point and the ray comes back unchanged;
+    /// nothing there is near a seam anyway.
+    pub fn seam_nearest(&self, view_ray: [f32; 3]) -> [f32; 3] {
+        let normal = self.seam_normal();
+        let along: f32 = (0..3).map(|c| normal[c] * view_ray[c]).sum();
+        let flat: [f32; 3] = std::array::from_fn(|c| view_ray[c] - normal[c] * along);
+        let reach = norm3(flat);
+        match reach > 0.0 {
+            true => flat.map(|c| c / reach),
+            false => view_ray,
+        }
+    }
+
+    /// A unit view direction beside `view_ray`'s piece of seam whose
+    /// [`Self::across_seam`] is exactly `across`.
+    ///
+    /// The inverse of [`Self::across_seam`] restricted to the great circle
+    /// through [`Self::seam_nearest`] and [`Self::seam_normal`]: take the
+    /// nearest point on the 50/50 locus and tilt it off the seam plane by
+    /// `asin(2 * across / spread)`. That is how the anchor's world direction
+    /// gets PLACED rather than merely found, and it is exact, which is what
+    /// lets [`SeamAnchor::hold`] re-place the anchor on the view centre's own
+    /// azimuth every redraw for nothing.
+    ///
+    /// Past what the spread can reach, and on a one-stream file, it clamps to
+    /// the seam plane's own pole rather than returning a direction that is not
+    /// one.
+    pub fn seam_ray_at(&self, view_ray: [f32; 3], across: f32) -> [f32; 3] {
+        let spread = self.seam_spread();
+        if spread <= 0.0 {
+            return unit(view_ray);
+        }
+        let normal = self.seam_normal();
+        let base = self.seam_nearest(view_ray);
+        let rise = (2.0 * across / spread).clamp(-1.0, 1.0);
+        let run = (1.0 - rise * rise).max(0.0).sqrt();
+        std::array::from_fn(|c| base[c] * run + normal[c] * rise)
+    }
+
     /// The table this map is drawing with.
     pub fn table(&self) -> super::band::Table {
         self.table
@@ -753,10 +1321,65 @@ impl Reframe {
     /// ask untouched: nothing is ever handed over, so the number is never used
     /// and a clamp would be inventing a bound out of a camera that is not
     /// there.
+    ///
+    /// **THIS IS NOT A SAFETY BOUND, AND SAYING IT WAS COST A REVIEW ROUND.**
+    /// The clamp keeps the handover's support inside the shared picture *when
+    /// the drawn line sits on the seam*, which is the only case there was
+    /// before [`SeamAnchor`]. With a line held on the world the support is
+    /// centred on the DRAWN line and not on the seam, so it runs
+    /// `band / 2 - shift` one way and `band / 2 + shift` the other
+    /// ([`crossover`]), and `|shift|` is allowed up to `band / 2`
+    /// ([`Self::with_shift`]). At the rail that is a **whole band** off the
+    /// seam on one side, against `overlap / 2` of shared picture: 8.00 degrees
+    /// into 7.22 on the X4 Air fixture and into 4.59 on a camera that overlaps
+    /// the way the ONE X2 does. Measured on the owner's own footage through the
+    /// held line's own trace, 2026-08-09: at `down1` the support never leaves
+    /// the coverage (0 of 300 frames, worst 7.13 degrees into 7.28 a side), and
+    /// over the July-14 fast segment it does on **202 of 900 frames**, by at
+    /// most 0.09 degrees. Replay the same offsets on a camera that overlaps the
+    /// way the X2 does and it is **866 of 900**, by up to 2.94.
+    ///
+    /// **What makes that safe is not this number.** A lens's claim is its share
+    /// of the handover times its own coverage depth ([`claim`]), and the depth
+    /// falls to zero exactly where that lens runs out of picture, so the outer
+    /// lens is faded out by its own rim before the ramp ever asks it for a
+    /// sample it does not have. The share the ramp is still handing it there is
+    /// spent on nothing and the pair renormalizes to the lens that does have
+    /// the ray. The two properties that matter - the weights always sum to
+    /// one, and the delivered weight never steps - are asserted over the whole
+    /// ring at the rail on both camera classes by
+    /// `tests::the_anchored_handover_leaves_no_hole_and_no_cliff`, with a
+    /// planted hole and a planted cliff as its controls. **The guard against a
+    /// hole is [`Self::with_shift`]'s clamp**, and the margin it holds is
+    /// `overlap / 2`, which that test measures rather than assumes.
+    ///
+    /// So what this clamp is actually for is the fade's SHAPE: it is what makes
+    /// the crossfade a ramp the two lenses can both pay for rather than one the
+    /// rim truncates. Widening it past the overlap would not put a hole in the
+    /// picture; it would hand the outer edge of the handover to the coverage
+    /// taper instead of to the ramp.
     fn afforded(&self) -> f32 {
         let asked = crossover_deg().to_radians();
         match self.overlap() {
-            Some(overlap) => asked.min(super::band::affordable(overlap)),
+            // The overlap itself, and that is the whole bound. An UNSHIFTED
+            // handover of width `w` reaches `w / 2` off the seam on either side
+            // (`super::band::reach`) and the shared picture runs `overlap / 2`
+            // off it, so a band as wide as the overlap ends exactly on the rim
+            // and a wider one would be asking a lens for picture it does not
+            // have. There used to be a second term: the bend the band carried
+            // moved the SAMPLE further off the seam than the ray was, so the
+            // width had to leave room for it, and that room was worth 2.6
+            // degrees on a roomy camera and a whole regime change on a tight
+            // one (`super::band::affordable`, deleted with the bend). Nothing
+            // moves a sample now.
+            //
+            // **The shift is not in this arithmetic and deliberately is not.**
+            // Taking `|shift|` off the width here would narrow the fade every
+            // time the line moved, which is the breathing width the owner
+            // refused (`Self::handover_width`), and it would change the picture
+            // he approved. The doc above says what carries the overshoot
+            // instead.
+            Some(overlap) => asked.min(overlap),
             None => asked,
         }
     }
@@ -790,7 +1413,9 @@ impl Reframe {
             // One lens and no overlap, so nothing is ever handed over: the ask
             // itself, which is what a camera with room for it would get.
             crossover: crossover_deg().to_radians(),
-            _pad: [0.0; 3],
+            // No seam, so no line to hold anywhere.
+            handover_shift: 0.0,
+            _pad: [0.0; 2],
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -833,45 +1458,45 @@ impl Reframe {
     /// **model**: [`Self::within`] is one dot product and it decides whether
     /// the projection runs at all (issue #10).
     ///
+    /// **THE RAY IS THE RAY, and this is the flat seam** (owner's ruling,
+    /// 2026-08-08). Nothing the band measures moves a sample here. Between
+    /// stage 2 and 2026-08-08 it did: each lens was projected at a ray bent by
+    /// the other lens's weight times what the two lenses disagreed by at this
+    /// ray's azimuth, on both of the seam's axes, and the width of the
+    /// handover was itself a function of that disagreement. All of it is gone,
+    /// and what replaced it is nothing - the two pictures are fused, at the
+    /// calibration they were fused at, and the eye judged that better than
+    /// every morphing arm it was shown against.
+    ///
+    /// **The argument, in one line: a correction that is wrong is worse when
+    /// it moves.** The corridor bend was a live per-frame estimate, and where
+    /// it was right it bought alignment the eye did not miss when it went, and
+    /// where it was wrong it swam - the same picture drawn a slightly
+    /// different shape every frame. The owner has been calling that shimmer
+    /// since 2026-08-05 and refusing arms over it. Turning it off cost the
+    /// near-field alignment the instruments could measure and bought a seam
+    /// that stands still, and he chose the still one, blind, on his own
+    /// footage. docs/research/studio-parity.md is the whole record.
+    ///
+    /// **What is left is the honest doubling.** With no morphing, content the
+    /// two lenses genuinely disagree about is drawn twice across the handover
+    /// rather than smeared into one wrong shape. At the bad crossing that is
+    /// visible as a doubled object; the wide band is what softens it, and the
+    /// belt - a displacement learned over the whole picture rather than a ramp
+    /// across a corridor - is what is meant to fix it, later and behind its own
+    /// switch.
+    ///
+    /// Each lens stakes a [`claim`] on the ray and the claims are normalized
+    /// against each other, so the weights sum to 1 wherever anything has the
+    /// ray. Outside the overlap only one lens claims anything and its weight
+    /// is exactly 1 (see [`share`]), so the pass takes the one sample the
+    /// hard pick took before issue #7 and multiplies it by an exact one.
+    ///
+    /// Where the 50/50 line falls is [`Self::handover`]'s, and since the seam
+    /// anchor that is the geometry plus [`Self::handover_shift`].
+    ///
     /// WGSL twin: `blend`.
     pub fn blend(&self, view_ray: [f32; 3]) -> Blend {
-        self.blend_bent(view_ray, super::band::Reading::default())
-    }
-
-    /// The same with the band's own correction in it (issue #103): each lens's
-    /// ray bent by the **other** lens's weight times what the two lenses
-    /// disagree by at this ray's azimuth, on **both** of the seam's axes since
-    /// stage 5 - the epipolar one, which is depth, and the along-seam one,
-    /// which is the camera.
-    ///
-    /// The two bends then differ by exactly the disparity wherever the weights
-    /// sum to 1, so the two lenses show the same content across the whole
-    /// band; and each lens's own bend is zero wherever its weight is 1, so
-    /// nothing outside the band moves and there is no edge to feather. Neither
-    /// property is arranged: both fall out of the weights this function was
-    /// already computing.
-    ///
-    /// The crossover is taken from the **unbent** ray, on purpose. The bend is
-    /// what the handover asked for, so a handover that then followed the bend
-    /// would be its own input.
-    ///
-    /// **That is true of the `share` and not of the whole weight.** `share` is
-    /// the handover fraction and it is a function of the unbent ray alone.
-    /// What goes into the array is [`claim`], which is `share` times the
-    /// **bent** landing's `depth`, so a bend that carries a ray over a lens's
-    /// image circle does change that lens's weight. `depth` is 1 everywhere
-    /// but within a bend's reach of the rim, so this bites only there - but it
-    /// bites, it predates stage 9, and a later stage that widens the field
-    /// inherits it.
-    ///
-    /// **How wide the handover is, is the same question** (issue #103, stage
-    /// 4). The bend runs from zero to the whole disparity across the band, so
-    /// the band has to be wide enough to carry it, and
-    /// [`Self::crossover_at`] is that width. It is the floor everywhere the
-    /// disparity is small, so the far field is the picture it always was.
-    ///
-    /// WGSL twin: `blend`, whose `band` argument is `band_bend`'s answer.
-    pub fn blend_bent(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Blend {
         let mut landings = [Landing::MISSED; MAX_LENSES];
         let mut weights = [0.0; MAX_LENSES];
         let reach = norm3(view_ray);
@@ -880,9 +1505,7 @@ impl Reframe {
         // is what keeps this pass costing what it cost before the crossover
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
-        let band = self.crossover_at(reading.epi);
-        let front = self.handover(axis, reach, band);
-        let bend = self.bent(view_ray, reading, band);
+        let front = self.handover(axis, reach, self.crossover);
         for lens in 0..MAX_LENSES {
             if !self.covers(lens, axis[lens], reach) {
                 continue;
@@ -891,21 +1514,7 @@ impl Reframe {
                 0 => front,
                 _ => 1.0 - front,
             };
-            // This lens's share of the bend is the OTHER lens's weight, with
-            // the sign that puts the two of them one whole disparity apart.
-            let carry = match lens {
-                0 => share - 1.0,
-                _ => 1.0 - share,
-            };
-            // The along-seam term is not shared out: it goes to lens 1 whole,
-            // which is the convention the calibration already uses
-            // ([`super::seam::SeamFit`] turns lens 1 and leaves lens 0 alone),
-            // and it is applied over the whole picture rather than across the
-            // handover. See [`Self::bent`].
-            let turn = f32::from(u8::from(lens == 1));
-            let bent =
-                std::array::from_fn(|c| view_ray[c] + carry * bend.epi[c] + turn * bend.along[c]);
-            landings[lens] = self.project(lens, bent);
+            landings[lens] = self.project(lens, view_ray);
             if lens < self.lens_count as usize {
                 weights[lens] = claim(landings[lens], share);
             }
@@ -948,26 +1557,29 @@ impl Reframe {
     /// WGSL twin: `handover`.
     fn handover(&self, axis: [f32; MAX_LENSES], reach: f32, band: f32) -> f32 {
         match self.lens_count > 1.0 {
-            true => crossover(axis[0] - axis[1], reach, band),
+            true => crossover(axis[0] - axis[1], reach, band, self.handover_shift),
             false => 1.0,
         }
     }
 
-    /// How wide the crossover opens at a ray whose measured disparity is
-    /// `disparity`, in radians (issue #103, stage 4).
+    /// How wide this camera hands the picture over, in radians: what
+    /// [`CROSSOVER_DEG`] asked for, clamped by what these two lenses overlap
+    /// by ([`Self::afforded`]).
     ///
-    /// [`Self::crossover`] wherever that already carries the reading without
-    /// folding, and wider exactly where the reading would otherwise be
-    /// clamped. At the 8 degrees this camera family hands over across, the
-    /// second half never happens: the widest stage 4 can ask for is 4.33
-    /// ([`super::band::WIDEST_DEG`]) and the floor is above it, so this is a
-    /// constant on every X4-class file. What keeps it here is that the floor
-    /// is the camera's and not the picture's, and a camera whose overlap
-    /// forces it under 4.33 puts the reading back in charge.
+    /// **One number for the whole picture, and it does not breathe.** From
+    /// issue #103's stage 4 until 2026-08-08 this took a measured disparity
+    /// and opened the band wide enough to carry that reading's bend without
+    /// folding, so the fade's own width moved with the near field, frame by
+    /// frame. There is no bend to carry now, so there is nothing to open for,
+    /// and a fade whose width breathes is one more thing at the seam that
+    /// moves when the picture does not. The owner named that class of fault
+    /// directly; docs/research/studio-parity.md carries the ruling.
     ///
-    /// WGSL twin: `band_width`.
-    pub fn crossover_at(&self, disparity: f32) -> f32 {
-        super::band::width(disparity, self.crossover)
+    /// It is a plain accessor on purpose: it used to take an argument, and
+    /// every caller that still passed one would have been passing something
+    /// this no longer reads.
+    pub fn handover_width(&self) -> f32 {
+        self.crossover
     }
 
     /// A view-space ray in the camera body's own frame, which is where the
@@ -1080,84 +1692,6 @@ impl Reframe {
         (ea * a.disparity + eb * b.disparity) / total * strength
     }
 
-    /// The offset one lens's ray takes for a whole disparity, in view space,
-    /// scaled by the ray's own length so that adding it turns the ray by
-    /// `disparity` radians.
-    ///
-    /// Clamped to what the crossover can carry without folding
-    /// (`super::band::carried`), which is the guard the record has wanted
-    /// since the band narrowed: the bend's own gradient across the band **is**
-    /// the shear, and past 1 the mapping prints the picture back over itself.
-    /// Since stage 4 the crossover it is clamped against is the one that
-    /// direction's own reading opened ([`Self::crossover_at`]), so the clamp
-    /// bites only where the band has run out of room to open.
-    ///
-    /// WGSL twin: `band_bend`.
-    pub fn bend(&self, view_ray: [f32; 3], reading: super::band::Reading) -> Bend {
-        self.bent(view_ray, reading, self.crossover_at(reading.epi))
-    }
-
-    /// The same with the width already in hand, which is how [`Self::blend_bent`]
-    /// asks for it: the handover needs the same number and neither of them may
-    /// have its own copy.
-    ///
-    /// **The two axes are applied by different laws, because they are
-    /// different phenomena** (issue #103, stage 5).
-    ///
-    /// The epipolar term is **parallax**: the two lenses genuinely see
-    /// different things and neither is wrong, so it is split across the
-    /// handover by the other lens's weight. That makes the two agree inside
-    /// the band and moves nothing outside it, which is the whole of stage 2.
-    /// It is what folds and what opens the crossover.
-    ///
-    /// The along-seam term is **the camera**: parallax cannot reach that axis
-    /// at any distance, so what is left there is a relative pose error the
-    /// static five-knob fit could not describe, and a pose error is wrong
-    /// everywhere and not only at the handover. Correcting it only across the
-    /// band would make the two pictures agree over two degrees and leave the
-    /// horizon still drawn in two places, which is measured: the band-local
-    /// form moves the owner's reference view by 0.03 view px of 32.8. So it is
-    /// applied the way the calibration it belongs to is applied - to lens 1,
-    /// over its whole picture, with lens 0 left exactly alone.
-    ///
-    /// The scale is `reach`, the ray flattened into the seam plane, and that
-    /// is not a taper chosen to be safe. A relative roll `w` about the body's
-    /// z displaces a direction `d` by `w x d`, which is `|w| cos(elevation)`
-    /// along the seam's own tangent at every elevation and exactly zero at
-    /// both lens poles, where an azimuth does not exist. Scaling by the
-    /// flattened length rather than the whole one **is** that factor, for
-    /// free, and it makes a constant reading exactly a relative roll - which
-    /// is what the harmonic decomposition says a constant along-seam residual
-    /// is (`kjerag-spike --bin seam`).
-    ///
-    /// **The along-seam term has two halves since stage 9**, and the same
-    /// scale carries both because they are the same displacement on the same
-    /// axis. The band's own is a pose, fitted live to this session's ring.
-    /// [`super::band::Table`]'s is what no pose can describe, read off the
-    /// camera and held still. The table has the pass's own five terms taken
-    /// out of it when it is built, so adding them is not applying one
-    /// correction twice.
-    fn bent(&self, view_ray: [f32; 3], reading: super::band::Reading, band: f32) -> Bend {
-        let Some(at) = self.seam_at(view_ray) else {
-            return Bend::default();
-        };
-        let body = self.body_ray(view_ray);
-        let reach = body[0].hypot(body[1]);
-        let epi = super::band::carried(reading.epi, band) * norm3(view_ray);
-        // The measured field and the stored one, on one axis and at one
-        // scale: the first is what this session's ring supports as a pose,
-        // the second is what no pose can say and what the camera reads the
-        // same on every flight ([`super::band::Table`]). They are added
-        // because they are the same displacement measured at two orders, and
-        // the table has the pass's own five terms taken out of it so neither
-        // of them corrects what the other already did.
-        let along = (reading.along + self.table.at(body[0] / reach, body[1] / reach)) * reach;
-        Bend {
-            epi: self.out(at.epi, epi),
-            along: self.out(at.perp, along),
-        }
-    }
-
     /// A body-frame axis, scaled, expressed in the named view's frame.
     ///
     /// `view_to_body` is a rotation, so its transpose is its inverse.
@@ -1173,7 +1707,7 @@ impl Reframe {
     /// Where the stored table alone sends one lens's ray, before projection.
     ///
     /// Lens 1 takes it whole and lens 0 does not take it at all, which is how
-    /// [`Self::blend_bent`] applies it and how the calibration it belongs to
+    /// the retired bend applied it and how the calibration it belongs to
     /// is applied ([`super::seam::SeamFit`]). This is that one step on its
     /// own, for a reader that samples the raw planes through [`Self::project`]
     /// rather than drawing a picture: `seam::measure` reads a ring through the
@@ -1396,7 +1930,12 @@ impl Reframe {
     /// record, and then [`Self::project`] is what it was before issue #9.
     ///
     /// WGSL twin: the `reframe.row_axis` test in `project`.
-    fn is_rolling(&self) -> bool {
+    ///
+    /// `pub(crate)` for one reader, [`crate::twin`]: this is the test the
+    /// whole readout branch sits behind on both halves, so a fixture that
+    /// leaves it false compares a `project` with its second half deleted. The
+    /// twin asserts on it rather than assuming it.
+    pub(crate) fn is_rolling(&self) -> bool {
         self.row_axis != [0.0; 2]
     }
 
@@ -1621,10 +2160,10 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 ///
 /// `apart` is the difference of the two unnormalized dot products and `reach`
 /// is the ray's length, so the division that normalizes them happens once
-/// here rather than twice at the call site. `band` is how wide the crossover
-/// is at this ray, which since issue #103's stage 4 is a measurement rather
-/// than [`CROSSOVER_DEG`] itself, and is that constant exactly wherever the
-/// reading is small enough for it ([`Reframe::crossover_at`]).
+/// here rather than twice at the call site. `band` is how wide this camera
+/// hands the picture over ([`Reframe::handover_width`]), which is what
+/// [`CROSSOVER_DEG`] asks for unless the two lenses' overlap cannot pay for
+/// it.
 ///
 /// How far past the seam a ray looks is half the difference of the two
 /// lenses' angles off their own axes. Written that way rather than as "ninety
@@ -1642,27 +2181,34 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// there does not matter. No trig anywhere, and one multiply fewer than the
 /// `cos^2(theta / 2)` preference this replaces.
 ///
+/// `shift` is the [`SeamAnchor`]'s, in radians across the seam
+/// ([`Reframe::handover_shift`]): a whole term of its own beside the
+/// geometry's, divided by the same band, so a shift of half the band puts the
+/// 50/50 line at the edge of the fade and a shift of zero leaves it exactly
+/// where the two axis cosines put it.
+///
+/// **The support moves with the line, and it is not narrowed to compensate.**
+/// This closes at `-band / 2 - shift` off the seam and opens at
+/// `band / 2 - shift`, so the far end reaches `band / 2 + |shift|` and, at the
+/// rail, a **whole band**. That is past the shared picture on every camera in
+/// the corpus and it is deliberate: what refuses the sample out there is the
+/// outer lens's own coverage depth inside [`claim`], not this width.
+/// [`Reframe::afforded`] carries the argument and
+/// `tests::the_anchored_handover_leaves_no_hole_and_no_cliff`
+/// carries the measurement.
+///
+/// **The ramp is the whole curve, and there is no exponent on it.** Between
+/// 2026-08-08 and the flat seam this share was re-spent on `s^n / (s^n +
+/// (1-s)^n)` at `n = 1.5`, to hand the picture over inside a narrower part of
+/// the same support. That curve existed to make a *bend* fold-free over less
+/// picture; with no bend to shear there is nothing for it to buy, and the
+/// owner judged the linear one on his own footage. `n = 1` is the identity, so
+/// deleting it is deleting a function that had become one - see
+/// docs/research/studio-parity.md.
+///
 /// WGSL twin: `crossover`.
-fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-    steepen((0.5 + apart / (2.0 * reach * band)).clamp(0.0, 1.0))
-}
-
-/// The ramp's share, re-spent on a steeper curve inside the same support
-/// (docs/research/seam-temporal.md 8.1).
-///
-/// `s^n / (s^n + (1-s)^n)`: symmetric about the seam, exactly 0 and 1 where
-/// the ramp is, monotone between them, and exactly the ramp at `n = 1`. It is
-/// a crossfade and not a moved seam
-/// (`the_blend_curve_is_a_crossfade_and_not_a_moved_seam`).
-///
-/// The denominator cannot be zero for a share the clamp above produced: it is
-/// smallest at the seam itself, where it is `2 * 0.5^n`.
-///
-/// WGSL twin: `steepen`.
-fn steepen(share: f32) -> f32 {
-    let front = share.powf(BLEND_POWER);
-    let back = (1.0 - share).powf(BLEND_POWER);
-    front / (front + back)
+fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
+    (0.5 + apart / (2.0 * reach * band) + shift / band).clamp(0.0, 1.0)
 }
 
 impl LensBlock {
@@ -1939,13 +2485,14 @@ pub(crate) fn wgsl() -> String {
     // what an array's size in WGSL has to be written in. `AZIMUTHS` itself is
     // the band's own name and is declared by the band's own half, which only
     // one of the two pipelines compiled from this file is given.
-    // The blend curve's exponent IS here, unlike the crossover: it is a
-    // property of the map rather than of the file, so it is a constant on both
-    // sides and there is one place it is written ([`BLEND_POWER`]).
+    // The blend curve's exponent used to be here, unlike the crossover,
+    // because it was a property of the map rather than of the file. There is
+    // no exponent any more: the crossfade is the linear ramp, which is what
+    // `crossover` computes and nothing re-spends.
     let lanes = super::band::AZIMUTHS / 4;
     format!(
         "const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n\
-         const TABLE_LANES = {lanes}u;\nconst BLEND_POWER = {BLEND_POWER:?};\n{WGSL}"
+         const TABLE_LANES = {lanes}u;\n{WGSL}"
     )
 }
 
@@ -2009,17 +2556,23 @@ struct Reframe {
   sharpen_luma: f32,
   sharpen_chroma: f32,
   // How wide this camera hands the picture over, in radians. Rust twin:
-  // `Reframe::crossover`. Read by `band_width` and `band_rest`.
+  // `Reframe::crossover`. Read by `handover`.
   crossover: f32,
+  // How far across the seam the drawn 50/50 handover line is moved from where
+  // the geometry puts it, in radians. One number, because the law that
+  // produces it has one and there is no event in it. Zero is the geometric
+  // handover. Rust twin: `Reframe::handover_shift`. Read by `handover`.
+  handover_shift: f32,
   // What puts the table below on its own 16-byte boundary. Rust twin:
   // `Reframe::_pad`, which is what makes the two layouts agree.
-  pad0: f32,
   pad1: f32,
   pad2: f32,
   // What the along-seam axis still disagrees by after a pose, direction by
-  // direction, in radians, four to a lane. Rust twin: `Reframe::table`. Read
-  // by `table_at`, which the band's own half declares because the wrapping is
-  // written in `AZIMUTHS` and that name is the band's.
+  // direction, in radians, four to a lane. Rust twin: `Reframe::table`.
+  //
+  // NOTHING READS IT. It is declared because the block is one layout and both
+  // sides have to describe the same bytes; its reader was `table_at`, inside
+  // the bend, and the bend is gone.
   table: array<vec4<f32>, TABLE_LANES>,
 };
 
@@ -2035,24 +2588,6 @@ struct Landing {
 struct Blend {
   landings: array<Landing, MAX_LENSES>,
   weights: array<f32, MAX_LENSES>,
-};
-
-// What the band says about one ray: the offset that puts the two lenses'
-// pictures on top of each other, and how wide the handover has to be to carry
-// it without folding. Both come out of one measurement and neither may be
-// taken without the other, which is why they arrive together.
-//
-// Declared here rather than beside `band_bend`, which fills it, because the
-// compute half of the band is compiled with this file and without that one,
-// and a shader that names a type it has not been given does not compile.
-// Rust twins: `Reframe::bend` and `Reframe::crossover_at`.
-struct Band {
-  offset: vec3<f32>,
-  // The along-seam correction, which lens 1 takes whole and lens 0 does not
-  // take at all: it is the camera and not the scene, so it is applied the way
-  // the calibration is. Rust twin: `Bend::along`.
-  along: vec3<f32>,
-  crossover: f32,
 };
 
 // x right, y down, z forward, matching the lens frame the model projects in.
@@ -2079,14 +2614,15 @@ fn view_ray(uv: vec2<f32>) -> vec4<f32> {
   return vec4<f32>(plane * out, cos(theta), 1.0);
 }
 
-// Every lens's claim on the ray, normalized. Rust twin: `Reframe::blend_bent`.
+// Every lens's claim on the ray, normalized. Rust twin: `Reframe::blend`.
 //
-// `band` is what the band says at this direction (`band_bend`): the offset the
-// two lenses disagree by, and how wide the handover has to be to carry it. On
-// a file with one lens stream and on every direction the band has not
-// measured, the offset is zero and the width is the shipped crossover, and
-// then this pass is what it was before issue #103. Both are taken from the
-// UNBENT ray: a bend that moved its own lookup would be its own input.
+// THE RAY IS THE RAY. It used to be bent first: `band_bend` answered what the
+// two lenses disagreed by at this direction and how wide the handover had to
+// open to carry that without folding, and each lens was sampled at a ray moved
+// by the other lens's weight. None of that is here. The seam is flat, the
+// picture is fused and not morphed, and what the band measures reaches the
+// instruments and the future belt but never this function. See
+// `Reframe::blend` for the ruling and what it cost.
 //
 // The loop runs MAX_LENSES times whatever the file holds, and the lens count
 // zeroes the claim of a slot that has no stream rather than shortening the
@@ -2094,7 +2630,7 @@ fn view_ray(uv: vec2<f32>) -> vec4<f32> {
 // puts it in scratch memory and costs more than the blend does; the numbers
 // are on the Rust twin. The array writes stay unconditional for the same
 // reason; what `within` skips is the model, not the bookkeeping.
-fn blend(ray: vec3<f32>, band: Band) -> Blend {
+fn blend(ray: vec3<f32>) -> Blend {
   var out: Blend;
   var total = 0.0;
   let reach = length(ray);
@@ -2104,7 +2640,7 @@ fn blend(ray: vec3<f32>, band: Band) -> Blend {
   // twin: `Reframe::blend`.
   let axis0 = axis_of(reframe.lenses[0], ray);
   let axis1 = axis_of(reframe.lenses[1], ray);
-  let front = handover(axis0, axis1, reach, band.crossover);
+  let front = handover(axis0, axis1, reach, reframe.crossover);
   for (var index = 0u; index < MAX_LENSES; index += 1u) {
     let lens = reframe.lenses[index];
     // Zero, which is `Landing::MISSED`: a lens the ray cannot reach is never
@@ -2113,14 +2649,7 @@ fn blend(ray: vec3<f32>, band: Band) -> Blend {
     var claimed = 0.0;
     if within(lens, select(axis1, axis0, index == 0u), reach) {
       let share = select(1.0 - front, front, index == 0u);
-      // This lens's share of the bend is the OTHER lens's weight, with the
-      // sign that puts the two of them one whole disparity apart. Rust twin:
-      // `Reframe::blend_bent`.
-      let carry = select(1.0 - share, share - 1.0, index == 0u);
-      // The along-seam term is not shared out: lens 1 takes it whole and lens
-      // 0 does not take it at all. Rust twin: `Reframe::blend_bent`'s `turn`.
-      let turn = select(0.0, 1.0, index == 1u);
-      landing = project(lens, ray + carry * band.offset + turn * band.along);
+      landing = project(lens, ray);
       claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
     }
     out.landings[index] = landing;
@@ -2175,27 +2704,25 @@ fn claim(landing: Landing, share: f32) -> f32 {
 }
 
 // The front lens's share of the ray, and 1 for a one-stream file, which has
-// no seam to hand over at. Rust twin: `Reframe::handover`.
+// no seam to hand over at.
+//
+// The drawn 50/50 line is moved across the seam by `reframe.handover_shift`,
+// which is the seam anchor's one number and a whole term of its own inside
+// `crossover`. Rust twin: `Reframe::handover`.
 fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
   if reframe.lens_count <= 1.0 {
     return 1.0;
   }
-  return crossover(axis0 - axis1, reach, band);
+  return crossover(axis0 - axis1, reach, band, reframe.handover_shift);
 }
 
 // The front lens's share, from how far apart the two dot products are, across
-// a band this ray's own reading decided the width of (`band_width`). Rust
-// twin: `crossover`.
-fn crossover(apart: f32, reach: f32, band: f32) -> f32 {
-  return steepen(clamp(0.5 + apart / (2.0 * reach * band), 0.0, 1.0));
-}
-
-// The same share re-spent on a steeper curve inside the same support. Rust
-// twin: `steepen`.
-fn steepen(share: f32) -> f32 {
-  let front = pow(share, BLEND_POWER);
-  let back = pow(1.0 - share, BLEND_POWER);
-  return front / (front + back);
+// the band the camera hands over on, and moved across the seam by `shift`
+// radians. A linear ramp and nothing on top of it: the exponent that used to
+// re-spend this share inside a narrower part of the same support existed to
+// keep a bend fold-free, and there is no bend. Rust twin: `crossover`.
+fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
+  return clamp(0.5 + apart / (2.0 * reach * band) + shift / band, 0.0, 1.0);
 }
 
 // The forward map, with the readout taken out of it. Rust twin:
@@ -2364,6 +2891,61 @@ pub(crate) mod tests {
     fn fixture(camera: Camera) -> Reframe {
         held(camera, Held::default())
     }
+
+    /// The same optics with the image circle cropped, which is the only knob
+    /// there is for asking a narrower camera a question here.
+    ///
+    /// A lens's picture stops where its landing leaves the largest circle that
+    /// fits in the delivered frame ([`image_radius`]), so a smaller frame round
+    /// the same principal point is a lens that sees less, and two of them
+    /// overlap by less. That is exactly what [`Reframe::overlap`] reads and
+    /// exactly what [`Reframe::afforded`] clamps against.
+    ///
+    /// **Synthesized rather than checked in, and that is a rule and not a
+    /// shortcut.** The ONE X2's own calibration lives in the owner's footage
+    /// and a trailer dump carries his camera serial and his GPS track, which
+    /// AGENTS.md forbids committing. The X4 Air fixture is the one calibration
+    /// this repository has, so a narrow camera is made out of it by taking away
+    /// picture, and the overlaps below are asserted rather than assumed so that
+    /// the fixture cannot quietly stop being the camera class it says it is.
+    fn cropped(frame: u32) -> Reframe {
+        Reframe::new(
+            &fixture_lenses(),
+            Size {
+                width: frame,
+                height: frame,
+            },
+            Camera::default(),
+            Held::default(),
+            1.0,
+            false,
+            Sampling::default(),
+        )
+    }
+
+    /// A camera that overlaps by 9.18 degrees, which is the ONE X2's 9.19 to a
+    /// hundredth of a degree: the narrowest camera in the corpus, and the one
+    /// the flat seam moved from 3.94 degrees of handover to the whole 8.00.
+    ///
+    /// **It reproduces that camera's OVERLAP and nothing else about its
+    /// optics**, and every "X2-class" figure this file and
+    /// docs/research/studio-parity.md 5.3 report means that. The crop is
+    /// concentric with each lens's unchanged principal point, so the boundary
+    /// it makes is the X4 Air's own shape scaled down; a real narrow camera's
+    /// is raggeder, and the review that raised the width finding puts the ONE
+    /// X2's lens 1 worst azimuth at 3.39 degrees against this fixture's 0.66.
+    /// Neither property asserted here is read off that shape - a hole needs
+    /// `|shift| > band / 2 + overlap / 2`, whose only camera term is the
+    /// overlap, and a cliff is carried by [`claim`]'s per-lens taper, which
+    /// runs out on whatever rim the lens has - so the conclusions hold and the
+    /// SIZE of an overshoot quoted for "an X2-class camera" is this fixture's
+    /// and not that camera's.
+    const X2_CLASS: u32 = 3803;
+
+    /// A camera that overlaps by 7.43 degrees, which is narrower than the 8 the
+    /// picture asks for. Nothing in the corpus is this tight; it exists so that
+    /// [`Reframe::afforded`]'s clamp has something to bind on.
+    const UNDER_THE_ASK: u32 = 3790;
 
     /// The same fixture with the camera body somewhere other than level,
     /// which is what horizon lock has to take back out.
@@ -2581,7 +3163,7 @@ pub(crate) mod tests {
     #[test]
     fn the_seam_is_a_mix_of_two_pictures_and_not_a_gap() {
         let reframe = fixture(Camera::default());
-        let half = 0.5 * reframe.crossover_at(0.0).to_degrees();
+        let half = 0.5 * reframe.handover_width().to_degrees();
 
         for phi in 0..360 {
             let phi = phi as f32;
@@ -2618,20 +3200,14 @@ pub(crate) mod tests {
         }
     }
 
-    /// What the picture carries of the along-seam correction at one offset
-    /// from the seam, in units of the correction itself.
+    /// How much of the picture lens 1 holds at one offset from the seam.
     ///
-    /// Lens 1 takes the along-seam term whole and lens 0 takes none of it
-    /// ([`Reframe::blend_bent`]), so the share of it the picture shows **is**
-    /// lens 1's weight. Nothing else in the pass carries that axis.
-    fn along_carried(reframe: &Reframe, offset: f32, phi: f32) -> f32 {
-        let reading = super::super::band::Reading {
-            epi: 0.0,
-            along: 0.006,
-        };
-        reframe
-            .blend_bent(direction(90.0 + offset, phi), reading)
-            .weights[1]
+    /// The handover, read where it is delivered: not `crossover`'s own share
+    /// but that share after each lens's coverage depth has multiplied it and
+    /// the pair has been renormalized ([`claim`]), which is what the fragment
+    /// shader is actually handed.
+    fn lens_one_holds(reframe: &Reframe, offset: f32, phi: f32) -> f32 {
+        reframe.blend(direction(90.0 + offset, phi)).weights[1]
     }
 
     /// The map hands the along-seam correction over across the whole handover
@@ -2683,13 +3259,13 @@ pub(crate) mod tests {
     #[test]
     fn the_along_seam_correction_hands_over_across_the_whole_crossover() {
         let reframe = fixture(Camera::default());
-        let width = reframe.crossover_at(0.0).to_degrees();
+        let width = reframe.handover_width().to_degrees();
 
         for phi in (0..360).step_by(15) {
             let phi = phi as f32;
             // Positive offsets are lens 1's side, which is the side that takes
             // the correction ([`the_seam_is_a_mix_of_two_pictures_and_not_a_gap`]).
-            let carried = |offset: f32| along_carried(&reframe, offset, phi);
+            let carried = |offset: f32| lens_one_holds(&reframe, offset, phi);
             // The SUPPORT, which the curve leaves exactly where it was:
             // `steepen` is exact at both ends, so what the two lenses are
             // mixed over at all is the same picture it was before.
@@ -2719,144 +3295,146 @@ pub(crate) mod tests {
         }
     }
 
-    /// How many degrees of that same support the crossfade is **visible**
-    /// over: the number [`BLEND_POWER`] exists to move
-    /// (docs/research/seam-temporal.md 8.1).
+    /// **How many degrees of the support the handover is visible over.** The
+    /// number the blend curve existed to move, measured after the curve went.
     ///
-    /// **Measured on the delivered map and not predicted off the ramp**, which
-    /// is a correction to the memo and worth the sentence. The memo's sweep
-    /// asked where a linear map would have to be for the curve to deliver a
-    /// tenth, and answered 3.46 degrees. That inversion is not exact here: a
-    /// lens's claim is its share times its own `landing.depth` and the two
-    /// lenses' depths are not equal, so the pair is renormalized AFTER the
-    /// curve and the curve does not simply compose through it
-    /// ([`claim`]). Read directly off the weights the pass hands the fragment
-    /// shader, on this fixture over 24 azimuths at the shipped 8 degree
-    /// support, walking from nine tenths of the correction to one tenth:
+    /// **What it asserted.** That the delivered 10-to-90 walk spans 3.81 to
+    /// 3.90 degrees of the 8 degree support, and under 4.80 at every azimuth -
+    /// the power-1.5 column of the table the test carried, against the linear
+    /// column it replaced.
     ///
-    /// | crossfade | linear (`main`) | power 1.5 (ships) |
+    /// **What it asserts now.** The linear column, which is the one that
+    /// ships: 4.80 to 4.89 degrees, mean 4.85, over the same 24 azimuths of
+    /// the same fixture at the same 4000-step grid. Both columns were measured
+    /// here, on 2026-08-08, before either was chosen; the numbers are not
+    /// re-derived to fit.
+    ///
+    /// | crossfade | linear (ships) | power 1.5 (retired) |
     /// | --- | ---: | ---: |
-    /// | span, deg, mean | 4.85 | **3.85** |
-    /// | span, deg, per azimuth | 4.80 to 4.89 | 3.82 to 3.88 |
-    /// | share of the width | 0.61 | 0.482 |
+    /// | span, deg, mean | **4.85** | 3.85 |
+    /// | span, deg, per azimuth | **4.80 to 4.89** | 3.82 to 3.88 |
+    /// | share of the width | **0.61** | 0.482 |
     ///
-    /// The linear column is this same function on this same fixture with
-    /// [`BLEND_POWER`] at 1, where `steepen` is the identity and the map is
-    /// `main`'s, and it is what says the support did not move underneath the
-    /// change.
-    ///
-    /// **Both columns are means and the spread is a real 0.09 degrees**,
-    /// re-measured 2026-08-08 during PR #172's review after the branch had
-    /// carried "4.88 to 4.92" and "3.88 to 3.92", which are neither the means
-    /// nor the ranges. The 4.85 in the table above is this column's mean read
-    /// at that test's own 400-step grid rather than a different measurement:
-    /// coarsening the grid moves the mean by 0.005 and widens the reported
-    /// spread by a grid step, which is 0.04 degrees there and 0.004 here.
+    /// **Why it is not loosened.** The bracket is the same shape it was, a
+    /// hundredth below the measured minimum and two above the measured
+    /// maximum, so a number that drifts is still a failure and not a
+    /// rounding. What
+    /// changed is which column it brackets. The curve was chosen to spend less
+    /// of the handover in view because a narrower visible handover made a
+    /// *bend* less obvious; with no bend, the wider crossfade is the gentler
+    /// one, and the owner picked it on his own footage against the other two.
     #[test]
-    fn the_blend_curve_spends_less_of_the_handover_in_view() {
+    fn the_handover_spends_its_whole_support_in_view() {
         let reframe = fixture(Camera::default());
-        let width = reframe.crossover_at(0.0).to_degrees();
+        let width = reframe.handover_width().to_degrees();
 
         for phi in (0..360).step_by(15) {
             let phi = phi as f32;
-            let carried = |offset: f32| along_carried(&reframe, offset, phi);
+            let held = |offset: f32| lens_one_holds(&reframe, offset, phi);
             let steps = 4000;
             let at = |share: f32| {
                 (0..=steps)
                     .map(|step| width - 2.0 * width * step as f32 / steps as f32)
-                    .find(|offset| carried(*offset) < share)
+                    .find(|offset| held(*offset) < share)
                     .unwrap_or(-width)
             };
             let span = at(0.9) - at(0.1);
-            // The bracket holds the measured 3.82 to 3.88 spread with a
-            // hundredth below and two above, so a number that drifts is a
-            // failure and not a rounding.
             assert!(
-                (3.81..3.90).contains(&span),
-                "the blend curve at {phi} spends {span} degrees of {width} going from nine \
-                 tenths of the correction to one tenth, not the 3.82 to 3.88 on record"
-            );
-            // And it is less than the ramp it replaced at EVERY azimuth,
-            // against the narrowest the ramp ever spent rather than against its
-            // mean: the two do not overlap at all.
-            assert!(
-                span < 4.80,
-                "the blend curve at {phi} spends {span} degrees, which is not less than the \
-                 4.80 the linear ramp spent at its narrowest azimuth"
+                (4.79..4.91).contains(&span),
+                "the handover at {phi} spends {span} degrees of {width} going from nine \
+                 tenths to one tenth, not the 4.80 to 4.89 on record"
             );
         }
     }
 
-    /// The curve is symmetric about the seam, monotone, and exact at both
+    /// The handover is symmetric about the seam, monotone, and exact at both
     /// ends: the three things that make it a crossfade rather than a shift of
     /// the seam.
+    ///
+    /// **What it asserted.** The same three properties of `steepen`, the
+    /// `s^n / (s^n + (1-s)^n)` curve the share was re-spent on at `n = 1.5`.
+    ///
+    /// **What it asserts now.** The same three properties of [`crossover`]
+    /// itself, which is the ramp the curve used to sit on top of, read at real
+    /// geometry rather than at a bare share: symmetric about the seam, exactly
+    /// 0 and 1 at the two edges of the support, monotone in between, and the
+    /// two lenses' shares summing to exactly 1 everywhere.
+    ///
+    /// **Why it is not loosened.** It is stated at the same tolerances on a
+    /// function that is now the whole of the blend rather than half of it, so
+    /// it covers strictly more than it did. `steepen` at `n = 1` was the
+    /// identity, and a test of the identity is a test of nothing.
     #[test]
-    fn the_blend_curve_is_a_crossfade_and_not_a_moved_seam() {
-        assert_eq!(steepen(0.0), 0.0);
-        assert_eq!(steepen(1.0), 1.0);
-        near(steepen(0.5), 0.5, 1e-6);
-        let mut last = -1.0;
+    fn the_handover_is_a_crossfade_and_not_a_moved_seam() {
+        let band = 8.0f32.to_radians();
+        let reach = 1.0f32;
+        // `apart` is twice the across-seam angle, so the support runs from
+        // minus to plus half a band and the ends are exact.
+        assert_eq!(crossover(-band * reach, reach, band, 0.0), 0.0);
+        assert_eq!(crossover(band * reach, reach, band, 0.0), 1.0);
+        near(crossover(0.0, reach, band, 0.0), 0.5, 1e-6);
+        let mut last = -1.0f32;
         for step in 0..=10_000 {
-            let share = step as f32 / 10_000.0;
-            let curved = steepen(share);
-            assert!(curved.is_finite() && (0.0..=1.0).contains(&curved));
-            assert!(curved >= last, "the blend curve runs backwards at {share}");
-            near(curved + steepen(1.0 - share), 1.0, 1e-6);
-            last = curved;
+            let apart = (step as f32 / 10_000.0 * 2.0 - 1.0) * band * reach;
+            let share = crossover(apart, reach, band, 0.0);
+            assert!(share.is_finite() && (0.0..=1.0).contains(&share));
+            assert!(share >= last, "the handover runs backwards at {apart}");
+            // The other lens takes exactly the rest of the ray, at every
+            // point of the support: this is what makes it a crossfade.
+            near(share + crossover(-apart, reach, band, 0.0), 1.0, 1e-6);
+            last = share;
         }
     }
 
-    /// And it cannot fold the picture, which is the one thing a steeper
-    /// crossfade could newly break.
+    /// **Nothing can fold the picture, because nothing displaces a sample.**
     ///
-    /// The fold guard is one inequality, `gradient * disparity / band <= 1`,
-    /// held at 0.9 by `super::band::FOLD`. It was written against a **linear**
-    /// ramp, whose share walks one whole unit across one whole band, so the
-    /// gradient was 1 and dropped out. This curve's peak gradient is its
-    /// exponent, measured here rather than differentiated, and that is exactly
-    /// what `super::band::SPEND` has divided out of it once for all five
-    /// functions that read the inequality.
+    /// **What it asserted.** That the steep crossfade could not fold the
+    /// narrowest camera in the corpus. Folding was a real hazard with a real
+    /// failing case behind it: the corridor bend ran from zero to the whole
+    /// measured disparity across the band, so its own gradient across the band
+    /// **was** the shear, and above 1 the mapping printed the picture back
+    /// over itself. A whole apparatus existed to keep that inequality true -
+    /// `FOLD`, `SPEND`, `WIDEST_DEG`, `carried`, `width` - and this test was
+    /// its acceptance, complete with a positive control that showed the
+    /// undivided limit folding the ONE X2.
     ///
-    /// **Without that division the curve folds a real camera.** At the ONE
-    /// X2's 4.18 degree support against a search that reads out to 2.6 degrees
-    /// ([`super::band::WIDEST_DEG`] is what the adaptive term may even ask
-    /// for), the undivided shear is over 1. That is measured below, so the
-    /// division is a fix with a failing case behind it and not a precaution.
+    /// **What it asserts now.** That the map from view ray to lens pixel is
+    /// the projection alone. Every lens is sampled at the ray itself, so the
+    /// Jacobian at any pixel is the lens model's own and the handover
+    /// contributes nothing to it: the two lenses' landings at one ray are
+    /// **exactly** what `project` returns for that ray, and the weights that
+    /// mix them are a scalar per lens summing to one. A scalar blend of two
+    /// samples cannot fold a mapping.
+    ///
+    /// **Why it is not loosened.** There is no tolerance here to loosen. The
+    /// old test bounded a displacement; this one asserts the displacement is
+    /// not merely small but absent, which is the stronger statement and the
+    /// only one that stays true if the belt is ever built on top.
     #[test]
-    fn the_blend_curve_cannot_fold_the_narrowest_camera() {
-        let floor = super::super::band::affordable(9.19f32.to_radians());
-        // Wider than the search can ever return, on purpose: this is the
-        // widest the adaptive term may even ASK for, so the answer bounds
-        // every reading rather than the ones a corpus happened to produce.
-        let disparity = super::super::band::WIDEST_DEG.to_radians();
-        let band = super::super::band::width(disparity, floor);
-        // The share's own gradient across the band, measured rather than
-        // differentiated: the steepest secant the curve takes over a fine
-        // grid, which reads a shade above the true peak and never below it.
-        let steps = 100_000;
-        let mut peak: f32 = 0.0;
-        let mut last = steepen(0.0);
-        for step in 1..=steps {
-            let curved = steepen(step as f32 / steps as f32);
-            peak = peak.max((curved - last) * steps as f32);
-            last = curved;
+    fn nothing_displaces_a_sample_so_nothing_can_fold() {
+        let reframe = fixture(Camera::default());
+        for theta in [70.0f32, 85.0, 88.5, 90.0, 91.5, 95.0, 110.0] {
+            for phi in [0.0f32, 47.0, 123.0, 250.0, 340.0] {
+                let ray = direction(theta, phi);
+                let blend = reframe.blend(ray);
+                for lens in 0..MAX_LENSES {
+                    // `Landing::MISSED` is a lens the pre-test skipped, which
+                    // is a lens the model was never run for (issue #10) and a
+                    // lens whose weight is zero. Everywhere else the landing
+                    // is the projection of the ray and of nothing else.
+                    assert!(
+                        blend.landings[lens] == Landing::MISSED
+                            || blend.landings[lens] == reframe.project(lens, ray),
+                        "lens {lens} at theta {theta} phi {phi} was sampled off the ray",
+                    );
+                }
+                let total: f32 = blend.weights.iter().sum();
+                assert!(
+                    (total - 1.0).abs() < 1e-6 || total == 0.0,
+                    "the weights at theta {theta} phi {phi} sum to {total}",
+                );
+            }
         }
-        near(peak, BLEND_POWER, 0.02);
-
-        let shear = |carried: f32| peak * carried / band;
-        assert!(
-            shear(disparity.clamp(-0.9 * band, 0.9 * band)) > 1.0,
-            "the undivided limit no longer folds, so this test has stopped being a control"
-        );
-        // Back on the guard, at the 0.9 the linear ramp sat on, to within what
-        // the secant above overreads by - asked through the shipped clamp
-        // rather than through a second copy of its arithmetic, so a limit that
-        // stopped dividing would be caught here and not merely described.
-        near(
-            shear(super::super::band::carried(disparity, band)),
-            0.9,
-            0.02,
-        );
     }
 
     /// A run that does not ask draws the width the owner validated, and an ask
@@ -3056,35 +3634,41 @@ pub(crate) mod tests {
         }
     }
 
-    /// And a camera whose overlap forces a narrow floor still opens the
-    /// crossover to the width a near-field reading asks for, still centred on
-    /// the seam (issue #103, stage 4).
+    /// **A near reading does not open the crossover, and that is the change.**
     ///
-    /// The same sweep as above, drawn through the bent blend, so what is
-    /// measured is the band the shipped pass actually hands over across and
-    /// not the arithmetic that decided it.
+    /// **What it asserted.** That a direction reading 1.8, 2.2 or 2.6 degrees
+    /// of disparity was drawn across a band widened to carry that reading
+    /// without folding - measured in the picture, as the span of view over
+    /// which both lenses have a positive weight, against the width
+    /// `crossover_at` asked for. That was stage 4, and the width it produced
+    /// moved frame by frame with the near field.
     ///
-    /// The floor is set here rather than taken from the fixture because the
-    /// fixture affords the 8 degrees the picture asks for, and above 4.33 no
-    /// reading the search can return opens anything
-    /// (`band::tests::the_adaptive_width_is_inert_under_the_shipped_floor`).
-    /// Two degrees is what this camera family handed over across until
-    /// 2026-08-05 and what a camera with 5.6 degrees of overlap would get now,
-    /// and stage 4 has to still work there.
+    /// **What it asserts now.** That the drawn span is the camera's own width
+    /// at every one of those readings, to the same 0.02 degrees, and that it
+    /// is still centred on the seam. Same fixture, same four readings, same
+    /// four azimuths, same bar; the expected value is a constant instead of a
+    /// function.
+    ///
+    /// **Why it is not loosened.** The 0.02 degree bracket is the one the
+    /// stage-4 test used, and it is now being asked of a number that must not
+    /// move at all rather than of one that was supposed to move. The reading
+    /// is still constructed and still non-zero - a test that froze the width
+    /// by feeding the map nothing would prove nothing.
     #[test]
-    fn a_near_reading_opens_the_crossover_to_what_it_needs() {
+    fn a_near_reading_does_not_open_the_crossover() {
         let mut reframe = fixture(Camera::default());
         reframe.crossover = 2.0f32.to_radians();
+        let wanted = reframe.handover_width().to_degrees();
         for disparity_deg in [0.0f32, 1.8, 2.2, 2.6] {
             let disparity = disparity_deg.to_radians();
-            let wanted = reframe.crossover_at(disparity).to_degrees();
+            // The reading exists and says something; the picture does not
+            // listen. `reading` is the same helper stage 4 measured through.
+            assert!((reading(disparity).epi - disparity).abs() < 1e-9);
             for phi in [0.0, 90.0, 180.0, 270.0] {
                 let mixed: Vec<f32> = (0..3000)
                     .map(|step| 70.0 + step as f32 * 0.01)
                     .filter(|theta| {
-                        let weights = reframe
-                            .blend_bent(direction(*theta, phi), reading(disparity))
-                            .weights;
+                        let weights = reframe.blend(direction(*theta, phi)).weights;
                         weights.iter().all(|weight| *weight > 0.0)
                     })
                     .collect();
@@ -3098,51 +3682,343 @@ pub(crate) mod tests {
         }
     }
 
-    /// The bound the band is not allowed to cross, measured off the
-    /// calibration fixture rather than quoted from the format study.
+    /// **The widest band stays inside the overlap while the line is on the
+    /// seam - and runs past it as soon as the line is held.**
     ///
-    /// A band that opened past the overlap would hand over to a lens that has
-    /// no picture there. What that costs is **not** a sample from off the end
-    /// of the fisheye circle: the coverage test is taken on the **unbent** ray
-    /// ([`Reframe::covers`]) and the bend then moves the sample, but a bent ray
-    /// that lands outside the lens's own boundary comes back
-    /// `inside == false`, [`claim`] returns zero for it, and the fragment
-    /// shader reads a lens only where its weight is positive. What it costs is
-    /// the handover itself: past that edge the coverage depth takes the weight
-    /// over from the crossover's ramp and steps it to zero at the rim, so the
-    /// picture is handed over by the optics rather than by the width that was
-    /// chosen, and where both lenses miss it is transparent. What has to fit is
-    /// half the band **plus the whole bend it carries**: at the edge of the
-    /// band one lens's weight is 1, so the other lens is sampled a whole
-    /// disparity away from where the ray points.
+    /// **What it asserted.** That the widest band this camera could open to -
+    /// its floor, or a near-field reading past that floor - plus the widest
+    /// bend that band could carry, still landed inside the picture both lenses
+    /// have. On the fixture that was a band of 8.00 reaching 6.60 into 7.22 a
+    /// side: 0.62 degrees to spare.
     ///
-    /// This is the bound the width the picture asks for is clamped by since
-    /// 2026-08-05 ([`super::band::affordable`]), so it is asserted against the
-    /// width the fixture actually hands over across rather than against the
-    /// widest [`super::band::width`] could ever return. The margin used to be
-    /// three degrees a side and it is not any more, which is the point of
-    /// measuring it.
+    /// **What it asserts now, and the half of it that was missing.** The bend
+    /// is struck out, so an unshifted band of 8.00 reaches 4.00 into the same
+    /// 7.22 and has 3.22 degrees to spare where it had 0.62 - that part is
+    /// unchanged and it is the headroom the flat seam bought back. What this
+    /// test used to leave out, and what a review found in it on 2026-08-09, is
+    /// that **the shipped picture does not draw an unshifted band**: the
+    /// handover's support is centred on the drawn line, the line is held on
+    /// world content ([`SeamAnchor`]), and at the allowance the support reaches
+    /// `band / 2 + allowance` = a whole band off the seam. Written against the
+    /// widths this camera actually uses, the old inequality is FALSE at the
+    /// rail, and the second assertion below is the true one stated in the
+    /// direction it is true in.
+    ///
+    /// **Why it is not loosened.** Nothing here got a wider tolerance: a claim
+    /// that was made about the shipped picture and only held for one value of
+    /// one field is now made about the case it holds in, and the case it does
+    /// not hold in is asserted as the fact it is. What carries the overshoot
+    /// safely is `the_anchored_handover_leaves_no_hole_and_no_cliff`, which is
+    /// the test this one used to be mistaken for.
     #[test]
-    fn the_widest_band_and_its_bend_stay_inside_the_overlap() {
+    fn the_widest_band_stays_inside_the_overlap() {
         let reframe = fixture(Camera::default());
         let overlap = reframe
             .overlap()
             .expect("the fixture has two lenses")
             .to_degrees();
-        // The widest this camera's band gets: its floor, or a near-field
-        // reading past it on a camera whose overlap forced the floor down.
-        let widest = reframe.crossover_at(crate::band::WIDEST_DEG.to_radians());
+        let widest = reframe.handover_width();
         let reach = crate::band::reach(widest).to_degrees();
-        // Measured on the fixture 2026-08-05: 14.44 degrees of overlap, 7.22 a
-        // side, a band of 8.00 and a reach of 6.60, so 0.62 to spare where 2
-        // degrees left 3.18.
         assert!(
             reach < 0.5 * overlap,
-            "a band of {:.2} deg reaches {reach:.2} deg off the seam into an overlap of \
-             {overlap:.2} deg, which is {:.2} deg a side",
+            "an unshifted band of {:.2} deg reaches {reach:.2} deg off the seam into an overlap \
+             of {overlap:.2} deg, which is {:.2} deg a side",
             widest.to_degrees(),
             0.5 * overlap,
         );
+        // And the room the bend used to want is measurably back: 3.22 degrees
+        // a side on this fixture, against the 0.62 the bent band left.
+        let spare = 0.5 * overlap - reach;
+        assert!(
+            spare > 3.0,
+            "the flat band leaves only {spare:.2} deg a side, not the 3.22 on record",
+        );
+        // The other half, and the reason the sentence above needs its first
+        // four words. At the allowance the support runs a whole band off the
+        // seam on one side, which is 0.78 degrees PAST the shared picture on
+        // the roomiest camera there is and 3.41 past it on an X2-class one.
+        for (name, reframe) in [
+            ("the fixture", fixture(Camera::default())),
+            ("an X2-class camera", cropped(X2_CLASS)),
+        ] {
+            let overlap = reframe.overlap().expect("two lenses").to_degrees();
+            let band = reframe.handover_width().to_degrees();
+            let farthest = 0.5 * band + 0.5 * band;
+            assert!(
+                farthest > 0.5 * overlap,
+                "{name} holds its line inside the overlap after all: a band of {band:.2} at the \
+                 {:.2} degree allowance reaches {farthest:.2} against {:.2} a side, so the claim \
+                 this test used to make would be true and the doc on Reframe::afforded is wrong",
+                0.5 * band,
+                0.5 * overlap,
+            );
+        }
+    }
+
+    /// **The held line puts the handover past the picture, and nothing falls
+    /// through the gap.** The safety property the width clamp was mistaken for.
+    ///
+    /// **Why it exists.** `Reframe::afforded` clamps the handover to the
+    /// camera's own overlap and said, until 2026-08-09, that this kept the
+    /// handover inside the picture both lenses have, because "a handover of
+    /// width `w` reaches `w / 2` off the seam". With [`SeamAnchor`] that is
+    /// false: the support is centred on the DRAWN line, so it runs
+    /// `band / 2 + |shift|` off the seam and `|shift|` is allowed up to
+    /// `band / 2`. Over the July-14 fast segment 202 of 900 frames draw some
+    /// support past the coverage on the owner's own X4 Air, and 866 of 900
+    /// would on a camera that overlaps the way the ONE X2 does; at the rail
+    /// there the ramp is still asking for a sample 8.00 degrees off a seam
+    /// whose shared picture stops at 4.59. The two guards that existed were tautologies - one
+    /// asserts `width / 2 < overlap / 2` for widths the clamp already caps at
+    /// the overlap, the other is `min(8, o) / 2 <= o / 2` - and neither has a
+    /// shift in it.
+    ///
+    /// **What it asserts, over the whole ring at the rail on both camera
+    /// classes.** The two properties that are what "safe" means for a
+    /// crossfade:
+    ///
+    /// - **no hole**: the delivered weights sum to one at every direction, so
+    ///   no pixel is left transparent by a ramp that zeroed the only lens with
+    ///   the ray;
+    /// - **no cliff**: the delivered weight never steps by more than this
+    ///   test's bar from one probe to the next, so the handover is still a fade
+    ///   out there and not an edge.
+    ///
+    /// Measured 2026-08-09, this grid, both classes: the sum is one to a single
+    /// ulp (0.99999988, which is `share`'s division and not a gap), and the
+    /// worst step is **0.0025** per hundredth of a degree on the X4 Air fixture
+    /// and **0.0034** on the X2-class one.
+    ///
+    /// **What 0.0040 is, said plainly: a regression bar and not a safety
+    /// threshold.** It is set a sixth above the worst this grid measures - and
+    /// above the 0.003485 a finer sweep of the same ring read in review - so
+    /// that a change to the taper trips it and ordinary rounding does not.
+    /// Nothing derives it, and in particular the fade's own mean slope over its
+    /// delivered 10-to-90 walk, which is 0.0017, is **context for the size of
+    /// the number and not the derivation of it**: this test cannot say at what
+    /// step a fade stops reading as a fade, because no eye has been asked that
+    /// question. What makes the bar worth asserting is the **gap to the
+    /// control**: the planted cliff below steps the weight by 0.36, a hundred
+    /// times this bar and a hundred times the worst measured, so the two are
+    /// two orders apart and where in that gap the line is drawn changes no
+    /// verdict this test has ever returned.
+    ///
+    /// **What actually carries it** is [`claim`]: a lens's share is multiplied
+    /// by its own coverage depth, which reaches zero exactly where that lens
+    /// runs out of picture, so the outer lens is faded to nothing by its own
+    /// rim before the ramp can ask it for a sample it does not have. The
+    /// controls say so by breaking exactly that:
+    ///
+    /// - **the planted cliff**: the same weights with the coverage depth
+    ///   replaced by a hard in-or-out step. Everything else is the shipped map.
+    ///   The step at the rim is then the whole share the ramp is still handing
+    ///   the outer lens, which this grid reads at 0.36, a hundred times the
+    ///   bar.
+    /// - **the planted hole**: a shift written straight into the block past
+    ///   what [`Reframe::with_shift`] allows, which is the one thing that can
+    ///   put the ramp's closing end outside the shared picture. The weights
+    ///   then sum to zero over a stretch of the ring, and the margin the
+    ///   shipped clamp holds against it is `overlap / 2`.
+    #[test]
+    fn the_anchored_handover_leaves_no_hole_and_no_cliff() {
+        for (name, reframe) in [
+            ("the X4 Air fixture", fixture(Camera::default())),
+            ("an X2-class camera", cropped(X2_CLASS)),
+        ] {
+            let overlap = reframe.overlap().expect("two lenses").to_degrees();
+            let allowance = 0.5 * reframe.handover_width();
+            let mut worst_sum = f32::INFINITY;
+            let mut worst_step = 0.0f32;
+            for shift in shifts(allowance) {
+                let held = reframe.with_shift(shift);
+                for phi in (0..360).step_by(5) {
+                    let (sum, step) = walked(&held, phi as f32, delivered);
+                    worst_sum = worst_sum.min(sum);
+                    worst_step = worst_step.max(step);
+                }
+            }
+            assert!(
+                worst_sum > 1.0 - 1e-6,
+                "{name} leaves a pixel weighing {worst_sum} of a whole one somewhere on the ring: \
+                 the ramp zeroed the only lens that had the ray",
+            );
+            assert!(
+                worst_step < 0.0040,
+                "{name} steps the delivered weight by {worst_step:.6} in a hundredth of a degree, \
+                 which is an edge and not a fade",
+            );
+
+            // The control for the cliff: the same map with the coverage taper
+            // broken to a hard edge, which is the term that carries the
+            // overshoot. It has to fail the bar this test just passed.
+            let mut planted = 0.0f32;
+            for shift in shifts(allowance) {
+                let held = reframe.with_shift(shift);
+                for phi in (0..360).step_by(5) {
+                    planted = planted.max(walked(&held, phi as f32, hard_edged).1);
+                }
+            }
+            assert!(
+                planted > 0.10,
+                "{name}: breaking the coverage taper only steps the weight by {planted:.6}, so \
+                 this test would pass a map with no taper in it and proves nothing",
+            );
+
+            // The control for the hole, and the measurement of what stops it.
+            // A shift past the clamp by more than half the overlap puts the
+            // ramp's closing end outside the shared picture; the clamp allows
+            // half the band, so the margin is half the overlap.
+            let mut torn = reframe;
+            torn.handover_shift =
+                (0.5 * reframe.handover_width().to_degrees() + 0.5 * overlap + 0.5).to_radians();
+            let mut lowest = f32::INFINITY;
+            for phi in (0..360).step_by(5) {
+                lowest = lowest.min(walked(&torn, phi as f32, delivered).0);
+            }
+            assert!(
+                lowest < 1e-6,
+                "{name}: a shift of {:.2} degrees, which is past everything, still leaves the \
+                 weights summing to {lowest}, so the no-hole assertion above cannot fail",
+                torn.handover_shift.to_degrees(),
+            );
+            assert_eq!(
+                reframe.with_shift(torn.handover_shift).handover_shift,
+                allowance,
+                "{name}: the clamp that stands between the anchor and that hole did not fire",
+            );
+        }
+    }
+
+    /// **A camera that cannot pay for the width the picture asks for gets the
+    /// width it can pay for**, asked of the code that ships rather than of a
+    /// copy of its arithmetic.
+    ///
+    /// **Why it exists.** `Reframe::afforded` is `asked.min(overlap)` and
+    /// nothing in the suite bound that `min` until 2026-08-09. Every fixture
+    /// here overlaps by 14.44 and every file in the corpus by 9.19 or more,
+    /// all of them over the 8 degrees the picture asks for, so `min` picked the
+    /// ask in every test there was: deleting the clamp outright left the whole
+    /// workspace green. `band::tests::the_width_a_camera_can_pay_for_is_its_own_overlap`
+    /// looks like the missing one and is not - it recomputes `CROSSOVER_DEG.min(overlap)`
+    /// beside the code instead of calling it, so it would pass a build whose
+    /// `afforded` did anything at all.
+    ///
+    /// **What it asserts.** Three cameras through [`Reframe::new`], which is
+    /// the only door `afforded` has, reading the answer back off the block the
+    /// shader is handed:
+    ///
+    /// - the X4 Air fixture, roomy at 14.44, draws the ask;
+    /// - an X2-class camera at 9.18 draws the ask **as well**, which is the
+    ///   disclosed picture change of this merge (the ONE X2 went from 3.94 to
+    ///   8.00) and is why the corpus alone cannot bind the clamp;
+    /// - a camera at 7.43, narrower than the ask, draws **7.43** and not 8.
+    ///
+    /// The third is the one that binds, and it is written as an equality
+    /// against the camera's own measured overlap rather than against a
+    /// constant, so a build that clamps to something else - or to nothing -
+    /// fails here.
+    #[test]
+    fn a_camera_narrower_than_the_ask_draws_what_it_can_pay_for() {
+        let asked = CROSSOVER_DEG;
+        for (name, reframe, overlap, draws) in [
+            (
+                "the X4 Air fixture",
+                fixture(Camera::default()),
+                14.44f32,
+                asked,
+            ),
+            ("an X2-class camera", cropped(X2_CLASS), 9.18, asked),
+            ("a camera under the ask", cropped(UNDER_THE_ASK), 7.43, 7.43),
+        ] {
+            let measured = reframe.overlap().expect("two lenses").to_degrees();
+            assert!(
+                (measured - overlap).abs() < 0.01,
+                "{name} overlaps by {measured:.4} and not the {overlap} this fixture is here to \
+                 stand for",
+            );
+            let width = reframe.handover_width().to_degrees();
+            assert!(
+                (width - draws).abs() < 0.01,
+                "{name} overlaps by {measured:.2} and draws {width:.4}, not {draws}",
+            );
+            // And the clamp is the one that chose it: the width is the smaller
+            // of the two, whichever that is on this camera.
+            assert!(
+                (width - asked.min(measured)).abs() < 0.01,
+                "{name} draws {width:.4}, which is neither the {asked} asked for nor the \
+                 {measured:.4} it overlaps by",
+            );
+        }
+        // The negative control, and the whole reason the third camera is here:
+        // with the clamp deleted, `afforded` would be the ask alone, and that
+        // is a different answer on exactly one of the three.
+        assert!(
+            cropped(UNDER_THE_ASK).handover_width().to_degrees() < asked - 0.5,
+            "the narrow camera draws the whole ask, so deleting the clamp would still pass",
+        );
+    }
+
+    /// The shifts the safety sweep is run at: the rail both ways, three
+    /// quarters of it both ways, and none.
+    fn shifts(allowance: f32) -> [f32; 5] {
+        [
+            -allowance,
+            -0.75 * allowance,
+            0.0,
+            0.75 * allowance,
+            allowance,
+        ]
+    }
+
+    /// Lens 1's delivered weight and whether the pair covers the ray at all:
+    /// what the fragment shader is handed, after the coverage depth and the
+    /// renormalization ([`claim`]).
+    fn delivered(reframe: &Reframe, ray: [f32; 3]) -> (f32, f32) {
+        let weights = reframe.blend(ray).weights;
+        (weights[0] + weights[1], weights[1])
+    }
+
+    /// The same with the coverage depth broken to a hard in-or-out step, which
+    /// is the control for the cliff. Every other term is the shipped map's.
+    fn hard_edged(reframe: &Reframe, ray: [f32; 3]) -> (f32, f32) {
+        let reach = norm3(ray);
+        let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| reframe.axis_of(lens, ray));
+        let front = reframe.handover(axis, reach, reframe.crossover);
+        let mut weights = [0.0; MAX_LENSES];
+        for (lens, weight) in weights.iter_mut().enumerate().take(2) {
+            let share = match lens {
+                0 => front,
+                _ => 1.0 - front,
+            };
+            let landing = reframe.project(lens, ray);
+            *weight = share * f32::from(u8::from(landing.inside));
+        }
+        let total: f32 = weights.iter().sum();
+        match total > 0.0 {
+            true => (1.0, weights[1] / total),
+            false => (0.0, 0.0),
+        }
+    }
+
+    /// Walks one azimuth across the whole seam and past both lenses' rims,
+    /// returning the smallest coverage the pair ever showed and the largest
+    /// step the weight took in a hundredth of a degree.
+    fn walked(
+        reframe: &Reframe,
+        phi: f32,
+        read: fn(&Reframe, [f32; 3]) -> (f32, f32),
+    ) -> (f32, f32) {
+        let (mut lowest, mut step, mut previous) = (f32::INFINITY, 0.0f32, None::<f32>);
+        for probe in 0..=2600 {
+            let theta = 90.0 + (-13.0 + probe as f32 * 0.01);
+            let (sum, weight) = read(reframe, direction(theta, phi));
+            lowest = lowest.min(sum);
+            if let Some(before) = previous {
+                step = step.max((weight - before).abs());
+            }
+            previous = Some(weight);
+        }
+        (lowest, step)
     }
 
     /// Issue #10's pre-test, and the only property it has to have: what it
@@ -3584,7 +4460,7 @@ pub(crate) mod tests {
             norm3(ray),
             // No band and no reading, so the width is the floor, which is the
             // width this test was written against.
-            reframe.crossover_at(0.0),
+            reframe.handover_width(),
         );
         let mut weights: [f32; MAX_LENSES] =
             std::array::from_fn(|lens| match lens < reframe.lens_count as usize {
@@ -3959,7 +4835,11 @@ pub(crate) mod tests {
 
     /// 90 deg/s, a brisk but ordinary roll, across the X4 Air's 15.883 ms
     /// readout: 1.43 degrees from the first row of the sensor to the last.
-    const READOUT_TURN: f64 = 90.0 * 0.015_883 * std::f64::consts::PI / 180.0;
+    ///
+    /// `pub(crate)` because [`crate::twin`]'s fixture rolls at the same rate,
+    /// and one number with one derivation is better than the same number
+    /// written twice.
+    pub(crate) const READOUT_TURN: f64 = 90.0 * 0.015_883 * std::f64::consts::PI / 180.0;
 
     /// The whole of issue #9 as one analytic prediction: a camera rolling
     /// about a lens's own axis smears that lens's picture round the axis, by
@@ -4373,6 +5253,570 @@ pub(crate) mod tests {
         // picture rather than refuse a pipeline.
         assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
         assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
+        // The seam anchor's one number took the FIRST of the three padding
+        // words the table's alignment already needed, rather than being
+        // appended: the block is the size it was and the table has not moved,
+        // which is what the two assertions above would otherwise have to be
+        // rewritten to say.
+        assert_eq!(
+            std::mem::offset_of!(Reframe, handover_shift),
+            std::mem::offset_of!(Reframe, crossover) + 4
+        );
+        assert_eq!(std::mem::size_of_val(&Reframe::blank(1.0, false)._pad), 8);
+    }
+
+    /// **The anchor's null.** A map nobody has held a line on draws the
+    /// picture the geometry draws, and the term that carries the anchor is a
+    /// literal zero.
+    ///
+    /// This is what `KJERAG_ANCHOR=off` gets, what every instrument gets, what
+    /// every test above gets, and what the blank pane gets. It matters because
+    /// the offset is an ADDED term inside [`crossover`] rather than a factor
+    /// folded into the quotient beside it: at zero the arithmetic is the
+    /// arithmetic that was there before the anchor existed, bit for bit, and
+    /// the whole mechanism is provably absent from every picture that does not
+    /// ask for it.
+    #[test]
+    fn a_map_with_no_line_held_on_it_draws_the_geometry() {
+        let reframe = fixture(Camera::default());
+        assert_eq!(reframe.handover_shift, 0.0);
+        assert_eq!(Reframe::blank(1.0, false).handover_shift, 0.0);
+        // `with_shift(0.0)` is the identity on the whole block, so a caller
+        // that runs the follow and is handed a zero is the caller that does
+        // not run it.
+        assert_eq!(reframe.with_shift(0.0).bytes(), reframe.bytes());
+        // And the shift is a real term rather than a decoration: it puts the
+        // 50/50 line exactly where a ray whose `across_seam` is minus the
+        // shift sits, which is the inverse [`SeamAnchor::hold`] relies on.
+        // Read off the arithmetic and not off a rendered weight, because a
+        // delivered weight is the share times each lens's own coverage depth
+        // and renormalized after ([`claim`]), so the crossing of the WEIGHTS
+        // is a different question from where the handover put its line.
+        let band = reframe.handover_width();
+        let reach = 1.0f32;
+        for asked_deg in [-2.0f32, -0.4, 0.4, 2.0] {
+            let shift = asked_deg.to_radians();
+            // A ray at `across_seam = -shift` has `apart = 2 * reach * -shift`.
+            let apart = 2.0 * reach * -shift;
+            near(crossover(apart, reach, band, shift), 0.5, 1e-6);
+            // And it is the same line the geometry alone would have put at
+            // that offset, moved by exactly the shift: nothing else in the
+            // ramp changed.
+            near(
+                crossover(apart, reach, band, shift),
+                crossover(0.0, reach, band, 0.0),
+                1e-6,
+            );
+        }
+    }
+
+    /// **THE UPDATE LAW, and the four properties the owner's ruling is.**
+    /// Checked on the arithmetic itself rather than on a picture.
+    ///
+    /// *"Every now and then it glitches. We need it to be smooth, that is a
+    /// requirement."* A glitch is a velocity that changes in one frame, and
+    /// the three ways one frame's arithmetic can do that are a jump, an
+    /// overshoot and a threshold. None of them is reachable here, and this is
+    /// why.
+    #[test]
+    fn the_follow_is_smooth_and_cannot_overshoot() {
+        let allowance = 4f32.to_radians();
+        let step = 1.0 / 30.0;
+
+        // A redraw with no new frame behind it is exactly the identity, so the
+        // follow is a length of film and not a count of redraws, and running
+        // it twice on one frame is running it once.
+        for degrees in [-4.0, -1.0, 0.0, 0.7, 3.9, 12.0] {
+            let target = (degrees as f32).to_radians();
+            assert_eq!(SeamAnchor::follow(target, 0.0, allowance).0, target);
+        }
+
+        // It never overshoots and never changes sign, whatever the step: the
+        // answer is always between the target and zero. A whole second of film
+        // charged at once is well past anything a redraw can deliver.
+        for degrees in [-30.0, -4.0, -2.5, -0.1, 0.1, 2.5, 4.0, 30.0] {
+            let target = (degrees as f32).to_radians();
+            for step in [0.001, 1.0 / 60.0, step, 0.25, 1.0] {
+                let (delta, _) = SeamAnchor::follow(target, step, allowance);
+                assert!(
+                    delta.abs() <= target.abs() && delta.signum() == target.signum(),
+                    "{degrees} deg over {step} s left the line at {} deg",
+                    delta.to_degrees(),
+                );
+            }
+        }
+
+        // Standing still costs the line nothing. At a quarter of the allowance
+        // - twice the shake this corpus puts on a parked airframe - one frame
+        // moves the drawn line by under a ten-thousandth of a degree.
+        let (delta, _) = SeamAnchor::follow(1f32.to_radians(), step, allowance);
+        assert!(
+            (1.0 - delta.to_degrees()) < 1e-4,
+            "a still camera moved the line by {} deg in one frame",
+            1.0 - delta.to_degrees(),
+        );
+
+        // And there is no knee to click on: over the whole range the drawn
+        // offset is a monotone, smooth function of the target, so a first
+        // difference of it can never change abruptly. Sampled finely, no
+        // second difference is more than a hundredth of a degree.
+        let sample = |i: i32| {
+            SeamAnchor::follow((i as f32 * 0.01).to_radians(), step, allowance)
+                .0
+                .to_degrees()
+        };
+        let mut roughest = 0.0f32;
+        for i in -600..600 {
+            let (back, here, next) = (sample(i - 1), sample(i), sample(i + 1));
+            assert!(next >= here, "the follow is not monotone at {i}");
+            roughest = roughest.max((next - 2.0 * here + back).abs());
+        }
+        assert!(
+            roughest < 0.01,
+            "the follow has a knee worth {roughest} in it"
+        );
+    }
+
+    /// The clamp is a guard and not the mechanism: the line stays inside the
+    /// fade it lives in, however hard the geometry pulls.
+    #[test]
+    fn the_held_line_stays_inside_the_fade() {
+        let reframe = fixture(Camera::default());
+        let allowance = 0.5 * reframe.handover_width();
+        for asked in [-10.0f32, -0.1, 0.0, 0.1, 10.0] {
+            let shift = reframe.with_shift(asked.to_radians()).handover_shift;
+            assert!(
+                shift.abs() <= allowance + 1e-9,
+                "a shift of {asked} deg put the line {} deg out of a {} deg allowance",
+                shift.to_degrees(),
+                allowance.to_degrees(),
+            );
+        }
+        // And a sustained drift approaches the allowance without reaching it,
+        // as an eleventh root of the drift rate: 25 times the drift buys about
+        // a third more offset, which is why no aircraft manoeuvre makes the
+        // clamp above the thing that decides where the line is drawn.
+        let settled = |drift_dps: f32| {
+            let mut delta = 0.0f32;
+            for _ in 0..600 {
+                let target = delta + drift_dps.to_radians() / 30.0;
+                delta = SeamAnchor::follow(target, 1.0 / 30.0, allowance).0;
+            }
+            delta.to_degrees()
+        };
+        let (slow, fast) = (settled(1.0), settled(25.0));
+        assert!(slow < fast, "a faster drift held less offset");
+        assert!(
+            fast < allowance.to_degrees(),
+            "a 25 deg/s drift railed the line at {fast}",
+        );
+        assert!(
+            fast < 1.4 * slow,
+            "25 times the drift bought {:.2}x the offset, not the eleventh root",
+            fast / slow,
+        );
+    }
+
+    /// **The follow has a ceiling, and the film's frame rate is what sets
+    /// it.** The characteristic behind `the_held_line_stays_inside_the_fade`'s
+    /// "approaches and does not reach", written down rather than left implied.
+    ///
+    /// The eleventh root the law is described by is the continuum answer, and
+    /// the law is charged once per frame: the geometry's sweep arrives as a
+    /// jump and the leak is then read at a gain taken AFTER that jump, which
+    /// over-charges the leak by more the coarser the step. Letting the drift
+    /// run away isolates it, because the target then dominates and the answer
+    /// stops depending on the drift at all:
+    ///
+    /// ```text
+    /// delta -> allowance / (POWER * RATE * dt)^(1 / POWER)
+    /// ```
+    ///
+    /// **Why it is worth a test of its own.** `POWER * RATE` is 100 per second,
+    /// so the ceiling equals the allowance at exactly 100 fps, and both cameras
+    /// in the corpus shoot 120 fps modes. Under 100 fps the follow is what
+    /// decides where the line sits and `Reframe::with_shift`'s clamp is
+    /// unreachable; over it the clamp is the rail. That is the whole reason
+    /// [`SeamAnchor::hold`] clamps before it places its anchor, and this test
+    /// is what says the 30 fps side of the line is the side every frame the
+    /// owner has judged sits on.
+    #[test]
+    fn the_follow_has_a_ceiling_and_the_frame_rate_sets_it() {
+        let allowance = 4f32.to_radians();
+        let power = ANCHOR_FOLLOW_POWER as f32;
+        // The table in `SeamAnchor::follow`'s doc, and the closed form it is
+        // read off, checked against the law itself at a drift it can never
+        // catch up with.
+        for (fps, ceiling) in [
+            (24.0f32, 3.47f32),
+            (30.0, 3.55),
+            (60.0, 3.80),
+            (100.0, 4.00),
+            (120.0, 4.07),
+            (240.0, 4.37),
+        ] {
+            let step = 1.0 / fps;
+            let closed_form =
+                allowance.to_degrees() / (power * ANCHOR_FOLLOW_RATE * step).powf(1.0 / power);
+            near(closed_form, ceiling, 0.005);
+            // The law itself, asked for an offset a hundred times the
+            // allowance: what comes back is the ceiling and not the ask.
+            let reached = SeamAnchor::follow(100.0 * allowance, step, allowance)
+                .0
+                .to_degrees();
+            near(reached, ceiling, 0.01);
+            // And a runaway drift settles there rather than climbing past it.
+            let mut delta = 0.0f32;
+            for _ in 0..400 {
+                delta = SeamAnchor::follow(delta + 40f32.to_radians(), step, allowance).0;
+            }
+            assert!(
+                delta.to_degrees() <= ceiling + 0.01,
+                "at {fps} fps a runaway drift held {} deg against a ceiling of {ceiling}",
+                delta.to_degrees(),
+            );
+        }
+        // The consequence, stated as the inequality it is: film's own rate
+        // leaves the map's clamp unreachable, and a 120 fps mode does not.
+        let ceiling = |fps: f32| {
+            allowance.to_degrees() / (power * ANCHOR_FOLLOW_RATE / fps).powf(1.0 / power)
+        };
+        assert!(
+            ceiling(30.0) < allowance.to_degrees(),
+            "the 30 fps ceiling reaches the allowance, so the arm the owner approved could rail",
+        );
+        assert!(
+            ceiling(120.0) > allowance.to_degrees(),
+            "the 120 fps ceiling is under the allowance, so the clamp in `hold` guards nothing",
+        );
+        // The crossing is exactly where `POWER * RATE * dt` is one, which is
+        // the only place the root can be.
+        near(
+            ceiling(power * ANCHOR_FOLLOW_RATE),
+            allowance.to_degrees(),
+            1e-4,
+        );
+    }
+
+    /// **The anchor records the line the picture actually draws.**
+    ///
+    /// [`Reframe::with_shift`] clamps on the way to the shader, so an offset
+    /// past the allowance is DRAWN at the allowance. Until 2026-08-09
+    /// [`SeamAnchor::hold`] placed its world anchor on the unclamped value, so
+    /// whenever the clamp fired the state said the line stood somewhere the
+    /// picture had not put it, and the next redraw's target was read off that
+    /// fiction. It is a standing bias and not a transient: the error is re-made
+    /// every frame the clamp fires.
+    ///
+    /// The read-back is `hold` itself at a step of zero, where the law is the
+    /// identity, so what comes back as the target is precisely where the state
+    /// says the line is standing. Under the fix it is the drawn offset.
+    ///
+    /// **The control is the frame rate.** At 30 fps the follow's own ceiling is
+    /// 3.55 of the 4.00 degrees allowed, so the clamp cannot fire and this test
+    /// would pass on the broken code as well - which is exactly why the arm the
+    /// owner approved is byte-identical either way. The step here is a 240 fps
+    /// one, where the ceiling is 4.36, and the first assertion is that the
+    /// unclamped law really does overshoot at it.
+    #[test]
+    fn the_held_line_is_placed_where_the_picture_draws_it() {
+        let reframe = fixture(Camera::default());
+        let allowance = 0.5 * reframe.handover_width();
+        let step = 1.0f32 / 240.0;
+
+        // The control: at this step the law itself goes past the allowance, so
+        // there is something for the clamp to catch.
+        let raw = SeamAnchor::follow(100.0 * allowance, step, allowance).0;
+        assert!(
+            raw > allowance,
+            "the follow stops at {} deg of a {} deg allowance on its own, so this test is empty",
+            raw.to_degrees(),
+            allowance.to_degrees(),
+        );
+
+        let was = standing(&reframe, 30.0, 10.0);
+        let anchor = SeamAnchor::hold(Some(was), &reframe, Held::default(), 10.0 + f64::from(step));
+        assert!(
+            anchor.shift().abs() <= allowance,
+            "the anchor held {} deg of a {} deg allowance",
+            anchor.shift().to_degrees(),
+            allowance.to_degrees(),
+        );
+        // The shader is handed what the anchor says, untouched: the map's own
+        // clamp is a guard behind this one and never a second opinion.
+        assert_eq!(
+            reframe.with_shift(anchor.shift()).handover_shift,
+            anchor.shift(),
+        );
+        // And the world anchor stands on the drawn line: read back through the
+        // same pose at a step of nothing, the target IS the drawn offset.
+        let again = SeamAnchor::hold(Some(anchor), &reframe, Held::default(), anchor.at);
+        near(again.target, anchor.shift(), 1e-6);
+        near(again.shift(), anchor.shift(), 1e-6);
+    }
+
+    /// **A seek starts the hold again, whichever way the film jumped.**
+    ///
+    /// The step used to be `(at - was.at).clamp(0.0, CAP)`, so a backward seek
+    /// came out as a step of zero - and a step of zero is the identity, which
+    /// means the line was pinned to whatever the target said on that frame. The
+    /// target after a seek is `was.on` read through a pose from a different
+    /// part of the flight and can be a quadrant wide, so the line slammed to
+    /// the rail on the seek frame and walked back over the next second: a lurch
+    /// laid over the one frame where every pixel already changed.
+    ///
+    /// **The forward half of that was still there until 2026-08-09**, and this
+    /// test now carries it. A forward seek took the ordinary arm with the step
+    /// capped, which charges the follow with the same stale target - and the
+    /// size of that is a closed form rather than an accident. The follow's own
+    /// ceiling at a step of `dt` is `allowance / (POWER * RATE * dt)^(1/POWER)`
+    /// (see [`Self::follow`] and the frame-rate rail), so at the capped step of
+    /// 0.25 s **every** forward seek, of any length, drew the line **2.90 of
+    /// the 4.00 degrees** on the seek frame and then walked it back: 72 percent
+    /// of the whole allowance, laid over the one frame where the picture had
+    /// already changed. That is the identical defect the backward arm was
+    /// fixed for, and the argument it was given - a seek is already a
+    /// discontinuity in every pixel - never said which way the clock had moved.
+    /// So what separates a seek from a redraw is the SIZE of the step and not
+    /// its sign ([`ANCHOR_SEEK_SECS`]).
+    ///
+    /// The four cases, and the middle two are the fix:
+    ///
+    /// - film moving on: the follow runs, and the line is where the law puts
+    ///   it;
+    /// - film going backwards: the anchor is placed afresh on the geometry,
+    ///   which is where the line would be if the file had been opened there;
+    /// - **film jumping forward past [`ANCHOR_SEEK_SECS`]**: the same;
+    /// - **the same instant twice**: NOT a seek. It is a redraw with no new
+    ///   frame behind it, it stays in the second arm, and the law at a step of
+    ///   zero is the identity, which is the property that lets a 60 Hz window
+    ///   and an offscreen instrument at one draw per frame hold the same line.
+    #[test]
+    fn a_seek_starts_the_hold_again_whichever_way_the_film_jumped() {
+        let reframe = fixture(Camera::default());
+        let was = standing(&reframe, 3.0, 10.0);
+        let held = |at| SeamAnchor::hold(Some(was), &reframe, Held::default(), at);
+
+        let onward = held(10.0 + 1.0 / 30.0);
+        assert!(
+            onward.shift().to_degrees() > 2.0,
+            "the follow gave up {} of a 3.00 degree hold in one frame",
+            onward.shift().to_degrees(),
+        );
+
+        // Backward, which is what the first half of this fix caught.
+        let back = held(4.0);
+        assert_eq!(
+            back.shift(),
+            0.0,
+            "a seek back to 4.0 s left the line {} deg off the geometry",
+            back.shift().to_degrees(),
+        );
+        assert_eq!(back.target, 0.0);
+
+        // Forward, which is what the second half of it caught. A seek moves
+        // the body as well as the clock, so the frame it lands on is held at a
+        // pose from another part of the flight, and `was.on` read back through
+        // THAT pose is the target the old code charged the follow with.
+        let elsewhere = Held {
+            body_from_world: Quat::from_rotation_vector([0.0, 0.9, 0.0]).conjugate(),
+            ..Held::default()
+        };
+        let forward = SeamAnchor::hold(Some(was), &reframe, elsewhere, 16.0);
+        assert_eq!(
+            forward.shift(),
+            0.0,
+            "a seek on to 16.0 s left the line {} deg off the geometry",
+            forward.shift().to_degrees(),
+        );
+        assert_eq!(forward.target, 0.0);
+
+        // And what that was worth, by running the arithmetic the old arm ran:
+        // the stale target at the step it capped to. The answer is the
+        // follow's own ceiling at that step - `allowance / (POWER * RATE *
+        // dt)^(1 / POWER)`, which is 2.90 of these 4.00 degrees at dt = 0.25 -
+        // so it is the same 2.90 for a forward seek of any length, and it is
+        // 72 percent of the whole allowance delivered on one frame.
+        let allowance = 0.5 * reframe.handover_width();
+        let stale = -reframe.across_seam(
+            reframe.view_ray_from_body(
+                elsewhere
+                    .body_from_world
+                    .rotate(was.on)
+                    .map(|axis| axis as f32),
+            ),
+        );
+        assert!(
+            stale.abs() > allowance,
+            "the stale target is only {} deg, so this is not the case the fix is about",
+            stale.to_degrees(),
+        );
+        let drawn = SeamAnchor::follow(stale, ANCHOR_SEEK_SECS as f32, allowance)
+            .0
+            .clamp(-allowance, allowance);
+        near(drawn.to_degrees(), 2.90, 0.01);
+        near(
+            drawn.to_degrees(),
+            (allowance
+                / (f32::from(ANCHOR_FOLLOW_POWER as i16)
+                    * ANCHOR_FOLLOW_RATE
+                    * ANCHOR_SEEK_SECS as f32)
+                    .powf(1.0 / ANCHOR_FOLLOW_POWER as f32))
+            .to_degrees(),
+            0.01,
+        );
+
+        // The two boundaries of the arm, so the constant is pinned and not
+        // decorative: a step of exactly `ANCHOR_SEEK_SECS` still follows, and
+        // anything past it does not.
+        assert_ne!(held(10.0 + ANCHOR_SEEK_SECS).target, 0.0);
+        assert_eq!(held(10.0 + ANCHOR_SEEK_SECS + 1e-6).target, 0.0);
+
+        // And the same instant twice is not a seek in either direction.
+        let redrawn = held(10.0);
+        near(redrawn.shift(), was.delta, 1e-6);
+    }
+
+    /// **What the held line delivers is a fraction of what it commands, and the
+    /// fraction is the camera's.** The honesty this PR's own prose needed
+    /// (2026-08-09 review).
+    ///
+    /// The anchor holds the SHARE's 50/50 line: [`crossover`] is a ramp in
+    /// `across_seam - shift`, so the whole share profile translates rigidly by
+    /// the shift and the anchor's arithmetic is exact about it. **The picture
+    /// draws the WEIGHTS' crossing**, which is that share times each lens's own
+    /// coverage depth, renormalized ([`claim`]) - and the depths are fixed to
+    /// the lenses and do not translate. The crossing of the delivered weights
+    /// therefore moves by less than the shift, and the shortfall is the
+    /// camera's own overlap against the band it hands over on: a linear taper
+    /// predicts `overlap / (overlap + band)`, which is an upper bound the real
+    /// taper does not reach.
+    ///
+    /// **Measured here, mean over 24 azimuths, 2026-08-09:**
+    ///
+    /// | | X4 Air fixture | X2-class |
+    /// | --- | ---: | ---: |
+    /// | overlap / band, deg | 14.44 / 8.00 | 9.18 / 8.00 |
+    /// | `overlap / (overlap + band)` | 0.643 | 0.534 |
+    /// | **delivered per commanded degree** | **0.617** | **0.510** |
+    /// | the same, spread over the 24 azimuths | 0.610 to 0.624 | 0.499 to 0.522 |
+    /// | drawn offset at a 4.00 degree hold, deg | 2.54 | 2.13 |
+    ///
+    /// So the anchor removes about **62 percent** of the seam's crawl on the
+    /// camera the owner judged it on and about **51 percent** on the narrowest
+    /// one, not all of it. flat6 behaved identically - this is a property of
+    /// the fusion the owner approved and not of anything this merge changed -
+    /// and it is recorded in docs/research/studio-parity.md 6 and in the PR's
+    /// accepted tradeoffs rather than fixed here.
+    ///
+    /// The zero-shift crossing is not exactly on the seam either (0.07 degrees
+    /// on the fixture), because the two lenses are not the same lens: their
+    /// depths differ slightly at the seam. The gain is read as a SLOPE across
+    /// two shifts so that this standing offset cancels out of it.
+    #[test]
+    fn the_held_line_delivers_a_fraction_of_the_hold_it_commands() {
+        for (name, reframe, predicted, gain, drawn) in [
+            (
+                "the X4 Air fixture",
+                fixture(Camera::default()),
+                0.643f32,
+                0.617f32,
+                2.54f32,
+            ),
+            ("an X2-class camera", cropped(X2_CLASS), 0.534, 0.510, 2.13),
+        ] {
+            let overlap = reframe.overlap().expect("two lenses").to_degrees();
+            let band = reframe.handover_width().to_degrees();
+            near(overlap / (overlap + band), predicted, 0.002);
+
+            let allowance = 0.5 * band;
+            let (mut mean, mut lowest, mut highest) = (0.0f32, f32::INFINITY, 0.0f32);
+            let mut rail = 0.0f32;
+            let azimuths = (0..360).step_by(15);
+            let count = azimuths.clone().count() as f32;
+            for phi in azimuths {
+                let phi = phi as f32;
+                let still = crossing(&reframe.with_shift(0.0), phi);
+                let held = crossing(&reframe.with_shift(allowance.to_radians()), phi);
+                let slope = (held - still) / allowance;
+                mean += slope / count;
+                lowest = lowest.min(slope);
+                highest = highest.max(slope);
+                rail += held / count;
+            }
+            assert!(
+                (mean - gain).abs() < 0.01,
+                "{name} delivers {mean:.4} of every degree it is asked to hold, not {gain}",
+            );
+            assert!(
+                highest - lowest < 0.03,
+                "{name}'s gain runs {lowest:.4} to {highest:.4} round the ring, so a mean of it \
+                 says nothing",
+            );
+            assert!(
+                (rail - drawn).abs() < 0.02,
+                "{name} draws its line {rail:.4} deg off the seam at the {allowance:.2} degree \
+                 rail, not {drawn}",
+            );
+            // And the finding, as an inequality: the delivered line moves by
+            // materially less than the line the anchor is holding, so some of
+            // the crawl survives the hold.
+            assert!(
+                mean < 0.7,
+                "{name} delivers {mean:.4} of the hold, which is close enough to all of it that \
+                 the disclosure this test exists for would be wrong",
+            );
+            assert!(
+                mean < overlap / (overlap + band),
+                "{name} delivers more than the linear-taper bound, which cannot happen",
+            );
+        }
+    }
+
+    /// Where the DELIVERED weights cross, in degrees past the seam, at one
+    /// azimuth. Bisected rather than swept: the two weights are monotone
+    /// against each other across the handover, and a sweep fine enough to place
+    /// the crossing to a thousandth is a hundred times the work.
+    fn crossing(reframe: &Reframe, phi: f32) -> f32 {
+        let apart = |theta: f32| {
+            let weights = reframe.blend(direction(theta, phi)).weights;
+            weights[0] - weights[1]
+        };
+        let (mut lens_zero, mut lens_one) = (80.0f32, 100.0f32);
+        assert!(
+            apart(lens_zero) > 0.0 && apart(lens_one) < 0.0,
+            "the handover does not run from lens 0 to lens 1 across {lens_zero} to {lens_one}",
+        );
+        for _ in 0..40 {
+            let middle = 0.5 * (lens_zero + lens_one);
+            match apart(middle) > 0.0 {
+                true => lens_zero = middle,
+                false => lens_one = middle,
+            }
+        }
+        0.5 * (lens_zero + lens_one) - 90.0
+    }
+
+    /// A state that says the drawn line is standing `offset_deg` off the seam
+    /// at `at` seconds, on the piece of world content it would be standing on.
+    ///
+    /// [`SeamAnchor::hold`] places its own anchor exactly this way
+    /// ([`Reframe::seam_ray_at`] is the inverse of [`Reframe::across_seam`]),
+    /// and with the horizon at rest the world frame and the body frame are the
+    /// same one, so this is the state a run would have arrived at rather than a
+    /// state invented beside the mechanism.
+    fn standing(reframe: &Reframe, offset_deg: f32, at: f64) -> SeamAnchor {
+        let delta = offset_deg.to_radians();
+        let centre = reframe.seam_nearest([0.0, 0.0, 1.0]);
+        SeamAnchor {
+            on: reframe
+                .body_ray(reframe.seam_ray_at(centre, -delta))
+                .map(f64::from),
+            delta,
+            at,
+            target: delta,
+            gain: 0.0,
+        }
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {
