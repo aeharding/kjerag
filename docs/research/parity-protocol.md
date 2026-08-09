@@ -456,8 +456,11 @@ are frames of somebody's real flights and this repo is public.
 Two exports of `VID_20260501_183417_00_002.insv`, made with **Stitching
 Optimization OFF, Direction Lock OFF, Chromatic Calibration ON**, both 3840 x
 2160 at 30 fps and 176.6 s long, both told **FOV 60, Distortion 0, roll 0**.
-Run by `scripts/research/real.sh` at `a0366bd` and the reported answer at
-`c8c8e7f`; every output quoted is in gitignored `scratch/real/`.
+The pairing, the registration table and the swap control were run at
+`a0366bd`; the plant matrix and the reported answer were run at `6594dce`,
+which adds the radial report and leaves every fitted number of the plant at
+640 px identical to four decimals. Every output quoted is in gitignored
+`scratch/real/`.
 
 Nothing in sections 1 to 9 was changed after the data arrived. What follows is
 that criterion applied.
