@@ -44,7 +44,7 @@ use cosmic::cosmic_config;
 use cosmic::dialog::file_chooser::{self, FileFilter};
 use cosmic::iced::event::{self, Event};
 use cosmic::iced::futures::channel::oneshot;
-use cosmic::iced::keyboard::key::{Key, Physical};
+use cosmic::iced::keyboard::key::{Key, Named, Physical};
 use cosmic::iced::keyboard::{Event as KeyEvent, Modifiers};
 use cosmic::iced::mouse::Event as MouseEvent;
 use cosmic::iced::runtime::clipboard;
@@ -60,6 +60,7 @@ use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executo
 use kjerag_render::capture_set::{self, Missing};
 use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, Stall, Stats};
 
+use crate::ab::{self, Session};
 use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
 use crate::fail::{Alert, Failure};
@@ -118,15 +119,38 @@ const TOASTS: usize = 5;
 /// Width of the volume popup (cosmic-player `src/main.rs:1924`).
 const VOLUME_POPUP: f32 = 240.0;
 
+/// How often a running A/B session looks at the clock to see whether its
+/// segment has run out.
+///
+/// Its own timer rather than [`CONTROLS_POLL`]'s, because that one stops when
+/// the control row hides and the loop may not. A tenth of a second is how
+/// late the turn can be, against a segment of seconds; below it the tick
+/// would be finer than the seek it triggers, which lands a frame about
+/// 240 ms after it is asked for (`Player::seek`). It exists only while a
+/// session does, so no shipped run has this timer in it.
+const AB_POLL: Duration = Duration::from_millis(100);
+
 /// Runs the shell.
-pub fn run(input: Option<PathBuf>, at: Option<Framing>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    input: Option<PathBuf>,
+    at: Option<Framing>,
+    ab: Option<Session>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let stored = Stored::load(App::APP_ID);
     let settings = Settings::default()
         .size_limits(Limits::NONE.min_width(360.0).min_height(240.0))
         // The window opens in the configured theme rather than flashing the
         // default one first (cosmic-player `src/main.rs:154-155`).
         .theme(stored.config.app_theme.theme());
-    cosmic::app::run::<App>(settings, Flags { stored, input, at })?;
+    cosmic::app::run::<App>(
+        settings,
+        Flags {
+            stored,
+            input,
+            at,
+            ab,
+        },
+    )?;
     Ok(())
 }
 
@@ -135,6 +159,29 @@ pub struct Flags {
     input: Option<PathBuf>,
     /// Where to land, when the command line named a view as well as a file.
     at: Option<Framing>,
+    /// The staged blind A/B this run is, if it is one (`--ab-session`).
+    ab: Option<Session>,
+}
+
+/// A blind A/B session in progress: which trial, which arm is on screen, and
+/// what the owner has done to get there.
+///
+/// The counts are the soft confidence the answer is read with. A trial voted
+/// on after nine loops and twenty flips is a different answer from one voted
+/// on after one loop and no flips, and neither of them says so out loud.
+struct Running {
+    session: Session,
+    /// Index into [`Session::trials`].
+    trial: usize,
+    /// Which **position** of this trial is on screen, from 0. Never a name:
+    /// the shell does not know which arm this is and is not the place that
+    /// finds out (`crate::ab`).
+    arm: usize,
+    loops: u32,
+    swaps: u32,
+    /// When this trial went up, which is what the results file's seconds are
+    /// measured from.
+    began: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -153,6 +200,17 @@ pub enum Message {
     /// It was let go, which is when the setting is written. A cosmic-config
     /// entry per pointer move would be a file write per pointer move.
     AudioVolumeRelease,
+    /// Look at the arm sitting at this **position** of the running trial,
+    /// counted from 0. The whole of what a research arm costs: the knobs it
+    /// names are stored, and the next redraw is drawn with them
+    /// (`crate::ab::wear`).
+    AbArm(usize),
+    /// Answer the running trial with the position on screen, or with `None`
+    /// for cannot tell, and go on to the next one.
+    AbVote(Option<usize>),
+    /// Has the segment run out? [`AB_POLL`] asks, because there is no
+    /// per-frame message to ask on and no end-of-segment event to wait for.
+    AbTick,
     Config(Config),
     ConfigState(ConfigState),
     /// A drag and drop landed. `None` is a payload that could not be read.
@@ -279,6 +337,10 @@ pub struct App {
     /// The counters as of the last report, so each line covers its own five
     /// seconds instead of the whole run.
     counted: Stats,
+    /// The staged blind A/B this run is, if it is one. `None` in every
+    /// shipped run, and every branch below that reads it is a branch a
+    /// shipped run does not take.
+    ab: Option<Running>,
 }
 
 /// A file on screen.
@@ -461,7 +523,23 @@ impl cosmic::Application for App {
             fullscreen: false,
             reported: Instant::now(),
             counted: Stats::default(),
+            ab: flags.ab.map(|session| Running {
+                session,
+                trial: 0,
+                arm: 0,
+                loops: 0,
+                swaps: 0,
+                began: Instant::now(),
+            }),
         };
+
+        // A session says what to open and where to look, so it opens its own
+        // first trial rather than the command line's file, which
+        // `args::parse` refuses to be given alongside one.
+        if app.ab.is_some() {
+            let task = app.ab_enter(0);
+            return (app, task);
+        }
 
         let task = match flags.input {
             Some(path) => app.update(Message::FileLoad(path)),
@@ -586,7 +664,18 @@ impl cosmic::Application for App {
                 };
                 return window::set_mode(id, mode);
             }
+            Message::AbArm(position) => self.ab_wear(position),
+            Message::AbVote(vote) => return self.ab_answer(vote),
+            Message::AbTick => self.ab_loop(now),
             Message::Key(modifiers, physical, key) => {
+                // The session's keys first, and only while a session is
+                // running: a run without one never reaches this line, which
+                // is what keeps the player's own keys the player's.
+                if modifiers.is_empty()
+                    && let Some(message) = self.ab_pressed(&key)
+                {
+                    return self.update(message);
+                }
                 for (bind, action) in &self.key_binds {
                     if bind.matches(modifiers, &key, Some(&physical)) {
                         return self.update(action.message());
@@ -916,6 +1005,12 @@ impl cosmic::Application for App {
             if self.controls.shown {
                 sources.push(time::every(CONTROLS_POLL).map(|_| Message::Tick));
             }
+        }
+        // Not gated on playing: the segment can run out at the end of the
+        // file, which pauses, and a loop that stopped there would have to be
+        // restarted by hand.
+        if self.ab.is_some() {
+            sources.push(time::every(AB_POLL).map(|_| Message::AbTick));
         }
         Subscription::batch(sources)
     }
@@ -1373,6 +1468,169 @@ impl App {
         open.position = framing.at.min(open.duration);
         open.scene.seek(open.position, Accuracy::Exact);
         open.scene.nudge(Nudge::Point(framing.camera));
+    }
+
+    /// Put up one trial of a running session: its clip, its view, the top of
+    /// its loop, and the arm at position 1.
+    ///
+    /// The loop always starts at its own beginning rather than at the view
+    /// line's instant, so the first time round is the same stretch of film as
+    /// the tenth. The view line still names the moment the trial is about,
+    /// and `ab::Session::read` refuses one that sits outside the loop.
+    fn ab_enter(&mut self, index: usize) -> Task<Message> {
+        let Some(running) = &mut self.ab else {
+            return Task::none();
+        };
+        running.trial = index;
+        running.arm = 0;
+        running.loops = 0;
+        running.swaps = 0;
+        running.began = Instant::now();
+        let trial = &running.session.trials[index];
+        let (id, clip, from) = (trial.id.clone(), trial.clip.clone(), trial.from);
+        let arms = running.session.arms_at(index);
+        let top = Framing {
+            at: from,
+            ..trial.at
+        };
+        let opened = self.open.as_ref().is_some_and(|open| open.path == clip);
+        // The same clip twice running is one decode: reopening it would throw
+        // away the seam state the first trial warmed up and cost the seconds
+        // that warms it, for nothing.
+        let task = match opened {
+            true => Task::none(),
+            false => self.update(Message::FileLoad(clip)),
+        };
+        self.place(top);
+        if let Some(open) = &mut self.open {
+            open.scene.play();
+        }
+        self.ab_wear(0);
+        println!(
+            "ab:     trial {id}, {} of {}. {arms} arms: press 1 to {arms} to look, enter to \
+             answer with what is on screen, 0 for cannot tell",
+            index + 1,
+            self.ab
+                .as_ref()
+                .map_or(0, |running| running.session.trials.len()),
+        );
+        task
+    }
+
+    /// Hand the picture over to the arm at this position of the running
+    /// trial, and say what that cost.
+    ///
+    /// **The number is the whole swap.** Every knob an arm may name is
+    /// rebuilt into the uniform block every frame anyway (`crate::ab::KNOBS`,
+    /// [`kjerag_render::ask_handover`]), so this stores values and returns;
+    /// nothing is recompiled, no buffer is made, and the first frame drawn
+    /// after it is drawn the new way.
+    fn ab_wear(&mut self, position: usize) {
+        let (Some(running), Some(open)) = (&mut self.ab, &self.open) else {
+            return;
+        };
+        if position >= running.session.arms_at(running.trial) {
+            return;
+        }
+        if position != running.arm {
+            running.swaps += 1;
+        }
+        running.arm = position;
+        let began = Instant::now();
+        ab::wear(&running.session, running.trial, position, &open.scene);
+        println!(
+            "ab:     arm {}, applied in {:.3} ms",
+            position + 1,
+            began.elapsed().as_secs_f64() * 1e3
+        );
+    }
+
+    /// Turn the loop round when the segment has run out.
+    ///
+    /// A pause is honoured, because pausing to look is how this player is
+    /// used; the end of the file is not, because that is where a segment
+    /// asked for past the end lands and the loop has to survive it.
+    fn ab_loop(&mut self, now: Instant) {
+        let (Some(running), Some(open)) = (&mut self.ab, &mut self.open) else {
+            return;
+        };
+        let at = open.scene.position(now);
+        let paused = !open.scene.is_playing() && at < open.duration;
+        let trial = &running.session.trials[running.trial];
+        if paused || at < trial.to.min(open.duration) {
+            return;
+        }
+        running.loops += 1;
+        open.position = trial.from;
+        open.scene.seek(trial.from, Accuracy::Exact);
+        open.scene.play();
+    }
+
+    /// Write down the answer to the running trial and go on to the next one,
+    /// or end the session if that was the last.
+    ///
+    /// The vote is a position and the results file records a position. What
+    /// arm won is a question the key answers afterwards and this process
+    /// never asks.
+    fn ab_answer(&mut self, vote: Option<usize>) -> Task<Message> {
+        let Some(running) = &self.ab else {
+            return Task::none();
+        };
+        let trial = &running.session.trials[running.trial];
+        let answer = ab::Answer {
+            trial: trial.id.clone(),
+            vote: vote.map(|position| position + 1),
+            loops: running.loops,
+            swaps: running.swaps,
+            watched: running.began.elapsed(),
+        };
+        println!(
+            "ab:     {} answered {}, after {} loops and {} swaps",
+            answer.trial,
+            match answer.vote {
+                Some(position) => format!("arm {position}"),
+                None => "cannot tell".to_owned(),
+            },
+            answer.loops,
+            answer.swaps
+        );
+        if let Err(said) = ab::append(&running.session, &answer) {
+            eprintln!("kjerag: {said}");
+        }
+        let next = running.trial + 1;
+        if next < running.session.trials.len() {
+            return self.ab_enter(next);
+        }
+        println!(
+            "ab:     session {} done, {} trials answered into {}",
+            running.session.id,
+            running.session.trials.len(),
+            running.session.results.display()
+        );
+        self.update(Message::Quit)
+    }
+
+    /// The session's own keys, which exist only while one is running.
+    ///
+    /// The digits look at an arm and enter answers with the one on screen, so
+    /// the answer is the picture in front of him rather than a number he has
+    /// to remember, and 0 is cannot tell. `None` for every other key and for
+    /// every key at all when no session is running, which is what leaves the
+    /// player's keys the player's.
+    fn ab_pressed(&self, key: &Key) -> Option<Message> {
+        let running = self.ab.as_ref()?;
+        match key {
+            Key::Named(Named::Enter) => Some(Message::AbVote(Some(running.arm))),
+            Key::Character(pressed) => match pressed.as_ref() {
+                "0" => Some(Message::AbVote(None)),
+                digit => {
+                    let position = digit.parse::<usize>().ok()?.checked_sub(1)?;
+                    (position < running.session.arms_at(running.trial))
+                        .then_some(Message::AbArm(position))
+                }
+            },
+            _ => None,
+        }
     }
 
     /// One toast, and the task that takes it away again five seconds later.

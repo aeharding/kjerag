@@ -162,6 +162,12 @@ pub struct Scene {
     /// How the pass samples where the view magnifies the source (issue #11).
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
+    /// Whether Studio's Optical Flow arm is selected (`super::belt`). Stored
+    /// here rather than on the pipeline because the A/B hands over between
+    /// arms from the shell's own thread, and the pipeline is the render
+    /// thread's; it reaches the pass through [`ScenePrimitive`], which is the
+    /// same road `sampling` takes.
+    flowing: Cell<bool>,
     /// Where the pass leaves word that it cannot draw this file any more
     /// (issue #124). It belongs to the open capture rather than to the
     /// pipeline, which outlives every file it draws.
@@ -308,6 +314,7 @@ impl Scene {
             forced: Cell::new(None),
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
+            flowing: Cell::new(belt_default()),
             stalled: Stalled::default(),
             shown: Shown::default(),
         }
@@ -804,6 +811,21 @@ impl Scene {
     /// reason: what a quality change is worth is the difference between two
     /// pictures, and the losing one has to come out of the same pass.
     /// Nothing in the shell calls this.
+    /// Select Studio's Optical Flow arm, or put it away. The A/B's own arm
+    /// switch, and the one live knob this feature has.
+    ///
+    /// **Mutually exclusive with nothing else, because there is nothing else**
+    /// (owner ruling, docs/research/studio-parity.md): Off is calibration plus
+    /// fusion plus the anchored line, Optical Flow is that plus the belt, and
+    /// Studio does not blend the two either.
+    pub fn set_flowing(&self, on: bool) {
+        self.flowing.set(on);
+    }
+
+    pub fn is_flowing(&self) -> bool {
+        self.flowing.get()
+    }
+
     pub fn set_sampling(&self, sampling: Sampling) {
         self.sampling.set(sampling);
     }
@@ -880,6 +902,7 @@ impl Scene {
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
             sampling: self.sampling.get(),
+            flowing: self.flowing.get(),
             shutter: self.shutter.clone(),
             stalled: self.stalled.clone(),
             shown: self.shown.clone(),
@@ -1168,6 +1191,8 @@ pub struct ScenePrimitive {
     /// How the pass samples a magnified picture, which is a property of the
     /// redraw rather than of the frame in it.
     sampling: Sampling,
+    /// Whether the belt runs for this redraw ([`Scene::set_flowing`]).
+    flowing: bool,
     /// A handle on the [`Scene`]'s shutter, not a copy of it: the request
     /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
     /// first, and one that never does is still armed for the next.
@@ -1520,6 +1545,10 @@ impl ScenePipeline {
             self.reported = true;
             println!("device: {}", dmabuf::device_report(device));
         }
+        // The arm, taken from the primitive every redraw, which is what makes
+        // the swap a store on one thread and a different picture on the next
+        // frame drawn by the other.
+        self.set_flowing(primitive.flowing);
         if let Some(view) = &primitive.view {
             self.show(device, view, primitive);
         }
