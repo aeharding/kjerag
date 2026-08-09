@@ -477,6 +477,20 @@ pub struct Reframe {
     /// already needed, so the block is the size it always was and the table
     /// has not moved.
     ///
+    /// **In radians, and not divided by the band it is about to be divided
+    /// by.** A review asked for `shift / crossover` to be folded into this
+    /// field, since the shader divides by the band anyway and the two are both
+    /// in the same block: one division per fragment for free. It is not free.
+    /// Measured on this box 2026-08-09, RADV's f32 divide is not the CPU's:
+    /// over 40000 pairs drawn from every width a camera can draw and every
+    /// shift the clamp allows, **11653 of them - 29 percent - differ, by up to
+    /// 2 ulp** (the Vulkan spec allows 2.5 for `FDiv`). Precomputing the
+    /// quotient would therefore feed the ramp a different number on about a
+    /// third of the frames, which is enough to flip an output code, and the
+    /// picture in this block is one the owner approved by eye and this branch
+    /// is byte-identical to. The division stays where it is until there is a
+    /// reason for it to move that is worth a re-approval.
+    ///
     /// WGSL twin: `reframe.handover_shift`, read by `handover`.
     handover_shift: f32,
     /// What puts the table below on a sixteen-byte offset.

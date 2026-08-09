@@ -613,6 +613,42 @@ live, no keyframe UI ever.
   which way was simpler. The simpler arm also measured smoother than the
   picture it is drawn from, where the elaborate one was four times rougher.
 
+  **HELD IS PARTIAL, AND THE NUMBER IS 0.62** (adversarial review, 2026-08-09;
+  a correction to this record and not a change to the picture, which flat6 drew
+  the same way). The anchor holds the SHARE's 50/50 line exactly; the picture
+  draws the WEIGHTS' crossing, which is that share times each lens's own
+  coverage depth, and the depths are fixed to the lenses. Measured over 24
+  azimuths: **0.617 degrees drawn per degree commanded on the X4 Air and 0.510
+  on an X2-class camera**, so the anchor reduces the seam's crawl by about 60
+  percent rather than removing it, and about 40 percent survives. Two real
+  defects were found inside the follow and fixed, neither of them reachable at
+  30 fps and so neither of them a byte of the approved picture: the anchor was
+  placed on the unclamped offset while the shader drew the clamped one, and a
+  backward seek came out as a step of zero, which pinned the line to a target
+  from another part of the flight. The follow's rail is the film rate's -
+  `allowance / (POWER * RATE * dt)^(1/POWER)`, 3.55 degrees at 30 fps, past the
+  4.00 allowance above 100 fps - and both cameras have 120 fps modes, which is
+  documented with its table rather than fixed, because a dt invariant law is a
+  different picture at 30 fps too.
+
+  **The width clamp was never the safety bound, and now something is.** The
+  handover's support is centred on the drawn line, so with the anchor it reaches
+  a whole band off the seam at the rail and 91 percent of frames on a real
+  flight draw some of it past the coverage. What carries that is each lens's
+  coverage depth inside `claim`. Measured over the ring at the rail on both
+  camera classes: the weights sum to one everywhere and the worst weight step is
+  0.0034 per hundredth of a degree, against a fade whose own slope is 0.0017;
+  a planted hole and a planted cliff are the controls.
+
+  **The two twins are checked against each other on a real GPU**
+  (`crates/render/src/twin.rs`). A review planted a bend in the WGSL half alone
+  and the whole workspace stayed green while the picture changed. The guard
+  compiles the shipped shader with a probe entry after it and compares every
+  weight and landing against the Rust mirror; it fails on that mutation by 887
+  times its bar and is the only test that does. CI has no GPU and skips it;
+  `KJERAG_REQUIRE_GPU=1` makes the skip a failure and `scripts/uitest.sh` runs
+  it that way, so a release cannot be tagged without it.
+
   **THE ONE X2 NOW DRAWS 8.00 DEGREES WHERE IT DREW 3.94.** The bound on how
   wide a camera may hand over was its overlap minus the room a bend needed to
   carry a sample past its own ray; nothing displaces a sample now, so the bound
@@ -627,10 +663,11 @@ live, no keyframe UI ever.
 
   Known and disclosed rather than fixed, in
   docs/research/studio-parity.md 6: the honest doubling at the bad crossing
-  (the wide band softens it, the belt is its fix), the one sided fade truncation
-  under sustained motion, the seam ring still crawling away from the view
-  centre, and the far field alignment the bend used to buy. That last one is the
-  trade he made: alignment that moves, for a seam that stands still.
+  (the wide band softens it, the belt is its fix), the partial hold above, the
+  one sided fade truncation under sustained motion, the frame rate dependent
+  rail, the seam ring still crawling away from the view centre, and the far
+  field alignment the bend used to buy. That last one is the trade he made:
+  alignment that moves, for a seam that stands still.
 
   Calibration stays v3; v6 was refused by his eye on 2026-08-08 and the parity
   line continues elsewhere. `KJERAG_HANDOVER_DEG` stays live, because it selects

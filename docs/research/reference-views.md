@@ -552,6 +552,16 @@ is what ships; Optical Flow is the belt, later, behind its own switch; one mode 
   the app itself on `VID_20251018_191318_00_002.insv`: the X2 drew 4.91 at open and 3.94 after
   its per-file fit landed, and now draws 8.00 at both. The bound was the overlap minus the room
   the bend needed; it is the bare overlap now, and the X2 overlaps by 9.19.
+  **That bound is about the width and NOT about safety** (review, 2026-08-09). The handover's
+  support is centred on the drawn line, so with the seam anchor's offset in it the ramp reaches
+  `band/2 + |shift|` off the seam, up to a whole band at the rail: 8.00 degrees against 7.22 a
+  side on the X4 Air and 4.59 on an X2-class camera, and 91 percent of frames on a real flight
+  draw some support past the coverage. Nothing is narrowed for it - narrowing is the breathing
+  width he refused - and what carries it is each lens's coverage depth inside `claim`, which
+  fades the outer lens out on its own rim. Measured over the whole ring at the rail on both
+  classes: the weights sum to 1 everywhere and the worst weight step is 0.0025 (X4 Air) and
+  0.0034 (X2-class) per hundredth of a degree, against a fade whose own slope is 0.0017.
+  docs/research/studio-parity.md 5.3.
 - 2026-08-08 THE HELD LINE (`SeamAnchor`, on by default; `KJERAG_ANCHOR=off` to refuse).
   Three arms, in order, each refused until the last: `flat4` slewed the line to a new anchor and
   the owner's word for it was **"lurching"**; `flat5` held two lines and dissolved between them
@@ -560,12 +570,26 @@ is what ships; Optical Flow is the belt, later, behind its own switch; one mode 
   simpler too, with some fixing to prevent small movements when stopped at one position."*;
   `flat6` is one line on one closed-form law with no events in it. STATUS: `flat6` APPROVED and
   merged, on by default.
-  Measured at `down1` over the ten seconds he named: the drawn line moves at most **0.0046 deg
-  per frame** while the unanchored geometry sweeps at up to **21.8 deg/s**, and the shake his
-  paramotor puts through 3.0 of the 4.0 degrees of allowance at a couple of hertz reaches none
-  of it. On the July-14 fast segment, 900 redraws: `flat6` changes the drawn line's velocity by
-  at most 11.3 deg/s frame to frame, which is BELOW the 14.2 the geometry it is drawn from
-  changes by; `flat5` changed it by 59.2 with 29 retargets and 25 promotes.
+  Measured at `down1` over the ten seconds he named: the **commanded** line moves at most
+  **0.0046 deg per frame** while the unanchored geometry sweeps at up to **21.8 deg/s**, and the
+  shake his paramotor puts through 3.0 of the 4.0 degrees of allowance at a couple of hertz
+  reaches none of it. On the July-14 fast segment, 900 redraws: `flat6` changes the drawn line's
+  velocity by at most 11.3 deg/s frame to frame, which is BELOW the 14.2 the geometry it is drawn
+  from changes by; `flat5` changed it by 59.2 with 29 retargets and 25 promotes.
+  **THE HOLD IS PARTIAL AND THE FIGURES ABOVE ARE ABOUT THE COMMANDED LINE** (found in review,
+  2026-08-09; not a change to the picture, and flat6 behaves identically). The anchor holds the
+  SHARE's 50/50 line exactly; the picture draws the WEIGHTS' crossing, which is that share times
+  each lens's own coverage depth, and the depths do not move with the line. Measured on the
+  calibration fixture over 24 azimuths: **0.617 degrees drawn per degree commanded on the X4 Air
+  and 0.510 on an X2-class camera**, so the anchor **reduces the crawl by about 60 percent** on
+  the camera he judged it on and by about half on the narrowest one, rather than removing it.
+  At `down1`'s worst the drawn line still crawls 0.32 deg per frame where unanchored it crawls
+  0.82. At the 3.55 degree rail the fast segment reaches, the drawn line sits **2.25 deg** off the
+  seam on the X4 Air and **1.89** on an X2-class camera, not 3.55.
+  The rail itself is the film rate's: the follow's ceiling is
+  `allowance / (POWER * RATE * dt)^(1/POWER)`, which is 3.55 of 4.00 degrees at 30 fps and passes
+  the allowance above 100 fps. Every file judged here is 30 fps; both cameras have 120 fps modes
+  and no such file has been looked at. docs/research/studio-parity.md 3.4 carries the table.
 - 2026-08-08 CALIBRATION v6: REFUSED BY HIS EYE. STATUS: calibration stays v3. The parity line
   against the maker's own export continues separately and is not this PR's.
 - 2026-08-08 the `ghost` field arm (one displacement of the back lens's whole picture) and the
