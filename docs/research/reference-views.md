@@ -555,8 +555,11 @@ is what ships; Optical Flow is the belt, later, behind its own switch; one mode 
   **That bound is about the width and NOT about safety** (review, 2026-08-09). The handover's
   support is centred on the drawn line, so with the seam anchor's offset in it the ramp reaches
   `band/2 + |shift|` off the seam, up to a whole band at the rail: 8.00 degrees against 7.22 a
-  side on the X4 Air and 4.59 on an X2-class camera, and 91 percent of frames on a real flight
-  draw some support past the coverage. Nothing is narrowed for it - narrowing is the breathing
+  side on the X4 Air and 4.59 on an X2-class camera. Read off the held line's own trace on his
+  own film: at `down1` the support never leaves the coverage (0 of 300 frames), over the July-14
+  fast segment it does on 202 of 900 by at most 0.09 degrees, and the same offsets on a camera
+  overlapping the way the X2 does would cross on 866 of 900 by up to 2.94. Nothing is narrowed
+  for it - narrowing is the breathing
   width he refused - and what carries it is each lens's coverage depth inside `claim`, which
   fades the outer lens out on its own rim. Measured over the whole ring at the rail on both
   classes: the weights sum to 1 everywhere and the worst weight step is 0.0025 (X4 Air) and

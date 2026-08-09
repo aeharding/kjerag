@@ -633,8 +633,10 @@ live, no keyframe UI ever.
 
   **The width clamp was never the safety bound, and now something is.** The
   handover's support is centred on the drawn line, so with the anchor it reaches
-  a whole band off the seam at the rail and 91 percent of frames on a real
-  flight draw some of it past the coverage. What carries that is each lens's
+  a whole band off the seam at the rail: over the July-14 fast segment 202 of
+  900 frames draw some of it past the coverage on his own X4 Air, and 866 of 900
+  would on a camera overlapping the way the ONE X2 does. What carries that is
+  each lens's
   coverage depth inside `claim`. Measured over the ring at the rail on both
   camera classes: the weights sum to one everywhere and the worst weight step is
   0.0034 per hundredth of a degree, against a fade whose own slope is 0.0017;

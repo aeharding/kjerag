@@ -358,9 +358,21 @@ rail that is a **whole band**:
 | the support at the rail | 8.00 deg | 8.00 deg |
 | how far past the coverage | 0.78 deg | 3.41 deg |
 
-Measured on a real X4 Air flight: **91 percent of frames draw some support past
-the coverage**, worst case 7.55 degrees of support against 4.60 a side on an
-X2-class camera. The two guards that were supposed to hold the invariant were
+**How often that happens on his own film**, read off the held line's own trace,
+2026-08-09. `band / 2 + |delta|` against `overlap / 2`, frame by frame:
+
+| | frames past the coverage | worst support | against |
+| --- | ---: | ---: | ---: |
+| `down1`, 10 s, X4 Air, overlap 14.56 | **0 of 300** | 7.13 deg | 7.28 a side |
+| July-14 fast segment, 30 s, X4 Air, overlap 14.89 | **202 of 900** | 7.53 deg | 7.45 a side |
+| the same offsets on an X2-class camera, overlap 9.19 | **866 of 900** | 7.53 deg | 4.59 a side |
+
+So the roomy camera crosses barely and only under the hardest motion in the
+corpus, and a narrow one crosses almost always. **The first commit of this round
+said "91 percent of frames on a real X4 Air flight" and that figure is wrong**:
+it is the X2-class number, taken from the review that raised the finding rather
+than re-measured, and it was corrected here as soon as the trace was read. The
+commit message is not rewritten, because this repository does not force-push. The two guards that were supposed to hold the invariant were
 tautologies - one asserts `width / 2 < overlap / 2` for widths already clamped
 to the overlap, the other reduces to `min(8, o) <= o` - and neither has a shift
 in it.

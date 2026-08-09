@@ -1271,8 +1271,12 @@ impl Reframe {
     /// ([`Self::with_shift`]). At the rail that is a **whole band** off the
     /// seam on one side, against `overlap / 2` of shared picture: 8.00 degrees
     /// into 7.22 on the X4 Air fixture and into 4.59 on a camera that overlaps
-    /// the way the ONE X2 does. Measured on a real X4 Air flight, 91 percent
-    /// of frames draw some support past the coverage.
+    /// the way the ONE X2 does. Measured on the owner's own footage through the
+    /// held line's own trace, 2026-08-09: at `down1` the support never leaves
+    /// the coverage (0 of 300 frames, worst 7.13 degrees into 7.28 a side), and
+    /// over the July-14 fast segment it does on **202 of 900 frames**, by at
+    /// most 0.09 degrees. Replay the same offsets on a camera that overlaps the
+    /// way the X2 does and it is **866 of 900**, by up to 2.94.
     ///
     /// **What makes that safe is not this number.** A lens's claim is its share
     /// of the handover times its own coverage depth ([`claim`]), and the depth
@@ -3680,10 +3684,11 @@ pub(crate) mod tests {
     /// width `w` reaches `w / 2` off the seam". With [`SeamAnchor`] that is
     /// false: the support is centred on the DRAWN line, so it runs
     /// `band / 2 + |shift|` off the seam and `|shift|` is allowed up to
-    /// `band / 2`. On a real X4 Air flight 91 percent of frames draw some
-    /// support past the coverage; at the rail on an X2-class camera the ramp is
-    /// still asking for a sample 8.00 degrees off a seam whose shared picture
-    /// stops at 4.59. The two guards that existed were tautologies - one
+    /// `band / 2`. Over the July-14 fast segment 202 of 900 frames draw some
+    /// support past the coverage on the owner's own X4 Air, and 866 of 900
+    /// would on a camera that overlaps the way the ONE X2 does; at the rail
+    /// there the ramp is still asking for a sample 8.00 degrees off a seam
+    /// whose shared picture stops at 4.59. The two guards that existed were tautologies - one
     /// asserts `width / 2 < overlap / 2` for widths the clamp already caps at
     /// the overlap, the other is `min(8, o) / 2 <= o / 2` - and neither has a
     /// shift in it.
