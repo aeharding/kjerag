@@ -12,6 +12,9 @@
 //!   from=488.855 yaw=-5.17 pitch=2.56 fov=218.99 lock=1 out=scratch/stage3-proof
 //! # the pooled gain frame by frame: does it pump
 //! cargo run --release -p kjerag-spike --bin expose -- <file.insv> mode=trace count=120
+//! # does the trailer's own per-lens shutter predict any of it (stage 10, P.1)
+//! cargo run --release -p kjerag-spike --bin expose -- <file.insv> mode=meta \
+//!   from=488.855 count=60
 //! ```
 //!
 //! **`lock=1` is written out because it is the default and a bare `yaw=` does
@@ -62,6 +65,7 @@ fn main() -> Fallible<()> {
         Mode::Annulus => annulus(&options),
         Mode::Render => render(&options),
         Mode::Trace => trace(&options),
+        Mode::Meta => meta(&options),
     }
 }
 
@@ -75,6 +79,9 @@ enum Mode {
     Render,
     /// What the shipped pass's own pooled gain does frame to frame.
     Trace,
+    /// The trailer's own per-lens shutter ratio, against what the two lenses
+    /// actually came out at (issue #103, stage 10 step P.1).
+    Meta,
 }
 
 // ------------------------------------------------------------ the sampling
@@ -1108,6 +1115,146 @@ fn annulus(options: &Options) -> Fallible<()> {
     Ok(())
 }
 
+// ------------------------------------------------- the file's own shutters
+
+/// Does the trailer's per-lens shutter ratio predict the brightness the two
+/// lenses actually came out at (issue #103, stage 10 step P.1)?
+///
+/// This is the whole of the deterministic normalization's claim, asked as one
+/// question on one run of frames. For each frame it reads:
+///
+/// - `g`, the trailer's own `shutter1 / shutter0` at that frame's own camera
+///   instant (records 4 and 12, `kjerag_meta::ExposureTrack`), which is what a
+///   correction computed from metadata alone would have to use;
+/// - the delivered ratio, the two lenses' mean luma over the overlap annulus,
+///   which is the same set of world directions in both and therefore a
+///   brightness and not a content difference.
+///
+/// A correction that helps has to make the second smaller. It is applied by
+/// multiplying the two lenses by `sqrt(g)` and `1/sqrt(g)`, so what it leaves
+/// is `ln(delivered) - ln(g)`, and the rows below print exactly that.
+///
+/// **The annulus and not the aligned field, deliberately.** This is the
+/// estimator docs/research/insv-format.md 6.3 used, so the numbers here are
+/// comparable with the ones the shutter-ratio correction was refused on in the
+/// first place; `mode=field` is the better instrument for the SIZE of the
+/// step, and it is a pooled figure over a run rather than a per-frame one, so
+/// it cannot answer a question about correlation. Run both.
+fn meta(options: &Options) -> Fallible<()> {
+    let (calibration, _, frame) = calibrated(options)?;
+    let mut walk = Walk::open(&options.input, options.from, frame)?;
+    if walk.streams() < 2 {
+        return Err("this file carries one lens stream, so it has no seam".into());
+    }
+    if calibration.exposure[0].is_empty() || calibration.exposure[1].is_empty() {
+        return Err(
+            "this file carries no per-lens shutter record, so there is nothing deterministic \
+             to normalize by"
+                .into(),
+        );
+    }
+    println!(
+        "\nmeta:   what the TRAILER says the two lenses' exposures differ by, against what \n\
+         \ttheir pictures of the same directions actually differ by. `g` is the file's own \n\
+         \tshutter1/shutter0; `delivered` is the overlap annulus, the 6.3 estimator.\n"
+    );
+    println!(
+        "  {:>7} {:>10} {:>10} {:>9} {:>11} {:>11} {:>11}",
+        "frame", "shutter0", "shutter1", "g", "ln g", "ln deliv", "ln left"
+    );
+    let radii = [(1680.0, 1913.0), (1670.0, 1905.0)];
+    let mut rows: Vec<(f64, f64)> = Vec::new();
+    for _ in 0..options.count {
+        let Some(pair) = walk.next_pair()? else {
+            break;
+        };
+        let shutters: Vec<f64> = (0..2)
+            .filter_map(|lens| calibration.exposure[lens].shutter_at(pair.at))
+            .collect();
+        let [front, back] = shutters[..] else {
+            continue;
+        };
+        if front <= 0.0 || back <= 0.0 {
+            continue;
+        }
+        let means: Vec<f64> = (0..2)
+            .map(|lens| ring_mean(&pair.lenses[lens], &calibration.lenses[lens], radii[lens]))
+            .collect();
+        if means[0] <= 0.0 || means[1] <= 0.0 {
+            continue;
+        }
+        let (metadata, delivered) = ((back / front).ln(), (means[1] / means[0]).ln());
+        println!(
+            "  {:>7} {:>10.6} {:>10.6} {:>9.4} {:>11.4} {:>11.4} {:>11.4}",
+            pair.index,
+            front,
+            back,
+            back / front,
+            metadata,
+            delivered,
+            delivered - metadata,
+        );
+        rows.push((metadata, delivered));
+    }
+    if rows.len() < 3 {
+        return Err("fewer than three frames read, which is not a correlation".into());
+    }
+    let mean =
+        |pick: fn(&(f64, f64)) -> f64| rows.iter().map(pick).sum::<f64>() / rows.len() as f64;
+    let (mx, my) = (mean(|row| row.0), mean(|row| row.1));
+    let rms = |pick: fn(&(f64, f64)) -> f64| {
+        (rows.iter().map(|row| pick(row).powi(2)).sum::<f64>() / rows.len() as f64).sqrt()
+    };
+    let (mut cov, mut vx, mut vy) = (0.0, 0.0, 0.0);
+    for (x, y) in &rows {
+        cov += (x - mx) * (y - my);
+        vx += (x - mx).powi(2);
+        vy += (y - my).powi(2);
+    }
+    let correlation = match vx > 0.0 && vy > 0.0 {
+        true => cov / (vx * vy).sqrt(),
+        false => 0.0,
+    };
+    let (before, after) = (rms(|row| row.1), rms(|row| row.1 - row.0));
+    println!(
+        "\nspread: the metadata swings {:.4} ln rms about its own mean, {:+.2} to {:+.2} percent; \n\
+         \tthe delivered difference swings {:.4}, {:+.2} to {:+.2} percent. the correction has \n\
+         \tto be the size of the artifact to be a correction of it.",
+        (vx / rows.len() as f64).sqrt(),
+        100.0 * (rows.iter().map(|r| r.0).fold(f64::INFINITY, f64::min).exp() - 1.0),
+        100.0
+            * (rows
+                .iter()
+                .map(|r| r.0)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .exp()
+                - 1.0),
+        (vy / rows.len() as f64).sqrt(),
+        100.0 * (rows.iter().map(|r| r.1).fold(f64::INFINITY, f64::min).exp() - 1.0),
+        100.0
+            * (rows
+                .iter()
+                .map(|r| r.1)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .exp()
+                - 1.0),
+    );
+    println!(
+        "\nagree:  correlation {correlation:+.4} between the two columns over {} frames. this is \n\
+         \tthe number the whole design rests on: a metadata term that predicts the artifact \n\
+         \treads near +1, and one that does not is a correction applied at random.",
+        rows.len(),
+    );
+    println!(
+        "\nleaves: {:.4} ln rms before the correction, {:.4} after, which is {:+.1} percent of \n\
+         \tthe artifact. BELOW 100 is a correction; ABOVE is damage.",
+        before,
+        after,
+        100.0 * (after / before - 1.0),
+    );
+    Ok(())
+}
+
 /// Mean luma of one lens's annulus about its own principal point.
 ///
 /// The principal point rather than the middle of the frame, because that is
@@ -1572,6 +1719,7 @@ impl Options {
                         "annulus" => Mode::Annulus,
                         "render" => Mode::Render,
                         "trace" => Mode::Trace,
+                        "meta" => Mode::Meta,
                         _ => return Err(format!("no mode called {value}").into()),
                     }
                 }
@@ -1643,6 +1791,6 @@ impl Options {
     }
 }
 
-const USAGE: &str = "usage: expose <file.insv> [mode=field|annulus|render|trace] [from=seconds] \
+const USAGE: &str = "usage: expose <file.insv> [mode=field|annulus|render|trace|meta] [from=seconds] \
      [count=frames] [places=n] [gain=ln] [patches=n] [keep=r] [seam=file|factory] [verbose=1] [yaw=deg] [pitch=deg] \
      [fov=deg] [size=px] [lock=0] [out=dir] [tag=name]";

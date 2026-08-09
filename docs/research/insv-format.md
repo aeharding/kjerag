@@ -927,6 +927,30 @@ Records 4 and 12 are still worth parsing, and Kjerag parses them: they
 are the camera's own frame clock if `pts_type = 2` means what it says
 (section 8.3), and they are what this measurement was made against.
 
+**RE-DERIVED 2026-08-09 on nine of the owner's own reference views, on the
+flat-seam architecture, and the verdict is the same one twice as large**
+(issue #103, stage 10 step P.1; `--bin expose mode=meta`;
+docs/research/seam-blending.md 17 to 23 carries the tables). Across five X4
+Air captures the shutter ratio says the two lenses are 33 to 57 percent
+apart while their pictures of the same directions are 0.07 to 4.3 percent
+apart; the correlation between the two columns runs **-0.74 to +0.51 and
+averages about -0.05**, with three of the nine strongly NEGATIVE, which is
+metadata pointing the wrong way; and the correction leaves **11 to 228
+times** the artifact it was meant to remove, never once below 100 percent.
+Drawn at the dirt reference the seam's own step goes **2.14 to 15.26
+codes** with the decoy circle unmoved. The search for the missing per-lens
+gain was re-run at the same time and came back empty on a third capture and
+a later firmware: record 9 is 43280 samples of 48 bytes written once for
+the file, there is no second copy for the second lens, and no key of the
+record-1 protobuf is an exposure.
+
+**And the ONE X2 does not carry the pair at all.** On
+`VID_20251018_191318_00_002.insv` the trailer holds records 1, 2, 3, 4, 5, 9
+and 10: record 4 is 131696 bytes, 8231 samples, lens 0's shutter, and
+**record 12 is absent**. So on that camera the calculation has one lens's
+shutter and nothing to divide it by, and the instrument refuses the file in
+those words rather than reading a ratio of one.
+
 ### 6.4 The rest of the artifact budget
 
 Ranked for a player that samples one lens for most of the frame. The
