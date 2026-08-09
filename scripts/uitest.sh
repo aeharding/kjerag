@@ -2512,6 +2512,36 @@ foreign() {
 	exits_clean
 }
 
+# ---------------------------------------------- the shader against its twin
+#
+# The one unit test in the workspace that needs a GPU, run here for the same
+# reason this whole script lives outside CI: a runner has no
+# /dev/dri/renderD128 and would skip it silently for ever.
+#
+# What it guards is the boundary the seam work keeps moving. Every number the
+# map is made of exists twice, once as Rust and once as the WGSL that Rust
+# emits, and they are kept in step by hand. A review on 2026-08-09 planted a
+# bend inside the WGSL half alone and the whole workspace stayed green while
+# the rendered picture changed; `crates/render/src/twin.rs` compiles the
+# shipped shader with a probe entry after it, runs it on this box's own
+# device, and compares every weight and every landing against the Rust twin.
+#
+# KJERAG_REQUIRE_GPU turns the test's own skip into a failure, so a box with
+# no device says so here rather than passing quietly.
+twin_guard() {
+	printf '\n-- the shader against its Rust twin\n'
+	local out=$session/twin.log
+	if (cd "$root" && KJERAG_REQUIRE_GPU=1 cargo test --release -p kjerag-render \
+		--lib -- --nocapture the_shader_and_its_rust_twin) >"$out" 2>&1; then
+		pass "the shipped shader answers the map its Rust twin answers"
+		grep '^twin:' "$out" | sed 's/^/      /'
+	else
+		fail "the shipped shader answers the map its Rust twin answers" \
+			"$(grep -E '^twin:|panicked at|disagree|apart' "$out" | head -4)" \
+			"log: $out"
+	fi
+}
+
 # ------------------------------------------------------------------- run
 
 if [ -n "$media" ]; then
@@ -2526,6 +2556,7 @@ fi
 a_camera_pointing_elsewhere_is_still_fitted
 dud
 foreign
+twin_guard
 
 printf '\n%s checks, %s failed\n' "$checks" "$failures"
 printf 'captures and logs: %s\n' "$session"

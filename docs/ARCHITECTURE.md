@@ -463,6 +463,17 @@ with no GPU and no footage. Both read one `Reframe` uniform block, and the
 bind group's `min_binding_size` makes wgpu reject a pipeline whose two
 definitions have drifted apart.
 
+**Two definitions of the same arithmetic drift, and `min_binding_size` only
+catches the layout.** A review on 2026-08-09 planted a bend inside the WGSL half
+alone: the whole workspace stayed green while the rendered picture changed, and
+the only instrument that noticed needed real footage and a second build of the
+tree. `crates/render/src/twin.rs` is the cheap guard - it compiles the shipped
+`projection::wgsl()` with a compute probe after it, runs `blend` on a few
+thousand rays on this box's own device, and compares every weight and landing
+against the Rust mirror. It needs a GPU, so CI skips it and
+`KJERAG_REQUIRE_GPU=1` turns that skip into a failure; `scripts/uitest.sh` runs
+it that way, which is the same seat the harness itself sits in.
+
 Reframing, stabilization, and rolling-shutter correction fuse into ONE
 backward mapping per output pixel. No intermediate equirect, ever.
 

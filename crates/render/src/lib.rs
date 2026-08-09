@@ -20,6 +20,11 @@ mod scene;
 /// attribution and the controls printed round it.
 pub mod seam;
 mod stall;
+/// The shader and its Rust mirror, asked the same question on a real GPU
+/// (`src/twin.rs`). Tests only: it exists because a change to one half and not
+/// the other used to pass the whole suite.
+#[cfg(test)]
+mod twin;
 mod widget;
 
 pub use band::{
