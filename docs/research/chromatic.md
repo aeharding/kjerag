@@ -545,3 +545,448 @@ the belt's neighbourhood and is out of this line's scope.
    nothing away from the seam; a constant model changes both hemispheres by half
    the split. Top of the PR body, relayed as a question, before he is asked to
    test anything.
+
+---
+
+# M-results: the measuring phase, run
+
+**Date:** 2026-08-09, the run after the memo above. Everything from here down is
+measurement. Nothing is built.
+
+**What changed under this section while it was being taken, and it is not a
+detail.** The owner ruled mid-run that Studio's chromatic correction is
+**seam-line aware**: *"To be clear, the chromatic fixing Studio is doing is
+definitely seam line aware. In other places it only makes changes close to the
+seam line."* That demotes section 3's constant-per-lens model from *the* build
+target to *at most the DC term of a seam-local field*. **Every measurement below
+was designed against the memo above and none of them changes**: M1 stops being
+"is there a hemisphere split, GO or REFUSED" and becomes "how much of the split
+is a constant the field can carry as its DC, and how much is local"; M2, M3, M4
+and M5 feed the local estimator's transfer function, weighting, guard and
+refusal rule directly. Section M-9 states the recommendation in the new frame.
+
+**How everything below was run.** One command per capture, CPU only, eight
+frames at each of three places minutes apart in the same file, 72 azimuths round
+the seam:
+
+```sh
+cargo run --release -p kjerag-spike --bin colour -- <file.insv> \
+  mode=chroma from=<t> count=8 places=3 patches=72
+```
+
+Eight instants over six flights: the May file's dirt reference (488.855) and its
+wide view (630.763), the April file's green pair (594.027 and 602.368), hard
+mode (clip 1, 31.064), and the three registry flights
+(`VID_20260501_183417_00_002` 65.666, `VID_20260714_193252_00_006` 36.303,
+`VID_20260501_183417_00_003` 99.032). 1704 to 1728 azimuth-frames each, about
+325 000 paired samples each.
+
+---
+
+## M-0. The instrument, and the two extensions the M-numbers stand on
+
+Both extensions the memo names are built and are modes this tree runs.
+
+### M-0.1 `interior()` per channel, with per-channel plants (memo 6.2)
+
+The finding the memo predicted is now a printed row rather than a claim. On the
+ANTI-ACCEPTANCE view (`VID_20260526_191025_00_004` 630.763, `yaw=-86.02
+pitch=-17.08 fov=114.41 lock=1`), through `mode=profile`, ROUGH percent:
+
+| planted ripple, 8 cycles round the ring | luma | R | G | B |
+| --- | ---: | ---: | ---: | ---: |
+| nothing at all | 0.00 | 0.00 | 0.00 | 0.00 |
+| 0.5 codes of LUMA (R, G, B all +0.5) | **2.04** | 1.71 | 2.16 | 2.08 |
+| 2.0 codes of LUMA | **8.15** | 6.82 | 8.64 | 8.32 |
+| 0.5 codes of CHROMA (R +0.50, G -0.20, B +0.50) | **0.00** | 1.71 | 0.86 | 2.08 |
+| 2.0 codes of CHROMA (R +2.00, G -0.80, B +2.00) | **0.00** | 6.82 | 3.44 | 8.32 |
+
+The two luma rows reproduce the published 2.07 and 8.27 percent, which is what
+says this is the same statistic and not a new one. **The two chroma rows are the
+finding.** They carry exactly zero luminance by construction (`Plant::chroma`
+puts G at `-(0.2126 + 0.0722) / 0.7152` of R and B, and the instrument prints
+the luma lift so the equality is checked rather than asserted), and the luma
+column reads **0.00 percent** for a stripe that a per-channel reading calls 6.8
+to 8.3. A chroma-only stripe of two codes round the ring was, until today,
+exactly invisible to the one anti-acceptance metric this campaign's whole
+photometric line is gated on. It is not now.
+
+Main itself, drawn: applied 0.004 codes, ROUGH 0.01 percent in luma and 0.01 in
+each of R, G and B, over 88 bins. **Viewed**, not just tabulated: the amplified
+difference between the band held and the band drawing
+(`scratch/chromatic/interior/...-3-what-moved.png`) is a flat mid-grey field
+with no structure anywhere in it, which is what an applied field of four
+thousandths of a code looks like. The marked render beside it
+(`...-4-marked.png`) shows the seam, the crossover and the overlap running
+corner to corner across BOTH the sunset sky and the dark ploughed soil, which is
+the reason M-0.2 needs a content window.
+
+### M-0.2 The arm-internal per-channel statistic, as `mode=arm`
+
+The oracle's own instrument, and it is a mode now rather than a thing one
+session measured once. The band region is the handover's own half-width asked of
+the map the render was drawn with (4.00 degrees a side today); its surround is 1
+to 5 degrees past that edge; the split is the band's warmth minus the
+surround's, which is a difference taken inside one picture and is therefore
+**stretch-proof**; and it is reported in codes, as a share of the warmth it sits
+on, and as a log ratio of ratios, which is exactly invariant to any per-channel
+gain applied to the whole picture.
+
+Positive-capable before it clears anything. On the dirt reference, `+2 codes of
+R on the band alone` moves the R-G split from 2.40 to 4.40 codes, **exactly the
+two codes planted**, and leaves B-G at -2.02 untouched; a 2-code green-magenta
+stripe moves both by 2.79, which is the 2.796 the plant's own arithmetic asks
+for. The decoy circle is read every time and does not move.
+
+**And it settles memo 5.3's claim as a measurement.** The pooled luma gain must
+not move a chroma statistic, and over five views the `band held off` and `as it
+draws` rows agree to 0.01 codes and 0.0001 ln everywhere:
+
+| view | level | R-G split, band held / drawn | B-G split, band held / drawn |
+| --- | ---: | ---: | ---: |
+| dirt reference, 488.855, fov 60 | 74.5 | 2.40 / 2.40 | -2.02 / -2.03 |
+| May wide, 630.763, whole frame | 67.0 | 2.24 / 2.24 | -2.24 / -2.24 |
+| May wide, 630.763, **soil only** | 16.6 | -0.01 / -0.01 | +0.52 / +0.52 |
+| green pair a, 594.027 | 39.6 | 1.81 / 1.81 | 1.29 / 1.29 |
+| green pair b, 602.368 | 40.0 | 2.27 / 2.27 | 1.92 / 1.92 |
+| hard mode, 31.064 | 80.5 | -1.07 / -1.07 | -0.87 / -0.87 |
+
+The soil-only row is the one to read on Weber grounds, and it says something
+useful about which view is which: on the May wide view's own dark soil, where
+the owner's complaint was measured as an ADDITIVE 6.5-code step, the hue split
+is **-0.01 and +0.52 codes**, so that view's defect is luminance and not colour.
+The green pair reads 1.81 / 1.29 and 2.27 / 1.92 codes on 40-code ground, which
+is 4.5 and 3.4 percent in log terms, and that is the owner's reported cast.
+
+**A caveat with a number on it.** The `rel %` column divides by the surround's
+own warmth, and on the green pair that warmth is 0.18 codes, so the column
+prints 1024 percent and means nothing. The stretch-proof log column is the one
+to quote when the denominator is near zero.
+
+---
+
+## M-1. Does a hemisphere-scale chroma split exist at all? (the gate)
+
+### M-1.1 A defect found while pointing the instrument, and it is worth naming
+
+The memo says to point `--bin colour` "at the far field the way `pool` does".
+Doing that literally reads `Cell::disparity` and cuts at
+`band::NEAR_KNEE_DEG`. **That is wrong here for the reason 4.2 already gave**:
+a direction whose patch never correlated is sampled at a shift of **zero**, so
+reading the shift alone calls it far field and pools it with the horizon. On
+the dirt reference that mistake moves 40 percent of the ring into the far-field
+bin and changes the answer. Three populations are kept apart instead:
+**correlated far field** (what the shipped pass actually pools), **correlated
+near field**, and **never correlated** (read at zero shift, which is 4.3's
+content). Every table below says which.
+
+### M-1.2 The two chroma coordinates are arm-internal by construction
+
+`R-G` is `ln(m1_R/m0_R) - ln(m1_G/m0_G)`: a difference of two log ratios taken
+on the same patch of the same frame through the same two lenses. Everything
+common to the three channels at that direction cancels **exactly** - the
+scene's own level, the shading, the shutter, the auto-exposure loops, and stage
+3's pooled gain itself. That is the arm-internal discipline applied to the ring
+rather than to a drawn view, and it is why these numbers do not need a
+reference.
+
+### M-1.3 The noise floor, demonstrated with plants
+
+Two nulls and three plants, every one of them a `Trial` running the same code on
+the same frames with one multiplier changed. On the dirt reference:
+
+| trial | R-G read | B-G read | what arithmetic requires |
+| --- | ---: | ---: | --- |
+| lens 0 against ITSELF at the found shift | **-0.00007** | **+0.00008** | 0, 0 |
+| lens 0 against itself, no alignment | 0.00000 | 0.00000 | 0, 0 exactly |
+| lens 1 times 1.02 in R alone | **+0.01729** | -0.02176 | +0.01729 / -0.02176 |
+| lens 1 times 1.01 / 0.99 / 1.01 | **+0.01749** | **-0.00176** | +0.01749 / -0.00176 |
+| lens 1 plus 4 codes in R alone | +0.03158 | -0.02271 | level-dependent, see M-2 |
+
+The plants come back **to five decimals, in the channel they were put in and in
+no other**, on all eight instants. The instrument's own bias floor is 0.00008 ln
+on the dirt reference and 0.00000 to 0.00676 across the corpus. On directions
+read at a shift of zero the null is zero *by arithmetic* rather than by
+measurement, so there the standard error is the whole of the floor and is
+reported as such.
+
+### M-1.4 The answer, over eight instants on six flights
+
+Pooled the shipped way (a weighted ratio of means, then logged, `lit` squared),
+10 percent trimmed per reading, over the whole ring:
+
+| instant | R-G, ln | B-G, ln | se | signal / se | floor, ln | place-to-place span, B-G |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| May dirt reference 488.855 | -0.0025 | **-0.0218** | 0.0033 | 6.6 | 0.00008 | 0.0034 |
+| May wide 630.763 | -0.0072 | **-0.0172** | 0.0020 | 8.8 | 0.00001 | 0.0093 |
+| April green a 594.027 | -0.0013 | **-0.0166** | 0.0028 | 4.3 | 0.0032 | 0.0266 |
+| April green b 602.368 | -0.0185 | **-0.0144** | 0.0033 | 5.6 | 0.0023 | 0.0264 |
+| hard mode 31.064 | -0.0003 | **-0.0196** | 0.0035 | 5.5 | 0.0000 | 0.0157 |
+| registry `..._002` 65.666 | -0.0067 | **-0.0114** | 0.0030 | 2.5 | 0.0000 | 0.0067 |
+| shimmer 36.303 | -0.0069 | -0.0062 | 0.0024 | 2.8 | 0.00012 | 0.0306 |
+| registry `..._003` 99.032 | -0.0017 | **-0.0196** | 0.0026 | 5.5 | 0.0000 | 0.0033 |
+
+**A hemisphere-scale chroma split exists, it is one coordinate and not two, and
+it is far outside the instrument's noise.** `B-G` is **negative on all eight
+instants**, between -0.006 and -0.022 ln (0.6 to 2.2 percent), at 2.5 to 8.8
+standard errors from zero, and 25 to 1300 times the instrument's own bias floor
+where that floor is measurable at all. Six of the eight clear 4.3 se.
+
+`R-G` does **not** do this. It runs -0.0003 to -0.0185 with no consistent size,
+and on six of eight instants its place-to-place span inside one capture is
+**larger than the reading itself**. The green-magenta axis is not a
+hemisphere-scale property of these cameras. The blue-amber axis is.
+
+### M-1.5 How much of it is a CONSTANT, which is the question the steer asks
+
+The per-direction readings averaged round the ring and fitted through the five
+terms a smooth field can have. Each column is what the fit **leaves**, in ln rms
+over the directions; `DC var %` is the share of the ring's variance the constant
+alone accounts for.
+
+| instant | coord | nothing | constant | +1 cycle | +2 cycles | DC value | DC var % |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| May dirt | R-G | 0.0209 | 0.0208 | 0.0157 | 0.0155 | -0.0027 | 1.7% |
+| May dirt | **B-G** | 0.0300 | 0.0199 | 0.0195 | 0.0176 | **-0.0222** | **56.1%** |
+| May wide | R-G | 0.0163 | 0.0147 | 0.0113 | 0.0112 | -0.0068 | 18.0% |
+| May wide | **B-G** | 0.0224 | 0.0152 | 0.0117 | 0.0114 | **-0.0163** | **54.4%** |
+| April green a | R-G | 0.0248 | 0.0248 | 0.0202 | 0.0197 | -0.0009 | 0.1% |
+| April green a | **B-G** | 0.0241 | 0.0171 | 0.0168 | 0.0165 | **-0.0169** | **50.1%** |
+| April green b | R-G | 0.0303 | 0.0230 | 0.0195 | 0.0183 | -0.0194 | 42.4% |
+| April green b | B-G | 0.0257 | 0.0210 | 0.0198 | 0.0184 | -0.0146 | 33.2% |
+| hard mode | R-G | 0.0238 | 0.0238 | 0.0142 | 0.0138 | +0.0010 | 0.2% |
+| hard mode | B-G | 0.0295 | 0.0231 | 0.0221 | 0.0203 | -0.0180 | 38.5% |
+| registry `_002` | R-G | 0.0299 | 0.0285 | 0.0219 | 0.0165 | -0.0088 | 8.8% |
+| registry `_002` | B-G | 0.0248 | 0.0209 | 0.0191 | 0.0155 | -0.0132 | 29.1% |
+| shimmer | R-G | 0.0181 | 0.0165 | 0.0148 | 0.0146 | -0.0074 | 16.9% |
+| shimmer | B-G | 0.0145 | 0.0142 | 0.0142 | 0.0134 | -0.0031 | 4.8% |
+| registry `_003` | R-G | 0.0242 | 0.0239 | 0.0191 | 0.0171 | -0.0034 | 2.1% |
+| registry `_003` | **B-G** | 0.0281 | 0.0194 | 0.0187 | 0.0170 | **-0.0200** | **52.2%** |
+
+**The constant reaches about half of the blue-amber split and no more.** On the
+four strongest instants the DC accounts for 50 to 56 percent of the ring's
+variance in B-G; on the weakest it accounts for 5. Adding one cycle and two
+cycles buys another 2 to 20 percent, and then it stops: 0.011 to 0.020 ln of
+per-direction structure survives every smooth ring model on every capture. That
+residue is **local to the seam by definition** - it is what varies from
+direction to direction faster than two cycles - and it is the same size as the
+DC itself.
+
+In R-G the constant reaches essentially nothing (0.1 to 18 percent on six of
+eight), which is the same finding from the other side: R-G is local, all of it.
+
+**This is the number the owner's steer predicts.** A correction that is only a
+constant per lens reaches at most half of one of the two chroma coordinates and
+none of the other. A seam-local field that carries a DC reaches both. The
+constant is not refused; it is **demoted to a term inside the field**, which is
+exactly what the steer said.
+
+---
+
+## M-2. Gain or offset (the thing 6.11 could not settle)
+
+Fitted per channel over the never-correlated population, which is the one that
+spans the ring's real dynamic range. `leaves` is what each candidate correction
+leaves at the seam, in codes rms, applied as a symmetric split.
+
+| instant | ch | span, codes | nothing | gain alone | offset alone | gain AND offset | fitted offset |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| May dirt | R | 20-190 | 4.84 | 4.83 | 4.52 | **4.11** | -4.16 |
+| May dirt | G | 15-183 | 3.71 | 3.68 | 3.59 | **2.98** | -3.43 |
+| May dirt | B | 16-193 | 4.69 | 4.33 | 3.38 | **3.24** | -4.33 |
+| May wide | R | 20-208 | 3.97 | 3.94 | 3.59 | **3.16** | -4.25 |
+| May wide | G | 15-195 | 3.42 | 3.35 | 3.34 | **2.46** | -4.05 |
+| May wide | B | 18-224 | 4.17 | 3.93 | 3.44 | **3.33** | -3.41 |
+| April green a | R | 10-253 | 7.20 | 7.08 | 6.73 | **6.57** | +5.49 |
+| April green a | B | 13-255 | 3.98 | 3.75 | 3.97 | **3.49** | +2.39 |
+| hard mode | R | 21-230 | 8.46 | 8.35 | 7.92 | **7.60** | +7.54 |
+| hard mode | G | 23-226 | 4.95 | 4.70 | 4.32 | **4.18** | +4.48 |
+| shimmer | B | 13-257 | 5.27 | 5.26 | 5.00 | **4.30** | +4.76 |
+| registry `_003` | B | 12-245 | 3.47 | 3.02 | 3.40 | **2.81** | +1.93 |
+
+**The answer is: both, and the offset is the bigger half.** On 23 of the 24
+channel-fits over the eight instants, `gain and offset together` leaves the
+least; and `offset alone` beats `gain alone` on 19 of 24. The fitted offsets are
+**2 to 7 codes** and they are not one-signed across flights: negative on the May
+file, positive on April, hard mode, shimmer and `_003`.
+
+**What that costs a multiplicative model, stated plainly.** A pure gain leaves
+3.0 to 8.4 codes on the same content the offset model takes to 2.5 to 7.6. On
+the May file a gain removes 0.2 to 0.9 of a 4-code step; adding the offset
+removes 0.7 to 1.5. *"The correction is multiplicative and the difference is
+additive"* was the first of the three measured reasons stage 7 could not reach
+the artifact, and the ring's own dynamic range now says the same thing at 10 to
+255 codes rather than on one view's flat patches.
+
+The far-field cut on its own cannot settle this and it is worth saying why: on
+these captures the correlated far field spans 22 to 181 codes on the May file
+but **101 to 246** on registry `_002` and **65 to 231** on the green pair. It is
+mostly sky. The population that spans a real black-to-white range is the one the
+shipped pass reads nothing on.
+
+---
+
+## M-3. The weighting fork, three columns
+
+Pre-registered rather than chosen. One estimator, three weights: `lit` squared
+(shipped, and the inverse-variance weight for a log ratio), equal weight, and
+Weber, which is `1 / lit` squared - the deliberate inverse, pricing a direction
+by how VISIBLE a fixed error is there rather than by how many photons it has.
+
+| instant | B-G, `lit`² | B-G, equal | B-G, Weber | R-G, `lit`² | R-G, equal | R-G, Weber |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| May dirt | -0.0218 | -0.0273 | **-0.0451** | -0.0025 | -0.0017 | -0.0032 |
+| May wide | -0.0172 | -0.0135 | **-0.0078** | -0.0072 | -0.0064 | +0.0004 |
+| April green a | -0.0166 | -0.0216 | **-0.0349** | -0.0013 | +0.0065 | **+0.0439** |
+| April green b | -0.0144 | -0.0198 | -0.0269 | -0.0185 | -0.0244 | -0.0099 |
+| hard mode | -0.0196 | -0.0246 | **-0.0475** | -0.0003 | +0.0081 | +0.0185 |
+| registry `_002` | -0.0114 | -0.0175 | -0.0177 | -0.0067 | -0.0186 | -0.0359 |
+| shimmer | -0.0062 | **+0.0075** | **+0.0251** | -0.0069 | -0.0167 | -0.0376 |
+| registry `_003` | -0.0196 | -0.0183 | -0.0042 | -0.0017 | -0.0061 | +0.0025 |
+
+**The fork is not decidable from the ring, and that is the result.** The three
+columns disagree by a factor of two to three on five of eight instants, they
+disagree by a factor of **four** on registry `_003`, and on shimmer they
+disagree in **sign**. Weber does not simply amplify the shipped answer; it goes
+the other way as often as it goes further.
+
+The reason is in the split at each ring's own median level:
+
+| instant | median | dark half `lit`² | dark half Weber | light half `lit`² | light half Weber |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| May dirt | 60 | -0.0249 | -0.0606 | -0.0221 | -0.0232 |
+| May wide | 83 | +0.0051 | -0.0086 | -0.0194 | -0.0201 |
+| April green a | 98 | -0.0326 | -0.0727 | -0.0170 | -0.0206 |
+| hard mode | 100 | -0.0103 | -0.0491 | -0.0219 | -0.0230 |
+| registry `_002` | 122 | -0.0369 | -0.0027 | -0.0105 | -0.0117 |
+| shimmer | 83 | +0.0362 | +0.0322 | -0.0105 | -0.0088 |
+| registry `_003` | 117 | -0.0236 | -0.0011 | -0.0194 | -0.0192 |
+
+(B-G throughout.) **On the light half the three weightings agree to within 0.002
+to 0.004 ln everywhere.** On the dark half they disagree by up to 0.04 and they
+change sign. So the whole of the fork's disagreement is the dark half's own
+noise, and the fork is a question about how much to trust the dark half rather
+than a question about the weight.
+
+**What that means for the build, and it is not what the memo expected.** The
+memo's complaint about `lit` squared is right about visibility and wrong about
+what to do next. `lit` squared does under-weight the content the owner is
+looking at. But re-weighting toward that content does not recover a better
+estimate of it - it recovers **noise that is four times the size of the
+signal**. The dark half of the ring, read at zero shift on flat soil, does not
+support a per-direction chroma reading at this instrument's precision.
+
+The way out is not a weight. It is **more samples per reading on the dark
+directions** (a longer patch, or pooling frames before pooling directions) or a
+correction whose support is local enough that it only ever has to answer where
+it has evidence. That second one is the steer's own field. The fork's verdict is
+therefore: **keep `lit` squared for any DC term** (it is the only column that
+does not change sign anywhere, and it is the inverse-variance weight for exactly
+this quantity), **and do not use a re-weighting to reach dark content**; reach
+it with support and with evidence instead. The oracle's own statistic at the
+owner's dirt views, which the memo names as the tie-breaker, is M-0.2 and reads
+the green pair at 1.8 to 2.3 codes with `lit` squared already.
+
+---
+
+## M-4. The runaway guard, per channel
+
+`LIMIT_LN` is 0.25 because the achromatic ratio was **fitted over whole
+captures** and the guard is the widest fit, times four. Same derivation here,
+and it matters that it is the fit and not the widest single reading: the widest
+single chroma reading in this corpus is **0.61 ln**, which is a dark patch's
+noise and not a camera.
+
+| instant | widest FITTED chroma coordinate over the three weightings, ln |
+| --- | ---: |
+| May dirt | 0.0451 |
+| May wide | 0.0172 |
+| April green a | 0.0439 |
+| April green b | 0.0269 |
+| hard mode | **0.0475** |
+| registry `_002` | 0.0359 |
+| shimmer | 0.0376 |
+| registry `_003` | 0.0196 |
+
+Widest over the corpus: **0.0475 ln**, on hard mode. Times four:
+
+> **`LIMIT_CHROMA_LN = 0.19`**, which is 21 percent of hue.
+
+Nothing measured is clipped by it, which is what keeps it a guard rather than a
+tuning knob. Under `lit` squared alone the widest is 0.0218 and the guard would
+be 0.087; 0.19 admits the Weber column too rather than half-correcting a
+capture whose dark half is loud. Say both numbers in the build brief and pick
+the one the estimator's own weighting justifies.
+
+---
+
+## M-5. What the ring refuses, and to whom
+
+Shares of the azimuth-frames tried (72 azimuths times 24 frames = 1728):
+
+| instant | correlated far | correlated near | **never correlated** | flat (under the 6-code gate) | blind AND flat |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| May dirt | 13.1% | 9.5% | **77.4%** | 36.3% | 27.1% |
+| May wide | 7.9% | 11.7% | **80.4%** | 36.2% | 31.5% |
+| April green a | 4.0% | 6.7% | **88.9%** | 44.8% | 43.1% |
+| April green b | 4.2% | 10.6% | **85.2%** | 48.4% | 46.2% |
+| hard mode | **0.1%** | 15.0% | **85.0%** | 56.4% | 55.0% |
+| registry `_002` | 4.9% | 12.3% | **82.8%** | 43.8% | 40.7% |
+| shimmer | 2.9% | 19.9% | **77.2%** | 31.0% | 29.2% |
+| registry `_003` | 4.5% | 12.0% | **83.5%** | 47.5% | 46.8% |
+
+**The shipped pass pools 0.1 to 13 percent of the ring, and on hard mode that is
+one direction.** The memo quoted 20 to 64 percent of the ring as flat; measured
+at 72 azimuths on the owner's own captures with the correlation gate applied as
+the pass applies it, what the pass reads **nothing** on is 77 to 89 percent.
+The memo's number was the contrast gate alone; this is the contrast gate plus
+everything else that stops a patch correlating.
+
+And the two populations do not disagree. On the dirt reference the far field
+reads B-G -0.0244 and the never-correlated directions read -0.0226, on 950
+readings against 145. Across the corpus the never-correlated pool is within
+0.002 to 0.007 ln of the far-field pool on B-G wherever both have enough
+readings to speak.
+
+**So 4.3's rule change buys evidence and does not buy bias**, and that is a
+measurement rather than the hope the memo recorded. It is also no longer
+optional at the size the correlated far field turns out to be: an estimator that
+reads only what the pass pools has one direction to work with on hard mode.
+
+---
+
+## M-6. Temporal: how fast does it move, and what filter class is that?
+
+Per-frame pooled readings over 24 frames spanning three places minutes apart.
+
+| instant | frame-to-frame rms, R-G / B-G | worst single step | whole-run span | place-to-place span, B-G |
+| --- | ---: | ---: | ---: | ---: |
+| May dirt | 0.0035 / 0.0016 | 0.0141 / 0.0060 | 0.0178 / 0.0070 | 0.0034 |
+| May wide | 0.0032 / 0.0022 | 0.0105 / 0.0088 | 0.0121 / 0.0099 | 0.0093 |
+| April green a | 0.0031 / 0.0067 | 0.0108 / 0.0244 | 0.0239 / 0.0265 | 0.0266 |
+| April green b | 0.0097 / 0.0065 | 0.0409 / 0.0235 | 0.0466 / 0.0274 | 0.0264 |
+| hard mode | 0.0052 / 0.0035 | 0.0191 / 0.0162 | 0.0366 / 0.0179 | 0.0157 |
+| registry `_002` | 0.0018 / 0.0018 | 0.0059 / 0.0061 | 0.0116 / 0.0082 | 0.0067 |
+| shimmer | 0.0072 / 0.0064 | 0.0240 / 0.0196 | 0.0288 / 0.0452 | 0.0306 |
+| registry `_003` | 0.0047 / 0.0018 | 0.0153 / 0.0045 | 0.0228 / 0.0088 | 0.0033 |
+
+**It is a constant seen through noise, and the tone gain's filter class is
+right.** The per-frame reading moves by 0.0016 to 0.0067 ln rms between
+consecutive frames, which is 10 to 40 percent of the signal itself, so the
+per-frame reading is not usable raw. `TAU_GAIN_S` is `TAU_FAR_S` is 2 seconds,
+which at 30 fps averages about sixty readings and divides that per-frame noise
+by about 7.7, taking it to 0.0002 to 0.0009 ln - twenty to a hundred times under
+the signal. **Nothing here asks for anything faster, and the memo's instinct
+that a hue flicker is worse than a static cast is unopposed by any measurement.**
+
+**Per-session, not per-frame, and not per-flight either.** The reading pooled
+per place drifts by 0.003 to 0.031 ln over minutes inside one capture. On the
+four strongest instants that drift is 15 to 54 percent of the signal; on the
+weakest it exceeds it. So the term is a slowly-varying property of the session
+and not a constant of the camera: a value learned at the top of a flight and
+frozen would be wrong by a third of itself ten minutes later. A first-order ease
+at `TAU_GAIN_S` tracks that drift with three orders of magnitude to spare and
+needs no events, no states and no thresholds - which is the tone gain's filter
+and not the anchor's. The one thing to take from the anchor stands: a seek
+re-seeds rather than easing across.
+
