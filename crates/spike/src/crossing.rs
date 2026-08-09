@@ -928,12 +928,16 @@ mod tests {
             Lens {
                 intrinsics,
                 distortion,
+                model: kjerag_meta::Model::Mei,
+                mounting: None,
                 pose: pose(0.0, [0.0; 3]),
                 lens_type: 131,
             },
             Lens {
                 intrinsics,
                 distortion,
+                model: kjerag_meta::Model::Mei,
+                mounting: None,
                 pose: pose(back_pitch_deg, BASELINE),
                 lens_type: 131,
             },
@@ -976,6 +980,7 @@ mod tests {
             stride: size.width as usize,
             size,
             chroma: None,
+            wide: false,
         }
     }
 
@@ -999,6 +1004,7 @@ mod tests {
             stride: size.width as usize,
             size,
             chroma: None,
+            wide: false,
         }
     }
 

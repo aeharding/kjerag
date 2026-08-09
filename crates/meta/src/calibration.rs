@@ -85,22 +85,74 @@ pub struct CalibrationSet {
     /// that choice is made and where it can be overridden by a harness
     /// that wants to watch a wrong one fail.
     pub imu: GyroTrack,
+    /// An orientation the camera solved for itself, in Kjerag's own frames,
+    /// for a capture that records one instead of a raw IMU.
+    ///
+    /// Empty on an `.insv`, which writes the gyroscope and the accelerometer
+    /// and leaves the fusing to [`Self::orientation`]. A DJI `.OSV` writes the
+    /// answer rather than the readings ([`super::osmo`]), and there is no
+    /// filter setting that could change it, so it arrives already solved and
+    /// [`Self::orientation`] hands it back whatever it is asked for.
+    pub fused: OrientationTrack,
     /// The canvas the file's own numbers were expressed on, kept so the
     /// conversion in [`Intrinsics`] stays auditable. Nothing downstream
     /// needs it.
     pub calibration_canvas: Size,
 }
 
-/// One lens: a Mei/UCM camera model plus where the lens sits.
+/// One lens: a camera model, and where the lens sits.
 #[derive(Debug, Clone)]
 pub struct Lens {
     pub intrinsics: Intrinsics,
     pub distortion: Distortion,
+    /// Which family the numbers above belong to, because two cameras in the
+    /// corpus do not share one.
+    pub model: Model,
     pub pose: Pose,
+    /// The whole rotation from the camera body to this lens, for a file that
+    /// records one, and `None` for a file that records a residual instead.
+    ///
+    /// Insta360 writes the second kind: [`Pose`]'s three angles are a
+    /// tolerance against a back-to-back arrangement the file never states, so
+    /// the arrangement is the reader's to supply (`kjerag_render`'s
+    /// `opposed`). A DJI `.OSV` writes a unit quaternion per lens that already
+    /// holds the half turn, and composing an arrangement onto it a second time
+    /// would point both lenses the same way. There is no rotation that means
+    /// both things, so which one it is travels with the numbers.
+    pub mounting: Option<Mat3>,
     /// `lensType`, 131 on the X4 Air and 71 on the non-Air X4. No
     /// decoder table for this value exists anywhere; it is carried
     /// through so a future reader can match on it.
     pub lens_type: u32,
+}
+
+/// Which lens model one lens's numbers describe.
+///
+/// The pass runs whichever this names, in both of its halves
+/// (`kjerag_render::projection`). It is on the lens rather than on the
+/// [`CalibrationSet`] because it is a property of the numbers beside it, and
+/// a lens is where those are.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Model {
+    /// Mei/UCM with Brown-Conrady distortion on the normalized plane, which
+    /// is what Insta360's `offset_v3` writes ([`Intrinsics`], [`Distortion`]).
+    Mei,
+    /// The angle off the axis straight onto a radius, through an odd
+    /// polynomial in that angle:
+    /// `r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8 + k5 t^10)`,
+    /// which is the Kannala-Brandt fisheye and what a DJI Osmo 360's `djmd`
+    /// calibration writes (`super::osmo`). All-zero coefficients are the plain
+    /// equidistant map `r = fx * theta`, which is what this camera's numbers
+    /// were read as until the fifth coefficient was found in field 15.
+    ///
+    /// **The five travel on the variant rather than in [`Distortion`]** because
+    /// they are not the same kind of number. Brown-Conrady's are a polynomial
+    /// in a radius on a normalized plane and these are one in an angle in
+    /// radians; a struct holding either, with a field somewhere else saying
+    /// which, is a struct whose contents cannot be read on their own. It also
+    /// keeps them out of [`CalibrationSet::camera_key`], which deliberately
+    /// hashes no part of the model.
+    Theta { k: [f64; 5] },
 }
 
 /// Mei/UCM intrinsics in delivered-frame pixels.
@@ -128,7 +180,7 @@ pub struct Intrinsics {
     /// The unified-camera-model mirror parameter, 2.31494 on the
     /// fixture. It is why rays past 90 degrees off-axis still project to
     /// finite coordinates, and therefore why the overlap region is
-    /// representable at all.
+    /// representable at all. Zero, and unread, under [`Model::Theta`].
     pub xi: f64,
     pub fx: f64,
     pub fy: f64,
@@ -388,6 +440,21 @@ impl CalibrationSet {
     /// different key and gets its own calibration rather than one scaled
     /// wrong.
     ///
+    /// [`Lens::model`] and [`Lens::mounting`] are deliberately **not** in it,
+    /// and since the theta polynomial's coefficients ride on the model
+    /// ([`Model::Theta`]) they are not in it either. They would not tell two
+    /// cameras apart that the numbers above do not already, because a model
+    /// comes with its own numbers - a theta-polynomial lens carries no mirror
+    /// parameter and a Mei one carries 2.31, and the focal length and
+    /// principal point beside them are per unit to four decimal places - and a
+    /// mounting is the same measurement the angles beside it are. What
+    /// putting them in would do is change the key of every camera already in
+    /// a pilot's pool, and a seam correction filed under a key nobody asks
+    /// for again is a calibration thrown away. Measured on the owner's box:
+    /// stirring them in moved the X4 Air's key from `d8a393389b7b8639` to
+    /// `547a23074ff87e25` and `seam=pool` then answered that it had never
+    /// seen the camera.
+    ///
     /// 0 for a calibration with no lenses in it, which is not a camera.
     pub fn camera_key(&self) -> u64 {
         if self.lenses.is_empty() {
@@ -430,8 +497,17 @@ impl CalibrationSet {
     ///
     /// Empty for a file with no IMU record, which is what makes horizon
     /// lock a no-op on such a file rather than an error.
+    ///
+    /// `filter` is ignored on a capture that solved its own orientation
+    /// ([`Self::fused`]): there is no gyroscope and no accelerometer to mix,
+    /// so there is nothing for a time constant to be a time constant of, and
+    /// answering a filter setting with a track it did not produce would be a
+    /// worse lie than ignoring it.
     pub fn orientation(&self, filter: Filter) -> OrientationTrack {
-        filter.solve(&self.imu, self.body_from_imu())
+        match self.fused.is_empty() {
+            true => filter.solve(&self.imu, self.body_from_imu()),
+            false => self.fused.clone(),
+        }
     }
 
     /// Interpret the trailer's metadata record.
@@ -503,6 +579,7 @@ impl CalibrationSet {
             gyro: GyroConfig::from_metadata(metadata),
             exposure: Default::default(),
             imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
             calibration_canvas: canvas,
         })
     }
@@ -733,6 +810,10 @@ impl LensBlock {
                 cy: cy * (dimension.height as f64 / canvas_h as f64),
             },
             distortion: Distortion { k1, k2, k3, p1, p2 },
+            model: Model::Mei,
+            // `offset_v3` records a residual, so the arrangement it is a
+            // residual against is supplied by the pass and not by the file.
+            mounting: None,
             pose: Pose {
                 yaw_deg: yaw,
                 pitch_deg: pitch,

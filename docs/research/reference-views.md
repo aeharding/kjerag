@@ -619,18 +619,71 @@ The six views, unchanged, and what they are for in this round:
   The wide band softens it and the belt is its fix. UNCHANGED and still roughly 20 view px; this
   architecture changes whether a measurement is SPENT, not what is measured.
 
-## Photometric: the DJI Osmo 360 reference line (owner 2026-08-0?, REGISTERED - stage 10 gate)
+## A second camera: DJI Osmo 360 `.OSV` (VERDICT: APPROVED, three lines)
+
+The first lines here that are not an Insta360 capture, and the first that name a file outside
+`~/Videos`. **None of the three is a Ctrl+V target**, for the reason the header gives twice over:
+the file's name has spaces in it, and `Framing::read_line` takes the first whitespace word as the
+path (issue #157, and issue #174 is the same trap found again from the other end). They are CLI
+arguments, and the quoting below is what a shell needs. The seam knobs are absent on purpose: a DJI
+lens takes the mounting branch of `lens_from_body` and a fitted pose writes `lens.pose`, so a
+`seam=` cannot move this camera's picture at all (see the honest leftovers in
+`crates/meta/src/osmo.rs`). `seam=factory` is what these were read at and the only thing they can
+be read at.
+
+All three are on `~/Downloads/"1 8k30p standard 10bit iso max 800-003.OSV"`, which is unit B, the
+owner's own camera. Verified on the flat-seam rebase 2026-08-09 through `--bin reframe` at 1920 px;
+stills in gitignored `scratch/OSV-VERIFY/`.
+
+- 2026-08-08 `time=97.831 yaw=90.49 pitch=33.25 fov=26.90 lock=1 seam=factory` — **the tower.**
+  The acceptance line for the five-coefficient lens model. The owner reported the picture "fixed
+  off everywhere" and a doubled tower; read through the app's own map with `--bin crossing` at a
+  90 degree seam view, the two lenses drew the same far content **241 source px apart across the
+  seam, 13.1 degrees**, and after the fifth coefficient (field 15) **3.2 px, 0.18 degrees**. What
+  to read in the still is that the tower is ONE tower with one set of balcony edges. Verdict: the
+  owner tested the branch build and passed it, *"can confirm tear is gone"*.
+- 2026-08-08 `time=23.590 yaw=-87.45 pitch=-18.11 fov=48.41 lock=1 seam=factory` — **the kerb.**
+  The far-field companion to the tower: what to read is that the lawn edge, the path and the
+  building line across the middle distance run through the handover unbroken. **Near-field
+  ghosting at metre range remains, in this arm and every other, and it is parallax and not
+  calibration** — no inter-lens translation is recorded in an `.OSV`, so the parallax band is off
+  and nothing can be done about it from the file. That is the accepted v1 and it is on the PR's
+  tradeoff list.
+- 2026-08-08 `time=139.806 yaw=-63.98 pitch=-15.06 fov=160.04 lock=1 seam=factory` — **the dip.**
+  The owner's own line, and the acceptance line for horizon lock on this camera: he wrote it down
+  at the instant the lock was visibly failing. What to read is that the marina horizon runs level
+  and the pavilion columns stand up. The counter-null is the same line at `lock=0`, which is
+  visibly rolled and pitched, and the two differ byte for byte
+  (`226bbf3d…` against `836e1514…`, sha256 of the 1920 px still). Verdict: the owner tested the
+  mounting-b build and passed it, *"OSV video output looks good, approved"*.
+
+**The fourth line that is not here is the one for the other unit.** `--bin reframe
+~/Videos/samples/dji-osmo360/CAM_20250715191201_0003_D.OSV time=20 yaw=0 fov=90 lock=1` renders
+with **no horizon lock at all**, because that capture's own two records of where down is contradict
+each other: its quaternion and its accelerometer disagree by 23.0 degrees where a camera assumed
+upright would be out by 14.7, printed at open. That is a fault in the file by the file's own
+evidence, and reading the quaternion the other way round does not rescue it either (11.3 degrees,
+past the 8 degree ceiling). The lock refuses rather than holding a horizon on a record it cannot
+believe. `lock=0` and `lock=1` are byte-identical there, which is the check that the refusal is
+complete. Nobody has asked for that file to hold a horizon.
+
+**The gate is not a mounting check and must not be read as one** (review, 2026-08-09;
+docs/research/osv-format.md 6.2). A mounting's mirror and turn move the quaternion and the
+accelerometer together, so they cancel out of it: a unit whose inertial frame is reflected the
+other way would draw a visibly tilted horizon here and print the line a file that agrees prints.
+The mounting was verified offline, on the picture, over 177 degrees of lean azimuth, and that is
+the instrument a second unit would need re-run.
+
+## Photometric: the DJI Osmo 360 reference line (REGISTERED - stage 10 gate)
 - 2026-08-09 `~/Downloads/"1 8k30p standard 10bit iso max 800-003.OSV" time=15.215 yaw=-178.05 pitch=-3.15 fov=249.43 lock=1`
-  The owner's DJI line, registered here as a **photometry gate** so that seam work on the second
-  camera family has an aim with a name. `lock=1`; the Osmo writes its own solved orientation a
-  frame, so the world-fixed re-derivation rule above does not apply to it - that rule is about
-  Kjerag's own IMU filter and this file does not go through it.
-  **IT DOES NOT RENDER ON `main` AND THAT IS NOT A DEFECT IN THE LINE.** `main` refuses every
-  `.OSV` by name (`crates/meta/src/format.rs`; the pilot sees "That is a DJI video. Kjerag plays
-  Insta360 .insv only.") and `--bin reframe` answers `Error: Dji`. The reader that opens one is
-  the unmerged `feat/osmo-osv`, and the render below was taken there, at 343897f, `size=1024`.
-  Anything measured at this line before that branch merges is measured on a build the owner
-  cannot be handed.
+  A fourth line on the same unit-B capture as the three above, registered as a **photometry gate**
+  so that seam work on the second camera family has an aim with a name. `lock=1`; the Osmo writes
+  its own solved orientation a frame, so the world-fixed re-derivation rule above does not apply to
+  it - that rule is about Kjerag's own IMU filter and this file does not go through it. Not a
+  Ctrl+V target, for the section header's reason: the path has spaces in it.
+  **PROVENANCE.** The render described below was taken on the then-unmerged `feat/osmo-osv` at
+  343897f, `size=1024`, when `main` still refused every `.OSV` by name. #178 landed that reader on
+  2026-08-09, so the line renders on `main` now and the caveat is history rather than a live one.
   WHAT IT SHOWS, on that render. A park under a tree canopy at head height, the camera worn: the
   **sun is directly in frame** through the leaves a little above centre, with a chain of flare
   ghosts running down and left of it across the grass, and the wearer's own head and shoulder
@@ -640,13 +693,14 @@ The six views, unchanged, and what they are for in this round:
   top-left, top-right and bottom-right corners. The dynamic range across it is the widest in
   either registry: blown canopy against deep shadow on grass in one frame.
   **UNMEASURED, and named as such**: no per-crossing photometric reading has been taken at this
-  line. `--bin colour` and `--bin expose` run against `Scene`, so they refuse the file for the
-  same reason `reframe` does, and porting them is the OSV branch's work and not this line's.
+  line. `--bin colour` and `--bin expose` open a file through `CalibrationSet::from_insv`, which
+  has no `.OSV` path even now that the player has one, so they still refuse it; giving them one is
+  its own work and not this line's.
   What IS settled at this line is the metadata question stage 10 asked of it (seam-blending.md
   23): the file carries **per-frame ISO, shutter and white balance**, one sample per frame, in
   both its `djmd` tracks - and **the two tracks carry the same block**, so there is no per-lens
   exposure in an `.OSV` and nothing for a deterministic normalization to divide by.
-  STATUS: REGISTERED, rendered on `feat/osmo-osv`, photometrically unmeasured. Gates stage 10 on
+  STATUS: REGISTERED, renders on `main` since #178, photometrically unmeasured. Gates stage 10 on
   the DJI side.
 
 ## Standing bars

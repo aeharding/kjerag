@@ -1680,7 +1680,26 @@ fn ring_at(centre: vec3<f32>) -> Ring {
   out.epi = select(vec3<f32>(0.0), -seen / out.reach_m, out.reach_m > 0.0);
   // `epi x centre`, which is the seam circle's own tangent towards increasing
   // azimuth and the sign `seam::ring` publishes. Rust twin: `Ring::at`.
-  out.perp = normalize(cross(out.epi, centre));
+  //
+  // The guard is the Rust twin's `unit`, and what it protects has moved
+  // without going away. A camera whose file records no inter-lens translation
+  // has a zero baseline, no epipolar direction and a zero cross product, and
+  // `normalize` of a zero vector is NaN. On the base this branch was written
+  // against, that NaN reached the picture through the corridor bend and drew
+  // a DJI `.OSV`'s whole forward hemisphere black. #176 deleted the bend, so
+  // it reaches no pixel today: taking this line back out renders the owner's
+  // three `.OSV` views byte for byte identical (measured 2026-08-09).
+  //
+  // What it still reaches is `measure`, which lays every one of its taps out
+  // along `perp` and `epi`. NaN there is a patch that correlates with nothing
+  // on every DJI capture, and the band is not idle machinery: it is the
+  // measurement the belt will be seeded from, and one that quietly reads
+  // nothing is worse than one that is switched off. So the guard stays, on
+  // the strength of the compute pass rather than the picture. `normalize` is
+  // kept for the ordinary case rather than replaced with a division, so
+  // nothing an Insta360 capture draws moves by a bit.
+  let tangent = cross(out.epi, centre);
+  out.perp = select(vec3<f32>(0.0), normalize(tangent), length(tangent) > 0.0);
   return out;
 }
 "#;

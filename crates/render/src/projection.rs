@@ -1,5 +1,26 @@
-//! The Mei/UCM forward map: one output ray to one lens pixel, for each lens
-//! of the camera, and how much of each is shown.
+//! The forward map: one output ray to one lens pixel, for each lens of the
+//! camera, and how much of each is shown.
+//!
+//! **Two lens models, chosen per lens** (`kjerag_meta::Model`). Insta360's
+//! `offset_v3` is Mei/UCM with Brown-Conrady distortion on the normalized
+//! plane; a DJI Osmo 360's `djmd` calibration is the Kannala-Brandt fisheye,
+//! `r = fx * theta * (1 + k1 t^2 + ... + k5 t^10)`, with all five of the
+//! coefficients the file carries (`kjerag_meta::osmo` has where the fifth of
+//! them hides). Both are one function of a unit ray in the lens's own frame
+//! and nothing else, so the model is a branch inside [`lens_pixel`] and the
+//! rest of the pass - the caps, the crossover, the handover, the readout -
+//! does not know which one it is running. Both take five coefficients, so
+//! [`LensBlock`] carries five slots and not ten.
+//!
+//! **One direction only, and that is the whole of what the pass needs.** Both
+//! models here are the forward map, a ray to a pixel; nothing in this crate
+//! inverts one, for either family. The pass is already a backward map - an
+//! output pixel becomes a ray ([`Screen::ray`]) and the ray is projected into
+//! each lens - so the sampling asks for exactly this direction, and the two
+//! questions that sound like they need the other one do not: the coverage cap
+//! is bisected on the forward map ([`cap`]) and the sampling density is a
+//! finite difference of it (`texel_ratio`). A `theta(r)` would be a Newton
+//! solve on a fifth-order polynomial and nothing would call it.
 //!
 //! It exists twice on purpose. `WGSL` below is the copy the GPU runs, once
 //! per output pixel; [`Reframe::project`] is the same arithmetic in Rust, so
@@ -26,10 +47,10 @@
 //! measured per camera and the correction is switched off on any camera it
 //! has not been measured on (`kjerag_meta::Sweep`).
 //!
-//! Written from the model description in `docs/research/insv-format.md` 5.1
-//! (Mei and Rives 2007, as OpenCV's `cv::omnidir` states it). Nothing here
-//! is transcribed from Gyroflow's `insta360.wgsl`, so this file is plain
-//! AGPL-3.0 with no GPL header.
+//! The Mei half is written from the model description in
+//! `docs/research/insv-format.md` 5.1 (Mei and Rives 2007, as OpenCV's
+//! `cv::omnidir` states it). Nothing here is transcribed from Gyroflow's
+//! `insta360.wgsl`, so this file is plain AGPL-3.0 with no GPL header.
 //!
 //! The other half of the map is the **output** projection, [`Screen`]: how a
 //! point of the frame becomes the ray this file then projects. A flat window
@@ -40,7 +61,7 @@
 use std::f32::consts::PI;
 use std::sync::OnceLock;
 
-use kjerag_meta::{Intrinsics, Lens, Pose, Quat};
+use kjerag_meta::{Intrinsics, Lens, Model, Quat};
 
 use super::sampling::Sampling;
 use super::{Camera, Size};
@@ -493,24 +514,42 @@ pub struct Reframe {
     ///
     /// WGSL twin: `reframe.handover_shift`, read by `handover`.
     handover_shift: f32,
-    /// What puts the table below on a sixteen-byte offset.
+    /// The two planes hold 16-bit words rather than bytes, which the shader
+    /// puts back together itself (`kjerag_media::Samples::wide`,
+    /// `super::dmabuf::plane_format`). 1 for a P010 frame and 0 for NV12.
     ///
-    /// **WGSL's alignment and not this struct's.** Every member of this block
-    /// is an `f32` or an array of them, so `repr(C)` gives the whole thing an
-    /// alignment of 4 and would happily start the table at 340. WGSL lays an
-    /// `array<vec4<f32>, N>` out at 16, so the two definitions would then
-    /// describe different bytes.
+    /// **Sibling of [`Self::crossover`] and not a new field at the end**, for
+    /// [`Self::handover_shift`]'s reason: it takes the second of the three
+    /// padding words the table's alignment already needed, so the block is
+    /// the size it always was and the table has not moved.
+    wide: f32,
+    /// Studio swing rather than the whole range
+    /// (`kjerag_media::Samples::limited`). 1 for a DJI capture and 0 for
+    /// every Insta360 one, which is the picture this pass drew before there
+    /// was a second answer.
     ///
-    /// **Nothing catches that at run time.** `min_binding_size` checks the
-    /// block's total size and not one offset in it, and the sizes agree either
-    /// way, so the shader would read the table shifted by twelve bytes and
-    /// draw a wrong picture rather than refuse a pipeline. The test
-    /// `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
-    /// it checks the offset as well as the size for exactly that reason.
-    ///
-    /// Two words rather than three since the seam anchor took the first of
-    /// them ([`Self::handover_shift`]).
-    _pad: [f32; 2],
+    /// The last of the three padding words, which is why there is no `_pad`
+    /// below it any more.
+    limited: f32,
+    // What used to sit here is what put the table below on a sixteen-byte
+    // offset: three padding words, all three of which are now numbers the
+    // shader reads (`handover_shift`, `wide`, `limited`), so the block reaches
+    // that offset on its own and there is nothing left to pad with.
+    //
+    // **WGSL's alignment and not this struct's.** Every member of this block
+    // is an `f32` or an array of them, so `repr(C)` gives the whole thing an
+    // alignment of 4 and would happily start the table at 340. WGSL lays an
+    // `array<vec4<f32>, N>` out at 16, so the two definitions would then
+    // describe different bytes.
+    //
+    // **Nothing catches that at run time.** `min_binding_size` checks the
+    // block's total size and not one offset in it, and the sizes agree either
+    // way, so the shader would read the table shifted by twelve bytes and draw
+    // a wrong picture rather than refuse a pipeline. The test
+    // `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
+    // it checks the offset as well as the size for exactly that reason. A
+    // fourth number added beside those three is what it will fail on, and the
+    // fix is another three words of padding, not a smaller table.
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -536,7 +575,7 @@ pub struct Reframe {
     table: super::band::Table,
 }
 
-/// One lens's half of the block: the Mei/UCM model, and where the lens is
+/// One lens's half of the block: the camera model, and where the lens is
 /// pointing after the camera's own rotation.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -549,11 +588,16 @@ struct LensBlock {
     fy: f32,
     cx: f32,
     cy: f32,
-    k1: f32,
-    k2: f32,
-    k3: f32,
-    p1: f32,
-    p2: f32,
+    /// The five coefficients of whichever model [`Self::model`] names, in the
+    /// order that model reads them: Mei's three radial terms and two
+    /// tangential ones ([`mei`]), or the theta polynomial's `k1` to `k5`
+    /// ([`theta`]).
+    ///
+    /// Five slots shared rather than ten, because no lens is two models at
+    /// once and a uniform block is per draw: the two families are the same
+    /// count of numbers and each is meaningless to the other. What keeps them
+    /// apart is that neither model reads a slot by any name but its own.
+    coefficients: [f32; 5],
     image_radius: f32,
     /// The cosine of the widest angle off this lens's axis that can still be
     /// in its picture, widened by [`CAP_MARGIN_DEG`] and by whatever the
@@ -576,9 +620,11 @@ struct LensBlock {
     /// half turn apart, which is exactly why a readout displacement does not
     /// cancel between them at the seam.
     turn: [f32; 3],
-    /// A uniform array's element stride rounds up to the element's 16-byte
-    /// alignment. WGSL does that itself; `repr(C)` does not.
-    _pad: [f32; 1],
+    /// Which model [`lens_pixel`] runs for this lens: [`MEI`] or [`THETA`].
+    /// An `f32` because every member of this block is one,
+    /// and a uniform block with a mixed member type is a layout to get wrong
+    /// for nothing.
+    model: f32,
 }
 
 /// Where a view ray lands in one lens's image, in delivered-frame pixels.
@@ -1148,13 +1194,29 @@ impl Reframe {
             // No line held until a caller says otherwise
             // ([`Self::with_shift`]), and no shift is the geometric handover.
             handover_shift: 0.0,
-            _pad: [0.0; 2],
+            // Eight bit, full range: what every `.insv` is, and what
+            // [`Self::with_samples`] is asked to say otherwise.
+            wide: 0.0,
+            limited: 0.0,
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
         };
         block.crossover = block.afforded();
         block
+    }
+
+    /// The same map told how the planes it will sample are written.
+    ///
+    /// A step of its own rather than an argument to [`Self::new`], for
+    /// [`Self::with_table`]'s reason: every caller that asks this map about
+    /// geometry rather than about pixels would otherwise have to say
+    /// something, and the thing it would be saying is 8-bit full range, which
+    /// is what this defaults to and what every `.insv` in the corpus is.
+    pub fn with_samples(mut self, samples: kjerag_media::Samples) -> Self {
+        self.wide = f32::from(u8::from(samples.wide));
+        self.limited = f32::from(u8::from(samples.limited));
+        self
     }
 
     /// The same map with a camera's along-seam table in it (issue #103, stage
@@ -1415,7 +1477,8 @@ impl Reframe {
             crossover: crossover_deg().to_radians(),
             // No seam, so no line to hold anywhere.
             handover_shift: 0.0,
-            _pad: [0.0; 2],
+            wide: 0.0,
+            limited: 0.0,
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -1885,8 +1948,9 @@ impl Reframe {
         axis >= self.lenses[lens].axis_min * reach
     }
 
-    /// The forward map: a view ray, through one lens's extrinsics and the
-    /// Mei/UCM model, to a pixel of that lens's delivered frame.
+    /// The forward map: a view ray, through one lens's extrinsics and
+    /// whichever model its calibration is written in ([`lens_pixel`]), to a
+    /// pixel of that lens's delivered frame.
     ///
     /// **Where the rolling shutter is taken out (issue #9).** The lens saw
     /// this ray when it read the row the ray lands on, not when the frame
@@ -1915,12 +1979,12 @@ impl Reframe {
     pub fn solve(&self, lens: usize, view_ray: [f32; 3], rounds: usize) -> Landing {
         let block = &self.lenses[lens];
         let aimed = block.lens_ray(view_ray);
-        let mut landing = self.mei(lens, normalize(aimed));
+        let mut landing = self.lens_pixel(lens, normalize(aimed));
         if self.is_rolling() {
             for _ in 0..rounds {
                 let share = self.readout_share(landing.pixel);
                 let turned = turned(aimed, block.turn.map(|axis| axis * share));
-                landing = self.mei(lens, normalize(turned));
+                landing = self.lens_pixel(lens, normalize(turned));
             }
         }
         landing
@@ -1950,19 +2014,113 @@ impl Reframe {
         (across * self.row_axis[0] + down * self.row_axis[1]).clamp(-0.5, 0.5)
     }
 
-    /// The Mei/UCM model itself, for one of this block's lenses.
+    /// The lens model itself, for one of this block's lenses.
     ///
-    /// WGSL twin: `mei`.
-    fn mei(&self, lens: usize, p: [f32; 3]) -> Landing {
-        mei(&self.lenses[lens], p)
+    /// WGSL twin: `lens_pixel`.
+    fn lens_pixel(&self, lens: usize, p: [f32; 3]) -> Landing {
+        lens_pixel(&self.lenses[lens], p)
     }
 }
 
-/// The Mei/UCM model itself: a unit ray in one lens's own frame, to a pixel
-/// of that lens's delivered frame.
+/// [`LensBlock::model`] for Mei/UCM, which is what every Insta360 capture is.
+const MEI: f32 = 0.0;
+
+/// [`LensBlock::model`] for the theta polynomial, which is what a DJI `.OSV`
+/// is.
+const THETA: f32 = 1.0;
+
+/// A unit ray in one lens's own frame, to a pixel of that lens's delivered
+/// frame, through whichever model that lens's calibration is written in.
 ///
-/// Free of [`Reframe`] because [`coverage_floor`] runs it against a block
-/// that is still being built, before there is a `Reframe` to index.
+/// Free of [`Reframe`] because [`coverage_floor`] runs it against a block that
+/// is still being built, before there is a `Reframe` to index.
+///
+/// WGSL twin: `lens_pixel`.
+fn lens_pixel(lens: &LensBlock, p: [f32; 3]) -> Landing {
+    match lens.model == THETA {
+        true => theta(lens, p),
+        false => mei(lens, p),
+    }
+}
+
+/// The Kannala-Brandt fisheye: the angle off the axis, onto a radius, through
+/// an odd polynomial in that angle.
+///
+/// ```text
+/// r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8 + k5 t^10)
+/// ```
+///
+/// with `t = theta` in radians, and `fy / fx` squeezing the one axis against
+/// the other, which is the whole model. All five coefficients are the file's
+/// own (`kjerag_meta::osmo`, which says where the fifth hides and what reading
+/// four of them cost); all-zero is the plain equidistant map this shipped as
+/// until 2026-08-08.
+///
+/// **Where it may be believed.** The polynomial is a fit and not a law, so it
+/// is not monotone by construction the way `r = fx * theta` is: the same
+/// coefficients read four-at-a-time turn the radius over at 89 degrees and
+/// bring it back down, and a map that folds lands a ray from behind the lens
+/// on a pixel that belongs to one in front of it, which is issue #30's ghost.
+/// So the same question Mei answers with its turning point is answered here by
+/// the derivative,
+///
+/// ```text
+/// dr/dtheta = fx * (1 + 3 k1 t^2 + 5 k2 t^4 + 7 k3 t^6 + 9 k4 t^8 + 11 k5 t^10)
+/// ```
+///
+/// which is one Horner chain beside the one already being run, exact at the
+/// ray rather than bounded by a stated angle, and positive over the whole
+/// sphere on all four lenses of the two units in the corpus
+/// (`the_theta_model_is_monotone_over_the_whole_sphere`): on this camera
+/// family it never fires, and on a calibration that folds it stops the picture
+/// where the fold is.
+///
+/// WGSL twin: `theta`.
+fn theta(lens: &LensBlock, p: [f32; 3]) -> Landing {
+    // The ray is a unit vector, so its z IS the cosine of the angle off the
+    // axis. `atan2` of the perpendicular reach against it rather than `acos`,
+    // because `acos` loses its precision exactly where this model is used
+    // most, which is the far half of a 199 degree lens.
+    let reach = p[0].hypot(p[1]);
+    let angle = reach.atan2(p[2]);
+    let square = angle * angle;
+    let k = lens.coefficients;
+    let radial =
+        1.0 + square * (k[0] + square * (k[1] + square * (k[2] + square * (k[3] + square * k[4]))));
+    let slope = 1.0
+        + square
+            * (3.0 * k[0]
+                + square
+                    * (5.0 * k[1]
+                        + square * (7.0 * k[2] + square * (9.0 * k[3] + square * 11.0 * k[4]))));
+    // Straight down the axis, where the azimuth is not defined and the
+    // radius is zero anyway.
+    let scale = match reach > 0.0 {
+        true => angle * radial / reach,
+        false => 0.0,
+    };
+    let offset = [lens.fx * p[0] * scale, lens.fy * p[1] * scale];
+    landed(lens, offset, p[2], slope > 0.0)
+}
+
+/// One model's pixel offset, as the [`Landing`] the rest of the pass reads.
+///
+/// `injective` is whether the map can be believed this far round, which is a
+/// question the two models answer differently and both have to answer: Mei
+/// folds past a turning point its mirror parameter puts in closed form, and
+/// the theta polynomial folds wherever its own derivative goes negative.
+fn landed(lens: &LensBlock, offset: [f32; 2], axis: f32, injective: bool) -> Landing {
+    let depth = lens.image_radius - norm(offset);
+    Landing {
+        pixel: [offset[0] + lens.cx, offset[1] + lens.cy],
+        inside: injective && depth > 0.0,
+        axis,
+        depth,
+    }
+}
+
+/// The Mei/UCM model: a unit ray in one lens's own frame, to a pixel of that
+/// lens's delivered frame.
 ///
 /// WGSL twin: `mei`.
 fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
@@ -1974,10 +2132,13 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
     let x = p[0] / denom;
     let y = p[1] / denom;
 
+    // Three radial terms and two tangential, which is what these five slots
+    // are under this model ([`LensBlock::coefficients`]).
+    let [k1, k2, k3, p1, p2] = lens.coefficients;
     let r2 = x * x + y * y;
-    let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
-    let xd = x * radial + 2.0 * lens.p1 * x * y + lens.p2 * (r2 + 2.0 * x * x);
-    let yd = y * radial + 2.0 * lens.p2 * x * y + lens.p1 * (r2 + 2.0 * y * y);
+    let radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+    let xd = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
+    let yd = y * radial + 2.0 * p2 * x * y + p1 * (r2 + 2.0 * y * y);
 
     let offset = [lens.fx * xd, lens.fy * yd];
     // How far round the map can be believed, which is not as far as it
@@ -1994,13 +2155,7 @@ fn mei(lens: &LensBlock, p: [f32; 3]) -> Landing {
     // there, the radius runs away to infinity instead, and `denom` is the
     // limit that binds.
     let injective = p[2] * lens.xi > -1.0;
-    let depth = lens.image_radius - norm(offset);
-    Landing {
-        pixel: [offset[0] + lens.cx, offset[1] + lens.cy],
-        inside: denom > 0.0 && injective && depth > 0.0,
-        axis: p[2],
-        depth,
-    }
+    landed(lens, offset, p[2], denom > 0.0 && injective)
 }
 
 /// The cosine of the widest angle off a lens's axis that can still be in its
@@ -2069,7 +2224,7 @@ fn inside_anywhere(block: &LensBlock, axis: f32) -> bool {
     let rim = (1.0 - axis * axis).max(0.0).sqrt();
     (0..CAP_AZIMUTHS).any(|step| {
         let (sin, cos) = (step as f32 * std::f32::consts::TAU / CAP_AZIMUTHS as f32).sin_cos();
-        mei(block, [rim * cos, rim * sin, axis]).inside
+        lens_pixel(block, [rim * cos, rim * sin, axis]).inside
     })
 }
 
@@ -2229,46 +2384,46 @@ impl LensBlock {
         fy: 1.0,
         cx: 0.0,
         cy: 0.0,
-        k1: 0.0,
-        k2: 0.0,
-        k3: 0.0,
-        p1: 0.0,
-        p2: 0.0,
+        coefficients: [0.0; 5],
         image_radius: 0.0,
         axis_min: 2.0,
         turn: [0.0; 3],
-        _pad: [0.0; 1],
+        model: MEI,
     };
 
     fn new(lens: &Lens, index: usize, frame: Size, camera: Camera, held: Held) -> Self {
         let Intrinsics { xi, fx, fy, cx, cy } = lens.intrinsics;
-        let distortion = lens.distortion;
+        let d = lens.distortion;
+        // Which five numbers the block carries is the model's own answer, and
+        // it is given here rather than read out of two places by the map:
+        // `mei` and `theta` each read five slots and neither knows the other's
+        // meaning ([`LensBlock::coefficients`]).
+        let (model, coefficients) = match lens.model {
+            Model::Mei => (MEI, [d.k1, d.k2, d.k3, d.p1, d.p2]),
+            Model::Theta { k } => (THETA, k),
+        };
         let mut block = Self {
-            view_to_lens: view_to_lens(&lens.pose, index, camera, held).columns(),
+            view_to_lens: view_to_lens(lens, index, camera, held).columns(),
             xi: xi as f32,
             fx: fx as f32,
             fy: fy as f32,
             cx: cx as f32,
             cy: cy as f32,
-            k1: distortion.k1 as f32,
-            k2: distortion.k2 as f32,
-            k3: distortion.k3 as f32,
-            p1: distortion.p1 as f32,
-            p2: distortion.p2 as f32,
-            image_radius: image_radius(&lens.intrinsics, frame) as f32,
+            coefficients: coefficients.map(|number| number as f32),
+            image_radius: image_radius(lens, frame) as f32,
             // The body's turn across the readout, carried into this lens's
             // own frame, which is where the ray it corrects is expressed.
             // Conjugating the rotation by the mounting is what rotating its
             // axis by the mounting does, and it is why the two lenses'
             // corrections run opposite ways in the world.
             turn: held.rolling.map_or([0.0; 3], |rolling| {
-                lens_from_body(&lens.pose, index).mul_vec(rolling.turn.map(|axis| axis as f32))
+                lens_from_body(lens, index).mul_vec(rolling.turn.map(|axis| axis as f32))
             }),
             // Solved for below: the cap is a property of the model this block
             // has just been filled with, and the readout it widens by is the
             // `turn` above.
             axis_min: 2.0,
-            _pad: [0.0; 1],
+            model,
         };
         // Half of it, because `readout_share` runs -1/2 to +1/2 and the model
         // is handed the ray turned by that share of the whole readout.
@@ -2321,8 +2476,8 @@ pub(crate) fn world_ray(camera: Camera, ray: [f32; 3]) -> [f32; 3] {
 /// direction in that frame and solves for the view that puts it back there,
 /// and with lock on that frame is the world: the anchor stays on the world
 /// and the picture turns under it.
-fn view_to_lens(pose: &Pose, index: usize, camera: Camera, held: Held) -> Mat3 {
-    lens_from_body(pose, index).mul(body_from_view(camera, held))
+fn view_to_lens(lens: &Lens, index: usize, camera: Camera, held: Held) -> Mat3 {
+    lens_from_body(lens, index).mul(body_from_view(camera, held))
 }
 
 /// The same composition with the lens's own mounting left off: a view-space
@@ -2350,8 +2505,17 @@ fn camera_rotation(camera: Camera) -> Mat3 {
 /// in `kjerag_meta::Pose::lens_from_body`, because the IMU needs the same
 /// rotation to get out of the front lens's frame and into the body's, and one
 /// settled convention wants one definition.
-fn lens_from_body(pose: &Pose, index: usize) -> Mat3 {
-    Mat3::from(pose.lens_from_body().rows()).mul(opposed(index))
+///
+/// A file that records the **whole** rotation rather than a residual against
+/// the arrangement takes it verbatim and gets no [`opposed`] composed onto it:
+/// a DJI `.OSV`'s two quaternions already point opposite ways, and turning one
+/// of them a further half turn would point both lenses forward
+/// (`kjerag_meta::Lens::mounting`).
+fn lens_from_body(lens: &Lens, index: usize) -> Mat3 {
+    match lens.mounting {
+        Some(whole) => Mat3::from(whole.rows()),
+        None => Mat3::from(lens.pose.lens_from_body().rows()).mul(opposed(index)),
+    }
 }
 
 /// The nominal pose lens `index` is mounted in, which its extrinsics are a
@@ -2384,25 +2548,51 @@ fn opposed(index: usize) -> Mat3 {
     }
 }
 
-/// The largest circle centred on the principal point that fits in the
-/// delivered frame.
+/// Where this lens's picture stops, as a radius in delivered-frame pixels
+/// from its own principal point.
 ///
-/// The file records no image-circle radius and the model does not bound
-/// itself: past the lens's real coverage the radial polynomial keeps
-/// returning finite pixel coordinates, so something has to say where the
-/// picture stops. On the X4 Air fixture this radius is 1913 px, which the
-/// model reaches at about 97.4 degrees off axis, so two lenses overlap by
-/// about 14 degrees around the seam. That circle is the validity boundary
-/// [`claim`] measures its coverage depth from, so it sets the blend band as
-/// well as the picture's edge.
-fn image_radius(intrinsics: &Intrinsics, frame: Size) -> f64 {
+/// Neither file records an image-circle radius and neither model bounds
+/// itself: past the lens's real coverage both keep returning finite pixel
+/// coordinates, so something has to say where the picture stops. That circle
+/// is the validity boundary [`claim`] measures its coverage depth from, so it
+/// sets the blend band as well as the picture's edge, and the two camera
+/// families frame their pictures differently enough that one answer will not
+/// do for both.
+///
+/// **Insta360 (Mei): the largest circle centred on the principal point that
+/// fits in the delivered frame.** On the X4 Air fixture that is 1913 px, which
+/// the model reaches at about 97.4 degrees off axis, so two lenses overlap by
+/// about 14 degrees around the seam.
+///
+/// **DJI (the theta polynomial): half the delivered frame, which is the image
+/// circle itself.** The Osmo 360 delivers a 3840 px square with the circle
+/// inscribed in it - the picture reaches all four edges and the corners are
+/// unexposed (measured on frames of both units: content to the frame edge at
+/// the mid-sides, and out to about 2035 px on the diagonals, where the optical
+/// rim is) - so the circle's radius is half the frame's shorter side and its
+/// centre is the frame's, not the principal point's. The model says the same:
+/// it puts 1920 px at 98.9 to 99.4 degrees off axis on all four lenses of the
+/// two units, so 197.9 to 198.8 degrees of coverage, which is that camera's
+/// published figure (`the_theta_model_covers_a_199_degree_lens`).
+///
+/// Taking the inscribed circle about the **principal point** there is what
+/// this did until 2026-08-08, and it is wrong in both directions at once: the
+/// number moves from 1910.2 to 1916.7 px across four lenses of two units
+/// purely because the principal point wanders 10 px around the frame centre,
+/// which is a property of nobody's optics, and every one of those frames is
+/// lit past it.
+fn image_radius(lens: &Lens, frame: Size) -> f64 {
     let (width, height) = (f64::from(frame.width), f64::from(frame.height));
-    intrinsics
-        .cx
-        .min(intrinsics.cy)
-        .min(width - intrinsics.cx)
-        .min(height - intrinsics.cy)
-        .max(0.0)
+    match lens.model {
+        Model::Theta { .. } => 0.5 * width.min(height),
+        Model::Mei => lens
+            .intrinsics
+            .cx
+            .min(lens.intrinsics.cy)
+            .min(width - lens.intrinsics.cx)
+            .min(height - lens.intrinsics.cy)
+            .max(0.0),
+    }
 }
 
 fn norm(v: [f32; 2]) -> f32 {
@@ -2492,7 +2682,7 @@ pub(crate) fn wgsl() -> String {
     let lanes = super::band::AZIMUTHS / 4;
     format!(
         "const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n\
-         const TABLE_LANES = {lanes}u;\n{WGSL}"
+         const TABLE_LANES = {lanes}u;\nconst THETA = {THETA:?};\n{WGSL}"
     )
 }
 
@@ -2504,11 +2694,18 @@ struct LensBlock {
   fy: f32,
   cx: f32,
   cy: f32,
-  k1: f32,
-  k2: f32,
-  k3: f32,
-  p1: f32,
-  p2: f32,
+  // The five coefficients of whichever model `model` names, in the order that
+  // model reads them: Mei's three radial and two tangential (`mei`), or the
+  // theta polynomial's k1 to k5 (`theta`). Rust twin:
+  // `LensBlock::coefficients`, which is an array there and five members here
+  // because a uniform block cannot hold an `array<f32, 5>`: WGSL gives an
+  // array in that address space a sixteen-byte stride and these five numbers
+  // are adjacent.
+  c1: f32,
+  c2: f32,
+  c3: f32,
+  c4: f32,
+  c5: f32,
   image_radius: f32,
   // The cosine of the widest angle off this lens's axis that can still be in
   // its picture. Rust twin: `LensBlock::axis_min`.
@@ -2518,6 +2715,9 @@ struct LensBlock {
   turn_x: f32,
   turn_y: f32,
   turn_z: f32,
+  // Which model `lens_pixel` runs for this lens: MEI or THETA. Rust twin:
+  // `LensBlock::model`.
+  model: f32,
 };
 
 // How a point of the frame becomes a ray. Rust twin: `Screen`.
@@ -2563,10 +2763,15 @@ struct Reframe {
   // produces it has one and there is no event in it. Zero is the geometric
   // handover. Rust twin: `Reframe::handover_shift`. Read by `handover`.
   handover_shift: f32,
-  // What puts the table below on its own 16-byte boundary. Rust twin:
-  // `Reframe::_pad`, which is what makes the two layouts agree.
-  pad1: f32,
-  pad2: f32,
+  // The planes hold 16-bit words rather than bytes. Rust twin:
+  // `Reframe::wide`, read by `plane_word`.
+  wide: f32,
+  // Studio swing rather than the whole range. Rust twin: `Reframe::limited`,
+  // read by `levels`.
+  limited: f32,
+  // The three words above are what put the table below on its own 16-byte
+  // boundary; they were padding until each became a number the shader reads,
+  // so there is no `pad` member here any more and none in the Rust twin.
   // What the along-seam axis still disagrees by after a pose, direction by
   // direction, in radians, four to a lane. Rust twin: `Reframe::table`.
   //
@@ -2735,13 +2940,55 @@ fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
 // test, so a file with no IMU record costs what it cost before issue #9.
 fn project(lens: LensBlock, ray: vec3<f32>) -> Landing {
   let aimed = lens.view_to_lens * ray;
-  var landing = mei(lens, normalize(aimed));
+  var landing = lens_pixel(lens, normalize(aimed));
   if reframe.row_axis_x != 0.0 || reframe.row_axis_y != 0.0 {
     let turn = vec3<f32>(lens.turn_x, lens.turn_y, lens.turn_z);
     for (var step = 0u; step < READOUT_STEPS; step += 1u) {
-      landing = mei(lens, normalize(turned(aimed, turn * readout_share(landing.pixel))));
+      landing = lens_pixel(lens, normalize(turned(aimed, turn * readout_share(landing.pixel))));
     }
   }
+  return landing;
+}
+
+// A unit ray in one lens's frame to a pixel, through whichever model that
+// lens's calibration is written in. Rust twin: `lens_pixel`.
+fn lens_pixel(lens: LensBlock, p: vec3<f32>) -> Landing {
+  if lens.model == THETA {
+    return theta(lens, p);
+  }
+  return mei(lens, p);
+}
+
+// The Kannala-Brandt fisheye:
+//   r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8 + k5 t^10)
+// Rust twin: `theta`, which has the provenance of the five coefficients and
+// why the derivative is computed beside the radius.
+fn theta(lens: LensBlock, p: vec3<f32>) -> Landing {
+  let reach = length(p.xy);
+  let angle = atan2(reach, p.z);
+  let t2 = angle * angle;
+  let radial = 1.0 + t2 * (lens.c1 + t2 * (lens.c2 + t2 * (lens.c3 + t2 * (lens.c4 + t2 * lens.c5))));
+  // dr/dtheta over fx: where this is not positive the map has folded and a ray
+  // from behind the lens would land back inside its picture. Rust twin: the
+  // `slope` in `theta`.
+  let slope = 1.0 + t2 * (3.0 * lens.c1
+    + t2 * (5.0 * lens.c2 + t2 * (7.0 * lens.c3 + t2 * (9.0 * lens.c4 + t2 * 11.0 * lens.c5))));
+  // Straight down the axis, where the azimuth is not defined and the radius
+  // is zero anyway.
+  let scale = select(0.0, angle * radial / reach, reach > 0.0);
+  let offset = vec2<f32>(lens.fx * p.x, lens.fy * p.y) * scale;
+  return landed(lens, offset, p.z, slope > 0.0);
+}
+
+// One model's pixel offset, as the Landing the rest of the pass reads. Rust
+// twin: `landed`.
+fn landed(lens: LensBlock, offset: vec2<f32>, axis: f32, injective: bool) -> Landing {
+  let depth = lens.image_radius - length(offset);
+  var landing: Landing;
+  landing.pixel = offset + vec2<f32>(lens.cx, lens.cy);
+  landing.inside = injective && depth > 0.0;
+  landing.axis = axis;
+  landing.depth = depth;
   return landing;
 }
 
@@ -2768,11 +3015,13 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
   let denom = p.z + lens.xi;
   let n = p.xy / denom;
 
+  // Three radial terms and two tangential, which is what the five coefficient
+  // slots are under this model.
   let r2 = dot(n, n);
-  let radial = 1.0 + r2 * (lens.k1 + r2 * (lens.k2 + r2 * lens.k3));
+  let radial = 1.0 + r2 * (lens.c1 + r2 * (lens.c2 + r2 * lens.c3));
   let tangential = vec2<f32>(
-    2.0 * lens.p1 * n.x * n.y + lens.p2 * (r2 + 2.0 * n.x * n.x),
-    2.0 * lens.p2 * n.x * n.y + lens.p1 * (r2 + 2.0 * n.y * n.y),
+    2.0 * lens.c4 * n.x * n.y + lens.c5 * (r2 + 2.0 * n.x * n.x),
+    2.0 * lens.c5 * n.x * n.y + lens.c4 * (r2 + 2.0 * n.y * n.y),
   );
   let d = n * radial + tangential;
 
@@ -2780,13 +3029,7 @@ fn mei(lens: LensBlock, p: vec3<f32>) -> Landing {
   // Past `cos(theta) = -1/xi` the map folds and lands rays from behind this
   // lens back inside its image circle. Rust twin: `injective`.
   let injective = p.z * lens.xi > -1.0;
-  let depth = lens.image_radius - length(offset);
-  var landing: Landing;
-  landing.pixel = offset + vec2<f32>(lens.cx, lens.cy);
-  landing.inside = denom > 0.0 && injective && depth > 0.0;
-  landing.axis = p.z;
-  landing.depth = depth;
-  return landing;
+  return landed(lens, offset, p.z, denom > 0.0 && injective);
 }
 
 // Pixel centres sit at integer coordinates in the camera model and at
@@ -2854,7 +3097,9 @@ pub(crate) mod tests {
                     p1: -0.0007338,
                     p2: -0.00115458,
                 },
-                pose: Pose {
+                model: Model::Mei,
+                mounting: None,
+                pose: kjerag_meta::Pose {
                     yaw_deg: -0.103,
                     pitch_deg: -0.07,
                     roll_deg: 90.534,
@@ -2877,7 +3122,9 @@ pub(crate) mod tests {
                     p1: -0.0019249,
                     p2: 0.00054564,
                 },
-                pose: Pose {
+                model: Model::Mei,
+                mounting: None,
+                pose: kjerag_meta::Pose {
                     yaw_deg: 0.039,
                     pitch_deg: -0.193,
                     roll_deg: 89.076,
@@ -2886,6 +3133,164 @@ pub(crate) mod tests {
                 lens_type: 131,
             },
         ]
+    }
+
+    /// The four lenses of the two DJI Osmo 360 units in the corpus, in
+    /// delivered-frame pixels: what `kjerag_meta::osmo` reads out of
+    /// `CAM_20250715191201_0003_D.OSV` (unit A) and `1 8k30p standard 10bit
+    /// iso max 800-003.OSV` (unit B), lens 0 then lens 1 of each. Copied for
+    /// the same reason [`fixture_lenses`] is.
+    ///
+    /// A mounting of `None` and a zero pose, because nothing below asks where
+    /// these lenses point: the model runs on a ray already in the lens's own
+    /// frame, and what is being checked is the model.
+    pub(crate) fn osmo_lenses() -> [(&'static str, Lens); 4] {
+        let lens = |fx, fy, cx, cy, k: [f64; 5]| Lens {
+            intrinsics: Intrinsics {
+                xi: 0.0,
+                fx,
+                fy,
+                cx,
+                cy,
+            },
+            distortion: Distortion {
+                k1: 0.0,
+                k2: 0.0,
+                k3: 0.0,
+                p1: 0.0,
+                p2: 0.0,
+            },
+            model: Model::Theta { k },
+            mounting: None,
+            pose: kjerag_meta::Pose {
+                yaw_deg: 0.0,
+                pitch_deg: 0.0,
+                roll_deg: -ROLL_DATUM_DEG,
+                translation_m: [0.0; 3],
+            },
+            lens_type: 0,
+        };
+        [
+            (
+                "A0",
+                lens(
+                    1046.3793,
+                    1046.168,
+                    1920.8534,
+                    1916.7302,
+                    [0.068134, -0.013797, 0.0117944, -0.00733225, 0.00104408],
+                ),
+            ),
+            (
+                "A1",
+                lens(
+                    1048.025,
+                    1047.8745,
+                    1910.7661,
+                    1916.2424,
+                    [0.0644356, -0.00886799, 0.00849704, -0.00639127, 0.000955506],
+                ),
+            ),
+            (
+                "B0",
+                lens(
+                    1052.6311,
+                    1052.53064,
+                    1914.02368,
+                    1918.42773,
+                    [0.0671674, -0.0126124, 0.0101191, -0.00672833, 0.000983484],
+                ),
+            ),
+            (
+                "B1",
+                lens(
+                    1044.52869,
+                    1044.27771,
+                    1916.26648,
+                    1929.8512,
+                    [0.0700723, -0.016647, 0.0146503, -0.00833712, 0.00115667],
+                ),
+            ),
+        ]
+    }
+
+    /// The two lenses of one DJI Osmo 360, as a camera with a seam: unit B's
+    /// pair from [`osmo_lenses`], which is the unit the owner flies.
+    ///
+    /// **What this is for is the twin guard** (`super::super::twin`), which
+    /// needs a whole [`Reframe`] whose blocks say [`THETA`] so that the WGSL
+    /// `theta` runs on the GPU beside the Rust one. Every other test of the
+    /// model above works on one [`LensBlock`] and does not care where the lens
+    /// points; this one has to hand two lenses over to each other across a
+    /// seam.
+    ///
+    /// The mounting is left `None`, so the pair is opposed by [`opposed`] the
+    /// way an Insta360's is, rather than by the whole rotation an `.OSV` writes
+    /// per lens (`kjerag_meta::Lens::mounting`). That is deliberate and it
+    /// costs the guard nothing: both mountings are resolved on the CPU into
+    /// `view_to_lens`, which the shader reads as a matrix and cannot tell
+    /// apart. What the guard compares is the model the block names, not how
+    /// the block was addressed.
+    pub(crate) fn osmo_pair() -> Vec<Lens> {
+        osmo_lenses()[..2].iter().map(|(_, l)| l.clone()).collect()
+    }
+
+    /// Whether every lens of this map names the theta polynomial.
+    ///
+    /// The twin guard's arms assert it (`super::super::twin`), because
+    /// [`lens_pixel`] branches on this field and an arm whose blocks named the
+    /// other model would be the other arm run twice: green, and guarding half
+    /// of what it says it guards.
+    pub(crate) fn runs_theta(reframe: &Reframe) -> bool {
+        reframe.lenses.iter().all(|lens| lens.model == THETA)
+    }
+
+    /// The quarter turn `kjerag_meta::Pose` measures roll against, undone so
+    /// that a zero pose above is a lens looking straight down `+z`.
+    const ROLL_DATUM_DEG: f64 = -90.0;
+
+    /// One Osmo lens's block, which is what the model tests run against.
+    fn osmo_block(lens: &Lens) -> LensBlock {
+        LensBlock::new(lens, 0, FRAME, Camera::default(), Held::default())
+    }
+
+    /// The radius the theta model puts one angle at, in delivered-frame
+    /// pixels: the forward map read straight, with the azimuth taken out of
+    /// it.
+    fn theta_radius(block: &LensBlock, angle: f32) -> f32 {
+        let (sin, cos) = angle.sin_cos();
+        let landing = lens_pixel(block, [sin, 0.0, cos]);
+        landing.pixel[0] - block.cx
+    }
+
+    /// The inverse of the forward map, by Newton from the equidistant guess.
+    ///
+    /// **It lives in the tests because nothing ships needs it**: the pass is a
+    /// backward map and asks the model for a ray's pixel, never a pixel's ray
+    /// (`super`'s own doc). What it is for is checking that the forward map is
+    /// a map at all - one radius, one angle - over the picture the pass draws.
+    ///
+    /// The guess is `r / fx`, which is the model with its polynomial dropped,
+    /// and the polynomial is worth 8 percent at the rim, so the first step
+    /// starts within about 5 degrees. Newton on a function whose derivative
+    /// stays above `0.7 fx` over the whole picture (measured, and
+    /// `the_theta_model_is_monotone_over_the_whole_sphere` is the check)
+    /// converges quadratically from there: eight rounds leave under a
+    /// millionth of a radian on every lens in the corpus, and
+    /// `the_forward_map_and_its_inverse_are_each_others_undoing` measures the
+    /// round trip rather than trusting the bound.
+    fn theta_angle(block: &LensBlock, radius: f32) -> f32 {
+        let k = block.coefficients;
+        let mut angle = radius / block.fx;
+        for _ in 0..8 {
+            let t2 = angle * angle;
+            let radial = 1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * (k[3] + t2 * k[4]))));
+            let slope = 1.0
+                + t2 * (3.0 * k[0]
+                    + t2 * (5.0 * k[1] + t2 * (7.0 * k[2] + t2 * (9.0 * k[3] + t2 * 11.0 * k[4]))));
+            angle -= (block.fx * angle * radial - radius) / (block.fx * slope);
+        }
+        angle
     }
 
     fn fixture(camera: Camera) -> Reframe {
@@ -3097,9 +3502,10 @@ pub(crate) mod tests {
     }
 
     /// A ray 90 degrees off the axis lands inside the image circle, which is
-    /// the whole point of the mirror parameter: an equidistant fisheye model
-    /// cannot represent this ray at all. 1802 px of the 1913 px circle, so
-    /// the frame holds roughly 195 degrees across.
+    /// the whole point of the mirror parameter: a rectilinear model cannot
+    /// represent this ray at all, its radius running away to infinity there.
+    /// 1802 px of the 1913 px circle, so the frame holds roughly 195 degrees
+    /// across.
     #[test]
     fn a_ray_at_ninety_degrees_lands_inside_the_image_circle() {
         let reframe = fixture(Camera::default());
@@ -3125,6 +3531,227 @@ pub(crate) mod tests {
         // And it is the back lens that shows it, on its own.
         let blend = reframe.blend(direction(120.0, 0.0));
         assert_eq!(blend.weights, [0.0, 1.0]);
+    }
+
+    /// **The headline for the theta model: a DJI lens is a 199 degree lens.**
+    ///
+    /// The Osmo 360 delivers its image circle inscribed in a 3840 px square,
+    /// so half the frame is half the coverage, and what the model has to do
+    /// with the file's own five coefficients is put that radius at the
+    /// camera's published figure. It does, on all four lenses of the two units
+    /// in the corpus, to within a degree and a half of each other.
+    ///
+    /// The control that says this test can fail is the same four lenses with
+    /// the polynomial dropped, which is the plain equidistant map this shipped
+    /// until 2026-08-08: it answers 209 to 211 degrees, a lens nobody makes,
+    /// and that surplus is what tore the seam open by 15 degrees.
+    #[test]
+    fn the_theta_model_covers_a_199_degree_lens() {
+        for (name, lens) in osmo_lenses() {
+            let block = osmo_block(&lens);
+            let coverage = 2.0 * theta_angle(&block, block.image_radius).to_degrees();
+            assert!(
+                (197.5..=199.5).contains(&coverage),
+                "{name} covers {coverage} degrees"
+            );
+
+            let equidistant = Lens {
+                model: Model::Theta { k: [0.0; 5] },
+                ..lens
+            };
+            let flat = osmo_block(&equidistant);
+            let without = 2.0 * theta_angle(&flat, flat.image_radius).to_degrees();
+            assert!(
+                (208.5..=211.5).contains(&without),
+                "{name} without the polynomial covers {without} degrees"
+            );
+        }
+    }
+
+    /// The cap the pass solves for off the model agrees with the coverage
+    /// above, so the picture the blend hands over is the one the lens has:
+    /// each lens sees a little past a hemisphere and the two overlap by 18
+    /// degrees, which is more than the handover ever asks for.
+    #[test]
+    fn a_dji_pair_overlaps_by_what_the_coverage_leaves() {
+        let lenses = osmo_pair();
+        for (name, lens) in osmo_lenses() {
+            let cap = cap(&osmo_block(&lens)).expect("an Osmo lens has a picture in it");
+            near(2.0 * cap.to_degrees(), 198.6, 1.0);
+            assert!(cap > 0.5 * PI, "{name} cannot reach its own seam");
+        }
+        // Two lenses of one camera, through the whole block: the overlap is
+        // what is left of the two caps past the sphere.
+        let reframe = Reframe::new(
+            &lenses,
+            FRAME,
+            Camera::default(),
+            Held::default(),
+            1.0,
+            false,
+            sampling::Sampling::default(),
+        );
+        let overlap = reframe.overlap().expect("two lenses overlap");
+        near(overlap.to_degrees(), 18.0, 2.0);
+        // And the handover it affords is the whole of what the pass asks for:
+        // 18 degrees of overlap against an 8 degree ask, so nothing is
+        // clamped. Read off [`Reframe::handover_width`], which is the one
+        // width there is since the seam went flat (#176) - this was
+        // `crossover_at(0.0)`, an azimuth's own widened band, and there is no
+        // longer a per-azimuth width to ask about.
+        near(reframe.handover_width().to_degrees(), 8.0, 1e-3);
+    }
+
+    /// **The five-term polynomial is a map and not a fold.** The four
+    /// coefficients that sit together turn the radius over before 90 degrees
+    /// and bring it back down - which is what made them look like decoration -
+    /// and the fifth is what stops that. With it, the radius climbs the whole
+    /// way to half a turn on every lens in the corpus, so a ray from behind
+    /// the lens can never land back inside its picture.
+    ///
+    /// The fold guard is checked where it can fire: the same lenses read
+    /// four-at-a-time are refused past the turn instead of drawing issue #30's
+    /// ghost.
+    #[test]
+    fn the_theta_model_is_monotone_over_the_whole_sphere() {
+        for (name, lens) in osmo_lenses() {
+            let block = osmo_block(&lens);
+            let mut last = 0.0;
+            for step in 1..=1800 {
+                let angle = step as f32 * PI / 1800.0;
+                let radius = theta_radius(&block, angle);
+                assert!(
+                    radius > last,
+                    "{name} folds at {} degrees",
+                    angle.to_degrees()
+                );
+                last = radius;
+            }
+            // The derivative the guard reads never goes negative, so the guard
+            // never fires on this camera family: every refusal on an Osmo is
+            // the image circle and nothing else.
+            for step in 0..=1800 {
+                let angle = step as f32 * PI / 1800.0;
+                let (sin, cos) = angle.sin_cos();
+                let landing = lens_pixel(&block, [sin, 0.0, cos]);
+                assert_eq!(
+                    landing.inside,
+                    landing.depth > 0.0,
+                    "{name} refused {} degrees for something other than its picture's edge",
+                    angle.to_degrees()
+                );
+            }
+
+            // The control: the same file's four adjacent coefficients, which
+            // is what this shipped reading before field 15 was found. The
+            // radius turns over before 90 degrees, and the guard is what keeps
+            // the fold out of the picture.
+            let Model::Theta { k } = lens.model else {
+                unreachable!("an Osmo lens is a theta polynomial")
+            };
+            let four = Lens {
+                model: Model::Theta {
+                    k: [k[0], k[1], k[2], k[3], 0.0],
+                },
+                ..lens
+            };
+            let folded = osmo_block(&four);
+            let turn = (1..=1800)
+                .map(|step| step as f32 * PI / 1800.0)
+                .find(|angle| theta_radius(&folded, *angle) < theta_radius(&folded, angle - 0.001))
+                .expect("the four-coefficient reading folds");
+            assert!(
+                (88.0..=90.5).contains(&turn.to_degrees()),
+                "{name} folds at {} degrees",
+                turn.to_degrees()
+            );
+            let past = turn + 0.1;
+            let (sin, cos) = past.sin_cos();
+            assert!(
+                !lens_pixel(&folded, [sin, 0.0, cos]).inside,
+                "{name} kept a ray past its own fold"
+            );
+        }
+    }
+
+    /// The forward map and its inverse undo each other over the whole picture,
+    /// which is what says the model is one-to-one where the pass uses it.
+    ///
+    /// Nothing ships the inverse ([`tests::theta_angle`] says why); this is
+    /// the property that would matter if anything did, and it is the cheapest
+    /// statement of "one radius, one angle" there is.
+    #[test]
+    fn the_forward_map_and_its_inverse_are_each_others_undoing() {
+        for (name, lens) in osmo_lenses() {
+            let block = osmo_block(&lens);
+            for step in 0..=100 {
+                let angle = step as f32 * theta_angle(&block, block.image_radius) / 100.0;
+                let back = theta_angle(&block, theta_radius(&block, angle));
+                assert!(
+                    (back - angle).abs() < 1e-5,
+                    "{name} at {} degrees came back {} degrees",
+                    angle.to_degrees(),
+                    back.to_degrees()
+                );
+            }
+            for step in 0..=100 {
+                let radius = step as f32 * block.image_radius / 100.0;
+                let back = theta_radius(&block, theta_angle(&block, radius));
+                assert!(
+                    (back - radius).abs() < 2e-3,
+                    "{name} at {radius} px came back {back} px"
+                );
+            }
+        }
+    }
+
+    /// Where each family's picture stops, and that the two answers are
+    /// different questions rather than one number rounded twice.
+    ///
+    /// DJI inscribes the image circle in the delivered frame, so the boundary
+    /// is half the frame and does not move when the principal point does.
+    /// Insta360 delivers a circle that overflows its frame, so the boundary is
+    /// the largest circle that fits around the principal point, which is where
+    /// it has always been.
+    #[test]
+    fn each_family_gets_its_own_picture_edge() {
+        for (name, lens) in osmo_lenses() {
+            let block = osmo_block(&lens);
+            assert_eq!(block.image_radius, 1920.0, "{name}");
+        }
+        // And the principal points it does NOT follow are 10 px apart: the
+        // number this replaced moved with them, from 1910.2 to 1916.7 px.
+        let inscribed = |lens: &Lens| {
+            let i = &lens.intrinsics;
+            i.cx.min(i.cy)
+                .min(3840.0 - i.cx)
+                .min(3840.0 - i.cy)
+                .max(0.0)
+        };
+        let spread = osmo_lenses().map(|(_, lens)| inscribed(&lens));
+        near(
+            spread.iter().cloned().fold(f64::MAX, f64::min) as f32,
+            1910.1,
+            0.2,
+        );
+        near(
+            spread.iter().cloned().fold(0.0, f64::max) as f32,
+            1916.7,
+            0.2,
+        );
+
+        for lens in fixture_lenses() {
+            near(
+                image_radius(&lens, FRAME) as f32,
+                inscribed(&lens) as f32,
+                1e-3,
+            );
+        }
+        near(
+            image_radius(&fixture_lenses()[0], FRAME) as f32,
+            1912.79,
+            0.01,
+        );
     }
 
     /// The whole sphere, on a grid fine enough to walk through the seam: every
@@ -4493,7 +5120,7 @@ pub(crate) mod tests {
             .map(|step| step as f32 * 0.01)
             .take_while(|theta| {
                 let (sin, cos) = theta.to_radians().sin_cos();
-                mei(block, [sin * cos_phi, sin * sin_phi, cos]).inside
+                lens_pixel(block, [sin * cos_phi, sin * sin_phi, cos]).inside
             })
             .last()
             .expect("the lens has no picture at all")
@@ -4897,7 +5524,7 @@ pub(crate) mod tests {
                 // answer does not move under.
                 let block = &reframe.lenses[0];
                 let share = reframe.readout_share(solved.pixel);
-                let again = reframe.mei(
+                let again = reframe.lens_pixel(
                     0,
                     normalize(turned(
                         block.lens_ray(ray),
@@ -4960,7 +5587,7 @@ pub(crate) mod tests {
                 let ray = direction(70.0, phi as f32);
                 assert_eq!(
                     reframe.project(lens, ray),
-                    reframe.mei(lens, normalize(reframe.lenses[lens].lens_ray(ray))),
+                    reframe.lens_pixel(lens, normalize(reframe.lenses[lens].lens_ray(ray))),
                 );
             }
         }
@@ -5253,16 +5880,21 @@ pub(crate) mod tests {
         // picture rather than refuse a pipeline.
         assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
         assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
-        // The seam anchor's one number took the FIRST of the three padding
-        // words the table's alignment already needed, rather than being
-        // appended: the block is the size it was and the table has not moved,
-        // which is what the two assertions above would otherwise have to be
-        // rewritten to say.
-        assert_eq!(
-            std::mem::offset_of!(Reframe, handover_shift),
-            std::mem::offset_of!(Reframe, crossover) + 4
-        );
-        assert_eq!(std::mem::size_of_val(&Reframe::blank(1.0, false)._pad), 8);
+        // The three numbers that took the three padding words the table's
+        // alignment already needed, rather than being appended: the seam
+        // anchor's one, and the two that say how the planes are written. The
+        // block is the size it was and the table has not moved, which is what
+        // the two assertions above would otherwise have to be rewritten to
+        // say.
+        let after = |words: usize| std::mem::offset_of!(Reframe, crossover) + 4 * words;
+        assert_eq!(std::mem::offset_of!(Reframe, handover_shift), after(1));
+        assert_eq!(std::mem::offset_of!(Reframe, wide), after(2));
+        assert_eq!(std::mem::offset_of!(Reframe, limited), after(3));
+        // And the table starts the word after the last of them, with nothing
+        // padding it there: all three are spoken for, so the next number added
+        // beside them lands ON the table's boundary and this is the assertion
+        // that says so first.
+        assert_eq!(std::mem::offset_of!(Reframe, table), after(4));
     }
 
     /// **The anchor's null.** A map nobody has held a line on draws the

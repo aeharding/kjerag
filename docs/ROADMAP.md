@@ -626,6 +626,88 @@ live, no keyframe UI ever.
   which measures the source and not the picture.** So the two corrections cannot
   double-correct and cannot check each other either; they multiply blindly.
 
+- 2026-08-09 **The `.OSV` support is rebased onto the flat seam, the mounting is
+  baked as a constant of the camera, and the horizon lock is gated on the file's
+  own gravity** (docs/research/osv-format.md, which is this format's reference
+  chapter from today). The branch sat on a pre-#172 base; it is replayed onto
+  #176 rather than reimplemented, eighteen commits, six of which needed a hand.
+  The flat seam SIMPLIFIED the port, exactly as expected: the branch's inert
+  seam-fit is moot now that nothing applies a band correction anywhere, and its
+  one `band.rs` change - a `normalize` of a zero vector, which is the NaN that
+  drew a DJI capture's whole forward hemisphere black - merged untouched and is
+  still wanted, because `ring_at` still runs for the instruments.
+
+  **Three owner verdicts stand on the rebased path**, re-verified 2026-08-09 at
+  1920 px through the delivered pass and recorded as registry lines
+  (docs/research/reference-views.md): the tower single (*"can confirm tear is
+  gone"*), the far kerb joined, and the dip's horizon held (*"OSV video output
+  looks good, approved"*). The counter-null for the last is the same line at
+  `lock=0`, which is visibly rolled and differs byte for byte.
+
+  **`KJERAG_MOUNT` is gone.** Candidate b - a mirror in `y` and a quarter turn -
+  is `MOUNTING`, a `const`. A setting that moves the horizon is the calibration
+  ritual zero-config playback forbids, and the escape hatch is replaced by
+  something better: the file's own accelerometer is a second, independent
+  statement of where down is, and it is held against the file's own quaternion
+  **per file**. Under 8 degrees, better than the null of a camera assumed never
+  to lean, and better than the same quaternion read the other way round, and the
+  horizon is held; otherwise the capture comes out with an empty orientation
+  track, which is the shape a capture with no inertial record at all already
+  had, so it reaches the pilot as the disabled menu item and the same `level:`
+  line. Measured over all seven corpus files: six unit B files at 1.55 to 3.75
+  degrees against nulls of 5.68 to 9.44, and the one unit A file at 23.02
+  against a null of 14.72.
+
+  **That gate is a check on the FILE and not on the mounting** (adversarial
+  review, 2026-08-09; a correction to this record and to the line the app
+  prints, and not a change to any picture). The mounting's mirror and its turn
+  are applied to the quaternion and to the accelerometer alike, so they cancel
+  out of the angle between them: all four sign families whose change of basis is
+  a rotation score the check identically, and the refuted `as written` family
+  passes it with the shipped family's numbers to the last bit while composing an
+  orientation tens of degrees away. What the check really sees is a file whose
+  own two records disagree - which is what unit A is - plus the CONJUGATION, the
+  one bit of the mounting that does not cancel, which is now a third bar and a
+  third number in the printed line rather than an unstated assumption.
+  **Mounting verification is offline and stays there**: the vanishing-point
+  solve over 177 degrees of lean azimuth. The limitation this leaves is written
+  down rather than left to be found: a third unit whose inertial frame is
+  reflected the other way would render a tilted horizon and pass the gate.
+  docs/research/osv-format.md 6.2, and
+  `osmo::tests::the_check_scores_a_mirrored_mounting_identically` is the proof
+  in code.
+
+  **So unit A's sample capture no longer holds a horizon, and says why.** Its
+  quaternion and its accelerometer disagree by 23.0 degrees where a camera
+  assumed upright is out by 14.7, and reading the quaternion the other way round
+  does not rescue it (11.3, past the ceiling). Its picture is untouched and its
+  `lock=0` and `lock=1` renders are byte-identical, which is the check that the
+  refusal is complete.
+
+  **The GPU twin guard now runs both models.** `lens_pixel` branches on the
+  block's own model field, so the Insta360 fixture never ran a line of `theta` on
+  either half and the `.OSV` could have shipped a WGSL model that disagreed with
+  its Rust twin with every test green. Two WGSL-only mutations were planted,
+  measured and reverted; the telling one is a tenth of a percent on the leading
+  coefficient, far too small to see, at 22 times the bar.
+
+  **The `.insv` null holds.** All sixteen views of the standing null method
+  (six registry views plus lock on/off pairs at four of them, rendered by
+  `--bin reframe` against each build in its own target dir) render byte for
+  byte identical to main at 7ef59a3, and the four lock pairs inside them
+  differ from each other, so the null is not vacuous.
+
+  **Playback is unchanged within the noise, and the claim that it improved was
+  not sourced** (review, 2026-08-09). This entry said the pre-rebase branch
+  "recorded 26.6 fps at 20.6 ms", and no such measurement exists anywhere in
+  this branch's record. What the pre-rebase branch recorded on unit B 8k30p is
+  the two-column table in the 2026-08-08 entry below, taken while another agent
+  shared the box: **29.57 fps at 6.91 ms a redraw at best and 25.54 at 21.05 at
+  worst**. The rebased build reads 29.36 fps at 7.25 ms, one run. So against the
+  best column it is a shade slower and against the worst it is far faster, which
+  together say the box's own load moves this more than the rebase does. No
+  playback claim is made for the rebase in either direction.
+
 - 2026-08-09 **The seam is flat, the handover line is held on the world, and
   the machinery that morphed the picture is deleted rather than switched off**
   (docs/research/studio-parity.md). The owner approved the architecture on
@@ -798,6 +880,454 @@ live, no keyframe UI ever.
 
   Untouched: the roughly one degree across-seam residual on his downward arc,
   which is the expensive work.
+
+- 2026-08-08 **The `.OSV` lock's missing piece is the IMU-to-optical mounting,
+  it is measured, and it is a knob rather than a default.** *(The entry below
+  left this open: "which rotation it is was NOT pinned". It is pinned now.)*
+  The instrument is the one that entry built - the vertical vanishing point of a
+  **lock off** render, which measures where the world's up sits in Kjerag's
+  camera body from the picture alone and is the same picture whatever candidate
+  is under test - run over the whole corpus instead of one dip.
+
+  **The derivation is a measurement and not a fit.** A reading of
+  `(w, x, y, z)` plus a mounting turn about the camera's own vertical composes
+  as `BODY^-1 . reading(q) . BODY . Rot(up, turn)`, and setting the up it
+  predicts equal to the up the picture measures leaves the turn as a
+  DIFFERENCE OF TWO AZIMUTHS - one number per instant, no free parameters. The
+  lean magnitudes on the two sides agree to 0.18 degrees, which is the control
+  that says the mounting fixes the camera's vertical and is a rotation about
+  it.
+
+  **There are four families, not eight readings.** Negating `x` and `y`
+  together is conjugation by a half turn about the file's `z`, which splits
+  into a world-side yaw that `from_first_heading` removes and a body-side half
+  turn - a mounting of 180 degrees. So `wxyZ` IS the shipped `wXYZ` turned half
+  a circle, and `wxYZ` is `wXyZ` turned half a circle: **the eight-row sign
+  table of the entry below was two families sampled at 0 and 180 only**, which
+  is why none of its rows held the horizon. The answer is at 87.
+
+  **What separates them is scatter.** On the right family the turn is one
+  constant of the hardware; on a wrong one it walks with whatever that family
+  is not accounting for. Over **23 instants of the three unit B files spanning
+  177 degrees of lean azimuth**, weighted by each instant's own lean because an
+  azimuth of a nearly upright vector is nearly undefined:
+
+  | family | turn | rms scatter | worst | walks with |
+  | --- | ---: | ---: | ---: | --- |
+  | as written | -84.6 | 65.9 | 148.8 | heading 0.69 |
+  | conjugate (shipped) | -107.1 | 62.1 | 133.2 | azimuth 0.73 |
+  | **mirror in y** | **+86.8** | **3.3** | **10.1** | nothing 0.15 |
+  | mirror x, conjugated | -90.9 | 61.2 | 170.8 | azimuth 0.89 |
+
+  One of the four is a constant and the other three are not, by a factor of
+  nineteen. It is the same constant on each file alone - `+88.3` on B003 over
+  11 instants, `+84.5` on B002 over 7, `+85.7` on B001 over 5 - and **dropping
+  any whole file moves it by at most 1.8 degrees** (`+85.0`, `+87.6`, `+87.1`),
+  which is the leave-one-out that makes the owner-dip score below a held-out
+  one.
+
+  **Residual tilt of the horizon, degrees, median over each site**, on the same
+  lock-off instrument, gated on its own control - the lean the lock-off render
+  reads has to reproduce the file's own lean, which every reading agrees on
+  because `1 - 2(x^2 + y^2)` carries no sign, so the gate is candidate blind and
+  what it throws out is an instant where the fit found a false family of
+  parallel lines. On the owner's dip that control is met to 0.13 degrees at the
+  median, worst 0.53, at every consensus setting:
+
+  | candidate | owner's dip B003 | B001 leaned | B002 leaned | flat stretch B003 |
+  | --- | ---: | ---: | ---: | ---: |
+  | **`a` mirror y, turn +86.8** | **0.44** | **0.66** | **1.21** | **0.66** |
+  | `b` mirror y, turn +90.0 | 0.34 | 0.72 | 1.38 | 0.53 |
+  | the same family, held out at +85.0 | 0.78 | 0.75 | 1.20 | 0.74 |
+  | `c` conjugate, turn -107.1 | 5.06 | 5.57 | 11.63 | 1.72 |
+  | `d` mirror x-c, turn -90.9 | 1.20 | 15.89 | 3.23 | 1.92 |
+  | SHIPPED (conjugate, no turn) | 20.85 | 15.87 | 2.55 | 2.98 |
+  | NO LOCK AT ALL (null) | 11.36 | 8.33 | 7.65 | 2.61 |
+  | *instants / lean* | *9, 8.2-15.2* | *5, 7.2-11.1* | *7, 7.7-9.4* | *2, 2.1-3.2* |
+
+  **One candidate family collapses the residual at every site**, and no other
+  does: `a` and `b` stay under 1.4 degrees everywhere, where the shipped
+  reading is worse than no lock at all on two of the three dip sites and `c`
+  and `d` each blow up on a site the other survives. The row that matters most
+  is the third: `+85.0` is derived from B002 and B001 ONLY, and it scores 0.78
+  on the owner's B003 dip, which no instant of it ever saw. **The flat stretch
+  is the heading control and nothing regresses on it** - every candidate sits
+  within a couple of degrees of the null there, as it must, because a mounting
+  turn about the camera's own vertical is a pure world yaw on an upright camera
+  and `from_first_heading` takes a constant world yaw out
+  (`a_mounting_turn_is_a_pure_heading_on_an_upright_camera`).
+
+  **Unit A is a null result and is reported as one.** Its capture affords the
+  instrument nothing: 3 instants of 51 fitted at all and none of those passed
+  the lock-off control, and its own accelerometer is not a plumb line either
+  (2.74 g mean, 1.29 sd). Nothing here is claimed for the second camera.
+
+  **And the app's own picture agrees.** Locked renders at pitch 0 through the
+  peak of the owner's dip, read by the same vanishing point with the lock ON
+  and the candidate in the binary, come out level to **0 to 2 degrees** under
+  `a` and `b`, where the lock-off control reads the body's own 14 to 17 and the
+  shipped reading reads 30 and worse.
+
+  **What it means: the file's inertial frame is left handed against the optical
+  one.** That is also why the heading looked settled while the tilt was not - a
+  mirror reverses the heading exactly as a conjugate does, so the turn
+  measurement that pinned the conjugate could not tell the two apart and picked
+  the one that gets the tilt wrong. The file's own two streams still agree with
+  each other, because the accelerometer is written in that same frame: read
+  through the mirror it misses the file's own gravity by **2.0 degrees** on
+  leaned frames where the conjugate families miss it by **9.3**, against a null
+  of 9.4 for a camera assumed never to lean. That check is printed per file
+  whenever the knob is on, and it is the shipping verify this needs.
+
+  **What the file does NOT say.** An hour was spent looking for the constant
+  written down. The `camd` nested MP4 - a top-level box in all four captures,
+  never audited before - was dumped leaf by leaf: it is a self-contained
+  re-mux whose `mdat` is a **byte-identical copy of the outer `djmd` tracks**
+  (all 585+585, 4384+4384, 3590+3590 and 6606+6606 samples compared, zero
+  differing), and not one leaf carries a float constant. Fields 20 and 27 hold
+  the same two `f32`s as each other in every entry of both units and are 0.022
+  to 0.046 degrees as radians - three orders of magnitude short. Field 24 is
+  `8.0` as an **`f32`**, the same on both lenses of both units, so it is not an
+  octant index; 25 is the `-1000.0` sentinel beside it. Every non-`mdat` byte
+  of all four files was scanned at every offset as `f32`/`f64` in both
+  endiannesses for 45, 135, 225 and 315 degrees and their radian, cosine, sine
+  and half-angle-quaternion encodings: every hit is a per-frame varying
+  quantity (`.3.2.16.1` is a temperature, `.3.2.3.1` the ISO, `.3.2.15.2` a
+  photometric value that passes through 135). The 16 unexplained bytes at
+  `.1.3.1`, identical on two physical cameras, are not a unit quaternion and
+  not a rotation. **Verdict: the mounting angle is not written in any field
+  this audit could read**, and the HEVC/AAC payloads are the one place not
+  looked.
+
+  **Nothing is defaulted.** `KJERAG_MOUNT=a|b|c|d` selects a candidate and
+  prints which one and why on stderr; unset is the shipped composition **byte
+  for byte** - verified against a clean build of 61dc430 on both an `.OSV`
+  lock=0/lock=1 pair and the sixteen-view `.insv` null, all sixteen hashes
+  identical. Evidence and harness: `scratch/imu/{mount,solvemount,verify,plant}.py`.
+
+- 2026-08-08 **The `.OSV` horizon lock does not hold the horizon when the
+  camera leans, and the mirror that was left open is not what is wrong with
+  it.** The owner's report on the entry below: "OSV now stays still when guy
+  rotates in a circle, but when the camera dips the horizon is no longer
+  locked", with his own view line,
+  `time=139.806 yaw=-63.98 pitch=-15.06 fov=160.04 lock=1`. That instant sits
+  inside a real dip - the file's own quaternion puts the camera 8 to 15.9
+  degrees off vertical from 138.40 to 140.51 s - and the report reproduces.
+
+  **A new instrument, because every angle read off the picture so far was the
+  wrong angle.** A view whose axis is not horizontal makes vertical world
+  lines converge, so their apparent lean changes across the frame and is not
+  the view's roll: `lean.py`, a Hough vertical cluster and a shoreline fit
+  were all tried and all failed their own controls. The convergence is the
+  signal. Vertical world lines meet at the vertical VANISHING POINT, and the
+  direction that point sits in **is** the world's vertical in the frame of
+  whatever camera took the picture. Kjerag's own output map is a plain pinhole
+  up to `FOV_FLAT` (110 degrees), so at 65 degrees the fit is exact.
+
+  Measured on a **lock off** render, which applies no orientation at all: the
+  picture is then identical whatever candidate is under test, and every
+  candidate enters only as a PREDICTION of where world up should be. Three
+  controls hold it up:
+
+  - eight view directions 45 degrees apart, fitted independently at the same
+    instant, agree to **0.37 degrees at the median** (worst 2.4);
+  - the tilt it reads with the lock off is **1.02 times** the lean the file's
+    own quaternion states, correlation 0.99 - it measures the body's lean when
+    that is what it is looking at;
+  - the tilt of a LOCKED render matches what that lock-off measurement plus
+    the candidate's own arithmetic predicts, to **0.1 to 0.3 degrees**.
+
+  **The residual tilt each reading leaves**, in degrees, on the owner's dip (9
+  instants, 138.40 to 140.60 s, peak lean 15.9) and on a flat stretch of the
+  same walk (6 instants, 121.0 to 123.5 s, camera upright):
+
+  | reading of (w, x, y, z) | owner's dip | flat stretch |
+  | --- | ---: | ---: |
+  | **`wXYZ` conjugated (shipped)** | **21.94** | **5.00** |
+  | `wxYZ` mirrored in x | 16.77 | 4.21 |
+  | `wXyZ` mirrored in y | 16.38 | 4.90 |
+  | `wxyZ` z negated, otherwise as written | 8.51 | 4.21 |
+  | `wxyz` as written | 20.40 | 1.97 |
+  | `wXYz` mirrored in z | 11.58 | 6.28 |
+  | `wxYz` mirror y, conjugated | 18.73 | 5.98 |
+  | `wXyz` mirror x, conjugated | 16.16 | 2.08 |
+  | NO LOCK AT ALL (null control) | 11.88 | 3.44 |
+
+  **The shipped reading leaves nearly twice the tilt that switching the lock
+  off leaves.** So does each of the two mirrors that were the open question.
+  Only `wxyZ` beats the null and it still leaves 8.5 degrees, which is not a
+  held horizon. The deepest dip in the corpus - unit B file 1, 28.4 to 30.6 s,
+  peak lean 23 degrees - says the same where the scene gave the instrument
+  something to fit: shipped 21.1 against a null of 11.6.
+
+  **What the error tracks is the lean, not the clock.** Against the file's own
+  lean the shipped error fits a slope of 2.65 with correlation **0.987**, and
+  its median is **1.84 times the lean**; against the body's turn rate the
+  correlation is **0.102**. A lag would grow with rate and vanish at the
+  bottom of a dip, where the rate passes through zero; this is largest exactly
+  there. It is a standing frame error.
+
+  **Where it is.** Low pass the file's accelerometer over 2 s - which is what
+  takes the wearer's stride out of it - and the quaternion read AS WRITTEN
+  predicts it to 2.1, 2.1 and 2.8 degrees on the three unit B files, on the
+  frames leaning more than 8 degrees, against a null of about 10. So the
+  file's own two streams agree with each other and its frame is internally
+  consistent. The picture disagrees with both by about 21 degrees at the dip,
+  and **essentially all of it is azimuth**: the lean magnitude the picture
+  measures matches the file's own to 0.18 degrees at the median, while the
+  direction that lean points, taken round the camera's own vertical,
+  disagrees by about 135. The tilt is being applied the right amount the wrong
+  way round the vertical - a composition between the file's inertial frame and
+  the optical frame Kjerag renders in, not a handedness in the quaternion.
+  Which rotation it is was NOT pinned: the scene offers the instrument
+  vertical structure for only about a tenth of the capture, and the 4 to 9
+  instants that survived span 29 degrees of lean azimuth, which is not enough
+  to tell a turned frame from a reflected one. **So nothing was changed.** A
+  sign flip would not have fixed this and no other number here is measured
+  well enough to ship.
+
+  **Why the two oracles under the entry below preferred the shipped reading.**
+  Neither of them measured a distance from level. The tilt-pairs oracle scored
+  the worst angle BETWEEN two locked renders half a second apart, which is a
+  difference between candidates, so two readings that are wrong the same way
+  both score well and the reading that moves least wins whether or not it is
+  level. The accelerometer's 1.8 degrees was a median over every steady frame
+  of a capture whose median lean is 4 degrees, and all eight readings predict
+  the same lean MAGNITUDE - `1 - 2(x^2 + y^2)` has no sign in it - so they
+  differ only in azimuth and only in proportion to the lean. On those frames
+  every candidate scores within a degree of every other and of the null; read
+  on the frames that lean more than 8 degrees, with the stride low passed out,
+  the same instrument spreads them over 8 degrees. It was a real instrument
+  used at the one operating point where it says nothing.
+
+  Evidence, panels and the throwaway harness: `scratch/EVIDENCE_2026-08-08-osv-dip/`.
+
+- 2026-08-08 **Horizon lock works on a DJI `.OSV`, and the file's quaternion is
+  written the other way round.** *(The "what is still open" paragraph at the
+  end of this entry is superseded by the entry above: the open question was
+  the wrong question, and both of the readings it weighed leave more tilt
+  through a dip than switching the lock off does.)* The owner's report was "the camera rotates
+  when the wearer turns around", which on this format it did, because the lock
+  was a designed refusal: the file's fused orientation was there and its frame
+  was not pinned. It is pinned now, and the whole of it is
+  `world_from_body = BODY^-1 . conjugate(w, x, y, z) . BODY`
+  (`kjerag_meta::osmo`, which carries the evidence in its own doc).
+
+  **Everything the scoping pass concluded about the orientation was measured
+  under the four-coefficient lens model**, with 15 degrees of seam tear in the
+  picture, so "applying the quaternions made the stitch worse" settled nothing
+  and was re-derived from scratch under the five-term model above.
+
+  **The oracle is the picture, through the app's own pass** (`--bin reframe`,
+  `lock=1` against `lock=0`). Two measurements, on the owner's capture:
+
+  1. **World stability across a turn.** 12 renders 0.25 s apart over 120.90 to
+     123.65 s, during which the wearer turns 133 degrees, at yaw 0 and 90
+     degrees of view. The score is how much of the picture one render still
+     shares with the next, and how far the world has turned between them.
+  2. **The tilt head to head.** The candidates that reverse the heading agree
+     exactly for a camera held upright and differ by twice its lean when it is
+     not, so they are separated on the frame pairs, half a second apart, where
+     they predict the most different motion. The score is the worst of the
+     three angles between the two locked renders, which should be zero.
+
+  | candidate | hold, 133 deg turn | step yaw | max roll | tilt pairs, residual |
+  | --- | ---: | ---: | ---: | ---: |
+  | **`wxyz` conjugated (shipped)** | **0.718** | **0.46** | **0.89** | **5.8** |
+  | `wxYZ` mirrored in x | 0.677 | 0.49 | 1.29 | 11.4 |
+  | `wXyZ` mirrored in y | 0.694 | 0.86 | 1.99 | 10.8 |
+  | `wXYz` mirror z, conjugated | 0.680 | 1.34 | 2.11 | - |
+  | `wxyz` as written | 0.366 | - | - | - |
+  | `wXYz` mirrored in z | 0.361 | - | - | - |
+  | `xyzw` order | 0.224 | - | - | - |
+  | `xyzw` order, conjugated | 0.269 | - | - | - |
+  | LOCK OFF (null control) | 0.460 | 11.68 | - | 7.1 |
+
+  Angles in degrees; a dash is a candidate the picture had moved too far for
+  the fit to converge on, which is itself the finding. **Reading the
+  quaternion as written scores below the null**: it turns the picture twice as
+  far as the wearer instead of holding it, which is the defect the owner saw
+  made worse rather than fixed.
+
+  **The heading is pinned outright and needs no scoring.** With the lock off
+  the view rides the body, so the camera yaw that makes a later frame show
+  what an earlier one showed IS the body's turn, in the renderer's own sign.
+  Searched on the picture over three half-second pairs: -16, -22 and -10
+  degrees, where the file's own yaw changed by +15.7, +22.0 and +8.6. The same
+  turn to about a degree, the opposite way round.
+
+  **Cross file and cross unit.** The turn oracle on the two other unit B files
+  that carry one: conjugated 0.494 and 0.712 against nulls of 0.316 and 0.439
+  and an as-written 0.241 and 0.280. The tilt head to head on the same two:
+  conjugated 5.9 and 3.5 degrees against the mirrors' 9.0/6.9 and 10.3/7.7.
+  The conjugate wins every comparison it was scored in, on four runs across
+  three files. **Unit A cannot arbitrate**: its capture is a camera bolted to
+  a car driving straight down a motorway, 4 degrees of turn in the whole 23 s,
+  so the world-stability oracle has no signal in it and the road rushing past
+  swamps what there is.
+
+  **Controls.** The plant: `Scene::hold_at` forced with `about_down(20 deg)`
+  renders, at view yaw 0, the pixel-identical picture that the unlocked view
+  renders at yaw -20 (similarity 1.0000 against 0.40 and 0.26 for yaw 0 and
+  +20), so the scorer reads a known rotation back through the delivered path.
+  The null: with the lock off the same 12 renders track the wearer, 11.68
+  degrees a step and 133 over the segment, which is the turn the file states.
+  And `lock=0` against `lock=1` on an `.OSV` was a proven no-op before this
+  and now differs: that null is a counter-null.
+
+  **What is still open.** A left-handed reading of the file's own frame
+  reverses the heading the same way the conjugate does; the two are identical
+  for an upright camera and differ by twice its lean otherwise. The conjugate
+  wins the head to head above by about two to one and is the only one of the
+  three to beat the null, but the file's own accelerometer (field 3.2.10, in
+  g) agrees with the *unconjugated* reading to 1.8 degrees and so argues for
+  the mirror. The picture is the oracle and the accelerometer is the
+  instrument disagreeing with it. The exposure is bounded by twice the
+  camera's lean, 4.3 degrees at the median and 11 at the 95th percentile over
+  the corpus. **A Mimo export of one clip with lock on and off would settle it
+  outright**, and nothing else in this corpus will.
+
+  The menu item un-disables itself off `Scene::has_orientation`, which is the
+  same fact it was disabled by; the refusal stays for a capture that carries
+  no orientation. Playback is unmoved: 29.97 of 29.97 presented on the owner's
+  8k30p file, nothing dropped or starved.
+
+- 2026-08-08 **The `.OSV` lens model has five coefficients, and the fifth is
+  field 15.** The entry below shipped the plain equidistant map and called the
+  file's `k` coefficients decoration. They are not: the model is
+  Kannala-Brandt,
+  `r = fx * theta * (1 + k1 t^2 + k2 t^4 + k3 t^6 + k4 t^8 + k5 t^10)`, and
+  four of its five coefficients sit together at fields 5 to 8 while the fifth
+  is at **field 15**, seven fields later, past the yaw/pitch/roll triple. The
+  reader was taking the run of four, and four of them fold the radius over
+  before 90 degrees, which is what the entry below measured and refused. With
+  the fifth the radius is monotone to half a turn on all four lenses of both
+  units.
+
+  **What it was worth: the seam tear.** The owner reported the picture "fixed
+  off everywhere" and a doubled tower. Measured through the app's own map with
+  `--bin crossing` at a 90 degree seam view, `seam=factory`, the two lenses
+  drew the same far content **241 source px apart across the seam on his own
+  camera, 13.1 degrees**, and 149 px on the sample unit; after, **3.2 px
+  (0.18 deg)** and **7.9 px (0.43 deg)**, both within a degree of the
+  `theta0 + theta1 = 180` that far content must satisfy, and what is left is
+  ordinary near parallax at the range of the content. **Both readings needed
+  the instrument's search opened to 20 degrees to take the before arm at all**:
+  at its own 1.4 degree default the old model accepts 0 of 18 sites on unit B,
+  railing or correlating nothing, against 13 of 18 after. Opened up, 7 of 18
+  before and 14 of 18 after on unit B, 5 and 12 on unit A. The along-seam
+  component is nothing either way, 0.6 px before and 0.05 px after, which is
+  what says the 241 px is the radial map and not a pose.
+
+  **Coverage is the check anyone can redo.** The delivered 3840 px square holds
+  the image circle inscribed, so half the frame is half the coverage: the
+  five-term model puts 1920 px at 98.9 to 99.4 degrees off axis, i.e. **197.9
+  to 198.8 degrees**, which is the Osmo 360's published figure. Equidistant put
+  the same radius at 209 to 211, a lens nobody makes, and that surplus is the
+  tear. The refusal below leaned on fields 22 and 23, a fourteen-point
+  polyline, read as this lens's coverage rim; those 112 bytes are byte-identical
+  across all four lenses of both units, so they are a model constant - the arc
+  where the camera's own body cuts the bottom of the picture - and a constant
+  cannot measure a lens.
+
+  **`image_radius` on this format is now the image circle** rather than the
+  largest circle that fits around the principal point. That number moved from
+  1910.2 to 1916.7 px across four lenses purely because the principal point
+  wanders 10 px about the frame centre, and every delivered frame is lit past
+  it: measured on frames of both units, content runs to the frame edge at the
+  mid-sides and out to about 2035 px on the diagonals before the optical rim.
+
+  **The `.insv` path is untouched, byte for byte.** Sixteen rendered views over
+  three files - an X4 Air at eight views including the fitted and the stored-fit
+  paths, plus a seam zoom, the nadir, the 220 degree ball and a one-stream ONE
+  X2 - are identical to the branch's base at `a7b6930`, hash for hash. The
+  Mei arm of the map is the arithmetic it always was; what changed under it is
+  that the five coefficient slots of the uniform block are now named for the
+  model that reads them, and Mei reads the same five it always did.
+
+  **What is still open, and disclosed rather than fixed.** The per-file seam
+  fit remains structurally dead on this format: the pose knobs write
+  `lens.pose.*` and a DJI lens takes the mounting branch, so a fit cannot move
+  the picture. With the model corrected the fitter now finds enough azimuths to
+  try - the app's refusal moves from "only 2 of 72 azimuths" to "the seam
+  readings do not pin a correction" - and then hits that wall. Factory
+  calibration now joins at infinity without it. Near-field ghosting at metre
+  range remains and is parallax, not calibration.
+
+  Playback is unmoved: best of three 20 s runs each side on one box, 29.22 fps
+  presented and 8.90 ms a redraw in the pass before, 29.32 and 8.00 after, with
+  the box carrying another agent's work throughout (`--bin playback`, unit B
+  8k30p, 2560x1440).
+
+- 2026-08-07 **A DJI Osmo 360 `.OSV` plays, on an equidistant lens model and
+  with no horizon lock** (branch `feat/osmo-osv`, MVP). `kjerag <file>.osv` is
+  the whole of it. The calibration is in the file's own `djmd` telemetry track
+  rather than a trailer, as a protobuf with no `.proto` anywhere, read by field
+  number in `kjerag_meta::osmo`; both units' parsed intrinsics match the
+  scoping pass's independent table exactly, to the last digit of the `f32`.
+
+  **Equidistant only, `r = fx * theta`, and the four `k` coefficients the file
+  carries are read past.** *(Superseded 2026-08-08 by the entry above: there
+  are five coefficients, not four, and this paragraph's whole argument rests on
+  a polyline that turns out to be a model constant. It stays as written because
+  the arithmetic in it is right and only the premise is wrong.)* Each lens entry
+  also writes a fourteen-point mask of
+  where the camera body cuts the picture, and on all four lenses of the two
+  units it sits 1804 to 1860 px out. Equidistant puts that at 98.6 to 101.7
+  degrees off axis, so 197 to 203 degrees of coverage, bracketing DJI's
+  published 199. The Kannala-Brandt theta-polynomial reading of the same
+  coefficients turns over between 88.4 and 89.8 degrees at 1615 to 1640 px and
+  folds back, so it cannot reach that ring at any angle and would make a 199
+  degree lens a sub-hemisphere one. The inverse reading folds too. No candidate
+  form was kept, and the refusal is a forward check anyone can redo from the
+  file rather than an overlap score: the scoping pass's overlap scorer
+  preferred a known 20 px principal-point error, so its preference is not
+  evidence.
+
+  **Horizon lock is off on this format and says so.** The file carries a fused
+  orientation at about 1 kHz whose frame is not pinned, and applying it naively
+  made the scoping stitch worse, so none is read. The menu item draws disabled,
+  the key bind does nothing rather than flipping a setting that cannot move the
+  picture, and the app prints one `level:` line at open. Manual pan is v1.
+
+  **The seam is left to fit itself and refuses.** No inter-lens translation is
+  recorded, so the parallax band switches off, and on both units the fitter
+  found 0 of 72 azimuths with content it could match and kept the factory
+  calibration. Far-field content joins cleanly; near-field shows a soft band at
+  the handover. That is the accepted v1. *(Corrected 2026-08-08: far-field
+  content did not join cleanly, it was 13 degrees out, and the fitter's refusal
+  was the lens model's doing rather than the content's. The refusal itself
+  stands, for a different reason: the fit is structurally dead on this format.)*
+
+  Measured with `--bin playback`, rendering 2560x1440, VA-API, 20 to 30 s of
+  paced playback per row; kjerag has no software decode path. **Two columns for
+  every number, because this box was not this branch's alone**: a second agent
+  was running its own instruments out of another worktree for most of the
+  session, and the same command on the same build read 6.91 ms a redraw in a
+  lull and 21.05 ms beside that agent's run. So the best of five runs and the
+  worst are both here, and neither on its own is the box's answer.
+
+  | capture              | decode, best  | presented, best | dropped | pass, best | presented, worst | dropped | pass, worst |
+  | -------------------- | ------------: | --------------: | ------: | ---------: | ---------------: | ------: | ----------: |
+  | unit B 8k30p         | 2.56x         | 29.57 of 29.97  |      10 |    6.91 ms |   25.54 of 29.97 |     129 |    21.05 ms |
+  | unit B 8k50p         | 1.60x         | 49.45 of 50.00  |       4 |    5.11 ms |   24.43 of 50.00 |     242 |    38.46 ms |
+  | unit A 8k25p         | 3.00x         | 24.87 of 25.00  |       0 |    6.51 ms |   21.89 of 25.00 |      13 |    27.53 ms |
+  | X4 Air `.insv` 8k30p | 2.44x         | 29.94 of 29.97  |       1 |    7.90 ms |   27.24 of 29.97 |      82 |    20.00 ms |
+
+  What survives the noise is the **comparison**, because the `.insv` control in
+  the last row was measured in the same conditions and moves with the rest: an
+  `.OSV` plays at its own rate when the box is free and falls short when it is
+  not, and it does so by about as much as an `.insv` does. **Decode is not what
+  runs out.** Even at its slowest the 10-bit VA-API pair decode ran at 1.17x
+  realtime and no row starved for more than 33 redraws; what moves is the
+  render pass, which is the same pass both formats draw through. That is worth
+  saying against the scoping pass's figure of 487 percent CPU for ffmpeg to
+  software-decode the same file at realtime. The app's own report, in a window
+  at 1280x720, presents 30.00 of 29.97 and 25.00 of 25.00 with nothing dropped
+  or starved on units B and A.
+
+  D-Log M is out of scope: those files play with the log look, and no transform
+  for it is in the container.
 
 - 2026-08-07 **An acceptance line names the pose instead of copying it**
   (`seam=pool`, docs/research/reference-views.md). Three acceptance commands -

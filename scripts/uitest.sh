@@ -312,7 +312,16 @@ boot() {
 	# The sound out, and only the sound out: see the preflight above.
 	[ "$sound" = no ] || ln -s "/run/user/$(id -u)/pipewire-0" "$runtime/pipewire-0"
 
-	env \
+	# `--ignore-environment` is not what is wanted here (the build's own
+	# variables have to survive), so the two that name the developer's
+	# desktop are unset by name. `WLR_BACKENDS=headless` below is supposed to
+	# settle it on its own and does not always: a cage that can still see
+	# `WAYLAND_DISPLAY` and a runtime directory with a socket in it can come
+	# up as a client of the session instead of a backend of its own, and then
+	# the harness opens a window over whatever the owner was looking at
+	# (2026-08-08, on his screen). Unset, there is nothing for it to fall back
+	# to. `DISPLAY` goes with it for the same reason, one X server along.
+	env -u WAYLAND_DISPLAY -u DISPLAY \
 		HOME="$HOME_DIR" \
 		XDG_RUNTIME_DIR="$runtime" \
 		XDG_CONFIG_HOME="$session/config" \
@@ -1265,9 +1274,29 @@ returns_to_the_copied_view() {
 # ends up saying false. Reading the config rather than the picture is what
 # separates a key that landed from a key that was swallowed: the two views
 # differ by a rotation that one still frame need not show.
+#
+# A capture carrying no orientation record the app can use is the other case,
+# and the app says so at open. There the key is meant to do nothing, so the
+# same config read is the assertion with its sign flipped: a write would be
+# the defect. Two captures are that today: one whose telemetry carries no
+# orientation at all, and a DJI Osmo 360 `.OSV` whose own accelerometer
+# refuses the mounting its orientations would be read with (`kjerag_meta`'s
+# `osmo`, the plumb check). Both arrive here as the same `level:` line, which
+# is what this branches on.
 flips_the_horizon() {
 	local locked=$session/config/cosmic/dev.harding.Kjerag/v1/horizon_lock
 	local try=0
+	if said 'horizon lock does nothing on it'; then
+		local check="h leaves the lock alone on a capture that cannot hold one"
+		key -k h
+		alive || lost "$check"
+		if [ -s "$locked" ]; then
+			fail "$check" "$locked says $(cat "$locked")"
+			return
+		fi
+		pass "$check"
+		return
+	fi
 	while [ "$try" -lt "$PRESSES" ]; do
 		key -k h
 		alive || lost "h flips the horizon lock"
@@ -1795,7 +1824,22 @@ HICCUP=0.4
 # pattern of plain `stopped:` reads that as the picture dying. Measured: it
 # failed the hiccup check that way on 2026-08-01, on two underruns that landed
 # before the file's first report line.
-STOPPED='.insv stopped:'
+#
+# The extension is the media file's own and was the literal `.insv` until
+# 2026-08-09. Kjerag plays a second format now, and the pattern never matched
+# on one: the whole stall section failed on an `.OSV` while the app was doing
+# exactly the right thing, and the transient check beside it passed for the
+# wrong reason, because "no line was printed" was what it was looking for.
+STOPPED=".${media##*.} stopped:"
+
+# How much film these checks need behind them, in seconds: the hiccup, the
+# settle, the stuck window, the alert and the final watch, end to end, plus
+# the boot in front of them. A capture shorter than this reaches its own end
+# before the squeeze does, and then nothing stops because there is nothing
+# left to import, which is the app behaving. Found on the 23.4 s Osmo 360
+# sample, where every check in this section failed and none of them was about
+# the app (2026-08-09).
+STALL_FILM=40
 
 stalls() {
 	local check
@@ -1803,6 +1847,13 @@ stalls() {
 
 	if [ -n "${KJERAG_FLATPAK:-}" ]; then
 		skip "a stuck import stops the file and says so (no preload into a sandbox)"
+		return
+	fi
+	local seconds
+	seconds=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$media" 2>/dev/null |
+		cut -d. -f1)
+	if [ -n "$seconds" ] && [ "$seconds" -lt "$STALL_FILM" ] 2>/dev/null; then
+		skip "a stuck import stops the file and says so (${seconds}s of film, and these checks need ${STALL_FILM})"
 		return
 	fi
 	if ! command -v cc >/dev/null; then
@@ -2500,13 +2551,17 @@ foreign() {
 	fi
 	quit >/dev/null 2>&1 || teardown
 
-	# The other half of the rule: the bytes said nothing, so the name is what
-	# is left, and an `.osv` is DJI's.
+	# An `.osv` is not the other half of that rule any more. It used to be
+	# refused by name the way a `.360` still is; Kjerag plays one now, so a
+	# file with nothing in it gets as far as the demuxer and is refused by
+	# what actually failed there, which is the same line a broken `.insv`
+	# gets and what "errors are the error" asks for. What is checked is that
+	# it is refused at all, and in words the demuxer wrote.
 	boot dji "$dji"
-	if await 'not shown: a DJI capture' "$READY"; then
-		pass "an .osv with nothing in it is still named"
+	if await 'not shown: Invalid data found' "$READY"; then
+		pass "an .osv with nothing in it is refused in the demuxer's own words"
 	else
-		fail "an .osv with nothing in it is still named" \
+		fail "an .osv with nothing in it is refused in the demuxer's own words" \
 			"$(grep 'not shown' "$log" || echo 'nothing was refused')" "log: $log"
 	fi
 	exits_clean

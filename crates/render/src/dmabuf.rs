@@ -24,6 +24,11 @@ use super::{Extent, Fallible, Planes, Size};
 const DRM_FORMAT_R8: u32 = fourcc(b"R8  ");
 const DRM_FORMAT_GR88: u32 = fourcc(b"GR88");
 
+/// P010, which is what a 10-bit stream decodes to, the same way: one 16-bit
+/// luma plane and one pair-of-16-bit chroma plane.
+const DRM_FORMAT_R16: u32 = fourcc(b"R16 ");
+const DRM_FORMAT_GR1616: u32 = fourcc(b"GR32");
+
 const fn fourcc(code: &[u8; 4]) -> u32 {
     (code[0] as u32) | ((code[1] as u32) << 8) | ((code[2] as u32) << 16) | ((code[3] as u32) << 24)
 }
@@ -114,7 +119,7 @@ pub fn import(device: &wgpu::Device, desc: &AVDRMFrameDescriptor, luma: Size) ->
         .into());
     }
     if desc.nb_layers != 2 {
-        return Err(format!("expected 2 NV12 layers, got {}", desc.nb_layers).into());
+        return Err(format!("expected 2 luma/chroma layers, got {}", desc.nb_layers).into());
     }
     Ok(Planes {
         luma: import_layer(device, desc, 0, luma)?,
@@ -372,10 +377,36 @@ impl Drop for ImageGuard<'_> {
     }
 }
 
+/// The formats a plane is aliased as, wgpu's and Vulkan's.
+///
+/// **A 16-bit plane is taken a byte at a time, on purpose.** The obvious
+/// aliases for P010's two planes are `R16Unorm` and `Rg16Unorm`, and neither
+/// can be created here: both need `Features::TEXTURE_FORMAT_16BIT_NORM`, and
+/// the device the pass draws on is iced's, which asks for `SHADER_F16` and
+/// nothing else (`iced_wgpu::window::compositor`). There is no hook to add
+/// one, which is the same wall `force_extensions` exists for and the reason
+/// this file exists at all.
+///
+/// So a 16-bit plane is aliased as two 8-bit components and a four-byte one
+/// as four, and the shader puts the words back together (`plane_word`). Two
+/// things make that a reinterpretation rather than a loss:
+///
+/// - **The tiling is the same.** An AMD format modifier's swizzle depends on
+///   how many bytes an element is, not on how they are divided up, so a
+///   16-bit plane and an `R8G8` one of the same width lay out identically.
+///   `modifier_supported` is asked either way, and it refuses rather than
+///   guesses.
+/// - **The filtering is the same.** Bilinear interpolation is linear, so
+///   interpolating the two bytes separately and recombining them
+///   `high * 256 + low` is interpolating the 16-bit word, exactly, to within
+///   the hardware's own subtexel precision. Nothing is dithered, rounded or
+///   dropped: all ten bits reach the shader.
 fn plane_format(drm_format: u32) -> Fallible<(wgpu::TextureFormat, vk::Format)> {
     match drm_format {
         DRM_FORMAT_R8 => Ok((wgpu::TextureFormat::R8Unorm, vk::Format::R8_UNORM)),
         DRM_FORMAT_GR88 => Ok((wgpu::TextureFormat::Rg8Unorm, vk::Format::R8G8_UNORM)),
+        DRM_FORMAT_R16 => Ok((wgpu::TextureFormat::Rg8Unorm, vk::Format::R8G8_UNORM)),
+        DRM_FORMAT_GR1616 => Ok((wgpu::TextureFormat::Rgba8Unorm, vk::Format::R8G8B8A8_UNORM)),
         other => Err(format!("unexpected DRM plane format {other:#x}").into()),
     }
 }
@@ -398,6 +429,8 @@ mod tests {
     fn plane_fourccs_match_drm_fourcc_h() {
         assert_eq!(DRM_FORMAT_R8, 0x2020_3852);
         assert_eq!(DRM_FORMAT_GR88, 0x3838_5247);
+        assert_eq!(DRM_FORMAT_R16, 0x2036_3152);
+        assert_eq!(DRM_FORMAT_GR1616, 0x3233_5247);
     }
 
     /// The third name is the one wgpu-hal 28 never enables on its own; if it

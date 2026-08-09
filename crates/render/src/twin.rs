@@ -16,13 +16,24 @@
 //! it asks [`Reframe::blend`] the same rays on the CPU and compares. A change
 //! to one side and not the other fails here, in a unit test, with no footage.
 //!
-//! **What it does not do.** The fragment half - the NV12 sampling, the colour
+//! **What it does not do.** The fragment half - the plane sampling, the colour
 //! transform, the write to the target - is not covered: it needs decoded
 //! planes, which means real footage, which means the null instrument. The
 //! boundary this guards is the one the seam work keeps moving, which is every
 //! function of the map: `blend`, `handover`, `crossover`, `claim`, `share`,
-//! `within`, `axis_of`, `project`, `readout_share`, `turned` and `mei`, plus
-//! the layout of the uniform block they all read.
+//! `within`, `axis_of`, `project`, `readout_share`, `turned`, `lens_pixel` and
+//! **both of the models it dispatches to**, plus the layout of the uniform
+//! block they all read.
+//!
+//! **Both models, because a model is only guarded at a fixture that selects
+//! it.** `lens_pixel` branches on the block's own `model` field, so a camera
+//! whose blocks say `MEI` never runs a line of `theta` on either half, and the
+//! `.OSV` support could have shipped a WGSL `theta` that disagreed with its
+//! Rust twin with every test in the workspace green. The comparison below is
+//! therefore run twice over, on an Insta360 X4 Air's pair and on a DJI Osmo
+//! 360's, and each arm asserts that the blocks it built name the model it
+//! meant to test - which is the same lesson the rolling fixture below records,
+//! learned once and applied before it could be learned again.
 //!
 //! **A guarded function is only guarded at a fixture that reaches it, and
 //! this file learned that on 2026-08-09.** The list above was written while
@@ -43,6 +54,8 @@
 //! box that can, and not skippable on the way to a tag.
 
 #![cfg(test)]
+
+use kjerag_meta::Lens;
 
 use crate::projection::{Held, MAX_LENSES, Reframe, Rolling};
 use crate::sampling::Sampling;
@@ -342,6 +355,20 @@ fn probe_rays(reframe: &Reframe) -> Vec<[f32; 3]> {
 ///
 /// Each was the **only** failing test in the workspace, and each was reverted.
 ///
+/// **The theta arm calibrated the same way**, 2026-08-09, and both of these
+/// were caught by the DJI arm while the Insta360 arm stayed green to the last
+/// digit above - which is the check that the two arms are independent and not
+/// one fixture reported twice:
+///
+/// | mutation, WGSL `theta` only | worst weight | of the bar |
+/// | --- | ---: | ---: |
+/// | the tail coefficient read twice, `c5` written `c4` - the copy-paste a five-slot chain invites | 3.5e-1 | 17700x |
+/// | the leading coefficient out by a **tenth of a percent**, `c1 * 1.001` | 4.3e-4 | 22x |
+///
+/// The second is the one worth reading: an error far too small to see in a
+/// picture, on the term that does the most work, is still twenty times the
+/// bar. Both were reverted.
+///
 /// **Why the landings are compared where the weight is not zero, and not
 /// everywhere.** A lens the ray cannot reach is never projected, and its
 /// landing is whatever the slot held. WGSL says a `var` with no initializer is
@@ -404,7 +431,35 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
     };
     eprintln!("twin: {name}");
 
-    let lenses = crate::projection::tests::fixture_lenses();
+    // One device, two cameras. The Insta360 pair selects `mei` inside
+    // `lens_pixel` and the DJI pair selects `theta`; everything else about the
+    // fixture, the rays and the bars is held identical, so an arm that fails
+    // names a model rather than a setup.
+    for (camera, theta, lenses) in [
+        (
+            "insta360 (mei)",
+            false,
+            crate::projection::tests::fixture_lenses(),
+        ),
+        (
+            "dji osmo 360 (theta)",
+            true,
+            crate::projection::tests::osmo_pair(),
+        ),
+    ] {
+        compare(&device, &queue, camera, theta, lenses);
+    }
+}
+
+/// One camera's worth of the comparison above: build the map, run it on both
+/// halves, and hold them to the bars.
+fn compare(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    camera: &str,
+    theta: bool,
+    lenses: Vec<Lens>,
+) {
     // **The frame is read out while the body turns, and that is not a
     // decoration.** `Held::default()` leaves `rolling` at `None`, which leaves
     // the block's `row_axis` at zero, which makes the WGSL test
@@ -454,16 +509,24 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
     .with_shift(2.5f32.to_radians());
     // The block the shader is handed carries the held line, or this test would
     // be run on the one field the seam anchor added.
-    assert!(reframe.handover_width() > 0.0);
+    assert!(reframe.handover_width() > 0.0, "{camera}");
     // And it carries the readout, or `project`'s second half is dead on both
     // halves and the boundary this file claims to guard is half a boundary.
     assert!(
         reframe.is_rolling(),
-        "the block's row axis is zero, so the readout branch of `project` runs on neither side",
+        "{camera}: the block's row axis is zero, so the readout branch of `project` runs on \
+         neither side",
+    );
+    // And it says the model this arm exists to reach, or `lens_pixel` takes the
+    // other branch on both halves and this arm is the other arm again.
+    assert_eq!(
+        crate::projection::tests::runs_theta(&reframe),
+        theta,
+        "{camera}: the blocks do not name the model this arm is meant to run",
     );
 
     let rays = probe_rays(&reframe);
-    let answers = on_the_gpu(&device, &queue, &reframe, &rays);
+    let answers = on_the_gpu(device, queue, &reframe, &rays);
     assert_eq!(answers.len(), rays.len());
 
     let (mut worst_weight, mut worst_pixel) = (0.0f32, 0.0f32);
@@ -490,8 +553,8 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
             landings += 1;
             assert!(
                 answer.inside[lens],
-                "lens {lens} carries weight {} on the mirror and is outside on the shader at \
-                 {ray:?}",
+                "{camera}: lens {lens} carries weight {} on the mirror and is outside on the \
+                 shader at {ray:?}",
                 mirror.weights[lens],
             );
             for axis in 0..2 {
@@ -506,32 +569,33 @@ fn the_shader_and_its_rust_twin_answer_the_same_map() {
     // about the far field where one lens takes everything at a weight of one.
     assert!(
         mixed > 500,
-        "only {mixed} of {} probes are inside the handover, so this compares the far field",
+        "{camera}: only {mixed} of {} probes are inside the handover, so this compares the far \
+         field",
         rays.len(),
     );
     assert!(
         landings > 4000,
-        "only {landings} landings reach a pixel, so this compares almost nothing",
+        "{camera}: only {landings} landings reach a pixel, so this compares almost nothing",
     );
     assert!(
         worst_weight < 2e-5,
-        "the two halves disagree by {worst_weight} of a whole weight",
+        "{camera}: the two halves disagree by {worst_weight} of a whole weight",
     );
     assert!(
         worst_pixel < 1e-2,
-        "the two halves land {worst_pixel} px apart",
+        "{camera}: the two halves land {worst_pixel} px apart",
     );
     assert!(
         worst_depth < 1e-2,
-        "the two halves read coverage depths {worst_depth} px apart",
+        "{camera}: the two halves read coverage depths {worst_depth} px apart",
     );
     assert!(
         worst_axis < 1e-6,
-        "the two halves read the landing's own axis cosine {worst_axis} apart",
+        "{camera}: the two halves read the landing's own axis cosine {worst_axis} apart",
     );
     eprintln!(
-        "twin: {} rays, {mixed} inside the handover, {landings} landings compared; worst \
-         weight {worst_weight:.3e}, worst landing {worst_pixel:.3e} px, worst depth \
+        "twin: {camera}: {} rays, {mixed} inside the handover, {landings} landings compared; \
+         worst weight {worst_weight:.3e}, worst landing {worst_pixel:.3e} px, worst depth \
          {worst_depth:.3e} px, worst axis {worst_axis:.3e}",
         rays.len(),
     );

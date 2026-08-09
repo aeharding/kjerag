@@ -78,7 +78,13 @@ use kjerag_spike::{Seam, Walk};
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
-    let calibration = CalibrationSet::from_insv(&options.input)?;
+    // `from_capture` and not `from_insv`: this instrument measures through the
+    // app's own map, and the app opens files with the former. For a file that
+    // carries its own trailer the two are the same read down to the bytes; the
+    // difference is the two kinds of file that keep their calibration
+    // elsewhere, a ONE X2's second half and a DJI `.OSV`, which answered
+    // `NoTrailer` here and could not be measured at all.
+    let calibration = CalibrationSet::from_capture(&options.input)?;
     let baseline = calibration
         .lenses
         .get(1)

@@ -43,6 +43,32 @@ pub use walk::{Chroma, Pair, Plane, Walk};
 
 const NANOS: u64 = 1_000_000_000;
 
+/// `AV_DISPOSITION_ATTACHED_PIC`, from libavformat's own header: the stream
+/// is a still attached to the file rather than a picture of it.
+const ATTACHED_PIC: i32 = ff::ffi::AV_DISPOSITION_ATTACHED_PIC;
+
+/// Whether a stream is one of the capture's lenses.
+///
+/// A still the camera attached to the container is not a lens. An Osmo 360
+/// writes one, a 344x612 MJPEG cover carrying `AV_DISPOSITION_ATTACHED_PIC`,
+/// and no `.insv` in the corpus carries one, so this drops nothing an
+/// Insta360 capture has.
+///
+/// One copy, because both deliveries need it and taking the cover costs each
+/// of them differently: [`reader`] fails the whole open on a time base nobody
+/// set, and [`walk`] pairs frames by "the same instant on every lane", which a
+/// lane holding one still can never reach again. Its queues then grow for as
+/// long as the file lasts. Measured on the corpus 2026-08-07, before this
+/// filter was on the walk: 19 GB resident in 33 seconds and the process
+/// killed, on the seam fit every first open of an Osmo capture runs.
+pub(crate) fn is_lens(stream: &ff::format::stream::Stream<'_>) -> bool {
+    stream.parameters().medium() == ff::media::Type::Video
+        // `Stream` hands out no accessor for the disposition, and the pointer
+        // is what the rest of this crate reaches for when the container's own
+        // struct is the only place an answer lives (`read_only`).
+        && unsafe { (*stream.as_ptr()).disposition } & ATTACHED_PIC == 0
+}
+
 /// Tell a container which of its streams are wanted, and discard the rest.
 ///
 /// A discarded stream is not read at all: libavformat's MP4 demuxer skips its
@@ -80,6 +106,29 @@ pub(crate) fn media_time(pts: i64, start: i64, time_base: ff::Rational) -> Durat
 /// Errors cross thread boundaries here because iced's shader primitives are
 /// `Send + Sync`, so the plain `Box<dyn Error>` a binary would use will not do.
 pub type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// How one decoded frame's samples are written, which the shader needs and
+/// the pixels do not say.
+///
+/// Two facts, both read off the container rather than guessed from each
+/// other: an 8-bit stream decodes to NV12 and a 10-bit one to P010, and
+/// either can be written full range or studio swing. Insta360 writes 8-bit
+/// full range and DJI writes 10-bit studio swing, which is a coincidence of
+/// the corpus and not a rule, so neither flag is derived from the other.
+///
+/// [`Self::default`] is 8-bit full range, which is what every `.insv` in the
+/// corpus is and what the pass drew before this existed. A container that
+/// tags neither field is read as 8-bit STUDIO swing rather than as this, and
+/// `reader::written` is where that choice is made and argued.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Samples {
+    /// The two planes hold 16-bit little-endian words rather than bytes:
+    /// P010, whose ten bits sit at the top of each word.
+    pub wide: bool,
+    /// Studio swing: luma runs 64 to 940 of 1023 and chroma is centred on 512
+    /// with 448 either side, rather than either using the whole range.
+    pub limited: bool,
+}
 
 /// A frame size in pixels. NV12 chroma is half of luma in both axes, and
 /// getting that halving wrong is a silent half-image, so it has a name.
