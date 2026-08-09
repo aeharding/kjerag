@@ -846,14 +846,54 @@ impl SeamAnchor {
         // exactly where it is on the content it was drawn on last redraw. The
         // first redraw of a run has no line yet, and its target is the geometry
         // itself, which is where the line would have been anyway.
-        let (target, step) = match state.filter(|state| state.on != [0.0; 3]) {
+        //
+        // **A redraw whose film runs BACKWARDS starts the run again**, and that
+        // is the whole of the seek path. Film time only goes down when the
+        // pilot has seeked (or a loop has wrapped), and the content under the
+        // seam after a seek has nothing to do with the content the line was
+        // held on: `was.on` is a world direction from a different part of the
+        // flight, so reading it back through this pose answers a target that
+        // can be a quadrant wide. Charging the follow with that would slam the
+        // line to the rail on the seek frame and then walk it back over the
+        // next second, which is a lurch laid over the one frame where the whole
+        // picture already changed. Anchoring afresh puts the line on the
+        // geometry there instead, which is where it would have been if the file
+        // had been opened at that instant. It is an event, and it is the one
+        // event this mechanism has: a seek is already a discontinuity in every
+        // pixel, so there is no velocity in the picture for it to break.
+        //
+        // `at == was.at` is NOT that case and stays in the second arm: it is a
+        // redraw with no new frame behind it, the step is zero, and the law at
+        // a step of zero is exactly the identity (`Self::follow`).
+        let (target, step) = match state.filter(|state| state.on != [0.0; 3] && at >= state.at) {
             None => (0.0, 0.0),
+            // `min` and not `clamp`, because the arm above is what makes the
+            // difference non-negative. A stall and a forward seek are the same
+            // number here and are both taken at the cap: neither is a stretch
+            // of picture the line should be pulled across, and nothing in a
+            // presentation time can tell them apart.
             Some(was) => (
                 offset_of(was.on),
-                (at - was.at).clamp(0.0, ANCHOR_STEP_CAP_SECS) as f32,
+                (at - was.at).min(ANCHOR_STEP_CAP_SECS) as f32,
             ),
         };
         let (delta, gain) = Self::follow(target, step, allowance);
+        // **Clamped HERE, and that is what makes the anchor and the picture
+        // agree about where the line is.** `Reframe::with_shift` clamps on the
+        // way to the shader, so a `delta` past the allowance draws at the rail;
+        // placing `on` at the unclamped value would then record the line as
+        // standing somewhere it is not, and the next redraw's target would be
+        // read off that fiction. The error does not decay - it is re-made every
+        // frame the clamp fires - so it is a standing bias and not a transient.
+        //
+        // At film's 30 fps this cannot fire: the follow's own ceiling is
+        // `allowance / (POWER * RATE * dt)^(1/POWER)`, which is 3.55 of these
+        // 4.00 degrees at `dt = 1/30` whatever the drift
+        // (`Self::follow`), so the picture the owner approved is
+        // untouched by this line. It fires above 100 fps, where that ceiling
+        // passes the allowance, and both cameras in the corpus have 120 fps
+        // modes.
+        let delta = delta.clamp(-allowance, allowance);
         Self {
             on: world_of(reframe.seam_ray_at(centre, -delta)),
             delta,
@@ -907,12 +947,42 @@ impl SeamAnchor {
     /// everywhere, smooth at zero, and smooth in every derivative, so motion
     /// starting and motion stopping have nothing to click on.
     ///
-    /// **The allowance is approached and not hit.** The offset a sustained
-    /// drift of `w` can hold is `allowance * (w / (RATE * allowance))^(1 /
-    /// (POWER + 1))`, an eleventh root: 25 times the drift buys 34 percent more
-    /// offset. Over the two segments this was tuned on the line reaches 3.53 of
-    /// the 4.00 degrees it is allowed and [`Reframe::with_shift`]'s clamp,
-    /// which is the map's own property and not part of this, never fires.
+    /// **The allowance is approached and not hit, AT 30 FPS.** The offset a
+    /// sustained drift of `w` can hold is `allowance * (w / (RATE *
+    /// allowance))^(1 / (POWER + 1))`, an eleventh root: 25 times the drift
+    /// buys 34 percent more offset. Over the two segments this was tuned on the
+    /// line reaches 3.53 of the 4.00 degrees it is allowed.
+    ///
+    /// **That eleventh root is the continuum answer and the law is applied per
+    /// frame, so the rail depends on the frame rate.** The geometry's sweep
+    /// arrives as a jump of `w * dt` and the leak is then charged at a gain
+    /// read AFTER that jump, which over-charges it, and the over-charge is
+    /// larger the coarser the step. Letting the drift run away gives the
+    /// ceiling in closed form: as `target` grows the divisor grows with it, and
+    ///
+    /// ```text
+    /// delta -> allowance / (POWER * RATE * dt)^(1 / POWER)
+    /// ```
+    ///
+    /// so the largest offset this law can hold at all is a property of the film
+    /// rate and nothing else. `POWER * RATE` is 100 per second, so it equals
+    /// the allowance at exactly `dt = 0.01 s`:
+    ///
+    /// | film fps | 24 | 30 | 60 | **100** | 120 | 240 |
+    /// | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    /// | ceiling, deg, of a 4.00 allowance | 3.47 | **3.55** | 3.80 | **4.00** | 4.07 | 4.37 |
+    ///
+    /// **Read as a known characteristic and not as a defect with a fix
+    /// pending.** Every file the owner has judged this on is 30 fps, where the
+    /// ceiling is 3.55 and the map's own clamp is unreachable; that is also why
+    /// [`Self::hold`]'s clamp is provably inert on the arm he approved. Both
+    /// cameras in the corpus shoot 120 fps modes, and there the rail is the
+    /// clamp rather than the law, which is a fade held one-sided at its widest
+    /// for as long as the drift lasts. Making the law dt-invariant is a
+    /// different picture at 30 fps as well, so it is not a change this merge
+    /// may make; it is written down here, pinned by
+    /// `tests::the_follow_has_a_ceiling_and_the_frame_rate_sets_it`, and it is
+    /// the belt's neighbour on the list.
     fn follow(target: f32, step: f32, allowance: f32) -> (f32, f32) {
         // An EVEN power, so this is the magnitude without an `abs` and without
         // a branch, and the whole law is a polynomial in `target` divided by a
@@ -5231,6 +5301,332 @@ pub(crate) mod tests {
             "25 times the drift bought {:.2}x the offset, not the eleventh root",
             fast / slow,
         );
+    }
+
+    /// **The follow has a ceiling, and the film's frame rate is what sets
+    /// it.** The characteristic behind `the_held_line_stays_inside_the_fade`'s
+    /// "approaches and does not reach", written down rather than left implied.
+    ///
+    /// The eleventh root the law is described by is the continuum answer, and
+    /// the law is charged once per frame: the geometry's sweep arrives as a
+    /// jump and the leak is then read at a gain taken AFTER that jump, which
+    /// over-charges the leak by more the coarser the step. Letting the drift
+    /// run away isolates it, because the target then dominates and the answer
+    /// stops depending on the drift at all:
+    ///
+    /// ```text
+    /// delta -> allowance / (POWER * RATE * dt)^(1 / POWER)
+    /// ```
+    ///
+    /// **Why it is worth a test of its own.** `POWER * RATE` is 100 per second,
+    /// so the ceiling equals the allowance at exactly 100 fps, and both cameras
+    /// in the corpus shoot 120 fps modes. Under 100 fps the follow is what
+    /// decides where the line sits and `Reframe::with_shift`'s clamp is
+    /// unreachable; over it the clamp is the rail. That is the whole reason
+    /// [`SeamAnchor::hold`] clamps before it places its anchor, and this test
+    /// is what says the 30 fps side of the line is the side every frame the
+    /// owner has judged sits on.
+    #[test]
+    fn the_follow_has_a_ceiling_and_the_frame_rate_sets_it() {
+        let allowance = 4f32.to_radians();
+        let power = ANCHOR_FOLLOW_POWER as f32;
+        // The table in `SeamAnchor::follow`'s doc, and the closed form it is
+        // read off, checked against the law itself at a drift it can never
+        // catch up with.
+        for (fps, ceiling) in [
+            (24.0f32, 3.47f32),
+            (30.0, 3.55),
+            (60.0, 3.80),
+            (100.0, 4.00),
+            (120.0, 4.07),
+            (240.0, 4.37),
+        ] {
+            let step = 1.0 / fps;
+            let closed_form =
+                allowance.to_degrees() / (power * ANCHOR_FOLLOW_RATE * step).powf(1.0 / power);
+            near(closed_form, ceiling, 0.005);
+            // The law itself, asked for an offset a hundred times the
+            // allowance: what comes back is the ceiling and not the ask.
+            let reached = SeamAnchor::follow(100.0 * allowance, step, allowance)
+                .0
+                .to_degrees();
+            near(reached, ceiling, 0.01);
+            // And a runaway drift settles there rather than climbing past it.
+            let mut delta = 0.0f32;
+            for _ in 0..400 {
+                delta = SeamAnchor::follow(delta + 40f32.to_radians(), step, allowance).0;
+            }
+            assert!(
+                delta.to_degrees() <= ceiling + 0.01,
+                "at {fps} fps a runaway drift held {} deg against a ceiling of {ceiling}",
+                delta.to_degrees(),
+            );
+        }
+        // The consequence, stated as the inequality it is: film's own rate
+        // leaves the map's clamp unreachable, and a 120 fps mode does not.
+        let ceiling = |fps: f32| {
+            allowance.to_degrees() / (power * ANCHOR_FOLLOW_RATE / fps).powf(1.0 / power)
+        };
+        assert!(
+            ceiling(30.0) < allowance.to_degrees(),
+            "the 30 fps ceiling reaches the allowance, so the arm the owner approved could rail",
+        );
+        assert!(
+            ceiling(120.0) > allowance.to_degrees(),
+            "the 120 fps ceiling is under the allowance, so the clamp in `hold` guards nothing",
+        );
+        // The crossing is exactly where `POWER * RATE * dt` is one, which is
+        // the only place the root can be.
+        near(
+            ceiling(power * ANCHOR_FOLLOW_RATE),
+            allowance.to_degrees(),
+            1e-4,
+        );
+    }
+
+    /// **The anchor records the line the picture actually draws.**
+    ///
+    /// [`Reframe::with_shift`] clamps on the way to the shader, so an offset
+    /// past the allowance is DRAWN at the allowance. Until 2026-08-09
+    /// [`SeamAnchor::hold`] placed its world anchor on the unclamped value, so
+    /// whenever the clamp fired the state said the line stood somewhere the
+    /// picture had not put it, and the next redraw's target was read off that
+    /// fiction. It is a standing bias and not a transient: the error is re-made
+    /// every frame the clamp fires.
+    ///
+    /// The read-back is `hold` itself at a step of zero, where the law is the
+    /// identity, so what comes back as the target is precisely where the state
+    /// says the line is standing. Under the fix it is the drawn offset.
+    ///
+    /// **The control is the frame rate.** At 30 fps the follow's own ceiling is
+    /// 3.55 of the 4.00 degrees allowed, so the clamp cannot fire and this test
+    /// would pass on the broken code as well - which is exactly why the arm the
+    /// owner approved is byte-identical either way. The step here is a 240 fps
+    /// one, where the ceiling is 4.36, and the first assertion is that the
+    /// unclamped law really does overshoot at it.
+    #[test]
+    fn the_held_line_is_placed_where_the_picture_draws_it() {
+        let reframe = fixture(Camera::default());
+        let allowance = 0.5 * reframe.handover_width();
+        let step = 1.0f32 / 240.0;
+
+        // The control: at this step the law itself goes past the allowance, so
+        // there is something for the clamp to catch.
+        let raw = SeamAnchor::follow(100.0 * allowance, step, allowance).0;
+        assert!(
+            raw > allowance,
+            "the follow stops at {} deg of a {} deg allowance on its own, so this test is empty",
+            raw.to_degrees(),
+            allowance.to_degrees(),
+        );
+
+        let was = standing(&reframe, 30.0, 10.0);
+        let anchor = SeamAnchor::hold(Some(was), &reframe, Held::default(), 10.0 + f64::from(step));
+        assert!(
+            anchor.shift().abs() <= allowance,
+            "the anchor held {} deg of a {} deg allowance",
+            anchor.shift().to_degrees(),
+            allowance.to_degrees(),
+        );
+        // The shader is handed what the anchor says, untouched: the map's own
+        // clamp is a guard behind this one and never a second opinion.
+        assert_eq!(
+            reframe.with_shift(anchor.shift()).handover_shift,
+            anchor.shift(),
+        );
+        // And the world anchor stands on the drawn line: read back through the
+        // same pose at a step of nothing, the target IS the drawn offset.
+        let again = SeamAnchor::hold(Some(anchor), &reframe, Held::default(), anchor.at);
+        near(again.target, anchor.shift(), 1e-6);
+        near(again.shift(), anchor.shift(), 1e-6);
+    }
+
+    /// **Film that runs backwards is a seek, and a seek starts the hold
+    /// again.**
+    ///
+    /// The step used to be `(at - was.at).clamp(0.0, CAP)`, so a backward seek
+    /// came out as a step of zero - and a step of zero is the identity, which
+    /// means the line was pinned to whatever the target said on that frame. The
+    /// target after a seek is `was.on` read through a pose from a different
+    /// part of the flight and can be a quadrant wide, so the line slammed to
+    /// the rail on the seek frame and walked back over the next second: a lurch
+    /// laid over the one frame where every pixel already changed.
+    ///
+    /// The three cases, and the middle one is the fix:
+    ///
+    /// - film moving on: the follow runs, and the line is where the law puts
+    ///   it;
+    /// - film going backwards: the anchor is placed afresh on the geometry,
+    ///   which is where the line would be if the file had been opened there;
+    /// - **the same instant twice**: NOT a seek. It is a redraw with no new
+    ///   frame behind it, it stays in the second arm, and the law at a step of
+    ///   zero is the identity, which is the property that lets a 60 Hz window
+    ///   and an offscreen instrument at one draw per frame hold the same line.
+    #[test]
+    fn film_that_runs_backwards_starts_the_hold_again() {
+        let reframe = fixture(Camera::default());
+        let was = standing(&reframe, 3.0, 10.0);
+
+        let onward = SeamAnchor::hold(Some(was), &reframe, Held::default(), 10.0 + 1.0 / 30.0);
+        assert!(
+            onward.shift().to_degrees() > 2.0,
+            "the follow gave up {} of a 3.00 degree hold in one frame",
+            onward.shift().to_degrees(),
+        );
+
+        let seeked = SeamAnchor::hold(Some(was), &reframe, Held::default(), 4.0);
+        assert_eq!(
+            seeked.shift(),
+            0.0,
+            "a seek back to 4.0 s left the line {} deg off the geometry",
+            seeked.shift().to_degrees(),
+        );
+        assert_eq!(seeked.target, 0.0);
+
+        let redrawn = SeamAnchor::hold(Some(was), &reframe, Held::default(), 10.0);
+        near(redrawn.shift(), was.delta, 1e-6);
+    }
+
+    /// **What the held line delivers is a fraction of what it commands, and the
+    /// fraction is the camera's.** The honesty this PR's own prose needed
+    /// (2026-08-09 review).
+    ///
+    /// The anchor holds the SHARE's 50/50 line: [`crossover`] is a ramp in
+    /// `across_seam - shift`, so the whole share profile translates rigidly by
+    /// the shift and the anchor's arithmetic is exact about it. **The picture
+    /// draws the WEIGHTS' crossing**, which is that share times each lens's own
+    /// coverage depth, renormalized ([`claim`]) - and the depths are fixed to
+    /// the lenses and do not translate. The crossing of the delivered weights
+    /// therefore moves by less than the shift, and the shortfall is the
+    /// camera's own overlap against the band it hands over on: a linear taper
+    /// predicts `overlap / (overlap + band)`, which is an upper bound the real
+    /// taper does not reach.
+    ///
+    /// **Measured here, mean over 24 azimuths, 2026-08-09:**
+    ///
+    /// | | X4 Air fixture | X2-class |
+    /// | --- | ---: | ---: |
+    /// | overlap / band, deg | 14.44 / 8.00 | 9.18 / 8.00 |
+    /// | `overlap / (overlap + band)` | 0.643 | 0.534 |
+    /// | **delivered per commanded degree** | **0.617** | **0.510** |
+    /// | the same, spread over the 24 azimuths | 0.610 to 0.624 | 0.499 to 0.522 |
+    /// | drawn offset at a 4.00 degree hold, deg | 2.54 | 2.13 |
+    ///
+    /// So the anchor removes about **62 percent** of the seam's crawl on the
+    /// camera the owner judged it on and about **51 percent** on the narrowest
+    /// one, not all of it. flat6 behaved identically - this is a property of
+    /// the fusion the owner approved and not of anything this merge changed -
+    /// and it is recorded in docs/research/studio-parity.md 6 and in the PR's
+    /// accepted tradeoffs rather than fixed here.
+    ///
+    /// The zero-shift crossing is not exactly on the seam either (0.07 degrees
+    /// on the fixture), because the two lenses are not the same lens: their
+    /// depths differ slightly at the seam. The gain is read as a SLOPE across
+    /// two shifts so that this standing offset cancels out of it.
+    #[test]
+    fn the_held_line_delivers_a_fraction_of_the_hold_it_commands() {
+        for (name, reframe, predicted, gain, drawn) in [
+            (
+                "the X4 Air fixture",
+                fixture(Camera::default()),
+                0.643f32,
+                0.617f32,
+                2.54f32,
+            ),
+            ("an X2-class camera", cropped(X2_CLASS), 0.534, 0.510, 2.13),
+        ] {
+            let overlap = reframe.overlap().expect("two lenses").to_degrees();
+            let band = reframe.handover_width().to_degrees();
+            near(overlap / (overlap + band), predicted, 0.002);
+
+            let allowance = 0.5 * band;
+            let (mut mean, mut lowest, mut highest) = (0.0f32, f32::INFINITY, 0.0f32);
+            let mut rail = 0.0f32;
+            let azimuths = (0..360).step_by(15);
+            let count = azimuths.clone().count() as f32;
+            for phi in azimuths {
+                let phi = phi as f32;
+                let still = crossing(&reframe.with_shift(0.0), phi);
+                let held = crossing(&reframe.with_shift(allowance.to_radians()), phi);
+                let slope = (held - still) / allowance;
+                mean += slope / count;
+                lowest = lowest.min(slope);
+                highest = highest.max(slope);
+                rail += held / count;
+            }
+            assert!(
+                (mean - gain).abs() < 0.01,
+                "{name} delivers {mean:.4} of every degree it is asked to hold, not {gain}",
+            );
+            assert!(
+                highest - lowest < 0.03,
+                "{name}'s gain runs {lowest:.4} to {highest:.4} round the ring, so a mean of it \
+                 says nothing",
+            );
+            assert!(
+                (rail - drawn).abs() < 0.02,
+                "{name} draws its line {rail:.4} deg off the seam at the {allowance:.2} degree \
+                 rail, not {drawn}",
+            );
+            // And the finding, as an inequality: the delivered line moves by
+            // materially less than the line the anchor is holding, so some of
+            // the crawl survives the hold.
+            assert!(
+                mean < 0.7,
+                "{name} delivers {mean:.4} of the hold, which is close enough to all of it that \
+                 the disclosure this test exists for would be wrong",
+            );
+            assert!(
+                mean < overlap / (overlap + band),
+                "{name} delivers more than the linear-taper bound, which cannot happen",
+            );
+        }
+    }
+
+    /// Where the DELIVERED weights cross, in degrees past the seam, at one
+    /// azimuth. Bisected rather than swept: the two weights are monotone
+    /// against each other across the handover, and a sweep fine enough to place
+    /// the crossing to a thousandth is a hundred times the work.
+    fn crossing(reframe: &Reframe, phi: f32) -> f32 {
+        let apart = |theta: f32| {
+            let weights = reframe.blend(direction(theta, phi)).weights;
+            weights[0] - weights[1]
+        };
+        let (mut lens_zero, mut lens_one) = (80.0f32, 100.0f32);
+        assert!(
+            apart(lens_zero) > 0.0 && apart(lens_one) < 0.0,
+            "the handover does not run from lens 0 to lens 1 across {lens_zero} to {lens_one}",
+        );
+        for _ in 0..40 {
+            let middle = 0.5 * (lens_zero + lens_one);
+            match apart(middle) > 0.0 {
+                true => lens_zero = middle,
+                false => lens_one = middle,
+            }
+        }
+        0.5 * (lens_zero + lens_one) - 90.0
+    }
+
+    /// A state that says the drawn line is standing `offset_deg` off the seam
+    /// at `at` seconds, on the piece of world content it would be standing on.
+    ///
+    /// [`SeamAnchor::hold`] places its own anchor exactly this way
+    /// ([`Reframe::seam_ray_at`] is the inverse of [`Reframe::across_seam`]),
+    /// and with the horizon at rest the world frame and the body frame are the
+    /// same one, so this is the state a run would have arrived at rather than a
+    /// state invented beside the mechanism.
+    fn standing(reframe: &Reframe, offset_deg: f32, at: f64) -> SeamAnchor {
+        let delta = offset_deg.to_radians();
+        let centre = reframe.seam_nearest([0.0, 0.0, 1.0]);
+        SeamAnchor {
+            on: reframe
+                .body_ray(reframe.seam_ray_at(centre, -delta))
+                .map(f64::from),
+            delta,
+            at,
+            target: delta,
+            gain: 0.0,
+        }
     }
 
     fn radius(reframe: &Reframe, lens: usize, landing: Landing) -> f32 {
