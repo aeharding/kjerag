@@ -2639,6 +2639,24 @@ struct Site {
     /// and owns much of the across one, which is why they are kept apart.
     along: f64,
     across: f64,
+    /// How far off ITS OWN LENS'S AXIS this site looks, in degrees. The field
+    /// angle, which is the variable a distortion polynomial is a function of.
+    field: f64,
+    /// The same displacement resolved RADIALLY away from that lens's axis and
+    /// TANGENTIALLY about it, in degrees.
+    ///
+    /// This is the second coordinate the protocol's section 3 asks a failure
+    /// to be reported in, and it separates two things nothing else here can.
+    /// A **pose** error between two calibrations is a rotation, and a rotation
+    /// of the lens shows up as a dipole -- one cycle of azimuth, changing sign
+    /// across the frame -- with no net radial term. A **distortion** error is
+    /// a different radial law, and it shows up as a radial displacement that
+    /// is a smooth function of the field angle and the SAME sign all the way
+    /// round. The five knobs this solve carries can chase the first and cannot
+    /// touch the second, so which of the two the residual is decides whether
+    /// the next attempt moves the pose or the polynomial.
+    radial: f64,
+    tangential: f64,
 }
 
 impl Displacements {
@@ -2736,6 +2754,43 @@ impl Displacements {
             }
         }
         (table, harmonics)
+    }
+
+    /// The residual against the FIELD ANGLE, per lens: how far off its own
+    /// lens's axis a site looks against how far its content moved radially and
+    /// tangentially.
+    ///
+    /// The other half of what section 3 asks a failure to be reported with,
+    /// and the half that names the next diagnosis. A calibration whose POSE
+    /// differs displaces content by a rotation, which has no net radial term
+    /// at any field angle and averages to nothing round the axis. A
+    /// calibration whose DISTORTION differs displaces it radially by a smooth
+    /// function of the field angle with one sign, which is the shape a
+    /// polynomial difference has and the shape none of this solve's five knobs
+    /// can produce.
+    fn radially(&self, lens: usize, step: f64) -> Vec<(f64, f64, f64, f64, usize)> {
+        let mut bins: std::collections::BTreeMap<i64, (f64, f64, f64, usize)> =
+            std::collections::BTreeMap::new();
+        for site in self.residuals.iter().filter(|site| site.lens == lens) {
+            let at = (site.field / step).floor() as i64;
+            let entry = bins.entry(at).or_insert((0.0, 0.0, 0.0, 0));
+            entry.0 += site.radial;
+            entry.1 += site.tangential;
+            entry.2 += site.size * site.size;
+            entry.3 += 1;
+        }
+        bins.into_iter()
+            .map(|(at, (radial, tangential, squared, count))| {
+                let n = count as f64;
+                (
+                    (at as f64 + 0.5) * step,
+                    radial / n,
+                    tangential / n,
+                    (squared / n).sqrt(),
+                    count,
+                )
+            })
+            .collect()
     }
 }
 
@@ -3011,6 +3066,11 @@ fn solve(options: &Options) -> Fallible<()> {
             )
         };
         let here = build(theta);
+        // Where the two lenses point in the body frame, read out of the map
+        // this round is drawing through rather than out of the calibration, so
+        // a solve that has moved lens 1 measures its field angles about where
+        // lens 1 now is.
+        let lens_axes = [axis_of(&here.1, 0), axis_of(&here.1, 1)];
         let steps: Vec<((Look, Reframe), (Look, Reframe))> = (0..SOLVED)
             .map(|k| {
                 (
@@ -3133,6 +3193,22 @@ fn solve(options: &Options) -> Fallible<()> {
                 let onto = |axis: [f64; 3]| {
                     (0..3).map(|c| moved[c] * axis[c]).sum::<f64>().to_degrees()
                 };
+                // The same displacement in the lens's own polar coordinates.
+                // `outward` is the tangent direction at this ray that
+                // increases the field angle, and `round` is the one that turns
+                // about the axis; together they say whether the residual is a
+                // rotation or a radial law.
+                let axis = lens_axes[lens];
+                let along_ray = (0..3).map(|c| axis[c] * ray[c]).sum::<f64>();
+                let perpendicular: [f64; 3] =
+                    std::array::from_fn(|c| axis[c] - along_ray * ray[c]);
+                let field = along_ray.clamp(-1.0, 1.0).acos().to_degrees();
+                let outward = unit(perpendicular).map(|c| -c);
+                let round = [
+                    ray[1] * outward[2] - ray[2] * outward[1],
+                    ray[2] * outward[0] - ray[0] * outward[2],
+                    ray[0] * outward[1] - ray[1] * outward[0],
+                ];
                 reading.residuals.push(Site {
                     size: shift[0].hypot(shift[1]),
                     lens,
@@ -3140,6 +3216,9 @@ fn solve(options: &Options) -> Fallible<()> {
                     azimuth,
                     along: onto(along_axis),
                     across: onto(across_axis),
+                    field,
+                    radial: onto(outward),
+                    tangential: onto(round),
                 });
                 // The picture has to move by -shift to land on the target.
                 rows.push((free_of(&jacobian[0], &options.free), -shift[0]));
@@ -3295,6 +3374,39 @@ fn solve(options: &Options) -> Fallible<()> {
                     2 => "the FOCAL ASPECT, fx against fy",
                     _ => "no calibration term of this map reaches here",
                 },
+            );
+        }
+        // ---- and the same residual against the field angle, per lens
+        for lens in 0..2 {
+            let table = coverage.radially(lens, 5.0);
+            if table.is_empty() {
+                continue;
+            }
+            println!(
+                "\nlens {lens}, the residual against ITS OWN field angle. RADIAL is the \n\
+                 direction a distortion polynomial displaces content in and a rotation \n\
+                 does not:\n\
+                 \n{:>10} {:>12} {:>12} {:>10} {:>8}",
+                "field deg", "radial deg", "tangent deg", "rms px", "sites",
+            );
+            let mut heaviest: (f64, f64) = (0.0, 0.0);
+            for (field, radial, tangential, rms, count) in &table {
+                println!(
+                    "{field:>10.1} {radial:>12.5} {tangential:>12.5} {rms:>10.4} {count:>8}"
+                );
+                if radial.abs() > heaviest.0.abs() {
+                    heaviest = (*radial, *field);
+                }
+            }
+            println!(
+                "the heaviest radial bin is {:+.5} deg at {:.1} deg of field, which is \
+                 {:+.2} px \n\
+                 at this view's scale. A pure pose difference cannot make a net radial \n\
+                 term at any field angle; a different radial law is the only thing here \n\
+                 that can, and none of the five knobs this solve carries is one.",
+                heaviest.0,
+                heaviest.1,
+                heaviest.0 * per_degree,
             );
         }
     }
