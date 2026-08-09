@@ -591,5 +591,14 @@ whole picture rather than a ramp across a corridor, behind its own switch, one
 mode at a time. Everything the band measures today is what it will be seeded
 from, which is why none of the measurement was deleted with the application.
 
+**Increment 1 of it is built** (2026-08-09, docs/research/belt.md): one strip
+at 4096x128, a DIS-class dense match over it every frame seeded from the frame
+before, a field that displaces what each lens is sampled at before the
+crossfade mixes them, and an untrusted along-seam segment that fails upward to
+the coarse pyramid rather than snapping to calibration. It is off by default,
+the null against this architecture is byte identity, and the arm is a live word
+of the uniform block so an A/B can hand over between the two columns of the
+table above inside one playback. Nobody has ruled on the picture.
+
 The parity line against the maker's own export continues separately; calibration
 stays at v3 (v6 refused, 2026-08-08).
