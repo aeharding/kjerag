@@ -1243,6 +1243,26 @@ struct Options {
     /// exactly the camera's own motion, and comparing the body angles across
     /// instants would report the flight rather than the export.
     world: bool,
+    /// Which frame a told pan/tilt/roll is told IN, which is exactly what
+    /// Studio's Direction Lock checkbox decides.
+    ///
+    /// **This is not a preference and it is not read off the checkbox.** It
+    /// picks the model the `told=` sweep builds its aims with, and the two
+    /// models are different geometry:
+    ///
+    /// - `lock=world` — DIRECTION LOCK ON. Their view is fixed in the world,
+    ///   so the body aim is `body(t)^-1 * world(pan + datum, tilt, roll)` and
+    ///   is different at every instant by exactly the flight. This is what the
+    ///   July-14 exports were and what section 2 of the protocol describes.
+    /// - `lock=body` — DIRECTION LOCK OFF. Their view is fixed in the camera
+    ///   body, so the aim is `orientation(pan + datum, tilt, roll)` with no
+    ///   IMU in it at all, and it is the SAME three numbers at every instant.
+    ///   Section 5 item 5 is the request that produced this, and the thing
+    ///   that confirms it is that the body aims agree across instants.
+    ///
+    /// Run BOTH on a new export and let the score say which the export is.
+    /// A checkbox is a label like every other label here.
+    lock: Lock,
     /// Tikhonov damping, in output pixels of cost per [`KNOB_STEPS`] of step.
     ///
     /// It exists for one reason and it is not conditioning-in-general: a view
@@ -1253,6 +1273,27 @@ struct Options {
     /// It is small against the noise floor on purpose, so a direction the data
     /// does constrain is not pulled by it.
     damp: f64,
+    /// Which of the nine numbers `mode=solve` is allowed to move.
+    ///
+    /// Default is all of them, which is every run this file has ever made.
+    /// It exists for **the protocol's match criterion (b)**, which asks for
+    /// the same measurement made with the SHIPPED FACTORY calibration in place
+    /// of the solved one and wants the solved one to beat it by three times.
+    /// That comparison is only fair if the view is still fitted in both — a
+    /// factory run whose view is also wrong would be beaten by its own aim
+    /// error rather than by its calibration — so the factory arm is
+    /// `free=view`: the four view numbers move and lens 1's five stay exactly
+    /// where the file's own `offset_v3` put them.
+    free: Vec<usize>,
+}
+
+/// Which frame Studio's told pan/tilt/roll is told in. See [`Options::lock`].
+#[derive(Clone, Copy, PartialEq)]
+enum Lock {
+    /// Direction Lock ON: the view is fixed in the world.
+    World,
+    /// Direction Lock OFF: the view is fixed in the camera body.
+    Body,
 }
 
 impl Options {
@@ -1316,6 +1357,8 @@ impl Options {
             seed: Vec::new(),
             told: Vec::new(),
             world: true,
+            lock: Lock::World,
+            free: (0..SOLVED).collect(),
         };
         for arg in args {
             let (key, value) = arg.split_once('=').ok_or(USAGE)?;
@@ -1400,6 +1443,31 @@ impl Options {
                 }
                 "texture" => options.texture = value.parse()?,
                 "world" => options.world = value.parse::<u32>()? != 0,
+                "lock" => {
+                    options.lock = match value {
+                        "world" | "on" => Lock::World,
+                        "body" | "off" => Lock::Body,
+                        _ => return Err(format!("lock is world or body, not {value}").into()),
+                    };
+                }
+                "free" => {
+                    options.free = value
+                        .split(',')
+                        .map(|name| match name {
+                            "view" => Ok(vec![0, 1, 2, 3]),
+                            "lens1" => Ok(vec![4, 5, 6, 7, 8]),
+                            "all" => Ok((0..SOLVED).collect()),
+                            _ => KNOB_NAMES
+                                .iter()
+                                .position(|known| known.replace(' ', "") == name.replace(' ', ""))
+                                .map(|at| vec![at])
+                                .ok_or(format!("no knob or group called {name}")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .concat();
+                    options.free.sort_unstable();
+                    options.free.dedup();
+                }
                 "fit" => options.fit = value.parse::<u32>()? != 0,
                 "panini" => options.panini = value.parse()?,
                 "from" => options.from = value.parse()?,
@@ -2535,8 +2603,33 @@ fn knobs_line(fit: &kjerag_render::SeamFit) -> String {
 /// What one round of the solve read, kept so the report can say where the
 /// residual is rather than only how big it is.
 struct Displacements {
-    /// Displacement magnitude in output pixels, per kept site.
-    residuals: Vec<(f64, usize, f64)>,
+    residuals: Vec<Site>,
+}
+
+/// One kept site's reading, in the two coordinates the answer is read in.
+///
+/// The magnitude is what the match criterion is in. The rest is what a FAILURE
+/// is reported with: the protocol's section 3 asks a run that does not match to
+/// print the residual's structure round the seam, because that structure names
+/// the error -- constant along the seam is a relative roll, one cycle round it
+/// is the principal point, two cycles is the focal aspect -- and a number with
+/// no structure beside it is the next diagnosis's dead end.
+#[derive(Clone, Copy)]
+struct Site {
+    /// Displacement magnitude in output pixels.
+    size: f64,
+    lens: usize,
+    /// Degrees past the seam: negative in the front lens's hemisphere.
+    past: f64,
+    /// Where round the seam circle this site sits, in degrees. The seam circle
+    /// is the body frame's own `z = 0` plane (`kjerag_render::seam::ring`), so
+    /// this is `atan2(y, x)` of the ray and nothing more.
+    azimuth: f64,
+    /// The displacement resolved ALONG the seam circle's tangent and ACROSS
+    /// it, in degrees of world angle. Parallax cannot reach the along column
+    /// and owns much of the across one, which is why they are kept apart.
+    along: f64,
+    across: f64,
 }
 
 impl Displacements {
@@ -2546,8 +2639,8 @@ impl Displacements {
         let picked: Vec<f64> = self
             .residuals
             .iter()
-            .filter(|(_, lens, past)| keep(*lens, *past))
-            .map(|(size, _, _)| size * size)
+            .filter(|site| keep(site.lens, site.past))
+            .map(|site| site.size * site.size)
             .collect();
         match picked.is_empty() {
             true => (f64::NAN, 0),
@@ -2556,6 +2649,84 @@ impl Displacements {
                 picked.len(),
             ),
         }
+    }
+
+    /// How much of the seam circle the near-seam sites actually cover, in
+    /// degrees.
+    ///
+    /// Azimuth is circular, so this is 360 less the widest gap between
+    /// neighbouring sites and not `max - min`: a handful of sites either side
+    /// of zero spans a few degrees and would read 359 the naive way. The
+    /// protocol's match criterion asks for 60 degrees of it and this is the
+    /// number that answers.
+    fn azimuth_spread(&self) -> f64 {
+        let mut all: Vec<f64> = self
+            .residuals
+            .iter()
+            .filter(|site| site.past.abs() < 8.0)
+            .map(|site| site.azimuth)
+            .collect();
+        if all.len() < 2 {
+            return 0.0;
+        }
+        all.sort_by(f64::total_cmp);
+        let mut widest = all[0] + 360.0 - all[all.len() - 1];
+        for pair in all.windows(2) {
+            widest = widest.max(pair[1] - pair[0]);
+        }
+        (360.0 - widest).max(0.0)
+    }
+
+    /// The along-seam and across-seam residual binned by azimuth, and the
+    /// first three harmonics of the along-seam column.
+    ///
+    /// Returned as the bins and as `[(cos, sin); 4]` for orders 0 to 3, in
+    /// degrees. Order 0 is a relative roll, order 1 is the principal point and
+    /// order 2 is the focal aspect: the derivation is this file's own header
+    /// and the fit here is the reading of it.
+    fn profile(&self, bins: usize) -> (Vec<(f64, f64, f64, usize)>, [(f64, f64); 4]) {
+        let near: Vec<&Site> = self
+            .residuals
+            .iter()
+            .filter(|site| site.past.abs() < 8.0)
+            .collect();
+        let mut binned = vec![(0.0, 0.0, 0usize); bins];
+        for site in &near {
+            let at = ((site.azimuth + 360.0) / 360.0 * bins as f64) as usize % bins;
+            binned[at].0 += site.along;
+            binned[at].1 += site.across;
+            binned[at].2 += 1;
+        }
+        let table = binned
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, count))| *count > 0)
+            .map(|(at, (along, across, count))| {
+                (
+                    (at as f64 + 0.5) / bins as f64 * 360.0 - 180.0,
+                    along / *count as f64,
+                    across / *count as f64,
+                    *count,
+                )
+            })
+            .collect();
+        // A plain least-squares harmonic fit on the sites themselves, not on
+        // the bins: the bins are for looking at and the fit is for reporting.
+        let mut harmonics = [(0.0, 0.0); 4];
+        if !near.is_empty() {
+            let n = near.len() as f64;
+            harmonics[0].0 = near.iter().map(|site| site.along).sum::<f64>() / n;
+            for order in 1..4 {
+                let (mut c, mut s) = (0.0, 0.0);
+                for site in &near {
+                    let angle = f64::from(order as u32) * site.azimuth.to_radians();
+                    c += site.along * angle.cos();
+                    s += site.along * angle.sin();
+                }
+                harmonics[order] = (2.0 * c / n, 2.0 * s / n);
+            }
+        }
+        (table, harmonics)
     }
 }
 
@@ -2626,6 +2797,21 @@ fn correlated(rows: &[(Vec<f64>, f64)]) -> Option<Vec<Vec<f64>>> {
             })
             .collect(),
     )
+}
+
+/// The columns of one Jacobian row this run is allowed to move.
+fn free_of(row: &[f64; SOLVED], free: &[usize]) -> Vec<f64> {
+    free.iter().map(|k| row[*k]).collect()
+}
+
+/// A vector over the free knobs, spread back over all nine, with `fill`
+/// wherever a knob was pinned.
+fn spread_over(values: &[f64], free: &[usize], fill: f64) -> Vec<f64> {
+    let mut whole = vec![fill; SOLVED];
+    for (at, k) in free.iter().copied().enumerate() {
+        whole[k] = values[at];
+    }
+    whole
 }
 
 /// Fit lens 1's calibration by making our picture land where theirs does.
@@ -2784,6 +2970,11 @@ fn solve(options: &Options) -> Fallible<()> {
     let mut last = None;
     let mut errors = vec![f64::NAN; SOLVED];
     let mut correlations: Option<Vec<Vec<f64>>> = None;
+    // The last round's sites, kept so the report can say where the residual is
+    // and what shape it has round the seam, rather than only how big it is.
+    let mut coverage = Displacements {
+        residuals: Vec::new(),
+    };
     for round in 0..=options.rounds {
         // The search shrinks once the first round has taken out the bulk: a
         // wide search is what finds a two degree error and a narrow one is
@@ -2913,12 +3104,37 @@ fn solve(options: &Options) -> Fallible<()> {
                     continue;
                 }
                 sites += 1;
-                reading
-                    .residuals
-                    .push((shift[0].hypot(shift[1]), lens, past));
+                // Where round the seam this site is, and what its displacement
+                // is when it is resolved onto the seam's own tangent rather
+                // than onto the picture's axes. The picture's axes are an
+                // accident of where the view was pointed; the seam's tangent
+                // is a property of the camera, and the harmonics that name a
+                // calibration error are harmonics of that column.
+                let azimuth = ray[1].atan2(ray[0]).to_degrees();
+                let (sin, cos) = azimuth.to_radians().sin_cos();
+                let (along_axis, across_axis) = ([-sin, cos, 0.0], [0.0, 0.0, 1.0]);
+                let step_u = here.0.ray([uv[0] + du, uv[1]], shape.aspect());
+                let back_u = here.0.ray([uv[0] - du, uv[1]], shape.aspect());
+                let step_v = here.0.ray([uv[0], uv[1] + dv], shape.aspect());
+                let back_v = here.0.ray([uv[0], uv[1] - dv], shape.aspect());
+                let moved: [f64; 3] = std::array::from_fn(|c| {
+                    shift[0] * (step_u[c] - back_u[c]) / 2.0
+                        + shift[1] * (step_v[c] - back_v[c]) / 2.0
+                });
+                let onto = |axis: [f64; 3]| {
+                    (0..3).map(|c| moved[c] * axis[c]).sum::<f64>().to_degrees()
+                };
+                reading.residuals.push(Site {
+                    size: shift[0].hypot(shift[1]),
+                    lens,
+                    past,
+                    azimuth,
+                    along: onto(along_axis),
+                    across: onto(across_axis),
+                });
                 // The picture has to move by -shift to land on the target.
-                rows.push((jacobian[0].to_vec(), -shift[0]));
-                rows.push((jacobian[1].to_vec(), -shift[1]));
+                rows.push((free_of(&jacobian[0], &options.free), -shift[0]));
+                rows.push((free_of(&jacobian[1], &options.free), -shift[1]));
             }
             y += stride;
         }
@@ -2941,15 +3157,16 @@ fn solve(options: &Options) -> Fallible<()> {
             return Ok(());
         }
         last = Some((whole, zero, one, seam, at_zero, at_one, at_seam, sites));
+        coverage = reading;
 
         if round == options.rounds {
             break;
         }
         // See Options::damp: this is what stops a straight-down view from
         // being a singular matrix rather than an answer.
-        for k in 0..SOLVED {
-            let mut basis = vec![0.0; SOLVED];
-            basis[k] = options.damp / KNOB_STEPS[k];
+        for (column, k) in options.free.iter().copied().enumerate() {
+            let mut basis = vec![0.0; options.free.len()];
+            basis[column] = options.damp / KNOB_STEPS[k];
             rows.push((basis, 0.0));
         }
         let Some(fit) = least_squares(&rows) else {
@@ -2959,11 +3176,28 @@ fn solve(options: &Options) -> Fallible<()> {
             );
             return Ok(());
         };
-        errors = fit.errors.clone();
-        correlations = correlated(&rows);
-        let step: Vec<f64> = (0..SOLVED)
-            .map(|k| fit.params[k].clamp(-KNOB_CAPS[k], KNOB_CAPS[k]))
-            .collect();
+        errors = spread_over(&fit.errors, &options.free, f64::NAN);
+        correlations = correlated(&rows).map(|reduced| {
+            let mut whole = vec![vec![f64::NAN; SOLVED]; SOLVED];
+            for (i, row) in options.free.iter().copied().enumerate() {
+                for (j, column) in options.free.iter().copied().enumerate() {
+                    whole[row][column] = reduced[i][j];
+                }
+            }
+            whole
+        });
+        let step = spread_over(
+            &(0..options.free.len())
+                .map(|column| {
+                    fit.params[column].clamp(
+                        -KNOB_CAPS[options.free[column]],
+                        KNOB_CAPS[options.free[column]],
+                    )
+                })
+                .collect::<Vec<_>>(),
+            &options.free,
+            0.0,
+        );
         theta = theta.shifted(&step);
     }
 
@@ -2998,6 +3232,62 @@ fn solve(options: &Options) -> Fallible<()> {
             "\nresidual {whole:.4} px rms over {sites} sites ({at_zero} on lens 0, \
              {at_one} on lens 1, {at_seam} within 8 deg of the seam at {seam:.4} px rms)"
         );
+    }
+    // ------------------------------------- what the match criterion asks of it
+    //
+    // Printed on every solve, pass or fail, because it is the criterion's own
+    // arithmetic and not a summary of it: section 3(a) of
+    // docs/research/parity-protocol.md wants 100 sites, 40 of them within 8
+    // degrees of the seam, over 60 degrees of seam azimuth, at 1.0 px rms of
+    // the export's own pixel scale.
+    if let Some((whole, _, _, seam, _, _, at_seam, sites)) = last {
+        let spread = coverage.azimuth_spread();
+        let per_degree = f64::from(shape.width) / theta.fov;
+        let gate = |ok: bool| match ok {
+            true => "PASS",
+            false => "FAIL",
+        };
+        println!(
+            "\ncriterion 3(a), at {} px across the picture ({per_degree:.2} px per degree of \
+             world angle, so 1.0 px is {:.4} deg):\n  \
+             {:<5} {sites} sites kept, wanted 100\n  \
+             {:<5} {at_seam} of them within 8 deg of the seam, wanted 40\n  \
+             {:<5} {spread:.1} deg of seam azimuth covered, wanted 60\n  \
+             {:<5} {whole:.4} px rms over all of them, wanted 1.0 ({seam:.4} px near the seam)",
+            shape.width,
+            1.0 / per_degree,
+            gate(sites >= 100),
+            gate(at_seam >= 40),
+            gate(spread >= 60.0),
+            gate(whole <= 1.0),
+        );
+        // ---- the structure, which is what a failure is reported WITH
+        let (table, harmonics) = coverage.profile(24);
+        println!(
+            "\nthe residual round the seam, over the sites within 8 deg of it. ALONG the seam \n\
+             is the column parallax cannot reach and ACROSS it is the one parallax owns:\n\
+             \n{:>10} {:>12} {:>12} {:>8}",
+            "azimuth", "along deg", "across deg", "sites",
+        );
+        for (azimuth, along, across, count) in &table {
+            println!("{azimuth:>10.1} {along:>12.5} {across:>12.5} {count:>8}");
+        }
+        println!(
+            "\n{:>8} {:>12} {:>12} {:>12}   what each order of the along-seam column names",
+            "order", "cos deg", "sin deg", "amplitude",
+        );
+        for (order, (cosine, sine)) in harmonics.iter().enumerate() {
+            println!(
+                "{order:>8} {cosine:>12.5} {sine:>12.5} {:>12.5}   {}",
+                cosine.hypot(*sine),
+                match order {
+                    0 => "a relative ROLL between the lenses",
+                    1 => "the PRINCIPAL POINT",
+                    2 => "the FOCAL ASPECT, fx against fy",
+                    _ => "no calibration term of this map reaches here",
+                },
+            );
+        }
     }
     if let Some(truth) = truth {
         let mut angle = 0.0_f64;
@@ -4189,7 +4479,15 @@ fn register(options: &Options) -> Fallible<()> {
             // it, because their field of view number is still a label.
             (false, true) => {
                 let at = (ours.at.as_secs_f64() * 1e6).round() as i64;
-                let body = track.at(at).conjugate();
+                // With the lock ON their view is fixed in the world and this
+                // is what carries it into the body frame the search works in.
+                // With it OFF the view is fixed in the body already and the
+                // IMU has no business in the aim at all, so the carrier is
+                // the identity and the sweep is over the body's own heading.
+                let body = match options.lock {
+                    Lock::World => track.at(at).conjugate(),
+                    Lock::Body => Quat::default(),
+                };
                 // The datum steps a degree because the sweep picture is 16
                 // across and a correlation reaches about one of its pixels,
                 // which on a 20 degree view is 1.25 degrees. Their tilt and
@@ -4887,7 +5185,52 @@ fn report_registration(options: &Options, runs: &[Registered], ds: &[f64]) -> Fa
                 kept.len(),
             ),
         );
-        if kept.iter().all(|run| run.world.is_some()) {
+        // ---- DIRECTION LOCK OFF: the body aim itself is the answer
+        //
+        // With the lock off Studio's view is fixed in the camera body, so
+        // there is ONE body aim for the whole export and the file's own IMU is
+        // not in it. That makes the across-instant test both simpler and
+        // STRICTER than the locked one: all three angles are gated, including
+        // the heading, which the locked path cannot gate because the locked
+        // path's heading is the integration's arbitrary datum and this camera
+        // has no magnetometer to hold it. Agreement here IS the confirmation
+        // that the lock was off, read off the pictures rather than off a
+        // checkbox.
+        if options.lock == Lock::Body {
+            let angles: Vec<[f64; 3]> = kept.iter().map(|run| run.aim.angles).collect();
+            let apart = |axis: usize| {
+                let all: Vec<f64> = angles.iter().map(|a| a[axis]).collect();
+                all.iter().copied().fold(f64::MIN, f64::max)
+                    - all.iter().copied().fold(f64::MAX, f64::min)
+            };
+            println!(
+                "\nbody aim:  yaw {:.3} sd {:.3}, pitch {:.3} sd {:.3}, roll {:.3} sd {:.3} deg",
+                mean(angles.iter().map(|a| a[0])),
+                spread(angles.iter().map(|a| a[0])),
+                mean(angles.iter().map(|a| a[1])),
+                spread(angles.iter().map(|a| a[1])),
+                mean(angles.iter().map(|a| a[2])),
+                spread(angles.iter().map(|a| a[2])),
+            );
+            println!(
+                "this is the aim in the camera BODY's frame, with no IMU in it. Direction Lock \n\
+                 is OFF on this export, so the same three numbers have to come back at every \n\
+                 instant however the camera moved between them -- and unlike the locked case \n\
+                 the HEADING is gated too, because with no orientation track in the answer \n\
+                 there is no arbitrary datum for it to wander on."
+            );
+            say(
+                "R5 stability",
+                apart(0) < 3.0 && apart(1) < 3.0 && apart(2) < 3.5,
+                format!(
+                    "the body heading agrees to {:.3} deg, the tilt to {:.3} and the roll to \
+                     {:.3} across the instants that passed, wanted 3.0, 3.0 and 3.5",
+                    apart(0),
+                    apart(1),
+                    apart(2),
+                ),
+            );
+        } else if kept.iter().all(|run| run.world.is_some()) {
             let worlds: Vec<Quat> = kept.iter().filter_map(|run| run.world).collect();
             let angles: Vec<[f64; 3]> = worlds.iter().map(|q| angles_of(*q)).collect();
             let apart = |axis: usize| {
@@ -4961,6 +5304,45 @@ fn report_registration(options: &Options, runs: &[Registered], ds: &[f64]) -> Fa
             }
             .projection(),
         );
+        if options.told.len() >= 3 {
+            // Their pan against our heading, in whichever frame the lock says
+            // the aim lives in. It is a per-file constant and not a conversion:
+            // section 4b of the protocol measured it as one, and the only thing
+            // it can be checked against is the OTHER export of the same file.
+            let held: Vec<[f64; 3]> = match options.lock {
+                Lock::Body => kept.iter().map(|run| run.aim.angles).collect(),
+                Lock::World => kept.iter().filter_map(|run| run.world).map(angles_of).collect(),
+            };
+            if !held.is_empty() {
+                let frame = match options.lock {
+                    Lock::Body => "body",
+                    Lock::World => "world",
+                };
+                let heading = mean(held.iter().map(|a| a[0]));
+                let mut constant = heading - options.told[0];
+                while constant > 180.0 {
+                    constant -= 360.0;
+                }
+                while constant < -180.0 {
+                    constant += 360.0;
+                }
+                println!(
+                    "their pan {:+.2} is our {frame} heading {:+.3} deg: a per-file constant of \
+                     {constant:+.3} deg.",
+                    options.told[0], heading,
+                );
+                println!(
+                    "their tilt {:+.2} is our {frame} pitch {:+.3} (off by {:+.3}) and their \
+                     roll {:+.2} is our {frame} roll {:+.3} (off by {:+.3}).",
+                    options.told[1],
+                    mean(held.iter().map(|a| a[1])),
+                    mean(held.iter().map(|a| a[1])) - options.told[1],
+                    options.told[2],
+                    mean(held.iter().map(|a| a[2])),
+                    mean(held.iter().map(|a| a[2])) - options.told[2],
+                );
+            }
+        }
     }
     println!(
         "\n{}",
