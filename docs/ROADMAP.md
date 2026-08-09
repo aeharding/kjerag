@@ -579,6 +579,63 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-09 **The seam is flat, the handover line is held on the world, and
+  the machinery that morphed the picture is deleted rather than switched off**
+  (docs/research/studio-parity.md). The owner approved the architecture on
+  2026-08-08 after a nine-arm eyeball loop on his own flights: *"current
+  architecture approved. you can merge the existing stitch with a wide band."*
+
+  **The shape of it is Studio's, which is the picture he compares everything
+  to.** Off is calibration plus fusion plus an anchored line, and that is what
+  ships; Optical Flow is the belt, and it is a separate mode, later, behind its
+  own switch. One mode at a time. What shipped before was a third thing - a
+  permanently on, partially trusted, live estimated morph inside a narrow
+  corridor - and it is the thing he had been refusing one arm at a time since
+  2026-08-05.
+
+  **Three things come out of the render path and are deleted, not gated**: the
+  corridor bend, the adaptive fade width (stage 4), and the steep blend curve
+  (half of #172). The fold apparatus goes with them - `FOLD`, `SPEND`,
+  `WIDEST_DEG`, `band::carried`, `band::width`, `band::affordable` - because
+  every one of them existed to keep the bend from printing the picture over
+  itself.
+
+  **The band still measures and reaches no pixel.** The compute half is
+  untouched. Those readings are what the belt will be seeded from, and an
+  instrument that stops measuring cannot say what the belt has to fix.
+
+  **The line is held** (`SeamAnchor`, on by default, `KJERAG_ANCHOR=off` to
+  refuse). Under a world locked view the 50/50 locus sweeps across world content
+  at up to 21.8 deg/s, so every static defect the seam has travels with it. One
+  offset, one closed form update law, and not one event in it: the owner refused
+  the two line dissolve that came before it - *"every now and then it glitches.
+  We need it to be smooth, that is a requirement"* - and he was right about
+  which way was simpler. The simpler arm also measured smoother than the
+  picture it is drawn from, where the elaborate one was four times rougher.
+
+  **THE ONE X2 NOW DRAWS 8.00 DEGREES WHERE IT DREW 3.94.** The bound on how
+  wide a camera may hand over was its overlap minus the room a bend needed to
+  carry a sample past its own ray; nothing displaces a sample now, so the bound
+  is the bare overlap and the X2's 9.19 pays for the whole ask. This is the
+  largest deliberate picture change in the merge and the one thing that cannot
+  be byte identical to the arm he approved.
+
+  **The null is byte identity against the arm he approved**, not against `main`:
+  the same instrument source built against this branch and against the flat6
+  commit, playing real film offscreen at the six registry views under two
+  calibration paths. The X2 is the disclosed exception above.
+
+  Known and disclosed rather than fixed, in
+  docs/research/studio-parity.md 6: the honest doubling at the bad crossing
+  (the wide band softens it, the belt is its fix), the one sided fade truncation
+  under sustained motion, the seam ring still crawling away from the view
+  centre, and the far field alignment the bend used to buy. That last one is the
+  trade he made: alignment that moves, for a seam that stands still.
+
+  Calibration stays v3; v6 was refused by his eye on 2026-08-08 and the parity
+  line continues elsewhere. `KJERAG_HANDOVER_DEG` stays live, because it selects
+  a value on a continuum the next A/B will want to sweep again.
+
 - 2026-08-08 **The seam's temporal bundle is the default behaviour, and its
   three research toggles are deleted rather than defaulted**
   (docs/research/seam-temporal.md 9, docs/research/reference-views.md). Three

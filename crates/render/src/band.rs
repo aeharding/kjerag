@@ -1531,7 +1531,13 @@ pub(crate) fn wgsl() -> String {
 /// and each declares the storage buffer with the access it needs: `read` in
 /// the fragment shader, `read_write` in the compute one.
 pub(crate) fn lookup_wgsl() -> String {
-    format!("const AZIMUTHS = {AZIMUTHS}u;\nconst LIMIT_LN = {LIMIT_LN:?};\n{CELL}{LOOKUP}")
+    // `KEEP` is `believed`'s, which the draw does not call but `CELL`
+    // declares, and a WGSL module is validated whole rather than from its
+    // entry points: an identifier a dead function names still has to exist.
+    format!(
+        "const AZIMUTHS = {AZIMUTHS}u;\nconst KEEP = {KEEP:?};\n\
+         const LIMIT_LN = {LIMIT_LN:?};\n{CELL}{LOOKUP}"
+    )
 }
 
 /// The state buffer's binding, on a group of its own.

@@ -419,16 +419,17 @@ impl Scene {
     ///
     /// **The width is the camera's and not the build's** since 2026-08-05: the
     /// projection asks for one number and this file's own overlap clamps it
-    /// ([`Reframe::crossover_at`], `band::affordable`). An X4 Air takes the 8
-    /// asked for; the owner's ONE X2 draws 4.18, and nothing else the app says
-    /// would ever mention it.
+    /// ([`Reframe::handover_width`], [`Reframe::afforded`]). Since the flat
+    /// seam every camera in the corpus takes the 8 asked for, the ONE X2
+    /// included, because the bound is the bare overlap and the X2 overlaps by
+    /// 9.19; it drew 4.18 while the bend it carried had to fit in the same
+    /// margin.
     ///
     /// Read off the lenses the pass will draw with **now**, correction and all,
     /// because a seam fit moves the principal point, which moves each lens's
-    /// coverage boundary, which moves the overlap: on that X2 the factory
-    /// calibration affords 4.91 and its own pooled fit affords 4.18. So this is
-    /// a reading and not a property of the file, and a fit landing later moves
-    /// it - which is why [`fit_into`] says it again when one does.
+    /// coverage boundary, which moves the overlap. So this is a reading and not
+    /// a property of the file, and a fit landing later can move it - which is
+    /// why [`fit_into`] says it again when one does.
     pub fn handover_deg(&self) -> Option<f32> {
         let show = self.show.as_ref()?;
         handover_deg(&show.lenses(), show.frame)
@@ -964,12 +965,13 @@ fn fit_into(
         }
         // A fit moves the principal point, which moves each lens's coverage
         // boundary, which moves how much the two of them overlap - and the
-        // handover is clamped by that overlap (`band::affordable`). So a
+        // handover is clamped by that overlap (`Reframe::afforded`). So a
         // fallback fit can change how wide this file hands over, seconds after
-        // the shell already said how wide it was: on the owner's ONE X2 the
-        // factory calibration affords 4.91 and this fit affords 4.15. Said only
-        // when it moves, because it usually does not, and a line that repeats
-        // itself is a line nobody reads.
+        // the shell already said how wide it was. Said only when it moves,
+        // which since the flat seam is rarer still: the bound is the bare
+        // overlap now, and every camera in the corpus overlaps by more than
+        // the picture asks for, so a fit has to move the overlap under 8
+        // degrees before this line has anything to report.
         //
         // Off the fit APPLIED and not off the correction's own lenses: a fit
         // that is asked rather than landed walks in over a second, so the
