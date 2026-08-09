@@ -5,6 +5,12 @@
 //! ```sh
 //! # the decomposition round the ring: per channel, per content class, with every control
 //! cargo run --release -p kjerag-spike --bin colour -- <file.insv> from=488.855 count=8
+//! # the chromatic line's measuring phase, M1 to M5 in one run (chromatic.md 7.1)
+//! cargo run --release -p kjerag-spike --bin colour -- <file.insv> mode=chroma \
+//!   from=488.855 count=8 places=3
+//! # the arm-internal per-channel discontinuity statistic on one drawn view
+//! cargo run --release -p kjerag-spike --bin colour -- <file.insv> mode=arm \
+//!   from=488.855 yaw=-5.17 pitch=2.56 fov=60 lock=1
 //! # what a drawn view's three channels do as they cross the seam - the acceptance evidence
 //! cargo run --release -p kjerag-spike --bin colour -- <file.insv> mode=profile \
 //!   from=488.855 yaw=-5.17 pitch=2.56 fov=60 lock=1 out=scratch/stage7
@@ -65,6 +71,8 @@ fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
     match options.mode {
         Mode::Field => field(&options),
+        Mode::Chroma => chroma(&options),
+        Mode::Arm => arm(&options),
         Mode::Profile => profile(&options),
         Mode::Studio => studio(&options),
         Mode::Trace => trace(&options),
@@ -75,6 +83,17 @@ fn main() -> Fallible<()> {
 enum Mode {
     /// The per-channel decomposition round the seam ring, and its controls.
     Field,
+    /// The two lenses' own per-channel FAR-FIELD ratio round the ring, pooled
+    /// the way the shipped pass pools its gain, decomposed into the achromatic
+    /// term stage 3 already owns and the two chromatic degrees of freedom the
+    /// chromatic line would estimate (docs/research/chromatic.md 7.1, M1 to
+    /// M5).
+    Chroma,
+    /// The arm-internal per-channel discontinuity statistic on a drawn view:
+    /// the band region against its own surrounding content, which is
+    /// stretch-proof and is the instrument the oracle's own number was read
+    /// with.
+    Arm,
     /// One drawn view, and what each channel does as it crosses the seam.
     Profile,
     /// Somebody else's stitch, measured across their own seam.
@@ -323,10 +342,31 @@ fn look(
 /// lens 1, and what kind of content it is.
 struct Seen {
     azimuth: usize,
+    /// Which frame of the run this was read on, counting from zero. The
+    /// temporal question needs it: a reading that moves frame to frame and a
+    /// reading that moves between sessions want different filters.
+    frame: usize,
+    /// Which of the run's places in the file this frame came from. Frames
+    /// inside one place are consecutive; places are minutes apart. It is the
+    /// difference between "does this reproduce over a second" and "does this
+    /// reproduce over a flight", and those are two different questions about
+    /// the same number.
+    place: usize,
     columns: Vec<Column>,
     /// How far across the seam the alignment moved lens 1, in degrees. This is
     /// the quantity the shipped pass gates the exposure on.
     across: f64,
+    /// Whether this direction's patch correlated at all on this frame.
+    ///
+    /// **Load-bearing, and it was measured to be** (docs/research/chromatic.md
+    /// 4.2, which inherits it from 6.11's own defect). A direction that did not
+    /// correlate is sampled at a shift of zero, so reading [`Self::across`]
+    /// alone calls it far field and pools it with the horizon. That is the far
+    /// field cut read as "the last reading a direction ever took" rather than
+    /// as "the disparity the pass is drawing with", and it is worth 40 percent
+    /// of this ring's population at the owner's dirt reference. The three
+    /// populations are kept apart instead.
+    correlated: bool,
     /// Lens 0's standard deviation over the at-seam columns, in codes.
     texture: f64,
     /// Which lens, if either, had the sun in it on this frame.
@@ -486,6 +526,25 @@ enum Class {
     /// Frames where one lens is looking at the sun and the other is not.
     Sun,
     NoSun,
+    /// What the shipped pass actually pools: directions the alignment barely
+    /// had to move, which is everything at infinity as far as a 33 mm baseline
+    /// is concerned. [`kjerag_render::band::NEAR_KNEE_DEG`], imported rather
+    /// than copied, so this cut is the pass's own and not a second opinion.
+    Far,
+    /// The rest, which is the wing, the lines and the cage: the darkest and
+    /// hardest-to-align content on a flight, and where an apparent additive
+    /// term was measured to come from (stage 3).
+    Near,
+    /// Directions whose patch did not correlate at all, and which are
+    /// therefore read at a shift of zero. Sky and flat soil, which is where
+    /// the owner sees the defect and where the shipped pass reads nothing
+    /// (docs/research/chromatic.md 4.3).
+    Blind,
+}
+
+/// The far-field knee, in degrees of across-seam disparity.
+fn knee() -> f64 {
+    f64::from(kjerag_render::band::NEAR_KNEE_DEG)
 }
 
 impl Class {
@@ -496,6 +555,9 @@ impl Class {
             Self::Textured => seen.textured(),
             Self::Sun => seen.sun.is_some(),
             Self::NoSun => seen.sun.is_none(),
+            Self::Far => seen.correlated && seen.across < knee(),
+            Self::Near => seen.correlated && seen.across >= knee(),
+            Self::Blind => !seen.correlated,
         }
     }
 
@@ -506,6 +568,9 @@ impl Class {
             Self::Textured => "textured: what the band can correlate on",
             Self::Sun => "the sun in one lens",
             Self::NoSun => "no sun in either lens",
+            Self::Far => "far field: what the shipped pass pools",
+            Self::Near => "near field: over the pass's own knee",
+            Self::Blind => "never correlated: read at zero shift",
         }
     }
 }
@@ -722,6 +787,18 @@ fn clipped(plane: &Plane) -> f64 {
     }
 }
 
+/// The two facts about a frame that a READING needs and the sampling does not:
+/// where in the file it came from, and what was in it.
+///
+/// One value rather than two arguments, because [`harvest`] already takes
+/// everything else a frame is made of and a seventh loose scalar is how a
+/// signature stops being readable.
+#[derive(Clone, Copy)]
+struct Whence {
+    place: usize,
+    sun: Option<usize>,
+}
+
 /// Which lens had the sun in it on this frame, if either.
 ///
 /// One lens clipping a measurable share of its picture while the other clips
@@ -779,10 +856,13 @@ fn sweep(options: &Options, trials: &[Trial]) -> Fallible<Vec<Field>> {
                 &options.probe(),
                 &mut refused,
             );
-            let sun = sun(&pair);
+            let whence = Whence {
+                place,
+                sun: sun(&pair),
+            };
             for (trial, field) in trials.iter().zip(&mut fields) {
                 field.azimuths = ring.len();
-                harvest(&reframe, &pair, &ring, &found, sun, *trial, field);
+                harvest(&reframe, &pair, &ring, &found, whence, *trial, field);
             }
         }
     }
@@ -806,7 +886,7 @@ fn harvest(
     pair: &Pair,
     ring: &[Where],
     found: &[Option<seam::Found>],
-    sun: Option<usize>,
+    whence: Whence,
     trial: Trial,
     field: &mut Field,
 ) {
@@ -824,10 +904,13 @@ fn harvest(
         };
         field.seen.push(Seen {
             azimuth: index,
+            frame: field.frames - 1,
+            place: whence.place,
             texture: held.texture(),
             columns,
             across: shift.1.abs(),
-            sun,
+            correlated: hit.is_some(),
+            sun: whence.sun,
         });
     }
 }
@@ -1301,6 +1384,1200 @@ fn table(field: &Field) {
     }
 }
 
+// ------------------------------------- the chromatic line's own measurements
+
+/// How bright a channel's mean has to be before its ratio is a colour reading
+/// rather than a division of noise, in codes of 255.
+///
+/// **Stated rather than left to `lit` squared to imply**
+/// (docs/research/chromatic.md 4.2). A weight makes a dark direction count for
+/// little; a floor says a 3-code patch is not a measurement at all, and the
+/// two are different claims. 8 codes is where the chroma plane's own
+/// quantisation, which is one code about 128 on a quarter-resolution plane,
+/// stops being a tenth of the signal and starts being a half of it.
+const LEVEL_FLOOR: f64 = 8.0;
+
+/// One azimuth-frame reduced to what the chromatic line estimates from.
+///
+/// **The two chroma coordinates are arm-internal by construction, and that is
+/// the discipline rather than a convenience.** `d[R] - d[G]` is a difference
+/// of two log ratios taken on the SAME patch of the SAME frame through the
+/// SAME two lenses, so everything common to the three channels at that
+/// direction cancels exactly: the scene's own level, the shading, the shutter,
+/// the auto-exposure loop, and stage 3's pooled gain itself. What survives is
+/// a difference of hue between the two lenses and nothing else. A per-channel
+/// step read against an absolute is not that, and stage 7 measured what
+/// reading against an absolute costs.
+struct Read {
+    azimuth: usize,
+    frame: usize,
+    /// Each lens's per-channel mean over the at-seam columns, in codes.
+    m0: [f64; 3],
+    m1: [f64; 3],
+    count: f64,
+    /// Lens 0's BT.709 luma, in codes: the `lit` the shipped pool weighs by.
+    lit: f64,
+    /// `ln(lens 1 / lens 0)` per channel.
+    d: [f64; 3],
+    /// The BT.709 achromatic part of `d`, which is stage 3's own quantity.
+    luma: f64,
+    /// `d` minus that, which carries no luminance by construction.
+    c: [f64; 3],
+    across: f64,
+    textured: bool,
+    place: usize,
+    sun: Option<usize>,
+}
+
+impl Read {
+    /// The green-magenta coordinate, in natural log. The oracle's own axis at
+    /// the dirt end of the seam.
+    fn warm(&self) -> f64 {
+        self.d[0] - self.d[1]
+    }
+
+    /// The blue-amber coordinate, in natural log. The oracle's axis at the sky
+    /// end, where it turns.
+    fn cool(&self) -> f64 {
+        self.d[2] - self.d[1]
+    }
+}
+
+/// Every azimuth-frame that clears the level floor, reduced to a [`Read`].
+fn reads(field: &Field, class: Class) -> Vec<Read> {
+    field
+        .seen
+        .iter()
+        .filter(|seen| class.holds(seen))
+        .filter_map(|seen| {
+            let held = seen.at_seam()?;
+            let m0: [f64; 3] = std::array::from_fn(|channel| held.mean(0, channel));
+            let m1: [f64; 3] = std::array::from_fn(|channel| held.mean(1, channel));
+            if m0
+                .iter()
+                .chain(&m1)
+                .any(|v| !v.is_finite() || *v < LEVEL_FLOOR)
+            {
+                return None;
+            }
+            let d: [f64; 3] = std::array::from_fn(|channel| (m1[channel] / m0[channel]).ln());
+            if d.iter().any(|v| !v.is_finite()) {
+                return None;
+            }
+            let luma: f64 = LUMA.iter().zip(d).map(|(w, v)| w * v).sum();
+            Some(Read {
+                azimuth: seen.azimuth,
+                frame: seen.frame,
+                m0,
+                m1,
+                count: held.count,
+                lit: LUMA.iter().zip(m0).map(|(w, v)| w * v).sum(),
+                d,
+                luma,
+                c: std::array::from_fn(|channel| d[channel] - luma),
+                across: seen.across,
+                textured: seen.textured(),
+                place: seen.place,
+                sun: seen.sun,
+            })
+        })
+        .collect()
+}
+
+/// How a direction's reading is priced when the ring is pooled: the fork the
+/// memo pre-registers rather than chooses (docs/research/chromatic.md 4.1, M3).
+///
+/// Only the weight changes between the three. The estimator underneath is one
+/// estimator, so what the columns compare is the weighting and not three
+/// different ideas.
+#[derive(Clone, Copy, PartialEq)]
+enum Weigh {
+    /// What stage 3 shipped, and it was measured rather than chosen: of three
+    /// poolings over nine captures, brightness squared left the smallest step
+    /// at the seam on all nine. It is also the inverse-variance weight for a
+    /// log ratio, because the noise on `ln(mean)` goes as one over the mean,
+    /// so it is the statistically efficient answer to the achromatic question.
+    Lit2,
+    /// One direction, one vote. The mean of log ratios.
+    Equal,
+    /// The deliberate inverse of the shipped weight, and the reason the fork
+    /// exists. `lit` squared prices a direction by how many photons it has;
+    /// this prices it by how VISIBLE a fixed error there would be, which is
+    /// Weber's law and is the axis every one of the owner's rejections has
+    /// been on. A code on 18-code soil is 5.6 percent and the same code on
+    /// 190-code sky is 0.5, and the shipped weight puts the soil at about one
+    /// percent of the total (seam-blending.md's TL;DR, measured as one of the
+    /// three reasons stage 7 could not reach the artifact).
+    Weber,
+}
+
+impl Weigh {
+    const ALL: [Self; 3] = [Self::Lit2, Self::Equal, Self::Weber];
+
+    fn of(self, lit: f64) -> f64 {
+        let lit = lit.max(LEVEL_FLOOR);
+        match self {
+            Self::Lit2 => lit * lit,
+            Self::Equal => 1.0,
+            Self::Weber => 1.0 / (lit * lit),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lit2 => "lit squared (shipped)",
+            Self::Equal => "equal weight",
+            Self::Weber => "Weber (1 / lit squared)",
+        }
+    }
+}
+
+/// What the whole ring agrees the two lenses differ by, per channel, split
+/// into the achromatic term stage 3 already owns and the two chromatic degrees
+/// of freedom the chromatic line would estimate.
+#[derive(Clone, Copy, Default)]
+struct Pooled {
+    /// `ln(lens 1 / lens 0)` per channel, pooled.
+    d: [f64; 3],
+    /// The BT.709 achromatic part of that.
+    luma: f64,
+    /// What is left: `d` minus the achromatic part, which sums to zero under
+    /// the BT.709 weights by construction.
+    c: [f64; 3],
+    /// The scatter of the green-magenta coordinate over the ring's own
+    /// directions, which is what a standard error is made of.
+    warm: Reading,
+    /// The same for the blue-amber coordinate.
+    cool: Reading,
+    /// How many readings were behind it, before and after the trim.
+    readings: usize,
+}
+
+impl Pooled {
+    fn warm(&self) -> f64 {
+        self.d[0] - self.d[1]
+    }
+
+    fn cool(&self) -> f64 {
+        self.d[2] - self.d[1]
+    }
+
+    /// The widest chroma coordinate, which is what a runaway guard is derived
+    /// from (M4).
+    fn widest(&self) -> f64 {
+        self.warm().abs().max(self.cool().abs())
+    }
+
+    /// The standard error of the wider of the two coordinates.
+    fn error(&self) -> f64 {
+        (self.warm.spread / (self.warm.count.max(1) as f64).sqrt())
+            .max(self.cool.spread / (self.cool.count.max(1) as f64).sqrt())
+    }
+
+    fn row(&self, label: &str) -> String {
+        format!(
+            "  {:<30} {:>9.5} {:>9.5} {:>9.5} {:>9.5} {:>9.5} {:>9.5} {:>8.5} {:>8.5} {:>6}",
+            label,
+            self.luma,
+            self.c[0],
+            self.c[1],
+            self.c[2],
+            self.warm(),
+            self.cool(),
+            self.warm.spread / (self.warm.count.max(1) as f64).sqrt(),
+            self.cool.spread / (self.cool.count.max(1) as f64).sqrt(),
+            self.readings,
+        )
+    }
+
+    fn header() -> String {
+        format!(
+            "  {:<30} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>8} {:>8} {:>6}\n  \
+             the first column is stage 3's own quantity and must not move; the next three \n  \
+             are the chromatic term, and sum to zero under the BT.709 weights by construction.",
+            "pooling", "achromatic", "cR", "cG", "cB", "R-G", "B-G", "se R-G", "se B-G", "n"
+        )
+    }
+}
+
+/// The pooled per-channel ratio, in the shipped estimator's own shape.
+///
+/// A **weighted ratio of means, then logged**, which is what `pooled_gain`
+/// does and is a ratio of means rather than a mean of ratios because what a
+/// correction inverts is the ratio of means. The only thing the fork changes
+/// is the weight.
+fn pool(reads: &[&Read], weigh: Weigh) -> Option<Pooled> {
+    let mut weight = 0.0;
+    let mut total = [0.0f64; 3];
+    for read in reads {
+        let held = weigh.of(read.lit);
+        weight += held;
+        for (channel, sum) in total.iter_mut().enumerate() {
+            *sum += held * (read.m1[channel] / read.m0[channel]);
+        }
+    }
+    if weight <= 0.0 {
+        return None;
+    }
+    let d: [f64; 3] = std::array::from_fn(|channel| (total[channel] / weight).ln());
+    if d.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let luma: f64 = LUMA.iter().zip(d).map(|(w, v)| w * v).sum();
+    Some(Pooled {
+        d,
+        luma,
+        c: std::array::from_fn(|channel| d[channel] - luma),
+        warm: Reading::of(reads.iter().map(|r| (r.azimuth, r.warm()))),
+        cool: Reading::of(reads.iter().map(|r| (r.azimuth, r.cool()))),
+        readings: reads.len(),
+    })
+}
+
+/// Drop the most extreme readings at each tail of each chroma coordinate.
+///
+/// **Per reading and not per direction**, because what this is defending
+/// against is one frame's patch landing on content the two lenses do not
+/// actually share - a bird, a rotor, a specular highlight in one lens only -
+/// and that is a property of the reading. A direction that is genuinely odd
+/// should survive as a direction, which is what the ring fit below is for.
+fn trimmed<'a>(reads: &[&'a Read], share: f64) -> Vec<&'a Read> {
+    if reads.len() < 10 {
+        return reads.to_vec();
+    }
+    let cut = |values: &mut Vec<f64>| -> (f64, f64) {
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let drop = ((values.len() as f64 * share).floor() as usize).max(1);
+        (values[drop], values[values.len() - 1 - drop])
+    };
+    let (warm_low, warm_high) = cut(&mut reads.iter().map(|r| r.warm()).collect());
+    let (cool_low, cool_high) = cut(&mut reads.iter().map(|r| r.cool()).collect());
+    reads
+        .iter()
+        .copied()
+        .filter(|r| (warm_low..=warm_high).contains(&r.warm()))
+        .filter(|r| (cool_low..=cool_high).contains(&r.cool()))
+        .collect()
+}
+
+/// What share of a reading's tails the trim takes off each end.
+const TRIM: f64 = 0.10;
+
+/// The chroma coordinates averaged per azimuth, weighted, for a ring fit.
+///
+/// Weights are normalized to sum to the direction count, because
+/// [`ring_fit`]'s ridge is a fixed 1.0 and a weight of four million or of a
+/// ten-thousandth would make that ridge either invisible or the whole answer.
+fn by_direction(
+    reads: &[&Read],
+    weigh: Weigh,
+    coordinate: usize,
+    azimuths: usize,
+) -> Vec<(f64, f64, f64)> {
+    let mut held: Vec<(usize, f64, f64)> = Vec::new();
+    for read in reads {
+        let value = match coordinate {
+            0 => read.warm(),
+            _ => read.cool(),
+        };
+        let weight = weigh.of(read.lit);
+        match held.iter_mut().find(|entry| entry.0 == read.azimuth) {
+            Some(entry) => {
+                entry.1 += value * weight;
+                entry.2 += weight;
+            }
+            None => held.push((read.azimuth, value * weight, weight)),
+        }
+    }
+    let total: f64 = held.iter().map(|entry| entry.2).sum();
+    let scale = match total > 0.0 {
+        true => held.len() as f64 / total,
+        false => 1.0,
+    };
+    held.into_iter()
+        .map(|(azimuth, sum, weight)| {
+            (
+                azimuth as f64 / azimuths.max(1) as f64 * std::f64::consts::TAU,
+                sum / weight,
+                weight * scale,
+            )
+        })
+        .collect()
+}
+
+/// M1 to M5 over one capture: the whole measuring phase in one run.
+fn chroma(options: &Options) -> Fallible<()> {
+    // Five trials, and every control is a trial rather than a second code
+    // path, which is stage 3's rule and the reason it is kept.
+    let trials = [
+        Trial::TRUTH,
+        // THE NOISE FLOOR. One lens against ITSELF at the very shift the
+        // alignment found, so the true chroma is exactly zero in every
+        // channel and what this reads is what the instrument invents. M1's
+        // pre-registered refusal is decided against this row.
+        Trial {
+            back: 0,
+            ..Trial::TRUTH
+        },
+        // The same with no alignment at all, which is what a flat direction
+        // gets.
+        Trial {
+            back: 0,
+            aligned: false,
+            ..Trial::TRUTH
+        },
+        // A 2 percent gain in R alone: a hue plant of a known size, which has
+        // to come back as +0.019803 ln in R and 0.0 in G and B.
+        Trial {
+            gain: [1.02, 1.0, 1.0],
+            ..Trial::TRUTH
+        },
+        // A green-magenta plant, which is the oracle's own axis: R and B up
+        // together against G.
+        Trial {
+            gain: [1.01, 0.99, 1.01],
+            ..Trial::TRUTH
+        },
+        // An additive plant in R, which a multiplicative estimator has to read
+        // as a level-dependent gain and not as a constant one. M2's own
+        // control.
+        Trial {
+            offset: [4.0, 0.0, 0.0],
+            ..Trial::TRUTH
+        },
+    ];
+    let fields = sweep(options, &trials)?;
+    let truth = &fields[0];
+    println!(
+        "\nchroma: {} azimuth-frames read of {} tried, over {} frames from {:.3} s at {} \n\
+         \tplace(s), {} azimuths round the seam. the two chroma coordinates below are \n\
+         \tARM-INTERNAL: R-G is a difference of two log ratios on the same patch of the \n\
+         \tsame frame, so the scene's own level, the shading and stage 3's pooled gain all \n\
+         \tcancel exactly and what is left is a difference of hue between the lenses.",
+        truth.seen.len(),
+        truth.seen.len() + truth.refused,
+        truth.frames,
+        options.from,
+        options.places.max(1),
+        options.patches,
+    );
+
+    yields(truth, options);
+    // TWO populations, and reporting both is the finding rather than a
+    // hedge. What the shipped pass pools is the correlated far field, and on
+    // these captures that is two to thirteen percent of the ring and almost
+    // all of it is sky. What a chromatic estimator COULD read, if 4.3's
+    // flat-content rule changed, is the whole ring at zero shift. M1's gate is
+    // asked of both, because a split that exists on one and not the other is a
+    // different answer to increment 1 than a split that exists on both.
+    let mut floor = 0.0f64;
+    for class in [Class::Far, Class::All] {
+        let held = reads(truth, class);
+        let kept: Vec<&Read> = held.iter().collect();
+        if kept.is_empty() {
+            println!("\nM1 ({}): nothing cleared the level floor.", class.name());
+            continue;
+        }
+        floor = floor.max(split(&fields, truth, &kept, class));
+    }
+    // Everything downstream is asked of the WHOLE ring, because the far field
+    // on these captures is sky and a weighting fork read on sky alone cannot
+    // discriminate anything.
+    let whole = reads(truth, Class::All);
+    let kept: Vec<&Read> = whole.iter().collect();
+    if kept.is_empty() {
+        return Ok(());
+    }
+    local(&kept);
+    fork(&kept);
+    separate(truth);
+    runaway(&kept, floor);
+    temporal(truth, &kept);
+    plants(&fields);
+    Ok(())
+}
+
+/// M5: what the ring refuses, and to whom.
+///
+/// The defect lives on sky and on flat soil and the band refuses to correlate
+/// on either, so what this counts is how much of the evidence the shipped
+/// acceptance rule throws away before the estimator sees it. It decides
+/// whether the flat-content rule changes in increment 1 or waits
+/// (docs/research/chromatic.md 4.3).
+fn yields(field: &Field, options: &Options) {
+    let tried = field.seen.len() + field.refused;
+    let count = |pick: &dyn Fn(&Seen) -> bool| field.seen.iter().filter(|s| pick(s)).count();
+    let flat = count(&|s| !s.textured());
+    let far = count(&|s| Class::Far.holds(s));
+    let near = count(&|s| Class::Near.holds(s));
+    let blind = count(&|s| Class::Blind.holds(s));
+    let blind_flat = count(&|s| Class::Blind.holds(s) && !s.textured());
+    let far_flat = count(&|s| Class::Far.holds(s) && !s.textured());
+    let sunny = count(&|s| s.sun.is_some());
+    let floored = reads(field, Class::All).len();
+    let far_floored = reads(field, Class::Far).len();
+    let blind_floored = reads(field, Class::Blind).len();
+    let share = |part: usize| -> f64 { 100.0 * part as f64 / (tried as f64).max(1.0) };
+    println!(
+        "\nM5 (the ring's yield, at {} azimuths over {} frames). every line is a share of \n\
+         \tthe {tried} azimuth-frames TRIED, so the refusals add up rather than nesting.\n",
+        options.patches, field.frames,
+    );
+    println!("  {:<52} {:>8} {:>9}", "population", "count", "of tried");
+    for (name, held) in [
+        ("tried: azimuths times frames", tried),
+        (
+            "no pair at all (one lens has no picture, or clipped)",
+            field.refused,
+        ),
+        ("read", field.seen.len()),
+        ("CORRELATED and far field: what the pass pools", far),
+        ("CORRELATED and near field", near),
+        ("NEVER CORRELATED: the pass reads nothing here", blind),
+        ("read AND flat: under the band's 6 code gate", flat),
+        ("far AND flat", far_flat),
+        ("blind AND flat: the defect's own content", blind_flat),
+        ("read AND the sun in one lens", sunny),
+        ("read AND over the 8 code level floor", floored),
+        ("far AND over the level floor: M1's population", far_floored),
+        (
+            "blind AND over the level floor: what M5 would add",
+            blind_floored,
+        ),
+    ] {
+        println!("  {name:<52} {held:>8} {:>8.1}%", share(held));
+    }
+    println!(
+        "\n  the NEVER CORRELATED share is the number 4.3 asks for: those directions are \n\
+         \tsampled at a shift of zero and the shipped pass pools none of them, and they are \n\
+         \twhere the owner sees the defect. reading them as far field because their shift \n\
+         \thappens to be zero is the 6.11 defect and is refused here."
+    );
+}
+
+/// M1: is there a hemisphere-scale chroma split at all, is it above the
+/// instrument's own noise, does it reproduce, and how much of it is a constant.
+///
+/// Returns the noise floor it measured, in natural log, so M4 can quote it.
+fn split(fields: &[Field], truth: &Field, kept: &[&Read], class: Class) -> f64 {
+    println!(
+        "\nM1 on `{}`. the two lenses' own per-channel ratio round the ring, pooled the way \n\
+         \tthe shipped pass pools its gain. if it is inside the instrument's noise the \n\
+         \tincrement is REFUSED before it is built, and the memo says so in advance \n\
+         \t(docs/research/chromatic.md 3.2).\n",
+        class.name(),
+    );
+    // What the population M1 pools actually is, so the pooled number below is
+    // read beside the evidence under it rather than on its own.
+    let samples: f64 = kept.iter().map(|r| r.count).sum();
+    let flat = kept.iter().filter(|r| !r.textured).count();
+    let sunny = kept.iter().filter(|r| r.sun.is_some()).count();
+    let mut disparity: Vec<f64> = kept.iter().map(|r| r.across).collect();
+    disparity.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut level: Vec<f64> = kept.iter().map(|r| r.lit).collect();
+    level.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let achromatic = Reading::of(kept.iter().map(|r| (r.azimuth, r.luma)));
+    println!(
+        "  the population: {} readings over {samples:.0} paired samples, {flat} of them on \n\
+         \tflat content and {sunny} with the sun in one lens. median across-seam disparity \n\
+         \t{:.3} deg (the pass's own knee is {:.2}); level runs {:.0} to {:.0} codes, median \n\
+         \t{:.0}. the achromatic term over the same readings is {:+.5} ln, spread {:.5}.\n",
+        kept.len(),
+        disparity[disparity.len() / 2],
+        knee(),
+        level[0],
+        level[level.len() - 1],
+        level[level.len() / 2],
+        achromatic.mean,
+        achromatic.spread,
+    );
+    println!("{}", Pooled::header());
+    let whole = pool(kept, Weigh::Lit2);
+    if let Some(read) = whole {
+        println!("{}", read.row("untrimmed"));
+    }
+    let cut = trimmed(kept, TRIM);
+    let trim = pool(&cut, Weigh::Lit2);
+    if let Some(read) = trim {
+        println!("{}", read.row("10% trimmed"));
+    }
+    // The three sub-populations pooled the same way, which is what M5's
+    // decision turns on: if the directions the pass reads NOTHING on agree
+    // with the ones it pools, then reading them buys evidence and no bias, and
+    // if they do not then the flat-content rule is a change of population and
+    // not a change of yield.
+    for held in [Class::Far, Class::Near, Class::Blind] {
+        let rows = reads(truth, held);
+        let rows: Vec<&Read> = rows.iter().collect();
+        if let Some(read) = pool(&trimmed(&rows, TRIM), Weigh::Lit2) {
+            println!("{}", read.row(&format!("  of which {}", held.name())));
+        }
+    }
+    // THE FLOOR, on this very population. The null trial is one lens against
+    // its own picture displaced by the shift the alignment found, so its true
+    // chroma is zero by arithmetic and everything it reads is the instrument.
+    // Measured on the same class as the signal, because a floor read on a
+    // different population is a floor for a different measurement.
+    let mut floor = 0.0f64;
+    for (index, label) in [
+        (1usize, "FLOOR: lens 0 vs itself, aligned"),
+        (2, "FLOOR: the same, unaligned"),
+    ] {
+        let null = reads(&fields[index], class);
+        let held: Vec<&Read> = null.iter().collect();
+        if let Some(read) = pool(&trimmed(&held, TRIM), Weigh::Lit2) {
+            println!("{}", read.row(label));
+            // Both halves of the floor: the bias the null pools to, and its
+            // own scatter. On directions that never correlated the null is
+            // sampled at a shift of zero, so it is EXACTLY zero by
+            // arithmetic and the bias term is not a floor at all; what is
+            // left there is the chroma plane's own quantisation, which the
+            // standard error measures.
+            floor = floor.max(read.widest()).max(read.error());
+        }
+    }
+    let Some(trim) = trim else {
+        println!("\n  nothing pooled. No verdict.");
+        return floor;
+    };
+    // Does it reproduce WITHIN the capture? The run's places are minutes apart
+    // in the same file, which is the cheapest hold-out there is and the one
+    // 3.3's first row asks for by name.
+    let places = kept.iter().map(|r| r.place).max().unwrap_or(0) + 1;
+    let mut per_place: Vec<(f64, f64)> = Vec::new();
+    for place in 0..places {
+        let held: Vec<&Read> = kept.iter().copied().filter(|r| r.place == place).collect();
+        if let Some(read) = pool(&trimmed(&held, TRIM), Weigh::Lit2) {
+            println!("{}", read.row(&format!("place {place} of the capture")));
+            per_place.push((read.warm(), read.cool()));
+        }
+    }
+    let reproduces = match per_place.len() > 1 {
+        true => {
+            let span = |pick: fn(&(f64, f64)) -> f64| -> f64 {
+                per_place.iter().map(pick).fold(f64::MIN, f64::max)
+                    - per_place.iter().map(pick).fold(f64::MAX, f64::min)
+            };
+            Some((span(|p| p.0), span(|p| p.1)))
+        }
+        false => None,
+    };
+
+    // How much of the split is a CONSTANT, which is the only thing increment
+    // 1's two degrees of freedom can reach, and how much is local. The five
+    // terms are the same basis the geometry is fitted through.
+    println!(
+        "\n  how much of it a CONSTANT reaches. the readings are averaged per direction and \n\
+         \tfitted round the ring; each row is what the fit LEAVES, in natural log rms over \n\
+         \tthe directions. the drop from `nothing` to `a constant` is the DC term's share, \n\
+         \tand whatever the five terms cannot describe is local to the seam and out of \n\
+         \treach of any hemisphere-wide model.\n"
+    );
+    println!(
+        "  {:<12} {:>10} {:>10} {:>10} {:>10} {:>12}",
+        "coordinate", "nothing", "constant", "+1 cycle", "+2 cycles", "DC value"
+    );
+    for (coordinate, name) in [(0usize, "R-G"), (1, "B-G")] {
+        let points = by_direction(kept, Weigh::Lit2, coordinate, truth.azimuths);
+        if points.len() < 5 {
+            println!("  {name:<12} too few directions to fit");
+            continue;
+        }
+        let leaves: Vec<f64> = [0usize, 1, 3, 5]
+            .iter()
+            .map(|terms| ring_fit(&points, *terms).1)
+            .collect();
+        let (fitted, _) = ring_fit(&points, 1);
+        println!(
+            "  {name:<12} {:>10.5} {:>10.5} {:>10.5} {:>10.5} {:>12.5}   ({} directions)",
+            leaves[0],
+            leaves[1],
+            leaves[2],
+            leaves[3],
+            fitted[0],
+            points.len(),
+        );
+    }
+
+    // The pre-registered verdict, computed rather than narrated.
+    let signal = trim.widest();
+    let se = trim.error();
+    println!(
+        "\n  VERDICT. widest chroma coordinate {signal:.5} ln ({:.2}% of level). instrument \n\
+         \tfloor {floor:.5} ln{}. standard error {se:.5} ln, so the reading is {:.1} se from \n\
+         \tzero.{}",
+        100.0 * (signal.exp() - 1.0),
+        match floor > 1e-5 {
+            true => format!(", ratio {:.1}x", signal / floor),
+            false => ", which is the null pooling to zero BY ARITHMETIC on directions read \n\
+                      \tat a shift of zero: there the standard error is the whole floor"
+                .to_owned(),
+        },
+        signal / se.max(f64::MIN_POSITIVE),
+        match reproduces {
+            Some((warm, cool)) => format!(
+                "\n\tover the run's places, minutes apart in the same file, the reading spans \n\
+                 \t{warm:.5} in R-G and {cool:.5} in B-G, against a signal of {signal:.5}.",
+            ),
+            None => String::new(),
+        },
+    );
+    floor
+}
+
+/// Is the per-direction structure REAL, or is it the noise stage 8 painted?
+///
+/// **The decisive question for any correction whose support is local**, and it
+/// is not in the memo above because the memo was scoped to a constant. The ring
+/// leaves per-direction structure that no smooth model reaches (M1.5), and a
+/// seam-local field is exactly a thing that would fit it. Whether fitting it is
+/// estimation or is stage 5's scalloping reborn on the photometric axis turns
+/// on one measurement: **does the same direction read the same thing twice.**
+///
+/// Three numbers, and the third is the one that decides:
+///
+/// - **within**: the spread of one direction's readings over consecutive frames
+///   inside one place, where the content is the same and the two lenses have
+///   not moved. That is the instrument, in full.
+/// - **between**: the spread over directions of each direction's own mean,
+///   after the ring's constant is taken out. That is what a per-direction field
+///   would fit, and it contains the instrument's noise as well as any structure.
+/// - **corrected**: `between` with `within` divided out of it, which is the
+///   structure that is left when the noise is accounted for. A field can only
+///   honestly reach this much.
+///
+/// And then the test that noise cannot pass: the same directions read at two
+/// PLACES minutes apart in the same file, correlated against each other. Local
+/// structure that belongs to the lens pair reproduces; local structure that is
+/// the scene or the correlator does not.
+fn local(kept: &[&Read]) {
+    println!(
+        "\nlocal structure. what a smooth ring model leaves is fitted by anything with local \n\
+         \tsupport, so the question is whether it is real. `within` is one direction read on \n\
+         \tconsecutive frames of the same place, which is the instrument and nothing else; \n\
+         \t`between` is the spread over directions after the constant is removed; `corrected` \n\
+         \tis what survives dividing the first out of the second.\n"
+    );
+    println!(
+        "  {:<12} {:>10} {:>10} {:>11} {:>9} {:>26}",
+        "coordinate", "within", "between", "corrected", "real %", "same directions, 2 places"
+    );
+    for (coordinate, name) in [(0usize, "R-G"), (1, "B-G")] {
+        let value = |read: &Read| match coordinate {
+            0 => read.warm(),
+            _ => read.cool(),
+        };
+        // Group by place and direction, which is the only grouping where the
+        // content is genuinely the same thing read twice.
+        let mut groups: Vec<((usize, usize), Vec<f64>)> = Vec::new();
+        for read in kept {
+            let key = (read.place, read.azimuth);
+            match groups.iter_mut().find(|held| held.0 == key) {
+                Some(held) => held.1.push(value(read)),
+                None => groups.push((key, vec![value(read)])),
+            }
+        }
+        let mut error = 0.0;
+        let mut freedom = 0.0;
+        let mut sizes = 0.0;
+        let mut counted = 0.0;
+        for (_, values) in groups.iter().filter(|group| group.1.len() > 1) {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            for held in values {
+                error += (held - mean).powi(2);
+            }
+            freedom += (values.len() - 1) as f64;
+            sizes += values.len() as f64;
+            counted += 1.0;
+        }
+        if freedom < 1.0 || counted < 4.0 {
+            println!("  {name:<12} too few repeats to say");
+            continue;
+        }
+        let within = (error / freedom).sqrt();
+        let per_group = sizes / counted;
+        // The per-direction means, per place, with that place's own constant
+        // removed so what is measured is the SHAPE round the ring and not the
+        // DC M1 already reported.
+        let mut places: Vec<(usize, Vec<(usize, f64)>)> = Vec::new();
+        for ((place, azimuth), values) in &groups {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            match places.iter_mut().find(|held| held.0 == *place) {
+                Some(held) => held.1.push((*azimuth, mean)),
+                None => places.push((*place, vec![(*azimuth, mean)])),
+            }
+        }
+        let mut spread = 0.0;
+        let mut directions = 0.0;
+        let mut centred: Vec<(usize, Vec<(usize, f64)>)> = Vec::new();
+        for (place, rows) in &places {
+            if rows.len() < 4 {
+                continue;
+            }
+            let mean = rows.iter().map(|r| r.1).sum::<f64>() / rows.len() as f64;
+            let rows: Vec<(usize, f64)> = rows.iter().map(|r| (r.0, r.1 - mean)).collect();
+            for (_, held) in &rows {
+                spread += held * held;
+                directions += 1.0;
+            }
+            centred.push((*place, rows));
+        }
+        if directions < 4.0 {
+            println!("  {name:<12} too few directions to say");
+            continue;
+        }
+        let between = (spread / directions).sqrt();
+        let corrected = (between * between - within * within / per_group)
+            .max(0.0)
+            .sqrt();
+        // The test noise cannot pass: the same directions at two places.
+        let mut pairs: Vec<(f64, f64)> = Vec::new();
+        for first in 0..centred.len() {
+            for second in (first + 1)..centred.len() {
+                for (azimuth, held) in &centred[first].1 {
+                    if let Some((_, other)) = centred[second].1.iter().find(|r| r.0 == *azimuth) {
+                        pairs.push((*held, *other));
+                    }
+                }
+            }
+        }
+        let agreement = match pairs.len() > 8 {
+            true => {
+                let n = pairs.len() as f64;
+                let mx = pairs.iter().map(|p| p.0).sum::<f64>() / n;
+                let my = pairs.iter().map(|p| p.1).sum::<f64>() / n;
+                let mut sxy = 0.0;
+                let mut sxx = 0.0;
+                let mut syy = 0.0;
+                for (x, y) in &pairs {
+                    sxy += (x - mx) * (y - my);
+                    sxx += (x - mx).powi(2);
+                    syy += (y - my).powi(2);
+                }
+                match sxx > 0.0 && syy > 0.0 {
+                    true => format!(
+                        "r {:+.3} over {} pairs",
+                        sxy / (sxx * syy).sqrt(),
+                        pairs.len()
+                    ),
+                    false => "degenerate".to_owned(),
+                }
+            }
+            false => "too few shared directions".to_owned(),
+        };
+        println!(
+            "  {name:<12} {within:>10.5} {between:>10.5} {corrected:>11.5} {:>8.0}% {agreement:>26}",
+            100.0 * corrected / between.max(f64::MIN_POSITIVE),
+        );
+    }
+    println!(
+        "\n  a correlation near zero between two places says the per-direction structure is \n\
+         \tNOT a property of the lens pair, and a field that fits it paints the scene's own \n\
+         \tnoise along each direction's whole sweep. that is stage 8, and it is what the \n\
+         \towner rejected."
+    );
+}
+
+/// M3: the weighting fork, three columns, pre-registered rather than chosen.
+fn fork(kept: &[&Read]) {
+    println!(
+        "\nM3 (the weighting fork). `lit` squared was fitted on the ACHROMATIC question and \n\
+         \tis measured to put the directions where the defect is visible at about one \n\
+         \tpercent of the weight. so the chromatic term's weighting is a decision of its \n\
+         \town, and all three columns are reported (docs/research/chromatic.md 4.1).\n"
+    );
+    println!("{}", Pooled::header());
+    for weigh in Weigh::ALL {
+        if let Some(read) = pool(&trimmed(kept, TRIM), weigh) {
+            println!("{}", read.row(weigh.name()));
+        }
+    }
+    // And the same three on the DARK half of the ring alone, which is the
+    // content the owner's every rejection has been on. If the three columns
+    // agree there, the fork does not matter and that is itself the finding.
+    let mut levels: Vec<f64> = kept.iter().map(|r| r.lit).collect();
+    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = levels[levels.len() / 2];
+    let dark: Vec<&Read> = kept.iter().copied().filter(|r| r.lit <= median).collect();
+    let light: Vec<&Read> = kept.iter().copied().filter(|r| r.lit > median).collect();
+    println!(
+        "\n  and split at the ring's own median level of {median:.0} codes, because a \n\
+         \tweighting only matters where the two halves disagree:\n"
+    );
+    for (name, half) in [("dark half", &dark), ("light half", &light)] {
+        for weigh in Weigh::ALL {
+            if let Some(read) = pool(&trimmed(half, TRIM), weigh) {
+                println!("{}", read.row(&format!("{name}, {}", weigh.name())));
+            }
+        }
+    }
+}
+
+/// M2: gain or offset, over the ring's own dynamic range.
+fn separate(field: &Field) {
+    println!(
+        "\nM2 (gain or offset). 6.11 could not separate them on one view's flat patches; the \n\
+         \tring's own 20-to-190 code range can. a multiplicative correction cannot fix an \n\
+         \tadditive defect, and the last column is what says which this is."
+    );
+    models(field, Class::Far);
+    models(field, Class::Near);
+    models(field, Class::Blind);
+}
+
+/// M4: the runaway guard, per channel, re-derived rather than copied.
+fn runaway(kept: &[&Read], floor: f64) {
+    // The FITTED value and not the widest single reading, because that is how
+    // LIMIT_LN itself was derived: `--bin expose` fitted the achromatic ratio
+    // over whole captures and took the widest of those fits, times four. A
+    // guard sized on the widest single reading a dark patch ever produced
+    // would be a guard sized on the noise it exists to catch.
+    let mut fitted = 0.0f64;
+    for weigh in Weigh::ALL {
+        if let Some(read) = pool(&trimmed(kept, TRIM), weigh) {
+            fitted = fitted.max(read.widest());
+        }
+    }
+    let mut per_reading: Vec<f64> = kept
+        .iter()
+        .map(|r| r.c.iter().fold(0.0f64, |held, v| held.max(v.abs())))
+        .collect();
+    per_reading.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let widest = *per_reading.last().unwrap_or(&0.0);
+    let p99 = per_reading[(per_reading.len() * 99 / 100).min(per_reading.len() - 1)];
+    println!(
+        "\nM4 (the runaway guard). LIMIT_LN is 0.25 because the ACHROMATIC ratio was measured \n\
+         \tat 0.946 to 1.004 over seven captures and the guard is the widest FIT, times four. \n\
+         \t0.25 ln of hue is 28 percent, which is far outside anything 6.11 measured.\n\
+         \n  this capture: widest FITTED chroma coordinate over the three weightings \n\
+         \t{fitted:.5} ln, which asks for {:.4} at four times. instrument floor {floor:.5}.\n\
+         \tfor scale, the widest SINGLE reading is {widest:.5} ln and the 99th percentile \n\
+         \t{p99:.5}, which is what a guard would be sized at if it were sized on the noise \n\
+         \tit exists to catch. the corpus number is the widest fit over every flight and is \n\
+         \tassembled in the results section, not here.",
+        4.0 * fitted,
+    );
+}
+
+/// The temporal question: how fast does the term move, and what filter class
+/// does that make it?
+fn temporal(field: &Field, kept: &[&Read]) {
+    println!(
+        "\ntemporal. the band's own reasoning applies twice over: a gain that flickers \n\
+         \tchanges the brightness of everything, and a white balance that flickers changes \n\
+         \tthe COLOUR of everything. what decides the filter is whether the reading moves \n\
+         \tframe to frame or only between sessions.\n"
+    );
+    println!("  {:>7} {:>10} {:>10} {:>8}", "frame", "R-G", "B-G", "n");
+    let mut series: Vec<(usize, f64, f64)> = Vec::new();
+    for frame in 0..field.frames {
+        let held: Vec<&Read> = kept.iter().copied().filter(|r| r.frame == frame).collect();
+        if held.len() < 4 {
+            continue;
+        }
+        if let Some(read) = pool(&held, Weigh::Lit2) {
+            println!(
+                "  {frame:>7} {:>10.5} {:>10.5} {:>8}",
+                read.warm(),
+                read.cool(),
+                held.len()
+            );
+            series.push((frame, read.warm(), read.cool()));
+        }
+    }
+    if series.len() < 2 {
+        println!("  too few frames answered to say anything about time.");
+        return;
+    }
+    let mut worst = (0.0f64, 0.0f64);
+    let mut rms = (0.0f64, 0.0f64);
+    for pair in series.windows(2) {
+        let warm = (pair[1].1 - pair[0].1).abs();
+        let cool = (pair[1].2 - pair[0].2).abs();
+        worst = (worst.0.max(warm), worst.1.max(cool));
+        rms.0 += warm * warm;
+        rms.1 += cool * cool;
+    }
+    let steps = (series.len() - 1) as f64;
+    let span = |pick: fn(&(usize, f64, f64)) -> f64| -> f64 {
+        let values: Vec<f64> = series.iter().map(pick).collect();
+        values.iter().copied().fold(f64::MIN, f64::max)
+            - values.iter().copied().fold(f64::MAX, f64::min)
+    };
+    println!(
+        "\n  frame to frame: worst {:.5} / {:.5} ln, rms {:.5} / {:.5}, over {} steps. \n\
+         \tthe whole run's span is {:.5} / {:.5} ln. a reading whose frame-to-frame noise \n\
+         \tis the same size as its whole span is a CONSTANT seen through noise, and wants \n\
+         \tthe tone gain's filter class: a first-order ease at TAU_GAIN_S, no events, no \n\
+         \tstates, no thresholds.",
+        worst.0,
+        worst.1,
+        (rms.0 / steps).sqrt(),
+        (rms.1 / steps).sqrt(),
+        steps as usize,
+        span(|s| s.1),
+        span(|s| s.2),
+    );
+}
+
+/// Every plant, beside the number it has to produce.
+///
+/// A per-channel reading is a negative result until it is shown able to read a
+/// positive one, and each of these runs the SAME code on the SAME frames: only
+/// one multiplier and one addend change.
+fn plants(fields: &[Field]) {
+    println!(
+        "\nplants. every trial runs the same code on the same frames. the expected column is \n\
+         \tarithmetic, not a previous run.\n"
+    );
+    println!(
+        "  {:<40} {:>10} {:>10} {:>26}",
+        "trial", "R-G", "B-G", "expected R-G / B-G"
+    );
+    // Read on the WHOLE ring rather than on the far field, because on these
+    // captures the far field is two to thirteen percent of it and on hard
+    // mode it is one reading, and a control read on one reading has cleared
+    // nothing.
+    let base = reads(&fields[0], Class::All);
+    let held: Vec<&Read> = base.iter().collect();
+    let truth = pool(&trimmed(&held, TRIM), Weigh::Lit2);
+    let (warm, cool) = truth.map_or((0.0, 0.0), |read| (read.warm(), read.cool()));
+    for (index, label, expect) in [
+        (
+            1usize,
+            "lens 0 vs itself at the found shift",
+            Some((0.0, 0.0)),
+        ),
+        (2, "lens 0 vs itself, no alignment", Some((0.0, 0.0))),
+        (
+            3,
+            "lens 1 times 1.02 in R alone",
+            Some((warm + 1.02f64.ln(), cool)),
+        ),
+        (
+            4,
+            "lens 1 times 1.01 / 0.99 / 1.01",
+            Some((warm + (1.01f64 / 0.99).ln(), cool + (1.01f64 / 0.99).ln())),
+        ),
+        (5, "lens 1 plus 4 codes in R alone", None),
+    ] {
+        let held = reads(&fields[index], Class::All);
+        let rows: Vec<&Read> = held.iter().collect();
+        let Some(read) = pool(&trimmed(&rows, TRIM), Weigh::Lit2) else {
+            continue;
+        };
+        println!(
+            "  {label:<40} {:>10.5} {:>10.5} {:>26}",
+            read.warm(),
+            read.cool(),
+            match expect {
+                Some((w, c)) => format!("{w:+.5} / {c:+.5}"),
+                None => "level-dependent, see M2".to_owned(),
+            },
+        );
+    }
+}
+
+// ---------------------------------------------- the arm-internal instrument
+
+/// How far off the seam the arm's own surrounding content starts and stops,
+/// in degrees, measured from the edge of the band region.
+///
+/// Close enough that it is the SAME content the band sits on - the oracle's
+/// number is a band of dirt against the dirt round it - and far enough out
+/// that the handover itself is not in it.
+const SURROUND_DEG: (f64, f64) = (1.0, 5.0);
+
+/// The band region against its own surrounding content, per channel.
+///
+/// **This is the instrument the oracle's own number was read with**, and the
+/// memo's own complaint was that it was a thing one session measured once
+/// (docs/research/chromatic.md 7.2). It is a mode now.
+///
+/// Why it is the valid one: it is **stretch-proof**. Every number below is a
+/// difference taken inside one picture between two regions of the same
+/// content, so a tone curve, a display stretch, a global gain or a JPEG
+/// encode's own gamma moves both regions together and cancels out of the
+/// difference. A reading of the band against an absolute does not have that
+/// property and stage 7 measured what reading against an absolute costs. And
+/// the Weber law it serves is that dark content is judged relative: the split
+/// is reported against the warmth it sits on as well as in codes, because 5
+/// codes on 11-code warmth is 45 percent and the same 5 codes on the sky end
+/// is under 2.
+#[derive(Clone, Copy, Default)]
+struct Arm {
+    band: [f64; 3],
+    surround: [f64; 3],
+    band_pixels: usize,
+    surround_pixels: usize,
+}
+
+impl Arm {
+    fn warmth(region: [f64; 3]) -> f64 {
+        region[0] - region[1]
+    }
+
+    fn coolth(region: [f64; 3]) -> f64 {
+        region[2] - region[1]
+    }
+
+    /// The number: how much warmer the band is than the content round it, in
+    /// codes.
+    fn warm_split(&self) -> f64 {
+        Self::warmth(self.band) - Self::warmth(self.surround)
+    }
+
+    fn cool_split(&self) -> f64 {
+        Self::coolth(self.band) - Self::coolth(self.surround)
+    }
+
+    /// The same split as a log ratio of ratios, which is exactly invariant to
+    /// any per-channel gain applied to the whole picture.
+    fn stretch_proof(&self) -> (f64, f64) {
+        let ratio = |channel: usize| (self.band[channel] / self.surround[channel]).ln();
+        (ratio(0) - ratio(1), ratio(2) - ratio(1))
+    }
+
+    fn level(&self) -> f64 {
+        LUMA.iter().zip(self.surround).map(|(w, v)| w * v).sum()
+    }
+
+    fn row(&self, label: &str) -> String {
+        let (warm, cool) = self.stretch_proof();
+        format!(
+            "  {label:<34} {:>7.1} {:>8.2} {:>8.2} {:>9.2} {:>9.2} {:>8.1} {:>8.1} {:>8.4} {:>8.4} {:>7}/{}",
+            self.level(),
+            Self::warmth(self.surround),
+            Self::coolth(self.surround),
+            self.warm_split(),
+            self.cool_split(),
+            100.0 * self.warm_split() / Self::warmth(self.surround).abs().max(f64::MIN_POSITIVE),
+            100.0 * self.cool_split() / Self::coolth(self.surround).abs().max(f64::MIN_POSITIVE),
+            warm,
+            cool,
+            self.band_pixels,
+            self.surround_pixels,
+        )
+    }
+
+    fn header() -> String {
+        format!(
+            "  {:<34} {:>7} {:>8} {:>8} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8} {:>7}",
+            "region",
+            "level",
+            "R-G out",
+            "B-G out",
+            "R-G split",
+            "B-G split",
+            "rel %",
+            "rel %",
+            "ln R-G",
+            "ln B-G",
+            "px in/out"
+        )
+    }
+}
+
+/// The arm-internal statistic over one picture about one great circle.
+///
+/// `plant` is added to the BAND region alone, per channel, which is a chroma
+/// stripe laid on the seam of a known size: the positive control.
+fn arm_read(
+    planes: &[Vec<f64>; 3],
+    distance: &[Option<f64>],
+    half: f64,
+    plant: [f64; 3],
+) -> Option<Arm> {
+    let mut band = [0.0f64; 3];
+    let mut surround = [0.0f64; 3];
+    let (mut inside, mut outside) = (0usize, 0usize);
+    for index in 0..planes[0].len() {
+        let Some(at) = distance[index] else {
+            continue;
+        };
+        let off = at.abs();
+        let level: f64 = LUMA
+            .iter()
+            .enumerate()
+            .map(|(channel, weight)| weight * planes[channel][index])
+            .sum();
+        if level <= 0.0 {
+            continue;
+        }
+        if off <= half {
+            inside += 1;
+            for channel in 0..3 {
+                band[channel] += planes[channel][index] + plant[channel];
+            }
+        } else if (half + SURROUND_DEG.0..=half + SURROUND_DEG.1).contains(&off) {
+            outside += 1;
+            for channel in 0..3 {
+                surround[channel] += planes[channel][index];
+            }
+        }
+    }
+    if inside < 256 || outside < 256 {
+        return None;
+    }
+    Some(Arm {
+        band: std::array::from_fn(|channel| band[channel] / inside as f64),
+        surround: std::array::from_fn(|channel| surround[channel] / outside as f64),
+        band_pixels: inside,
+        surround_pixels: outside,
+    })
+}
+
+fn arm(options: &Options) -> Fallible<()> {
+    let gpu = Gpu::open()?;
+    println!("gpu:    {}", gpu.name);
+    let size = Size::new(options.size, options.size);
+    let (before, mapped, _) = drawn(options, &gpu, size, true)?;
+    let (after, _, tone) = drawn(options, &gpu, size, false)?;
+    let half = f64::from(mapped.handover_width().to_degrees()) / 2.0;
+    println!(
+        "\narm: the band region is the handover's own half-width, {half:.2} degrees either \n\
+         \tside of the seam, asked of the map this render was drawn with. its surrounding \n\
+         \tcontent is {:.1} to {:.1} degrees past that edge. the split columns are the \n\
+         \tband's warmth minus the surround's, which is a difference taken inside one \n\
+         \tpicture and is therefore stretch-proof; `rel %` is the same against the warmth \n\
+         \tit sits on, which is Weber and is how dark content is judged.\n",
+        SURROUND_DEG.0, SURROUND_DEG.1,
+    );
+    println!("{}", Arm::header());
+    let seam = distances(&mapped, size, 2, options.window);
+    let decoy = distances(&mapped, size, 0, options.window);
+    for (label, picture) in [("band held off", &before), ("as it draws", &after)] {
+        let planes = channels(picture);
+        if let Some(read) = arm_read(&planes, &seam, half, [0.0; 3]) {
+            println!("{}", read.row(&format!("{label}: at the seam")));
+        }
+        // P.1's own control: the same statistic about a circle the correction
+        // has no business touching. If the decoy moves, the change belongs to
+        // the scene and not to the correction.
+        if let Some(read) = arm_read(&planes, &decoy, half, [0.0; 3]) {
+            println!("{}", read.row(&format!("{label}: at the DECOY")));
+        }
+    }
+    println!("\n  controls:");
+    let planes = channels(&before);
+    for (label, plant) in [
+        ("nothing planted", [0.0f64; 3]),
+        ("+2 codes of R on the band alone", [2.0, 0.0, 0.0]),
+        ("a 2 code green-magenta stripe", [2.0, -0.7963, 2.0]),
+    ] {
+        if let Some(read) = arm_read(&planes, &seam, half, plant) {
+            println!("{}", read.row(label));
+        }
+    }
+    println!(
+        "\n  gain: the shipped pass drew with {:+.5} ln. a pooled LUMA gain moves both \n\
+         \tregions' channels together and must leave every split column above unmoved, \n\
+         \twhich is what the two `band held off` / `as it draws` rows check.",
+        tone.log_gain,
+    );
+    Ok(())
+}
+
 // ------------------------------------------------------------ the picture
 
 /// One drawn view, and what each channel does as it crosses the seam.
@@ -1313,6 +2590,70 @@ fn table(field: &Field) {
 /// **decoy** is the same statistic about a great circle 90 degrees away where
 /// there is no handover at all, which is what the scene contributes to a number
 /// like this.
+/// One drawn view, with the band's photometry held off or let run.
+///
+/// Lifted out of [`profile`] so that [`arm`] draws the very same picture
+/// through the very same code: two modes reading one render is the point of
+/// the arm-internal instrument, and a second copy of this block is a second
+/// thing to get out of step.
+fn drawn(
+    options: &Options,
+    gpu: &Gpu,
+    size: Size,
+    held: bool,
+) -> Fallible<(Picture, Reframe, kjerag_render::Tone)> {
+    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    pipeline.hold_tone(held);
+    let mut scene = Scene::still(
+        &options.input,
+        Cue::Time(std::time::Duration::from_secs_f64(options.from)),
+    )?;
+    scene.set_horizon(match options.lock {
+        true => Horizon::Locked,
+        false => Horizon::Free,
+    });
+    scene.fit_seam(true);
+    scene.use_table(options.table);
+    let mut shot = None;
+    for _ in 0..options.count.max(1) {
+        shot = Some(
+            Render {
+                gpu,
+                scene: &scene,
+                pipeline: &mut pipeline,
+            }
+            .frame(options.camera(), Sampling::default(), size)?,
+        );
+        if !scene.advance()? {
+            break;
+        }
+    }
+    let mapped = scene
+        .mapped(options.camera(), 1.0)
+        .ok_or("no frame to map")?;
+    let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
+    let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
+    // What the shipped state holds, which since this PR re-scoped is main's:
+    // one gain over the whole ring, and how much of the ring is behind it.
+    // The instrument reports it so a picture can be read beside the number
+    // that drew it; it no longer reports a per-direction anything, because
+    // the pass no longer has one.
+    let seen =
+        cells.iter().filter(|cell| cell.confidence > 0.0).count() as f32 / cells.len() as f32;
+    println!(
+        "band:   the shipped gain is {:+.5} ln, evidence {:.3}, {:.0} percent of the ring \n\
+         \tis correlating.",
+        tone.log_gain,
+        tone.evidence,
+        100.0 * seen,
+    );
+    Ok((
+        shot.ok_or("no frame decoded at that instant")?,
+        mapped,
+        tone,
+    ))
+}
+
 fn profile(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
@@ -1320,60 +2661,8 @@ fn profile(options: &Options) -> Fallible<()> {
     std::fs::create_dir_all(&out)?;
     let size = Size::new(options.size, options.size);
 
-    let draw = |held: bool| -> Fallible<(Picture, Reframe, kjerag_render::Tone)> {
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
-        pipeline.hold_tone(held);
-        let mut scene = Scene::still(
-            &options.input,
-            Cue::Time(std::time::Duration::from_secs_f64(options.from)),
-        )?;
-        scene.set_horizon(match options.lock {
-            true => Horizon::Locked,
-            false => Horizon::Free,
-        });
-        scene.fit_seam(true);
-        scene.use_table(options.table);
-        let mut shot = None;
-        for _ in 0..options.count.max(1) {
-            shot = Some(
-                Render {
-                    gpu: &gpu,
-                    scene: &scene,
-                    pipeline: &mut pipeline,
-                }
-                .frame(options.camera(), Sampling::default(), size)?,
-            );
-            if !scene.advance()? {
-                break;
-            }
-        }
-        let mapped = scene
-            .mapped(options.camera(), 1.0)
-            .ok_or("no frame to map")?;
-        let tone = pipeline.band_tone(&gpu.device, &gpu.queue)?;
-        let (_, cells) = pipeline.band_state(&gpu.device, &gpu.queue)?;
-        // What the shipped state holds, which since this PR re-scoped is main's:
-        // one gain over the whole ring, and how much of the ring is behind it.
-        // The instrument reports it so a picture can be read beside the number
-        // that drew it; it no longer reports a per-direction anything, because
-        // the pass no longer has one.
-        let seen =
-            cells.iter().filter(|cell| cell.confidence > 0.0).count() as f32 / cells.len() as f32;
-        println!(
-            "band:   the shipped gain is {:+.5} ln, evidence {:.3}, {:.0} percent of the ring \n\
-             \tis correlating.",
-            tone.log_gain,
-            tone.evidence,
-            100.0 * seen,
-        );
-        Ok((
-            shot.ok_or("no frame decoded at that instant")?,
-            mapped,
-            tone,
-        ))
-    };
-    let (before, mapped, _) = draw(true)?;
-    let (after, _, tone) = draw(false)?;
+    let (before, mapped, _) = drawn(options, &gpu, size, true)?;
+    let (after, _, tone) = drawn(options, &gpu, size, false)?;
 
     let stem = format!("{}-{}", options.stem(), options.tag);
     before.save(&gpu, &out.join(format!("{stem}-1-held.png")))?;
@@ -1402,25 +2691,31 @@ fn profile(options: &Options) -> Fallible<()> {
         "\n=== the applied field, {} to {} degrees off the seam ===",
         INTERIOR.0, INTERIOR.1,
     );
-    match interior(&before, &after, &mapped, size, 0.0) {
-        Some(read) => println!("  what is drawn        {}", read.report()),
+    println!("{}", Interior::header());
+    match interior(&before, &after, &mapped, size, Plant::NOTHING) {
+        Some(read) => print!("{}", read.report("what is drawn")),
         None => println!("  not enough of the interior is in this view"),
     }
-    println!("  controls:");
-    if let Some(read) = interior(&before, &before, &mapped, size, 0.0) {
-        println!(
-            "    nothing applied at all                {}",
-            read.report()
-        );
-    }
-    for planted in [0.5f64, 2.0] {
-        if let Some(read) = interior(&before, &before, &mapped, size, planted) {
-            println!(
-                "    a {planted:.1} code ripple, 8 cycles round the ring   {}",
-                read.report(),
-            );
+    // Every plant runs against a picture with NOTHING applied, so what comes
+    // back is the plant and not the plant plus a correction. A control that
+    // has never been shown able to read a positive is a control that has
+    // cleared nothing.
+    for (label, plant) in [
+        ("nothing applied at all", Plant::NOTHING),
+        ("a 0.5 code LUMA ripple", Plant::luma(0.5)),
+        ("a 2.0 code LUMA ripple", Plant::luma(2.0)),
+        ("a 0.5 code CHROMA ripple", Plant::chroma(0.5)),
+        ("a 2.0 code CHROMA ripple", Plant::chroma(2.0)),
+    ] {
+        if let Some(read) = interior(&before, &before, &mapped, size, plant) {
+            print!("{}", read.report(&format!("{label}: {}", plant.name())),);
         }
     }
+    println!(
+        "  the two CHROMA rows are the finding: they carry zero luminance by construction, \n\
+         \tso the luma row reads its own noise while R, G and B read the stripe. Until \n\
+         \t2026-08-09 the luma row was the whole statistic."
+    );
     for (name, picture) in [("the band held off", &before), ("as it draws", &after)] {
         println!("\n=== {name} ===");
         across_seam(&mapped, picture, size, options.window);
@@ -1953,8 +3248,20 @@ const DARK: f64 = 64.0;
 ///
 /// A smooth field reads zero however large it is. A striped one reads its
 /// stripes.
+///
+/// **And until 2026-08-09 it read all of that in LUMA and nothing else**
+/// (docs/research/chromatic.md 6.2). The applied field was reduced through
+/// [`LUMA`] before it was binned, so a chroma-only stripe with no luminance
+/// lift in it read exactly 0.00 percent, however violent it was, on the one
+/// anti-acceptance metric this campaign's whole photometric line is gated on.
+/// The chromatic line is the mechanism most able to produce exactly that
+/// artifact, so extending this was a gate on that build and not a step inside
+/// it. It reads four channels now: luma first, so every number already
+/// published still compares, then R, G and B, each with its own plant.
+///
+/// What names the four is [`INTERIOR_CHANNELS`].
 #[derive(Clone, Copy, Debug, Default)]
-struct Interior {
+struct Coherence {
     /// The applied correction's mean size over the band, in codes.
     applied: f64,
     /// What is smooth round the ring, as Weber percent: the five-term fit.
@@ -1963,40 +3270,123 @@ struct Interior {
     rough: f64,
     /// The largest single step between neighbouring azimuth bins, Weber.
     step: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Interior {
+    /// Luma, then R, G and B.
+    read: [Coherence; 4],
     /// How many azimuth bins had any picture in them.
     bins: usize,
 }
 
+/// What [`Interior`]'s four readings are called, in order. Luma is first
+/// because it is the one every earlier number in this campaign was.
+const INTERIOR_CHANNELS: [&str; 4] = ["luma", "R", "G", "B"];
+
 impl Interior {
-    fn report(&self) -> String {
+    /// One row per channel under a label that is printed once, so four
+    /// readings do not cost four labels.
+    fn report(&self, label: &str) -> String {
+        let mut out = String::new();
+        for (index, name) in INTERIOR_CHANNELS.iter().enumerate() {
+            let read = self.read[index];
+            out.push_str(&format!(
+                "  {:<40} {:>5} {:>10.3} {:>9.2} {:>9.2} {:>9.2}{}\n",
+                match index {
+                    0 => label,
+                    _ => "",
+                },
+                name,
+                read.applied,
+                100.0 * read.smooth,
+                100.0 * read.rough,
+                100.0 * read.step,
+                match index {
+                    0 => format!("   ({} bins)", self.bins),
+                    _ => String::new(),
+                },
+            ));
+        }
+        out
+    }
+
+    /// The header the rows above want over them.
+    fn header() -> String {
         format!(
-            "applied {:.2} codes; smooth {:.2}%, ROUGH {:.2}%, worst neighbour step {:.2}%              ({} bins)",
-            self.applied,
-            100.0 * self.smooth,
-            100.0 * self.rough,
-            100.0 * self.step,
-            self.bins,
+            "  {:<40} {:>5} {:>10} {:>9} {:>9} {:>9}",
+            "field", "ch", "applied", "smooth %", "ROUGH %", "step %"
         )
     }
 }
 
-/// The interior statistic over one pair of pictures.
+/// A known azimuthal ripple planted into the applied field before it is
+/// measured, in codes, **per channel**: the positive control.
 ///
-/// `ripple` plants a known azimuthal ripple of that amplitude in codes into the
-/// applied field before it is measured, which is the positive control: a
-/// correction that is smooth round the ring plus a ripple has to read the
-/// ripple back, and a run with no ripple and no correction has to read zero.
+/// Per channel and not one number, and that is this memo's second finding
+/// made runnable. A luma plant can only ever exercise a luma statistic. The
+/// plant that decides whether this instrument can see the chromatic line's
+/// own artifact is [`Plant::chroma`], which carries exactly zero luminance:
+/// under the statistic as it stood it reads 0.00 percent however large it is,
+/// and a chroma-only stripe round the ring is precisely what a per-channel
+/// correction estimated per direction would paint.
+#[derive(Clone, Copy, Default)]
+struct Plant([f64; 3]);
+
+impl Plant {
+    const NOTHING: Self = Self([0.0; 3]);
+
+    /// The same codes in all three channels: a luminance ripple, which is what
+    /// this control has always planted. 0.5 and 2.0 read 2.07 and 8.27 percent
+    /// on the rejected build's own view and those numbers still stand.
+    fn luma(codes: f64) -> Self {
+        Self([codes; 3])
+    }
+
+    /// A ripple on the green-magenta axis with **no luminance in it at all**:
+    /// R and B up together, G down by exactly the BT.709 weight that cancels
+    /// them. It is the oracle's own axis at the dirt end of the seam
+    /// (docs/research/chromatic.md 2.2), and [`Plant::lifts`] is the equality
+    /// that says it is neutral rather than nearly so.
+    fn chroma(codes: f64) -> Self {
+        Self([codes, -codes * (LUMA[0] + LUMA[2]) / LUMA[1], codes])
+    }
+
+    /// What this plant lifts the luma by, in codes. Zero for [`Self::chroma`]
+    /// by construction, and printed rather than assumed.
+    fn lifts(&self) -> f64 {
+        LUMA.iter().zip(self.0).map(|(w, c)| w * c).sum()
+    }
+
+    fn name(&self) -> String {
+        format!(
+            "R {:+.2}, G {:+.2}, B {:+.2} codes (luma {:+.3})",
+            self.0[0],
+            self.0[1],
+            self.0[2],
+            self.lifts(),
+        )
+    }
+}
+
+/// The interior statistic over one pair of pictures, per channel.
+///
+/// `plant` plants a known azimuthal ripple into the applied field before it is
+/// measured, which is the positive control: a correction that is smooth round
+/// the ring plus a ripple has to read the ripple back **in the channels it was
+/// planted in and in no others**, and a run with no ripple and no correction
+/// has to read zero in all four.
 fn interior(
     before: &Picture,
     after: &Picture,
     reframe: &Reframe,
     size: Size,
-    ripple: f64,
+    plant: Plant,
 ) -> Option<Interior> {
     let width = size.width as usize;
-    // Sums per azimuth bin: the applied correction, the level it sits on, and
-    // how many pixels answered.
-    let mut held = vec![(0.0f64, 0.0f64, 0.0f64); SWEEP];
+    // Sums per azimuth bin: the applied correction and the level it sits on,
+    // each in four channels, and how many pixels answered.
+    let mut held = vec![([0.0f64; 4], [0.0f64; 4], 0.0f64); SWEEP];
     for index in 0..(size.width * size.height) as usize {
         let uv = [
             (index % width) as f32 / size.width as f32,
@@ -2016,98 +3406,111 @@ fn interior(
         }
         let phi = f64::from(body[1].atan2(body[0]));
         let bin = ((phi / std::f64::consts::TAU + 1.0) * SWEEP as f64) as usize % SWEEP;
-        // Luma of what was applied, and of what it was applied to. Dark content
-        // is where an additive correction is a large ratio and where the owner
-        // is looking, and the level in the denominator is what makes this a
-        // Weber number rather than a count of codes.
-        let (mut lift, mut level) = (0.0, 0.0);
-        for (channel, weight) in LUMA.iter().enumerate() {
+        // What was applied and what it was applied to, in four channels: the
+        // BT.709 luma first, so the number this campaign has published all
+        // along is still index 0, then R, G and B themselves. Dark content is
+        // where an additive correction is a large ratio and where the owner is
+        // looking, and the level in the denominator is what makes this a Weber
+        // number rather than a count of codes.
+        let (mut lift, mut level) = ([0.0f64; 4], [0.0f64; 4]);
+        for channel in 0..3 {
             let a = f64::from(before.rgba[4 * index + channel]);
             let b = f64::from(after.rgba[4 * index + channel]);
-            lift += weight * (b - a);
-            level += weight * a;
+            lift[0] += LUMA[channel] * (b - a);
+            level[0] += LUMA[channel] * a;
+            lift[1 + channel] = b - a;
+            level[1 + channel] = a;
         }
-        if level <= 0.0 || level > DARK {
+        // The gate is the LUMA level, unchanged, so which pixels this reads is
+        // exactly the set it always read and the four numbers are four
+        // statistics over one population rather than four populations.
+        if level[0] <= 0.0 || level[0] > DARK {
             continue;
         }
-        let planted = ripple * (8.0 * phi).cos();
+        let wave = (8.0 * phi).cos();
+        let planted = [
+            plant.lifts() * wave,
+            plant.0[0] * wave,
+            plant.0[1] * wave,
+            plant.0[2] * wave,
+        ];
         // The FIELD in the numerator and the content in the denominator, each
         // averaged over the bin before they are divided. Dividing per pixel
         // instead puts the content's own roughness into the numerator, and the
         // statistic then reads the soil rather than the correction painted over
         // it - measured: it reported 0.89 percent of roughness for a field that
         // is smooth by construction.
-        held[bin].0 += lift + planted;
-        held[bin].1 += level;
+        for channel in 0..4 {
+            held[bin].0[channel] += lift[channel] + planted[channel];
+            held[bin].1[channel] += level[channel].max(0.0);
+        }
         held[bin].2 += 1.0;
     }
-    let seen: Vec<(f64, f64, f64)> = held
+    let seen: Vec<(f64, [f64; 4], [f64; 4])> = held
         .iter()
         .enumerate()
         .filter(|(_, bin)| bin.2 > 16.0)
         .map(|(index, bin)| {
             (
                 index as f64 / SWEEP as f64 * std::f64::consts::TAU,
-                bin.0 / bin.2,
-                bin.1 / bin.2,
+                std::array::from_fn(|channel| bin.0[channel] / bin.2),
+                std::array::from_fn(|channel| bin.1[channel] / bin.2),
             )
         })
         .collect();
     if seen.len() < 16 {
         return None;
     }
-    // The five terms a field CAN have and stay smooth: a constant, one cycle
-    // and two. The same basis the geometry is fitted through, and the same one
-    // stage 7's colour field used. Anything outside it is a stripe.
-    let mut normal = [[0.0f64; 5]; 5];
-    let mut right = [0.0f64; 5];
-    for (phi, codes, _) in &seen {
-        let basis = [
-            1.0,
-            phi.cos(),
-            phi.sin(),
-            (2.0 * phi).cos(),
-            (2.0 * phi).sin(),
-        ];
-        for row in 0..5 {
-            for column in 0..5 {
-                normal[row][column] += basis[row] * basis[column];
-            }
-            right[row] += basis[row] * codes;
-        }
-    }
-    let fitted = solve5(normal, right);
-    let smooth_at = |phi: f64| -> f64 {
-        let basis = [
-            1.0,
-            phi.cos(),
-            phi.sin(),
-            (2.0 * phi).cos(),
-            (2.0 * phi).sin(),
-        ];
-        (0..5).map(|term| fitted[term] * basis[term]).sum()
-    };
     let count = seen.len() as f64;
-    let mut applied = 0.0;
-    let mut smooth = 0.0;
-    let mut rough = 0.0;
-    for (phi, codes, level) in &seen {
-        applied += codes.abs();
-        smooth += (smooth_at(*phi) / level).powi(2);
-        rough += ((codes - smooth_at(*phi)) / level).powi(2);
-    }
-    let mut step: f64 = 0.0;
-    for pair in seen.windows(2) {
-        let level = 0.5 * (pair[0].2 + pair[1].2);
-        if level > 0.0 {
-            step = step.max((pair[1].1 - pair[0].1).abs() / level);
+    let read = std::array::from_fn(|channel| {
+        // The five terms a field CAN have and stay smooth: a constant, one
+        // cycle and two. The same basis the geometry is fitted through, and the
+        // same one stage 7's colour field used. Anything outside it is a
+        // stripe.
+        let mut normal = [[0.0f64; 5]; 5];
+        let mut right = [0.0f64; 5];
+        for (phi, codes, _) in &seen {
+            let held = basis(*phi);
+            for row in 0..5 {
+                for column in 0..5 {
+                    normal[row][column] += held[row] * held[column];
+                }
+                right[row] += held[row] * codes[channel];
+            }
         }
-    }
+        let fitted = solve5(normal, right);
+        let smooth_at = |phi: f64| -> f64 {
+            basis(phi)
+                .iter()
+                .zip(fitted)
+                .map(|(term, coefficient)| term * coefficient)
+                .sum()
+        };
+        let mut applied = 0.0;
+        let mut smooth = 0.0;
+        let mut rough = 0.0;
+        for (phi, codes, level) in &seen {
+            let level = level[channel].max(f64::MIN_POSITIVE);
+            applied += codes[channel].abs();
+            smooth += (smooth_at(*phi) / level).powi(2);
+            rough += ((codes[channel] - smooth_at(*phi)) / level).powi(2);
+        }
+        let mut step: f64 = 0.0;
+        for pair in seen.windows(2) {
+            let level = 0.5 * (pair[0].2[channel] + pair[1].2[channel]);
+            if level > 0.0 {
+                step = step.max((pair[1].1[channel] - pair[0].1[channel]).abs() / level);
+            }
+        }
+        Coherence {
+            applied: applied / count,
+            smooth: (smooth / count).sqrt(),
+            rough: (rough / count).sqrt(),
+            step,
+        }
+    });
     Some(Interior {
-        applied: applied / count,
-        smooth: (smooth / count).sqrt(),
-        rough: (rough / count).sqrt(),
-        step,
+        read,
         bins: seen.len(),
     })
 }
@@ -2571,6 +3974,8 @@ impl Options {
                 Some(("mode", value)) => {
                     options.mode = match value {
                         "field" => Mode::Field,
+                        "chroma" => Mode::Chroma,
+                        "arm" => Mode::Arm,
                         "profile" => Mode::Profile,
                         "studio" => Mode::Studio,
                         "trace" => Mode::Trace,
@@ -2682,7 +4087,8 @@ fn pair(value: &str) -> Fallible<(f64, f64)> {
     Ok((low.parse()?, high.parse()?))
 }
 
-const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|studio|trace] \
+const USAGE: &str = "usage: colour <file.insv|export.mp4> \
+     [mode=field|chroma|arm|profile|studio|trace] \
      [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [seam=file|factory] [verbose=1] \
      [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg] \
      [rows=lo:hi] [cols=lo:hi] [box=left:top:right:bottom] [table=table.txt]";

@@ -7,6 +7,17 @@
 pub mod band;
 mod camera;
 mod capture;
+/// The chromatic seam correction: a seam-local source-matching field per
+/// channel, estimated from the current frame's own overlap, spread on a
+/// fixed angular kernel, behind `KJERAG_CHROMATIC` and off by default
+/// (issue #103, stage 10). Public for the instruments that read its state
+/// back and for the twins the guard compares.
+pub mod chromatic;
+/// The chromatic mechanism's own GPU guard: the estimator and the lookup
+/// against their Rust twins, on planted planes and a planted field
+/// (`src/chromatic_guard.rs`). Tests only, like [`twin`].
+#[cfg(test)]
+mod chromatic_guard;
 pub mod dmabuf;
 mod framing;
 mod projection;

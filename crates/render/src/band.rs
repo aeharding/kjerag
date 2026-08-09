@@ -257,7 +257,7 @@ const SLICES: u32 = 2;
 /// flickers moves the picture inside the crossover and a gain that flickers
 /// changes the brightness of **everything**, which is the one artifact worse
 /// than the step it is correcting (issue #103, stage 3).
-const TAU_GAIN_S: f32 = TAU_FAR_S;
+pub(crate) const TAU_GAIN_S: f32 = TAU_FAR_S;
 
 /// The widest gain that is an exposure difference rather than a measurement
 /// coming apart, as a natural log.
@@ -281,7 +281,7 @@ const TAU_GAIN_S: f32 = TAU_FAR_S;
 /// What it is here for is the case none of those captures is: a seam
 /// correlating on content that is not the same content at all, which would
 /// otherwise reach the picture as a hemisphere washing out.
-const LIMIT_LN: f32 = 0.25;
+pub(crate) const LIMIT_LN: f32 = 0.25;
 
 /// The exposure the two lenses hand the same content over at, pooled over the
 /// whole ring, smoothed, and split between them (issue #103, stage 3).
@@ -1184,6 +1184,15 @@ pub struct Watch {
     /// whole ring on the one frame that resets it costs one frame's worth of
     /// the other half and is the only place the two can be made to agree.
     pub stride: f32,
+    /// The chromatic arm's scale (issue #103, stage 10): 0 off - the default,
+    /// and every line of the chromatic estimator in the shader is behind a
+    /// test of it - 1 on, 2 the sensitivity arm. Set by the caller from
+    /// [`super::chromatic::arm`], which reads `KJERAG_CHROMATIC` once.
+    pub chromatic: f32,
+    /// A uniform block's struct is read through WGSL's own layout and
+    /// `repr(C)` does not round for us; three floats keep the two sides the
+    /// same size.
+    pub _pad: [f32; 3],
 }
 
 impl Watch {
@@ -1195,6 +1204,8 @@ impl Watch {
             reset: 1.0,
             slice: 0.0,
             stride: 1.0,
+            chromatic: 0.0,
+            _pad: [0.0; 3],
         }
     }
 
@@ -1208,6 +1219,8 @@ impl Watch {
             reset: 0.0,
             slice: slice as f32,
             stride: SLICES as f32,
+            chromatic: 0.0,
+            _pad: [0.0; 3],
         }
     }
 
@@ -1509,8 +1522,14 @@ pub(crate) fn wgsl() -> String {
          const BACK_ALONG = {back_along}u;\n\
          const BACK_ACROSS = {back_across}u;\n\
          const TAU = {tau:?};\n\
+         const ZERO_SHIFT = {zero_shift}u;\n\
          {photometry}{CELL}{RING}{WGSL}",
         tau = std::f32::consts::TAU,
+        // The candidate index whose shift is zero on both axes: where the
+        // never-correlated and flat directions are read for their colour
+        // (issue #103, stage 10). Derived here from the same grid arithmetic
+        // the candidates are laid out with, so the two cannot drift apart.
+        zero_shift = (-far) as usize * perp_shifts + PERP_STEPS,
         step = STEP_DEG.to_radians(),
         perp_steps = PERP_STEPS,
         keep = KEEP,
@@ -1571,14 +1590,36 @@ pub(crate) const STATE_BINDING: u32 = 0;
 pub(crate) const WATCH_BINDING: u32 = 1;
 
 /// How many bytes the state buffer is: the pooled [`Tone`], the pooled
-/// [`Along`], then one [`Cell`] per direction.
-pub(crate) const BYTES: u64 = (CELLS_AT + AZIMUTHS * std::mem::size_of::<Cell>()) as u64;
+/// [`Along`], one [`Cell`] per direction, and then the chromatic zone -
+/// header, one reading per direction, and the applied field (issue #103,
+/// stage 10). The chromatic zone is APPENDED so nothing an existing
+/// instrument reads has moved.
+pub(crate) const BYTES: u64 = (FIELD_AT + AZIMUTHS * 16) as u64;
 
 /// Where the along-seam field starts in that buffer.
 pub(crate) const ALONG_AT: usize = std::mem::size_of::<Tone>();
 
 /// Where the cells start in that buffer, for the readback that unpacks it.
 pub(crate) const CELLS_AT: usize = ALONG_AT + std::mem::size_of::<Along>();
+
+/// Where the chromatic header starts: after the last cell.
+pub(crate) const CHROMA_HEAD_AT: usize = CELLS_AT + AZIMUTHS * std::mem::size_of::<Cell>();
+
+/// Where the per-direction chroma readings start.
+pub(crate) const CHROMA_CELLS_AT: usize =
+    CHROMA_HEAD_AT + std::mem::size_of::<super::chromatic::Chromatic>();
+
+/// Where the applied chromatic field starts: one `vec4` per direction (the
+/// three channels and that entry's evidence), which is why the stride is a
+/// literal 16 in [`BYTES`].
+pub(crate) const FIELD_AT: usize =
+    CHROMA_CELLS_AT + AZIMUTHS * std::mem::size_of::<super::chromatic::ChromaCell>();
+
+/// The `vec4` alignment the field's WGSL type imposes on its offset, checked
+/// where the layout is written rather than discovered by a wrong picture.
+const _: () = assert!(FIELD_AT.is_multiple_of(16));
+const _: () = assert!(std::mem::size_of::<super::chromatic::ChromaCell>() == 48);
+const _: () = assert!(std::mem::size_of::<super::chromatic::Chromatic>() == 16);
 
 /// A sample at or above this is a clipped highlight and not a brightness.
 ///
@@ -1630,10 +1671,47 @@ struct Along {
   pad1: f32,
 };
 
+// One direction's chroma reading: the two lenses' mean R, G, B of the same
+// patch, the level and the evidence behind it, and which population it came
+// from (issue #103, stage 10). Scalars rather than vec3s so the stride is
+// the twelve floats the Rust twin lays out. Rust twin:
+// `chromatic::ChromaCell`.
+struct ChromaCell {
+  m0r: f32,
+  m0g: f32,
+  m0b: f32,
+  m1r: f32,
+  m1g: f32,
+  m1b: f32,
+  lit: f32,
+  evidence: f32,
+  population: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+// The chromatic arm's header: zero scale is OFF, and the buffer is created
+// zeroed, so a draw with the arm never dispatched reads exactly nothing.
+// Rust twin: `chromatic::Chromatic`.
+struct Chromatic {
+  scale: f32,
+  evidence: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
 struct State {
   tone: Tone,
   along: Along,
   cells: array<Cell, AZIMUTHS>,
+  // The chromatic zone is appended so nothing an existing reader holds an
+  // offset into has moved (issue #103, stage 10). `field` is the applied
+  // per-azimuth amplitude: xyz the three channels' local pull in gamma-coded
+  // codes, w that entry's evidence.
+  chromatic: Chromatic,
+  chroma: array<ChromaCell, AZIMUTHS>,
+  field: array<vec4<f32>, AZIMUTHS>,
 };
 
 // The along-seam correction at one azimuth, from that azimuth's own cosine and
@@ -1729,15 +1807,47 @@ fn tone_split() -> vec2<f32> {
   return vec2<f32>(exp(half), exp(-half));
 }
 
+// The chromatic seam correction one LENS receives at a view ray: half the
+// field's local per-channel amplitude, on the fixed angular kernel, at the
+// arm's scale (issue #103, stage 10). `picture` applies it with opposite
+// signs through the blend weights - `(w0 - w1)` times this - so the two
+// lenses move toward each other, equal and opposite, and the correction
+// cancels exactly at the 50/50 line, which is the oracle's own dark-line
+// fingerprint (docs/research/chromatic.md M-8.2).
+//
+// Zero by equality with the arm off: the scale is only ever written by a
+// pass the arm gates, the buffer is created zeroed, and the first test here
+// returns before any arithmetic touches the picture. Rust twin:
+// `chromatic::pull`.
+fn chromatic_half(ray: vec3<f32>) -> vec3<f32> {
+  let scale = band.chromatic.scale;
+  if scale == 0.0 {
+    return vec3<f32>(0.0);
+  }
+  let at = chromatic_cell(reframe.view_to_body * ray);
+  if at.z >= CHROMATIC_EDGE {
+    return vec3<f32>(0.0);
+  }
+  let low = u32(i32(at.x) % i32(CHROMATIC_CELLS) + i32(CHROMATIC_CELLS)) % CHROMATIC_CELLS;
+  let e0 = band.field[low];
+  let e1 = band.field[(low + 1u) % CHROMATIC_CELLS];
+  return chromatic_reach(e0.xyz, e1.xyz, at.y, at.z, scale);
+}
+
 "#;
 
 const WGSL: &str = r#"
 // The same group the draw binds, so the band correlates the very pictures the
-// frame after it will sample. The chroma planes are not declared: a doubled
-// edge is geometry and geometry is in the luma, and a bind group may carry
-// bindings a shader has no use for.
+// frame after it will sample. The chroma planes are declared since stage 10:
+// the CORRELATION stays luma-only - a doubled edge is geometry and geometry
+// is in the luma, and the chroma planes are a quarter of the resolution the
+// correlation wants - but a photometric MEAN over the patch does not care
+// about resolution, and the chromatic estimator reads its per-channel means
+// through them (docs/research/chromatic.md 4.1).
 @group(0) @binding(1) var luma0: texture_2d<f32>;
+@group(0) @binding(2) var chroma0: texture_2d<f32>;
 @group(0) @binding(3) var luma1: texture_2d<f32>;
+@group(0) @binding(4) var chroma1: texture_2d<f32>;
 @group(0) @binding(5) var samp: sampler;
 
 // A group of its own, because the two pipelines want the same buffer with
@@ -1765,6 +1875,13 @@ struct Watch {
   // frame, which sweeps the whole ring so that a reset reaches every
   // direction and not only the slice it landed on. Rust twin: `Watch::stride`.
   stride: f32,
+  // The chromatic arm's scale: 0 off - and every line of stage 10's work in
+  // this shader is behind a test of it - 1 on, 2 the sensitivity arm. Rust
+  // twin: `Watch::chromatic`, read once per process off KJERAG_CHROMATIC.
+  chromatic: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
 };
 
 // One lens's picture of the patch, and the other's picture of the patch plus
@@ -1785,6 +1902,15 @@ var<workgroup> winner: u32;
 // difference between a flat direction costing one patch and costing the whole
 // table (issue #103, stage 6).
 var<workgroup> textured: bool;
+// Whether the front patch is fully inside lens 0's picture at all. Its own
+// flag since stage 10, because the two refusals part ways there: a patch a
+// lens has no picture of refuses everything, while a patch that is merely
+// FLAT refuses the correlation and is still read for its colour at zero
+// shift - the easiest content to read a colour on, because what a
+// misregistration costs is proportional to the content's own gradient
+// (chromatic.md 4.3; on the owner's views 77 to 89 percent of the ring never
+// correlates and agrees with the far field to 0.002 to 0.007 ln, M-5).
+var<workgroup> covered: bool;
 // The photometry, summed cooperatively over the patch at that one winning
 // shift (issue #103, stage 3). One entry per lane, reduced by lane 0.
 //
@@ -1802,6 +1928,17 @@ var<workgroup> lit_n: array<f32, THREADS>;
 var<workgroup> pooled_weight: array<f32, THREADS>;
 var<workgroup> pooled_total: array<f32, THREADS>;
 var<workgroup> pooled_count: array<f32, THREADS>;
+// The chromatic photometry's partials, one entry per lane, reduced by lane 0
+// in `settle_chroma` (issue #103, stage 10). Their own arrays and not
+// `lit0`/`lit1`, because those are read by `read_photometry` inside `settle`
+// and the two reductions happen after the same barrier.
+var<workgroup> chroma_y0: array<f32, THREADS>;
+var<workgroup> chroma_y1: array<f32, THREADS>;
+var<workgroup> chroma_cb0: array<f32, THREADS>;
+var<workgroup> chroma_cr0: array<f32, THREADS>;
+var<workgroup> chroma_cb1: array<f32, THREADS>;
+var<workgroup> chroma_cr1: array<f32, THREADS>;
+var<workgroup> chroma_n: array<f32, THREADS>;
 
 // The map the band is read through: the camera left where it stands and the
 // view pointed nowhere, so a direction is a direction in the body's own frame
@@ -1849,13 +1986,35 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     front[i] = tap(0u, aim0, at.centre + a * at.perp + b * at.epi);
   }
   if lane == 0u {
-    textured = has_picture();
+    survey();
   }
   workgroupBarrier();
-  if !textured {
-    // Nothing to read here. The state keeps what it had and gives up the
-    // evidence behind it, which is the same rule a refusal takes.
+  if !covered {
+    // No picture of part of the patch. The state keeps what it had and gives
+    // up the evidence behind it, which is the same rule a refusal takes.
     if lane == 0u {
+      forget(cell, at);
+      if watch.chromatic != 0.0 {
+        forget_chroma(cell);
+      }
+    }
+    return;
+  }
+  if !textured {
+    // Flat: the correlation refuses it - flat sky correlates with anything -
+    // and the geometry keeps stage 6's answer exactly. The COLOUR is still
+    // read, at zero shift, where the flatness that refused the correlation
+    // is what makes the reading cheap: a photometry needs an alignment only
+    // in proportion to the content's own gradient (chromatic.md 4.3), and
+    // flat soil and sky are where the owner sees the defect.
+    if watch.chromatic != 0.0 {
+      chroma_photometry(lane, ZERO_SHIFT, at, aim0, aim1);
+      workgroupBarrier();
+      if lane == 0u {
+        settle_chroma(cell, 2.0);
+        forget(cell, at);
+      }
+    } else if lane == 0u {
       forget(cell, at);
     }
     return;
@@ -1884,11 +2043,171 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   // above just established and what no earlier exposure measurement in this
   // project had. Cooperative, so it costs a seventh of a sample per lane.
   photometry(lane, winner);
+  // The per-channel means beside it (issue #103, stage 10): at the winning
+  // shift where the geometry stands behind it, and at zero shift where it
+  // does not - the never-correlated population, which the measurement phase
+  // showed pools with the far field without bias (M-5). Every lane computes
+  // the same refusal from the same workgroup `winner`, so the shift is
+  // uniform.
+  if watch.chromatic != 0.0 {
+    chroma_photometry(lane, select(winner, ZERO_SHIFT, chroma_pinned()), at, aim0, aim1);
+  }
   workgroupBarrier();
 
   if lane == 0u {
     settle(cell, at);
+    if watch.chromatic != 0.0 {
+      settle_chroma(cell, select(1.0, 2.0, chroma_pinned()));
+    }
   }
+}
+
+// Whether the winning shift established the same content, asked the same way
+// `settle` asks: quiet or pinned against the epipolar window's edge is a
+// depth the band cannot carry and a colour read there would be read off
+// content that is not the same content. Rust twin: the population rule in
+// `chromatic::ChromaCell`.
+fn chroma_pinned() -> bool {
+  let found = winner;
+  let epi = i32(found / PERP_SHIFTS);
+  return scores[found] < KEEP || epi == 0 || epi == i32(EPI_SHIFTS) - 1;
+}
+
+// The two lenses' per-channel picture of this direction's patch: one lane's
+// share of the sums, at candidate shift `found`, in the planes' own raw
+// units (issue #103, stage 10).
+//
+// It re-derives each sample's two landings from the ray rather than reading
+// `front`/`back`, because those hold luma VALUES and this needs coordinates
+// - and because the flat path never filled `back` at all. The clip gate is
+// the photometry's own, taken on the luma pair so a clipped highlight drops
+// both sides together and biases nothing.
+fn chroma_photometry(lane: u32, found: u32, at: Ring, aim0: mat3x3<f32>, aim1: mat3x3<f32>) {
+  let width = u32(2 * HALF + 1);
+  let epi = i32(found / PERP_SHIFTS);
+  let perp = i32(found % PERP_SHIFTS) * PERP_STEP;
+  // Where the winning candidate put the back lens's patch, relative to the
+  // front's own sample: the same arithmetic `photometry` indexes the back
+  // grid with, read out as angles.
+  let da = f32(perp - PERP_STEPS * PERP_STEP) * STEP;
+  let db = f32(epi + EPI_FAR) * STEP;
+  var y0 = 0.0;
+  var y1 = 0.0;
+  var cb0 = 0.0;
+  var cr0 = 0.0;
+  var cb1 = 0.0;
+  var cr1 = 0.0;
+  var n = 0.0;
+  for (var i = lane; i < PATCH; i += THREADS) {
+    let a = f32(i32(i % width) - HALF) * STEP;
+    let b = f32(i32(i / width) - HALF) * STEP;
+    let l0 = look(0u, aim0, at.centre + a * at.perp + b * at.epi);
+    let l1 = look(1u, aim1, at.centre + (a + da) * at.perp + (b + db) * at.epi);
+    if !l0.inside || !l1.inside {
+      continue;
+    }
+    let uv0 = frame_uv(l0.pixel);
+    let uv1 = frame_uv(l1.pixel);
+    let bright0 = textureSampleLevel(luma0, samp, uv0, 0.0).r;
+    let bright1 = textureSampleLevel(luma1, samp, uv1, 0.0).r;
+    // A pair, both ways, exactly as `photometry` drops its pairs.
+    if bright0 < CLIP_LOW || bright1 < CLIP_LOW || bright0 > CLIP_HIGH || bright1 > CLIP_HIGH {
+      continue;
+    }
+    let pair0 = textureSampleLevel(chroma0, samp, uv0, 0.0).rg;
+    let pair1 = textureSampleLevel(chroma1, samp, uv1, 0.0).rg;
+    y0 += bright0;
+    y1 += bright1;
+    cb0 += pair0.r;
+    cr0 += pair0.g;
+    cb1 += pair1.r;
+    cr1 += pair1.g;
+    n += 1.0;
+  }
+  chroma_y0[lane] = y0;
+  chroma_y1[lane] = y1;
+  chroma_cb0[lane] = cb0;
+  chroma_cr0[lane] = cr0;
+  chroma_cb1[lane] = cb1;
+  chroma_cr1[lane] = cr1;
+  chroma_n[lane] = n;
+}
+
+// A direction whose colour could not be read this frame: the reading keeps
+// what it had and gives up the evidence behind it, the same rule every
+// refusal in this file takes. Rust twin: the evidence rule on
+// `chromatic::ChromaCell`.
+fn forget_chroma(cell: u32) {
+  var held = band.chroma[cell];
+  if watch.reset != 0.0 {
+    held = ChromaCell(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+  }
+  held.evidence -= held.evidence * ease(watch.seconds, TAU_GAIN);
+  band.chroma[cell] = held;
+}
+
+// The reduction, the refusals, and the write of one direction's chroma
+// reading. One thread, like `settle`, over partials the workgroup already
+// summed.
+//
+// The refusals are fail-upward - a patch that cannot be measured keeps what
+// it had and loses evidence, which is LESS correction, never more: a `wide`
+// (P010) frame, whose planes this pass reads a byte at a time and a reading
+// through half a word is not a measurement; and a patch under the level
+// floor on either side, because a chroma ratio on candle-dark content is
+// noise at four times the signal (chromatic.md M-3, the level floor the
+// measuring phase used).
+fn settle_chroma(cell: u32, population: f32) {
+  var y0 = 0.0;
+  var y1 = 0.0;
+  var cb0 = 0.0;
+  var cr0 = 0.0;
+  var cb1 = 0.0;
+  var cr1 = 0.0;
+  var n = 0.0;
+  for (var i = 0u; i < THREADS; i += 1u) {
+    y0 += chroma_y0[i];
+    y1 += chroma_y1[i];
+    cb0 += chroma_cb0[i];
+    cr0 += chroma_cr0[i];
+    cb1 += chroma_cb1[i];
+    cr1 += chroma_cr1[i];
+    n += chroma_n[i];
+  }
+  if reframe.wide > 0.5 || n <= 0.0 {
+    forget_chroma(cell);
+    return;
+  }
+  let mean_y0 = y0 / n;
+  let mean_y1 = y1 / n;
+  if mean_y0 < CHROMATIC_FLOOR || mean_y1 < CHROMATIC_FLOOR {
+    forget_chroma(cell);
+    return;
+  }
+  var held = band.chroma[cell];
+  if watch.reset != 0.0 {
+    held = ChromaCell(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+  }
+  // The means whole, like `Cell::tone`: one reading of the patch, and the
+  // only filter in the whole mechanism is the one on the pooled field. The
+  // EVIDENCE is eased, and a direction with none takes its first whole for
+  // stage 6's reason: there is nothing behind it for an ease to be
+  // continuous with.
+  let rgb0 = chromatic_rgb(vec3<f32>(mean_y0, cb0 / n, cr0 / n), reframe.limited);
+  let rgb1 = chromatic_rgb(vec3<f32>(mean_y1, cb1 / n, cr1 / n), reframe.limited);
+  held.m0r = rgb0.x;
+  held.m0g = rgb0.y;
+  held.m0b = rgb0.z;
+  held.m1r = rgb1.x;
+  held.m1g = rgb1.y;
+  held.m1b = rgb1.z;
+  held.lit = mean_y0;
+  let want = clamp(n / f32(PATCH), 0.0, 1.0);
+  let fresh = watch.reset != 0.0 || held.evidence <= 0.0;
+  let learn = select(ease(watch.seconds, TAU_GAIN), 1.0, fresh);
+  held.evidence += (want - held.evidence) * learn;
+  held.population = population;
+  band.chroma[cell] = held;
 }
 
 // The best-scoring candidate shift.
@@ -1971,16 +2290,19 @@ fn correlate(i: u32) -> f32 {
   return (sum_ab - sum_a * sum_b / count) / sqrt(var_a * var_b);
 }
 
-// Whether the front patch has enough picture in it to correlate: the gate that
-// keeps flat sky out, which correlates with anything and what it correlates
-// with is noise.
+// Whether the front patch is in the picture at all, and whether it has
+// enough in it to correlate: the gate that keeps flat sky out of the
+// correlation, which correlates with anything and what it correlates with is
+// noise.
 //
-// One test for the whole direction rather than one per candidate. It was
-// written inside `correlate` and reached only after that candidate's whole
-// double loop had run, so a direction of blank sky paid for the entire table
-// to be told there was nothing in it - which on a real seam is most of the
-// ring (issue #103, stage 6).
-fn has_picture() -> bool {
+// One walk for the whole direction rather than one per candidate (issue
+// #103, stage 6), and two answers since stage 10, because the two refusals
+// part ways: `covered` false refuses everything, `textured` false refuses
+// the correlation and leaves the colour readable at zero shift. `textured`
+// is exactly the answer the old `has_picture` gave.
+fn survey() {
+  covered = false;
+  textured = false;
   var sum = 0.0;
   var square = 0.0;
   var count = 0.0;
@@ -1989,14 +2311,15 @@ fn has_picture() -> bool {
     if a < 0.0 {
       // No picture of part of the patch. The correlation refuses that anyway,
       // one candidate at a time, and this refuses it once.
-      return false;
+      return;
     }
     sum += a;
     square += a * a;
     count += 1.0;
   }
+  covered = true;
   let spread = square - sum * sum / count;
-  return spread > 0.0 && sqrt(spread / count) >= CONTRAST;
+  textured = spread > 0.0 && sqrt(spread / count) >= CONTRAST;
 }
 
 // A direction with nothing in the picture to read. What it keeps is the
@@ -2305,6 +2628,95 @@ fn pool_along() {
   out.terms = solve5(&normal, &right);
   out.evidence = evidence;
   band.along = out;
+}
+
+// The chromatic field: the ring's per-channel disagreements, pooled along
+// azimuth on the raised cosine and eased over media time (issue #103, stage
+// 10). Rust twin: `chromatic::field_target` for the assembly, `ease` for the
+// step.
+//
+// Dispatched straight after `pool` in the same pass, so the tone it takes
+// out of the difference is the very gain the draw will apply: what the field
+// corrects is what the DRAWN picture still disagrees by, and the field and
+// stage 3's gain cannot correct the same thing twice. Only ever dispatched
+// with the arm on; with it off the field keeps the zero the buffer was
+// created with, which the lookup answers by equality.
+//
+// Each entry is a weighted mean over the kernel's window - `lit` squared
+// times the evidence, M-3's verdict - shrunk by its own kernel-weighted
+// evidence against RIDGE, the band's own fail-upward rule: thin support is
+// less correction, never more, and no support is exactly zero. The clamp per
+// reading is the runaway guard, CHROMATIC_LIMIT of the level the reading
+// sits on (chromatic.md M-4).
+@compute @workgroup_size(THREADS)
+fn pool_chroma(@builtin(local_invocation_index) lane: u32) {
+  // The same clamped symmetric split `tone_split` computes. Rust twin:
+  // `Tone::split`, via `chromatic::field_target`'s `tone_pair`.
+  let half = 0.5 * clamp(band.tone.log_gain, -LIMIT_LN, LIMIT_LN);
+  var tone = vec2<f32>(1.0, 1.0);
+  if half != 0.0 {
+    tone = vec2<f32>(exp(half), exp(-half));
+  }
+  for (var index = lane; index < AZIMUTHS; index += THREADS) {
+    let phi = f32(index) / f32(AZIMUTHS) * TAU;
+    var value = vec3<f32>(0.0);
+    var weight = 0.0;
+    var evidence = 0.0;
+    for (var other = 0u; other < AZIMUTHS; other += 1u) {
+      let read = band.chroma[other];
+      if read.evidence <= 0.0 {
+        continue;
+      }
+      let near = chromatic_smooth(chromatic_wrap(f32(other) / f32(AZIMUTHS) * TAU - phi));
+      if near <= 0.0 {
+        continue;
+      }
+      let limit = CHROMATIC_LIMIT * read.lit;
+      // Clamped at the guard, then the luminance projected out: the field
+      // is a hue and carries no level (`chromatic_neutral`'s own doc).
+      let d = chromatic_neutral(clamp(
+        tone.y * vec3<f32>(read.m1r, read.m1g, read.m1b)
+          - tone.x * vec3<f32>(read.m0r, read.m0g, read.m0b),
+        vec3<f32>(-limit),
+        vec3<f32>(limit),
+      ));
+      let trust = near * read.evidence * read.lit * read.lit;
+      value += trust * d;
+      weight += trust;
+      evidence += near * read.evidence;
+    }
+    var wanted = vec3<f32>(0.0);
+    var shrink = 0.0;
+    if weight > 0.0 {
+      shrink = evidence / (evidence + RIDGE);
+      wanted = value / weight * shrink;
+    }
+    var held = band.field[index];
+    if watch.reset != 0.0 {
+      // A seek re-seeds: the field walks in from nothing over TAU_GAIN
+      // rather than arriving whole or easing across the cut - a seam hue
+      // that lands in one frame is the flicker class this stage exists to
+      // not create, which is the same argument `pool` makes for the gain.
+      held = vec4<f32>(0.0);
+    }
+    let step = ease(watch.seconds, TAU_GAIN);
+    let eased = held.xyz + (wanted - held.xyz) * step;
+    band.field[index] = vec4<f32>(eased, shrink);
+  }
+  workgroupBarrier();
+  if lane != 0u {
+    return;
+  }
+  var behind = 0.0;
+  for (var index = 0u; index < AZIMUTHS; index += 1u) {
+    if band.chroma[index].evidence > 0.0 {
+      behind += 1.0;
+    }
+  }
+  var head = band.chromatic;
+  head.scale = watch.chromatic;
+  head.evidence = behind / f32(AZIMUTHS);
+  band.chromatic = head;
 }
 
 // Gaussian elimination with no pivoting on a 5x5. Safe without pivoting
