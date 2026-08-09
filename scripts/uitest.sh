@@ -1278,8 +1278,11 @@ returns_to_the_copied_view() {
 # A capture carrying no orientation record the app can use is the other case,
 # and the app says so at open. There the key is meant to do nothing, so the
 # same config read is the assertion with its sign flipped: a write would be
-# the defect. A DJI Osmo 360 `.OSV` is that capture today (`kjerag_meta`'s
-# `osmo`, "No IMU").
+# the defect. Two captures are that today: one whose telemetry carries no
+# orientation at all, and a DJI Osmo 360 `.OSV` whose own accelerometer
+# refuses the mounting its orientations would be read with (`kjerag_meta`'s
+# `osmo`, the plumb check). Both arrive here as the same `level:` line, which
+# is what this branches on.
 flips_the_horizon() {
 	local locked=$session/config/cosmic/dev.harding.Kjerag/v1/horizon_lock
 	local try=0

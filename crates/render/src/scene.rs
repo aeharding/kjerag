@@ -1101,20 +1101,28 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
     );
 
     let orientation = calibration.orientation(Filter::default());
-    match calibration.fused.is_empty() {
-        true => println!(
+    // What this line reports is whatever the file turned out to have, and a
+    // file can have none: a capture with no inertial record at all, and a DJI
+    // `.OSV` whose own gravity refused the mounting its orientations would have
+    // been read with (`kjerag_meta::osmo`, which has already said so and why).
+    // Neither has a sample count, a rate or an axis convention worth printing,
+    // and printing the first branch's zeros for them reads as a broken IMU
+    // rather than an absent one. The `level:` line below is what those two get.
+    if !calibration.imu.samples().is_empty() {
+        println!(
             "imu:    {} samples at {:.0} Hz, {} orientations, axes {}",
             calibration.imu.samples().len(),
             calibration.imu.rate_hz(),
             orientation.samples().len(),
             calibration.gyro.imu_orientation,
-        ),
+        );
+    } else if !orientation.is_empty() {
         // A camera that solved its own has no axis convention to name and no
         // filter to have run: what it wrote is what is held.
-        false => println!(
+        println!(
             "imu:    {} orientations the camera solved for itself, one a frame",
             orientation.samples().len()
-        ),
+        );
     }
     // Said out loud, because the alternative is a menu item that does nothing
     // and a pilot who cannot tell that from a broken one. A capture whose

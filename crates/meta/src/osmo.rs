@@ -151,19 +151,21 @@
 //! composition between the file's inertial frame and the optical frame
 //! [`BODY`] lands in, not a handedness in the quaternion.
 //!
-//! **That rotation is now measured, and it is a knob rather than a default.**
-//! The same instrument, run over the whole corpus instead of one dip, states
-//! one turn per instant - it is the azimuth between two vectors, not a fit -
-//! and the SCATTER of those over instants that lean in different directions is
-//! what separates the families. Over 23 instants of the three unit B files and
-//! **177 degrees of lean azimuth**, only one of the four families leaves a
-//! constant behind: a mirror in `y` turned `+86.8` degrees, scatter 3.3 rms,
-//! against 61 to 66 rms for each of the other three. It is the same constant
-//! on each file alone (`+88.3`, `+84.5`, `+85.7`) and dropping any whole file
-//! moves it by at most 1.8 degrees. Through the owner's own dip that leaves
-//! **0.4 degrees of residual tilt where the shipped reading leaves 20.9 and no
-//! lock at all leaves 11.4**, and the app's own locked picture, read at the
-//! peak of the dip, comes out level to 0 to 2 degrees.
+//! **That rotation is measured, and it is [`MOUNTING`]: a mirror in `y` and a
+//! quarter turn.** The same instrument, run over the whole corpus instead of
+//! one dip, states one turn per instant - it is the azimuth between two
+//! vectors, not a fit - and the SCATTER of those over instants that lean in
+//! different directions is what separates the families. Over 23 instants of
+//! the three unit B files and **177 degrees of lean azimuth**, only one of the
+//! four families leaves a constant behind: a mirror in `y` turned `+86.8`
+//! degrees, scatter 3.3 rms, against 61 to 66 rms for each of the other three.
+//! It is the same constant on each file alone (`+88.3`, `+84.5`, `+85.7`) and
+//! dropping any whole file moves it by at most 1.8 degrees. Through the
+//! owner's own dip that leaves **0.4 degrees of residual tilt where the
+//! shipped reading leaves 20.9 and no lock at all leaves 11.4**, and the app's
+//! own locked picture, read at the peak of the dip, comes out level to 0 to 2
+//! degrees. The owner tested that build and passed it: *"OSV video output
+//! looks good, approved"* (2026-08-08).
 //!
 //! **What it means is that the file's inertial frame is left handed against
 //! the optical one**, which is also why the heading looked settled while the
@@ -172,14 +174,21 @@
 //! apart, and it picked the one that gets the tilt wrong. The file's own two
 //! streams agree with each other under the mirror as they did before, because
 //! the accelerometer is written in that same left-handed frame - which is what
-//! [`say_plumb`] prints, and why the mirror families miss the file's own
-//! gravity by 2 degrees on leaned frames where the conjugate families miss it
-//! by 9.3 against a null of 9.4.
+//! [`Plumb`] measures, and why the mirror family misses the file's own gravity
+//! by 2 degrees on leaned frames where the conjugate family misses it by 9.3
+//! against a null of 9.4.
 //!
-//! **None of it is the default.** [`MOUNT`] stages the candidates and unset is
-//! the shipped composition byte for byte, because what is measured here is one
-//! instrument on one corpus and the eye has not passed on it yet.
-//! `docs/ROADMAP.md` (2026-08-08) has the candidate table and every control.
+//! **It is a constant of the model and not a knob, and every file is asked to
+//! confirm it.** The turn was staged behind a `KJERAG_MOUNT` environment
+//! variable while the eye was deciding; it is baked now, because a setting
+//! that moves the horizon is the calibration ritual zero-config playback
+//! forbids, and because there is something better than an escape hatch to put
+//! in its place: the file's own accelerometer is a second, independent
+//! statement of where down is, and [`Plumb`] checks the mounting against it
+//! **per file** and refuses the lock when the file disagrees. The other three
+//! candidates are not in the code any more; the table above and
+//! `docs/ROADMAP.md` (2026-08-08) are their record, and re-staging them is a
+//! patch, not a feature that has to ship for ever in case.
 //!
 //! **Why the oracles that pinned this preferred the shipped reading**, so the
 //! next pass does not reuse them: neither measured a distance from level. The
@@ -232,7 +241,6 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::OnceLock;
 
 use super::calibration::{
     CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Pose, Size,
@@ -429,8 +437,6 @@ fn sample(file: &mut File, at: At) -> Result<Vec<u8>, Error> {
 /// stream is not there.
 fn orientation(file: &mut File, track: &Track) -> OrientationTrack {
     let mut samples = Vec::with_capacity(track.at.len());
-    // Only gathered when a mounting was asked for: unset, this reads and
-    // allocates exactly what it read before the knob existed.
     let mut plumb = Vec::new();
     for (at, offset_us) in track.at.iter().zip(&track.offset_us) {
         let Ok(record) = sample(file, *at) else {
@@ -439,24 +445,30 @@ fn orientation(file: &mut File, track: &Track) -> OrientationTrack {
         let Some(world_from_body) = pointing(&record) else {
             continue;
         };
-        if let Some(mount) = mounting()
-            && let (Some(raw), Some(measured)) = (raw_pointing(&record), accelerometer(&record))
-        {
-            plumb.push((mount.read(raw).normalized(), measured));
+        if let (Some(raw), Some(measured)) = (raw_pointing(&record), accelerometer(&record)) {
+            plumb.push((MOUNTING.read(raw).normalized(), measured));
         }
         samples.push(OrientationSample {
             offset_us: *offset_us,
             world_from_body,
         });
     }
-    if let Some(mount) = mounting() {
-        say_plumb(mount, &leaned(&plumb, &track.offset_us));
+    // The gate. Every file is asked whether its own gravity agrees with the
+    // mounting the orientations above were composed with, and a file that says
+    // no comes out with no orientation at all - which is the same empty track a
+    // file with no inertial record at all comes out with, and reaches the pilot
+    // as the same disabled menu item and the same `level:` line
+    // (`kjerag_render::scene`). One refusal, one shape, whatever the reason.
+    let verdict = Plumb::read(&leaned(&plumb, &track.offset_us));
+    verdict.say();
+    if !verdict.held() {
+        return OrientationTrack::default();
     }
     from_first_heading(samples)
 }
 
 /// Each frame's lean, its low-passed accelerometer and its reading, which is
-/// what [`say_plumb`] scores.
+/// what [`Plumb::read`] scores.
 fn leaned(plumb: &[(Quat, [f64; 3])], offset_us: &[i64]) -> Vec<(f64, [f64; 3], Quat)> {
     let span = offset_us.last().unwrap_or(&0) - offset_us.first().unwrap_or(&0);
     let rate_hz = match span > 0 {
@@ -516,18 +528,13 @@ fn from_first_heading(mut samples: Vec<OrientationSample>) -> OrientationTrack {
 ///   bodies, so it goes on the right where a Kjerag body vector arrives and
 ///   its inverse on the left where the answer comes back.
 fn pointing(record: &[u8]) -> Option<Quat> {
-    let raw = raw_pointing(record)?;
-    let Some(mount) = mounting() else {
-        let written = raw.normalized().conjugate();
-        return Some(BODY_QUAT.conjugate().times(written).times(BODY_QUAT));
-    };
-    let written = mount.read(raw).normalized();
+    let written = MOUNTING.read(raw_pointing(record)?).normalized();
     Some(
         BODY_QUAT
             .conjugate()
             .times(written)
             .times(BODY_QUAT)
-            .times(mount.turn()),
+            .times(MOUNTING.turn()),
     )
 }
 
@@ -554,25 +561,9 @@ fn accelerometer(record: &[u8]) -> Option<[f64; 3]> {
     Some([f32s(block, 2)?, f32s(block, 3)?, f32s(block, 4)?])
 }
 
-/// Research only: which IMU-to-optical MOUNTING this run composes with, from
-/// `KJERAG_MOUNT`. Unset - which is every shipped run - is no mounting at all
-/// and the reading above, byte for byte.
-///
-/// **What the knob is for.** The lock's heading is proven and its lean is not:
-/// through a dip the shipped composition leaves nearly twice the tilt that
-/// switching the lock off leaves, and the picture says why - the lean
-/// magnitude is right to 0.18 degrees and the direction that lean points,
-/// round the camera's own vertical, is wrong by about 135. That is a constant
-/// rotation between the frame the file's inertial stream lives in and the
-/// optical frame [`BODY`] lands in, and no reading of the four components is
-/// it. This stages the candidates for that rotation as arms of one binary, so
-/// the eye can pick one on a dip without a rebuild per arm - the same reason
-/// `kjerag_render::projection`'s handover width is an environment variable.
-const MOUNT: &str = "KJERAG_MOUNT";
-
-/// A candidate mounting: which reading of the four components it is a family
-/// of, and how far round the camera's own vertical the optical frame sits from
-/// the inertial one.
+/// The mounting: which reading of the four components the file's inertial
+/// frame is, and how far round the camera's own vertical the optical frame
+/// sits from it.
 ///
 /// **The two halves are one model and not two knobs.** A reading and a turn
 /// compose as `BODY^-1 . reading(q) . BODY . Rot(up, turn)`, and negating `x`
@@ -582,18 +573,16 @@ const MOUNT: &str = "KJERAG_MOUNT";
 /// readings of the last session are four families sampled at 0 and 180 only,
 /// which is why none of its eight rows held the horizon: the answer is at 87.
 struct Mounting {
-    name: &'static str,
     /// The signs the reading puts on `(x, y, z)`. `(-1, -1, -1)` is the
-    /// conjugate this file shipped with.
+    /// conjugate this file shipped with until 2026-08-08.
     reading: [f64; 3],
     /// The turn about Kjerag's own up axis, in degrees, applied on the body
     /// side after the change of basis.
     turn_deg: f64,
     /// The signs the same reading puts on the accelerometer, which is a vector
     /// in the same inertial frame and has to be carried through the same
-    /// reflection for [`say_plumb`] to be comparing two of one thing.
+    /// reflection for [`Plumb`] to be comparing two of one thing.
     plumb: [f64; 3],
-    why: &'static str,
 }
 
 impl Mounting {
@@ -611,8 +600,9 @@ impl Mounting {
     }
 }
 
-/// The candidates, derived from the picture over 23 instants of the three unit
-/// B files, and enumerated so one can be refused rather than assumed.
+/// **The mounting an Osmo 360 is read with**, derived from the picture over 23
+/// instants of the three unit B files and confirmed per file against the
+/// file's own gravity ([`Plumb`]).
 ///
 /// The instrument is the vertical vanishing point of a **lock off** render,
 /// which measures where the world's up sits in Kjerag's camera body from the
@@ -644,134 +634,171 @@ impl Mounting {
 /// that is why the heading looked settled while the tilt was not: a mirror
 /// reverses the heading exactly as a conjugate does, so the turn measurement of
 /// 88d9f3c could not tell them apart and picked the one that got the tilt
-/// wrong. The accelerometer says the same from the other side, and
-/// [`say_plumb`] prints it per file.
-static CANDIDATES: [Mounting; 4] = [
-    Mounting {
-        name: "a",
-        reading: [-1.0, 1.0, -1.0],
-        turn_deg: 86.8,
-        plumb: [1.0, -1.0, 1.0],
-        why: "the measurement: mirror in y, the lean-weighted mean of 23 instants over \
-              three unit B files and 177 degrees of lean azimuth, scatter 3.3 rms",
-    },
-    Mounting {
-        name: "b",
-        reading: [-1.0, 1.0, -1.0],
-        turn_deg: 90.0,
-        plumb: [1.0, -1.0, 1.0],
-        why: "the same family at a quarter turn: 3.2 degrees off the measurement, inside \
-              its own 3.3 rms scatter, and it puts the mirror plane on the 45 degree \
-              diagonal between the two lenses, which is a mounting a screw could make",
-    },
-    Mounting {
-        name: "c",
-        reading: [-1.0, -1.0, -1.0],
-        turn_deg: -107.1,
-        plumb: [1.0, 1.0, 1.0],
-        why: "the shipped reading's own best turn - the turned-not-reflected alternative \
-              the last session could not rule out. It fits no constant at all, 62.1 rms",
-    },
-    Mounting {
-        name: "d",
-        reading: [-1.0, 1.0, 1.0],
-        turn_deg: -90.9,
-        plumb: [-1.0, 1.0, 1.0],
-        why: "the other reflection, 61.2 rms and heading inconsistent: the control that \
-              says the eye is not simply preferring whichever arm moved least",
-    },
-];
+/// wrong. The accelerometer says the same from the other side, per file, which
+/// is [`Plumb`].
+///
+/// **Why the quarter turn and not the `+86.8` that was measured.** The two are
+/// 3.2 degrees apart, which is inside the measurement's own 3.3 rms scatter, so
+/// the corpus cannot separate them; a right angle is what a screw can hold and
+/// `+86.8` is what an estimator returns, and it puts the mirror plane on the 45
+/// degree diagonal between the two lenses. The eye ruled on this arm and not on
+/// the other: `+90.0` is the build the owner tested and approved.
+///
+/// **Everything about it is one hardware constant**, so it is `const` and not
+/// configuration. The three refuted families are gone from the code; the table
+/// above is their record.
+const MOUNTING: Mounting = Mounting {
+    reading: [-1.0, 1.0, -1.0],
+    turn_deg: 90.0,
+    plumb: [1.0, -1.0, 1.0],
+};
 
-/// Which mounting this run asked for, read once and written nowhere.
-fn mounting() -> Option<&'static Mounting> {
-    static CHOSEN: OnceLock<Option<&'static Mounting>> = OnceLock::new();
-    *CHOSEN.get_or_init(|| {
-        let asked = std::env::var(MOUNT).ok()?;
-        let found = CANDIDATES.iter().find(|c| c.name == asked.trim());
-        match found {
-            Some(mount) => {
-                eprintln!(
-                    "osmo:   research mounting on, {MOUNT}={}: the orientation is composed with \
-                     a turn of {:+.1} degrees about the camera's own vertical - {}",
-                    mount.name, mount.turn_deg, mount.why
-                );
-                Some(mount)
-            }
-            None => {
-                let names = CANDIDATES
-                    .iter()
-                    .map(|c| c.name)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                eprintln!(
-                    "osmo:   {MOUNT}={asked} names no candidate ({names}); composing the \
-                     shipped reading with no mounting"
-                );
-                None
-            }
-        }
-    })
-}
-
-/// The per-file plumb check: the gravity the composition predicts against the
-/// gravity the file measured, in the file's own inertial axes.
+/// What the file's own gravity says about [`MOUNTING`], which is what decides
+/// whether this capture's horizon is held.
+///
+/// **The self-check the lock is gated on.** [`MOUNTING`] is one constant
+/// derived from one corpus, and a constant derived from a corpus is a guess
+/// about every file outside it. The file carries a second, independent
+/// statement of where down is - its accelerometer - so the guess is checked
+/// against it per file, and a file that contradicts it does not get its
+/// horizon held. That is the house pattern: verify, or refuse gracefully and
+/// say why.
 ///
 /// **What it can see and what it cannot.** The accelerometer and the
 /// quaternion are two streams of one frame, so the mounting TURN cancels out
-/// of this - it rotates both - and the number below says nothing about the 87
-/// degrees. What it does say is whether the READING is the right family: the
-/// conjugate one misses the file's own plumb line by about 10 degrees on
-/// leaned frames where the mirror family misses it by about 2, against a null
-/// of about 10 for a camera assumed never to lean. It also catches a file
-/// whose stream is not gravity at all, which is what unit A's is not: its
-/// magnitude is 2.74 g with 1.29 sd.
+/// of this - it rotates both - and the numbers below say nothing about the 90
+/// degrees. What they do say is whether the READING is the right family, which
+/// is the half that can be catastrophically wrong: a mirror read as a rotation
+/// puts the lean in the wrong direction entirely.
 ///
 /// Read on frames leaning more than [`LEANED_DEG`] because every reading
 /// predicts the same lean MAGNITUDE - `1 - 2(x^2 + y^2)` carries no sign - so
-/// they differ only in azimuth and only in proportion to the lean, and on an
-/// upright camera this instrument says nothing.
-fn say_plumb(mount: &Mounting, plumb: &[(f64, [f64; 3], Quat)]) {
-    let mut errors: Vec<f64> = Vec::new();
-    let mut nulls: Vec<f64> = Vec::new();
-    let mut magnitudes: Vec<f64> = Vec::new();
-    for (lean, measured, written) in plumb {
-        magnitudes.push(norm(*measured));
-        if *lean <= LEANED_DEG {
-            continue;
-        }
-        let predicted = written.conjugate().rotate([0.0, 0.0, 1.0]);
-        let mut up = [0.0; 3];
-        let length = norm(*measured);
-        if length <= 0.0 {
-            continue;
-        }
-        for axis in 0..3 {
-            up[axis] = -measured[axis] / length * mount.plumb[axis];
-        }
-        errors.push(between(predicted, up));
-        nulls.push(between([0.0, 0.0, 1.0], up));
-    }
-    if errors.is_empty() {
-        eprintln!(
-            "osmo:   plumb check: no frame leans more than {LEANED_DEG:.0} degrees, so the \
-             accelerometer cannot separate one reading from another here"
-        );
-        return;
-    }
-    eprintln!(
-        "osmo:   plumb check, mounting {}: the reading misses the file's own gravity by \
-         {:.1} degrees at the median over {} leaned frames, against {:.1} for a camera \
-         assumed upright. |a| is {:.2} g at the median (1.00 is gravity alone)",
-        mount.name,
-        median(&mut errors),
-        errors.len(),
-        median(&mut nulls),
-        median(&mut magnitudes),
-    );
+/// they differ only in azimuth and only in proportion to the lean. **On an
+/// upright camera this instrument says nothing, and it does not need to**: the
+/// error it exists to catch is a lean pointed the wrong way, and a file with no
+/// lean in it has no such error to show. So [`Plumb::Blind`] holds the lock
+/// rather than refusing it.
+enum Plumb {
+    /// The file's own gravity is where the mounting predicts, so the lock is
+    /// held.
+    Agrees(Reading),
+    /// Nothing in this file leans far enough for the accelerometer to separate
+    /// one reading from another. The lock is held: see above.
+    Blind,
+    /// The file's own gravity is NOT where the mounting predicts, so this
+    /// capture's orientation is not read and the lock refuses.
+    Disagrees(Reading),
 }
+
+/// What one file's plumb check measured, in degrees, at the median over the
+/// frames that leaned.
+struct Reading {
+    /// How far the mounting's predicted up sits from the measured one.
+    miss: f64,
+    /// The same for a camera assumed never to lean, which is what the mounting
+    /// has to beat to have said anything.
+    null: f64,
+    /// The measured `|a|`, in g. 1.00 is gravity alone.
+    magnitude: f64,
+    frames: usize,
+}
+
+/// How far the reading may miss the file's own gravity and still be believed,
+/// in degrees.
+///
+/// **Measured, 2026-08-09, over the whole seven-file corpus** (the sweep is in
+/// the PR body). The six unit B files put the mirror family at 1.6, 2.0, 2.7,
+/// 2.9, 2.9 and 3.8 degrees; the one unit A file puts it at 23.0. So the bar
+/// is twice the worst file that agrees and a third of the one that does not,
+/// and no file in the corpus is anywhere near it.
+const PLUMB_CEILING_DEG: f64 = 8.0;
 
 /// Where the plumb check stops being blind, in degrees of lean.
 const LEANED_DEG: f64 = 8.0;
+
+impl Plumb {
+    /// The check itself: the gravity the composition predicts against the
+    /// gravity the file measured, in the file's own inertial axes.
+    ///
+    /// **Two bars, and each has a job.** The reading must miss gravity by less
+    /// than [`PLUMB_CEILING_DEG`], which bounds what a held horizon can be
+    /// wrong by; and it must miss by less than the null, which is what makes
+    /// this a verification rather than a tolerance - a mounting no better than
+    /// assuming the camera never leans has told us nothing, whatever its
+    /// absolute number. On this corpus the two agree on every file, which is
+    /// why both can be simple: the six that pass beat their own nulls by 1.9 to
+    /// 4.7 times, and the one that fails loses to its own null by 1.6.
+    fn read(plumb: &[(f64, [f64; 3], Quat)]) -> Self {
+        let mut errors: Vec<f64> = Vec::new();
+        let mut nulls: Vec<f64> = Vec::new();
+        let mut magnitudes: Vec<f64> = Vec::new();
+        for (lean, measured, written) in plumb {
+            magnitudes.push(norm(*measured));
+            if *lean <= LEANED_DEG {
+                continue;
+            }
+            let predicted = written.conjugate().rotate([0.0, 0.0, 1.0]);
+            let mut up = [0.0; 3];
+            let length = norm(*measured);
+            if length <= 0.0 {
+                continue;
+            }
+            for axis in 0..3 {
+                up[axis] = -measured[axis] / length * MOUNTING.plumb[axis];
+            }
+            errors.push(between(predicted, up));
+            nulls.push(between([0.0, 0.0, 1.0], up));
+        }
+        if errors.is_empty() {
+            return Self::Blind;
+        }
+        let reading = Reading {
+            frames: errors.len(),
+            miss: median(&mut errors),
+            null: median(&mut nulls),
+            magnitude: median(&mut magnitudes),
+        };
+        match reading.miss < PLUMB_CEILING_DEG && reading.miss < reading.null {
+            true => Self::Agrees(reading),
+            false => Self::Disagrees(reading),
+        }
+    }
+
+    /// The one line this prints per file, at open, whichever way it went.
+    ///
+    /// It is said out loud in every case and not only the refusal, because the
+    /// number is the evidence that the horizon being held IS held on something,
+    /// and a pilot comparing two captures wants to see the same line twice.
+    fn say(&self) {
+        match self {
+            Self::Blind => eprintln!(
+                "osmo:   plumb check: no frame leans more than {LEANED_DEG:.0} degrees, so the \
+                 file's own gravity cannot confirm the mounting here and does not need to; the \
+                 horizon is held"
+            ),
+            Self::Agrees(reading) => eprintln!(
+                "osmo:   plumb check: the mounting misses this file's own gravity by {:.1} \
+                 degrees at the median over {} leaned frames, against {:.1} for a camera assumed \
+                 upright, so it is confirmed and the horizon is held. |a| is {:.2} g at the \
+                 median (1.00 is gravity alone)",
+                reading.miss, reading.frames, reading.null, reading.magnitude,
+            ),
+            Self::Disagrees(reading) => eprintln!(
+                "osmo:   plumb check: the mounting misses this file's own gravity by {:.1} \
+                 degrees at the median over {} leaned frames, against {:.1} for a camera assumed \
+                 upright, so this capture's own record contradicts it and Kjerag will not hold a \
+                 horizon it cannot confirm. |a| is {:.2} g at the median (1.00 is gravity \
+                 alone). The picture is unaffected and the view is yours to pan",
+                reading.miss, reading.frames, reading.null, reading.magnitude,
+            ),
+        }
+    }
+
+    /// Whether the orientation this file recorded may be used.
+    fn held(&self) -> bool {
+        !matches!(self, Self::Disagrees(_))
+    }
+}
 
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -876,9 +903,9 @@ mod field {
     /// which is the plumb line the frame convention was pinned against.
     pub const POINTING: u32 = 9;
     /// The accelerometer beside it, in g, three `f32`s at fields 2 to 4. Read
-    /// only by the mounting knob's plumb check ([`super::say_plumb`]), which
-    /// is the one thing in the file that can say a reading is the wrong family
-    /// without a picture to look at.
+    /// only by the mounting's own self-check ([`super::Plumb`]), which is the
+    /// one thing in the file that can say a reading is the wrong family
+    /// without a picture to look at, and which the horizon lock is gated on.
     pub const ACCELEROMETER: u32 = 10;
 }
 
@@ -1301,6 +1328,17 @@ mod tests {
         }
     }
 
+    /// The same orientation with its heading taken off, which is the frame
+    /// every assertion about a mounting is made in.
+    ///
+    /// [`from_first_heading`] removes the first sample's heading from the whole
+    /// track, so a constant yaw - which is exactly what [`MOUNTING`]'s quarter
+    /// turn is on an upright camera - is not a thing the composition can be
+    /// wrong about. Comparing with it left on would be asserting a datum.
+    fn bare(q: Quat) -> Quat {
+        Quat::about_down(q.heading()).conjugate().times(q)
+    }
+
     #[track_caller]
     fn near(actual: f64, expected: f64, tolerance: f64) {
         assert!(
@@ -1471,14 +1509,35 @@ mod tests {
     /// then through the composition `kjerag_render` does with it, a direction
     /// fixed in the world has to come back into the body turned by exactly
     /// that much, which is what leaves it on the same pixel.
+    ///
+    /// **Measured against the capture's first frame and not against an
+    /// absolute datum**, which is both what the shipped path does and the only
+    /// claim that means anything. [`from_first_heading`] takes the first
+    /// sample's heading off the whole track, so what a pilot ever sees is the
+    /// turn RELATIVE to where the camera was looking when the file opened;
+    /// [`MOUNTING`]'s quarter turn is a constant yaw on an upright camera
+    /// (`a_mounting_turn_is_a_pure_heading_on_an_upright_camera`) and comes off
+    /// with it. So the fixture is two frames - level, then turned - run through
+    /// the real datum step, and the assertion is on the second.
     #[test]
     fn a_wearer_who_turns_leaves_the_world_where_it_was() {
         for turn_deg in [10.0f64, -35.0, 90.0, 133.0, 179.0] {
             let turn = turn_deg.to_radians();
             // What the camera writes: the world seen from a body that turned.
             let (sin, cos) = (-turn * 0.5).sin_cos();
-            let written = frame_record([cos as f32, 0.0, 0.0, sin as f32]);
-            let world_from_body = pointing(&written).expect("no orientation in the record");
+            let frames = [[1.0f32, 0.0, 0.0, 0.0], [cos as f32, 0.0, 0.0, sin as f32]];
+            let track = from_first_heading(
+                frames
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, written)| OrientationSample {
+                        offset_us: index as i64 * 33_000,
+                        world_from_body: pointing(&frame_record(written))
+                            .expect("no orientation in the record"),
+                    })
+                    .collect(),
+            );
+            let world_from_body = track.samples()[1].world_from_body;
             // Kjerag's world vertical is `-y`, and a turn about it is what
             // `about_down` names, the other way round because down is `+y`.
             let expected = Quat::about_down(-turn);
@@ -1495,6 +1554,9 @@ mod tests {
             near(ahead[0], turn.sin(), 1e-6);
             near(ahead[1], 0.0, 1e-6);
             near(ahead[2], turn.cos(), 1e-6);
+            // The first frame is the datum, so it comes out looking ahead
+            // whatever the mounting is.
+            near(track.samples()[0].world_from_body.heading(), 0.0, 1e-9);
         }
     }
 
@@ -1521,9 +1583,13 @@ mod tests {
 
     /// A camera held upright is upright, and one that leans leans the way it
     /// leaned: the file's own vertical, carried through, is the world's.
+    ///
+    /// With the heading off, for the reason above: the mounting's quarter turn
+    /// leaves an upright camera upright and pointed a constant 90 degrees
+    /// round, and the constant is removed a step later.
     #[test]
     fn an_upright_camera_comes_out_upright() {
-        let level = pointing(&frame_record([1.0, 0.0, 0.0, 0.0])).expect("no orientation");
+        let level = bare(pointing(&frame_record([1.0, 0.0, 0.0, 0.0])).expect("no orientation"));
         assert!(
             level.angle_to(Quat::IDENTITY).to_degrees() < 1e-4,
             "{level:?}"
@@ -1546,14 +1612,14 @@ mod tests {
     /// The turn is about the camera's own up axis, so on an upright camera it
     /// IS a turn about the world's vertical - a pure yaw, and
     /// [`from_first_heading`] takes the first frame's yaw off every sample. So
-    /// a candidate changes an upright frame by a constant heading and by
+    /// the mounting changes an upright frame by a constant heading and by
     /// nothing else, and a whole capture of upright frames comes out where it
     /// came out before. What it does move, and is meant to, is the tilt, in
     /// proportion to the lean.
     #[test]
     fn a_mounting_turn_is_a_pure_heading_on_an_upright_camera() {
-        for candidate in &CANDIDATES {
-            let turn = candidate.turn();
+        {
+            let turn = MOUNTING.turn();
             // The camera's own up in Kjerag's frame, which the turn is about.
             let up = turn.rotate([0.0, -1.0, 0.0]);
             near(up[0], 0.0, 1e-12);
@@ -1562,8 +1628,8 @@ mod tests {
             // And it is exactly the yaw `from_first_heading` removes.
             near(
                 turn.heading().to_degrees(),
-                -candidate.turn_deg,
-                1e-9 * candidate.turn_deg.abs().max(1.0),
+                -MOUNTING.turn_deg,
+                1e-9 * MOUNTING.turn_deg.abs().max(1.0),
             );
         }
     }
@@ -1601,7 +1667,6 @@ mod tests {
             let named = compose(sign(other), 0.0);
             // Equal up to a world yaw, which `from_first_heading` removes, so
             // the two are compared with their headings taken off.
-            let bare = |q: Quat| Quat::about_down(q.heading()).conjugate().times(q);
             assert!(
                 bare(half).angle_to(bare(named)).to_degrees() < 1e-9,
                 "{reading:?} at 180 is not {other:?}: {half:?} against {named:?}"
@@ -1609,13 +1674,16 @@ mod tests {
         }
     }
 
-    /// Unset, this file reads exactly what it read before the knob existed.
+    /// **The composition that ships, written out in full and by hand**, so that
+    /// changing [`MOUNTING`] fails a test rather than moving a horizon quietly.
+    ///
+    /// The mirror is not the conjugate: a conjugate negates all three of `x`,
+    /// `y` and `z`, and this negates `x` and `z` only, which is what makes the
+    /// file's inertial frame left handed against the optical one. The quarter
+    /// turn goes on the body side, after the change of basis. The composition
+    /// this pins is the one the owner tested and approved on 2026-08-08.
     #[test]
-    fn no_mounting_asked_for_is_the_shipped_composition() {
-        assert!(
-            std::env::var(MOUNT).is_err(),
-            "the test run named a mounting"
-        );
+    fn the_shipped_composition_is_the_mirror_and_the_quarter_turn() {
         let raw = Quat {
             w: 0.83,
             v: [0.21, -0.37, 0.35],
@@ -1631,12 +1699,29 @@ mod tests {
             w: f64::from(raw.w as f32),
             v: raw.v.map(|c| f64::from(c as f32)),
         };
+        let mirrored = Quat {
+            w: raw.w,
+            v: [-raw.v[0], raw.v[1], -raw.v[2]],
+        }
+        .normalized();
         let want = BODY_QUAT
+            .conjugate()
+            .times(mirrored)
+            .times(BODY_QUAT)
+            .times(Quat::about_down(-90f64.to_radians()));
+        let got = pointing(&record).expect("no orientation in the record");
+        assert!(got.angle_to(want).to_degrees() < 1e-12, "{got:?}");
+
+        // And it is NOT what shipped before the mounting was measured, which is
+        // the whole of what changed for the pilot: the conjugate with no turn.
+        let was = BODY_QUAT
             .conjugate()
             .times(raw.normalized().conjugate())
             .times(BODY_QUAT);
-        let got = pointing(&record).expect("no orientation in the record");
-        assert!(got.angle_to(want).to_degrees() < 1e-12, "{got:?}");
+        assert!(
+            got.angle_to(was).to_degrees() > 1.0,
+            "the mounting composes to what shipped before it, so nothing was baked"
+        );
     }
 
     /// The accelerometer beside the quaternion is read, and it is the one
@@ -1651,6 +1736,137 @@ mod tests {
         // way: a camera this nearly upright leans about a degree.
         let lean = between([0.0, 0.0, 1.0], got.map(|c| -c));
         assert!(lean < 2.0, "{lean}");
+    }
+
+    /// One frame's worth of what [`Plumb::read`] scores: a lean in degrees, a
+    /// measured accelerometer, and the reading whose predicted up is compared
+    /// against it.
+    ///
+    /// The reading is built from the up direction it is meant to predict, so a
+    /// test says what it wants in world terms and the fixture composes the
+    /// quaternion that says it.
+    fn plumb_frame(
+        lean_deg: f64,
+        predicted: [f64; 3],
+        measured: [f64; 3],
+    ) -> (f64, [f64; 3], Quat) {
+        // `Plumb::read` takes the predicted up as `written.conjugate()` turning
+        // the file's `+z`, so the quaternion wanted here is the one whose
+        // conjugate does that.
+        let axis = [-predicted[1], predicted[0], 0.0];
+        let sine = norm(axis);
+        let written = match sine > 0.0 {
+            false => Quat {
+                w: 1.0,
+                v: [0.0; 3],
+            },
+            true => {
+                let angle = sine.atan2(predicted[2]);
+                let half = 0.5 * angle;
+                Quat {
+                    w: half.cos(),
+                    v: axis.map(|c| c / sine * half.sin()),
+                }
+            }
+        };
+        (lean_deg, measured, written.conjugate())
+    }
+
+    /// **The gate holds when the file's own gravity confirms the mounting.**
+    ///
+    /// Down measured where the mounting predicts it, on frames that lean: the
+    /// reading agrees, and the capture's orientations are used.
+    #[test]
+    fn a_file_whose_gravity_confirms_the_mounting_holds_its_horizon() {
+        // The mounting's `plumb` signs are carried onto the measurement, so a
+        // fixture that wants "measured down agrees with predicted up" writes
+        // the measurement through them.
+        let up = [0.3, 0.0, (1.0f64 - 0.09).sqrt()];
+        let measured = std::array::from_fn(|i| -up[i] * MOUNTING.plumb[i]);
+        let frames: Vec<_> = (0..40).map(|_| plumb_frame(20.0, up, measured)).collect();
+        let verdict = Plumb::read(&frames);
+        assert!(
+            matches!(verdict, Plumb::Agrees(_)),
+            "a file whose gravity is where the mounting says was not believed"
+        );
+        assert!(verdict.held());
+    }
+
+    /// **The gate refuses when the file's own gravity contradicts it**, which
+    /// is the whole reason the mounting is allowed to be one baked constant.
+    ///
+    /// The fixture is the failure the corpus actually shows: the lean is the
+    /// right size and points somewhere else entirely, which is what a reading
+    /// of the wrong handedness does. The refusal is an EMPTY orientation
+    /// track, the same shape a capture with no inertial record at all comes
+    /// out with, so it reaches the pilot as the disabled menu item and the
+    /// `level:` line and never as an error.
+    #[test]
+    fn a_file_whose_gravity_contradicts_the_mounting_holds_no_horizon() {
+        let predicted = [0.3, 0.0, (1.0f64 - 0.09).sqrt()];
+        // The same lean, turned most of the way round the vertical.
+        let elsewhere = [-0.3, 0.0, (1.0f64 - 0.09).sqrt()];
+        let measured = std::array::from_fn(|i| -elsewhere[i] * MOUNTING.plumb[i]);
+        let frames: Vec<_> = (0..40)
+            .map(|_| plumb_frame(20.0, predicted, measured))
+            .collect();
+        let verdict = Plumb::read(&frames);
+        let Plumb::Disagrees(reading) = &verdict else {
+            panic!("a file whose gravity says otherwise was believed anyway");
+        };
+        assert!(
+            reading.miss > reading.null,
+            "the fixture does not actually lose to its own null: {} against {}",
+            reading.miss,
+            reading.null
+        );
+        assert!(!verdict.held());
+    }
+
+    /// **A mounting that is inside the ceiling but no better than assuming the
+    /// camera never leans is still refused**, which is what makes this a
+    /// verification and not a tolerance.
+    ///
+    /// Without the null bar a file could pass on a number that says nothing:
+    /// this fixture misses by less than [`PLUMB_CEILING_DEG`] and the null
+    /// misses by less still.
+    #[test]
+    fn a_mounting_no_better_than_no_mounting_is_refused() {
+        let predicted = [0.10, 0.0, (1.0f64 - 0.01).sqrt()];
+        // Barely leaned, so the null is small, and the reading points the
+        // other side of it.
+        let measured_up = [-0.02, 0.0, (1.0f64 - 0.0004).sqrt()];
+        let measured = std::array::from_fn(|i| -measured_up[i] * MOUNTING.plumb[i]);
+        let frames: Vec<_> = (0..40)
+            .map(|_| plumb_frame(20.0, predicted, measured))
+            .collect();
+        let Plumb::Disagrees(reading) = Plumb::read(&frames) else {
+            panic!("a reading that beat nothing was believed");
+        };
+        assert!(
+            reading.miss < PLUMB_CEILING_DEG,
+            "the fixture is refused by the ceiling, so it does not test the null bar: {}",
+            reading.miss
+        );
+    }
+
+    /// **A capture that never leans is held, not refused.**
+    ///
+    /// The check is blind on an upright camera by construction - every reading
+    /// predicts the same lean magnitude, so they differ only in proportion to
+    /// the lean - and being blind is not evidence against. It costs nothing to
+    /// be wrong about, either: the error this check exists to catch is a lean
+    /// pointed the wrong way, and a file with no lean in it cannot show one.
+    #[test]
+    fn a_capture_that_never_leans_is_held_rather_than_refused() {
+        let up = [0.0, 0.0, 1.0];
+        let measured = std::array::from_fn(|i| -up[i] * MOUNTING.plumb[i]);
+        let frames: Vec<_> = (0..40).map(|_| plumb_frame(0.5, up, measured)).collect();
+        let verdict = Plumb::read(&frames);
+        assert!(matches!(verdict, Plumb::Blind), "a still camera was scored");
+        assert!(verdict.held());
+        // And a file with no inertial record at all reaches the same place.
+        assert!(Plumb::read(&[]).held());
     }
 
     /// A box filter over a stride leaves gravity behind, which is the whole
