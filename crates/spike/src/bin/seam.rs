@@ -78,7 +78,7 @@
 use std::path::{Path, PathBuf};
 
 use kjerag_media::Fallible;
-use kjerag_meta::{CalibrationSet, Lens, Mat3, Quat, Size as MetaSize};
+use kjerag_meta::{CalibrationSet, Filter, Lens, Mat3, Quat, Size as MetaSize};
 use kjerag_render::seam::{
     self, Found, Knob, Probe, Reading, Refused, Where, least_squares, mapped, moved, read_ring,
     read_ring_centred, ring, rms, turned, unit,
@@ -95,6 +95,7 @@ fn main() -> Fallible<()> {
         Mode::Parity => parity(&options),
         Mode::Fit => fit(&options),
         Mode::Solve => solve(&options),
+        Mode::Register => register(&options),
     }
 }
 
@@ -115,6 +116,11 @@ enum Mode {
     /// a given reframed picture's does. Run it against a PLANT before ever
     /// running it against an export (docs/research/parity-protocol.md).
     Solve,
+    /// Where an export is pointed and how wide it is, found without believing
+    /// a single one of the stitcher's own labels. What `mode=solve` has to be
+    /// started from, and the thing section 8 of the protocol called the
+    /// blocker.
+    Register,
 }
 
 /// The inter-lens baseline in millimetres, which is what sets parallax and is
@@ -1109,6 +1115,134 @@ struct Options {
     /// falls away as the view is deliberately mis-aimed. The control that says
     /// a registration score is a score and not a constant.
     aim: bool,
+    // ---- mode=register. The search that has to run BEFORE a solve, because
+    // the solve is local and the export arrives with nothing but a maker's
+    // label on it.
+    /// Every source instant the registration is run at, in seconds of the
+    /// source file's own clock. Three or more is the point: one instant's
+    /// answer is a coincidence until another instant says the same thing.
+    instants: Vec<f64>,
+    /// The Panini `d` values swept, or empty for "whatever `panini=` said".
+    ///
+    /// Their "Distortion" slider is a label like every other label here, so a
+    /// told `d` is a place to start a sweep and not a number to believe.
+    dset: Vec<f64>,
+    /// The scale window, as OUR family's full field of view in degrees. It is
+    /// absolute and not a factor on their label on purpose: a window centred
+    /// on a number nobody trusts is a window that trusts it.
+    fovlo: f64,
+    /// The top of that window, or zero for "as far as the projection itself
+    /// goes" -- Panini's own pole is at `lambda = acos(-d)`, so `d = 0.9`
+    /// cannot draw more than 308 degrees whatever a search asks for.
+    fovhi: f64,
+    /// The three working widths of the cascade: the sphere sweep, the middle
+    /// refinement, and the final polish (`size=`).
+    coarse: u32,
+    mid: u32,
+    /// How many coarse candidates are carried into the refinement, and how far
+    /// apart they are made to sit first.
+    keepn: usize,
+    /// The high pass, as a fraction of the working picture's width.
+    ///
+    /// This is the whole difference between a peak and the flat 0.7 the
+    /// protocol's section 8 recorded. A raw correlation between our picture
+    /// and theirs is dominated by the biggest thing in both of them, which is
+    /// the sky/ground brightness ramp, and that ramp is there whatever the aim
+    /// is: it scores 0.73 at the pose and 0.74 half a degree off it. Taking a
+    /// local mean out leaves the structure, which is the only part of a
+    /// picture that knows where it is.
+    hp: f64,
+    /// How many of the sweep's aims are carried into the densification.
+    ///
+    /// Deep, and the depth is measured rather than chosen. The sweep's own
+    /// ranking is a filter and not a judgement: at 16 pixels across it scores
+    /// the export's own answer at about 0.45 when the nearest grid point sits
+    /// a degree off it, against a sweep maximum of 0.633 and a 99.9th
+    /// percentile of 0.485 -- so the right answer sits around the 99.8th
+    /// percentile of two million aims, which is rank four thousand. A pool cut
+    /// at a hundred, or at a thousand, does not contain it, and every run that
+    /// cut it there reported the export's second basin instead. The pool is
+    /// cut where the answer is, and the 48 pixel densification below is what
+    /// turns the pool back into a ranking.
+    pool: usize,
+    /// How wide the picture is at the SPHERE SWEEP, which is not the same as
+    /// `coarse` and is the number that makes the sweep possible at all.
+    ///
+    /// A correlation between two band-passed pictures falls off over about ONE
+    /// PIXEL OF THE WORKING PICTURE, whatever that pixel is worth in degrees.
+    /// So a sweep at `W` pixels across a view `F` degrees wide can only find
+    /// what it steps within about `F/W` of, and a grid stepping `F/8` needs
+    /// `W` no larger than 16. At 48 it needs `F/24`, which is fourteen times
+    /// the grid. Measured at 360 s on the creek: at 48 pixels the export's own
+    /// answer scores 0.92 where it stands and under 0.65 at the nearest point
+    /// a fifth-of-a-view grid visited, which is not enough to outrank a wrong
+    /// basin that landed on a grid point -- and every run built on that sweep
+    /// reported the wrong basin.
+    sweepw: u32,
+    /// The high pass used by the SWEEP, which is a different number from the
+    /// one the refinement uses and for a reason that is the whole of
+    /// coarse-to-fine.
+    ///
+    /// A sphere grid stepped by a fifth of the view can only be as good as the
+    /// objective's own capture radius, and that radius is set by the width of
+    /// the structure left after the high pass: measured at 360 s on the creek,
+    /// with the pass at an eighth of the width, the export's own answer scores
+    /// 0.9312 where it stands and 0.469 two degrees away, so the grid point
+    /// nearest the answer does not outrank a wrong basin that happened to land
+    /// on a grid point. A wider pass at the sweep leaves broader structure,
+    /// which is blunter and reaches further -- which is what a coarse stage is
+    /// for.
+    hpc: f64,
+    /// How coarsely the scale window is stepped, as a ratio between one swept
+    /// field of view and the next. The refinement is continuous, so this only
+    /// has to be fine enough that some sampled scale lands inside the right
+    /// basin.
+    ratio: f64,
+    /// How much local contrast a pixel of THEIR picture has to carry before
+    /// the correlation is allowed to score it, in luma codes.
+    ///
+    /// Not a taste. Outdoors, most of a frame is sky; sky with its local mean
+    /// taken out is sensor noise; and a correlation that scores noise against
+    /// noise gives every aim the same nothing over half the picture, which is
+    /// exactly the dilution that let a rival 64 degrees away come within 0.005
+    /// of the answer.
+    texture: f64,
+    /// Studio's own pan, tilt and roll for this export, in Studio's numbers.
+    ///
+    /// Given these, the search stops being four dimensional. Their reframe is
+    /// direction locked, so their view is fixed in the WORLD; the file's own
+    /// orientation track says where the body was at each instant; and the only
+    /// thing left unknown between their frame and ours is **one angle**, the
+    /// heading datum the IMU integration started from. That is a 1-D sweep of
+    /// a few hundred scores instead of a 4-D one of two million, and it is the
+    /// difference between a search that is information-limited on a 20 degree
+    /// view and one that is not.
+    ///
+    /// Their tilt and roll are used as given because they were MEASURED to be
+    /// ours: on the July-14 exports a told tilt of -90 came back as a world
+    /// pitch of -88.4 and a told 3.5 as +5.4, and a told roll of 0 as -0.6.
+    /// The scale is not taken on trust at all -- it is swept over the same
+    /// generous window the label-free search uses, and the refinement is free
+    /// to move all five numbers afterwards.
+    told: Vec<f64>,
+    /// Start the cascade from a known aim instead of sweeping the sphere:
+    /// `yaw,pitch,roll,fov,d`.
+    ///
+    /// Not a shortcut for the answer -- a seeded run reports no prominence,
+    /// because prominence is a statement about a search and a seeded run has
+    /// not made one. It is here so the objective's own settings can be argued
+    /// about in seconds rather than in minutes, and so a pose found at one
+    /// instant can be scored at another.
+    seed: Vec<f64>,
+    /// Whether the found aim is turned back into the world frame with the
+    /// file's own IMU before it is compared across instants.
+    ///
+    /// It has to be. Studio's reframe is gyro-stabilized, so their view is
+    /// fixed in the WORLD and ours is solved in the camera BODY's frame: the
+    /// same export registers at a different body aim on every instant, by
+    /// exactly the camera's own motion, and comparing the body angles across
+    /// instants would report the flight rather than the export.
+    world: bool,
     /// Tikhonov damping, in output pixels of cost per [`KNOB_STEPS`] of step.
     ///
     /// It exists for one reason and it is not conditioning-in-general: a view
@@ -1166,6 +1300,22 @@ impl Options {
             lag: 0.0,
             damp: 0.002,
             aim: false,
+            instants: Vec::new(),
+            dset: Vec::new(),
+            fovlo: 12.0,
+            fovhi: 0.0,
+            coarse: 48,
+            mid: 192,
+            keepn: 24,
+            hp: 0.125,
+            hpc: 0.3,
+            sweepw: 16,
+            pool: 6000,
+            ratio: 1.15,
+            texture: 8.0,
+            seed: Vec::new(),
+            told: Vec::new(),
+            world: true,
         };
         for arg in args {
             let (key, value) = arg.split_once('=').ok_or(USAGE)?;
@@ -1178,6 +1328,7 @@ impl Options {
                         "parity" => Mode::Parity,
                         "fit" => Mode::Fit,
                         "solve" => Mode::Solve,
+                        "register" => Mode::Register,
                         _ => return Err(format!("no mode called {value}. {USAGE}").into()),
                     };
                 }
@@ -1213,6 +1364,42 @@ impl Options {
                 "lag" => options.lag = value.parse()?,
                 "damp" => options.damp = value.parse()?,
                 "aim" => options.aim = value.parse::<u32>()? != 0,
+                "instants" => {
+                    options.instants = value
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<Vec<f64>, _>>()?;
+                }
+                "dset" => {
+                    options.dset = value
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<Vec<f64>, _>>()?;
+                }
+                "fovlo" => options.fovlo = value.parse()?,
+                "fovhi" => options.fovhi = value.parse()?,
+                "coarse" => options.coarse = value.parse()?,
+                "mid" => options.mid = value.parse()?,
+                "keepn" => options.keepn = value.parse()?,
+                "hp" => options.hp = value.parse()?,
+                "hpc" => options.hpc = value.parse()?,
+                "sweepw" => options.sweepw = value.parse()?,
+                "pool" => options.pool = value.parse()?,
+                "ratio" => options.ratio = value.parse()?,
+                "told" => {
+                    options.told = value
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<Vec<f64>, _>>()?;
+                }
+                "seed" => {
+                    options.seed = value
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<Vec<f64>, _>>()?;
+                }
+                "texture" => options.texture = value.parse()?,
+                "world" => options.world = value.parse::<u32>()? != 0,
                 "fit" => options.fit = value.parse::<u32>()? != 0,
                 "panini" => options.panini = value.parse()?,
                 "from" => options.from = value.parse()?,
@@ -1388,14 +1575,16 @@ fn triple(value: &str) -> Fallible<[f64; 3]> {
     }
 }
 
-const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend|parity|fit|solve] [also=<other.insv>] \
+const USAGE: &str = "usage: seam <file.insv> [mode=residual|render|blend|parity|fit|solve|register] [also=<other.insv>] \
      [fix=roll:0.8,yaw:-2] [fit=1] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [bands=14,8,4] [out=x.png] \
      [from=seconds] [count=frames] [patches=n] [panini=d] \
      [span=deg] [step=deg] [along=deg] [across=deg] [off=deg] [keep=r] [contrast=codes] \
      [knobs=roll,cx,cy,...] [control=1] \
      mode=solve: [view=yaw,pitch,roll] [viewoff=yaw,pitch,roll] [aspect=1.7778] \
      [plant=cx:8,pitch:0.2 | against=<export.mp4> lag=seconds] [start=roll:0,...] \
-     [sites=n] [patch=px] [search=px] [rounds=n] [floor=r]";
+     [sites=n] [patch=px] [search=px] [rounds=n] [floor=r] \
+     mode=register: against=<export.mp4> [instants=30,60,90] [lag=seconds] [panini=d] [dset=0,0.45,0.9] \
+     [fovlo=12] [fovhi=0] [coarse=48] [mid=192] [size=480] [keepn=24] [hp=0.125] [hpc=0.3] [sweepw=16] [pool=6000] [ratio=1.15] [texture=8] [seed=yaw,pitch,roll,fov,d] [told=pan,tilt,roll] [world=1]";
 
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
     let values: Vec<f64> = values.collect();
@@ -3025,6 +3214,39 @@ impl Export {
             })
             .collect()
     }
+
+    /// The same picture at `to`, each output pixel the MEAN of the input
+    /// pixels it covers.
+    ///
+    /// [`Self::resampled`] point-samples, which is right for a target the
+    /// solve reads at nearly its own resolution and wrong for a search that
+    /// looks at a 1920-wide export 48 pixels across: point-sampling a factor
+    /// of forty is aliasing, and two differently aliased pictures do not
+    /// correlate on the content they share. This is the coarse search's own
+    /// reader for that reason.
+    fn averaged(&self, to: Shape) -> Vec<f64> {
+        let (width, height) = (self.shape.width as usize, self.shape.height as usize);
+        let step = (
+            f64::from(self.shape.width) / f64::from(to.width),
+            f64::from(self.shape.height) / f64::from(to.height),
+        );
+        (0..to.pixels())
+            .map(|index| {
+                let (x, y) = (index % to.width, index / to.width);
+                let x0 = (f64::from(x) * step.0) as usize;
+                let y0 = (f64::from(y) * step.1) as usize;
+                let x1 = ((f64::from(x + 1) * step.0) as usize).clamp(x0 + 1, width);
+                let y1 = ((f64::from(y + 1) * step.1) as usize).clamp(y0 + 1, height);
+                let mut total = 0.0;
+                for row in y0..y1 {
+                    for column in x0..x1 {
+                        total += self.luma[row * width + column];
+                    }
+                }
+                total / ((x1 - x0) * (y1 - y0)) as f64
+            })
+            .collect()
+    }
 }
 
 fn export_frame(path: &Path, from: f64) -> Fallible<Export> {
@@ -3241,6 +3463,1517 @@ fn agree(ours: &[f64], theirs: &[f64]) -> f64 {
     }
 }
 
+// ------------------------------------- the label-free aim and scale search
+//
+// docs/research/parity-protocol.md section 8 called this the blocker: the
+// solve is local, it needs to start within about fifteen degrees of the true
+// scale and a search radius of the true aim, and on a real Studio export
+// nothing got it there. Two things were wrong, and both of them are here.
+//
+// **The objective was the picture and not its structure.** A zero-mean
+// correlation between two whole pictures is carried by the biggest thing in
+// both, which outdoors is the sky-to-ground ramp, and that ramp is in the
+// frame whatever the view is pointed at. It scored 0.7366 at the pose and
+// 0.7380 half a degree off it -- a ladder with the wrong sign, which is what
+// "flat" meant. [`Detail`] takes a local mean out of both pictures before
+// they are compared, and what is left is the only part of a picture that
+// knows where it is.
+//
+// **The search believed the label.** Their FOV number was used to centre the
+// scale ladder, so a label that means something else put the search in the
+// wrong basin and, on the tiny planet, walked it into the top of its own
+// window. The sweep here is over an absolute range of OUR family's own field
+// of view, from `fovlo` to the projection's own pole, and their number is
+// read at the end to say what it turned out to mean.
+
+/// A picture with its low frequencies taken out, and a record of where it has
+/// any content at all.
+///
+/// The mask is not a detail. Our render leaves a pixel at zero where no lens
+/// reached it, and a Panini view wide enough to be a tiny planet has corners
+/// like that; correlating those against Studio's real corners would score the
+/// shape of our own coverage.
+struct Detail {
+    value: Vec<f64>,
+    valid: Vec<bool>,
+    /// Where the picture has enough local contrast to say anything at all.
+    ///
+    /// Only the TARGET's copy of this is read, and it is the second half of
+    /// the discrimination problem. Half of an outdoor frame is sky, sky is
+    /// sensor noise once the local mean is out of it, and a correlation that
+    /// includes it is being asked to match noise to noise: every aim scores
+    /// the same nothing there, which dilutes the part of the score that
+    /// separates aims. Scoring only where their picture has content is what
+    /// makes a wrong aim pay for putting our sky over their hillside.
+    textured: Vec<bool>,
+}
+
+/// How much local contrast a neighbourhood has to have before it is believed,
+/// in luma codes.
+///
+/// The normalization below divides by the local spread, which is what stops
+/// one strong edge from being the whole correlation. Divided by nothing it
+/// would also amplify a flat patch of sky into pure sensor noise and put that
+/// in the sum with the same weight as a hillside. Four codes is a little above
+/// this camera's noise at these exposures, so flat stays near zero and texture
+/// comes up to one.
+const CONTRAST_FLOOR: f64 = 4.0;
+
+impl Detail {
+    /// A picture reduced to local contrast: the neighbourhood mean taken out,
+    /// and what is left divided by the neighbourhood's own spread.
+    ///
+    /// Both halves are load bearing, and each was measured against the export
+    /// it was written for.
+    ///
+    /// - **The mean out** is the difference between a peak and the flat 0.7
+    ///   the protocol's section 8 recorded: a raw correlation is carried by
+    ///   the sky-to-ground ramp, which is in the frame at every aim.
+    /// - **The spread out** is the difference between a peak that stands
+    ///   0.03 above its best rival and one that stands 0.2 above it. What is
+    ///   left after the ramp goes is the horizon EDGE, which is one line, and
+    ///   any aim that puts a horizon at the same height scores nearly as well
+    ///   as the right one. Dividing by the local spread caps that edge at the
+    ///   same weight as a square of hillside, and hillside is the part of a
+    ///   picture that knows which hillside it is.
+    fn of(luma: &[f64], shape: Shape, fraction: f64, texture: f64) -> Self {
+        let radius = ((f64::from(shape.width) * fraction).round() as usize).max(1);
+        let valid: Vec<bool> = luma.iter().map(|code| *code > 0.0).collect();
+        let (mean, spread) = local_moments(luma, &valid, shape, radius);
+        let value = luma
+            .iter()
+            .zip(mean.iter().zip(&spread))
+            .map(|(code, (mean, spread))| {
+                (code - mean) / (spread * spread + CONTRAST_FLOOR * CONTRAST_FLOOR).sqrt()
+            })
+            .collect();
+        let textured = valid
+            .iter()
+            .zip(&spread)
+            .map(|(valid, spread)| *valid && *spread >= texture)
+            .collect();
+        Self {
+            value,
+            valid,
+            textured,
+        }
+    }
+
+    fn textured_pixels(&self) -> usize {
+        self.textured.iter().filter(|on| **on).count()
+    }
+}
+
+/// The mean and the standard deviation of each pixel's own neighbourhood,
+/// over the pixels that have content in them, by summed-area table so the
+/// radius costs nothing.
+fn local_moments(
+    luma: &[f64],
+    valid: &[bool],
+    shape: Shape,
+    radius: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let (width, height) = (shape.width as usize, shape.height as usize);
+    let stride = width + 1;
+    let mut sum = vec![0.0; stride * (height + 1)];
+    let mut squares = vec![0.0; stride * (height + 1)];
+    let mut count = vec![0.0; stride * (height + 1)];
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let (code, one) = match valid[index] {
+                true => (luma[index], 1.0),
+                false => (0.0, 0.0),
+            };
+            for (table, value) in [
+                (&mut sum, code),
+                (&mut squares, code * code),
+                (&mut count, one),
+            ] {
+                table[(y + 1) * stride + x + 1] =
+                    value + table[y * stride + x + 1] + table[(y + 1) * stride + x]
+                        - table[y * stride + x];
+            }
+        }
+    }
+    let area = |table: &[f64], x0: usize, y0: usize, x1: usize, y1: usize| {
+        table[y1 * stride + x1] + table[y0 * stride + x0]
+            - table[y0 * stride + x1]
+            - table[y1 * stride + x0]
+    };
+    let mut means = vec![0.0; width * height];
+    let mut spreads = vec![0.0; width * height];
+    for index in 0..width * height {
+        let (x, y) = (index % width, index / width);
+        let x0 = x.saturating_sub(radius);
+        let y0 = y.saturating_sub(radius);
+        let x1 = (x + radius + 1).min(width);
+        let y1 = (y + radius + 1).min(height);
+        let n = area(&count, x0, y0, x1, y1);
+        if n <= 0.0 {
+            continue;
+        }
+        let mean = area(&sum, x0, y0, x1, y1) / n;
+        means[index] = mean;
+        spreads[index] = (area(&squares, x0, y0, x1, y1) / n - mean * mean)
+            .max(0.0)
+            .sqrt();
+    }
+    (means, spreads)
+}
+
+/// Zero-mean normalized cross-correlation of two [`Detail`]s, over the pixels
+/// both of them have content in.
+fn agree_detail(ours: &Detail, theirs: &Detail, want: usize) -> f64 {
+    let mut n = 0.0;
+    let (mut sum_a, mut sum_b) = (0.0, 0.0);
+    for index in 0..ours.value.len().min(theirs.value.len()) {
+        if !(ours.valid[index] && theirs.textured[index]) {
+            continue;
+        }
+        n += 1.0;
+        sum_a += ours.value[index];
+        sum_b += theirs.value[index];
+    }
+    // Half of their content is the floor. A pose whose coverage barely
+    // overlaps theirs can correlate perfectly on the sliver that does, and a
+    // sliver is not a registration.
+    if n < 0.5 * want as f64 {
+        return -1.0;
+    }
+    let (mean_a, mean_b) = (sum_a / n, sum_b / n);
+    let (mut covariance, mut var_a, mut var_b) = (0.0, 0.0, 0.0);
+    for index in 0..ours.value.len().min(theirs.value.len()) {
+        if !(ours.valid[index] && theirs.textured[index]) {
+            continue;
+        }
+        let (a, b) = (ours.value[index] - mean_a, theirs.value[index] - mean_b);
+        covariance += a * b;
+        var_a += a * a;
+        var_b += b * b;
+    }
+    match var_a > 0.0 && var_b > 0.0 {
+        true => covariance / (var_a * var_b).sqrt(),
+        false => -1.0,
+    }
+}
+
+/// One candidate for what an export is a picture of: where it points, how
+/// wide it is in OUR family's terms, and which Panini it is drawn in.
+#[derive(Clone, Copy, Debug)]
+struct Aim {
+    angles: [f64; 3],
+    fov: f64,
+    d: f64,
+}
+
+impl Aim {
+    /// The projection, as one number covering both families.
+    ///
+    /// Zero and up is Panini's `d`, which is what Studio's "Distortion"
+    /// slider is on a flat reframe. **Below zero is the compression family**,
+    /// `c = -d`: `theta = atan(rho tan(c H))/c`, rectilinear at `c = 1`,
+    /// equidistant in the limit at `c = 0`, and **stereographic at exactly
+    /// `c = 0.5`**.
+    ///
+    /// The second family is not decoration. Their tiny planet's horizon is a
+    /// CIRCLE in the delivered picture -- measured on the July-14 export at
+    /// 360 s, 721.5 pixels of radius across against 717.5 down, which is
+    /// round to within 0.6 percent -- and Panini cannot draw a circular
+    /// horizon at a nadir aim whatever `d` is: with the axis down, `y = s tan
+    /// phi` sends the horizon to infinity up and down the picture and leaves
+    /// it as two straight verticals at `lambda = +/-90`. A search that only
+    /// had Panini in it could not draw their picture at any scale, which is
+    /// why the field of view walked into the top of its own window instead of
+    /// finding a peak. This family is radially symmetric by construction and
+    /// draws a circular horizon at every `c`.
+    fn look(self) -> Look {
+        Look {
+            angles: self.angles,
+            fov: self.fov,
+            compression: match self.d < 0.0 {
+                true => -self.d,
+                false => 1.0,
+            },
+            panini: match self.d < 0.0 {
+                true => -1.0,
+                false => self.d,
+            },
+        }
+    }
+
+    fn projection(self) -> String {
+        match self.d < 0.0 {
+            true => format!(
+                "compression {:.3}{}",
+                -self.d,
+                match (-self.d - 0.5).abs() < 0.02 {
+                    true => " (stereographic)",
+                    false => "",
+                }
+            ),
+            false => format!("panini d {:.3}", self.d),
+        }
+    }
+
+    /// The widest this family can draw at this projection, less a margin.
+    ///
+    /// Panini's own pole: `s = (d+1)/(d+cos lambda)` runs to infinity at
+    /// `lambda = acos(-d)`, so `d = 0` cannot draw 180 degrees and `d = 0.9`
+    /// cannot draw 309. The compression family's pole is `c H = 90 deg`, so
+    /// `c = 0.5` cannot draw past 360. A search allowed past either is a
+    /// search that will report a number from beyond the edge of its own
+    /// projection, which is what the saturated 328 in section 8 of the
+    /// protocol was.
+    fn ceiling(d: f64) -> f64 {
+        match d < 0.0 {
+            true => 0.96 * 180.0 / -d,
+            false => 0.96 * 2.0 * (-d).clamp(-1.0, 1.0).acos().to_degrees(),
+        }
+    }
+
+    fn nudged(mut self, axis: usize, step: f64) -> Option<Self> {
+        match axis {
+            0..=2 => self.angles[axis] += step,
+            3 => self.fov *= (step / 50.0).exp(),
+            // The two families do not meet except at Panini 0 = compression
+            // 1, so a step never crosses between them: a search that changed
+            // family mid-polish would be comparing two answers and reporting
+            // one.
+            // Bounded, because below about sixty degrees of view the
+            // projection is not identifiable at all: every smooth radial map
+            // is linear over a small enough picture, so the refinement will
+            // trade `d` against the field of view without the score moving.
+            // Unbounded it reported Panini d = 9.4 on a twenty degree view,
+            // which is not a projection anybody ships -- it is the search
+            // telling us, in the only way it can, that this view does not
+            // constrain the number.
+            _ if self.d < 0.0 => self.d = (self.d + step / 40.0).clamp(-1.0, -0.3),
+            _ => self.d = (self.d + step / 40.0).clamp(0.0, 2.5),
+        }
+        (self.fov > 4.0 && self.fov < Self::ceiling(self.d)).then_some(self)
+    }
+}
+
+/// How far apart two aims point, as one angle: the rotation that takes one to
+/// the other.
+fn apart(a: &Aim, b: &Aim) -> f64 {
+    norm(
+        orientation(a.angles)
+            .conjugate()
+            .times(orientation(b.angles))
+            .rotation_vector(),
+    )
+    .to_degrees()
+}
+
+/// What a whole sweep's scores looked like, so "there is a peak" is a claim
+/// about a distribution rather than about one number.
+#[derive(Clone)]
+struct Spread {
+    bins: Vec<u64>,
+    total: u64,
+}
+
+impl Spread {
+    fn new() -> Self {
+        Self {
+            bins: vec![0; 400],
+            total: 0,
+        }
+    }
+
+    fn add(&mut self, score: f64) {
+        let at = (((score + 1.0) * 200.0) as isize).clamp(0, 399) as usize;
+        self.bins[at] += 1;
+        self.total += 1;
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.bins.iter_mut().zip(&other.bins) {
+            *mine += theirs;
+        }
+        self.total += other.total;
+    }
+
+    /// The score `share` of the sweep came in under, to the bin's own width.
+    fn quantile(&self, share: f64) -> f64 {
+        let want = (share * self.total as f64) as u64;
+        let mut seen = 0;
+        for (at, count) in self.bins.iter().enumerate() {
+            seen += count;
+            if seen >= want {
+                return f64::from(at as u32) / 200.0 - 1.0;
+            }
+        }
+        1.0
+    }
+}
+
+/// How finely the sphere is stepped at a given scale: an eighth of what the
+/// view can see, which is what a 16 pixel sweep picture can capture.
+fn sweep_step(fov: f64) -> f64 {
+    (fov / 8.0).clamp(1.5, 20.0)
+}
+
+/// The sphere sweep: every aim on a grid whose step is a fraction of what the
+/// candidate view can see, at every scale in the window, at every `d` asked
+/// for.
+///
+/// The step is not a constant. A fifteen degree grid finds nothing in a
+/// twenty degree view and is a waste of a day in a three hundred degree one,
+/// so it is the field of view over five, and the roll step is the aim step
+/// divided by the sine of the view's own angular radius -- which is what a
+/// roll displaces the rim by.
+///
+/// **The shortlist is kept per scale, not per sweep.** One scale scoring a
+/// little better at 48 pixels across would otherwise fill the whole list and
+/// the refinement would never visit the others, which is a search that has
+/// decided the answer at the resolution least able to decide it. Every scale
+/// in the window comes out of here with its own best aims, and the scale
+/// profile printed later is what that buys: a curve with a peak in it, rather
+/// than a number.
+#[allow(clippy::too_many_arguments)]
+fn sphere_sweep(
+    lenses: &[Lens],
+    frame: Size,
+    ours: &Pair,
+    cells: &[kjerag_render::Cell],
+    theirs: &Detail,
+    shape: Shape,
+    hp: f64,
+    texture: f64,
+    scales: &[(f64, f64)],
+    keep: usize,
+) -> (Vec<Vec<(f64, Aim)>>, Spread) {
+    let mut work: Vec<(usize, f64, f64)> = Vec::new();
+    for (which, (fov, _)) in scales.iter().enumerate() {
+        let step = sweep_step(*fov);
+        let turns = (360.0 / step).round().max(1.0) as i32;
+        for turn in 0..turns {
+            work.push((which, f64::from(turn) * 360.0 / f64::from(turns), 0.0));
+        }
+    }
+    let want = theirs.textured_pixels();
+    let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let mut found: Vec<Vec<(f64, Aim)>> = vec![Vec::new(); scales.len()];
+    let mut spread = Spread::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for lane in 0..threads {
+            let (work, scales) = (&work, &scales);
+            handles.push(scope.spawn(move || {
+                let mut best: Vec<Vec<(f64, Aim)>> = vec![Vec::new(); scales.len()];
+                let mut seen = Spread::new();
+                for (which, yaw, _) in work.iter().copied().skip(lane).step_by(threads) {
+                    let (fov, d) = scales[which];
+                    let step = sweep_step(fov);
+                    let rolls =
+                        (step / (fov.to_radians() / 2.0).sin().abs().max(0.05)).clamp(6.0, 60.0);
+                    let tilts = (180.0 / step).round().max(1.0) as i32;
+                    let turns = (360.0 / rolls).round().max(1.0) as i32;
+                    for tilt in 0..=tilts {
+                        let pitch = -90.0 + f64::from(tilt) * 180.0 / f64::from(tilts);
+                        for turn in 0..turns {
+                            let roll = f64::from(turn) * 360.0 / f64::from(turns) - 180.0;
+                            let aim = Aim {
+                                angles: [yaw, pitch, roll],
+                                fov,
+                                d,
+                            };
+                            let picture = looked(lenses, frame, aim.look(), ours, shape, cells);
+                            let score = agree_detail(
+                                &Detail::of(&picture, shape, hp, texture),
+                                theirs,
+                                want,
+                            );
+                            seen.add(score);
+                            best[which].push((score, aim));
+                            if best[which].len() > 8 * keep {
+                                best[which].sort_by(|a, b| b.0.total_cmp(&a.0));
+                                best[which].truncate(keep);
+                            }
+                        }
+                    }
+                }
+                (best, seen)
+            }));
+        }
+        for handle in handles {
+            let (best, seen) = handle.join().expect("a sweep lane panicked");
+            for (mine, theirs) in found.iter_mut().zip(best) {
+                mine.extend(theirs);
+            }
+            spread.merge(&seen);
+        }
+    });
+    for list in &mut found {
+        list.sort_by(|a, b| b.0.total_cmp(&a.0));
+        list.truncate(4 * keep);
+    }
+    (found, spread)
+}
+/// The best candidates that are not each other: a peak covered by a hundred
+/// of its own neighbours has no rival in the list to be measured against.
+fn spread_out(candidates: &[(f64, Aim)], apart_deg: f64, want: usize) -> Vec<(f64, Aim)> {
+    let mut kept: Vec<(f64, Aim)> = Vec::new();
+    for (score, aim) in candidates.iter().copied() {
+        if kept
+            .iter()
+            .any(|(_, held)| apart(held, &aim) < apart_deg && (held.fov / aim.fov).ln().abs() < 0.2)
+        {
+            continue;
+        }
+        kept.push((score, aim));
+        if kept.len() >= want {
+            break;
+        }
+    }
+    kept
+}
+
+/// Pattern search on the five numbers, halving its step until it is finer
+/// than `floor`.
+///
+/// `wide` scores the ten candidate steps of a round in parallel and takes the
+/// best of them rather than the first that improves. Both are the same search
+/// in the limit; the parallel one is what finishes at a picture wide enough to
+/// resolve a tiny planet, where one score is a million rays. It is off when
+/// the CALLER is already the parallel one -- a pattern search inside a lane
+/// that is itself a lane spawns twelve threads inside twelve and spends the
+/// run in the scheduler rather than in the picture.
+fn polish(
+    start: Aim,
+    step: f64,
+    floor: f64,
+    axes: usize,
+    wide: bool,
+    score: &(impl Fn(Aim) -> f64 + Sync),
+) -> (f64, Aim) {
+    let mut best = (score(start), start);
+    let mut step = step;
+    while step > floor {
+        let tries: Vec<Aim> = (0..axes)
+            .flat_map(|axis| [1.0, -1.0].map(|sign| best.1.nudged(axis, sign * step)))
+            .flatten()
+            .collect();
+        let scored: Vec<(f64, Aim)> = match wide {
+            false => tries.iter().map(|aim| (score(*aim), *aim)).collect(),
+            true => {
+                let mut all = Vec::new();
+                std::thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    for chunk in tries.chunks(2) {
+                        handles.push(scope.spawn(move || {
+                            chunk
+                                .iter()
+                                .map(|aim| (score(*aim), *aim))
+                                .collect::<Vec<_>>()
+                        }));
+                    }
+                    for handle in handles {
+                        all.extend(handle.join().expect("a polish lane panicked"));
+                    }
+                });
+                all
+            }
+        };
+        match scored
+            .into_iter()
+            .fold(None::<(f64, Aim)>, |best, one| match best {
+                Some(held) if held.0 >= one.0 => Some(held),
+                _ => Some(one),
+            }) {
+            Some(found) if found.0 > best.0 => best = found,
+            _ => step *= 0.5,
+        }
+    }
+    best
+}
+
+/// What one instant's registration came to.
+struct Registered {
+    at: f64,
+    aim: Aim,
+    peak: f64,
+    rival: f64,
+    /// The rotation the export's view is at in the WORLD, which is the frame
+    /// their stabilizer works in and the only frame two instants can be
+    /// compared in.
+    world: Option<Quat>,
+    ladder: Vec<(f64, [f64; 3])>,
+    scale_ladder: Vec<(f64, f64)>,
+    saturated: bool,
+    /// What share of THEIR frame carried enough local contrast to be scored.
+    /// The protocol's section 7 says a frame can fail on content; this is the
+    /// number that says so before the gates do.
+    textured: f64,
+}
+
+impl Registered {
+    fn at_off(&self, axis: usize, off: f64) -> f64 {
+        self.ladder
+            .iter()
+            .find(|(at, _)| (at - off).abs() < 1e-9)
+            .map_or(f64::MIN, |(_, scores)| scores[axis])
+    }
+
+    /// The worse of the two sides at `off`, which is the number a gate about
+    /// "beats plus or minus" is asking for.
+    fn beside(&self, axis: usize, off: f64) -> f64 {
+        self.at_off(axis, off).max(self.at_off(axis, -off))
+    }
+}
+
+fn frame_of(path: &Path, at: f64) -> Fallible<(CalibrationSet, Pair)> {
+    let calibration = CalibrationSet::from_insv(path)?;
+    let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
+    let mut walk = Walk::open(path, at, frame)?;
+    if walk.streams() < 2 {
+        return Err("this file carries one lens stream, so it has no seam".into());
+    }
+    let pair = walk.next_pair()?.ok_or("no frame decoded")?;
+    Ok((calibration, pair))
+}
+
+/// Yaw, pitch and roll back out of the rotation [`orientation`] builds, so a
+/// world-frame aim can be printed in the same three numbers a body-frame one
+/// is.
+fn angles_of(q: Quat) -> [f64; 3] {
+    let rows = q.matrix().rows();
+    // orientation() composes rot_y(yaw) rot_x(pitch) rot_z(roll), whose
+    // middle row is [cos(pitch) sin(roll), cos(pitch) cos(roll), -sin(pitch)]
+    // and whose last column is [sin(yaw) cos(pitch), -sin(pitch),
+    // cos(yaw) cos(pitch)]. `the_world_frame_survives_a_round_trip` is the
+    // check on that reading rather than this comment.
+    let pitch = (-rows[1][2]).clamp(-1.0, 1.0).asin();
+    let (yaw, roll) = match rows[1][2].abs() < 0.9999 {
+        true => (rows[0][2].atan2(rows[2][2]), rows[1][0].atan2(rows[1][1])),
+        // Straight up or straight down is a gimbal lock: yaw and roll are one
+        // rotation there and only their sum is a number.
+        false => (rows[2][0].atan2(rows[0][0]), 0.0),
+    };
+    [yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()]
+}
+
+fn register(options: &Options) -> Fallible<()> {
+    let theirs_path = options
+        .against
+        .clone()
+        .ok_or("register wants against=<export.mp4>")?;
+    let instants = match options.instants.is_empty() {
+        true => vec![options.from],
+        false => options.instants.clone(),
+    };
+    let scales_of = |d: f64| -> Vec<f64> {
+        let top = match options.fovhi > 0.0 {
+            true => options.fovhi.min(Aim::ceiling(d)),
+            false => Aim::ceiling(d),
+        };
+        let mut all = Vec::new();
+        let mut fov = options.fovlo;
+        while fov < top {
+            all.push(fov);
+            fov *= options.ratio;
+        }
+        all
+    };
+    // Both families, generously, whatever the export was labelled: Panini for
+    // a flat reframe and the compression family for anything that draws a
+    // round horizon. Panini 0 and compression 1 are the same projection, so
+    // only one of them is in the list.
+    let ds: Vec<f64> = match options.dset.is_empty() {
+        false => options.dset.clone(),
+        true => vec![0.0, 0.45, 0.9, 1.35, -0.85, -0.7, -0.6, -0.5, -0.42, -0.35],
+    };
+    let scales: Vec<(f64, f64)> = ds
+        .iter()
+        .flat_map(|d| scales_of(*d).into_iter().map(move |fov| (fov, *d)))
+        .collect();
+
+    println!(
+        "register: {} against {}",
+        options
+            .input
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        theirs_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+    );
+    println!(
+        "search:   fov {:.1} to {:.1} deg stepped by {:.2}, {} scales in all\n\
+         search:   projections {}\n\
+         search:   the aim grid steps a view over eight, high pass {:.0} percent of the \n\
+         search:   width at the sweep\n\
+         labels:   Studio says fov {:.1}, distortion {:.2} -- READ AT THE END, \
+         BELIEVED NOWHERE",
+        options.fovlo,
+        scales.iter().map(|(fov, _)| *fov).fold(0.0, f64::max),
+        options.ratio,
+        scales.len(),
+        ds.iter()
+            .map(|d| Aim {
+                angles: [0.0; 3],
+                fov: 0.0,
+                d: *d,
+            }
+            .projection())
+            .collect::<Vec<_>>()
+            .join(", "),
+        options.hpc * 100.0,
+        options.fov,
+        options.panini,
+    );
+
+    let mut runs: Vec<Registered> = Vec::new();
+    for at in instants.iter().copied() {
+        let started = std::time::Instant::now();
+        let (calibration, ours) = frame_of(&options.input, at)?;
+        let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
+        let lenses = options.corrected(
+            std::slice::from_ref(&options.input),
+            &calibration.lenses,
+            frame,
+        );
+        let track = calibration.orientation(Filter::default());
+        let export = export_frame(&theirs_path, at - options.lag)?;
+
+        let swept = export.shape.scaled(options.sweepw);
+        let coarse = export.shape.scaled(options.coarse);
+        let middle = export.shape.scaled(options.mid);
+        let fine = export.shape.scaled(options.size);
+        let theirs_swept = Detail::of(&export.averaged(swept), swept, options.hpc, options.texture);
+        let theirs_coarse = Detail::of(
+            &export.averaged(coarse),
+            coarse,
+            options.hpc,
+            options.texture,
+        );
+        let theirs_middle = Detail::of(
+            &export.averaged(middle),
+            middle,
+            options.hp,
+            options.texture,
+        );
+        let theirs_fine = Detail::of(&export.averaged(fine), fine, options.hp, options.texture);
+        let textured = theirs_fine.textured_pixels() as f64 / fine.pixels() as f64;
+        let at_shape = |aim: Aim, shape: Shape, theirs: &Detail| {
+            let picture = looked(&lenses, frame, aim.look(), &ours, shape, &options.band);
+            let pass = match shape.width <= coarse.width {
+                true => options.hpc,
+                false => options.hp,
+            };
+            agree_detail(
+                &Detail::of(&picture, shape, pass, options.texture),
+                theirs,
+                theirs.textured_pixels(),
+            )
+        };
+
+        let axes = match ds.len() > 1 {
+            true => 5,
+            false => 4,
+        };
+        let seeded = options.seed.len() >= 5;
+        let heading = options.told.len() >= 3;
+        let (candidates, spread) = match (seeded, heading) {
+            // ---- their own pan and tilt, and the one angle between us
+            //
+            // The sweep is over the heading datum alone: the angle the file's
+            // orientation track started counting from, which is arbitrary,
+            // constant for the file, and the only thing standing between a
+            // told pan and a body aim. Every scale in the window is swept with
+            // it, because their field of view number is still a label.
+            (false, true) => {
+                let at = (ours.at.as_secs_f64() * 1e6).round() as i64;
+                let body = track.at(at).conjugate();
+                // The datum steps a degree because the sweep picture is 16
+                // across and a correlation reaches about one of its pixels,
+                // which on a 20 degree view is 1.25 degrees. Their tilt and
+                // roll were measured to be ours to within two degrees, so
+                // those are walked over a four degree box at the same step
+                // rather than taken exactly: told is not the same as true.
+                let mut per_scale: Vec<Vec<(f64, Aim)>> = vec![Vec::new(); scales.len()];
+                let mut seen = Spread::new();
+                for (which, (fov, d)) in scales.iter().enumerate() {
+                    for step in 0..360 {
+                        for tilt in -4..=4 {
+                            for roll in -4..=4 {
+                                let world = orientation([
+                                    options.told[0] + f64::from(step),
+                                    options.told[1] + f64::from(tilt),
+                                    options.told[2] + f64::from(roll),
+                                ]);
+                                let aim = Aim {
+                                    angles: angles_of(body.times(world)),
+                                    fov: *fov,
+                                    d: *d,
+                                };
+                                let score = at_shape(aim, swept, &theirs_swept);
+                                seen.add(score);
+                                per_scale[which].push((score, aim));
+                            }
+                        }
+                    }
+                    per_scale[which].sort_by(|a, b| b.0.total_cmp(&a.0));
+                    per_scale[which].truncate(options.pool);
+                }
+                (per_scale, seen)
+            }
+            (true, _) => (
+                vec![vec![(
+                    0.0,
+                    Aim {
+                        angles: [options.seed[0], options.seed[1], options.seed[2]],
+                        fov: options.seed[3],
+                        d: options.seed[4],
+                    },
+                )]],
+                Spread::new(),
+            ),
+            _ => sphere_sweep(
+                &lenses,
+                frame,
+                &ours,
+                &options.band,
+                &theirs_coarse,
+                coarse,
+                options.hp,
+                options.texture,
+                &scales,
+                options.keepn,
+            ),
+        };
+        let coarse_peak = candidates
+            .iter()
+            .filter_map(|list| list.first().map(|(score, _)| *score))
+            .fold(-1.0, f64::max);
+        let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let lanes = |seeds: Vec<(usize, Aim)>,
+                     run: &(dyn Fn(usize, Aim) -> (f64, Aim, usize) + Sync)| {
+            let mut done: Vec<(f64, Aim, usize)> = Vec::new();
+            std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for lane in 0..threads {
+                    let seeds = &seeds;
+                    handles.push(scope.spawn(move || {
+                        seeds
+                            .iter()
+                            .copied()
+                            .skip(lane)
+                            .step_by(threads)
+                            .map(|(which, aim)| run(which, aim))
+                            .collect::<Vec<_>>()
+                    }));
+                }
+                for handle in handles {
+                    done.extend(handle.join().expect("a refinement lane panicked"));
+                }
+            });
+            done
+        };
+
+        // ---- the grid's own phase, taken out at the resolution it was swept
+        //
+        // The sphere grid steps by a fifth of what a view can see, so the best
+        // grid point can sit half a step -- two degrees on a twenty degree
+        // view -- off the answer. At 48 pixels across, with the high pass
+        // holding structure down to six of them, two degrees is most of the
+        // agreement: measured at 360 s on the creek, the export's own answer
+        // scores 0.9312 when it is looked at and 0.469 at the nearest point
+        // the grid actually visited, which is not enough to outrank a second
+        // basin that happened to land on a grid point. Every shortlisted aim
+        // therefore gets a local grid of its own, five deep in each angle at
+        // two fifths of the sweep's step and three in scale. It is 375 scores
+        // of 1300 rays each, which is nothing beside the sweep that produced
+        // the seed, and it is a GRID rather than a hill climb on purpose: a
+        // pattern search started off a peak walks down whichever side it
+        // tried first, and one of those walks is what reported fov 16.9 at
+        // 0.745 for an export whose answer is 19.6 at 0.95.
+        let mut caught: Vec<(f64, Aim, usize)> = candidates
+            .iter()
+            .enumerate()
+            .flat_map(|(which, list)| list.iter().map(move |(score, aim)| (*score, *aim, which)))
+            .collect();
+        caught.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let densified = lanes(
+            {
+                let ranked: Vec<(f64, Aim)> = caught
+                    .iter()
+                    .map(|(score, aim, _)| (*score, *aim))
+                    .collect();
+                let mut chosen: Vec<(usize, Aim)> = spread_out(&ranked, 2.0, options.pool)
+                    .into_iter()
+                    .map(|(_, aim)| {
+                        let which = caught
+                            .iter()
+                            .find(|(_, other, _)| {
+                                other.fov == aim.fov && other.angles == aim.angles
+                            })
+                            .map_or(0, |(_, _, at)| *at);
+                        (which, aim)
+                    })
+                    .collect();
+                // Two per scale on top of the pool, so no scale in the window
+                // goes into the profile unrepresented however the pool fell.
+                for (which, list) in candidates.iter().enumerate() {
+                    chosen.extend(
+                        spread_out(list, 4.0, 2)
+                            .into_iter()
+                            .map(|(_, aim)| (which, aim)),
+                    );
+                }
+                chosen
+            },
+            &|which, aim| {
+                let step = sweep_step(aim.fov) * 0.5;
+                let roll = (step / (aim.fov.to_radians() / 2.0).sin().abs().max(0.05)).min(20.0);
+                let mut best = (at_shape(aim, coarse, &theirs_coarse), aim);
+                for turn in -1..=1 {
+                    for tilt in -1..=1 {
+                        for spin in -1..=1 {
+                            for scale in [-1.0, 0.0, 1.0] {
+                                let mut here = aim;
+                                here.angles[0] += f64::from(turn) * step;
+                                here.angles[1] += f64::from(tilt) * step;
+                                here.angles[2] += f64::from(spin) * roll;
+                                here.fov *= (scale * 0.05f64).exp();
+                                if here.fov >= Aim::ceiling(here.d) {
+                                    continue;
+                                }
+                                let score = at_shape(here, coarse, &theirs_coarse);
+                                if score > best.0 {
+                                    best = (score, here);
+                                }
+                            }
+                        }
+                    }
+                }
+                (best.0, best.1, which)
+            },
+        );
+
+        // ---- what goes on to the middle width, and why it is two lists
+        //
+        // ONE PER SCALE, so the profile below is a fair comparison: every
+        // scale in the window is judged on what it can be made to do, not on
+        // where a grid point happened to fall in it.
+        //
+        // AND THE BEST OF ALL OF THEM TOGETHER, which is what actually finds
+        // the answer. A correlation between two band-passed pictures falls to
+        // half at a shift of about a sixth of the finest structure in them, so
+        // at 48 pixels across a twenty degree view the sweep's capture radius
+        // is under a degree while its grid steps four: measured at 360 s on
+        // the creek, the export's own answer scores 0.946 where it stands and
+        // 0.604 at the best point the grid visited anywhere. What saves it is
+        // that the grid's PHASE differs from scale to scale -- each scale
+        // steps by its own fifth -- so across a window of twenty scales one of
+        // them lands near the answer even though its neighbours do not, and
+        // the one that did is only visible in a ranking that puts all the
+        // scales side by side. A per-scale ranking hides it behind its own
+        // scale's second basin, which is exactly the run that reported fov
+        // 11.2 at 0.489 for an export whose answer is 19.6 at 0.95.
+        let mut everything: Vec<(f64, Aim, usize)> = densified.clone();
+        everything.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let global: Vec<(f64, Aim)> = everything
+            .iter()
+            .map(|(score, aim, _)| (*score, *aim))
+            .collect();
+        let mut seeds: Vec<(usize, Aim)> = spread_out(&global, 4.0, options.keepn * 2)
+            .into_iter()
+            .map(|(_, aim)| {
+                let which = everything
+                    .iter()
+                    .find(|(_, other, _)| other.fov == aim.fov && other.angles == aim.angles)
+                    .map_or(0, |(_, _, at)| *at);
+                (which, aim)
+            })
+            .collect();
+        for which in 0..scales.len() {
+            let mut mine: Vec<(f64, Aim)> = densified
+                .iter()
+                .filter(|(_, _, at)| *at == which)
+                .map(|(score, aim, _)| (*score, *aim))
+                .collect();
+            mine.sort_by(|a, b| b.0.total_cmp(&a.0));
+            seeds.extend(
+                spread_out(&mine, 4.0, 2)
+                    .into_iter()
+                    .map(|(_, aim)| (which, aim)),
+            );
+        }
+        let refined = lanes(seeds, &|which, aim| {
+            let (score, landed) = polish(
+                aim,
+                (aim.fov / 8.0).clamp(2.0, 10.0),
+                0.8,
+                axes,
+                false,
+                &|a| at_shape(a, middle, &theirs_middle),
+            );
+            (score, landed, which)
+        });
+        let mut profile: Vec<(f64, f64, f64)> = scales
+            .iter()
+            .enumerate()
+            .map(|(which, (fov, d))| {
+                (
+                    *fov,
+                    *d,
+                    refined
+                        .iter()
+                        .filter(|(_, _, at)| *at == which)
+                        .map(|(score, _, _)| *score)
+                        .fold(-1.0, f64::max),
+                )
+            })
+            .collect();
+        let mut middled: Vec<(f64, Aim)> = refined
+            .iter()
+            .map(|(score, aim, _)| (*score, *aim))
+            .collect();
+        middled.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+        let (peak, aim) = polish(middled[0].1, 0.4, 0.004, axes, true, &|a| {
+            at_shape(a, fine, &theirs_fine)
+        });
+        // The rival: the best pose in the list that is NOT this one, run
+        // through the same refinement so the two numbers are comparable, and
+        // still not this one when the refinement has finished. A rival that
+        // walked home during its own polish is the answer wearing a hat, and
+        // scoring it as a rival would report a prominence of nothing.
+        let mut rival = -1.0_f64;
+        let mut rival_aim = None;
+        let mut tried = 0;
+        for (_, other) in &middled {
+            if apart(other, &aim) <= 12.0 || tried >= 8 {
+                continue;
+            }
+            tried += 1;
+            let (score, landed) = polish(*other, 0.4, 0.02, axes, true, &|a| {
+                at_shape(a, fine, &theirs_fine)
+            });
+            if apart(&landed, &aim) > 12.0 && score > rival {
+                rival = score;
+                rival_aim = Some(landed);
+            }
+        }
+        // What each PROJECTION could be made to agree at, over the whole scale
+        // window. On the tiny planet this is the finding: Panini's best, at
+        // any d and any scale, is well below the compression family's, because
+        // Panini cannot draw a round horizon at a nadir aim.
+        let families: Vec<(f64, f64, f64)> = ds
+            .iter()
+            .map(|d| {
+                let best = profile
+                    .iter()
+                    .filter(|(_, at, _)| (at - d).abs() < 1e-9)
+                    .fold((0.0, f64::MIN), |held, (fov, _, score)| {
+                        match *score > held.1 {
+                            true => (*fov, *score),
+                            false => held,
+                        }
+                    });
+                (*d, best.0, best.1)
+            })
+            .collect();
+        let home = middled[0].1.d;
+        profile.retain(|(_, d, _)| (d - home).abs() < 1e-9);
+
+        let ladder: Vec<(f64, [f64; 3])> = [
+            -8.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0,
+            3.0, 4.0, 8.0,
+        ]
+        .into_iter()
+        .map(|off| {
+            let scores = std::array::from_fn(|axis| {
+                let mut moved = aim;
+                moved.angles[axis] += off;
+                at_shape(moved, fine, &theirs_fine)
+            });
+            (off, scores)
+        })
+        .collect();
+        // The scale's own ladder, which is the axis mode=solve cannot start
+        // more than about fifteen degrees away from.
+        let scale_ladder: Vec<(f64, f64)> =
+            [0.75, 0.85, 0.92, 0.96, 0.98, 1.02, 1.04, 1.08, 1.18, 1.33]
+                .into_iter()
+                .map(|factor| {
+                    let mut moved = aim;
+                    moved.fov *= factor;
+                    (factor, at_shape(moved, fine, &theirs_fine))
+                })
+                .collect();
+
+        // The capture gate, per projection: a scale is against the edge of
+        // the search if it is against the top of what was SWEPT for its own
+        // projection, or against the pole of that projection itself, or back
+        // against the bottom of the window. Read against the whole run's
+        // widest scale it would let a narrow projection's answer hide behind
+        // a wide one's window.
+        // The widest scale the sweep actually visited, and the pole of the
+        // projection the answer ended up in. Read over the WHOLE window and
+        // not over the answer's own `d`: the refinement is free to move the
+        // projection, and a window looked up by a `d` that is no longer in the
+        // swept set comes back empty and refuses a run that was never near an
+        // edge.
+        let ceiling = Aim::ceiling(aim.d);
+        let top = scales
+            .iter()
+            .map(|(fov, _)| *fov)
+            .fold(options.fovlo, f64::max);
+        let saturated =
+            aim.fov > 0.985 * ceiling || aim.fov > 0.99 * top || aim.fov < 1.02 * options.fovlo;
+
+        let world = options.world.then(|| {
+            let us = (ours.at.as_secs_f64() * 1e6).round() as i64;
+            track.at(us).times(orientation(aim.angles))
+        });
+
+        println!(
+            "\n---- source {at:.3} s (frame at {:.3} s), export {:.3} s, {:.0} s of search",
+            ours.at.as_secs_f64(),
+            at - options.lag,
+            started.elapsed().as_secs_f64(),
+        );
+        println!(
+            "peak:     yaw {:+8.3}, pitch {:+8.3}, roll {:+8.3} deg (our body frame), \
+             fov {:7.3} deg, {}",
+            aim.angles[0],
+            aim.angles[1],
+            aim.angles[2],
+            aim.fov,
+            aim.projection(),
+        );
+        println!(
+            "score:    {peak:.4} at the peak, {rival:.4} at the best rival more than 12 deg \
+             away, prominence {:+.4}",
+            peak - rival,
+        );
+        if let Some(other) = rival_aim {
+            println!(
+                "rival:    yaw {:+8.3}, pitch {:+8.3}, roll {:+8.3} deg, fov {:7.3}, {} \
+                 -- {:.2} deg of rotation from the peak",
+                other.angles[0],
+                other.angles[1],
+                other.angles[2],
+                other.fov,
+                other.projection(),
+                apart(&other, &aim),
+            );
+        }
+        if seeded {
+            println!("SEEDED:   the sphere sweep was skipped, so no prominence is claimed");
+        }
+        println!(
+            "content:  {:.1} percent of their frame carries enough local contrast to score",
+            100.0 * textured,
+        );
+        println!(
+            "sweep:    {} aims scored, median {:.3}, 99th {:.3}, 99.9th {:.3}, best {:.3}",
+            spread.total,
+            spread.quantile(0.5),
+            spread.quantile(0.99),
+            spread.quantile(0.999),
+            coarse_peak,
+        );
+        if let Some(world) = world {
+            let angles = angles_of(world);
+            println!(
+                "world:    yaw {:+8.3}, pitch {:+8.3}, roll {:+8.3} deg, once the file's own \
+                 IMU is taken out",
+                angles[0], angles[1], angles[2],
+            );
+        }
+        println!(
+            "\n{:>9} {:>11} {:>11} {:>11}",
+            "off deg", "yaw", "pitch", "roll"
+        );
+        for (off, scores) in &ladder {
+            if *off == 0.1 {
+                println!("{:>9.2} {peak:>11.5} {peak:>11.5} {peak:>11.5}", 0.0);
+            }
+            println!(
+                "{off:>9.2} {:>11.5} {:>11.5} {:>11.5}",
+                scores[0], scores[1], scores[2]
+            );
+        }
+        println!(
+            "\n{:>28} {:>9} {:>11}   the best each PROJECTION could be\n\
+             {:>28} {:>9} {:>11}   made to agree at, over the whole\n\
+             {:>28} {:>9} {:>11}   scale window",
+            "projection", "at fov", "best", "", "", "", "", "", "",
+        );
+        for (d, fov, score) in &families {
+            println!(
+                "{:>28} {fov:>9.2} {score:>11.5}",
+                Aim {
+                    angles: [0.0; 3],
+                    fov: 0.0,
+                    d: *d,
+                }
+                .projection(),
+            );
+        }
+        let mut ranked: Vec<f64> = families.iter().map(|(_, _, score)| *score).collect();
+        ranked.sort_by(|a, b| b.total_cmp(a));
+        if ranked.len() > 1 {
+            println!(
+                "\nprojection: the best beats the next by {:.5}. Below about sixty degrees of \n\
+                 view this number is near zero and it should be: every smooth radial map is \n\
+                 linear over a small enough picture, so a narrow reframe cannot tell one \n\
+                 projection from another and the aim and the scale are what it reports.",
+                ranked[0] - ranked[1],
+            );
+        }
+        println!(
+            "\n{:>9} {:>11}   the whole scale window at the winning projection, each\n\
+             {:>9} {:>11}   swept scale refined from its own best aims at {} px",
+            "fov deg", "best", "", "", middle.width,
+        );
+        for (fov, _, score) in &profile {
+            println!("{fov:>9.2} {score:>11.5}");
+        }
+        println!("\n{:>9} {:>11}", "fov x", "score");
+        for (factor, score) in &scale_ladder {
+            if *factor > 1.0 && *factor == 1.02 {
+                println!("{:>9.2} {peak:>11.5}", 1.0);
+            }
+            println!("{factor:>9.2} {score:>11.5}");
+        }
+
+        // A registration nobody has looked at is a correlation coefficient.
+        if let Some(out) = &options.out {
+            let theirs = export.averaged(fine);
+            let picture = looked(&lenses, frame, aim.look(), &ours, fine, &options.band);
+            let difference: Vec<f64> = picture
+                .iter()
+                .zip(&theirs)
+                .map(|(a, b)| match *a > 0.0 && *b > 0.0 {
+                    true => 128.0 + (a - b) * 4.0,
+                    false => 0.0,
+                })
+                .collect();
+            let stamp = format!("{at:.3}");
+            write_gray(&theirs, fine, &out.join(format!("theirs-{stamp}.png")))?;
+            write_gray(&picture, fine, &out.join(format!("ours-{stamp}.png")))?;
+            write_gray(
+                &difference,
+                fine,
+                &out.join(format!("difference-4x-{stamp}.png")),
+            )?;
+            println!(
+                "wrote:    {}/{{theirs,ours,difference-4x}}-{stamp}.png",
+                out.display()
+            );
+        }
+
+        runs.push(Registered {
+            at,
+            aim,
+            peak,
+            rival,
+            world,
+            ladder,
+            scale_ladder,
+            saturated,
+            textured,
+        });
+    }
+
+    report_registration(options, &runs, &ds)
+}
+
+/// Whether one instant registered, and by what margins.
+///
+/// Read per instant and not per run, because the protocol already knows that
+/// single frames fail for reasons of content rather than geometry (section 7)
+/// and that the analysis pools the ones that pass. A run's answer is the
+/// instants that passed, and a run whose failures are silent would be the
+/// dangerous kind: every one of these prints its own number beside its own
+/// verdict.
+struct Verdict {
+    ok: bool,
+    lines: Vec<(String, bool, String)>,
+}
+
+fn judge(run: &Registered, fovlo: f64, top: f64) -> Verdict {
+    let mut lines: Vec<(String, bool, String)> = Vec::new();
+    let mut add = |name: &str, ok: bool, detail: String| lines.push((name.to_owned(), ok, detail));
+
+    add(
+        "R1 agreement",
+        run.peak >= 0.30,
+        format!("peak correlation {:.4}, wanted 0.30", run.peak),
+    );
+    add(
+        "R2 prominence",
+        run.peak - run.rival >= 0.05,
+        format!(
+            "stands {:+.4} above the best rival past 12 deg ({:.4}), wanted 0.05",
+            run.peak - run.rival,
+            run.rival,
+        ),
+    );
+
+    // The protocol's G5, in G5's own words: monotone away from the fitted
+    // pose, and the pose beats +/-2 deg in every axis by more than the
+    // ladder's own step at 0.25 deg. Read over +/-2 deg because that is the
+    // range a solve is started inside; what happens eight degrees out is
+    // printed above and is R2's business, and R2 asks it of the whole sphere
+    // rather than of three Euler axes.
+    let mut monotone = true;
+    let mut sharpest = f64::MAX;
+    let mut margin = f64::MAX;
+    for axis in 0..3 {
+        let mut previous = run.peak;
+        for off in [0.1, 0.25, 0.5, 1.0, 1.5, 2.0] {
+            let here = run.beside(axis, off);
+            if here > previous + 1e-6 {
+                monotone = false;
+            }
+            previous = here;
+        }
+        let quarter = run.peak - run.beside(axis, 0.25);
+        sharpest = sharpest.min(quarter);
+        margin = margin.min(run.peak - run.beside(axis, 2.0) - quarter);
+    }
+    add(
+        "R3 peak",
+        monotone && sharpest > 0.0 && margin > 0.0,
+        format!(
+            "over +/-2 deg the ladder falls away in all three axes ({}); a quarter degree \
+             costs {sharpest:.5} and two degrees cost {margin:.5} more",
+            match monotone {
+                true => "monotone",
+                false => "NOT monotone",
+            },
+        ),
+    );
+
+    let mut peaked = true;
+    let mut cost = f64::MAX;
+    let mut previous = (run.peak, run.peak);
+    for factor in [1.02, 1.04, 1.08, 1.18, 1.33] {
+        let at = |want: f64| {
+            run.scale_ladder
+                .iter()
+                .find(|(at, _)| (at - want).abs() < 0.006)
+                .map_or(f64::MIN, |(_, score)| *score)
+        };
+        let (up, down) = (at(factor), at(1.0 / factor));
+        if up > previous.0 + 1e-6 || down > previous.1 + 1e-6 {
+            peaked = false;
+        }
+        previous = (up, down);
+        if (factor - 1.04).abs() < 1e-9 {
+            cost = run.peak - up.max(down);
+        }
+    }
+    add(
+        "R7 scale peak",
+        peaked && cost > 0.0,
+        format!("the field of view's ladder falls both ways; 4 percent of scale costs {cost:.5}"),
+    );
+    add(
+        "R4 capture",
+        !run.saturated,
+        format!(
+            "fov {:.3} is inside the window swept for its own projection and inside \
+             that projection's own pole; the window ran {fovlo:.1} to {top:.1} deg",
+            run.aim.fov,
+        ),
+    );
+
+    let ok = lines.iter().all(|(_, ok, _)| *ok);
+    Verdict { ok, lines }
+}
+
+/// What the whole run is allowed to be read as: the per-instant verdicts, the
+/// stability across the instants that passed, and the mapping their labels
+/// turned out to be.
+fn report_registration(options: &Options, runs: &[Registered], ds: &[f64]) -> Fallible<()> {
+    let widest = ds.iter().copied().fold(0.0, f64::max);
+    let top = match options.fovhi > 0.0 {
+        true => options.fovhi.min(Aim::ceiling(widest)),
+        false => Aim::ceiling(widest),
+    };
+    println!("\n================ the run, as a whole\n");
+    println!(
+        "{:>9} {:>9} {:>9} {:>11} {:>8} {:>6} {:>9} {:>8} {:>6}",
+        "source s", "peak", "rival", "prominence", "fov", "d", "1 deg off", "textured", "verdict"
+    );
+    let verdicts: Vec<Verdict> = runs
+        .iter()
+        .map(|run| judge(run, options.fovlo, top))
+        .collect();
+    for (run, verdict) in runs.iter().zip(&verdicts) {
+        let one = (0..3)
+            .map(|axis| run.peak - run.beside(axis, 1.0))
+            .fold(f64::MAX, f64::min);
+        println!(
+            "{:>9.3} {:>9.4} {:>9.4} {:>+11.4} {:>8.3} {:>6.3} {:>9.4} {:>7.1}% {:>6}",
+            run.at,
+            run.peak,
+            run.rival,
+            run.peak - run.rival,
+            run.aim.fov,
+            run.aim.d,
+            one,
+            100.0 * run.textured,
+            match verdict.ok {
+                true => "PASS",
+                false => "FAIL",
+            },
+        );
+    }
+    for (run, verdict) in runs.iter().zip(&verdicts) {
+        println!("\n{:.3} s:", run.at);
+        for (name, ok, detail) in &verdict.lines {
+            println!(
+                "  {name:<14} {:<5} {detail}",
+                match ok {
+                    true => "PASS",
+                    false => "FAIL",
+                }
+            );
+        }
+    }
+
+    let kept: Vec<&Registered> = runs
+        .iter()
+        .zip(&verdicts)
+        .filter(|(_, verdict)| verdict.ok)
+        .map(|(run, _)| run)
+        .collect();
+    println!("\n---- across instants");
+    let mut passed = true;
+    let mut say = |name: &str, ok: bool, detail: String| {
+        passed &= ok;
+        println!(
+            "{name:<14} {:<5} {detail}",
+            match ok {
+                true => "PASS",
+                false => "FAIL",
+            }
+        );
+    };
+    say(
+        "R0 repeats",
+        kept.len() >= 3,
+        format!(
+            "{} of {} instants registered. The protocol's section 7 already says single \
+             frames fail on content; what it asks is that they fail loudly, and each \
+             failure above names the gate it failed.",
+            kept.len(),
+            runs.len(),
+        ),
+    );
+    if kept.len() >= 2 {
+        let fovs: Vec<f64> = kept.iter().map(|run| run.aim.fov).collect();
+        let mean_fov = mean(fovs.iter().copied());
+        let sd_fov = spread(fovs.iter().copied());
+        say(
+            "R6 scale",
+            sd_fov / mean_fov < 0.02,
+            format!(
+                "fov {mean_fov:.3} deg, sd {sd_fov:.3} ({:.2} percent) over the {} that \
+                 passed, wanted under 2 percent",
+                100.0 * sd_fov / mean_fov,
+                kept.len(),
+            ),
+        );
+        if kept.iter().all(|run| run.world.is_some()) {
+            let worlds: Vec<Quat> = kept.iter().filter_map(|run| run.world).collect();
+            let angles: Vec<[f64; 3]> = worlds.iter().map(|q| angles_of(*q)).collect();
+            let apart = |axis: usize| {
+                let all: Vec<f64> = angles.iter().map(|a| a[axis]).collect();
+                all.iter().copied().fold(f64::MIN, f64::max)
+                    - all.iter().copied().fold(f64::MAX, f64::min)
+            };
+            println!(
+                "\nworld aim: yaw {:.3} sd {:.3}, pitch {:.3} sd {:.3}, roll {:.3} sd {:.3} deg",
+                mean(angles.iter().map(|a| a[0])),
+                spread(angles.iter().map(|a| a[0])),
+                mean(angles.iter().map(|a| a[1])),
+                spread(angles.iter().map(|a| a[1])),
+                mean(angles.iter().map(|a| a[2])),
+                spread(angles.iter().map(|a| a[2])),
+            );
+            println!(
+                "the world aim is the body aim with the file's own IMU taken out. Studio's \n\
+                 reframe is DIRECTION LOCKED, so their view is fixed in the world and ours is \n\
+                 solved in the camera body's frame: the body aim above is different at every \n\
+                 instant by exactly the flight, and only this is comparable.\n\
+                 \n\
+                 TILT AND ROLL ARE GATED AND HEADING IS NOT, and that is a property of the \n\
+                 file rather than of the search. Tilt and roll are referenced to gravity, \n\
+                 which the accelerometer measures directly and the integration holds; heading \n\
+                 is referenced to nothing. This camera carries no magnetometer, so the yaw of \n\
+                 the integrated track is an arbitrary datum that wanders, and any disagreement \n\
+                 in the column above is the track's and not the registration's. It is the \n\
+                 reason section 5 now asks for direction lock OFF: with the lock off there is \n\
+                 one body aim for the whole export and the IMU is not in the answer at all."
+            );
+            say(
+                "R5 stability",
+                apart(1) < 3.0 && apart(2) < 3.5,
+                format!(
+                    "the world tilt agrees to {:.3} deg and the world roll to {:.3} across \
+                     the instants that passed, wanted 3.0 and 3.5; the heading spans \
+                     {:.3} deg and is not gated",
+                    apart(1),
+                    apart(2),
+                    apart(0),
+                ),
+            );
+        }
+    } else {
+        passed = false;
+    }
+
+    // ----------------------------------------------------- what they meant
+    println!("\n---- Studio's labels, in our terms");
+    if kept.is_empty() {
+        println!("nothing registered, so there is nothing to read their labels against.");
+    } else {
+        let mean_fov = mean(kept.iter().map(|run| run.aim.fov));
+        let mean_d = mean(kept.iter().map(|run| run.aim.d));
+        println!(
+            "their FOV {:.2} is our {mean_fov:.3} deg of full field of view: a factor of \
+             {:.4} on their number, and our own HALF angle is {:.3} deg (factor {:.4}).",
+            options.fov,
+            mean_fov / options.fov,
+            mean_fov / 2.0,
+            mean_fov / 2.0 / options.fov,
+        );
+        println!(
+            "their Distortion {:.2} came back as {}.",
+            options.panini,
+            Aim {
+                angles: [0.0; 3],
+                fov: 0.0,
+                d: mean_d,
+            }
+            .projection(),
+        );
+    }
+    println!(
+        "\n{}",
+        match passed {
+            true => "REGISTERED: every gate above passed. mode=solve can be started here.",
+            false =>
+                "NOT REGISTERED: a gate above failed, so this is not a starting point for \
+                 a solve.",
+        }
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3287,6 +5020,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The world aim is only comparable across instants if the three angles
+    /// printed for it are the three angles that build it back.
+    #[test]
+    fn the_world_frame_survives_a_round_trip() {
+        for angles in [
+            [0.0, 0.0, 0.0],
+            [47.5, 52.0, 23.7],
+            [-108.3, -6.2, -4.8],
+            [239.4 - 360.0, -38.4, 179.6 - 360.0],
+            [170.0, 89.0, -12.0],
+        ] {
+            let back = angles_of(orientation(angles));
+            let same = orientation(back);
+            let apart = norm(
+                orientation(angles)
+                    .conjugate()
+                    .times(same)
+                    .rotation_vector(),
+            )
+            .to_degrees();
+            assert!(
+                apart < 1e-6,
+                "{angles:?} came back as {back:?}, which is {apart} deg away",
+            );
+        }
+    }
+
+    /// The compression family is what draws a round horizon, and `c = 0.5` is
+    /// exactly the stereographic projection every "little planet" is.
+    ///
+    /// `rho = tan(c theta) / tan(c H)`, so at `c = 0.5` the picture radius
+    /// goes as `tan(theta/2)`, which is stereographic's own law. This is the
+    /// projection the tiny planet export registered in, and the reason a
+    /// Panini-only search could not draw it at any scale.
+    #[test]
+    fn the_compression_family_is_stereographic_at_a_half() {
+        let (half, aspect) = (146.0f64.to_radians(), 16.0 / 9.0);
+        for theta in [10.0, 45.0, 90.0, 140.0f64] {
+            // Where a ray `theta` off the axis lands, along the picture's own
+            // horizontal, under stereographic's law.
+            let rho = (theta.to_radians() / 2.0).tan() / (half / 2.0).tan();
+            let ray = ray_of([(rho + 1.0) / 2.0, 0.5], half, 0.5, aspect);
+            let got = ray[0].hypot(ray[1]).atan2(ray[2]).to_degrees();
+            assert!(
+                (got - theta).abs() < 1e-9,
+                "stereographic {theta} deg landed at {got}",
+            );
+        }
+    }
+
+    /// A view pointed at the ground sees the horizon as a CIRCLE in the
+    /// compression family and as two straight lines in Panini, which is the
+    /// whole of why the tiny planet had to be given a second family.
+    #[test]
+    fn panini_cannot_draw_a_round_horizon_at_a_nadir_aim() {
+        // "The horizon" is every ray perpendicular to the view axis. Walk the
+        // picture out from the middle along two directions and record where
+        // it is crossed.
+        let (half, aspect) = (146.0f64.to_radians(), 16.0 / 9.0);
+        let crossing = |ray: &dyn Fn(f64, f64) -> [f64; 3], dx: f64, dy: f64| {
+            (1..2000)
+                .map(|step| f64::from(step) / 2000.0)
+                .find(|t| ray(dx * t, dy * t)[2] <= 0.0)
+                .unwrap_or(f64::INFINITY)
+        };
+        let panini = |x: f64, y: f64| panini_ray([0.5 + x / 2.0, 0.5 + y / 2.0], half, 0.9, aspect);
+        let round = |x: f64, y: f64| ray_of([0.5 + x / 2.0, 0.5 + y / 2.0], half, 0.5, aspect);
+        // Across, both families cross it somewhere in the picture.
+        assert!(crossing(&panini, 1.0, 0.0).is_finite());
+        assert!(crossing(&round, 1.0, 0.0).is_finite());
+        // Down the middle, only the round one does. Panini's `y = s tan phi`
+        // never reaches the pole, so its horizon runs off the top and bottom.
+        assert!(
+            crossing(&panini, 0.0, 1.0).is_infinite(),
+            "panini crossed the horizon vertically at {}",
+            crossing(&panini, 0.0, 1.0),
+        );
+        assert!(crossing(&round, 0.0, 1.0).is_finite());
+        // And the round one crosses it at the same radius both ways, which is
+        // the circle the export was measured to have.
+        let (across, down) = (crossing(&round, 1.0, 0.0), crossing(&round, 0.0, 1.0));
+        assert!(
+            (across - down * aspect.recip()).abs() < 2e-3,
+            "round horizon at {across} across and {down} down",
+        );
     }
 
     /// The half width is the half field of view asked for, whatever `d` does
