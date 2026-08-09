@@ -619,6 +619,52 @@ The six views, unchanged, and what they are for in this round:
   The wide band softens it and the belt is its fix. UNCHANGED and still roughly 20 view px; this
   architecture changes whether a measurement is SPENT, not what is measured.
 
+## A second camera: DJI Osmo 360 `.OSV` (VERDICT: APPROVED, three lines)
+
+The first lines here that are not an Insta360 capture, and the first that name a file outside
+`~/Videos`. **None of the three is a Ctrl+V target**, for the reason the header gives twice over:
+the file's name has spaces in it, and `Framing::read_line` takes the first whitespace word as the
+path (issue #157, and issue #174 is the same trap found again from the other end). They are CLI
+arguments, and the quoting below is what a shell needs. The seam knobs are absent on purpose: a DJI
+lens takes the mounting branch of `lens_from_body` and a fitted pose writes `lens.pose`, so a
+`seam=` cannot move this camera's picture at all (see the honest leftovers in
+`crates/meta/src/osmo.rs`). `seam=factory` is what these were read at and the only thing they can
+be read at.
+
+All three are on `~/Downloads/"1 8k30p standard 10bit iso max 800-003.OSV"`, which is unit B, the
+owner's own camera. Verified on the flat-seam rebase 2026-08-09 through `--bin reframe` at 1920 px;
+stills in gitignored `scratch/OSV-VERIFY/`.
+
+- 2026-08-08 `time=97.831 yaw=90.49 pitch=33.25 fov=26.90 lock=1 seam=factory` — **the tower.**
+  The acceptance line for the five-coefficient lens model. The owner reported the picture "fixed
+  off everywhere" and a doubled tower; read through the app's own map with `--bin crossing` at a
+  90 degree seam view, the two lenses drew the same far content **241 source px apart across the
+  seam, 13.1 degrees**, and after the fifth coefficient (field 15) **3.2 px, 0.18 degrees**. What
+  to read in the still is that the tower is ONE tower with one set of balcony edges. Verdict: the
+  owner tested the branch build and passed it, *"can confirm tear is gone"*.
+- 2026-08-08 `time=23.590 yaw=-87.45 pitch=-18.11 fov=48.41 lock=1 seam=factory` — **the kerb.**
+  The far-field companion to the tower: what to read is that the lawn edge, the path and the
+  building line across the middle distance run through the handover unbroken. **Near-field
+  ghosting at metre range remains, in this arm and every other, and it is parallax and not
+  calibration** — no inter-lens translation is recorded in an `.OSV`, so the parallax band is off
+  and nothing can be done about it from the file. That is the accepted v1 and it is on the PR's
+  tradeoff list.
+- 2026-08-08 `time=139.806 yaw=-63.98 pitch=-15.06 fov=160.04 lock=1 seam=factory` — **the dip.**
+  The owner's own line, and the acceptance line for horizon lock on this camera: he wrote it down
+  at the instant the lock was visibly failing. What to read is that the marina horizon runs level
+  and the pavilion columns stand up. The counter-null is the same line at `lock=0`, which is
+  visibly rolled and pitched, and the two differ byte for byte
+  (`226bbf3d…` against `836e1514…`, sha256 of the 1920 px still). Verdict: the owner tested the
+  mounting-b build and passed it, *"OSV video output looks good, approved"*.
+
+**The fourth line that is not here is the one for the other unit.** `--bin reframe
+~/Videos/samples/dji-osmo360/CAM_20250715191201_0003_D.OSV time=20 yaw=0 fov=90 lock=1` renders
+with **no horizon lock at all**, because that capture's own accelerometer contradicts the mounting
+(23.0 degrees against a 14.7 degree null, printed at open) and the lock refuses rather than holding
+a horizon it cannot confirm. `lock=0` and `lock=1` are byte-identical there, which is the check
+that the refusal is complete. Nobody has asked for that file to hold a horizon; if a second unit
+ever needs one, the mounting is what has to be re-derived, not the gate.
+
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).
 - "Perceptually minimizing the seam as much as possible" is THE objective; sky is the hardest canvas

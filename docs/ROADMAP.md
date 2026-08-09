@@ -579,6 +579,55 @@ live, no keyframe UI ever.
 
 ## Decisions log
 
+- 2026-08-09 **The `.OSV` support is rebased onto the flat seam, the mounting is
+  baked as a constant of the camera, and the horizon lock is gated on the file's
+  own gravity** (docs/research/osv-format.md, which is this format's reference
+  chapter from today). The branch sat on a pre-#172 base; it is replayed onto
+  #176 rather than reimplemented, eighteen commits, six of which needed a hand.
+  The flat seam SIMPLIFIED the port, exactly as expected: the branch's inert
+  seam-fit is moot now that nothing applies a band correction anywhere, and its
+  one `band.rs` change - a `normalize` of a zero vector, which is the NaN that
+  drew a DJI capture's whole forward hemisphere black - merged untouched and is
+  still wanted, because `ring_at` still runs for the instruments.
+
+  **Three owner verdicts stand on the rebased path**, re-verified 2026-08-09 at
+  1920 px through the delivered pass and recorded as registry lines
+  (docs/research/reference-views.md): the tower single (*"can confirm tear is
+  gone"*), the far kerb joined, and the dip's horizon held (*"OSV video output
+  looks good, approved"*). The counter-null for the last is the same line at
+  `lock=0`, which is visibly rolled and differs byte for byte.
+
+  **`KJERAG_MOUNT` is gone.** Candidate b - a mirror in `y` and a quarter turn -
+  is `MOUNTING`, a `const`. A setting that moves the horizon is the calibration
+  ritual zero-config playback forbids, and the escape hatch is replaced by
+  something better: the file's own accelerometer is a second, independent
+  statement of where down is, and it is checked **per file**. Under 8 degrees
+  and better than the null of a camera assumed never to lean, and the horizon is
+  held; otherwise the capture comes out with an empty orientation track, which is
+  the shape a capture with no inertial record at all already had, so it reaches
+  the pilot as the disabled menu item and the same `level:` line. Measured over
+  all seven corpus files: six unit B files at 1.6 to 3.8 degrees against nulls of
+  5.7 to 9.4, and the one unit A file at 23.0 against a null of 14.7.
+
+  **So unit A's sample capture no longer holds a horizon, and says why.** The
+  mounting was derived from unit B alone and unit A was a null result there. Its
+  picture is untouched and its `lock=0` and `lock=1` renders are byte-identical,
+  which is the check that the refusal is complete.
+
+  **The GPU twin guard now runs both models.** `lens_pixel` branches on the
+  block's own model field, so the Insta360 fixture never ran a line of `theta` on
+  either half and the `.OSV` could have shipped a WGSL model that disagreed with
+  its Rust twin with every test green. Two WGSL-only mutations were planted,
+  measured and reverted; the telling one is a tenth of a percent on the leading
+  coefficient, far too small to see, at 22 times the bar.
+
+  **The `.insv` null holds.** All sixteen views of the class method render byte
+  for byte identical to main at 7ef59a3, and the eight lock pairs inside it
+  differ from each other, so the null is not vacuous. Playback improved rather
+  than regressed on the way: unit B presents 29.36 of 29.97 fps at 7.25 ms a
+  redraw where the pre-rebase branch recorded 26.6 fps at 20.6 ms, which is the
+  flat seam's doing and not this branch's.
+
 - 2026-08-09 **The seam is flat, the handover line is held on the world, and
   the machinery that morphed the picture is deleted rather than switched off**
   (docs/research/studio-parity.md). The owner approved the architecture on

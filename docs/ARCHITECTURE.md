@@ -322,6 +322,19 @@ that takes it carries an SPDX header. Nothing does today. Static calibrated
 warp with a smooth blend; no optical flow (measured to not help). A reframed
 view centered near a lens axis contains no seam at all.
 
+**There are two camera models, chosen per lens.** A DJI Osmo 360 `.OSV`
+keeps its calibration in the file's own telemetry track rather than a
+trailer, and its model is the Kannala-Brandt fisheye,
+`r = fx * theta * (1 + k1 t^2 + ... + k5 t^10)`, with all five of the
+coefficients the file carries. Both families are one function of a unit ray
+in the lens's own frame and nothing else, so the model is a branch inside
+`lens_pixel` and the rest of the pass - the caps, the crossover, the
+handover, the readout - does not know which one it is running. Both take
+five coefficients, which is why `LensBlock` carries five slots and not ten.
+The GPU twin guard runs its whole comparison once per model, because a
+branch is only guarded at a fixture that takes it. docs/research/osv-format.md
+is that format's reference chapter, including what is still unknown about it.
+
 `kjerag-meta` turns that string into a `CalibrationSet` whose pixel numbers
 are already in delivered-frame coordinates (3840x3840 per lens), not the
 15360x7680 side-by-side calibration canvas the file writes them on. The
