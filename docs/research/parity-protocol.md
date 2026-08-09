@@ -836,7 +836,9 @@ the player must do differently.
 Section 11 was written and committed at `0738ec9`, before the radial model was
 fitted to anything. The instrument that fits it is `af7c5b9`; the diagnostics
 below it — the structure-against-scatter split and the per-geometry arm — are
-`e7f64b4`, and the readout report is the commit above this one. **Every run
+`e7f64b4`, and the readout report is `d8256ae`, which is this section's own
+commit and which changes no default: `rolling=` is off unless it is asked for,
+and the five-knob answer reproduces across the change. **Every run
 quoted was made on `e7f64b4` or later, and the five-knob answer of section 10
 reproduces on it to four decimals** (`each-v3-b160` returns 3.9173 px against
 section 10's 3.9173, and the other three geometries return 7.9601, 6.7069 and
