@@ -177,6 +177,21 @@ the same frame: mean absolute error per channel fell from 45.4 / 8.0 / 0.9 codes
 to **2.0 / 1.8 / 0.9**, and the mean chroma spread from 171.4 to 124.1 against
 swscale's 125.1.
 
+**Both facts are read off the container and neither is guessed from the other**
+(`kjerag_media`'s `reader::written`). Two edges are worth naming:
+
+- **Big endian is refused by name, not drawn.** The shader reassembles a 16-bit
+  word from two 8-bit components in one order, so a big-endian stream would come
+  out as noise with nothing to say so. Nothing in this path can produce one -
+  ffmpeg names the host's endianness on a decode - so the refusal is a claim
+  declined rather than a case anyone has met.
+- **An untagged range reads as studio swing.** `H.264` and `HEVC` both default
+  `video_full_range_flag` to 0, so a file that says nothing is saying studio
+  swing. Measured over the whole sample corpus 2026-08-09: every Insta360
+  capture, proxy and GoPro file is `yuvj420p` tagged `pc`, and every `.OSV` of
+  both units is `yuv420p10le` tagged `tv`. **Nothing in the corpus is untagged**,
+  so this fallback picks nothing that ships today.
+
 ## 6. Orientation: the camera solves its own, in a left-handed frame
 
 **HIGH** for the composition, **MEDIUM** for the turn.

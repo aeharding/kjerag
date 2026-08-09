@@ -117,7 +117,9 @@ pub type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// the corpus and not a rule, so neither flag is derived from the other.
 ///
 /// [`Self::default`] is 8-bit full range, which is what every `.insv` in the
-/// corpus is and what the pass drew before this existed.
+/// corpus is and what the pass drew before this existed. A container that
+/// tags neither field is read as 8-bit STUDIO swing rather than as this, and
+/// `reader::written` is where that choice is made and argued.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Samples {
     /// The two planes hold 16-bit little-endian words rather than bytes:

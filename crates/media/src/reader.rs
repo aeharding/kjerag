@@ -256,23 +256,42 @@ struct Video {
 ///
 /// Read here rather than off a decoded frame because only one of the two is
 /// in a frame at all: a pixel format says how wide a sample is, and the range
-/// travels beside it and not in it. Anything this does not recognize is the
-/// 8-bit full-range picture Kjerag drew before there was a second answer,
-/// which is what every `.insv` in the corpus is.
+/// travels beside it and not in it. A depth this does not recognize is the
+/// 8-bit picture Kjerag drew before there was a second answer, which is what
+/// every `.insv` in the corpus is.
+///
+/// **Big endian is refused rather than drawn.** The shader puts a 16-bit word
+/// back together itself, from two 8-bit components, in one order
+/// (`kjerag_render`'s `plane_word`), and a stream whose words are the other
+/// way round would come out as noise with nothing to say so. Nothing in this
+/// path can produce one - ffmpeg names the host's own endianness on a decode
+/// and this host is little endian - so the refusal is a claim this reader
+/// declines to make rather than a case anyone has met. Errors are the error:
+/// what a pilot would read is this sentence.
+///
+/// **The range's fallback is studio swing, not full**, which is the opposite
+/// of what this read on the way in. Full range is claimed only where the
+/// container claims it, because that is what the codecs say: `H.264` and
+/// `HEVC` both default `video_full_range_flag` to 0, and a file that says
+/// nothing is saying studio swing. Measured over the whole sample corpus,
+/// 2026-08-09: every Insta360 capture, proxy and GoPro file is `yuvj420p` and
+/// tagged `pc`, and every `.OSV` of both units is `yuv420p10le` tagged `tv`.
+/// **Not one file in the corpus is untagged**, so this fallback picks nothing
+/// that ships today and is written down because the next camera may be the
+/// one that needs it.
 ///
 /// # Safety
 /// `parameters` must be a live `AVCodecParameters` of a video stream.
-unsafe fn written(parameters: &ff::ffi::AVCodecParameters) -> Samples {
+unsafe fn written(parameters: &ff::ffi::AVCodecParameters) -> Fallible<Samples> {
     use ff::ffi::{AVColorRange, AVPixelFormat};
-    Samples {
-        wide: matches!(
-            parameters.format,
-            f if f == AVPixelFormat::AV_PIX_FMT_P010LE as i32
-                || f == AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32
-                || f == AVPixelFormat::AV_PIX_FMT_P010BE as i32
-        ),
-        limited: parameters.color_range == AVColorRange::AVCOL_RANGE_MPEG,
+    let is = |want: AVPixelFormat| parameters.format == want as i32;
+    if is(AVPixelFormat::AV_PIX_FMT_P010BE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10BE) {
+        return Err("this video's 10-bit samples are big endian, which Kjerag cannot read".into());
     }
+    Ok(Samples {
+        wide: is(AVPixelFormat::AV_PIX_FMT_P010LE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10LE),
+        limited: parameters.color_range != AVColorRange::AVCOL_RANGE_JPEG,
+    })
 }
 
 /// What a file has to agree with its sibling about to be the other lens of
@@ -817,17 +836,17 @@ impl Opened {
                 // reach `sound_rate` makes, for the same reason.
                 let (width, height, samples) = unsafe {
                     let p = *s.parameters().as_ptr();
-                    (p.width.max(0) as u32, p.height.max(0) as u32, written(&p))
+                    (p.width.max(0) as u32, p.height.max(0) as u32, written(&p)?)
                 };
-                Video {
+                Ok(Video {
                     stream: s.index(),
                     rate: s.avg_frame_rate(),
                     frames: s.frames().max(0) as u64,
                     size: Size::new(width, height),
                     samples,
-                }
+                })
             })
-            .collect();
+            .collect::<Fallible<Vec<Video>>>()?;
         let first = videos.first().ok_or("file has no video stream")?;
         let time_base = input
             .stream(first.stream)
