@@ -24,10 +24,13 @@
 //!   proxy, a Max hero-mode `.MP4`, two of GoPro's own published samples, and
 //!   a Fusion `.mp4`.
 //! - **DJI**: a track whose sample entry is `djmd` or `dbgi`, DJI's telemetry
-//!   and debug tracks. The Osmo 360 `.OSV` writes two of each; its handler
-//!   names and `©too` tag say `CAM` and `Osmo 360`, which are weaker. That
-//!   arm refused until the `djmd` calibration could be read, and now it
-//!   accepts: [`super::osmo`] is what reads it.
+//!   and debug tracks. The Osmo 360 `.OSV` writes two of each. That arm
+//!   refused every DJI capture until the `djmd` calibration could be read,
+//!   and now it accepts **one camera**: the `©too` tag has to say `Osmo 360`
+//!   as well ([`MODEL`]), because a Pocket, an Action and a drone write the
+//!   same telemetry track and Kjerag knows the calibration record of exactly
+//!   one of them. Any other DJI file keeps the refusal it always had, by
+//!   name, rather than reaching [`super::osmo`] and dying in a protobuf walk.
 //! - **Spherical**: Google's spherical metadata, `st3d`/`sv3d` in the video
 //!   sample entry (v2) or the `GSpherical` `uuid` box on a track (v1). That
 //!   is a stitched equirectangular MP4, which is what an export from any of
@@ -52,8 +55,9 @@ use super::trailer::MAGIC;
 pub enum Format {
     /// An Insta360 capture, by the magic on the end of it.
     Insta360,
-    /// A DJI capture carrying a `djmd` telemetry track, which on an Osmo 360
-    /// is where the lens calibration lives ([`super::osmo`]).
+    /// An Osmo 360 capture: a `djmd` telemetry track, which is where that
+    /// camera keeps its lens calibration ([`super::osmo`]), off a container
+    /// whose `©too` says which camera wrote it.
     Osmo,
     /// A 360 format Kjerag does not read, which is refused by name.
     Foreign(Foreign),
@@ -72,6 +76,12 @@ pub enum Format {
 pub enum Foreign {
     /// GoPro: a `.360` off a Max, or any other capture off a GoPro.
     GoPro,
+    /// DJI, but not the one camera of theirs Kjerag reads: a Pocket, an
+    /// Action, a drone. They write the same `djmd` telemetry track an Osmo
+    /// 360 does and nothing else about them is known here, so they are
+    /// refused by name rather than taken as far as a telemetry parse error
+    /// ([`MODEL`]).
+    Dji,
     /// An MP4 carrying spherical metadata: stitched equirectangular video,
     /// not the raw dual fisheye Kjerag reprojects.
     Spherical,
@@ -81,6 +91,7 @@ impl fmt::Display for Foreign {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let what = match self {
             Self::GoPro => "a GoPro capture",
+            Self::Dji => "a DJI capture",
             Self::Spherical => "a stitched 360 video",
         };
         write!(f, "{what}, not an Insta360 .insv")
@@ -145,7 +156,57 @@ fn read<S: Read + Seek>(source: &mut S) -> io::Result<Format> {
     let Some(moov) = moov(source, len)? else {
         return Ok(Format::Unknown);
     };
-    Ok(search(&moov, DEPTH, Parent::Anything).unwrap_or(Format::Unknown))
+    Ok(
+        match search(&moov, DEPTH, Parent::Anything).unwrap_or(Format::Unknown) {
+            // A `djmd` track says DJI and not which DJI, and every one of their
+            // cameras writes one. Which camera is the `©too` beside it.
+            Format::Osmo if !osmo360(&moov) => Format::Foreign(Foreign::Dji),
+            found => found,
+        },
+    )
+}
+
+/// What an Osmo 360 writes in `©too`, which is the tag every camera puts its
+/// own name in and ffprobe shows as `encoder`.
+///
+/// **Read on all seven captures of the corpus, both units: `Osmo 360`, exactly
+/// that, with no firmware version after it.** It is compared whole, which is
+/// the fail-closed direction: a DJI camera Kjerag has never seen, or an Osmo
+/// 360 firmware that starts writing something else, is refused by name with
+/// [`Foreign::Dji`] rather than taken to [`super::osmo`] and refused there
+/// with whatever a protobuf walk over a schema that is not this one happens to
+/// say. The `djmd` track alone cannot make that call: DJI writes one in a
+/// Pocket, an Action and a drone too, and this reader knows the calibration
+/// record of one camera.
+const MODEL: &str = "Osmo 360";
+
+/// Whether `moov/udta/meta/ilst/©too` names the camera this reads.
+///
+/// The tag sits four levels below `udta` and each level is an ordinary box
+/// except two: `meta` is a full box, so its children start after a version and
+/// flags, and the value is wrapped in a `data` box whose own eight bytes are a
+/// type and a locale (QuickTime metadata, as every camera in the corpus
+/// writes it).
+fn osmo360(moov: &[u8]) -> bool {
+    /// `©too`: the copyright sign is `0xa9`, and this is a 4cc rather than
+    /// text, so it is written as bytes.
+    const TOO: &[u8; 4] = b"\xa9too";
+    /// The one child of this name, and its payload past whatever fixed
+    /// header the box carries before its own children.
+    fn child<'a>(body: &'a [u8], want: &[u8; 4], skip: usize) -> Option<&'a [u8]> {
+        Boxes::new(body)
+            .find(|(kind, _)| *kind == want)
+            .and_then(|(_, payload)| payload.get(skip..))
+    }
+    let named = || -> Option<&[u8]> {
+        let udta = child(moov, b"udta", 0)?;
+        // `meta` is a full box: a version and flags before its children.
+        let meta = child(udta, b"meta", 4)?;
+        let too = child(child(meta, b"ilst", 0)?, TOO, 0)?;
+        // A type and a locale, then the string.
+        child(too, b"data", 8)
+    };
+    named() == Some(MODEL.as_bytes())
 }
 
 /// The trailer footer's magic on the last 32 bytes (`super::trailer`).
@@ -233,6 +294,9 @@ fn signature(kind: &[u8; 4], payload: &[u8], parent: Parent) -> Option<Format> {
         (Parent::Udta, b"FIRM" | b"GPMF" | b"CAME" | b"MUID") => {
             Some(Format::Foreign(Foreign::GoPro))
         }
+        // DJI, and which DJI is settled afterwards by the `©too` tag: this
+        // walk stops at the first signature it meets and the tag is in
+        // `udta`, several tracks along ([`read`]).
         (Parent::Stsd, b"djmd" | b"dbgi") => Some(Format::Osmo),
         (_, b"st3d" | b"sv3d") => Some(Format::Foreign(Foreign::Spherical)),
         (_, b"uuid") if payload.starts_with(&GSPHERICAL) => {
@@ -371,21 +435,76 @@ mod tests {
         }
     }
 
-    /// DJI's telemetry track, as the Osmo 360 `.OSV` writes it: the maker is
-    /// the sample entry's own format, because the handler names on that file
-    /// are the generic ones ffmpeg writes for anybody. It is a file Kjerag
-    /// plays, and [`super::super::osmo`] is what reads the calibration out of
-    /// that track.
+    /// The `©too` tag as both units of the corpus write it, in the box nest
+    /// they write it in: `udta/meta/ilst/©too/data`, with `meta`'s version and
+    /// flags and `data`'s type and locale in front of the string.
+    fn model(name: &[u8]) -> Vec<u8> {
+        let mut value = vec![0, 0, 0, 1, 0, 0, 0, 0];
+        value.extend_from_slice(name);
+        let ilst = mp4box(b"ilst", &mp4box(b"\xa9too", &mp4box(b"data", &value)));
+        let mut meta = vec![0, 0, 0, 0];
+        meta.extend(ilst);
+        mp4box(b"udta", &mp4box(b"meta", &meta))
+    }
+
+    /// DJI's telemetry track, as the Osmo 360 `.OSV` writes it: the sample
+    /// entry's own format says DJI, because the handler names on that file are
+    /// the generic ones ffmpeg writes for anybody, and the `©too` tag says
+    /// which DJI. It is a file Kjerag plays, and [`super::super::osmo`] is what
+    /// reads the calibration out of that track.
     #[test]
     fn djis_own_tracks_name_an_osmo() {
         for kind in [b"djmd", b"dbgi"] {
-            let track = nest(
+            let mut moov = nest(
                 &[b"trak", b"mdia", b"minf", b"stbl"],
                 stsd(&[mp4box(kind, &[0; 12])]),
             );
-            let bytes = file(b"pictures", mp4box(b"moov", &track));
+            moov.extend(model(MODEL.as_bytes()));
+            let bytes = file(b"pictures", mp4box(b"moov", &moov));
             assert_eq!(sniffed(&bytes), Format::Osmo, "{kind:?}");
         }
+    }
+
+    /// **DJI's other cameras write the same telemetry track and are not this
+    /// one.** A Pocket, an Action or a drone would sniff as an Osmo 360 on the
+    /// `djmd` box alone and then die inside a protobuf walk over a schema that
+    /// is not its own; refused here by name, the pilot gets "That is a DJI
+    /// capture" instead.
+    ///
+    /// The corpus has no such file, so this is built from the layout both Osmo
+    /// units do write, with the one field that names the camera changed. What
+    /// it pins is the direction of the doubt: only the name this reader was
+    /// written against is played.
+    #[test]
+    fn another_djis_telemetry_track_is_refused_by_name() {
+        let track = nest(
+            &[b"trak", b"mdia", b"minf", b"stbl"],
+            stsd(&[mp4box(b"djmd", &[0; 12])]),
+        );
+        for name in [
+            b"Osmo Pocket 3".as_slice(),
+            b"Osmo Action 5 Pro".as_slice(),
+            b"Mavic 3".as_slice(),
+            // A firmware that starts writing a version after the name is a
+            // camera this has not been read on either, and goes the same way.
+            b"Osmo 360 v1.2".as_slice(),
+            b"".as_slice(),
+        ] {
+            let mut moov = track.clone();
+            moov.extend(model(name));
+            let bytes = file(b"pictures", mp4box(b"moov", &moov));
+            assert_eq!(
+                sniffed(&bytes),
+                Format::Foreign(Foreign::Dji),
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        // And a DJI file with no `©too` at all is the same answer, which is
+        // the fail-closed half: the tag is what says this is the one camera,
+        // and its absence says nothing.
+        let bytes = file(b"pictures", mp4box(b"moov", &track));
+        assert_eq!(sniffed(&bytes), Format::Foreign(Foreign::Dji));
     }
 
     /// Google's spherical metadata, both versions: v2's `sv3d` inside the

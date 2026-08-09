@@ -36,6 +36,14 @@ Sniffing is by that same box (`(Parent::Stsd, b"djmd" | b"dbgi")`), with the
 `.osv` extension as the fallback, so a renamed file is still recognised and an
 `.OSV` that is really something else is still refused.
 
+**The `djmd` box says DJI and not which DJI**, and every camera of theirs writes
+one. What names the camera is `©too` at `moov/udta/meta/ilst`, which reads
+exactly `Osmo 360` on all seven captures of both units, with no firmware version
+after it. `kjerag_meta::format` compares it whole, so a Pocket, an Action or a
+drone keeps the named "That is a DJI video" refusal instead of being taken into
+a protobuf walk over a schema that is not its own. A firmware that starts
+writing something else goes the same way, which is the fail-closed direction.
+
 There is also a nested MP4 in a `camd` box. Its `mdat` is a byte-identical copy
 of the outer `djmd` tracks, so it is read past.
 

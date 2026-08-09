@@ -215,6 +215,11 @@ pub fn out_of_reach() -> String {
 pub fn foreign(format: Foreign) -> String {
     let what = match format {
         Foreign::GoPro => "a GoPro video",
+        // DJI, but not the Osmo 360. Their other cameras write the same
+        // telemetry track and Kjerag reads one camera's calibration record,
+        // so this refusal is the one they kept when the Osmo 360 stopped
+        // being refused (`kjerag_meta::format`).
+        Foreign::Dji => "a DJI video",
         // The spherical arm: an MP4 with 360 metadata in it, which is what
         // every one of these cameras' desktop apps exports. Kjerag reads the
         // raw dual fisheye and reprojects it; a stitched file has already had
@@ -375,7 +380,7 @@ mod tests {
         assert!(!view_is_from(Path::new("a.insv")).contains('\u{2014}'));
         assert!(!missing_decoder("hevc").contains('\u{2014}'));
         assert!(!out_of_reach().contains('\u{2014}'));
-        for format in [Foreign::GoPro, Foreign::Spherical] {
+        for format in [Foreign::GoPro, Foreign::Dji, Foreign::Spherical] {
             assert!(!foreign(format).contains('\u{2014}'));
         }
     }
@@ -390,6 +395,7 @@ mod tests {
         let said = [
             MissingDecoder { codec: "hevc" }.to_string(),
             Foreign::GoPro.to_string(),
+            Foreign::Dji.to_string(),
             Foreign::Spherical.to_string(),
             Stall::new("61 frames could not be imported").to_string(),
         ];
@@ -407,6 +413,10 @@ mod tests {
         assert_eq!(
             foreign(Foreign::GoPro),
             "That is a GoPro video. Kjerag plays Insta360 .insv and DJI Osmo 360 .osv."
+        );
+        assert_eq!(
+            foreign(Foreign::Dji),
+            "That is a DJI video. Kjerag plays Insta360 .insv and DJI Osmo 360 .osv."
         );
         assert_eq!(
             foreign(Foreign::Spherical),
