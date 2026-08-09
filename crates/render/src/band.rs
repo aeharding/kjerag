@@ -2672,12 +2672,14 @@ fn pool_chroma(@builtin(local_invocation_index) lane: u32) {
         continue;
       }
       let limit = CHROMATIC_LIMIT * read.lit;
-      let d = clamp(
+      // Clamped at the guard, then the luminance projected out: the field
+      // is a hue and carries no level (`chromatic_neutral`'s own doc).
+      let d = chromatic_neutral(clamp(
         tone.y * vec3<f32>(read.m1r, read.m1g, read.m1b)
           - tone.x * vec3<f32>(read.m0r, read.m0g, read.m0b),
         vec3<f32>(-limit),
         vec3<f32>(limit),
-      );
+      ));
       let trust = near * read.evidence * read.lit * read.lit;
       value += trust * d;
       weight += trust;

@@ -108,6 +108,21 @@ const CB_G: f32 = -0.1873;
 const CR_G: f32 = -0.4681;
 const CB_B: f32 = 1.8556;
 
+/// BT.709's luma weights: what [`field_target`] projects OUT of every
+/// reading, so the field is luminance-neutral by construction - the memo's
+/// 3.1 discipline, kept for the seam-local field and measured to be needed:
+/// with the luma component left in, the along-seam smoothing carries the
+/// bright near-horizon cells' luma offset onto the dark dirt azimuths and
+/// the dirt view's common-mode step across the seam GREW by 1.3 codes
+/// (R -4.22 to -5.57, G -3.90 to -4.84, B -5.08 to -6.61 at the fov-60
+/// dirt reference, measured 2026-08-09) - a level step laid across the
+/// handover, which is the artifact class P.1 was refused over
+/// (docs/research/seam-blending.md 19). Luminance is stage 3's business
+/// and stays with the pooled gain; what this field closes is the HUE step,
+/// which is the owner's complaint and Studio's dominant axis (chromatic.md
+/// 2.2: the chroma carries about twice what the luminance does).
+const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
 /// One direction's chroma reading: the two lenses' mean picture of the same
 /// patch, per channel, and the evidence behind it.
 ///
@@ -322,9 +337,21 @@ pub fn rgb_of(raw: [f32; 3], limited: bool) -> [f32; 3] {
     [y + CR_R * cr, y + CB_G * cb + CR_G * cr, y + CB_B * cb]
 }
 
+/// A per-channel disagreement with its luminance projected out: what is
+/// left carries `LUMA . d = 0` exactly, so the field cannot brighten or
+/// darken anything, cannot double-correct with the pooled gain, and cannot
+/// lay a level step across the handover (see [`LUMA`]).
+///
+/// WGSL twin: `chromatic_neutral`.
+pub fn neutral(d: [f32; 3]) -> [f32; 3] {
+    let luma: f32 = (0..3).map(|c| LUMA[c] * d[c]).sum();
+    d.map(|v| v - luma)
+}
+
 /// The field the pooling pass would assemble from these readings, before the
 /// temporal ease: per entry, the smoothed weighted mean of the ring's
-/// tone-adjusted per-channel disagreements, shrunk by its own evidence.
+/// tone-adjusted per-channel disagreements, luminance projected out of each,
+/// shrunk by its own evidence.
 ///
 /// **Rust twin of the `pool_chroma` entry point's per-entry loop**, and a twin
 /// rather than a description: the pass solves this on the GPU where no test
@@ -365,10 +392,11 @@ pub fn field_target(cells: &[ChromaCell], tone_log_gain: f32) -> Vec<[f32; 3]> {
                 }
                 let w = near * cell.evidence * cell.lit * cell.lit;
                 let limit = LIMIT_CHROMA_LN * cell.lit;
+                let d = neutral(std::array::from_fn(|channel| {
+                    (split[1] * cell.m1[channel] - split[0] * cell.m0[channel]).clamp(-limit, limit)
+                }));
                 for (channel, slot) in value.iter_mut().enumerate() {
-                    let d = (split[1] * cell.m1[channel] - split[0] * cell.m0[channel])
-                        .clamp(-limit, limit);
-                    *slot += w * d;
+                    *slot += w * d[channel];
                 }
                 weight += w;
                 evidence += near * cell.evidence;
@@ -451,8 +479,14 @@ pub(crate) fn wgsl() -> String {
          const CB_G = {CB_G:?};\n\
          const CR_G = {CR_G:?};\n\
          const CB_B = {CB_B:?};\n\
+         const LUMA_R = {lr:?};\n\
+         const LUMA_G = {lg:?};\n\
+         const LUMA_B = {lb:?};\n\
          {WGSL}",
         edge = EDGE_DEG.to_radians(),
+        lr = LUMA[0],
+        lg = LUMA[1],
+        lb = LUMA[2],
         smooth = SMOOTH_DEG.to_radians(),
         turn = std::f32::consts::TAU,
         half_pi = std::f32::consts::FRAC_PI_2,
@@ -507,6 +541,15 @@ fn chromatic_cell(body: vec3<f32>) -> vec3<f32> {
 // scale. Rust twin: `chromatic::reach`.
 fn chromatic_reach(e0: vec3<f32>, e1: vec3<f32>, mix: f32, off: f32, scale: f32) -> vec3<f32> {
   return (e0 + (e1 - e0) * mix) * (0.5 * scale * chromatic_kernel(off));
+}
+
+// A per-channel disagreement with its luminance projected out, so the field
+// cannot brighten or darken anything and cannot double-correct with the
+// pooled gain: the memo's 3.1 discipline kept for the local field. Rust
+// twin: `chromatic::neutral`.
+fn chromatic_neutral(d: vec3<f32>) -> vec3<f32> {
+  let luma = LUMA_R * d.x + LUMA_G * d.y + LUMA_B * d.z;
+  return d - vec3<f32>(luma);
 }
 
 // A mean in the planes' own raw units decoded to gamma-coded R, G, B: the
@@ -595,16 +638,17 @@ mod tests {
         }
         let field = field_target(&cells, 0.0);
         // Every direction weighs the same, so the target is the constant
-        // disagreement (0.02, 0, -0.02) shrunk by E/(E+1) with E the summed
-        // kernel-weighted evidence.
+        // disagreement (0.02, 0, -0.02), luminance projected out, shrunk by
+        // E/(E+1) with E the summed kernel-weighted evidence.
         let e: f32 = (0..AZIMUTHS)
             .map(|j| smooth(wrap(j as f32 / AZIMUTHS as f32 * std::f32::consts::TAU)))
             .sum();
         let shrink = e / (e + crate::band::RIDGE);
+        let wanted = neutral([0.02, 0.0, -0.02]);
         for entry in &field {
-            near(entry[0], 0.02 * shrink, 1e-4);
-            near(entry[1], 0.0, 1e-5);
-            near(entry[2], -0.02 * shrink, 1e-4);
+            near(entry[0], wanted[0] * shrink, 1e-4);
+            near(entry[1], wanted[1] * shrink, 1e-4);
+            near(entry[2], wanted[2] * shrink, 1e-4);
         }
 
         // One loud cell in an otherwise silent, evidence-free ring: the spike
@@ -667,15 +711,48 @@ mod tests {
             .map(|j| smooth(wrap(j as f32 / AZIMUTHS as f32 * std::f32::consts::TAU)))
             .sum();
         let shrink = e / (e + crate::band::RIDGE);
-        near(field[0][0], LIMIT_CHROMA_LN * 0.2 * shrink, 1e-4);
+        near(
+            field[0][0],
+            neutral([LIMIT_CHROMA_LN * 0.2, 0.0, 0.0])[0] * shrink,
+            1e-4,
+        );
     }
 
-    /// The pooling differences what the draw composites: the tone split is
-    /// applied to the two means before they are differenced, with the same
-    /// clamp `Tone::split` keeps, so the field and the pooled gain cannot
-    /// correct the same thing twice.
+    /// The field is a hue and carries no level: a disagreement that is all
+    /// luminance - every channel moved together - pools to exactly nothing,
+    /// and what any reading contributes is luminance-free to the weights'
+    /// own arithmetic.
     #[test]
-    fn the_tone_split_is_taken_out_before_the_difference() {
+    fn the_field_carries_no_luminance() {
+        let mut cells = vec![ChromaCell::default(); AZIMUTHS];
+        for cell in &mut cells {
+            cell.lit = 0.4;
+            cell.evidence = 1.0;
+            cell.m0 = [0.30; 3];
+            // Four codes of the same sign on every channel: a level step,
+            // stage 3's business and not this field's.
+            cell.m1 = [0.30 + 4.0 / 255.0; 3];
+        }
+        for entry in field_target(&cells, 0.0) {
+            for channel in entry {
+                assert!(channel.abs() < 1e-7, "{channel} of level leaked");
+            }
+        }
+        // And a hue survives the projection with its luma taken out: the
+        // planted (+2, 0, -2) keeps its R-B opposition.
+        let hue = neutral([2.0 / 255.0, 0.0, -2.0 / 255.0]);
+        let luma: f32 = (0..3).map(|c| LUMA[c] * hue[c]).sum();
+        assert!(luma.abs() < 1e-9);
+        assert!(hue[0] > 0.0 && hue[2] < 0.0);
+    }
+
+    /// The pooling differences what the draw composites - the tone split is
+    /// applied to the two means before they are differenced, with the same
+    /// clamp `Tone::split` keeps - and the luminance projection makes an
+    /// achromatic disagreement invisible to the field whatever the gain
+    /// says: two mechanisms, two axes, no double correction on either.
+    #[test]
+    fn an_achromatic_step_is_no_business_of_the_fields() {
         let mut cells = vec![ChromaCell::default(); AZIMUTHS];
         for cell in &mut cells {
             cell.lit = 0.4;
@@ -685,13 +762,27 @@ mod tests {
             cell.m0 = [0.30; 3];
             cell.m1 = [0.30 * (0.01f32).exp(); 3];
         }
-        let with = field_target(&cells, 0.01);
-        let without = field_target(&cells, 0.0);
-        // With the gain the draw applies handed in, the residual disagreement
-        // is nothing; without it, the field would have carried the whole
-        // achromatic step itself.
-        assert!(with[0][0].abs() < 2e-5, "{} survives the split", with[0][0]);
-        assert!(without[0][0] > 1e-3);
+        for tone in [0.0, 0.01] {
+            let field = field_target(&cells, tone);
+            for channel in field[0] {
+                assert!(channel.abs() < 1e-6, "{channel} of level leaked");
+            }
+        }
+        // And a hue rides through the tone term essentially unchanged: the
+        // split scales each lens by under a percent, which moves a hue by
+        // its second order and no more.
+        for cell in &mut cells {
+            cell.m1 = [0.30 + 2.0 / 255.0, 0.30, 0.30 - 2.0 / 255.0];
+        }
+        let still = field_target(&cells, 0.0);
+        let toned = field_target(&cells, 0.05);
+        for channel in 0..3 {
+            let apart = (still[0][channel] - toned[0][channel]).abs();
+            assert!(
+                apart < 0.03 * (2.0 / 255.0),
+                "the tone term moved a hue by {apart}",
+            );
+        }
     }
 
     /// The matrix here is the fragment shader's: the same four BT.709
