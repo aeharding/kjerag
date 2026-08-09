@@ -1824,7 +1824,22 @@ HICCUP=0.4
 # pattern of plain `stopped:` reads that as the picture dying. Measured: it
 # failed the hiccup check that way on 2026-08-01, on two underruns that landed
 # before the file's first report line.
-STOPPED='.insv stopped:'
+#
+# The extension is the media file's own and was the literal `.insv` until
+# 2026-08-09. Kjerag plays a second format now, and the pattern never matched
+# on one: the whole stall section failed on an `.OSV` while the app was doing
+# exactly the right thing, and the transient check beside it passed for the
+# wrong reason, because "no line was printed" was what it was looking for.
+STOPPED=".${media##*.} stopped:"
+
+# How much film these checks need behind them, in seconds: the hiccup, the
+# settle, the stuck window, the alert and the final watch, end to end, plus
+# the boot in front of them. A capture shorter than this reaches its own end
+# before the squeeze does, and then nothing stops because there is nothing
+# left to import, which is the app behaving. Found on the 23.4 s Osmo 360
+# sample, where every check in this section failed and none of them was about
+# the app (2026-08-09).
+STALL_FILM=40
 
 stalls() {
 	local check
@@ -1832,6 +1847,13 @@ stalls() {
 
 	if [ -n "${KJERAG_FLATPAK:-}" ]; then
 		skip "a stuck import stops the file and says so (no preload into a sandbox)"
+		return
+	fi
+	local seconds
+	seconds=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$media" 2>/dev/null |
+		cut -d. -f1)
+	if [ -n "$seconds" ] && [ "$seconds" -lt "$STALL_FILM" ] 2>/dev/null; then
+		skip "a stuck import stops the file and says so (${seconds}s of film, and these checks need ${STALL_FILM})"
 		return
 	fi
 	if ! command -v cc >/dev/null; then
