@@ -601,18 +601,41 @@ live, no keyframe UI ever.
   is `MOUNTING`, a `const`. A setting that moves the horizon is the calibration
   ritual zero-config playback forbids, and the escape hatch is replaced by
   something better: the file's own accelerometer is a second, independent
-  statement of where down is, and it is checked **per file**. Under 8 degrees
-  and better than the null of a camera assumed never to lean, and the horizon is
-  held; otherwise the capture comes out with an empty orientation track, which is
-  the shape a capture with no inertial record at all already had, so it reaches
-  the pilot as the disabled menu item and the same `level:` line. Measured over
-  all seven corpus files: six unit B files at 1.6 to 3.8 degrees against nulls of
-  5.7 to 9.4, and the one unit A file at 23.0 against a null of 14.7.
+  statement of where down is, and it is held against the file's own quaternion
+  **per file**. Under 8 degrees, better than the null of a camera assumed never
+  to lean, and better than the same quaternion read the other way round, and the
+  horizon is held; otherwise the capture comes out with an empty orientation
+  track, which is the shape a capture with no inertial record at all already
+  had, so it reaches the pilot as the disabled menu item and the same `level:`
+  line. Measured over all seven corpus files: six unit B files at 1.55 to 3.75
+  degrees against nulls of 5.68 to 9.44, and the one unit A file at 23.02
+  against a null of 14.72.
 
-  **So unit A's sample capture no longer holds a horizon, and says why.** The
-  mounting was derived from unit B alone and unit A was a null result there. Its
-  picture is untouched and its `lock=0` and `lock=1` renders are byte-identical,
-  which is the check that the refusal is complete.
+  **That gate is a check on the FILE and not on the mounting** (adversarial
+  review, 2026-08-09; a correction to this record and to the line the app
+  prints, and not a change to any picture). The mounting's mirror and its turn
+  are applied to the quaternion and to the accelerometer alike, so they cancel
+  out of the angle between them: all four sign families whose change of basis is
+  a rotation score the check identically, and the refuted `as written` family
+  passes it with the shipped family's numbers to the last bit while composing an
+  orientation tens of degrees away. What the check really sees is a file whose
+  own two records disagree - which is what unit A is - plus the CONJUGATION, the
+  one bit of the mounting that does not cancel, which is now a third bar and a
+  third number in the printed line rather than an unstated assumption.
+  **Mounting verification is offline and stays there**: the vanishing-point
+  solve over 177 degrees of lean azimuth. The limitation this leaves is written
+  down rather than left to be found: a third unit whose inertial frame is
+  reflected the other way would render a tilted horizon and pass the gate.
+  docs/research/osv-format.md 6.2, and
+  `osmo::tests::the_check_scores_a_mirrored_mounting_identically` is the proof
+  in code.
+
+  **So unit A's sample capture no longer holds a horizon, and says why.** Its
+  quaternion and its accelerometer disagree by 23.0 degrees where a camera
+  assumed upright is out by 14.7, and reading the quaternion the other way round
+  does not rescue it (11.3, past the ceiling). Its picture is untouched and its
+  `lock=0` and `lock=1` renders are byte-identical, which is the check that the
+  refusal is complete.
 
   **The GPU twin guard now runs both models.** `lens_pixel` branches on the
   block's own model field, so the Insta360 fixture never ran a line of `theta` on

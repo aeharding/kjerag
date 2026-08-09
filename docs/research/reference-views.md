@@ -659,11 +659,20 @@ stills in gitignored `scratch/OSV-VERIFY/`.
 
 **The fourth line that is not here is the one for the other unit.** `--bin reframe
 ~/Videos/samples/dji-osmo360/CAM_20250715191201_0003_D.OSV time=20 yaw=0 fov=90 lock=1` renders
-with **no horizon lock at all**, because that capture's own accelerometer contradicts the mounting
-(23.0 degrees against a 14.7 degree null, printed at open) and the lock refuses rather than holding
-a horizon it cannot confirm. `lock=0` and `lock=1` are byte-identical there, which is the check
-that the refusal is complete. Nobody has asked for that file to hold a horizon; if a second unit
-ever needs one, the mounting is what has to be re-derived, not the gate.
+with **no horizon lock at all**, because that capture's own two records of where down is contradict
+each other: its quaternion and its accelerometer disagree by 23.0 degrees where a camera assumed
+upright would be out by 14.7, printed at open. That is a fault in the file by the file's own
+evidence, and reading the quaternion the other way round does not rescue it either (11.3 degrees,
+past the 8 degree ceiling). The lock refuses rather than holding a horizon on a record it cannot
+believe. `lock=0` and `lock=1` are byte-identical there, which is the check that the refusal is
+complete. Nobody has asked for that file to hold a horizon.
+
+**The gate is not a mounting check and must not be read as one** (review, 2026-08-09;
+docs/research/osv-format.md 6.2). A mounting's mirror and turn move the quaternion and the
+accelerometer together, so they cancel out of it: a unit whose inertial frame is reflected the
+other way would draw a visibly tilted horizon here and print the line a file that agrees prints.
+The mounting was verified offline, on the picture, over 177 degrees of lean azimuth, and that is
+the instrument a second unit would need re-run.
 
 ## Standing bars
 - Pixel-perfect horizon at zoom is an acceptance criterion (owner, 2026-07-31).

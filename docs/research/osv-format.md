@@ -245,12 +245,21 @@ returns `+86.8`, and the quarter turn puts the mirror plane on the 45 degree
 diagonal between the two lenses. `+90.0` is the arm the owner tested and
 approved.
 
-### 6.1 The self-check, and why the mounting can be a constant
+**This table is the whole of the mounting's verification**, and it is offline
+and after the fact: rendered pictures, three files of one camera, one session.
+Nothing at open re-checks it, and section 6.2 is the proof that nothing at open
+can.
 
-**HIGH.** A constant derived from one corpus is a guess about every file outside
-it, so every file is asked to confirm it. The accelerometer at field 10 is a
-second, independent statement of where down is, in the same inertial frame, and
-`osmo::Plumb` scores the mounting against it per file.
+### 6.1 The self-check: what it verifies, and what it cannot
+
+**HIGH**, and the second half of this section is a correction made in review on
+2026-08-09. The check exists and does real work; the claim printed over it was
+bigger than the work.
+
+The accelerometer at field 10 is a second, independent statement of where down
+is, in the same inertial frame as the quaternion, so `osmo::Plumb` holds the two
+against each other per file and refuses the lock on a capture whose own two
+records contradict each other.
 
 It is read on frames leaning more than 8 degrees, because every reading predicts
 the same lean magnitude - `1 - 2(x^2 + y^2)` carries no sign - so the readings
@@ -259,32 +268,101 @@ low-passed over 2 s first, because a worn camera's accelerometer is gravity plus
 the wearer's stride and on this corpus the stride is the bigger of the two at
 frame rate.
 
-Measured over the whole seven-file corpus, 2026-08-09, in degrees at the median:
+Measured over the whole seven-file corpus, 2026-08-09, in degrees at the median,
+by the shipped check itself (printed to four decimals for this table and to one
+in the app's own line):
 
 ```text
-file                                   mirror   conjugate   null   leaned frames
-1- 8k30p stable                           3.8        11.0    5.7              39
-1 8k30p standard 10bit -003 (owner's)     2.0         9.3    9.4             539
-2 8k30p Dlog-M -002                       2.9        10.1    6.8             244
-2- shake_stable_shake                     2.9         5.4    8.3             680
-2 Lens Sharpness Test                     1.6        15.5    7.7              72
-3 8k50p Dlog-M -001                       2.7        11.3    8.9             893
-CAM_20250715191201_0003_D  (unit A)      23.0        11.3   14.7              53
+file                                    shipped   flipped   null   leaned frames
+1- 8k30p stable                          3.7510   10.9866  5.6774            39
+1 8k30p standard 10bit -003 (owner's)    1.9534    9.2554  9.4379           539
+2 8k30p Dlog-M -002                      2.8710   10.1090  6.8389           244
+2- shake_stable_shake                    2.8713    5.3565  8.2701           680
+2 Lens Sharpness Test                    1.5544   15.5463  7.6547            72
+3 8k50p Dlog-M -001                      2.6931   11.3220  8.8967           893
+CAM_20250715191201_0003_D  (unit A)     23.0196   11.3151 14.7221            53
 ```
 
-Two bars, each with a job: the reading must miss gravity by less than **8
-degrees**, which bounds what a held horizon can be wrong by, and by less than the
-**null** of a camera assumed never to lean, which is what makes this a
-verification rather than a tolerance. Both bars agree on every file in the
-corpus.
+Three bars, each with a job: the miss must be under **8 degrees**, which bounds
+what a held horizon can be wrong by; under the **null** of a camera assumed
+never to lean, which is what makes this a verification rather than a tolerance;
+and under the **flipped** reading of the same quaternion, which is the one bar a
+mounting can fail. All three agree on every file in the corpus. The six that
+pass beat their nulls by 1.51 to 4.92 times and their flipped readings by 1.87 to
+10.00; unit A loses to its own null by 1.56 and to its own flipped reading by
+2.03.
 
-**Unit A fails, and that is the honest outcome rather than a bug.** The mounting
-was derived from unit B alone and unit A was a null result there; its own
-accelerometer now says the reading is wrong for it. It comes out with an empty
-orientation track, which is the same shape a capture with no inertial record at
-all comes out with, so it reaches the pilot as the disabled menu item and the
-same `level:` line, never as an error. Its picture is untouched, and `lock=0` and
-`lock=1` render byte-identically there.
+**The margins are not all comfortable, and the thin one has a name.** `1- 8k30p
+stable` passes at 3.75 against a null of 5.68 over 39 leaned frames of an 83
+second capture, which is the whole of what that file offers. Read at 10 degrees
+of lean rather than 8 it offers none at all and goes Blind (measured), and `2
+Lens Sharpness Test` falls from 72 leaned frames to 6. The bar sits at 8 for
+that reason as much as any other.
+
+### 6.2 What the self-check CANNOT see, and where the mounting is really verified
+
+**HIGH, as arithmetic rather than as a measurement.** The line this check prints
+said the mounting was "confirmed" until 2026-08-09. It cannot confirm a mounting,
+and the table above says so if you count its columns: there are two distinct
+scores across the eight sign families, not eight.
+
+Both of the file's records are carried through the mounting on the way into the
+comparison - the quaternion by its reading, the accelerometer by the same change
+of basis - so anything the mounting does to one it does to the other. For a
+reading with signs `s` on the quaternion's vector part and `S = diag(s)`:
+
+```text
+predicted = R_s^T z = S R^T S z          up = -S a / |a|
+angle(predicted, up) = angle(R^T z, -a / |a|)      // S drops out
+```
+
+So the **mirror is invisible** to it, and so is the turn, which rotates both. The
+`as written` family in the table of section 6 - refuted from the picture at 65.9
+degrees rms of scatter - scores this check identically to the shipped one, to the
+last bit, while composing an orientation tens of degrees away.
+`osmo::tests::the_check_scores_a_mirrored_mounting_identically` is that as a
+test.
+
+**What it does see is real, and there are two things:**
+
+- **A file whose own two records disagree**, which is unit A: 23.0 degrees
+  against a 14.7 degree null. That is a fault in the file by the file's own
+  evidence, and it needs no reference to any mounting.
+- **The conjugation**, which is the one bit of the mounting that does not cancel:
+  reading the quaternion forwards rather than inverted transposes the rotation
+  and moves the angle. That is the `flipped` column, and it is a bar and not
+  only a print, so the verdict rests on the one mounting-sensitive number
+  available.
+
+**Mounting verification lives offline**, in the vanishing-point solve of section
+6: 23 instants of three unit B files over 177 degrees of lean azimuth, on
+rendered pictures, with the lock off. That is where the mirror and the quarter
+turn were settled and it is where a second unit's would have to be settled.
+
+**The honest limitation, stated rather than discovered later:** if some other
+Osmo 360 writes its inertial frame through a different reflection, that capture
+renders a **visibly tilted horizon** and this gate prints the same line it prints
+for a file that agrees. Nothing at open would catch it. There is no way to move
+that check to open time from gravity alone, because gravity is one direction and
+the reflection moves both of the vectors being compared. What would catch it is
+the eye, or a re-run of the offline instrument on that unit's own film.
+
+**Unit A fails, and that is the honest outcome rather than a bug.** Its own two
+records disagree by 23.0 degrees where a camera assumed upright would be out by
+14.7, so Kjerag has no orientation for that file it can believe. It comes out
+with an empty orientation track, which is the same shape a capture with no
+inertial record at all comes out with, so it reaches the pilot as the disabled
+menu item and the same `level:` line, never as an error. Its picture is
+untouched, and `lock=0` and `lock=1` render byte-identically there.
+
+What the check does NOT say is WHICH of the two records is the wrong one. It is
+worth ruling out the tidiest explanation, though, because the numbers do:
+"unit A is simply the other conjugation family" does not hold. Read that way
+its miss is its flipped column, 11.3 degrees, which clears its own 14.7 null by
+only 1.30 where every passing file clears its own by 1.51 or more, and which is
+past the 8 degree ceiling outright. There is no reading of that file's
+quaternion, in either family, that agrees with that file's own accelerometer
+well enough to hold a horizon on.
 
 **Blind is not refusal.** On a camera that never leans the check cannot separate
 one reading from another, and does not need to: the error it exists to catch is
