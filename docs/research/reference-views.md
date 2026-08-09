@@ -587,10 +587,11 @@ is what ships; Optical Flow is the belt, later, behind its own switch; one mode 
   and 0.510 on an X2-class camera**, so the anchor **reduces the crawl by about 60 percent** on
   the camera he judged it on and by about half on the narrowest one, rather than removing it.
   At `down1`'s worst the drawn line still crawls 0.32 deg per frame where unanchored it crawls
-  0.82. At the 3.55 degree rail the fast segment reaches, the drawn line sits **2.25 deg** off the
-  seam on the X4 Air and **1.89** on an X2-class camera, not 3.55.
+  0.82. At the **3.53 degrees the fast segment actually reaches**, the drawn line sits **2.25 deg**
+  off the seam on the X4 Air and **1.89** on an X2-class camera, not 3.53; at the 3.5463 ceiling
+  the frame rate sets, which the segment approaches and does not touch, it is 2.258 and 1.901.
   The rail itself is the film rate's: the follow's ceiling is
-  `allowance / (POWER * RATE * dt)^(1/POWER)`, which is 3.55 of 4.00 degrees at 30 fps and passes
+  `allowance / (POWER * RATE * dt)^(1/POWER)`, which is 3.5463 of 4.00 degrees at 30 fps and passes
   the allowance above 100 fps. Every file judged here is 30 fps; both cameras have 120 fps modes
   and no such file has been looked at. docs/research/studio-parity.md 3.4 carries the table.
 - 2026-08-08 CALIBRATION v6: REFUSED BY HIS EYE. STATUS: calibration stays v3. The parity line

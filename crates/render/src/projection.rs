@@ -671,12 +671,24 @@ pub struct Rolling {
 /// Whether the drawn handover line is held on world content instead of being
 /// carried across it by the body's own turning, from `KJERAG_ANCHOR`.
 ///
-/// **On is the shipped player.** `KJERAG_ANCHOR=off` (or `0`, or empty) is the
-/// research escape that puts the 50/50 line back on the raw geometry, which is
-/// the picture every build before 2026-08-08 drew and the arm every measurement
-/// of the follow is read against. It is a way to answer "is the anchor doing
+/// **On is the shipped player.** `KJERAG_ANCHOR=off` (or `0`) is the research
+/// escape that puts the 50/50 line back on the raw geometry, which is the
+/// picture every build before 2026-08-08 drew and the arm every measurement of
+/// the follow is read against. It is a way to answer "is the anchor doing
 /// this?" in one run and it is not a setting: nothing in the window offers it,
 /// it is read once, and it is written nowhere.
+///
+/// **`KJERAG_ANCHOR=` with nothing after it is UNSET, and says so.** It used to
+/// mean off, on the reasoning that anything that is not a yes is a no, and that
+/// cost a review a whole pass on 2026-08-09: a harness wrote
+/// `env KJERAG_ANCHOR="$mode"` with `$mode` empty for its "leave it alone" arm,
+/// every run of that arm silently drew the unanchored picture, and the digests
+/// were compared against an anchored reference. An empty variable is what a
+/// shell produces when a variable it is expanding is itself unset, so it is
+/// overwhelmingly a mistake rather than a request; the way to ask for the
+/// default is to not set it, which is `env -u KJERAG_ANCHOR`. A line on stderr
+/// says which of the two happened, because a silent reinterpretation is the
+/// thing that cost the pass.
 ///
 /// Read once, because a value that changed mid-run would change it between two
 /// frames of one pan.
@@ -686,7 +698,15 @@ pub fn anchoring() -> bool {
         let Ok(asked) = std::env::var(ANCHOR) else {
             return true;
         };
-        let on = asked != "0" && !asked.eq_ignore_ascii_case("off") && !asked.is_empty();
+        if asked.is_empty() {
+            eprintln!(
+                "blend:  {ANCHOR} is set to nothing, which is read as UNSET and leaves the seam \
+                 anchor ON. To turn it off say {ANCHOR}=off; to ask for the default say \
+                 `env -u {ANCHOR}`"
+            );
+            return true;
+        }
+        let on = asked != "0" && !asked.eq_ignore_ascii_case("off");
         if !on {
             println!(
                 "blend:  research seam anchor OFF, {ANCHOR}={asked}: the 50/50 handover line sits \
@@ -2906,6 +2926,20 @@ pub(crate) mod tests {
     /// A camera that overlaps by 9.18 degrees, which is the ONE X2's 9.19 to a
     /// hundredth of a degree: the narrowest camera in the corpus, and the one
     /// the flat seam moved from 3.94 degrees of handover to the whole 8.00.
+    ///
+    /// **It reproduces that camera's OVERLAP and nothing else about its
+    /// optics**, and every "X2-class" figure this file and
+    /// docs/research/studio-parity.md 5.3 report means that. The crop is
+    /// concentric with each lens's unchanged principal point, so the boundary
+    /// it makes is the X4 Air's own shape scaled down; a real narrow camera's
+    /// is raggeder, and the review that raised the width finding puts the ONE
+    /// X2's lens 1 worst azimuth at 3.39 degrees against this fixture's 0.66.
+    /// Neither property asserted here is read off that shape - a hole needs
+    /// `|shift| > band / 2 + overlap / 2`, whose only camera term is the
+    /// overlap, and a cliff is carried by [`claim`]'s per-lens taper, which
+    /// runs out on whatever rim the lens has - so the conclusions hold and the
+    /// SIZE of an overshoot quoted for "an X2-class camera" is this fixture's
+    /// and not that camera's.
     const X2_CLASS: u32 = 3803;
 
     /// A camera that overlaps by 7.43 degrees, which is narrower than the 8 the
@@ -3746,17 +3780,28 @@ pub(crate) mod tests {
     /// - **no hole**: the delivered weights sum to one at every direction, so
     ///   no pixel is left transparent by a ramp that zeroed the only lens with
     ///   the ray;
-    /// - **no cliff**: the delivered weight never steps by more than the fade's
-    ///   own slope class from one probe to the next, so the handover is still a
-    ///   fade out there and not an edge.
+    /// - **no cliff**: the delivered weight never steps by more than this
+    ///   test's bar from one probe to the next, so the handover is still a fade
+    ///   out there and not an edge.
     ///
     /// Measured 2026-08-09, this grid, both classes: the sum is one to a single
     /// ulp (0.99999988, which is `share`'s division and not a gap), and the
     /// worst step is **0.0025** per hundredth of a degree on the X4 Air fixture
-    /// and **0.0034** on the X2-class one, against a fade whose own mean slope
-    /// over its delivered 10-to-90 walk is 0.0017. The bar is 0.0040, which is
-    /// a sixth above the worst measured and a hundredth of what either control
-    /// below produces.
+    /// and **0.0034** on the X2-class one.
+    ///
+    /// **What 0.0040 is, said plainly: a regression bar and not a safety
+    /// threshold.** It is set a sixth above the worst this grid measures - and
+    /// above the 0.003485 a finer sweep of the same ring read in review - so
+    /// that a change to the taper trips it and ordinary rounding does not.
+    /// Nothing derives it, and in particular the fade's own mean slope over its
+    /// delivered 10-to-90 walk, which is 0.0017, is **context for the size of
+    /// the number and not the derivation of it**: this test cannot say at what
+    /// step a fade stops reading as a fade, because no eye has been asked that
+    /// question. What makes the bar worth asserting is the **gap to the
+    /// control**: the planted cliff below steps the weight by 0.36, a hundred
+    /// times this bar and a hundred times the worst measured, so the two are
+    /// two orders apart and where in that gap the line is drawn changes no
+    /// verdict this test has ever returned.
     ///
     /// **What actually carries it** is [`claim`]: a lens's share is multiplied
     /// by its own coverage depth, which reaches zero exactly where that lens

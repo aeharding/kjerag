@@ -125,6 +125,15 @@ is what the owner picked.
 puts the line back on the raw geometry; it is not a setting, nothing in the
 window offers it, and it is read once.
 
+> **Write the "leave it alone" arm of an A/B as `env -u KJERAG_ANCHOR`, never
+> as `KJERAG_ANCHOR=`.** An empty value used to mean off. It cost the
+> 2026-08-09 review a whole pass: its harness wrote `env KJERAG_ANCHOR="$mode"`
+> with `$mode` empty for the default arm, every run of that arm drew the
+> unanchored picture, and the digests were then compared against an anchored
+> reference. Since that day an empty value is read as **unset** - the default,
+> anchor on - and the engine says so on stderr, because a silent
+> reinterpretation is the part that cost the pass.
+
 **Read the heading, not the verb.** This chapter said "the line is held" and
 that is not the whole truth, which a review found on 2026-08-09. The anchor
 holds the **share's** 50/50 line exactly: `crossover` is a ramp in
@@ -143,7 +152,8 @@ it hands over on.
 | **delivered per commanded degree** | **0.617** | **0.510** |
 | the same, spread over the 24 azimuths | 0.610 to 0.624 | 0.499 to 0.522 |
 | drawn offset at a 4.00 degree hold | 2.54 deg | 2.13 deg |
-| drawn offset at the 3.55 degree rail the fast segment reaches | 2.25 deg | 1.89 deg |
+| drawn offset at the 3.53 degrees the fast segment actually reaches | 2.25 deg | 1.89 deg |
+| the same at the 3.5463 ceiling the 30 fps rate sets | 2.258 deg | 1.901 deg |
 
 **So the anchor reduces the seam's crawl by about 60 percent on the camera the
 owner judged it on, and by about half on the narrowest one. It does not remove
@@ -368,11 +378,39 @@ closes at `-band / 2 - shift` and opens at `band / 2 - shift`, so off the seam i
 reaches `band / 2 + |shift|`, and `|shift|` is allowed up to `band / 2`. At the
 rail that is a **whole band**:
 
-| | X4 Air fixture | X2-class |
+| | X4 Air fixture | X2-class stand-in |
 | --- | ---: | ---: |
 | shared picture, a side | 7.22 deg | 4.59 deg |
 | the support at the rail | 8.00 deg | 8.00 deg |
 | how far past the coverage | 0.78 deg | 3.41 deg |
+
+> **"X2-class" IS A SYMMETRIC-CROP STAND-IN, and every row of it in this
+> chapter means that.** It is `projection::tests::cropped(X2_CLASS)`: the X4
+> Air's own calibration with the delivered frame shrunk to 3803 px, which
+> shrinks each lens's image circle around its **unchanged principal point**
+> until the pair overlaps by 9.18 degrees - the ONE X2's 9.19 to a hundredth.
+> So it reproduces the ONE X2's **overlap** and nothing else about its optics.
+> In particular it does not reproduce that camera's own coverage boundary,
+> which is where a real narrow camera would be hardest on this property: the
+> review that raised the finding puts lens 1's worst azimuth at **3.39
+> degrees**, and a crop concentric with the principal point cannot make a
+> boundary that ragged out of a fixture whose own spread is 0.66.
+>
+> **The reason it is synthesized is a rule and not a shortcut.** The ONE X2's
+> calibration lives in the owner's footage and a trailer dump carries his
+> camera serial and his GPS track, which AGENTS.md forbids committing; the X4
+> Air fixture is the one calibration this repository has.
+>
+> **Why the conclusion survives the caveat anyway.** Neither property this
+> section asserts is read off the boundary's shape. A **hole** needs
+> `|shift| > band / 2 + overlap / 2` and the clamp allows `band / 2`, so the
+> margin is `overlap / 2` and the only camera-dependent term in it is the
+> overlap - which is exactly the term the stand-in does reproduce. A **cliff**
+> is carried by `claim`'s per-lens taper, which is each lens's own coverage
+> depth reaching zero on its own rim, whatever shape that rim is: a raggeder
+> boundary moves where the taper runs out, not whether it runs out. What the
+> stand-in cannot speak for is the SIZE of the overshoot at the ONE X2
+> specifically, and that number is quoted from it rather than from the camera.
 
 **How often that happens on his own film**, read off the held line's own trace,
 2026-08-09. `band / 2 + |delta|` against `overlap / 2`, frame by frame:

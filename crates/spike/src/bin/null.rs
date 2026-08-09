@@ -43,9 +43,18 @@ fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
+    // Empty and absent are one thing to `projection::anchoring` since
+    // 2026-08-09 - `KJERAG_ANCHOR=` is a shell expanding a variable that is
+    // itself unset, not a request to turn the anchor off - so this line
+    // reports what the engine read and not what the shell wrote. The way to
+    // ask for the default in an A/B arm is `env -u KJERAG_ANCHOR`.
+    let anchor = std::env::var("KJERAG_ANCHOR").unwrap_or_default();
     println!(
         "anchor: KJERAG_ANCHOR={}",
-        std::env::var("KJERAG_ANCHOR").unwrap_or_else(|_| "<unset>".to_owned())
+        match anchor.is_empty() {
+            true => "<unset>",
+            false => &anchor,
+        }
     );
     println!(
         "width:  KJERAG_HANDOVER_DEG={}",
