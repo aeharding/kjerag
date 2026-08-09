@@ -3214,6 +3214,37 @@ pub(crate) mod tests {
         ]
     }
 
+    /// The two lenses of one DJI Osmo 360, as a camera with a seam: unit B's
+    /// pair from [`osmo_lenses`], which is the unit the owner flies.
+    ///
+    /// **What this is for is the twin guard** (`super::super::twin`), which
+    /// needs a whole [`Reframe`] whose blocks say [`THETA`] so that the WGSL
+    /// `theta` runs on the GPU beside the Rust one. Every other test of the
+    /// model above works on one [`LensBlock`] and does not care where the lens
+    /// points; this one has to hand two lenses over to each other across a
+    /// seam.
+    ///
+    /// The mounting is left `None`, so the pair is opposed by [`opposed`] the
+    /// way an Insta360's is, rather than by the whole rotation an `.OSV` writes
+    /// per lens (`kjerag_meta::Lens::mounting`). That is deliberate and it
+    /// costs the guard nothing: both mountings are resolved on the CPU into
+    /// `view_to_lens`, which the shader reads as a matrix and cannot tell
+    /// apart. What the guard compares is the model the block names, not how
+    /// the block was addressed.
+    pub(crate) fn osmo_pair() -> Vec<Lens> {
+        osmo_lenses()[..2].iter().map(|(_, l)| l.clone()).collect()
+    }
+
+    /// Whether every lens of this map names the theta polynomial.
+    ///
+    /// The twin guard's arms assert it (`super::super::twin`), because
+    /// [`lens_pixel`] branches on this field and an arm whose blocks named the
+    /// other model would be the other arm run twice: green, and guarding half
+    /// of what it says it guards.
+    pub(crate) fn runs_theta(reframe: &Reframe) -> bool {
+        reframe.lenses.iter().all(|lens| lens.model == THETA)
+    }
+
     /// The quarter turn `kjerag_meta::Pose` measures roll against, undone so
     /// that a zero pose above is a lens looking straight down `+z`.
     const ROLL_DATUM_DEG: f64 = -90.0;
@@ -3543,7 +3574,7 @@ pub(crate) mod tests {
     /// degrees, which is more than the handover ever asks for.
     #[test]
     fn a_dji_pair_overlaps_by_what_the_coverage_leaves() {
-        let lenses: Vec<Lens> = osmo_lenses()[..2].iter().map(|(_, l)| l.clone()).collect();
+        let lenses = osmo_pair();
         for (name, lens) in osmo_lenses() {
             let cap = cap(&osmo_block(&lens)).expect("an Osmo lens has a picture in it");
             near(2.0 * cap.to_degrees(), 198.6, 1.0);
