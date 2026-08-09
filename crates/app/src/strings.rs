@@ -215,6 +215,10 @@ pub fn out_of_reach() -> String {
 pub fn foreign(format: Foreign) -> String {
     let what = match format {
         Foreign::GoPro => "a GoPro video",
+        // DJI, but not the Osmo 360. Their other cameras write the same
+        // telemetry track and Kjerag reads one camera's calibration record,
+        // so this refusal is the one they kept when the Osmo 360 stopped
+        // being refused (`kjerag_meta::format`).
         Foreign::Dji => "a DJI video",
         // The spherical arm: an MP4 with 360 metadata in it, which is what
         // every one of these cameras' desktop apps exports. Kjerag reads the
@@ -222,7 +226,7 @@ pub fn foreign(format: Foreign) -> String {
         // that done to it.
         Foreign::Spherical => "a stitched 360 video",
     };
-    format!("That is {what}. Kjerag plays Insta360 .insv only.")
+    format!("That is {what}. Kjerag plays Insta360 .insv and DJI Osmo 360 .osv.")
 }
 
 /// `{file name} - Kjerag`, and plain `Kjerag` with nothing open.
@@ -408,15 +412,15 @@ mod tests {
     fn a_foreign_format_is_named_and_so_is_the_one_kjerag_takes() {
         assert_eq!(
             foreign(Foreign::GoPro),
-            "That is a GoPro video. Kjerag plays Insta360 .insv only."
+            "That is a GoPro video. Kjerag plays Insta360 .insv and DJI Osmo 360 .osv."
         );
         assert_eq!(
             foreign(Foreign::Dji),
-            "That is a DJI video. Kjerag plays Insta360 .insv only."
+            "That is a DJI video. Kjerag plays Insta360 .insv and DJI Osmo 360 .osv."
         );
         assert_eq!(
             foreign(Foreign::Spherical),
-            "That is a stitched 360 video. Kjerag plays Insta360 .insv only."
+            "That is a stitched 360 video. Kjerag plays Insta360 .insv and DJI Osmo 360 .osv."
         );
     }
 

@@ -34,7 +34,7 @@ use ffmpeg_next as ff;
 
 use super::sound::Sound;
 use super::track::Track;
-use super::{DrmFrame, Fallible, HwDevice, NANOS, Size, decode, media_time, read_only};
+use super::{DrmFrame, Fallible, HwDevice, NANOS, Samples, Size, decode, media_time, read_only};
 
 /// Which frame a caller wants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +152,10 @@ pub struct Frames {
     /// One per video stream, in stream order: lens 0, then lens 1.
     pub lenses: Vec<DrmFrame>,
     pub size: Size,
+    /// How the planes behind those frames are written, which is the
+    /// container's answer and not the descriptor's: the DRM format says how
+    /// wide a sample is and nothing at all about what range it is in.
+    pub samples: Samples,
 }
 
 impl std::fmt::Debug for Frames {
@@ -178,6 +182,10 @@ pub struct Reader {
     track: Option<Track>,
     timing: Timing,
     size: Size,
+    /// How the planes of every frame this hands out are written. One answer
+    /// for the whole capture: a second file whose pictures do not match the
+    /// first's is not this capture's other lens ([`Shape`]).
+    samples: Samples,
     lookahead: usize,
     skip_before: u64,
     /// Set from a seek until the frame it landed on has been handed over.
@@ -240,6 +248,50 @@ struct Video {
     rate: ff::Rational,
     frames: u64,
     size: Size,
+    samples: Samples,
+}
+
+/// How one video stream's samples are written, off the container's own two
+/// fields.
+///
+/// Read here rather than off a decoded frame because only one of the two is
+/// in a frame at all: a pixel format says how wide a sample is, and the range
+/// travels beside it and not in it. A depth this does not recognize is the
+/// 8-bit picture Kjerag drew before there was a second answer, which is what
+/// every `.insv` in the corpus is.
+///
+/// **Big endian is refused rather than drawn.** The shader puts a 16-bit word
+/// back together itself, from two 8-bit components, in one order
+/// (`kjerag_render`'s `plane_word`), and a stream whose words are the other
+/// way round would come out as noise with nothing to say so. Nothing in this
+/// path can produce one - ffmpeg names the host's own endianness on a decode
+/// and this host is little endian - so the refusal is a claim this reader
+/// declines to make rather than a case anyone has met. Errors are the error:
+/// what a pilot would read is this sentence.
+///
+/// **The range's fallback is studio swing, not full**, which is the opposite
+/// of what this read on the way in. Full range is claimed only where the
+/// container claims it, because that is what the codecs say: `H.264` and
+/// `HEVC` both default `video_full_range_flag` to 0, and a file that says
+/// nothing is saying studio swing. Measured over the whole sample corpus,
+/// 2026-08-09: every Insta360 capture, proxy and GoPro file is `yuvj420p` and
+/// tagged `pc`, and every `.OSV` of both units is `yuv420p10le` tagged `tv`.
+/// **Not one file in the corpus is untagged**, so this fallback picks nothing
+/// that ships today and is written down because the next camera may be the
+/// one that needs it.
+///
+/// # Safety
+/// `parameters` must be a live `AVCodecParameters` of a video stream.
+unsafe fn written(parameters: &ff::ffi::AVCodecParameters) -> Fallible<Samples> {
+    use ff::ffi::{AVColorRange, AVPixelFormat};
+    let is = |want: AVPixelFormat| parameters.format == want as i32;
+    if is(AVPixelFormat::AV_PIX_FMT_P010BE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10BE) {
+        return Err("this video's 10-bit samples are big endian, which Kjerag cannot read".into());
+    }
+    Ok(Samples {
+        wide: is(AVPixelFormat::AV_PIX_FMT_P010LE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10LE),
+        limited: parameters.color_range != AVColorRange::AVCOL_RANGE_JPEG,
+    })
 }
 
 /// What a file has to agree with its sibling about to be the other lens of
@@ -359,6 +411,10 @@ impl Reader {
         // X2 pairs on this box are one frame apart, always in lens 0's
         // favour.
         let frames = videos().map(|video| video.frames).min().unwrap_or(0);
+        let samples = videos()
+            .next()
+            .map(|video| video.samples)
+            .unwrap_or_default();
 
         Ok(Self {
             sources: sources.into_iter().map(Opened::into_source).collect(),
@@ -366,6 +422,7 @@ impl Reader {
             track: None,
             timing: Timing::new(rate, frames)?,
             size,
+            samples,
             lookahead: 0,
             skip_before: 0,
             landing: false,
@@ -424,6 +481,12 @@ impl Reader {
 
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    /// How the planes of this capture's frames are written, which is what
+    /// the reprojection pass has to be told before it can read one.
+    pub fn samples(&self) -> Samples {
+        self.samples
     }
 
     /// One per video stream of every file: 2 for an `.insv` the camera wrote
@@ -645,6 +708,7 @@ impl Reader {
                     timestamp,
                     lenses,
                     size: self.size,
+                    samples: self.samples,
                 }));
             }
             // Decoded on the way to a cue. Dropping it here, before the map,
@@ -760,24 +824,29 @@ impl Opened {
         let mut input = ff::format::input(&path)?;
         let videos: Vec<Video> = input
             .streams()
-            .filter(|s| s.parameters().medium() == ff::media::Type::Video)
+            // The cover an Osmo attaches to its container is not a lens, and
+            // taken as a third one it fails the open on a time base nobody
+            // set: a still has no frame rate to agree with the pictures about
+            // ([`super::is_lens`]).
+            .filter(super::is_lens)
             .map(|s| {
                 // `Parameters` hands out no accessors, and opening a decoder
                 // to read two integers before deciding whether this file is
                 // even wanted is worse than reading the integers. The same
                 // reach `sound_rate` makes, for the same reason.
-                let (width, height) = unsafe {
+                let (width, height, samples) = unsafe {
                     let p = *s.parameters().as_ptr();
-                    (p.width.max(0) as u32, p.height.max(0) as u32)
+                    (p.width.max(0) as u32, p.height.max(0) as u32, written(&p)?)
                 };
-                Video {
+                Ok(Video {
                     stream: s.index(),
                     rate: s.avg_frame_rate(),
                     frames: s.frames().max(0) as u64,
                     size: Size::new(width, height),
-                }
+                    samples,
+                })
             })
-            .collect();
+            .collect::<Fallible<Vec<Video>>>()?;
         let first = videos.first().ok_or("file has no video stream")?;
         let time_base = input
             .stream(first.stream)

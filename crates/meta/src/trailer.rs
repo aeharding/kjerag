@@ -190,8 +190,14 @@ impl CalibrationSet {
     /// The reach is only made when this file has no trailer of its own, so
     /// a file that carries one is read exactly as [`Self::from_insv`] reads
     /// it, down to the bytes, and no X4-class capture takes this path.
+    /// A DJI `.OSV` is the other kind of file this answers for. It keeps its
+    /// calibration in a telemetry track rather than in a trailer, so what
+    /// reads it is `super::osmo` and the container is what says which.
     pub fn from_capture(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
+        if super::Format::sniff(path) == super::Format::Osmo {
+            return super::osmo::read(path);
+        }
         match (Self::from_insv(path), super::pair::sibling(path)) {
             (Err(Error::NoTrailer), Some(beside)) => Self::from_insv(beside),
             (read, _) => read,
