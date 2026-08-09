@@ -149,7 +149,14 @@ it hands over on.
 owner judged it on, and by about half on the narrowest one. It does not remove
 it.** At `down1`'s worst the geometry sweeps 0.82 degrees of world content per
 frame under the seam; unanchored the drawn line crawls by all of that, and
-anchored it crawls by 0.32.
+anchored it crawls by 0.31.
+
+**The smoothness claim survives the correction, and was re-measured on the drawn
+line to check it.** Frame to frame, the worst change in the drawn line's own
+velocity is 4.78 deg/s at `down1` against a geometry floor of 12.22, and 9.67 on
+the July-14 fast segment against 14.27. Both are below the picture they are
+drawn from, which is the criterion; the commanded line reads 1.62 and 13.95 on
+the same runs.
 
 **flat6 behaves identically** - this is a property of the fusion the owner
 approved, not of anything this merge changed - and he approved the picture by
