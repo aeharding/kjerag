@@ -1348,7 +1348,8 @@ fn pose_terms(fit: SeamFit, lenses: &[Lens], frame: Size) -> Option<[f64; 5]> {
 /// **A ring with a hole in it is what this is for.** Five terms fitted over one
 /// arc say whatever they like over the rest of the circle, and nothing else in
 /// the path notices: the fit's own residual is measured where the readings are,
-/// the plausibility gate is about single readings, and [`Table::plausible`]'s
+/// the plausibility gate is about single readings, and
+/// [`super::band::Table::plausible`]'s
 /// half a degree is wide enough for a field that is wrong by two tenths. The
 /// owner's July-25 flight is the case in the corpus - 190 degrees of coverage
 /// and a 170 degree hole - and its own field composes 2.1 times larger than the

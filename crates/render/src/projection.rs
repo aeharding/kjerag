@@ -117,7 +117,8 @@ const CAP_AZIMUTHS: usize = 8;
 /// 2 to 4.78 at 8, and that band's gradient energy against the front lens alone
 /// falls 12 percent over the same pixels, 1.309 to 1.150. What the sweep did
 /// settle is the other end: 12 is refused by the optics on every camera in the
-/// corpus ([`super::band::affordable`]).
+/// corpus (`Reframe::overlap`, which is what bounds it now that the fold
+/// apparatus is gone).
 ///
 /// What bounds it from below is **shear**, the two lenses' disagreement
 /// divided by the band: above 1 the crossover folds the picture rather than
@@ -157,18 +158,13 @@ pub(crate) const CROSSOVER_DEG: f32 = 8.0;
 /// Either way the camera's own overlap still has the last word
 /// ([`Reframe::crossover`]).
 ///
-/// **One knob and not two, because there can only be one.** The along-seam
-/// term is applied over a whole lens rather than across the band
-/// ([`Reframe::bent`]), so what ramps it from nothing to all of it in the
-/// picture is the handover itself, and it cannot be given a wider support of
-/// its own. The two lenses draw one piece of content in one place only while
-/// the share lens 1 takes and the share lens 0 takes differ by exactly the
-/// disagreement the fit measured, so wherever both lenses are in the picture
-/// that difference is pinned at one whole correction, and what the picture
-/// shows walks from none of it to all of it exactly as the weights do. A ramp
-/// spread wider than the weights is a ramp that un-corrects the seam over the
-/// width it spread. So the support of the along-seam handover **is** the
-/// crossover, and this widens the crossover.
+/// **One knob and not two, because there is only one support.** This used to
+/// carry a longer argument, about an along-seam term applied over a whole lens
+/// and ramped into the picture by the weights, which is why it could not be
+/// given a support of its own. Nothing is applied over a lens any more
+/// ([`Reframe::blend`]: the seam is flat), so the argument survives in its
+/// short form: the crossover is the only thing here with a width, and this is
+/// what sets it.
 ///
 /// **It stays because it is how this width was chosen.** The 8 above is one
 /// label-blind verdict at one pair of widths, staged as two arms of one binary
@@ -183,8 +179,10 @@ const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
 ///
 /// A guard against a typo and not the bound that matters. What actually caps
 /// the handover is the file's own calibration, which is a smaller number on
-/// every camera in the corpus ([`super::band::affordable`]): 9.36 to 9.82
-/// degrees over six X4 Air files and 4.18 on the ONE X2.
+/// every camera in the corpus ([`Reframe::overlap`]): 14.44 to 15.02 degrees
+/// over six X4 Air files and 9.19 on the ONE X2. Those figures were 9.36 to
+/// 9.82 and 4.18 until the flat seam, when the bound stopped being the overlap
+/// minus a bend's reach and became the bare overlap.
 const OVERLAP_DEG: f32 = 14.0;
 
 /// How wide the handover asks to be on this run, in degrees, which is
@@ -451,7 +449,7 @@ pub struct Reframe {
     sharpen: [f32; 2],
     /// How wide this camera hands the picture over, in **radians**: what
     /// [`CROSSOVER_DEG`] asks for, or what these two lenses' overlap can carry
-    /// if that is less ([`super::band::affordable`]).
+    /// if that is less ([`Self::afforded`]).
     ///
     /// In the block rather than written into the shader source, because it is
     /// a property of the file and the shader is compiled once before any file
@@ -1032,11 +1030,29 @@ impl Reframe {
     ///
     /// Clamped here as well as by [`SeamAnchor`], because the allowance is the
     /// map's own property and a shift past half the drawn fusion width would
-    /// put the 50/50 line outside the fade it is supposed to live inside. It is
-    /// a guard and not a mechanism: the follow approaches this bound as an
-    /// eleventh root of the drift rate and reaches 3.53 of these 4.00 degrees
-    /// on the fastest segment there is to measure, so nothing an aircraft does
-    /// makes this clamp the thing that decides where the line is drawn.
+    /// put the 50/50 line outside the fade it is supposed to live inside.
+    ///
+    /// **It is also the only thing standing between the anchor and a hole in
+    /// the picture, which is worth writing down.** The handover's support is
+    /// centred on the drawn line, so with a shift the ramp closes at
+    /// `-band / 2 - shift` on one side and opens at `band / 2 - shift` on the
+    /// other ([`crossover`]). A lens weighed at exactly zero where the OTHER
+    /// lens has no picture either is a transparent pixel, and that needs the
+    /// closing end to fall outside the shared picture, which is
+    /// `|shift| > band / 2 + overlap / 2`. This clamp allows `band / 2`, so the
+    /// margin is the whole of `overlap / 2` - 7.22 degrees on the X4 Air
+    /// fixture and 4.59 on an X2-class camera - and the picture cannot have a
+    /// hole in it while it holds.
+    /// `tests::the_anchored_handover_leaves_no_hole_and_no_cliff` measures
+    /// both halves of that: no hole at every shift this clamp allows, and a
+    /// hole the moment a shift past it is planted straight into the block.
+    ///
+    /// In normal running it is a guard and not a mechanism: at film's 30 fps
+    /// the follow's own ceiling is 3.55 degrees of these 4.00
+    /// ([`SeamAnchor::follow`]), so no drift an aircraft can produce reaches
+    /// this clamp at all. Above 100 fps that stops being true, which is why
+    /// [`SeamAnchor::hold`] clamps as well and places its anchor on the clamped
+    /// value rather than on the raw one.
     ///
     /// A step of its own, like [`Self::with_table`]: every caller that is not
     /// running the follow - every instrument, every test, the blank pane - gets
@@ -1160,11 +1176,44 @@ impl Reframe {
     /// ask untouched: nothing is ever handed over, so the number is never used
     /// and a clamp would be inventing a bound out of a camera that is not
     /// there.
+    ///
+    /// **THIS IS NOT A SAFETY BOUND, AND SAYING IT WAS COST A REVIEW ROUND.**
+    /// The clamp keeps the handover's support inside the shared picture *when
+    /// the drawn line sits on the seam*, which is the only case there was
+    /// before [`SeamAnchor`]. With a line held on the world the support is
+    /// centred on the DRAWN line and not on the seam, so it runs
+    /// `band / 2 - shift` one way and `band / 2 + shift` the other
+    /// ([`crossover`]), and `|shift|` is allowed up to `band / 2`
+    /// ([`Self::with_shift`]). At the rail that is a **whole band** off the
+    /// seam on one side, against `overlap / 2` of shared picture: 8.00 degrees
+    /// into 7.22 on the X4 Air fixture and into 4.59 on a camera that overlaps
+    /// the way the ONE X2 does. Measured on a real X4 Air flight, 91 percent
+    /// of frames draw some support past the coverage.
+    ///
+    /// **What makes that safe is not this number.** A lens's claim is its share
+    /// of the handover times its own coverage depth ([`claim`]), and the depth
+    /// falls to zero exactly where that lens runs out of picture, so the outer
+    /// lens is faded out by its own rim before the ramp ever asks it for a
+    /// sample it does not have. The share the ramp is still handing it there is
+    /// spent on nothing and the pair renormalizes to the lens that does have
+    /// the ray. The two properties that matter - the weights always sum to
+    /// one, and the delivered weight never steps - are asserted over the whole
+    /// ring at the rail on both camera classes by
+    /// `tests::the_anchored_handover_leaves_no_hole_and_no_cliff`, with a
+    /// planted hole and a planted cliff as its controls. **The guard against a
+    /// hole is [`Self::with_shift`]'s clamp**, and the margin it holds is
+    /// `overlap / 2`, which that test measures rather than assumes.
+    ///
+    /// So what this clamp is actually for is the fade's SHAPE: it is what makes
+    /// the crossfade a ramp the two lenses can both pay for rather than one the
+    /// rim truncates. Widening it past the overlap would not put a hole in the
+    /// picture; it would hand the outer edge of the handover to the coverage
+    /// taper instead of to the ramp.
     fn afforded(&self) -> f32 {
         let asked = crossover_deg().to_radians();
         match self.overlap() {
-            // The overlap itself, and that is the whole bound. A handover of
-            // width `w` reaches `w / 2` off the seam on either side
+            // The overlap itself, and that is the whole bound. An UNSHIFTED
+            // handover of width `w` reaches `w / 2` off the seam on either side
             // (`super::band::reach`) and the shared picture runs `overlap / 2`
             // off it, so a band as wide as the overlap ends exactly on the rim
             // and a wider one would be asking a lens for picture it does not
@@ -1174,6 +1223,13 @@ impl Reframe {
             // degrees on a roomy camera and a whole regime change on a tight
             // one (`super::band::affordable`, deleted with the bend). Nothing
             // moves a sample now.
+            //
+            // **The shift is not in this arithmetic and deliberately is not.**
+            // Taking `|shift|` off the width here would narrow the fade every
+            // time the line moved, which is the breathing width the owner
+            // refused (`Self::handover_width`), and it would change the picture
+            // he approved. The doc above says what carries the overshoot
+            // instead.
             Some(overlap) => asked.min(overlap),
             None => asked,
         }
@@ -1977,6 +2033,16 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// 50/50 line at the edge of the fade and a shift of zero leaves it exactly
 /// where the two axis cosines put it.
 ///
+/// **The support moves with the line, and it is not narrowed to compensate.**
+/// This closes at `-band / 2 - shift` off the seam and opens at
+/// `band / 2 - shift`, so the far end reaches `band / 2 + |shift|` and, at the
+/// rail, a **whole band**. That is past the shared picture on every camera in
+/// the corpus and it is deliberate: what refuses the sample out there is the
+/// outer lens's own coverage depth inside [`claim`], not this width.
+/// [`Reframe::afforded`] carries the argument and
+/// `tests::the_anchored_handover_leaves_no_hole_and_no_cliff`
+/// carries the measurement.
+///
 /// **The ramp is the whole curve, and there is no exponent on it.** Between
 /// 2026-08-08 and the flat seam this share was re-spent on `s^n / (s^n +
 /// (1-s)^n)` at `n = 1.5`, to hand the picture over inside a narrower part of
@@ -2671,6 +2737,47 @@ pub(crate) mod tests {
     fn fixture(camera: Camera) -> Reframe {
         held(camera, Held::default())
     }
+
+    /// The same optics with the image circle cropped, which is the only knob
+    /// there is for asking a narrower camera a question here.
+    ///
+    /// A lens's picture stops where its landing leaves the largest circle that
+    /// fits in the delivered frame ([`image_radius`]), so a smaller frame round
+    /// the same principal point is a lens that sees less, and two of them
+    /// overlap by less. That is exactly what [`Reframe::overlap`] reads and
+    /// exactly what [`Reframe::afforded`] clamps against.
+    ///
+    /// **Synthesized rather than checked in, and that is a rule and not a
+    /// shortcut.** The ONE X2's own calibration lives in the owner's footage
+    /// and a trailer dump carries his camera serial and his GPS track, which
+    /// AGENTS.md forbids committing. The X4 Air fixture is the one calibration
+    /// this repository has, so a narrow camera is made out of it by taking away
+    /// picture, and the overlaps below are asserted rather than assumed so that
+    /// the fixture cannot quietly stop being the camera class it says it is.
+    fn cropped(frame: u32) -> Reframe {
+        Reframe::new(
+            &fixture_lenses(),
+            Size {
+                width: frame,
+                height: frame,
+            },
+            Camera::default(),
+            Held::default(),
+            1.0,
+            false,
+            Sampling::default(),
+        )
+    }
+
+    /// A camera that overlaps by 9.18 degrees, which is the ONE X2's 9.19 to a
+    /// hundredth of a degree: the narrowest camera in the corpus, and the one
+    /// the flat seam moved from 3.94 degrees of handover to the whole 8.00.
+    const X2_CLASS: u32 = 3803;
+
+    /// A camera that overlaps by 7.43 degrees, which is narrower than the 8 the
+    /// picture asks for. Nothing in the corpus is this tight; it exists so that
+    /// [`Reframe::afforded`]'s clamp has something to bind on.
+    const UNDER_THE_ASK: u32 = 3790;
 
     /// The same fixture with the camera body somewhere other than level,
     /// which is what horizon lock has to take back out.
@@ -3407,8 +3514,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// **The widest band stays inside the overlap**, with the room the bend
-    /// used to take back in it.
+    /// **The widest band stays inside the overlap while the line is on the
+    /// seam - and runs past it as soon as the line is held.**
     ///
     /// **What it asserted.** That the widest band this camera could open to -
     /// its floor, or a near-field reading past that floor - plus the widest
@@ -3416,16 +3523,25 @@ pub(crate) mod tests {
     /// have. On the fixture that was a band of 8.00 reaching 6.60 into 7.22 a
     /// side: 0.62 degrees to spare.
     ///
-    /// **What it asserts now.** The same sentence with the bend struck out.
-    /// The band is 8.00, there is nothing past it to open to, and it reaches
-    /// 4.00 into the same 7.22: **3.22 degrees to spare** where there were
-    /// 0.62. That number is the headroom the flat seam bought back, and it is
-    /// why the ONE X2 can now draw the full width
-    /// (`band::tests::the_width_a_camera_can_pay_for_is_its_own_overlap`).
+    /// **What it asserts now, and the half of it that was missing.** The bend
+    /// is struck out, so an unshifted band of 8.00 reaches 4.00 into the same
+    /// 7.22 and has 3.22 degrees to spare where it had 0.62 - that part is
+    /// unchanged and it is the headroom the flat seam bought back. What this
+    /// test used to leave out, and what a review found in it on 2026-08-09, is
+    /// that **the shipped picture does not draw an unshifted band**: the
+    /// handover's support is centred on the drawn line, the line is held on
+    /// world content ([`SeamAnchor`]), and at the allowance the support reaches
+    /// `band / 2 + allowance` = a whole band off the seam. Written against the
+    /// widths this camera actually uses, the old inequality is FALSE at the
+    /// rail, and the second assertion below is the true one stated in the
+    /// direction it is true in.
     ///
-    /// **Why it is not loosened.** The assertion is the same inequality
-    /// against the same measured overlap. It passes by more, which is the
-    /// finding and not a weakening of the check.
+    /// **Why it is not loosened.** Nothing here got a wider tolerance: a claim
+    /// that was made about the shipped picture and only held for one value of
+    /// one field is now made about the case it holds in, and the case it does
+    /// not hold in is asserted as the fact it is. What carries the overshoot
+    /// safely is `the_anchored_handover_leaves_no_hole_and_no_cliff`, which is
+    /// the test this one used to be mistaken for.
     #[test]
     fn the_widest_band_stays_inside_the_overlap() {
         let reframe = fixture(Camera::default());
@@ -3437,8 +3553,8 @@ pub(crate) mod tests {
         let reach = crate::band::reach(widest).to_degrees();
         assert!(
             reach < 0.5 * overlap,
-            "a band of {:.2} deg reaches {reach:.2} deg off the seam into an overlap of \
-             {overlap:.2} deg, which is {:.2} deg a side",
+            "an unshifted band of {:.2} deg reaches {reach:.2} deg off the seam into an overlap \
+             of {overlap:.2} deg, which is {:.2} deg a side",
             widest.to_degrees(),
             0.5 * overlap,
         );
@@ -3449,6 +3565,280 @@ pub(crate) mod tests {
             spare > 3.0,
             "the flat band leaves only {spare:.2} deg a side, not the 3.22 on record",
         );
+        // The other half, and the reason the sentence above needs its first
+        // four words. At the allowance the support runs a whole band off the
+        // seam on one side, which is 0.78 degrees PAST the shared picture on
+        // the roomiest camera there is and 3.41 past it on an X2-class one.
+        for (name, reframe) in [
+            ("the fixture", fixture(Camera::default())),
+            ("an X2-class camera", cropped(X2_CLASS)),
+        ] {
+            let overlap = reframe.overlap().expect("two lenses").to_degrees();
+            let band = reframe.handover_width().to_degrees();
+            let farthest = 0.5 * band + 0.5 * band;
+            assert!(
+                farthest > 0.5 * overlap,
+                "{name} holds its line inside the overlap after all: a band of {band:.2} at the \
+                 {:.2} degree allowance reaches {farthest:.2} against {:.2} a side, so the claim \
+                 this test used to make would be true and the doc on Reframe::afforded is wrong",
+                0.5 * band,
+                0.5 * overlap,
+            );
+        }
+    }
+
+    /// **The held line puts the handover past the picture, and nothing falls
+    /// through the gap.** The safety property the width clamp was mistaken for.
+    ///
+    /// **Why it exists.** `Reframe::afforded` clamps the handover to the
+    /// camera's own overlap and said, until 2026-08-09, that this kept the
+    /// handover inside the picture both lenses have, because "a handover of
+    /// width `w` reaches `w / 2` off the seam". With [`SeamAnchor`] that is
+    /// false: the support is centred on the DRAWN line, so it runs
+    /// `band / 2 + |shift|` off the seam and `|shift|` is allowed up to
+    /// `band / 2`. On a real X4 Air flight 91 percent of frames draw some
+    /// support past the coverage; at the rail on an X2-class camera the ramp is
+    /// still asking for a sample 8.00 degrees off a seam whose shared picture
+    /// stops at 4.59. The two guards that existed were tautologies - one
+    /// asserts `width / 2 < overlap / 2` for widths the clamp already caps at
+    /// the overlap, the other is `min(8, o) / 2 <= o / 2` - and neither has a
+    /// shift in it.
+    ///
+    /// **What it asserts, over the whole ring at the rail on both camera
+    /// classes.** The two properties that are what "safe" means for a
+    /// crossfade:
+    ///
+    /// - **no hole**: the delivered weights sum to one at every direction, so
+    ///   no pixel is left transparent by a ramp that zeroed the only lens with
+    ///   the ray;
+    /// - **no cliff**: the delivered weight never steps by more than the fade's
+    ///   own slope class from one probe to the next, so the handover is still a
+    ///   fade out there and not an edge.
+    ///
+    /// Measured 2026-08-09, this grid, both classes: the sum is one to a single
+    /// ulp (0.99999988, which is `share`'s division and not a gap), and the
+    /// worst step is **0.0025** per hundredth of a degree on the X4 Air fixture
+    /// and **0.0034** on the X2-class one, against a fade whose own mean slope
+    /// over its delivered 10-to-90 walk is 0.0017. The bar is 0.0040, which is
+    /// a sixth above the worst measured and a hundredth of what either control
+    /// below produces.
+    ///
+    /// **What actually carries it** is [`claim`]: a lens's share is multiplied
+    /// by its own coverage depth, which reaches zero exactly where that lens
+    /// runs out of picture, so the outer lens is faded to nothing by its own
+    /// rim before the ramp can ask it for a sample it does not have. The
+    /// controls say so by breaking exactly that:
+    ///
+    /// - **the planted cliff**: the same weights with the coverage depth
+    ///   replaced by a hard in-or-out step. Everything else is the shipped map.
+    ///   The step at the rim is then the whole share the ramp is still handing
+    ///   the outer lens, which this grid reads at 0.36, a hundred times the
+    ///   bar.
+    /// - **the planted hole**: a shift written straight into the block past
+    ///   what [`Reframe::with_shift`] allows, which is the one thing that can
+    ///   put the ramp's closing end outside the shared picture. The weights
+    ///   then sum to zero over a stretch of the ring, and the margin the
+    ///   shipped clamp holds against it is `overlap / 2`.
+    #[test]
+    fn the_anchored_handover_leaves_no_hole_and_no_cliff() {
+        for (name, reframe) in [
+            ("the X4 Air fixture", fixture(Camera::default())),
+            ("an X2-class camera", cropped(X2_CLASS)),
+        ] {
+            let overlap = reframe.overlap().expect("two lenses").to_degrees();
+            let allowance = 0.5 * reframe.handover_width();
+            let mut worst_sum = f32::INFINITY;
+            let mut worst_step = 0.0f32;
+            for shift in shifts(allowance) {
+                let held = reframe.with_shift(shift);
+                for phi in (0..360).step_by(5) {
+                    let (sum, step) = walked(&held, phi as f32, delivered);
+                    worst_sum = worst_sum.min(sum);
+                    worst_step = worst_step.max(step);
+                }
+            }
+            assert!(
+                worst_sum > 1.0 - 1e-6,
+                "{name} leaves a pixel weighing {worst_sum} of a whole one somewhere on the ring: \
+                 the ramp zeroed the only lens that had the ray",
+            );
+            assert!(
+                worst_step < 0.0040,
+                "{name} steps the delivered weight by {worst_step:.6} in a hundredth of a degree, \
+                 which is an edge and not a fade",
+            );
+
+            // The control for the cliff: the same map with the coverage taper
+            // broken to a hard edge, which is the term that carries the
+            // overshoot. It has to fail the bar this test just passed.
+            let mut planted = 0.0f32;
+            for shift in shifts(allowance) {
+                let held = reframe.with_shift(shift);
+                for phi in (0..360).step_by(5) {
+                    planted = planted.max(walked(&held, phi as f32, hard_edged).1);
+                }
+            }
+            assert!(
+                planted > 0.10,
+                "{name}: breaking the coverage taper only steps the weight by {planted:.6}, so \
+                 this test would pass a map with no taper in it and proves nothing",
+            );
+
+            // The control for the hole, and the measurement of what stops it.
+            // A shift past the clamp by more than half the overlap puts the
+            // ramp's closing end outside the shared picture; the clamp allows
+            // half the band, so the margin is half the overlap.
+            let mut torn = reframe;
+            torn.handover_shift =
+                (0.5 * reframe.handover_width().to_degrees() + 0.5 * overlap + 0.5).to_radians();
+            let mut lowest = f32::INFINITY;
+            for phi in (0..360).step_by(5) {
+                lowest = lowest.min(walked(&torn, phi as f32, delivered).0);
+            }
+            assert!(
+                lowest < 1e-6,
+                "{name}: a shift of {:.2} degrees, which is past everything, still leaves the \
+                 weights summing to {lowest}, so the no-hole assertion above cannot fail",
+                torn.handover_shift.to_degrees(),
+            );
+            assert_eq!(
+                reframe.with_shift(torn.handover_shift).handover_shift,
+                allowance,
+                "{name}: the clamp that stands between the anchor and that hole did not fire",
+            );
+        }
+    }
+
+    /// **A camera that cannot pay for the width the picture asks for gets the
+    /// width it can pay for**, asked of the code that ships rather than of a
+    /// copy of its arithmetic.
+    ///
+    /// **Why it exists.** `Reframe::afforded` is `asked.min(overlap)` and
+    /// nothing in the suite bound that `min` until 2026-08-09. Every fixture
+    /// here overlaps by 14.44 and every file in the corpus by 9.19 or more,
+    /// all of them over the 8 degrees the picture asks for, so `min` picked the
+    /// ask in every test there was: deleting the clamp outright left the whole
+    /// workspace green. `band::tests::the_width_a_camera_can_pay_for_is_its_own_overlap`
+    /// looks like the missing one and is not - it recomputes `CROSSOVER_DEG.min(overlap)`
+    /// beside the code instead of calling it, so it would pass a build whose
+    /// `afforded` did anything at all.
+    ///
+    /// **What it asserts.** Three cameras through [`Reframe::new`], which is
+    /// the only door `afforded` has, reading the answer back off the block the
+    /// shader is handed:
+    ///
+    /// - the X4 Air fixture, roomy at 14.44, draws the ask;
+    /// - an X2-class camera at 9.18 draws the ask **as well**, which is the
+    ///   disclosed picture change of this merge (the ONE X2 went from 3.94 to
+    ///   8.00) and is why the corpus alone cannot bind the clamp;
+    /// - a camera at 7.43, narrower than the ask, draws **7.43** and not 8.
+    ///
+    /// The third is the one that binds, and it is written as an equality
+    /// against the camera's own measured overlap rather than against a
+    /// constant, so a build that clamps to something else - or to nothing -
+    /// fails here.
+    #[test]
+    fn a_camera_narrower_than_the_ask_draws_what_it_can_pay_for() {
+        let asked = CROSSOVER_DEG;
+        for (name, reframe, overlap, draws) in [
+            (
+                "the X4 Air fixture",
+                fixture(Camera::default()),
+                14.44f32,
+                asked,
+            ),
+            ("an X2-class camera", cropped(X2_CLASS), 9.18, asked),
+            ("a camera under the ask", cropped(UNDER_THE_ASK), 7.43, 7.43),
+        ] {
+            let measured = reframe.overlap().expect("two lenses").to_degrees();
+            assert!(
+                (measured - overlap).abs() < 0.01,
+                "{name} overlaps by {measured:.4} and not the {overlap} this fixture is here to \
+                 stand for",
+            );
+            let width = reframe.handover_width().to_degrees();
+            assert!(
+                (width - draws).abs() < 0.01,
+                "{name} overlaps by {measured:.2} and draws {width:.4}, not {draws}",
+            );
+            // And the clamp is the one that chose it: the width is the smaller
+            // of the two, whichever that is on this camera.
+            assert!(
+                (width - asked.min(measured)).abs() < 0.01,
+                "{name} draws {width:.4}, which is neither the {asked} asked for nor the \
+                 {measured:.4} it overlaps by",
+            );
+        }
+        // The negative control, and the whole reason the third camera is here:
+        // with the clamp deleted, `afforded` would be the ask alone, and that
+        // is a different answer on exactly one of the three.
+        assert!(
+            cropped(UNDER_THE_ASK).handover_width().to_degrees() < asked - 0.5,
+            "the narrow camera draws the whole ask, so deleting the clamp would still pass",
+        );
+    }
+
+    /// The shifts the safety sweep is run at: the rail both ways, three
+    /// quarters of it both ways, and none.
+    fn shifts(allowance: f32) -> [f32; 5] {
+        [
+            -allowance,
+            -0.75 * allowance,
+            0.0,
+            0.75 * allowance,
+            allowance,
+        ]
+    }
+
+    /// Lens 1's delivered weight and whether the pair covers the ray at all:
+    /// what the fragment shader is handed, after the coverage depth and the
+    /// renormalization ([`claim`]).
+    fn delivered(reframe: &Reframe, ray: [f32; 3]) -> (f32, f32) {
+        let weights = reframe.blend(ray).weights;
+        (weights[0] + weights[1], weights[1])
+    }
+
+    /// The same with the coverage depth broken to a hard in-or-out step, which
+    /// is the control for the cliff. Every other term is the shipped map's.
+    fn hard_edged(reframe: &Reframe, ray: [f32; 3]) -> (f32, f32) {
+        let reach = norm3(ray);
+        let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| reframe.axis_of(lens, ray));
+        let front = reframe.handover(axis, reach, reframe.crossover);
+        let mut weights = [0.0; MAX_LENSES];
+        for (lens, weight) in weights.iter_mut().enumerate().take(2) {
+            let share = match lens {
+                0 => front,
+                _ => 1.0 - front,
+            };
+            let landing = reframe.project(lens, ray);
+            *weight = share * f32::from(u8::from(landing.inside));
+        }
+        let total: f32 = weights.iter().sum();
+        match total > 0.0 {
+            true => (1.0, weights[1] / total),
+            false => (0.0, 0.0),
+        }
+    }
+
+    /// Walks one azimuth across the whole seam and past both lenses' rims,
+    /// returning the smallest coverage the pair ever showed and the largest
+    /// step the weight took in a hundredth of a degree.
+    fn walked(
+        reframe: &Reframe,
+        phi: f32,
+        read: fn(&Reframe, [f32; 3]) -> (f32, f32),
+    ) -> (f32, f32) {
+        let (mut lowest, mut step, mut previous) = (f32::INFINITY, 0.0f32, None::<f32>);
+        for probe in 0..=2600 {
+            let theta = 90.0 + (-13.0 + probe as f32 * 0.01);
+            let (sum, weight) = read(reframe, direction(theta, phi));
+            lowest = lowest.min(sum);
+            if let Some(before) = previous {
+                step = step.max((weight - before).abs());
+            }
+            previous = Some(weight);
+        }
+        (lowest, step)
     }
 
     /// Issue #10's pre-test, and the only property it has to have: what it

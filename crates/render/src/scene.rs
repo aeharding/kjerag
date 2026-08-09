@@ -1002,7 +1002,7 @@ fn fit_into(
 ///
 /// One place, because two callers need it at two moments: the shell at open,
 /// and [`fit_into`] when a fit moves it. It reads the same
-/// [`Reframe::crossover_at`] the pass reads, off the lenses it is handed, and
+/// [`Reframe::handover_width`] the pass reads, off the lenses it is handed, and
 /// the aspect and the camera it builds the map with do not reach the answer.
 fn handover_deg(lenses: &[Lens], frame: Size) -> Option<f32> {
     if lenses.len() < 2 {

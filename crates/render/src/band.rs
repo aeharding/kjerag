@@ -141,7 +141,8 @@ const FAR_DEG: f32 = -1.2;
 /// one is not, and that is the difference between the axes. A bend along
 /// [`Ring::perp`] is a **shear perpendicular to its own gradient**, whose
 /// Jacobian determinant is exactly 1, so it cannot fold however wide it opens
-/// ([`width`] is not asked about it); and `perp` is the seam circle's own
+/// (nothing solves a fold inequality for it, and since the flat seam nothing
+/// solves one at all); and `perp` is the seam circle's own
 /// tangent, so the bend slides content along the circle rather than off it and
 /// spends none of the overlap the two lenses share
 /// (`the_along_seam_bend_costs_no_overlap_and_cannot_fold`).
@@ -545,7 +546,7 @@ pub struct Leftover {
 /// along-seam axis, and at one reference view it made the delivered axis about
 /// two view pixels worse. Why the band does not simply absorb an applied table
 /// is measured in
-/// [`a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it`], and it
+/// `tests::a_partial_ring_cannot_fit_away_a_table_over_the_whole_of_it`, and it
 /// binds anything that ever fills this uniform.
 ///
 /// **Nothing pooled per azimuth either, and that is a measurement** (stage 9,
@@ -852,7 +853,7 @@ fn terms(cos: f32, sin: f32) -> [f32; 5] {
 /// The same five functions at one azimuth, in `f64`.
 ///
 /// A second expression of one identity, which is what
-/// [`the_two_bases_are_the_same_five_functions`] is for. It exists because the
+/// `tests::the_two_bases_are_the_same_five_functions` is for. It exists because the
 /// two live at different precisions for different reasons: [`terms`] is the
 /// twin of what a fragment shader computes and may not be widened without
 /// changing every pixel the CPU map draws, while the pooled field
@@ -981,7 +982,7 @@ impl Cell {
     /// is how `kjerag-spike --bin band` gives what the pass measured to
     /// `--bin seam`, whose parity render is a CPU one: the camera maker's own
     /// export is in a projection family the app's own pass does not draw, so
-    /// scoring against it has to go through [`super::Reframe::blend_bent`]
+    /// scoring against it has to go through [`super::Reframe::blend`] on the CPU
     /// rather than through the window.
     pub fn write(cells: &[Self]) -> String {
         cells
@@ -1434,7 +1435,8 @@ pub fn pooled_gain(cells: &[Cell]) -> Option<(f32, f32)> {
     }
 }
 
-/// How far off the seam a handover of this width reaches, in radians.
+/// How far off the seam a handover of this width reaches **when the drawn line
+/// is on the seam**, in radians.
 ///
 /// Half the band, and nothing else. It used to be half the band **plus the
 /// widest bend that band could carry**, because a bend moved the sample off
@@ -1443,6 +1445,18 @@ pub fn pooled_gain(cells: &[Cell]) -> Option<(f32, f32)> {
 /// so the handover reaches exactly as far as its own half-width and no
 /// further, and the two-regime arithmetic that bounded the bend went with the
 /// bend.
+///
+/// **It is half the band off the DRAWN line, which since the seam anchor is
+/// not the same thing as half the band off the seam.** The support is centred
+/// on the 50/50 line, and that line is held on world content
+/// (`super::projection::SeamAnchor`), so off the SEAM the support reaches
+/// `0.5 * width + |shift|` and, at the rail the anchor is allowed,
+/// `width` itself. Every caller here asks the unshifted question - what a
+/// camera's own two lenses can pay for, which is a property of the file and
+/// not of this redraw's line - so this stays the unshifted answer and says so.
+/// `super::projection::Reframe::afforded` is where the shifted one is argued
+/// and `projection::tests::the_anchored_handover_leaves_no_hole_and_no_cliff`
+/// is where it is measured.
 pub fn reach(width_rad: f32) -> f32 {
     0.5 * width_rad
 }
@@ -2762,9 +2776,32 @@ mod tests {
     ///
     /// **Why it is not loosened.** The old bound was not a safety margin that
     /// could be relaxed: it was the reach of a mechanism, and the mechanism is
-    /// gone. The bound that is left is the optics and it is still asserted -
-    /// the sweep below still refuses any width whose half reaches past half the
-    /// overlap, at every overlap from 1 to 21 degrees.
+    /// gone. The bound that is left is the optics, and the sweep below states
+    /// it at every overlap from 1 to 21 degrees.
+    ///
+    /// **WHAT THIS TEST IS NOT, found in review 2026-08-09 and written down so
+    /// the next reader does not make the same mistake twice.** Neither half of
+    /// it is a guard:
+    ///
+    /// - The table is a table. It recomputes `CROSSOVER_DEG.min(overlap)` here
+    ///   rather than calling `Reframe::afforded`, so it says what the corpus
+    ///   affords and cannot fail on any change to the code that decides it.
+    ///   `projection::tests::a_camera_narrower_than_the_ask_draws_what_it_can_pay_for`
+    ///   is the one that goes through `Reframe::new` and binds the clamp, on a
+    ///   camera narrower than the ask, because nothing in the corpus is.
+    /// - The sweep is an identity. `reach(min(8, o)) <= o / 2` reduces to
+    ///   `min(8, o) <= o`, which is true of `min` and not of the optics, so it
+    ///   would pass whatever the camera and whatever the width.
+    ///
+    /// And the inequality it states is about a handover centred on the SEAM,
+    /// which since `projection::SeamAnchor` is not the one the player draws:
+    /// the support is centred on the held line and reaches a whole band off the
+    /// seam at the rail, which is past the shared picture on every camera in
+    /// the corpus. What makes that safe is the coverage depth inside
+    /// `projection::claim`, and
+    /// `projection::tests::the_anchored_handover_leaves_no_hole_and_no_cliff`
+    /// is where it is measured. Kept here as what it honestly is: the record of
+    /// what each file in the corpus draws, and the arithmetic's own sanity.
     #[test]
     fn the_width_a_camera_can_pay_for_is_its_own_overlap() {
         // The corpus, as `kjerag-spike --bin band` reads it off each file's
@@ -2785,10 +2822,14 @@ mod tests {
                 "{file} overlaps by {overlap} deg and draws {width:.2}, not {draws}",
             );
         }
-        // And what a camera is allowed is what fits: a handover of width `w`
-        // reaches `w / 2` off the seam, and the shared picture runs half the
-        // overlap off it, so the widest that fits is the overlap and no
-        // narrower camera is quietly given more than it has.
+        // And what a camera is allowed is what fits, for a handover centred on
+        // the seam: one of width `w` reaches `w / 2` off it, the shared picture
+        // runs half the overlap off it, so the widest that fits is the overlap
+        // and no narrower camera is quietly given more than it has. **This
+        // reduces to `min(8, o) <= o` and is an identity, not a measurement**
+        // (see the doc above); it is here to catch a `reach` that stops being
+        // half its argument, which is the one way the sentence could become
+        // false.
         for step in 0..=400 {
             let overlap = (1.0 + step as f32 * 0.05).to_radians();
             let width = crate::projection::CROSSOVER_DEG.to_radians().min(overlap);
