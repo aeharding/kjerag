@@ -510,7 +510,12 @@ readings are comparable. A correction multiplies the lenses by `sqrt(g)` and
 `1/sqrt(g)`, so what it LEAVES is `ln(delivered) - ln(g)`, and that is the last
 column.
 
-Nine reference views, five X4 Air captures, 40 to 60 consecutive frames each:
+Nine reference views, five X4 Air captures, 40 to 60 consecutive frames each.
+The last column divides by a delivered difference of order a tenth of a
+percent, so its headline value moves with the exact frame count (`down1` reads
++26112 percent over 12 frames, +22686 over 40, +24382 over 60 - the tabled
+rows are at each view's own capture length); what is window-invariant is that
+it never goes below 100 percent.
 
 | view | `g` says | the lenses actually differ by | correlation | what the correction leaves |
 | --- | ---: | ---: | ---: | ---: |
@@ -661,9 +666,12 @@ ratio. **352 lines.** `git show 8107a23` reads it back and `git revert` would
 restore it; git history is the archive, which is why the tree is not.
 
 **What the arm proved on its way out, kept because it is the reason deleting it
-was safe.** Off by default it drew `main` byte for byte at four registry views
-(`down1` 7d2200ea, `down3` a19a9b80, `bad` f27874ed, `shimmer` 54fc67b7,
-`--bin null`), and `KJERAG_EXPOSURE_NORM=on` moved `down1` to 7d2ef9bc, which
+was safe.** Off by default it drew `main` - `7ef59a3`, the flat-seam squash it
+was built against - byte for byte at four registry views (`down1` 7d2200ea,
+`down3` a19a9b80, `bad` f27874ed, `shimmer` 54fc67b7, `--bin null`; the sums
+depend on the exact frame window, so what reproduces is the equality with
+`main`'s own sums at the same window, not these absolute values), and
+`KJERAG_EXPOSURE_NORM=on` moved `down1` to 7d2ef9bc, which
 was the positive control that the mechanism was live rather than absent. A
 mechanism that was off by default deletes byte-inert by construction, and the
 same four views were re-checked against `main` after the deletion and read
@@ -690,8 +698,8 @@ The stage-10 plan asked the same question of DJI. **An `.OSV` carries per-frame
 exposure metadata, in more detail than an `.insv` does, and none of it is per
 lens.**
 
-Sample 0 of each `djmd` track is the calibration message (`crates/meta/src/osmo.rs`
-on `feat/osmo-osv`); every sample after it is a per-frame block, one per video
+Sample 0 of each `djmd` track is the calibration message (`crates/meta/src/osmo.rs`,
+on `main` since PR #178); every sample after it is a per-frame block, one per video
 frame, and inside it:
 
 | field | what it is | how that was established |
@@ -722,8 +730,10 @@ in the corpus and it is flagged rather than fitted.
 
 **So the answer for `.OSV` is the answer for `.insv` with one fewer step: there
 is no per-lens exposure to ratio, so there is nothing deterministic to
-normalize.** No implementation is proposed, and none would have been possible on
-this branch in any case: `main` does not play `.OSV` at all - it is refused by
-name (`crates/meta/src/format.rs`, "That is a DJI video. Kjerag plays Insta360
-.insv only.") - and the reader that would change that is the unmerged
-`feat/osmo-osv`.
+normalize.** No implementation is proposed. These measurements were made from
+the `djmd` tracks directly, before `main` could play an `.OSV`; PR #178 has
+since merged the Osmo 360 reader (`crates/meta/src/osmo.rs`, on `main`, and
+carried by this branch), so the finding now describes a format the player
+ships. The named refusal ("That is a DJI video. Kjerag plays Insta360 .insv
+and DJI Osmo 360 .osv.", `crates/app/src/strings.rs`) is reserved for DJI's
+other cameras, whose `©too` is not `Osmo 360`.

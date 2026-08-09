@@ -930,7 +930,7 @@ are the camera's own frame clock if `pts_type = 2` means what it says
 **RE-DERIVED 2026-08-09 on nine of the owner's own reference views, on the
 flat-seam architecture, and the verdict is the same one twice as large**
 (issue #103, stage 10 step P.1; `--bin expose mode=meta`;
-docs/research/seam-blending.md 17 to 22 carries the tables). Across five X4
+docs/research/seam-blending.md 17 to 23 carries the tables). Across five X4
 Air captures the shutter ratio says the two lenses are 33 to 57 percent
 apart while their pictures of the same directions are 0.07 to 4.3 percent
 apart; the correlation between the two columns runs **-0.74 to +0.51 and
