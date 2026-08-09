@@ -8,8 +8,8 @@
 //! coefficients the file carries (`kjerag_meta::osmo` has where the fifth of
 //! them hides). Both are one function of a unit ray in the lens's own frame
 //! and nothing else, so the model is a branch inside [`lens_pixel`] and the
-//! rest of the pass - the caps, the crossover, the band, the readout - does
-//! not know which one it is running. Both take five coefficients, which is why
+//! rest of the pass - the caps, the crossover, the handover, the readout -
+//! does not know which one it is running. Both take five coefficients, so
 //! [`LensBlock`] carries five slots and not ten.
 //!
 //! **One direction only, and that is the whole of what the pass needs.** Both

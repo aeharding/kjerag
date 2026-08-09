@@ -622,11 +622,19 @@ live, no keyframe UI ever.
   coefficient, far too small to see, at 22 times the bar.
 
   **The `.insv` null holds.** All sixteen views of the class method render byte
-  for byte identical to main at 7ef59a3, and the eight lock pairs inside it
-  differ from each other, so the null is not vacuous. Playback improved rather
-  than regressed on the way: unit B presents 29.36 of 29.97 fps at 7.25 ms a
-  redraw where the pre-rebase branch recorded 26.6 fps at 20.6 ms, which is the
-  flat seam's doing and not this branch's.
+  for byte identical to main at 7ef59a3, and the four lock pairs inside them
+  differ from each other, so the null is not vacuous.
+
+  **Playback is unchanged within the noise, and the claim that it improved was
+  not sourced** (review, 2026-08-09). This entry said the pre-rebase branch
+  "recorded 26.6 fps at 20.6 ms", and no such measurement exists anywhere in
+  this branch's record. What the pre-rebase branch recorded on unit B 8k30p is
+  the two-column table in the 2026-08-08 entry below, taken while another agent
+  shared the box: **29.57 fps at 6.91 ms a redraw at best and 25.54 at 21.05 at
+  worst**. The rebased build reads 29.36 fps at 7.25 ms, one run. So against the
+  best column it is a shade slower and against the worst it is far faster, which
+  together say the box's own load moves this more than the rebase does. No
+  playback claim is made for the rebase in either direction.
 
 - 2026-08-09 **The seam is flat, the handover line is held on the world, and
   the machinery that morphed the picture is deleted rather than switched off**
