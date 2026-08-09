@@ -3103,6 +3103,63 @@ impl Displacements {
         (table, harmonics)
     }
 
+    /// How much of one lens's residual is a SMOOTH function of WHERE the site
+    /// is, and how much is scatter that no smooth calibration can reach.
+    ///
+    /// **This is the question a residual size cannot answer on its own.** A
+    /// model is worth adding if the thing it would remove is there to remove:
+    /// a residual whose binned means are small and whose site-to-site spread
+    /// is large is not a calibration error at all, and a bigger polynomial
+    /// fitted to it would be fitting the scatter.
+    ///
+    /// The sites are binned in TWO coordinates, the field angle and the
+    /// azimuth round the seam, because a calibration error is smooth in both
+    /// and averaging one of them away hides exactly the errors a rotation
+    /// makes -- a dipole in azimuth has zero mean at every field angle. Cells
+    /// with fewer than three sites are dropped: a one-site cell has no spread
+    /// in it and would be counted as pure structure.
+    ///
+    /// Returns `(structured, scatter, cells, sites)`, the first two in degrees
+    /// of world angle, so that `structured^2 + scatter^2` is the whole of the
+    /// residual in the lens's own polar frame.
+    fn split(&self, lens: usize, field_step: f64, azimuth_step: f64) -> (f64, f64, usize, usize) {
+        let mut cells: std::collections::BTreeMap<(i64, i64), Vec<(f64, f64)>> =
+            std::collections::BTreeMap::new();
+        for site in self.residuals.iter().filter(|site| site.lens == lens) {
+            let key = (
+                (site.field / field_step).floor() as i64,
+                ((site.azimuth + 360.0) / azimuth_step).floor() as i64,
+            );
+            cells
+                .entry(key)
+                .or_default()
+                .push((site.radial, site.tangential));
+        }
+        let (mut structured, mut scatter, mut kept, mut used) = (0.0, 0.0, 0usize, 0usize);
+        for values in cells.values().filter(|values| values.len() >= 3) {
+            let n = values.len() as f64;
+            let mean = (
+                values.iter().map(|v| v.0).sum::<f64>() / n,
+                values.iter().map(|v| v.1).sum::<f64>() / n,
+            );
+            structured += n * (mean.0 * mean.0 + mean.1 * mean.1);
+            for value in values {
+                scatter += (value.0 - mean.0).powi(2) + (value.1 - mean.1).powi(2);
+            }
+            kept += 1;
+            used += values.len();
+        }
+        match used {
+            0 => (f64::NAN, f64::NAN, 0, 0),
+            _ => (
+                (structured / used as f64).sqrt(),
+                (scatter / used as f64).sqrt(),
+                kept,
+                used,
+            ),
+        }
+    }
+
     /// The residual against the FIELD ANGLE, per lens: how far off its own
     /// lens's axis a site looks against how far its content moved radially and
     /// tangentially.
@@ -3932,6 +3989,15 @@ fn solve(options: &Options) -> Fallible<()> {
                 heaviest.1,
                 heaviest.0 * per_degree,
                 swing.1 - swing.0,
+            );
+            let (structured, scatter, cells, used) = arm.coverage.split(lens, 5.0, 30.0);
+            println!(
+                "of that residual, {:.3} px is a SMOOTH function of (field, azimuth) and \
+                 {:.3} px is \nsite-to-site SCATTER, over {used} sites in {cells} cells of 5 \
+                 deg by 30. No calibration \nof any shape can reach the second number: it is \
+                 what the two pictures disagree by \nat sites that sit in the same place.",
+                structured * per_degree,
+                scatter * per_degree,
             );
         }
     }

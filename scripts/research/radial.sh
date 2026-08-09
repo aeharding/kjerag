@@ -88,6 +88,25 @@ plant)
   run plant-three $THREE $PLANT $OFF arm=$P160 arm=$P055 arm=$Q160 arm=$Q055 &
   wait
   ;;
+# ------------------------------------- B1 at its most generous: one geometry at a time
+# The joint stage below shares one camera across four geometries, which is a
+# harder constraint than section 10's own arms were under. This stage gives the
+# radial model everything: each geometry fitted on its own, exactly as section
+# 10 fitted its five, so the two are comparable row for row and a failure here
+# cannot be blamed on the sharing.
+each)
+  for aim in b160 b055 h160 h055; do
+    case $aim in
+      b160) V="$B160";; b055) V="$B055";; h160) V="$H160";; h055) V="$H055";;
+    esac
+    run "each-full-$aim"  $FULL  arm="$V" &
+    run "each-three-$aim" $THREE arm="$V" &
+    # Section 10's own five-knob arm, re-run on THIS build so the two rows of
+    # the answer table were produced by one binary.
+    run "each-v3-$aim"    free=view,lens1 arm="$V" &
+  done
+  wait
+  ;;
 # ---------------------------------------------------------------- B1, the answer
 fit)
   run fit4-full  $FULL  arm=$B160 arm=$B055 arm=$H160 arm=$H055 &
