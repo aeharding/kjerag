@@ -429,10 +429,8 @@ impl<D: PisDirection> Input<D> {
             let mut survivors = [false; PATCH_SIZE];
             for col in 0..PATCH_SIZE {
                 let source_at = (source_row + row) * cols + source_col + col;
-                let mask_row = clamp_index(sampling.base_row + row as isize, rows);
-                let mask_col = clamp_index(sampling.base_col + col as isize, cols);
                 let survives = self.source_slot_mask[source_at] != 0
-                    && self.target_slot_mask[mask_row * cols + mask_col] != 0;
+                    && self.target_slot_mask[sampling.target_index(row, col)] != 0;
                 residuals[col] = sampling.candidate_residual(
                     &self.target,
                     row,
@@ -472,10 +470,8 @@ impl<D: PisDirection> Input<D> {
             let mut survivors = [false; PATCH_SIZE];
             for col in 0..PATCH_SIZE {
                 let source_at = (source_row + row) * cols + source_col + col;
-                let mask_row = clamp_index(sampling.base_row + row as isize, rows);
-                let mask_col = clamp_index(sampling.base_col + col as isize, cols);
                 let survives = self.source_slot_mask[source_at] != 0
-                    && self.target_slot_mask[mask_row * cols + mask_col] != 0;
+                    && self.target_slot_mask[sampling.target_index(row, col)] != 0;
                 residuals[col] = sampling.weighted_candidate_residual(
                     &self.target,
                     row,
@@ -521,9 +517,7 @@ impl<D: PisDirection> Input<D> {
                 if self.source_slot_mask[source_at] == 0 {
                     continue;
                 }
-                let mask_row = clamp_index(sampling.base_row + row as isize, rows);
-                let mask_col = clamp_index(sampling.base_col + col as isize, cols);
-                if self.target_slot_mask[mask_row * cols + mask_col] == 0 {
+                if self.target_slot_mask[sampling.target_index(row, col)] == 0 {
                     continue;
                 }
 
@@ -1286,9 +1280,7 @@ pub(crate) fn test_descent_survivors_at<D: PisDirection>(
             if input.source_slot_mask[source_at] == 0 {
                 continue;
             }
-            let mask_row = clamp_index(sampling.base_row + row as isize, rows);
-            let mask_col = clamp_index(sampling.base_col + col as isize, cols);
-            if input.target_slot_mask[mask_row * cols + mask_col] == 0 {
+            if input.target_slot_mask[sampling.target_index(row, col)] == 0 {
                 continue;
             }
 
@@ -2025,11 +2017,10 @@ fn clamp_index(index: isize, extent: usize) -> usize {
 /// edge. The readable unpadded representation therefore clamps the four
 /// integer neighbor indices independently while reusing this one coefficient
 /// set for every tap.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PatchSamplingPlan {
-    base_row: isize,
-    base_col: isize,
-    rows: usize,
+    row_indices: [usize; PATCH_SIZE + 1],
+    col_indices: [usize; PATCH_SIZE + 1],
     cols: usize,
     coefficients: [f32; 4],
 }
@@ -2042,10 +2033,15 @@ impl PatchSamplingPlan {
         let col_fraction = origin_col - floor_col;
         let inverse_row = 1.0 - row_fraction;
         let inverse_col = 1.0 - col_fraction;
+        let base_row = floor_row as isize;
+        let base_col = floor_col as isize;
         Self {
-            base_row: floor_row as isize,
-            base_col: floor_col as isize,
-            rows,
+            row_indices: std::array::from_fn(|offset| {
+                clamp_index(base_row + offset as isize, rows)
+            }),
+            col_indices: std::array::from_fn(|offset| {
+                clamp_index(base_col + offset as isize, cols)
+            }),
             cols,
             coefficients: [
                 inverse_row * inverse_col,
@@ -2057,15 +2053,19 @@ impl PatchSamplingPlan {
     }
 
     #[cfg(test)]
-    const fn coefficients(self) -> [f32; 4] {
+    const fn coefficients(&self) -> [f32; 4] {
         self.coefficients
     }
 
-    fn sample_for_descent(self, image: &[u8], patch_row: usize, patch_col: usize) -> f32 {
-        let row0 = clamp_index(self.base_row + patch_row as isize, self.rows);
-        let col0 = clamp_index(self.base_col + patch_col as isize, self.cols);
-        let row1 = clamp_index(self.base_row + patch_row as isize + 1, self.rows);
-        let col1 = clamp_index(self.base_col + patch_col as isize + 1, self.cols);
+    fn target_index(&self, patch_row: usize, patch_col: usize) -> usize {
+        self.row_indices[patch_row] * self.cols + self.col_indices[patch_col]
+    }
+
+    fn sample_for_descent(&self, image: &[u8], patch_row: usize, patch_col: usize) -> f32 {
+        let row0 = self.row_indices[patch_row];
+        let col0 = self.col_indices[patch_col];
+        let row1 = self.row_indices[patch_row + 1];
+        let col1 = self.col_indices[patch_col + 1];
         let top_left = f32::from(image[row0 * self.cols + col0]);
         let top_right = f32::from(image[row0 * self.cols + col1]);
         let bottom_left = f32::from(image[row1 * self.cols + col0]);
@@ -2088,17 +2088,17 @@ impl PatchSamplingPlan {
     /// separately rounded products per source row, bottom minus source before
     /// top is added, then the combined physical-mask multiplication.
     fn candidate_residual(
-        self,
+        &self,
         image: &[u8],
         patch_row: usize,
         patch_col: usize,
         source: u8,
         survives: bool,
     ) -> f32 {
-        let row0 = clamp_index(self.base_row + patch_row as isize, self.rows);
-        let col0 = clamp_index(self.base_col + patch_col as isize, self.cols);
-        let row1 = clamp_index(self.base_row + patch_row as isize + 1, self.rows);
-        let col1 = clamp_index(self.base_col + patch_col as isize + 1, self.cols);
+        let row0 = self.row_indices[patch_row];
+        let col0 = self.col_indices[patch_col];
+        let row1 = self.row_indices[patch_row + 1];
+        let col1 = self.col_indices[patch_col + 1];
         let [
             top_left_weight,
             top_right_weight,
@@ -2120,7 +2120,7 @@ impl PatchSamplingPlan {
     /// minus source before top is added, then mask, weight and reciprocal.
     #[allow(clippy::too_many_arguments)]
     fn weighted_candidate_residual(
-        self,
+        &self,
         image: &[u8],
         patch_row: usize,
         patch_col: usize,
@@ -2293,6 +2293,139 @@ mod tests {
         assert_eq!(sample(0.0, 0.0), 10.0); // integer first pixel
         assert_eq!(sample(2.0, 3.0), 120.0); // integer last pixel
         assert_eq!(sample(0.25, 0.5), 25.0); // interior
+    }
+
+    #[test]
+    fn cached_patch_indices_match_the_old_scalar_lookup_at_every_tap() {
+        fn old_indices(
+            origin_row: f32,
+            origin_col: f32,
+            rows: usize,
+            cols: usize,
+            patch_row: usize,
+            patch_col: usize,
+        ) -> [usize; 4] {
+            let base_row = origin_row.floor() as isize;
+            let base_col = origin_col.floor() as isize;
+            [
+                clamp_index(base_row + patch_row as isize, rows),
+                clamp_index(base_col + patch_col as isize, cols),
+                clamp_index(base_row + patch_row as isize + 1, rows),
+                clamp_index(base_col + patch_col as isize + 1, cols),
+            ]
+        }
+
+        fn old_descent_sample(
+            image: &[u8],
+            cols: usize,
+            indices: [usize; 4],
+            coefficients: [f32; 4],
+        ) -> f32 {
+            let [row0, col0, row1, col1] = indices;
+            let top_left = f32::from(image[row0 * cols + col0]);
+            let top_right = f32::from(image[row0 * cols + col1]);
+            let bottom_left = f32::from(image[row1 * cols + col0]);
+            let bottom_right = f32::from(image[row1 * cols + col1]);
+            let [
+                top_left_weight,
+                top_right_weight,
+                bottom_left_weight,
+                bottom_right_weight,
+            ] = coefficients;
+            let top_right = top_right * top_right_weight;
+            let top = top_left.mul_add(top_left_weight, top_right);
+            let bottom_left = bottom_left.mul_add(bottom_left_weight, top);
+            bottom_right.mul_add(bottom_right_weight, bottom_left)
+        }
+
+        fn old_candidate_residual(
+            image: &[u8],
+            cols: usize,
+            indices: [usize; 4],
+            coefficients: [f32; 4],
+            source: u8,
+            survives: bool,
+        ) -> f32 {
+            let [row0, col0, row1, col1] = indices;
+            let [
+                top_left_weight,
+                top_right_weight,
+                bottom_left_weight,
+                bottom_right_weight,
+            ] = coefficients;
+            let top_left = f32::from(image[row0 * cols + col0]) * top_left_weight;
+            let top_right = f32::from(image[row0 * cols + col1]) * top_right_weight;
+            let top = top_left + top_right;
+            let bottom_left = f32::from(image[row1 * cols + col0]) * bottom_left_weight;
+            let bottom_right = f32::from(image[row1 * cols + col1]) * bottom_right_weight;
+            let bottom = bottom_left + bottom_right;
+            let difference = (bottom - f32::from(source)) + top;
+            difference * f32::from(u8::from(survives))
+        }
+
+        for level in [Level::One, Level::Two] {
+            let rows = level.rows();
+            let cols = level.cols();
+            let image: Vec<u8> = (0..level.pixels())
+                .map(|index| ((index * 37 + 11) & 0xff) as u8)
+                .collect();
+            let interior = (11.375, 3.625);
+            let top = -6.625;
+            let bottom = rows as f32 - 0.375;
+            let left = -6.625;
+            let right = cols as f32 - 0.375;
+            let origins = [
+                interior,
+                (top, interior.1),
+                (bottom, interior.1),
+                (interior.0, left),
+                (interior.0, right),
+                (top, left),
+                (top, right),
+                (bottom, left),
+                (bottom, right),
+            ];
+
+            for (origin_row, origin_col) in origins {
+                let sampling = PatchSamplingPlan::new(origin_row, origin_col, rows, cols);
+                let coefficients = sampling.coefficients();
+                for patch_row in 0..PATCH_SIZE {
+                    for patch_col in 0..PATCH_SIZE {
+                        let indices =
+                            old_indices(origin_row, origin_col, rows, cols, patch_row, patch_col);
+                        let [row0, col0, row1, col1] = indices;
+                        assert_eq!(sampling.row_indices[patch_row], row0);
+                        assert_eq!(sampling.col_indices[patch_col], col0);
+                        assert_eq!(sampling.row_indices[patch_row + 1], row1);
+                        assert_eq!(sampling.col_indices[patch_col + 1], col1);
+                        assert_eq!(
+                            sampling.target_index(patch_row, patch_col),
+                            row0 * cols + col0
+                        );
+
+                        let old_descent = old_descent_sample(&image, cols, indices, coefficients);
+                        let cached_descent =
+                            sampling.sample_for_descent(&image, patch_row, patch_col);
+                        assert_eq!(cached_descent.to_bits(), old_descent.to_bits());
+
+                        for survives in [false, true] {
+                            let source = ((patch_row * 31 + patch_col * 17 + 7) & 0xff) as u8;
+                            let old_candidate = old_candidate_residual(
+                                &image,
+                                cols,
+                                indices,
+                                coefficients,
+                                source,
+                                survives,
+                            );
+                            let cached_candidate = sampling
+                                .candidate_residual(&image, patch_row, patch_col, source, survives);
+                            assert_eq!(cached_candidate.to_bits(), old_candidate.to_bits());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
