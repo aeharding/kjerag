@@ -248,9 +248,14 @@ impl RetainedBaseMaps {
         &self.uv[start..start + Self::NODES_PER_LENS]
     }
 
+    #[cfg(test)]
     fn sample_clamped(&self, lens: Lens, row: f32, col: f32) -> [f32; 2] {
         let row = ClampedAxis::new(row, one_xs::ROWS);
         let col = ClampedAxis::new(col, one_xs::COLS);
+        self.sample_clamped_axes(lens, row, col)
+    }
+
+    fn sample_clamped_axes(&self, lens: Lens, row: ClampedAxis, col: ClampedAxis) -> [f32; 2] {
         let map = self.lens(lens);
         let at = |row: usize, col: usize| map[row * one_xs::COLS + col];
         let top_left = at(row.lo, col.lo);
@@ -873,8 +878,10 @@ fn sample_source_uv(source: &SourceImage, [u, v]: [f32; 2]) -> u8 {
 /// Scheduling is direction-neutral: the two physical-lens images are each
 /// split into two equal contiguous row lanes. The first A lane runs on the
 /// caller while three scoped workers fill the other disjoint final-storage
-/// slices. Every lane retains its original row-then-column order, and all four
-/// join before the A-then-B [`SourceBelts`] can be returned.
+/// slices. The fixed retained-grid columns are clamped once before the lanes,
+/// and each retained-grid row is clamped once in the lane that owns it. Every
+/// lane retains its original row-then-column order, and all four join before
+/// the A-then-B [`SourceBelts`] can be returned.
 pub fn sample_source_belts(
     sources: &LensPair<SourceImage>,
     base_maps: &RetainedBaseMaps,
@@ -889,11 +896,53 @@ pub fn sample_source_belts(
     let (a, b) = pixels.split_at_mut(LENS_BYTES);
     let (a0, a1) = a.split_at_mut(LANE_BYTES);
     let (b0, b1) = b.split_at_mut(LANE_BYTES);
+    let retained_cols: [ClampedAxis; one_xs::SOURCE_COLS] =
+        std::array::from_fn(|col| ClampedAxis::new(col as f32 * RETAINED_SCALE, one_xs::COLS));
     run_source_lanes_scoped(
-        || sample_source_lane(a0, Lens::A, 0, sources, base_maps, RETAINED_SCALE),
-        || sample_source_lane(a1, Lens::A, LANE_ROWS, sources, base_maps, RETAINED_SCALE),
-        || sample_source_lane(b0, Lens::B, 0, sources, base_maps, RETAINED_SCALE),
-        || sample_source_lane(b1, Lens::B, LANE_ROWS, sources, base_maps, RETAINED_SCALE),
+        || {
+            sample_source_lane(
+                a0,
+                Lens::A,
+                0,
+                sources,
+                base_maps,
+                &retained_cols,
+                RETAINED_SCALE,
+            )
+        },
+        || {
+            sample_source_lane(
+                a1,
+                Lens::A,
+                LANE_ROWS,
+                sources,
+                base_maps,
+                &retained_cols,
+                RETAINED_SCALE,
+            )
+        },
+        || {
+            sample_source_lane(
+                b0,
+                Lens::B,
+                0,
+                sources,
+                base_maps,
+                &retained_cols,
+                RETAINED_SCALE,
+            )
+        },
+        || {
+            sample_source_lane(
+                b1,
+                Lens::B,
+                LANE_ROWS,
+                sources,
+                base_maps,
+                &retained_cols,
+                RETAINED_SCALE,
+            )
+        },
     );
     SourceBelts {
         pixels: pixels.into_boxed_slice(),
@@ -906,18 +955,16 @@ fn sample_source_lane(
     start_row: usize,
     sources: &LensPair<SourceImage>,
     base_maps: &RetainedBaseMaps,
+    retained_cols: &[ClampedAxis; one_xs::SOURCE_COLS],
     retained_scale: f32,
 ) {
     debug_assert_eq!(output.len(), one_xs::SOURCE_ROWS / 2 * one_xs::SOURCE_COLS);
     debug_assert!(start_row + output.len() / one_xs::SOURCE_COLS <= one_xs::SOURCE_ROWS);
     for local_row in 0..output.len() / one_xs::SOURCE_COLS {
         let row = start_row + local_row;
-        for col in 0..one_xs::SOURCE_COLS {
-            let [u, v] = base_maps.sample_clamped(
-                lens,
-                row as f32 * retained_scale,
-                col as f32 * retained_scale,
-            );
+        let retained_row = ClampedAxis::new(row as f32 * retained_scale, one_xs::ROWS);
+        for (col, &retained_col) in retained_cols.iter().enumerate() {
+            let [u, v] = base_maps.sample_clamped_axes(lens, retained_row, retained_col);
             output[local_row * one_xs::SOURCE_COLS + col] =
                 sample_source_uv(sources.get(lens), [u, v]);
         }
@@ -1670,6 +1717,46 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     #[test]
+    fn prepared_retained_axes_match_scalar_sampling_at_every_staging_position() {
+        const SCALE: f32 = 1.0 / AREA_SCALE as f32;
+        let map_for = |lens: Lens| {
+            (0..RetainedBaseMaps::NODES_PER_LENS)
+                .map(|index| {
+                    let row = index / one_xs::COLS;
+                    let col = index % one_xs::COLS;
+                    let seed = row * one_xs::COLS + col + lens.index() * 131_071;
+                    [
+                        f32::from_bits(0x3e80_0000 + (seed % 0x20_000) as u32),
+                        f32::from_bits(0x3f00_0000 + (seed * 17 % 0x20_000) as u32),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        let maps = RetainedBaseMaps::from_lenses(LensPair {
+            a: map_for(Lens::A),
+            b: map_for(Lens::B),
+        })
+        .unwrap();
+        let retained_cols: [ClampedAxis; one_xs::SOURCE_COLS] =
+            std::array::from_fn(|col| ClampedAxis::new(col as f32 * SCALE, one_xs::COLS));
+
+        for lens in Lens::ALL {
+            for row in 0..one_xs::SOURCE_ROWS {
+                let retained_row = ClampedAxis::new(row as f32 * SCALE, one_xs::ROWS);
+                for (col, &retained_col) in retained_cols.iter().enumerate() {
+                    let scalar = maps.sample_clamped(lens, row as f32 * SCALE, col as f32 * SCALE);
+                    let prepared = maps.sample_clamped_axes(lens, retained_row, retained_col);
+                    assert_eq!(
+                        prepared.map(f32::to_bits),
+                        scalar.map(f32::to_bits),
+                        "lens {lens} staging position ({row},{col})",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn source_uv_uses_strict_ordered_positive_full_dimensions_and_u8_truncation() {
         let source = compact_source(2, 2, |row, col| (20 * row + 10 * col) as u8);
 
@@ -1752,7 +1839,11 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
 
         let serial = sample_source_belts_serial(&sources, &maps);
         let four_lane = sample_source_belts(&sources, &maps);
+        assert_eq!(serial.bytes().len(), 1_166_400);
+        assert_eq!(four_lane.bytes().len(), 1_166_400);
         assert_eq!(four_lane.bytes(), serial.bytes());
+        assert_eq!(serial.reduce_area_3x3().bytes().len(), 129_600);
+        assert_eq!(four_lane.reduce_area_3x3().bytes().len(), 129_600);
         assert_eq!(
             four_lane.reduce_area_3x3().bytes(),
             serial.reduce_area_3x3().bytes(),
