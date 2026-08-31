@@ -3,11 +3,10 @@
 # Headless UI checks: drive the real app in a throwaway compositor and look
 # at what came out.
 #
-#   scripts/uitest.sh [file.insv] [offset.insv]
+#   scripts/uitest.sh [file.insv [time=S yaw=D pitch=D fov=D lock=0|1 [seam=factory]]]
 #
-# or set KJERAG_TEST_MEDIA and KJERAG_TEST_MEDIA_OFFSET. The second file is a
-# capture from a camera whose lenses are degrees from where its calibration
-# says, which is one check of its own and skips without one (issue #130).
+# or set KJERAG_TEST_MEDIA. With that variable set, the view terms may be the
+# first command-line words.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -43,8 +42,8 @@
 # The one thing the session shares with the desktop is the sound server, and
 # what it plays there goes into a null sink: see the preflight.
 #
-# Needs `cage wtype grim ffmpeg`, and `wl-paste` for the clipboard check,
-# which skips without it.
+# Needs `cage wtype grim ffmpeg`. The injection checks need `wl-copy` and the
+# clipboard-reading check needs `wl-paste`; each skips independently.
 #
 # Local only, and never in CI: see "UI verification" in AGENTS.md.
 #
@@ -55,14 +54,7 @@ set -uo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 session=$root/scratch/uitest
-media=${1:-${KJERAG_TEST_MEDIA:-}}
-
-# A capture from a camera whose lenses are degrees from where its own
-# calibration says they point, which is a fit that used to be impossible and
-# is one check of its own below (issue #130). Not the playback media, because
-# the two questions want different footage and only one of them is about the
-# window: KJERAG_TEST_MEDIA_OFFSET names it, and the check skips without one.
-offset_media=${2:-${KJERAG_TEST_MEDIA_OFFSET:-}}
+media=${KJERAG_TEST_MEDIA:-}
 
 # The session's home, and the state directory inside it.
 #
@@ -80,6 +72,13 @@ STATE_HOME=$HOME_DIR/.local/state
 # parse over a multi-gigabyte file, so READY is generous. A report line lands
 # every 5 s, so REPORT is a little more than that.
 READY=45
+# A selected ONE X2 view at 212.512 s is a causal frame-zero walk and the
+# archived run took about 355 s. Exact-view polling derives a bound from the
+# requested time at a conservative four wall seconds per media second, never
+# gives the transaction less than ten minutes and caps it at fifteen minutes.
+# Short UI probes keep using READY.
+EXACT_VIEW_MIN_WAIT=600
+EXACT_VIEW_MAX_WAIT=900
 REPORT=9
 QUIT=10
 # Long enough for a key to land and the window to be redrawn from it.
@@ -123,6 +122,79 @@ die() {
 	exit 2
 }
 
+# A leading word which is not a view term is the file. This keeps both forms
+# unambiguous:
+#
+#   scripts/uitest.sh file.insv time=...
+#   KJERAG_TEST_MEDIA=file.insv scripts/uitest.sh time=...
+case ${1:-} in
+"" | time=* | yaw=* | pitch=* | fov=* | lock=* | seam=*) ;;
+*) media=$1; shift ;;
+esac
+
+# An exact reported view can follow the file, in the same words `i` prints.
+# The player itself takes the five framing terms. It has no seam switch:
+# production always draws the factory calibration (`crates/app/src/lib.rs`).
+# Instruments add `seam=factory` to make that choice explicit, so accept that
+# one no-op here as well. Anything else must reach neither the app nor a test
+# result that could be mistaken for factory parity.
+time_arg=
+yaw_arg=
+pitch_arg=
+fov_arg=
+lock_arg=
+factory_seam=no
+for arg in "$@"; do
+	case $arg in
+	seam=factory)
+		[ "$factory_seam" = no ] || die "seam=factory was named more than once"
+		factory_seam=yes
+		;;
+	seam=*) die "the player only draws seam=factory, not $arg" ;;
+	time=*) [ -z "$time_arg" ] || die "time was named more than once"; time_arg=$arg ;;
+	yaw=*) [ -z "$yaw_arg" ] || die "yaw was named more than once"; yaw_arg=$arg ;;
+	pitch=*) [ -z "$pitch_arg" ] || die "pitch was named more than once"; pitch_arg=$arg ;;
+	fov=*) [ -z "$fov_arg" ] || die "fov was named more than once"; fov_arg=$arg ;;
+	lock=*) [ -z "$lock_arg" ] || die "lock was named more than once"; lock_arg=$arg ;;
+	*) die "unknown view term $arg" ;;
+	esac
+done
+play_args=()
+view_terms=0
+for arg in "$time_arg" "$yaw_arg" "$pitch_arg" "$fov_arg" "$lock_arg"; do
+	[ -z "$arg" ] || view_terms=$((view_terms + 1))
+done
+if [ "$view_terms" != 0 ]; then
+	[ -n "$media" ] || die "a view needs a file"
+	[ "$view_terms" = 5 ] || die "a view needs time, yaw, pitch, fov and lock together"
+	[[ ${time_arg#time=} =~ ^[0-9]+([.][0-9]{1,3})?$ ]] ||
+		die "$time_arg must be nonnegative seconds with at most three decimals"
+	for arg in "$yaw_arg" "$pitch_arg" "$fov_arg"; do
+		[[ ${arg#*=} =~ ^-?[0-9]+([.][0-9]{1,2})?$ ]] ||
+			die "$arg must be degrees with at most two decimals"
+	done
+	case $lock_arg in lock=0 | lock=1) ;; *) die "$lock_arg is not 0 or 1" ;; esac
+	LC_ALL=C awk -v value="${time_arg#time=}" 'BEGIN { exit !(value <= 21600) }' ||
+		die "$time_arg is beyond the six-hour harness limit"
+	LC_ALL=C awk -v value="${yaw_arg#yaw=}" 'BEGIN { exit !(value >= -180 && value <= 180) }' ||
+		die "$yaw_arg is outside -180 to 180 degrees"
+	LC_ALL=C awk -v value="${pitch_arg#pitch=}" 'BEGIN { exit !(value >= -180 && value <= 180) }' ||
+		die "$pitch_arg is outside -180 to 180 degrees"
+	LC_ALL=C awk -v value="${fov_arg#fov=}" 'BEGIN { exit !(value >= 20 && value <= 600) }' ||
+		die "$fov_arg is outside the player's 20 to 600 degree harness range"
+	play_args=("$time_arg" "$yaw_arg" "$pitch_arg" "$fov_arg" "$lock_arg")
+	canonical_time=$(LC_ALL=C awk -v value="${time_arg#time=}" \
+		'BEGIN { if (value < 0) value = 0; printf "%.3f", value }')
+	canonical_yaw=$(LC_ALL=C awk -v value="${yaw_arg#yaw=}" 'BEGIN { printf "%.2f", value }')
+	canonical_pitch=$(LC_ALL=C awk -v value="${pitch_arg#pitch=}" 'BEGIN { printf "%.2f", value }')
+	canonical_fov=$(LC_ALL=C awk -v value="${fov_arg#fov=}" 'BEGIN { printf "%.2f", value }')
+	canonical_args="time=$canonical_time yaw=$canonical_yaw pitch=$canonical_pitch fov=$canonical_fov $lock_arg"
+	expected_view="$media $canonical_args"
+else
+	canonical_args=
+	expected_view=
+fi
+
 # The session went away with checks still to run: a dead compositor cannot
 # answer anything, so the run stops rather than reporting a UI failure it did
 # not observe.
@@ -153,10 +225,26 @@ for tool in cage wtype grim ffmpeg; do
 	command -v "$tool" >/dev/null || die "$tool is not installed (AGENTS.md, UI verification)"
 done
 
-# One check reads the session's clipboard and nothing else wants this, so a
-# box without it loses that half of that check rather than the whole run.
-clipboard=yes
-command -v wl-paste >/dev/null || clipboard=no
+# Reject a copied view beyond the file before building or opening a window.
+# ffprobe reads the container duration when it can; a file or format it cannot
+# read is left to the app's own raw open error rather than replaced here.
+if [ "${#play_args[@]}" != 0 ] && [ -f "$media" ] && command -v ffprobe >/dev/null; then
+	media_duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 \
+		"$media" 2>/dev/null | head -1)
+	if [[ $media_duration =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+		! LC_ALL=C awk -v wanted="$canonical_time" -v duration="$media_duration" \
+			'BEGIN { exit !(wanted <= duration + 0.0005) }'; then
+		die "$time_arg is beyond this file's ${media_duration} second duration"
+	fi
+fi
+
+# Reading the selection and injecting one are separate capabilities. The
+# existing copy check needs only wl-paste; the exact-view injections need only
+# wl-copy. A box missing one loses only the assertion which uses that half.
+clipboard_read=yes
+clipboard_write=yes
+command -v wl-paste >/dev/null || clipboard_read=no
+command -v wl-copy >/dev/null || clipboard_write=no
 
 # The build is part of the run, not a fallback for a missing binary. Cargo
 # is a no-op on a fresh one, and the version that only built when the file
@@ -299,13 +387,15 @@ log=
 # wrap the app in, which is the fault shim and the file that arms it.
 wrap=()
 
-# boot <label> [file]
+# boot <label> [file [view arguments...]]
 #
 # The runtime directory is the session's own, which is what keeps the socket
 # away from the developer's desktop and makes its name predictable: wlroots
 # takes wayland-0 in an empty directory.
 boot() {
 	local label=$1 file=${2:-}
+	shift
+	[ "$#" = 0 ] || shift
 	log=$session/$label.log
 	runtime=$(mktemp -d "${TMPDIR:-/tmp}/kjerag-uitest.XXXXXXXX")
 	chmod 700 "$runtime"
@@ -333,7 +423,7 @@ boot() {
 		PIPEWIRE_NODE="$QUIET_SINK" \
 		WLR_BACKENDS=headless \
 		WLR_LIBINPUT_NO_DEVICES=1 \
-		cage -- "${wrap[@]}" "${launch[@]}" ${file:+"$file"} >"$log" 2>&1 &
+		cage -- "${wrap[@]}" "${launch[@]}" ${file:+"$file"} "$@" >"$log" 2>&1 &
 	cage_pid=$!
 
 	local waited=0
@@ -395,7 +485,10 @@ key() {
 # the pixel checks read, and grim writes it without a library.
 grab() {
 	local out=$session/$1.ppm
-	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" grim -t ppm "$out" 2>>"$log"
+	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		grim -t ppm "$out" 2>>"$log"; then
+		return 1
+	fi
 	printf '%s' "$out"
 }
 
@@ -509,15 +602,32 @@ await() {
 # the timer that refreshes the position label only runs while playing.
 still_picture() {
 	local a b
-	a=$(grab "$1-a")
+	a=$(grab "$1-a") || return 1
 	sleep 0.7
-	b=$(grab "$1-b")
+	b=$(grab "$1-b") || return 1
 	cmp -s "$a" "$b"
 }
 
 moving_picture() {
-	! still_picture "$1"
+	motion_problem=
+	local a b
+	if ! a=$(grab "$1-a"); then
+		motion_problem="the first capture failed"
+		return 1
+	fi
+	sleep 0.7
+	if ! b=$(grab "$1-b"); then
+		motion_problem="the second capture failed"
+		return 1
+	fi
+	if cmp -s "$a" "$b"; then
+		motion_problem="two captures 0.7 s apart are identical"
+		return 1
+	fi
+	return 0
 }
+
+motion_problem=
 
 # press_until <predicate> <name> <key...>: press until the app shows it
 # landed. See PRESSES. The name is what the predicate files its captures
@@ -559,8 +669,9 @@ await_paint() {
 # ------------------------------------------------- the checks, with a file
 
 with_media() {
-	printf '\n-- playback checks (%s)\n' "$media"
-	boot play "$media"
+	printf '\n-- playback checks (%s%s)\n' "$media" \
+		"${play_args[*]:+ ${play_args[*]}}"
+	boot play "$media" "${play_args[@]}"
 
 	if ! await '^media:' "$READY"; then
 		fail "the file opens" "no media line in $READY s" "log: $log"
@@ -568,6 +679,22 @@ with_media() {
 		return
 	fi
 	pass "the file opens"
+
+	# A command-line view is applied by `App::place`, whose `goto:` line is
+	# emitted only after all five framing terms have parsed and the real Scene
+	# has been asked to seek and point there. This is deliberately before any
+	# harness key changes the view. `seam=factory` was consumed above because
+	# factory calibration is the player's only production seam base.
+	if [ "${#play_args[@]}" != 0 ]; then
+		startup_goto=$(grep '^goto:' "$log" | head -1 | sed 's/^goto:[[:space:]]*//')
+		if [ "$startup_goto" = "$expected_view" ]; then
+			pass "the command-line view reaches the real player"
+		else
+			fail "the command-line view reaches the real player" \
+				"expected: $expected_view" \
+				"received: ${startup_goto:-no goto line}" "log: $log"
+		fi
+	fi
 
 	if await_paint play; then
 		pass "the window renders"
@@ -595,7 +722,7 @@ with_media() {
 		pass "the picture moves while playing"
 	else
 		fail "the picture moves while playing" \
-			"two captures 0.7 s apart are identical" \
+			"${motion_problem:-the movement probe failed}" \
 			"$session/playing-a.ppm" "$session/playing-b.ppm"
 	fi
 
@@ -610,6 +737,17 @@ with_media() {
 		fail "space pauses" "the picture still moved after $PRESSES presses" \
 			"$session/paused-a.ppm" "$session/paused-b.ppm"
 	fi
+
+	# These checks require a held display. Running them after a failed pause
+	# could turn a moving frame that happened to print the target into evidence.
+	if [ "$paused" = yes ]; then
+		holds_the_command_line_view
+		selected_one_x2_holds_a_backward_seek
+	else
+		skip "the command-line view selects and holds its exact frame (pause failed)"
+		skip "the selected ONE X2 holds a backward seek (pause failed)"
+	fi
+	nonshot_view_lines=$(grep -c '^view:' "$log")
 
 	# Before saves_a_still, because it wants a window with no toast on it and
 	# nothing has pressed `s` yet. A paused window keeps its control row for
@@ -1117,12 +1255,14 @@ view_line() {
 # A still carries the video and the timecode in its file name and no direction
 # anywhere, so a capture the pilot sends back months later is only placeable if
 # the terminal said where it was looking. Every capture prints one line, which
-# while nothing has pressed `i` yet means the two counts are equal.
+# after subtracting the exact-view probes means the two counts are equal.
+nonshot_view_lines=0
+
 a_still_says_where_it_was_looking() {
 	local check="every still prints where it was looking"
 	local shots views
 	shots=$(grep -c '^shot:' "$log")
-	views=$(grep -c '^view:' "$log")
+	views=$(($(grep -c '^view:' "$log") - nonshot_view_lines))
 	if [ "$shots" = 0 ]; then
 		skip "$check (nothing was captured)"
 	elif [ "$views" = "$shots" ]; then
@@ -1176,7 +1316,7 @@ copies_the_view() {
 		return
 	fi
 
-	if [ "$clipboard" = no ]; then
+	if [ "$clipboard_read" = no ]; then
 		pass "$check (terminal only: $args)"
 		skip "the view reaches the clipboard (no wl-paste)"
 		return
@@ -1201,6 +1341,163 @@ goto_lines=0
 
 more_goto_lines() {
 	[ "$(grep -c '^goto:' "$log")" -gt "$goto_lines" ]
+}
+
+# Poll the real displayed-frame observable until it names an independently
+# constructed expected view. The goto line proves only that a request arrived.
+displayed_view=
+wait_for_displayed_view() {
+	local expected=$1 limit=$2 check=$3 attempts=0
+	displayed_view=
+	while [ "$attempts" -lt "$limit" ]; do
+		view_lines=$(grep -c '^view:' "$log")
+		key -k i
+		alive || lost "$check"
+		if [ "$(grep -c '^view:' "$log")" -gt "$view_lines" ]; then
+			displayed_view=$(view_line)
+			[ "$displayed_view" = "$expected" ] && return 0
+		fi
+		attempts=$((attempts + 1))
+		if [ $((attempts % 30)) = 0 ]; then
+			printf '      waiting %s s for displayed target; latest: %s\n' \
+				"$attempts" "${displayed_view:-no view line}"
+		fi
+	done
+	return 1
+}
+
+# This UI check is intentionally limited to what the ordinary app exposes: a
+# backward request lands on and holds the requested displayed picture. The
+# fresh-owner and frame-zero-through-target causal guarantees are covered by
+# the Scene/Player replay tests and authenticated playback receipt; a `view:`
+# line alone cannot prove them, so this check does not claim that it can.
+ONE_X2_SEEK_MEDIA=/home/aeharding/Videos/Insta/VID_20251018_191318_00_002.insv
+ONE_X2_SEEK_TIME=0.100
+
+selected_one_x2_holds_a_backward_seek() {
+	[ "$media" = "$ONE_X2_SEEK_MEDIA" ] || return
+	local check="the selected ONE X2 holds a backward seek at the displayed target"
+	if [ "${#play_args[@]}" = 0 ]; then
+		skip "$check (pass the exact five-term view to establish the starting point)"
+		return
+	fi
+	if [ "$clipboard_write" = no ]; then
+		skip "$check (no wl-copy)"
+		return
+	fi
+
+	if ! awk -v current="$canonical_time" -v target="$ONE_X2_SEEK_TIME" \
+		'BEGIN { exit !(current > target) }'; then
+		fail "$check" \
+			"the supplied start was not beyond $ONE_X2_SEEK_TIME s: $expected_view" \
+			"a backward seek was not exercised"
+		return
+	fi
+	local backward_args expected artifact
+	backward_args="time=$ONE_X2_SEEK_TIME yaw=$canonical_yaw pitch=$canonical_pitch fov=$canonical_fov $lock_arg"
+	expected="$media $backward_args"
+
+	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-copy "$(basename "$media") $backward_args" 2>>"$log"; then
+		fail "$check" "wl-copy could not inject the backward view" "log: $log"
+		return
+	fi
+	goto_lines=$(grep -c '^goto:' "$log")
+	if ! press_until more_goto_lines one-x2-seek -M ctrl -k v -m ctrl; then
+		alive || lost "$check"
+		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
+		return
+	fi
+
+	if ! wait_for_displayed_view "$expected" "$READY" "$check"; then
+		fail "$check" "requested: $expected" \
+			"displayed: ${displayed_view:-no view line}" "log: $log"
+		return
+	fi
+	sleep "$TOAST_GONE"
+	if ! still_picture one-x2-backward-held; then
+		fail "$check" "the requested display was not held paused" "log: $log"
+		return
+	fi
+	if ! wait_for_displayed_view "$expected" "$READY" "$check"; then
+		fail "$check" "the display changed before capture" \
+			"displayed: ${displayed_view:-no view line}" "log: $log"
+		return
+	fi
+	sleep "$TOAST_GONE"
+	artifact=$(grab one-x2-backward) || {
+		fail "$check" "grim did not capture the displayed target" "log: $log"
+		return
+	}
+	if ! nonblack "$artifact"; then
+		fail "$check" "the displayed-target artifact is empty or black" "$artifact"
+		return
+	fi
+	pass "$check ($backward_args; $artifact)"
+}
+
+# A reported defect is a frame and a camera, not merely five arguments that
+# reached `main`. Once the ordinary playback checks have paused the player,
+# paste the canonical command-line view back through the real window, wait
+# until `i` reports that exact delivered frame, and only then keep the pixel
+# artifact. This uses the same path the owner used and leaves the requested
+# picture at `reported-view.ppm` for the seam trace and eye gate.
+holds_the_command_line_view() {
+	[ "${#play_args[@]}" != 0 ] || return
+	local check="the command-line view selects and holds its exact frame"
+	if [ "$clipboard_write" = no ]; then
+		skip "$check (no wl-copy)"
+		return
+	fi
+	case $media in
+	*' '*)
+		skip "$check (the copied-view grammar cannot name a path with spaces)"
+		return
+		;;
+	esac
+
+	local artifact view_ready
+	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-copy "$(basename "$media") $canonical_args" 2>>"$log"; then
+		fail "$check" "wl-copy could not inject the command-line view" "log: $log"
+		return
+	fi
+	goto_lines=$(grep -c '^goto:' "$log")
+	if ! press_until more_goto_lines reported-view -M ctrl -k v -m ctrl; then
+		alive || lost "$check"
+		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
+		return
+	fi
+
+	view_ready=$(LC_ALL=C awk -v seconds="$canonical_time" -v minimum="$EXACT_VIEW_MIN_WAIT" \
+		-v maximum="$EXACT_VIEW_MAX_WAIT" \
+		'BEGIN { wait = int(seconds * 4 + 45.999); if (wait < minimum) wait = minimum; if (wait > maximum) wait = maximum; print wait }')
+	if ! wait_for_displayed_view "$expected_view" "$view_ready" "$check"; then
+		fail "$check" "requested: $expected_view" \
+			"held: ${displayed_view:-no view line}" \
+			"log: $log"
+		return
+	fi
+	sleep "$TOAST_GONE"
+	if ! still_picture reported-view-held; then
+		fail "$check" "the requested display was not held paused" "log: $log"
+		return
+	fi
+	if ! wait_for_displayed_view "$expected_view" "$READY" "$check"; then
+		fail "$check" "the display changed before capture" \
+			"held: ${displayed_view:-no view line}" "log: $log"
+		return
+	fi
+	sleep "$TOAST_GONE"
+	artifact=$(grab reported-view) || {
+		fail "$check" "grim did not capture the displayed target" "log: $log"
+		return
+	}
+	if ! nonblack "$artifact"; then
+		fail "$check" "the displayed-target artifact is empty or black" "$artifact"
+		return
+	fi
+	pass "$check ($canonical_args; $artifact)"
 }
 
 # The whole loop, which is the feature: copy a view, wander off, paste, and be
@@ -1656,135 +1953,6 @@ exits_clean() {
 	fi
 }
 
-# ------------------------------- the checks, with a pool to remember
-#
-# The seam correction is pooled per camera, and nothing asks the pilot for it
-# (AGENTS.md, zero-config playback). The claim under test is that a camera the
-# pool knows is corrected before the first frame rather than two seconds into
-# it, so it is checked through the app: open the file once with an empty pool
-# and read the camera out of the report line, write a pool for that camera into
-# the session's own state directory, open it again, and require the app to say
-# it drew from the pool and never to say it was fitting.
-#
-# It is also the control for the failure it clears: with the first session's
-# empty pool, the app says it is fitting off the file, which is the line the
-# second session must not print.
-
-pooled_calibration() {
-	local check="a pooled calibration is in the first frame"
-	printf '\n-- calibration checks (%s)\n' "$media"
-
-	# The session's directories persist between runs, so a pool a previous run
-	# stored is still there and would make this session take the path it is
-	# here to rule out. The superseded single-entry key goes too: it is
-	# derived data and nothing reads it any more.
-	local state=$STATE_HOME/cosmic/dev.harding.Kjerag/v1
-	rm -f "$state/seam_pool" "$state/seam_calibration"
-
-	boot fallback "$media"
-	if ! await '^seam:' "$READY"; then
-		fail "$check" "no seam line in $READY s" "log: $log"
-		teardown
-		return
-	fi
-	local camera
-	camera=$(sed -n 's/^lens:.*camera \([0-9a-f]*\).*/\1/p' "$log" | head -1)
-	if ! grep -q 'nothing pooled for this camera yet' "$log"; then
-		fail "$check" "the empty pool did not fall back to fitting" "log: $log"
-		teardown
-		return
-	fi
-	quit >/dev/null 2>&1 || teardown
-	if [ -z "$camera" ]; then
-		fail "$check" "no camera key in the lens line" "log: $log"
-		return
-	fi
-
-	# The owner's own answer, which is what 6.8 fitted on his static capture,
-	# as a pool of one. Any five numbers would do here: what is under test is
-	# that they reach the first frame, not what they are.
-	mkdir -p "$state"
-	printf '{"%s":(samples:[(roll_deg:0.789,yaw_deg:-2.450,pitch_deg:-0.668,cx_px:-2.55,cy_px:-13.84,patches:13,residual_deg:0.108)])}\n' \
-		"$camera" >"$state/seam_pool"
-
-	boot calibrated "$media"
-	if ! await 'pooled over 1 fits' "$READY"; then
-		fail "$check" "the pooled calibration was not read" \
-			"$(grep '^seam:' "$log" || echo 'no seam line')" "log: $log"
-		teardown
-		return
-	fi
-	if grep -q 'nothing pooled for this camera yet' "$log"; then
-		fail "$check" "it fitted off the file anyway" "log: $log"
-		teardown
-		return
-	fi
-	pass "$check (camera $camera)"
-	exits_clean
-}
-
-# ------------------------- the checks, with a camera pointing somewhere else
-#
-# A fit that never happens is silent by design: the file keeps the factory
-# calibration, one line says why, and that camera's pool stays empty for good.
-# On the owner's ONE X2 that was every capture, 2 or 3 azimuths of 72 against
-# the ten a fit needs, because the search ran two degrees either side of where
-# the camera says its lenses point and they are nearly three degrees from
-# there (issue #130). Zero-config playback then delivered the weakest of the
-# three calibration paths on that camera, for ever, and said so once.
-#
-# So the claim under test is the pool's, end to end and through the app: a
-# capture whose lenses are degrees off its own calibration is fitted from its
-# own frames while it plays, and that fit reaches the camera's pool. Reading
-# the pool file rather than the report line is deliberate - the line is what
-# the fit said, the file is what the next session will draw with, and this
-# issue is about the second one.
-#
-# On main it fails at the first assertion, with "too few to fit" in the log.
-#
-# It needs a capture from such a camera, which is not the playback media:
-# KJERAG_TEST_MEDIA_OFFSET names it and the check skips without one.
-
-a_camera_pointing_elsewhere_is_still_fitted() {
-	local check="a capture whose lenses are degrees off its calibration reaches the pool"
-	printf '\n-- offset calibration checks (%s)\n' "${offset_media:-none}"
-	if [ -z "$offset_media" ]; then
-		skip "$check (set KJERAG_TEST_MEDIA_OFFSET to a capture from such a camera)"
-		return
-	fi
-	local state=$STATE_HOME/cosmic/dev.harding.Kjerag/v1
-	local pool=$state/seam_pool
-	rm -f "$pool" "$state/seam_calibration"
-
-	boot offset "$offset_media"
-	if ! await 'nothing pooled for this camera yet' "$READY"; then
-		fail "$check" "the file never reached the fallback fit in $READY s" \
-			"$(grep '^seam:' "$log" || echo 'no seam line')" "log: $log"
-		teardown
-		return
-	fi
-	# The fit is a second or two of decode on a thread of its own, and the
-	# pool is written on the report timer, which is every 5 s.
-	if ! await 'kept that fit' $((READY + REPORT)); then
-		fail "$check" "no fit reached the pool in $((READY + REPORT)) s" \
-			"$(grep '^seam:' "$log" | tr '\n' '|')" "log: $log"
-		teardown
-		return
-	fi
-	local azimuths
-	azimuths=$(sed -n 's/^seam:.*kept that fit, \([0-9]*\) azimuths.*/\1/p' "$log" | head -1)
-	quit >/dev/null 2>&1 || teardown
-	if [ ! -s "$pool" ]; then
-		fail "$check" "the fit was kept and no pool was written" "log: $log"
-		return
-	fi
-	if ! grep -q 'patches:' "$pool"; then
-		fail "$check" "the pool has no fit in it" "$(cat "$pool")" "log: $log"
-		return
-	fi
-	pass "$check ($azimuths azimuths, pooled)"
-}
-
 # ---------------------------------------- the checks, with the import failing
 #
 # Issue #124. A frame import can fail for reasons that pass: the box runs out
@@ -1915,6 +2083,7 @@ stalls() {
 	else
 		alive || lost "$check"
 		fail "$check" "the picture did not come back after a ${HICCUP}s squeeze" \
+			"${motion_problem:-the movement probe failed}" \
 			"$session/hiccup-a.ppm" "$session/hiccup-b.ppm"
 	fi
 
@@ -2155,30 +2324,16 @@ a_drop_opens_the_file() {
 #
 # A capture the camera wrote one lens per file is one capture however its two
 # files arrive, and everything downstream of the open has to agree about that.
-# The seam fit was what did not: it reopened the capture from the picked path
-# alone and looked beside it for the second lens, and beside is where a
-# capture's other half is by every route but the one this issue is about
-# (#123, the owner's log of 2026-08-01). Two files and two lenses on screen,
-# and the fit calling the same capture one lens and keeping the factory
-# calibration, one line under the other. A capture opened the proper way could
-# then never be calibrated or harvested from.
-#
-# So the assertion is the app's own contradiction, and it holds by any route:
-# a capture the app read as two files never says it has one lens stream.
-#
-# A session and an empty pool per route, which is not tidiness. A fit runs on
-# a thread and takes a second or two, and the pool decides whether it runs at
-# all: two routes sharing a session means one route's answer landing in the
-# next route's log, and five fits into a run means POOL_ENOUGH is reached and
-# the fit stops happening, which would leave the assertion true and empty.
-# Both were measured here before this said `boot`.
+# The per-capture seam fitter this originally followed was deliberately removed
+# on 2026-08-15: it was a non-Studio mechanism, and the player now draws the
+# factory calibration. The current contract is simpler and directly visible in
+# the app's own open report: two supplied paths become two calibrated lens
+# streams from two files, even when neither file sits beside the other.
 #
 # Four routes, because what they hand over is four different shapes:
 #
 #   beside          the two real paths, in the folder the camera wrote them
-#                   in. The route that always worked, and the control: if the
-#                   fit stops reporting at all this fails too, and the others
-#                   are not quietly passing on an absence of evidence.
+#                   in. The route that always worked, and the control.
 #   apart           the same two files, one directory each, neither holding
 #                   the other. That is what a multiple pick looks like coming
 #                   back through the document portal, and it is the shape
@@ -2200,17 +2355,17 @@ paired_files() {
 	printf '\n-- two-file capture checks (%s)\n' "$media"
 	local route
 	for route in beside apart apart-reversed portal; do
-		a_pair_is_one_capture_to_the_seam "$route"
+		a_pair_opens_as_one_capture "$route"
 	done
 }
 
-a_pair_is_one_capture_to_the_seam() {
+a_pair_opens_as_one_capture() {
 	local route=$1
-	local check="a two-file capture keeps its seam, arriving $route"
+	local check="two files open as one calibrated capture, arriving $route"
 	# Not `pair-$route.log`, which is what `boot` names the app's own log
 	# below.
 	local report=$session/drag-pair-$route.log
-	local mate waited=0 pid offer=uri-list first second apart swap
+	local mate pid offer=uri-list first second apart swap
 
 	mate=$(lens_mate "$media")
 	if [ -z "$mate" ]; then
@@ -2245,7 +2400,6 @@ a_pair_is_one_capture_to_the_seam() {
 		;;
 	esac
 
-	rm -f "$STATE_HOME/cosmic/dev.harding.Kjerag/v1/seam_pool"
 	boot "pair-$route"
 	if ! await_paint "pair-$route-welcome"; then
 		alive || lost "$check"
@@ -2258,39 +2412,25 @@ a_pair_is_one_capture_to_the_seam() {
 		"$dragsource" "$first" "$second" "offer=$offer" "linger=$DROP_OPEN" \
 		>"$report" 2>&1 &
 	pid=$!
-	# The fit is a second or two of decode on a thread of its own, so what is
-	# waited for is its verdict rather than the open: a line saying what the
-	# seam came to, or a line saying why it came to nothing.
-	while [ "$waited" -le $((DROP_OPEN * 2)) ]; do
-		alive || break
-		seam_reported && break
-		sleep 0.5
-		waited=$((waited + 1))
-	done
+	await '^media:.*2 lens streams from 2 files' "$DROP_OPEN"
 	kill "$pid" 2>/dev/null
 	wait "$pid" 2>/dev/null
 
 	alive || lost "$check"
-	if ! grep -q '^media:.*from 2 files' "$log"; then
+	if ! grep -q '^media:.*2 lens streams from 2 files' "$log"; then
 		fail "$check" "the drop did not open as a two-file capture" \
 			"$(grep '^media:' "$log" || echo 'no media line')" \
 			"report: $report" "log: $log"
 		ended
 		return
 	fi
-	if grep -q 'one lens stream, so it has no seam' "$log"; then
-		fail "$check" "the fit read one file of the two" \
-			"$(grep '^seam:' "$log" | tr '\n' '|')" "log: $log"
+	if ! grep -q '^lens:.*sampling 2 of 2 calibrated' "$log"; then
+		fail "$check" "the two streams were not both calibrated" \
+			"$(grep '^lens:' "$log" || echo 'no lens line')" "log: $log"
 		ended
 		return
 	fi
-	if ! seam_reported; then
-		fail "$check" "the seam fit never reported in $DROP_OPEN s" \
-			"$(grep '^seam:' "$log" | tr '\n' '|')" "log: $log"
-		ended
-		return
-	fi
-	pass "$check ($(grep -c '^seam:' "$log") seam lines, none of them one-lens)"
+	pass "$check ($(read_as "$report"))"
 	ended
 }
 
@@ -2300,13 +2440,6 @@ a_pair_is_one_capture_to_the_seam() {
 # elsewhere, five times over.
 ended() {
 	quit >/dev/null 2>&1 || teardown
-}
-
-# Whether the seam fit has said what it came to: a fit, with the patches it
-# was measured over, or a refusal that names its reason. A pooled calibration
-# landing at open is neither, and there is none in these sessions anyway.
-seam_reported() {
-	grep -q '^seam:.*\( patches, \|keeping the factory calibration\)' "$log"
 }
 
 # What the app asked the drag for, which only the source can say.
@@ -2601,14 +2734,12 @@ twin_guard() {
 
 if [ -n "$media" ]; then
 	with_media
-	pooled_calibration
 	dropped_files
 	paired_files
 	stalls
 else
 	welcome
 fi
-a_camera_pointing_elsewhere_is_still_fitted
 dud
 foreign
 twin_guard
