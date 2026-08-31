@@ -104,6 +104,29 @@ pub struct CalibrationSet {
 #[derive(Debug, Clone)]
 pub struct Lens {
     pub intrinsics: Intrinsics,
+    /// Centre of the crop-scaled camera model in delivered-frame pixels,
+    /// retained in the trailer's binary64 arithmetic.
+    ///
+    /// This differs deliberately from both [`Self::intrinsics`] and
+    /// [`Self::image_circle_centre`].  The former follows the calibration
+    /// canvas ratio used by Kjerag's projection.  The latter preserves
+    /// Studio's later packed-canvas binary32 narrowing for its mask helper.
+    /// Studio's selected ONE X2 flowstate model consumes this value directly
+    /// and narrows only when it packs the Metal parameter buffer; on lens 1,
+    /// narrowing after the packed-slot subtraction is two ULPs away.
+    pub crop_centre: [f64; 2],
+    /// Centre of Studio's static fisheye image circle in this delivered
+    /// lens frame, in pixels. This is deliberately separate from
+    /// [`Self::intrinsics`]: Studio applies the centred sensor-window crop
+    /// before it builds the camera mask, while Kjerag's existing projection
+    /// path retains the canvas-ratio principal point documented by
+    /// [`Intrinsics`].
+    ///
+    /// The value is binary32 because the native `Offset` object stores it
+    /// that way before the mask helper subtracts a packed lens-slot offset.
+    /// The parser preserves that narrowing and subtraction order, which is
+    /// observable on lens 1 of the ONE X2.
+    pub image_circle_centre: [f32; 2],
     pub distortion: Distortion,
     /// Which family the numbers above belong to, because two cameras in the
     /// corpus do not share one.
@@ -301,13 +324,13 @@ impl Pose {
     /// in a right-handed frame whose axes are the delivered frame's own,
     /// x right, y down, z out along the optical axis.
     ///
-    /// This is lens 0's whole story. Lens 1 additionally sits in a nominal
-    /// arrangement the file does not record, a half turn about the body's
-    /// vertical, which `kjerag-render` multiplies on the right of this
-    /// (docs/research/insv-format.md 4.9). The **order** of the three
-    /// angles is not settled, and neither camera can settle it: yaw and
-    /// pitch are 0.103 and 0.07 degrees on the X4 Air, so every ordering
-    /// agrees to about 2 px.
+    /// This is the generic residual-pose interpretation. Lens 1 additionally
+    /// sits in a nominal arrangement the file does not record, a half turn
+    /// about the body's vertical, which `kjerag-render` multiplies on the
+    /// right of this (docs/research/insv-format.md 4.9). Studio's selected
+    /// ONE X2 image-map producer is a measured exception and composes its
+    /// type-`0x29` pose in the renderer instead; the IMU mounting here remains
+    /// generic. Other residual-pose cameras keep this path.
     ///
     /// It lives here rather than in the shader layer because the same three
     /// angles describe where the IMU is bolted, one quarter turn away
@@ -743,12 +766,17 @@ fn imu_orientation(camera_model: &str) -> &'static str {
 /// cannot disturb issue #7's blend, where a sweep across the frame would have
 /// put 1.9 degrees of misalignment into it.
 ///
-/// X5 and everything else stay [`Sweep::Unknown`], which is a zero axis and
-/// therefore no correction: the direction is not in the file and no X5 has
-/// been measured. docs/research/insv-format.md 6.7 has the tables.
+/// A native ONE X2 packed-UV capture independently measures the same down-frame
+/// sweep. Its end-to-end turn agrees with the source IMU to 0.032 degrees, and
+/// the existing one-round solver reproduces both native lookup maps to less
+/// than one source pixel. X5 and everything else stay [`Sweep::Unknown`],
+/// which is a zero axis and therefore no correction: the direction is not in
+/// the file and no X5 has been measured. docs/research/insv-format.md 6.7 has
+/// the tables.
 fn readout_sweep(camera_model: &str) -> Sweep {
     match camera_model {
         m if m.starts_with("Insta360 X4") => Sweep::Down,
+        m if m.starts_with("Insta360 ONE X2") => Sweep::Down,
         m if m.starts_with("Insta360 X5") => Sweep::Unknown,
         _ => Sweep::Unknown,
     }
@@ -798,6 +826,25 @@ impl LensBlock {
             _,
             lens_type,
         ] = self.fields;
+        let crop_origin_x = (slot - f64::from(crop.width)) * 0.5;
+        let crop_origin_y = (f64::from(canvas_h) - f64::from(crop.height)) * 0.5;
+        let delivered_x = f64::from(dimension.width);
+        let delivered_y = f64::from(dimension.height);
+        let local_circle_x =
+            (cx - index as f64 * slot - crop_origin_x) * delivered_x / f64::from(crop.width);
+        let local_circle_y = (cy - crop_origin_y) * delivered_y / f64::from(crop.height);
+
+        // Studio crops CameraParameters while their centres still occupy a
+        // packed two-lens canvas, narrows that result into Offset's f32
+        // vector, and only then removes lens 1's delivered slot in the mask
+        // helper. Keep that order: on the ONE X2, narrowing local 1439.24
+        // directly is two ULP below narrowing packed 4319.24 then subtracting
+        // 2880.0.
+        let packed_circle_x = (local_circle_x + index as f64 * delivered_x) as f32;
+        let image_circle_centre = [
+            packed_circle_x - index as f32 * dimension.width as f32,
+            local_circle_y as f32,
+        ];
         Lens {
             intrinsics: Intrinsics {
                 xi,
@@ -809,6 +856,8 @@ impl LensBlock {
                 cx: (cx - index as f64 * slot) * (dimension.width as f64 / slot),
                 cy: cy * (dimension.height as f64 / canvas_h as f64),
             },
+            crop_centre: [local_circle_x, local_circle_y],
+            image_circle_centre,
             distortion: Distortion { k1, k2, k3, p1, p2 },
             model: Model::Mei,
             // `offset_v3` records a residual, so the arrangement it is a
@@ -1009,6 +1058,7 @@ mod tests {
         assert_eq!(readout.sweep, Sweep::Down);
         assert_eq!(readout.sweep.axis(), [0.0, 1.0]);
         assert_eq!(readout_sweep("Insta360 X4 Air"), Sweep::Down);
+        assert_eq!(readout_sweep("Insta360 ONE X2"), Sweep::Down);
         assert_eq!(readout_sweep("Insta360 X5"), Sweep::Unknown);
         assert_eq!(readout_sweep("GoPro Max"), Sweep::Unknown);
         assert_eq!(Sweep::Unknown.axis(), [0.0, 0.0]);

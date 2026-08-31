@@ -62,12 +62,10 @@ const BOUNDS: Size = Size {
 
 fn main() -> Fallible<()> {
     let options = Options::parse(std::env::args().skip(1))?;
-    // An instrument has no stored calibration to read: the app keeps that in
-    // its own config, and this is not the app. So the seam is fitted off this
-    // file, which is what every instrument did before the calibration moved
-    // to the camera (issue #48).
+    // An instrument has no stored calibration to read, and this is not the
+    // app. It draws the factory calibration, the parity base: the per-capture
+    // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
     let mut scene = Scene::open(&options.input)?;
-    scene.fit_seam(true);
     let aspect = BOUNDS.width as f32 / BOUNDS.height as f32;
 
     // Everything the window would build, because the picture has to be

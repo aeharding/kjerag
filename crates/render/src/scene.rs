@@ -30,20 +30,28 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use kjerag_media::{Accuracy, Cue, Frames, Player, Reader, Stats};
+use kjerag_media::{Accuracy, Cue, FrameStamp, Frames, Player, PresentationPolicy, Reader, Stats};
 use kjerag_meta::{
     CalibrationSet, ExposureTrack, Filter, Format, Lens, OrientationTrack, Quat, Readout,
 };
 
 use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
+use super::chroma;
+use super::direct_type2::DirectMapDraw;
+use super::flow::one_xs::player::{FrameOwner, FrameResult};
+use super::flow::{Cadence, Estimate};
+use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 use super::sampling::{self, Sampling};
-use super::seam::{self, Correction, Harvest, SeamFit};
+use super::seam::{Correction, SeamFit};
 use super::stall::{Stall, Stalled};
+use super::studio_type2::{MapBindError, OneXsMapFrame, OneXsMapRaster, PreparedPicture};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -156,6 +164,16 @@ pub struct Scene {
     /// How the pass samples where the view magnifies the source (issue #11).
     /// The instruments move it; the shell leaves it alone.
     sampling: Cell<Sampling>,
+    /// The available Studio-derived optical-flow seam correction on or off,
+    /// the player's runtime toggle and the "Optical Flow" arm of the stitching
+    /// control. **DEFAULT OFF**:
+    /// off, the pass is byte-identical to the shipped player; on, the pipeline
+    /// estimates the flow on a BACKGROUND WORKER on Studio's ~30-frame cadence and
+    /// applies the last field the worker returned, held between updates
+    /// ([`ScenePipeline::flow_step`], §35) — the render thread never runs the DIS.
+    /// A cell for the reason the toggles above are: `shader::Program` hands out
+    /// `&self`.
+    flow: Cell<bool>,
     /// Where the pass leaves word that it cannot draw this file any more
     /// (issue #124). It belongs to the open capture rather than to the
     /// pipeline, which outlives every file it draws.
@@ -174,20 +192,107 @@ struct Holding {
     readout: Option<Readout>,
 }
 
+fn supports_player_flow(lenses: Option<&[Lens]>) -> bool {
+    lenses.is_none_or(|lenses| !projection::is_one_xs_lens_pair(lenses))
+}
+
+/// The generated static resources and direct renderer have passed their
+/// authenticated substitution and rendered-pixel gates. Keep the activation
+/// explicit and reviewable; it is not a user-facing quality switch.
+const ONE_XS_PLAYBACK_ENABLED: bool = true;
+
+fn one_xs_playback_selected(enabled: bool, capture_owned: bool) -> bool {
+    enabled && capture_owned
+}
+
+/// Whether the player must keep offering its current selected frame.
+///
+/// `None` is the initial state before frame zero has been offered, so it must
+/// not close the gate. Once there is a current frame, only an exact ready-map
+/// acknowledgement lets the EveryFrame player hand over its successor.
+fn one_xs_frame_waiting(enabled: bool, capture_owned: bool, current_ready: Option<bool>) -> bool {
+    one_xs_playback_selected(enabled, capture_owned) && current_ready == Some(false)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayStart {
+    Continue,
+    FrameZero,
+}
+
+/// Decide whether the causal lineage can reach `target` by continuing the
+/// decoder exactly where it stands. `exact_ready` binds the offered surfaces
+/// to the completed map by full opaque identity; the adjacency arm covers the
+/// one offered successor which has not completed its transaction yet.
+fn one_xs_replay_start(
+    ready: Option<u64>,
+    offered: Option<u64>,
+    exact_ready: bool,
+    same_epoch: bool,
+    target: u64,
+) -> ReplayStart {
+    let Some(ready) = ready else {
+        return ReplayStart::FrameZero;
+    };
+    let Some(offered) = offered else {
+        return ReplayStart::FrameZero;
+    };
+    let safe_head =
+        exact_ready || (same_epoch && ready.checked_add(1).is_some_and(|next| next == offered));
+    if safe_head && target >= offered {
+        ReplayStart::Continue
+    } else {
+        ReplayStart::FrameZero
+    }
+}
+
+fn selected_replay_start(
+    proposed: ReplayStart,
+    allow_forward: bool,
+    replaying: bool,
+    offered: Option<u64>,
+    target: u64,
+) -> ReplayStart {
+    if replaying {
+        return ReplayStart::FrameZero;
+    }
+    match (proposed, allow_forward, offered) {
+        (ReplayStart::Continue, true, _) => ReplayStart::Continue,
+        (ReplayStart::Continue, false, Some(offered)) if offered == target => ReplayStart::Continue,
+        _ => ReplayStart::FrameZero,
+    }
+}
+
+fn replay_step_base(requested: Option<u64>, decoded: Option<u64>) -> Option<u64> {
+    requested.or(decoded)
+}
+
+fn retire_replay<T>(replay: &RefCell<Option<T>>) {
+    replay.borrow_mut().take();
+}
+
+fn next_after_pump(replaying: bool, playing: bool, seeking: bool, due: Option<Instant>) -> Next {
+    match (replaying, playing, seeking, due) {
+        // Decoder landing is deliberately earlier than selected transaction
+        // completion. Keep one redraw in flight so prepare can build the
+        // target map and the following pump can observe its acknowledgement.
+        (true, _, _, _) => Next::Refresh,
+        (false, false, true, _) => Next::Refresh,
+        (false, false, false, _) => Next::Never,
+        (false, true, _, Some(due)) => Next::At(due),
+        (false, true, _, None) => Next::Refresh,
+    }
+}
+
+fn exact_selected_display<T: Eq>(current: &T, shown: Option<&T>, same_capture: bool) -> bool {
+    same_capture && shown == Some(current)
+}
+
 /// A file on screen: its calibration, and where its frames come from.
 struct Show {
-    /// The capture itself, kept because a seam fit reads its own frames off
-    /// it, minutes into the file, long after it was opened (issue #48).
-    ///
-    /// Every file of it, in lens order, and not the one path the pilot named:
-    /// a capture written one lens per file has its second lens beside the
-    /// first by every route but the file chooser, which hands both halves
-    /// over as documents in a directory each (issue #123). The reader has
-    /// already answered where they are, and this is that answer kept rather
-    /// than asked again.
+    /// Containers in the exact decoder lane order admitted at open.
     files: Arc<[PathBuf]>,
-    /// The size of one lens's decoded frame, which the seam fit reads
-    /// through the same map the pass draws with.
+    /// The size of one lens's decoded frame.
     frame: Size,
     /// One per decoded stream, in stream order, as the camera calibrated
     /// them.
@@ -196,27 +301,28 @@ struct Show {
     /// ([`CalibrationSet::camera_key`]). The seam calibration is stored under
     /// it.
     camera: u64,
-    /// The same lenses with the seam correction in them (issue #48): what the
-    /// pool knows about this camera, landed at open, or a fit off this file's
-    /// own frames where it knows nothing. The factory calibration until one of
-    /// those arrives, and for good on a file with no seam.
-    ///
-    /// Shared rather than owned because the fallback fit runs on a thread of
-    /// its own and hands its answer back through this.
+    /// The lenses with a seam correction in them, or the factory calibration
+    /// where there is none. A manual [`Scene::use_seam`] lands a fit here for RE
+    /// and testing; the player never does, so what it draws is the factory
+    /// parity base (the per-capture fit of issue #48 was removed 2026-08-15).
+    /// Shared because it is read on every redraw.
     corrected: Arc<Correction>,
     /// The along-seam table this camera has been read at, landed at open
     /// (issue #103, stage 9). A cell because it is set once from outside and
     /// read on every redraw, exactly like the toggles above.
     table: Cell<Table>,
-    /// What a fallback fit off this file came to, for the pool to keep if it
-    /// is good enough. The shell reads it when the file is closed or another
-    /// is opened; nothing in the render path touches it.
-    harvested: Harvested,
     /// Where the camera body was, over the whole file, and the camera's own
     /// timestamp for each frame. Both come out of the trailer at open
     /// (issue #8); both are empty for a file with no IMU record, and then
     /// horizon lock is a no-op rather than an error.
     held: Arc<Motion>,
+    /// Sequential selected ONE X2 state for ordinary live playback only.
+    one_xs: Option<Arc<OneXsCapture>>,
+    /// Factory input for a genuinely fresh causal lineage after a restart.
+    one_xs_calibration: Option<Arc<CalibrationSet>>,
+    /// A requested target remains a seek until its exact map, not merely its
+    /// decoded surfaces, has completed the capture transaction.
+    replay: RefCell<Option<OneXsReplay>>,
     /// The clock and the frame it is showing. See the module docs for why
     /// this is a cell.
     playing: RefCell<Playing>,
@@ -231,6 +337,125 @@ struct Motion {
     /// How long one frame takes to come off the sensor and which way it
     /// comes, which is what issue #9's correction is measured against.
     readout: Readout,
+}
+
+/// The selected stitch state belonging to one open live capture.
+///
+/// iced owns [`ScenePipeline`] independently from [`Scene`], so the sequential
+/// CPU owner cannot live only in either one. A live [`View`] carries this
+/// shared capture identity across that boundary. The mutex is not for parallel
+/// estimation, which is deliberately absent in the first implementation; it
+/// makes the ownership explicit and keeps a recreated pipeline from restarting
+/// or duplicating the capture's numeric lineage.
+struct OneXsCapture {
+    state: Mutex<OneXsCaptureState>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OneXsReplay {
+    target: u64,
+    position: Duration,
+    playing: bool,
+}
+
+struct OneXsCaptureState {
+    /// Ordinary playback. The last completed resources are retained so a
+    /// redraw of the exact same delivered pair does not consume the
+    /// sequential owner twice.
+    owner: Box<FrameOwner>,
+    ready: Option<OneXsMapFrame>,
+}
+
+impl std::fmt::Debug for OneXsCapture {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("OneXsCapture")
+    }
+}
+
+impl OneXsCapture {
+    fn replay_start(&self, offered: Option<&FrameStamp>, target: u64) -> Fallible<ReplayStart> {
+        let state = self.state.lock().map_err(
+            |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
+        )?;
+        let ready = state.ready.as_ref().map(OneXsMapFrame::frame);
+        Ok(one_xs_replay_start(
+            ready.map(FrameStamp::index),
+            offered.map(FrameStamp::index),
+            ready
+                .zip(offered)
+                .is_some_and(|(ready, offered)| ready == offered),
+            ready
+                .zip(offered)
+                .is_some_and(|(ready, offered)| ready.same_decode_epoch(offered)),
+            target,
+        ))
+    }
+
+    fn new(calibration: &CalibrationSet) -> Fallible<Self> {
+        Ok(Self {
+            state: Mutex::new(OneXsCaptureState {
+                owner: Box::new(FrameOwner::new(calibration)?),
+                ready: None,
+            }),
+        })
+    }
+
+    fn acknowledged(&self, frame: &FrameStamp) -> Fallible<bool> {
+        let state = self.state.lock().map_err(
+            |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
+        )?;
+        Ok(state
+            .ready
+            .as_ref()
+            .is_some_and(|ready| ready.frame() == frame))
+    }
+
+    fn ready(&self, frame: &FrameStamp) -> Fallible<Option<OneXsMapFrame>> {
+        let state = self.state.lock().map_err(
+            |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
+        )?;
+        Ok(state
+            .ready
+            .as_ref()
+            .filter(|ready| ready.frame() == frame)
+            .cloned())
+    }
+
+    fn process(&self, frame: &super::OneXsLumaFrame) -> Fallible<OneXsMapFrame> {
+        let mut state = self.state.lock().map_err(
+            |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
+        )?;
+        if let Some(ready) = state
+            .ready
+            .as_ref()
+            .filter(|ready| ready.frame() == frame.frame())
+        {
+            return Ok(ready.clone());
+        }
+        let OneXsCaptureState { owner, ready } = &mut *state;
+        let FrameResult {
+            map,
+            phase,
+            camera_mask,
+            invalid_nodes,
+            weighted_rows,
+            lens_a_census,
+            lens_b_census,
+        } = owner.process(frame)?;
+        // Preserve access to the complete transaction diagnostics without
+        // making a pooled number a picture verdict. They remain available for
+        // the exact-frame regression and do not gate drawing.
+        let _ = (
+            phase,
+            camera_mask,
+            invalid_nodes,
+            weighted_rows,
+            lens_a_census,
+            lens_b_census,
+        );
+        *ready = Some(map.clone());
+        Ok(map)
+    }
 }
 
 impl Motion {
@@ -254,7 +479,8 @@ impl Motion {
     /// `None` where there is nothing to correct with, or nothing known to
     /// correct: a file with no IMU record, a trailer with no readout time,
     /// and any camera whose readout direction has not been measured
-    /// (`kjerag_meta::Sweep::Unknown`, which today is everything but an X4).
+    /// (`kjerag_meta::Sweep::Unknown`, which today is everything except the
+    /// measured X4 and ONE X2 families).
     /// The pass is then what it was before issue #9, and the picture with it.
     fn rolling(&self, at: i64, readout: Readout) -> Option<Rolling> {
         let span = (readout.seconds * 1e6) as i64;
@@ -302,6 +528,7 @@ impl Scene {
             forced: Cell::new(None),
             readout: Cell::new(None),
             sampling: Cell::new(Sampling::default()),
+            flow: Cell::new(false),
             stalled: Stalled::default(),
             shown: Shown::default(),
         }
@@ -320,7 +547,18 @@ impl Scene {
     /// only place it can come from (issue #123).
     pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
         ours(path)?;
-        let mut player = Player::open_with(path, alongside)?;
+        Self::open_live(Player::open_with(path, alongside)?)
+    }
+
+    /// Opens an already authenticated two-file capture for live playback in
+    /// explicit lens order. The caller may pass retained descriptor aliases;
+    /// neither media layer rediscovers or reopens a mutable sibling name.
+    pub fn open_pair(first: &Path, second: &Path) -> Fallible<Self> {
+        ours(first)?;
+        Self::open_live(Player::open_pair(first, second)?)
+    }
+
+    fn open_live(mut player: Player) -> Fallible<Self> {
         let files: Arc<[PathBuf]> = player.paths().into();
         // The trailer is the capture's rather than the picked file's, and on a
         // camera that writes one lens per file only lens 0 carries one
@@ -331,6 +569,7 @@ impl Scene {
         // either way round and one that opens only if it was picked in the
         // camera's own order (issue #123).
         let calibrated = calibrated(&files[0], player.size(), player.lenses())?;
+        let selected_one_xs = projection::is_one_xs_lens_pair(&calibrated.lenses);
         println!(
             "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
@@ -355,6 +594,16 @@ impl Scene {
         // Opening a file plays it, which is what every player does. Space
         // and the control row's button pause it (issue #16).
         let frame = player.size();
+        if one_xs_playback_selected(ONE_XS_PLAYBACK_ENABLED, selected_one_xs) {
+            // The selected estimator is causal: every aligned decoded pair is
+            // part of the next pair's state. Presentation therefore cannot
+            // discard a late frame before the stitch owner consumes it.
+            if !player.set_presentation_policy(PresentationPolicy::EveryFrame) {
+                return Err(
+                    "ONE X2 playback could not preserve every source frame before starting".into(),
+                );
+            }
+        }
         player.play();
         Ok(Self {
             show: Some(Show::new(
@@ -374,7 +623,22 @@ impl Scene {
     /// the frame it is checking.
     pub fn still(path: &Path, at: Cue) -> Fallible<Self> {
         ours(path)?;
-        let mut reader = Reader::open(path)?;
+        let reader = Reader::open(path)?;
+        Self::still_from_reader(reader, at)
+    }
+
+    /// One frame from an explicitly selected pair, in lens order.
+    ///
+    /// Offline evidence consumers use this with retained-descriptor paths so
+    /// container decode, trailer parsing and calibration all stay bound to
+    /// the authenticated leaves instead of reopening mutable names.
+    pub fn still_pair(first: &Path, second: &Path, at: Cue) -> Fallible<Self> {
+        ours(first)?;
+        let reader = Reader::open_pair(first, second)?;
+        Self::still_from_reader(reader, at)
+    }
+
+    fn still_from_reader(mut reader: Reader, at: Cue) -> Fallible<Self> {
         let files: Arc<[PathBuf]> = reader.paths().into();
         let calibrated = calibrated(&files[0], reader.size(), reader.lenses())?;
         let frame = reader.size();
@@ -453,84 +717,12 @@ impl Scene {
     ///
     /// **That is a discipline and not a property of this function.** Called
     /// mid-play it lands whatever it is given in the next frame, and the
-    /// picture steps by the whole of it. If a later stage ever re-answers a
-    /// pool while a file is up, this needs [`Correction`]'s walk rather than
-    /// this cell.
+    /// picture steps by the whole of it. A later stage that re-answered a table
+    /// while a file is up would need to ease it in rather than land it here.
     pub fn use_table(&self, table: Table) {
         if let Some(show) = &self.show {
             show.table.set(table);
         }
-    }
-
-    /// Ask for this correction, walking to it rather than landing it. What a
-    /// freshly pooled fit does to the file it was measured on: the picture is
-    /// already up, so it must not jump.
-    pub fn aim_seam(&self, fit: SeamFit) {
-        if let Some(show) = &self.show {
-            show.corrected.ask(fit);
-        }
-    }
-
-    /// Fit this capture's seam from its own frames, best effort
-    /// (`kjerag_render::seam`).
-    ///
-    /// The whole capture, which is every file the reader opened it from: a
-    /// fit reading one file of a two-file capture finds one lens, and a
-    /// capture with one lens has no seam, so it would refuse the very
-    /// captures this exists for (issue #123).
-    ///
-    /// On its own thread for a file that is playing, because a fit is a
-    /// second or two of decode and the picture is not waiting for it; on this
-    /// one for a still, which has no later to correct itself in.
-    ///
-    /// A fit that lands while the file plays is **asked for** rather than
-    /// landed: the picture walks to it over the next few seconds, because by
-    /// then there is a picture to jump.
-    /// `drive` puts the answer into the picture as well as into the pool,
-    /// which is what a camera with nothing pooled needs. A camera that already
-    /// has a pooled answer is drawing with it, and this file's own fit is a
-    /// candidate for the next pooled answer rather than a picture of its own:
-    /// the shell folds it in and asks for whatever the pool then answers.
-    pub fn fit_seam(&self, drive: bool) {
-        let Some(show) = &self.show else {
-            return;
-        };
-        if show.lenses.len() < 2 {
-            return;
-        }
-        if drive {
-            println!(
-                "seam:   nothing pooled for this camera yet, so it is fitted from this file, \
-                 best effort, while it plays"
-            );
-        }
-        let stepped = matches!(show.playing.borrow().source, Source::Stepped(_));
-        let (files, lenses, frame) = (show.files.clone(), show.lenses.clone(), show.frame);
-        let (corrected, kept) = (show.corrected.clone(), show.harvested.clone());
-        let into = drive.then(|| corrected.clone());
-        if stepped {
-            fit_into(&files, &lenses, frame, into.as_ref(), &kept, true);
-            return;
-        }
-        let spawned = std::thread::Builder::new()
-            .name("seam fit".to_owned())
-            .spawn(move || fit_into(&files, &lenses, frame, into.as_ref(), &kept, false));
-        if let Err(e) = spawned {
-            eprintln!("kjerag: the seam fit did not start: {e}");
-        }
-    }
-
-    /// What this file's own frames came to, for the pool to keep if it is good
-    /// enough. `None` until a fallback fit has landed, and on a file whose
-    /// camera the pool already knew, which fits nothing.
-    ///
-    /// **Taken, not read.** The shell asks on a timer as well as on the way
-    /// out, because the way out is not always taken: `Ctrl+Q` is
-    /// `std::process::exit(0)` and runs no shutdown. Taking it means the
-    /// answer is folded into the pool exactly once however many times it is
-    /// asked for, so the timer costs a lock and nothing else.
-    pub fn seam_harvest(&self) -> Option<Harvest> {
-        self.show.as_ref()?.harvested.lock().ok()?.take()
     }
 
     /// Take the next frame of a stepped scene, on this thread. `false` at the
@@ -556,13 +748,76 @@ impl Scene {
         }
     }
 
-    /// The frame on screen, for an instrument that needs to say which one it
-    /// measured.
+    /// The frame currently offered by the source, for instruments that drive
+    /// or measure that delivery boundary.
+    ///
+    /// This can be newer than the picture the pass has committed to display.
+    /// Use [`Self::displayed_frame`] when reporting what the pilot can see.
     pub fn frame(&self) -> Option<(u64, Duration)> {
         let show = self.show.as_ref()?;
         let playing = show.playing.borrow();
         let frames = playing.frames.as_ref()?;
         Some((frames.index, frames.timestamp))
+    }
+
+    /// The frame the pass most recently committed to display.
+    ///
+    /// Unlike [`Self::frame`], this reads the retained full [`View`] written
+    /// at the presentation boundary. It therefore stays on the visible frame
+    /// while a newer offered delivery is still waiting for import or its
+    /// selected stitch map.
+    pub fn displayed_frame(&self) -> Option<(u64, Duration)> {
+        self.shown.frame()
+    }
+
+    /// Opaque identity of the exact aligned lens pair currently held by this
+    /// scene. Unlike [`Self::frame`], this does not alias after a seek or
+    /// across captures.
+    pub fn frame_stamp(&self) -> Option<FrameStamp> {
+        let show = self.show.as_ref()?;
+        let playing = show.playing.borrow();
+        Some(playing.frames.as_ref()?.stamp())
+    }
+
+    /// Containers in the decoder's admitted lane order, for evidence
+    /// instruments which must bind the exact paired source rather than infer a
+    /// sibling from a filename.
+    pub fn source_paths(&self) -> Option<Arc<[PathBuf]>> {
+        Some(self.show.as_ref()?.files.clone())
+    }
+
+    /// Return the selected ONE X2 map for an instrument inspecting the exact
+    /// delivery currently held by this scene.
+    ///
+    /// This is deliberately narrower than exposing the capture owner or its
+    /// retained state. A map is returned only when selected ONE X2 playback
+    /// owns this capture and its ready transaction carries the complete opaque
+    /// [`FrameStamp`] of the scene's current aligned pair. An index and time
+    /// match after a seek or reopen is therefore not enough.
+    pub fn diagnostic_one_xs_map(&self) -> Fallible<Option<OneXsMapFrame>> {
+        let Some(show) = self.show.as_ref() else {
+            return Ok(None);
+        };
+        let playing = show.playing.borrow();
+        let Some(capture) = show.one_xs.as_ref() else {
+            return Ok(None);
+        };
+        let Some(frames) = playing.frames.as_ref() else {
+            return Ok(None);
+        };
+        let current = frames.stamp();
+        let Some(shown) = self.shown.get() else {
+            return Ok(None);
+        };
+        let shown_stamp = shown.frames.stamp();
+        let same_capture = shown
+            .one_xs
+            .as_ref()
+            .is_some_and(|shown_capture| Arc::ptr_eq(shown_capture, capture));
+        if !exact_selected_display(&current, Some(&shown_stamp), same_capture) {
+            return Ok(None);
+        }
+        capture.ready(&current)
     }
 
     /// Takes whichever frame belongs on screen at `now`, and says when to
@@ -579,17 +834,66 @@ impl Scene {
         // Out of the cell in one step: the borrow checker splits the fields
         // of a `&mut Playing`, but not those of a `RefMut`.
         let Playing { frames, source } = &mut *show.playing.borrow_mut();
-        let Source::Live(player) = source else {
-            return Next::Never;
-        };
         // The pass has been unable to put a frame on screen for long enough
         // that it has given up (issue #124). Pausing is what stops the sound
         // as well as the clock, because the sound follows the clock
         // (`kjerag_media`'s `Beat`), and a picture that died while the audio
         // played on is the whole of what that issue was.
         if let Some(stall) = self.stalled.take() {
-            player.pause(now);
-            return Next::Stopped(stall);
+            if let Source::Live(player) = source {
+                player.pause(now);
+            }
+            retire_replay(&show.replay);
+            return Next::Stopped(self.finish_observed_terminal_stop(stall));
+        }
+        let Source::Live(player) = source else {
+            return Next::Never;
+        };
+        // EveryFrame protects the decode queue from dropping a pair, but the
+        // scene still has to acknowledge when the currently offered pair has
+        // crossed the separate iced pipeline lifetime and completed its
+        // capture-owned stitch transaction. Gate on `playing.frames` itself,
+        // not `Shown`: selected output is deliberately not marked shown until
+        // the matching map is ready, so `Shown` cannot acknowledge the input
+        // whose replacement this controls. The initial `None` remains open so
+        // frame zero can be offered.
+        let capture_owned = show.one_xs.is_some();
+        let current_ready = match (show.one_xs.as_ref(), frames.as_ref()) {
+            (Some(capture), Some(frame)) => match capture.acknowledged(&frame.stamp()) {
+                Ok(ready) => Some(ready),
+                Err(error) => {
+                    // Capture-state loss is deterministic. Stop immediately
+                    // with its raw error and never ask the player for a frame
+                    // that the sequential owner can no longer consume.
+                    retire_replay(&show.replay);
+                    self.stalled.fail_now(&error);
+                    player.pause(now);
+                    self.fail_terminal_shutter_without_display();
+                    return self.stalled.take().map_or(Next::Never, Next::Stopped);
+                }
+            },
+            _ => None,
+        };
+        if current_ready == Some(true)
+            && frames.as_ref().is_some_and(|frame| {
+                show.replay
+                    .borrow()
+                    .is_some_and(|replay| replay.target == frame.index)
+            })
+        {
+            // Decoder landing is not completion. Retire the exposed seek only
+            // after the exact target source has its exact capture-owned map.
+            if show
+                .replay
+                .borrow_mut()
+                .take()
+                .is_some_and(|replay| replay.playing)
+            {
+                player.play();
+            }
+        }
+        if one_xs_frame_waiting(ONE_XS_PLAYBACK_ENABLED, capture_owned, current_ready) {
+            return Next::Refresh;
         }
         match player.pump(now) {
             Ok(None) => {}
@@ -599,7 +903,14 @@ impl Scene {
             // printed a line and paused in silence until issue #124.
             Err(e) => {
                 player.pause(now);
-                return Next::Stopped(Stall::new(format_args!("playback stopped: {e}")));
+                retire_replay(&show.replay);
+                self.stalled.fail_now(&e);
+                // This redraw may not reach preparation after publishing the
+                // stop. With no completed display there is nothing for that
+                // preparation to capture anyway, so resolve the independent
+                // one-shot here as part of the same terminal transition.
+                self.fail_terminal_shutter_without_display();
+                return self.stalled.take().map_or(Next::Never, Next::Stopped);
             }
         }
         // The end of the file stops the clock rather than leaving it running
@@ -608,33 +919,41 @@ impl Scene {
             player.pause(now);
             return Next::Never;
         }
-        match (player.is_playing(), player.next_due()) {
-            // A seek is outstanding: the picture is about to change even
-            // though no clock is running towards it, so keep asking until it
-            // does. This is what makes a scrub visible while paused, and
-            // dragging the scrubber pauses.
-            (false, _) if player.is_seeking() => Next::Refresh,
-            (false, _) => Next::Never,
-            (true, Some(due)) => Next::At(due),
-            // Playing, but the clock has nothing to measure from yet: the
-            // first frame is still being decoded.
-            (true, None) => Next::Refresh,
-        }
+        next_after_pump(
+            show.replay.borrow().is_some(),
+            player.is_playing(),
+            player.is_seeking(),
+            player.next_due(),
+        )
     }
 
     pub fn toggle_play(&mut self, now: Instant) {
-        if let Some(player) = self.player_mut() {
-            player.toggle(now);
+        if self.is_playing() {
+            self.pause(now);
+        } else {
+            self.play();
         }
     }
 
     pub fn play(&mut self) {
+        if let Some(show) = &self.show
+            && let Some(replay) = show.replay.borrow_mut().as_mut()
+        {
+            replay.playing = true;
+            return;
+        }
         if let Some(player) = self.player_mut() {
             player.play();
         }
     }
 
     pub fn pause(&mut self, now: Instant) {
+        if let Some(show) = &self.show
+            && let Some(replay) = show.replay.borrow_mut().as_mut()
+        {
+            replay.playing = false;
+            return;
+        }
         if let Some(player) = self.player_mut() {
             player.pause(now);
         }
@@ -643,6 +962,22 @@ impl Scene {
     /// Move the picture, to a keyframe while a drag is still going and to the
     /// frame itself when it ends (issue #5).
     pub fn seek(&mut self, to: Duration, accuracy: Accuracy) {
+        if self.stalled.stopped() {
+            return;
+        }
+        let selected = self
+            .show
+            .as_mut()
+            .map(|show| show.replay_to(Cue::Time(to), false))
+            .transpose();
+        match selected {
+            Ok(Some(true)) => return,
+            Ok(_) => {}
+            Err(error) => {
+                self.stalled.fail_now(error);
+                return;
+            }
+        }
         if let Some(player) = self.player_mut() {
             player.seek(Cue::Time(to), accuracy);
         }
@@ -650,6 +985,22 @@ impl Scene {
 
     /// One frame forward or back.
     pub fn step(&mut self, now: Instant, frames: i64) {
+        if self.stalled.stopped() {
+            return;
+        }
+        let selected = self
+            .show
+            .as_mut()
+            .map(|show| show.replay_step(now, frames))
+            .transpose();
+        match selected {
+            Ok(Some(true)) => return,
+            Ok(_) => {}
+            Err(error) => {
+                self.stalled.fail_now(error);
+                return;
+            }
+        }
         if let Some(player) = self.player_mut() {
             player.step(now, frames);
         }
@@ -658,23 +1009,51 @@ impl Scene {
     /// A seek has been asked for and has not landed. The shell keeps the
     /// picture redrawing while this is true.
     pub fn is_seeking(&self) -> bool {
+        if self
+            .show
+            .as_ref()
+            .is_some_and(|show| show.replay.borrow().is_some())
+        {
+            return true;
+        }
         self.player(Player::is_seeking).unwrap_or(false)
     }
 
     pub fn is_playing(&self) -> bool {
+        if let Some(replay) = self.show.as_ref().and_then(|show| *show.replay.borrow()) {
+            return replay.playing;
+        }
         self.player(Player::is_playing).unwrap_or(false)
     }
 
     pub fn position(&self, now: Instant) -> Duration {
+        if let Some(replay) = self.show.as_ref().and_then(|show| *show.replay.borrow()) {
+            return replay.position;
+        }
         self.player(|player| player.position(now))
+            .or_else(|| {
+                self.show
+                    .as_ref()?
+                    .playing
+                    .borrow()
+                    .frames
+                    .as_ref()
+                    .map(|frames| frames.timestamp)
+            })
             .unwrap_or_default()
     }
 
     /// How long the file runs, from the container: the frame count and the
     /// rational frame rate, divided.
     pub fn duration(&self) -> Duration {
-        self.player(|player| player.timing().duration())
-            .unwrap_or_default()
+        let Some(show) = self.show.as_ref() else {
+            return Duration::ZERO;
+        };
+        let playing = show.playing.borrow();
+        match &playing.source {
+            Source::Live(player) => player.timing().duration(),
+            Source::Stepped(reader) => reader.timing().duration(),
+        }
     }
 
     /// How many lenses the open capture is read as: two for a whole sphere,
@@ -684,7 +1063,7 @@ impl Scene {
     /// file the pilot cannot see. It looks like a whole one until the view is
     /// turned round (issue #123).
     pub fn lenses(&self) -> usize {
-        self.player(Player::lenses).unwrap_or_default()
+        self.show.as_ref().map_or(0, |show| show.lenses.len())
     }
 
     /// Whether this file has a sound track that a device took (issue #13).
@@ -756,6 +1135,14 @@ impl Scene {
             .is_some_and(|show| !show.held.orientation.is_empty())
     }
 
+    /// Whether the player's optical-flow toggle may use the available legacy
+    /// route for this file. With nothing open it remains a persisted
+    /// preference; an open ONE X2 refuses the legacy solver until its selected
+    /// maps, masks and warm state are authenticated.
+    pub fn supports_optical_flow(&self) -> bool {
+        supports_player_flow(self.show.as_ref().map(|show| show.lenses.as_ref()))
+    }
+
     /// Which clock a frame's orientation is looked up on. The instrument that
     /// measured the choice moves this; the shell leaves it alone
     /// ([`FrameClock`]).
@@ -802,6 +1189,20 @@ impl Scene {
         self.sampling.set(sampling);
     }
 
+    /// Request the available Studio-derived optical-flow seam correction
+    /// (default off). Takes effect on the next redraw. The selected ONE X2
+    /// camera refuses this legacy route in [`ScenePipeline::prepare`]; supported
+    /// cameras estimate on a background worker at the recovered cadence and
+    /// hold the last completed field. Off draws the ordinary pass and runs none
+    /// of that machinery.
+    pub fn set_flow(&self, on: bool) {
+        self.flow.set(on);
+    }
+
+    pub fn flow(&self) -> bool {
+        self.flow.get()
+    }
+
     pub fn stats(&self) -> Option<Stats> {
         self.player(Player::stats)
     }
@@ -834,11 +1235,38 @@ impl Scene {
         }
     }
 
+    /// Resolves an armed still as part of a terminal transition when this
+    /// capture has no complete display to offer it. Called from every stop
+    /// discovered in [`Self::pump`], because publishing that stop may end the
+    /// redraw before the renderer's preparation half gets another turn.
+    fn fail_terminal_shutter_without_display(&self) {
+        if self.shown.get().is_none()
+            && let Some(error) = self.stalled.terminal()
+        {
+            self.shutter.fail(error);
+        }
+    }
+
+    /// Completes the one-shot work belonging to a terminal stop the shell is
+    /// about to observe. The caller pauses playback and retires any replay
+    /// first; this final step preserves the raw retained error for a still
+    /// whose redraw will never arrive.
+    fn finish_observed_terminal_stop(&self, stall: Stall) -> Stall {
+        self.fail_terminal_shutter_without_display();
+        stall
+    }
+
     /// Asks for a still of whatever the next redraw draws, at the size the
     /// request names. The pixels come back on a worker thread, through the
     /// request's own `then`; nothing here waits.
     pub fn capture(&self, request: Request) {
+        // Arm before checking terminal state. Together with every terminal
+        // transition checking after it stores the reason, this closes both
+        // sides of the cross-thread race: whichever operation happens last
+        // observes and resolves the shutter. A complete shown display stays
+        // armed for the pipeline to restore and capture after failure.
         self.shutter.arm(request);
+        self.fail_terminal_shutter_without_display();
     }
 
     /// The map this scene would draw one view through, for an instrument that
@@ -874,6 +1302,7 @@ impl Scene {
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
             sampling: self.sampling.get(),
+            flow: self.flow.get(),
             shutter: self.shutter.clone(),
             stalled: self.stalled.clone(),
             shown: self.shown.clone(),
@@ -889,21 +1318,32 @@ impl Show {
         frames: Option<Arc<Frames>>,
         source: Source,
     ) -> Self {
+        // Stepped scenes are forensic inputs which can start at any requested
+        // frame and use explicit type-2 APIs. Only an ordinary live decode is
+        // the cold-from-frame-zero production transaction.
+        let one_xs = matches!(&source, Source::Live(_))
+            .then(|| calibrated.one_xs.clone())
+            .flatten();
+        let one_xs_calibration = matches!(&source, Source::Live(_))
+            .then(|| calibrated.one_xs_calibration.clone())
+            .flatten();
         Self {
             files,
             frame,
             corrected: Arc::new(Correction::none(&calibrated.lenses)),
             table: Cell::new(Table::REST),
-            harvested: Harvested::default(),
             lenses: calibrated.lenses,
             camera: calibrated.camera,
             held: calibrated.held,
+            one_xs,
+            one_xs_calibration,
+            replay: RefCell::new(None),
             playing: RefCell::new(Playing { frames, source }),
         }
     }
 
-    /// What the pass runs on this redraw: the correction as it stands, which
-    /// is one step further along its walk than it was on the last one.
+    /// What the pass runs on this redraw: the corrected lenses as they stand,
+    /// which since the seam fit landed at open never change under a viewer.
     fn lenses(&self) -> Arc<[Lens]> {
         self.corrected.lenses()
     }
@@ -928,80 +1368,105 @@ impl Show {
             lenses: self.lenses(),
             table: self.table.get(),
             frames,
+            one_xs: self.one_xs.clone(),
         })
     }
-}
 
-/// A fallback fit off one capture's own frames, into the correction it will be
-/// drawn with and the slot the pool reads it out of.
-///
-/// `land` for a still, which has no later moment to correct itself in, and
-/// `ask` for a file that is playing, which does: by the time this returns
-/// there is a picture on screen, and a picture that jumps is worse than a
-/// picture that is briefly a degree out.
-fn fit_into(
-    files: &[PathBuf],
-    lenses: &Arc<[Lens]>,
-    frame: Size,
-    into: Option<&Arc<Correction>>,
-    kept: &Harvested,
-    now: bool,
-) -> Option<Harvest> {
-    let started = Instant::now();
-    let fitted = seam::fit_reported(files, lenses, frame, &seam::Plan::default())?;
-    println!(
-        "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, cy {:+.2} px ({})",
-        fitted.fit.roll_deg,
-        fitted.fit.yaw_deg,
-        fitted.fit.pitch_deg,
-        fitted.fit.cx_px,
-        fitted.fit.cy_px,
-        fitted.describe(started.elapsed().as_secs_f64()),
-    );
-    if let Some(into) = into {
-        match now {
-            true => into.land(fitted.fit),
-            false => into.ask(fitted.fit),
-        }
-        // A fit moves the principal point, which moves each lens's coverage
-        // boundary, which moves how much the two of them overlap - and the
-        // handover is clamped by that overlap (`Reframe::afforded`). So a
-        // fallback fit can change how wide this file hands over, seconds after
-        // the shell already said how wide it was. Said only when it moves,
-        // which since the flat seam is rarer still: the bound is the bare
-        // overlap now, and every camera in the corpus overlaps by more than
-        // the picture asks for, so a fit has to move the overlap under 8
-        // degrees before this line has anything to report.
-        //
-        // Off the fit APPLIED and not off the correction's own lenses: a fit
-        // that is asked rather than landed walks in over a second, so the
-        // correction is still showing the old calibration at this instant and
-        // the width the picture is heading for is the one worth saying.
-        let was = handover_deg(lenses, frame);
-        let goes = handover_deg(&fitted.fit.applied(lenses), frame);
-        if let (Some(was), Some(goes)) = (was, goes)
-            && (goes - was).abs() >= 0.01
+    /// Route an exposed selected-capture jump through the causal replay
+    /// state machine. All callers of `Scene::seek` arrive here, including
+    /// scrub updates, releases, relative jumps and pasted views.
+    fn replay_to(&mut self, to: Cue, allow_forward: bool) -> Fallible<bool> {
+        let Some(capture) = self.one_xs.clone() else {
+            return Ok(false);
+        };
+        let Playing { frames, source } = self.playing.get_mut();
+        let Source::Live(player) = source else {
+            return Ok(false);
+        };
+        let target = to
+            .index(player.timing())
+            .min(player.timing().frames.saturating_sub(1));
+        let replaying = self.replay.borrow().is_some();
+        if self
+            .replay
+            .borrow()
+            .is_some_and(|replay| replay.target == target)
         {
-            println!("blend:  that fit moves the handover: {was:.2} -> {goes:.2} deg");
+            return Ok(true);
         }
+        let playing = self
+            .replay
+            .borrow()
+            .map_or_else(|| player.is_playing(), |replay| replay.playing);
+        let offered = frames.as_ref().map(|frames| frames.stamp());
+        let proposed = capture.replay_start(offered.as_ref(), target)?;
+        // Arbitrary seeks restart so the independent sound ring can be
+        // positioned at the requested target without consuming stale audio.
+        // A single forward step retains the already-proven next-audio splice.
+        let start = selected_replay_start(
+            proposed,
+            allow_forward,
+            replaying,
+            offered.as_ref().map(FrameStamp::index),
+            target,
+        );
+        if start == ReplayStart::FrameZero {
+            let calibration = self
+                .one_xs_calibration
+                .as_ref()
+                .ok_or("ONE X2 playback lost its capture calibration")?;
+            // Replace the Arc. The retained old View continues to name the
+            // old completed capture and can never submit its nonzero frame to
+            // this fresh frame-zero owner.
+            self.one_xs = Some(Arc::new(OneXsCapture::new(calibration)?));
+            // Do not let the acknowledgement gate wait for a surface from
+            // the lineage just retired. The last complete display remains in
+            // `Shown` and may be restored until new frame zero completes.
+            *frames = None;
+        }
+        self.replay.replace(Some(OneXsReplay {
+            target,
+            position: player.timing().time_of(target),
+            playing,
+        }));
+        if let Err(error) = player.replay_to(Cue::Index(target), start == ReplayStart::FrameZero) {
+            retire_replay(&self.replay);
+            return Err(error);
+        }
+        Ok(true)
     }
-    let harvest = Harvest {
-        fit: fitted.fit,
-        patches: fitted.patches,
-        residual_deg: fitted.after[0].hypot(fitted.after[1]),
-        along: fitted.along,
-    };
-    if let Ok(mut slot) = kept.lock() {
-        *slot = Some(harvest);
+
+    fn replay_step(&mut self, now: Instant, by: i64) -> Fallible<bool> {
+        if self.one_xs.is_none() {
+            return Ok(false);
+        }
+        let Playing { source, .. } = self.playing.get_mut();
+        let Source::Live(player) = source else {
+            return Ok(false);
+        };
+        player.pause(now);
+        let was_replaying = self.replay.borrow().is_some();
+        if let Some(replay) = self.replay.borrow_mut().as_mut() {
+            replay.playing = false;
+        }
+        let index = replay_step_base(
+            self.replay.borrow().map(|replay| replay.target),
+            player.index(),
+        );
+        let Some(index) = index else {
+            return Ok(true);
+        };
+        let target = index
+            .saturating_add_signed(by)
+            .min(player.timing().frames.saturating_sub(1));
+        self.replay_to(Cue::Index(target), by == 1 && !was_replaying)
     }
-    Some(harvest)
 }
 
 /// How wide a camera with these lenses hands the picture over, in degrees, or
 /// `None` where there is no seam to hand over at.
 ///
-/// One place, because two callers need it at two moments: the shell at open,
-/// and [`fit_into`] when a fit moves it. It reads the same
+/// Read by the shell at open ([`Scene::handover_deg`]). It reads the same
 /// [`Reframe::handover_width`] the pass reads, off the lenses it is handed, and
 /// the aspect and the camera it builds the map with do not reach the answer.
 fn handover_deg(lenses: &[Lens], frame: Size) -> Option<f32> {
@@ -1019,10 +1484,6 @@ fn handover_deg(lenses: &[Lens], frame: Size) -> Option<f32> {
     );
     Some(mapped.handover_width().to_degrees())
 }
-
-/// Where a fallback fit leaves its answer for the shell to pool. Shared,
-/// because the fit that fills it runs on a thread of its own.
-type Harvested = Arc<Mutex<Option<Harvest>>>;
 
 /// Everything the trailer contributes to one open capture: the calibration
 /// for the lenses the shader samples, checked against the streams they will
@@ -1139,10 +1600,23 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
         exposure: calibration.exposure[0].clone(),
         readout: calibration.readout(),
     };
+    let camera = calibration.camera_key();
+    let (one_xs, one_xs_calibration) =
+        if ONE_XS_PLAYBACK_ENABLED && projection::is_one_xs_lens_pair(&lenses) {
+            let calibration = Arc::new(calibration);
+            (
+                Some(Arc::new(OneXsCapture::new(&calibration)?)),
+                Some(calibration),
+            )
+        } else {
+            (None, None)
+        };
     Ok(Calibrated {
         lenses: lenses.into(),
-        camera: calibration.camera_key(),
+        camera,
         held: Arc::new(held),
+        one_xs,
+        one_xs_calibration,
     })
 }
 
@@ -1152,6 +1626,8 @@ struct Calibrated {
     lenses: Arc<[Lens]>,
     camera: u64,
     held: Arc<Motion>,
+    one_xs: Option<Arc<OneXsCapture>>,
+    one_xs_calibration: Option<Arc<CalibrationSet>>,
 }
 
 /// What the shell hands the renderer for one frame.
@@ -1162,6 +1638,10 @@ pub struct ScenePrimitive {
     /// How the pass samples a magnified picture, which is a property of the
     /// redraw rather than of the frame in it.
     sampling: Sampling,
+    /// Whether the Studio optical-flow correction is on for this redraw, read
+    /// from the [`Scene`]'s runtime toggle ([`Scene::set_flow`]). Default off,
+    /// so the shipped player carries `false` and draws the byte-identical pass.
+    flow: bool,
     /// A handle on the [`Scene`]'s shutter, not a copy of it: the request
     /// is taken by whichever redraw reaches [`ScenePipeline::prepare`]
     /// first, and one that never does is still armed for the next.
@@ -1189,6 +1669,27 @@ struct View {
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
     held: Held,
+    /// Capture-owned sequential stitch state. `None` for every other camera
+    /// and for stepped diagnostic scenes.
+    one_xs: Option<Arc<OneXsCapture>>,
+}
+
+/// Resolves the selected route's shutter at its final display boundary.
+/// A complete exact display wins even after a terminal successor failure;
+/// without one, only a terminal error consumes the request. A merely pending
+/// frame therefore leaves it armed for the redraw that completes the map.
+fn resolve_selected_shutter(
+    shutter: &Shutter,
+    stalled: &Stalled,
+    complete_display: bool,
+) -> Option<Request> {
+    if complete_display {
+        return shutter.take();
+    }
+    if let Some(error) = stalled.terminal() {
+        shutter.fail(error);
+    }
+    None
 }
 
 /// The last view the pass actually presented of one capture, which is what the
@@ -1213,12 +1714,45 @@ impl Shown {
     fn get(&self) -> Option<View> {
         self.0.lock().ok()?.clone()
     }
+
+    fn frame(&self) -> Option<(u64, Duration)> {
+        let slot = self.0.lock().ok()?;
+        let frames = &slot.as_ref()?.frames;
+        Some((frames.index, frames.timestamp))
+    }
 }
 
 /// The GPU state behind the widget. iced builds one of these per primitive
 /// type and keeps it for the life of the renderer.
 pub struct ScenePipeline {
     pipeline: wgpu::RenderPipeline,
+    /// The same draw with the Studio optical-flow apply compiled in, chosen per
+    /// draw when the runtime flow toggle is on ([`ScenePipeline::draw`]). Built
+    /// unconditionally beside the plain pipeline so the toggle needs neither the
+    /// `KJERAG_FLOW` env nor a pipeline rebuild; off, it is never bound and the
+    /// plain `pipeline` above draws the byte-identical shipped picture.
+    flow_pipeline: wgpu::RenderPipeline,
+    /// The same draw with the selected native ONE X2 1080-by-60 retained-field
+    /// apply compiled in. This is instrument-only until a complete selected
+    /// producer exists: normal playback never selects it, while the V6 oracle
+    /// can upload captured fields and exercise the real render pass.
+    one_xs_flow_pipeline: wgpu::RenderPipeline,
+    /// A one-shot dense captured-map draw installed only by older headless
+    /// oracles. The typed frame-bound consumer owns its draw separately, so it
+    /// cannot become pipeline or playback state.
+    map_oracle: Option<MapOracleDraw>,
+    /// Exact final projection and delivered pair written by the latest
+    /// [`Self::prepare_one_xs_picture`]. A fresh identity on every typed
+    /// preparation keeps a map from surviving a changed view of the same
+    /// frame. Ordinary preparation leaves this empty.
+    prepared_picture: Option<PreparedPicture>,
+    /// Lazy, instrument-only access to the exact bound R8 source pair.
+    /// Ordinary playback constructs no pipeline and allocates no readback.
+    one_xs_luma: Option<Box<LumaReadbackPipeline>>,
+    /// Lazily built native-grid type-2 consumer. Its pipeline and exact-size
+    /// buffers are reused; only the two map payloads and their CPU-side frame
+    /// association change between instrument submissions.
+    direct_one_xs_map: Option<DirectMapDraw>,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
@@ -1242,10 +1776,118 @@ pub struct ScenePipeline {
     /// history and the block that carries it to the GPU is rebuilt from
     /// nothing every frame.
     ///
-    /// `None` until the first redraw, and left alone entirely when
-    /// `KJERAG_ANCHOR=off`, which is when nothing ever reads it and the map is
-    /// handed the zero it builds itself with.
+    /// `None` until the first redraw.
     anchor: Option<SeamAnchor>,
+    /// Which displacement contract the next draw reads. [`Self::prepare`]
+    /// selects plain or legacy exactly as before. The V6 instrument can replace
+    /// that choice after preparation with [`Self::upload_one_xs_flow`]; a later
+    /// prepare restores normal playback selection, so captured corpus data can
+    /// never become held player state accidentally.
+    flow_draw: FlowDraw,
+    /// The exact selected ONE X2 delivery whose source, projection uniform and
+    /// native map completed as one display transaction. The GPU objects stay
+    /// in their existing owners; this stamp is the admission proof used to
+    /// restore that tuple after preparation of its successor fails.
+    one_xs_display: ExactDisplay<FrameStamp>,
+    /// The player's asynchronous optical-flow estimator: Studio's ~30-frame
+    /// cadence, the background DIS worker, and the async strip readback that
+    /// feeds it ([`Self::flow_step`]). None of it runs while the toggle is off,
+    /// and when it does the render thread never blocks on the DIS.
+    flow: Flow,
+}
+
+/// The three shader contracts that can draw one prepared frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlowDraw {
+    /// Selected ONE X2 has no exact map for the bound source yet. Drawing
+    /// nothing leaves the pane's freshly painted backdrop visible and cannot
+    /// expose either an unstitched source pair or a prior map on a new pair.
+    Nothing,
+    Plain,
+    Legacy,
+    OneXs,
+    DirectOneXs,
+    MapOracle,
+}
+
+/// Identity of the last complete selected display transaction.
+///
+/// A successor is recorded only when its source and map carry the same opaque
+/// delivery identity. Until then, including while it is pending or after it
+/// fails, the previous identity remains recoverable.
+#[derive(Debug)]
+struct ExactDisplay<T> {
+    complete: Option<T>,
+}
+
+impl<T> Default for ExactDisplay<T> {
+    fn default() -> Self {
+        Self { complete: None }
+    }
+}
+
+impl<T: Clone + Eq> ExactDisplay<T> {
+    fn commit(&mut self, source: &T, map: &T) -> bool {
+        if source != map {
+            return false;
+        }
+        self.complete = Some(source.clone());
+        true
+    }
+
+    fn recovery_index(
+        &self,
+        shown: &T,
+        map: Option<&T>,
+        retained: impl IntoIterator<Item = (usize, bool)>,
+    ) -> Option<usize> {
+        if self.complete.as_ref() != Some(shown) || map != Some(shown) {
+            return None;
+        }
+        retained
+            .into_iter()
+            .find_map(|(index, matches)| matches.then_some(index))
+    }
+
+    fn clear(&mut self) {
+        self.complete = None;
+    }
+}
+
+struct MapOracleDraw {
+    pipeline: wgpu::RenderPipeline,
+    _buffer: wgpu::Buffer,
+    read: wgpu::BindGroup,
+}
+
+impl FlowDraw {
+    /// The only selection normal frame preparation may make. Keeping this
+    /// transition in one place makes the instrument override explicitly
+    /// one-draw state rather than another playback mode.
+    fn prepared(active: bool) -> Self {
+        if active { Self::Legacy } else { Self::Plain }
+    }
+
+    fn selected_map(ready: bool) -> Self {
+        if ready {
+            Self::DirectOneXs
+        } else {
+            Self::Nothing
+        }
+    }
+}
+
+/// The player may run the legacy solver only for a route it actually owns.
+fn player_flow(requested: bool, selected_one_xs: bool) -> bool {
+    requested && !selected_one_xs
+}
+
+/// Neither the player nor the environment-driven research instrument may
+/// select the legacy draw contract for the selected ONE X2 route. The
+/// environment arm remains separate because it uploads its own field and must
+/// not start the player's worker.
+fn legacy_flow_draw(requested: bool, environment: bool, selected_one_xs: bool) -> bool {
+    (requested || environment) && !selected_one_xs
 }
 
 /// One frame on the GPU. The mapped frames must outlive the textures
@@ -1253,7 +1895,7 @@ pub struct ScenePipeline {
 /// which is what [`RETAINED`] is about.
 struct Live {
     frames: Arc<Frames>,
-    _planes: Vec<Planes>,
+    planes: Vec<Planes>,
 }
 
 /// The compute half of the seam: the pipeline that measures the overlap band,
@@ -1272,6 +1914,37 @@ struct Band {
     /// The along-seam field fitted over the whole ring, dispatched beside the
     /// exposure pooling and over the same cells (issue #103, stage 5).
     pool_along: wgpu::ComputePipeline,
+    /// Studio's grid, in the order the frame runs it: read the evidence band,
+    /// admit and weigh it, solve the 5,088-node system, then blur, ramp and
+    /// ease what came out (docs/research/chromatic.md P).
+    grid_gate: wgpu::ComputePipeline,
+    grid_read: wgpu::ComputePipeline,
+    grid_blur: wgpu::ComputePipeline,
+    grid_admit: wgpu::ComputePipeline,
+    grid_solve: wgpu::ComputePipeline,
+    grid_finish: wgpu::ComputePipeline,
+    /// The two rectified seam line-image strips, and the pass that fills them
+    /// (docs/research/studio-seam-re.md §35). An INSTRUMENT: dispatched only by
+    /// [`ScenePipeline::band_strips`], never by [`ScenePipeline::measure`], so
+    /// the shipped picture never sees it.
+    strip: wgpu::ComputePipeline,
+    strips: wgpu::Buffer,
+    /// The two DIS flow fields the draw applies (§38/§40): `4 × STRIP_W × STRIP_H`
+    /// floats, the `u` plane (along-seam) then the `v` plane (across-seam), in
+    /// belt/sample pixels. Created zeroed (which displaces nothing) and written
+    /// by [`ScenePipeline::upload_flow`]. Only bound into the draw's read group
+    /// when [`flow_on`]; off, it is an unread buffer.
+    flow: wgpu::Buffer,
+    /// The selected ONE X2 1080-by-60 displacement, held separately from the
+    /// incompatible legacy layout. A later normal prepare may select the
+    /// legacy pipeline before its worker publishes another field, so sharing
+    /// one allocation would let captured oracle bytes leak into playback.
+    one_xs_flow: wgpu::Buffer,
+    /// The grid's control block, kept so an instrument can read how often the
+    /// content gate said no.
+    control: wgpu::Buffer,
+    /// The grid's applied field, kept for the same reason.
+    shown: wgpu::Buffer,
     /// One [`band::Cell`] per direction, read by the draw and written here.
     state: wgpu::Buffer,
     watch: wgpu::Buffer,
@@ -1279,6 +1952,14 @@ struct Band {
     /// draw. Two groups over one buffer, and never both in one pass.
     group: wgpu::BindGroup,
     read: wgpu::BindGroup,
+    /// The read group the flow draw variant takes: the same state and chromatic
+    /// bindings as `read`, plus the composed flow displacement on
+    /// [`FLOW_BINDING`]. Chosen by [`ScenePipeline::draw`] when the runtime
+    /// toggle is on; otherwise `read` above is used and this is never bound.
+    flow_read: wgpu::BindGroup,
+    /// The same read group shape with the dedicated selected ONE X2 field on
+    /// binding 3. Only [`FlowDraw::OneXs`] selects it.
+    one_xs_flow_read: wgpu::BindGroup,
     /// Set by an instrument to stop measuring (`ScenePipeline::hold_band`).
     held: bool,
     /// Set by an instrument to leave the exposure alone
@@ -1299,67 +1980,87 @@ struct Band {
     at: Option<Duration>,
 }
 
+/// Everything one readback of the band's buffer yields: the pooled tone, the
+/// along-seam fit, the ring of cells, and the chromatic field.
+type BandState = (band::Tone, band::Along, Vec<band::Cell>, band::Field);
+
 impl ScenePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scene"),
-            // In dependency order, so nothing is used before it is declared:
-            // the map and its uniform block, then the band's lookup into it,
-            // then the sampling, then this file's own entry points.
-            source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "{}\n{}\n{}\n{SHADER}",
-                    projection::wgsl(),
-                    band::lookup_wgsl(),
-                    sampling::wgsl(),
-                )
-                .into(),
-            ),
-        });
         let layout = bind_group_layout(device);
         // Two groups: the pictures and the map, then the band's state. iced's
         // device is asked for a limit of exactly two (`iced_wgpu`), so this is
         // all of them, and there is nowhere for a third to go.
-        let reading = read_layout(device);
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scene"),
-            bind_group_layouts: &[&layout, &reading],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                // Blending, which the pass did without until issue #100: the
-                // picture writes alpha 1 and replaces exactly what a
-                // replacing pipeline replaced, and the room around the ball
-                // writes alpha 0 and leaves whatever the shell drew behind
-                // the widget exactly as it found it. Premultiplied, which is
-                // what the room's own colour already is: black at alpha 0.
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            // iced's own pass has one sample and no depth attachment
-            // (`iced_wgpu/src/lib.rs`, "iced_wgpu render pass"); a pipeline
-            // that disagrees fails to draw rather than looking wrong.
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        //
+        // Three draw pipelines, built unconditionally: the plain shipped pass,
+        // the audited legacy-flow pass, and the selected ONE X2 retained-flow
+        // pass used only by its headless oracle. Normal playback selects only
+        // the first two. Off, only the plain pipeline is ever bound, so the
+        // shipped picture is byte-identical. The two flow variants use the same
+        // binding number but separate typed storage allocations and shaders.
+        let (pipeline, flow_pipeline, one_xs_flow_pipeline) = {
+            let build = |label: &'static str, source: String, flow_bytes: Option<u64>| {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+                let reading = read_layout(device, flow_bytes);
+                let pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("scene"),
+                        bind_group_layouts: &[&layout, &reading],
+                        immediate_size: 0,
+                    });
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("scene"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        // Blending, which the pass did without until issue #100:
+                        // the picture writes alpha 1 and replaces exactly what a
+                        // replacing pipeline replaced, and the room around the
+                        // ball writes alpha 0 and leaves whatever the shell drew
+                        // behind the widget exactly as it found it.
+                        // Premultiplied, which is what the room's own colour
+                        // already is: black at alpha 0.
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    // iced's own pass has one sample and no depth attachment
+                    // (`iced_wgpu/src/lib.rs`, "iced_wgpu render pass"); a
+                    // pipeline that disagrees fails to draw rather than looking
+                    // wrong.
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+            (
+                build("scene", draw_wgsl_flow(false), None),
+                build(
+                    "scene legacy flow",
+                    draw_wgsl_flow(true),
+                    Some(band::FLOW_BYTES),
+                ),
+                build(
+                    "scene ONE X2 flow",
+                    draw_wgsl_one_xs_flow(),
+                    Some(crate::flow::one_xs::Displacement::BYTES as u64),
+                ),
+            )
+        };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -1377,6 +2078,12 @@ impl ScenePipeline {
 
         Self {
             pipeline,
+            flow_pipeline,
+            one_xs_flow_pipeline,
+            map_oracle: None,
+            prepared_picture: None,
+            one_xs_luma: None,
+            direct_one_xs_map: None,
             layout,
             sampler,
             uniforms,
@@ -1387,6 +2094,11 @@ impl ScenePipeline {
             format,
             reported: false,
             anchor: None,
+            // No draw contract exists before the first prepare. That prepare
+            // admits the environment instrument only for a non-ONE-X2 route.
+            flow_draw: FlowDraw::Plain,
+            one_xs_display: ExactDisplay::default(),
+            flow: Flow::new(),
         }
     }
 
@@ -1447,6 +2159,25 @@ impl ScenePipeline {
             }
             pass.set_pipeline(&self.band.pool_along);
             pass.dispatch_workgroups(1, 1, 1);
+            // And the chromatic field, on the readings the same dispatch
+            // wrote. Warm-started from what it left last frame, which is why
+            // it is in the state buffer and not a scratch one.
+            // And Studio's grid, on the same frame's pictures. Four dispatches
+            // in order, and WebGPU orders them against each other, so the
+            // admission sees every difference and the solve sees every weight
+            // without a barrier being asked for.
+            pass.set_pipeline(&self.band.grid_gate);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.band.grid_read);
+            pass.dispatch_workgroups(chroma::READ_GROUPS, 1, 1);
+            pass.set_pipeline(&self.band.grid_blur);
+            pass.dispatch_workgroups(chroma::READ_GROUPS, 1, 1);
+            pass.set_pipeline(&self.band.grid_admit);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.band.grid_solve);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.band.grid_finish);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         queue.submit([encoder.finish()]);
     }
@@ -1468,6 +2199,283 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         aspect: f32,
     ) {
+        let selected_one_xs = one_xs_playback_selected(
+            ONE_XS_PLAYBACK_ENABLED,
+            primitive
+                .view
+                .as_ref()
+                .is_some_and(|view| view.one_xs.is_some())
+                || primitive
+                    .shown
+                    .get()
+                    .is_some_and(|view| view.one_xs.is_some()),
+        );
+        if selected_one_xs {
+            if primitive.stalled.stopped() {
+                self.restore_one_xs_display(primitive, device, queue, aspect);
+                return;
+            }
+            if let Err(error) = self.prepare_one_xs_playback(primitive, device, queue, aspect) {
+                primitive.stalled.fail_now(error);
+                self.restore_one_xs_display(primitive, device, queue, aspect);
+            } else if self.flow_draw != FlowDraw::DirectOneXs {
+                // Initial decode and any future asynchronous implementation
+                // may have a source without an exact completed map yet.
+                self.restore_one_xs_display(primitive, device, queue, aspect);
+            }
+        } else {
+            self.one_xs_display.clear();
+            let _ = self.prepare_inner(primitive, device, queue, aspect, false);
+        }
+    }
+
+    /// Prepare through the ordinary picture path and return an inactive
+    /// capability for the exact final projection it wrote.
+    ///
+    /// This is the only route that pays for preparation identity. The widget
+    /// and normal playback call [`Self::prepare`] and allocate no preparation
+    /// identity.
+    pub fn prepare_one_xs_picture(
+        &mut self,
+        primitive: &ScenePrimitive,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        aspect: f32,
+    ) -> Option<PreparedPicture> {
+        let _ = self.prepare_inner(primitive, device, queue, aspect, true);
+        self.prepared_picture.clone()
+    }
+
+    /// Correctness-first live selected ONE X2 transaction.
+    ///
+    /// The initial implementation intentionally waits for exact luma and the
+    /// scalar owner on this redraw. It is slower than the eventual worker/GPU
+    /// implementation, but keeps one simple invariant: the source bindings,
+    /// sequential CPU state, uploaded native map and draw all name the same
+    /// full [`FrameStamp`].
+    fn prepare_one_xs_playback(
+        &mut self,
+        primitive: &ScenePrimitive,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        aspect: f32,
+    ) -> Fallible<()> {
+        let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, true) else {
+            self.flow_draw = FlowDraw::Nothing;
+            return Ok(());
+        };
+        // `prepare_inner` may deliberately hold the last successfully bound
+        // frame when a newer import fails. Select the View for those exact
+        // bindings, never merely the newest source offered by the player.
+        let view = primitive
+            .view
+            .as_ref()
+            .filter(|view| self.is_bound(view))
+            .cloned()
+            .or_else(|| primitive.shown.get().filter(|view| self.is_bound(view)))
+            .ok_or("ONE X2 playback has bound source textures without their capture view")?;
+        if view.frames.stamp() != frames.stamp() {
+            return Err("ONE X2 playback source view differs from its bound lens pair".into());
+        }
+        let capture = view
+            .one_xs
+            .as_ref()
+            .ok_or("ONE X2 playback lost its capture-owned stitch state")?;
+
+        let map = match capture.ready(&frames.stamp())? {
+            Some(map) => map,
+            None => {
+                let pending = self.submit_one_xs_luma(device, queue, frames.clone())?;
+                // This is the disclosed synchronous first implementation. The
+                // presentation policy admits only one frame at a time, so no
+                // later delivery can pass the causal estimator while this
+                // exact GPU readback is consumed.
+                let luma = pending.read()?;
+                capture.process(&luma)?
+            }
+        };
+        MapBindError::require_frame(map.frame(), self.prepared_picture.as_ref())?;
+        let source = frames.stamp();
+        if !self.one_xs_display.commit(&source, map.frame()) {
+            return Err(crate::studio_type2::FrameMapMismatch::new(
+                "source",
+                &source,
+                "map",
+                map.frame(),
+            )
+            .into());
+        }
+        let draw = self
+            .direct_one_xs_map
+            .get_or_insert_with(|| DirectMapDraw::new(device, &self.layout, self.format));
+        if draw.bound_frame() != Some(map.frame()) {
+            draw.upload(queue, &map);
+        }
+        debug_assert_eq!(draw.bound_frame(), Some(map.frame()));
+        self.flow_draw = FlowDraw::selected_map(true);
+        primitive.shown.keep(&view);
+
+        // A still request waits behind the same exact map rather than taking
+        // an unstitched or blank picture while the transaction is pending.
+        if let Some(request) = primitive.shutter.take() {
+            self.shoot(device, queue, request, aspect, Some(&view));
+        }
+        Ok(())
+    }
+
+    /// Restore the last complete selected display after preparation of its
+    /// successor waits or fails.
+    ///
+    /// `show` may already have imported the successor and replaced the source
+    /// bind group, and `prepare_inner` may already have written its uniform.
+    /// Merely retaining [`FlowDraw::DirectOneXs`] would therefore pair the old
+    /// map with the new source. Recovery is admitted only when the Scene-owned
+    /// shown view, retained imported planes, completed transaction and native
+    /// map all name the same opaque [`FrameStamp`]. It then makes that retained
+    /// source frontmost again and rebuilds the uniform for the current camera
+    /// and target aspect before selecting the direct draw.
+    fn restore_one_xs_display(
+        &mut self,
+        primitive: &ScenePrimitive,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        aspect: f32,
+    ) {
+        self.flow_draw = FlowDraw::Nothing;
+        let Some(view) = primitive.shown.get().filter(|view| view.one_xs.is_some()) else {
+            resolve_selected_shutter(&primitive.shutter, &primitive.stalled, false);
+            return;
+        };
+        let frame = view.frames.stamp();
+        let map = self
+            .direct_one_xs_map
+            .as_ref()
+            .and_then(|draw| draw.bound_frame());
+        let retained = self.one_xs_display.recovery_index(
+            &frame,
+            map,
+            self.live
+                .iter()
+                .enumerate()
+                .map(|(index, live)| (index, Arc::ptr_eq(&live.frames, &view.frames))),
+        );
+        let Some(retained) = retained else {
+            resolve_selected_shutter(&primitive.shutter, &primitive.stalled, false);
+            return;
+        };
+
+        // `is_bound` deliberately means `live.front`, so moving the exact
+        // retained import is part of restoration rather than bookkeeping.
+        let live = self
+            .live
+            .remove(retained)
+            .expect("retained source position came from this queue");
+        self.live.push_front(live);
+        let live = self
+            .live
+            .front()
+            .expect("restored selected source was pushed to the front");
+        self.bind_group = bind(
+            device,
+            &self.layout,
+            &self.uniforms,
+            std::array::from_fn(|lens| live.planes.get(lens).unwrap_or(&self.blank)),
+            &self.sampler,
+        );
+
+        let reframe = Reframe::new(
+            &view.lenses,
+            view.frames.size,
+            primitive.camera,
+            view.held,
+            aspect,
+            self.linearize(),
+            primitive.sampling,
+        )
+        .with_samples(view.frames.samples)
+        .with_table(view.table);
+        self.anchor = None;
+        self.map_oracle = None;
+        self.prepared_picture = Some(PreparedPicture::new(frame, reframe, aspect));
+        queue.write_buffer(&self.uniforms, 0, reframe.bytes());
+        self.flow_draw = FlowDraw::DirectOneXs;
+
+        if let Some(request) =
+            resolve_selected_shutter(&primitive.shutter, &primitive.stalled, true)
+        {
+            self.shoot(device, queue, request, aspect, Some(&view));
+        }
+    }
+
+    /// Prepare the ordinary picture and submit an inactive readback of the
+    /// exact R8 lens pair it actually bound.
+    ///
+    /// Selection and submission are one transaction. If a newer offered frame
+    /// cannot be imported, this captures the held frame the draw still samples,
+    /// not the newer offer. Normal playback has no caller and never constructs
+    /// the lazy compute pipeline.
+    pub fn prepare_one_xs_luma(
+        &mut self,
+        primitive: &ScenePrimitive,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        aspect: f32,
+    ) -> Fallible<Option<PendingOneXsLuma>> {
+        let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, false) else {
+            return Ok(None);
+        };
+        Ok(Some(self.submit_one_xs_luma(device, queue, frames)?))
+    }
+
+    /// Submit source extraction for the exact pair already bound by this
+    /// preparation. Keeping this separate lets live playback prepare once,
+    /// then wait for and consume that same binding without another import or
+    /// uniform write between source and map ownership.
+    fn submit_one_xs_luma(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frames: Arc<Frames>,
+    ) -> Fallible<PendingOneXsLuma> {
+        let shape = {
+            let live = self
+                .live
+                .front()
+                .ok_or("ONE X2 source readback has no bound lens pair")?;
+            if !Arc::ptr_eq(&live.frames, &frames) {
+                return Err(
+                    "ONE X2 source readback frame differs from the picture bindings".into(),
+                );
+            }
+            one_xs_luma::validate(&live.planes, &frames)?
+        };
+        let readback = self
+            .one_xs_luma
+            .get_or_insert_with(|| Box::new(LumaReadbackPipeline::new(device, &self.layout)));
+        Ok(readback.submit(device, queue, &self.bind_group, frames, shape))
+    }
+
+    /// How many imported frame pairs the inactive source oracle can currently
+    /// see, and the production retention bound that limits that queue.
+    ///
+    /// Normal playback never calls this. The source oracle uses it to prove
+    /// that submitted readbacks survive eviction of their imported frame from
+    /// the draw pipeline, rather than merely completing while still retained.
+    pub fn one_xs_luma_retention(&self) -> (usize, usize) {
+        (self.live.len(), RETAINED)
+    }
+
+    fn prepare_inner(
+        &mut self,
+        primitive: &ScenePrimitive,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        aspect: f32,
+        bind_map_picture: bool,
+    ) -> Option<Arc<Frames>> {
+        // Every preparation is a new picture transaction, even if it happens
+        // to draw the same delivered pair through identical values.
+        self.prepared_picture = None;
         if !self.reported {
             self.reported = true;
             println!("device: {}", dmabuf::device_report(device));
@@ -1496,6 +2504,14 @@ impl ScenePipeline {
             // other kind of failure.
             _ => primitive.shown.get(),
         };
+        let selected_one_xs = one_xs_playback_selected(
+            ONE_XS_PLAYBACK_ENABLED,
+            primitive
+                .view
+                .as_ref()
+                .is_some_and(|view| view.one_xs.is_some())
+                || showing.as_ref().is_some_and(|view| view.one_xs.is_some()),
+        );
 
         let reframe = match &showing {
             Some(view) if self.is_bound(view) => Reframe::new(
@@ -1523,31 +2539,180 @@ impl ScenePipeline {
         // redraw that arrives with the same frame behind it advances nothing,
         // and a run at 30 or at 300 fps follows over the same seconds of
         // picture.
-        let reframe = match projection::anchoring() {
-            false => reframe,
-            true => {
-                let held = showing.as_ref().map_or(Held::default(), |view| view.held);
-                let at = showing
-                    .as_ref()
-                    .map_or(0.0, |view| view.frames.timestamp.as_secs_f64());
-                let anchor = SeamAnchor::hold(self.anchor, &reframe, held, at);
-                self.anchor = Some(anchor);
-                reframe.with_shift(anchor.shift())
-            }
+        let reframe = if selected_one_xs {
+            // The selected packed map already owns the complete handover.
+            // Legacy held-line history is neither an input nor a fallback.
+            self.anchor = None;
+            reframe
+        } else {
+            let held = showing.as_ref().map_or(Held::default(), |view| view.held);
+            let at = showing
+                .as_ref()
+                .map_or(0.0, |view| view.frames.timestamp.as_secs_f64());
+            let anchor = SeamAnchor::hold(self.anchor, &reframe, held, at);
+            self.anchor = Some(anchor);
+            reframe.with_shift(anchor.shift())
+        };
+        let bound_frames = showing
+            .as_ref()
+            .filter(|view| self.is_bound(view))
+            .map(|view| view.frames.clone());
+        self.prepared_picture = if bind_map_picture {
+            bound_frames
+                .as_ref()
+                .map(|frames| PreparedPicture::new(frames.stamp(), reframe, aspect))
+        } else {
+            None
         };
         queue.write_buffer(&self.uniforms, 0, reframe.bytes());
         // After the uniform write, because the band reads the same block: the
         // calibration it measures against has to be the one the draw will use,
-        // or the two disagree by whatever the correction walked this redraw.
-        self.measure(device, queue, showing.as_ref());
+        // or the two would disagree.
+        if !selected_one_xs {
+            self.measure(device, queue, showing.as_ref());
+        }
+
+        // The legacy optical-flow estimate and apply, behind the player's
+        // runtime toggle (default OFF, [`ScenePrimitive`]'s `flow`). The
+        // selected ONE X2 route is refused here: feeding that camera through
+        // this legacy solver would substitute a different Studio mechanism.
+        // ASYNCHRONOUS
+        // (§35): the render thread never runs the DIS. Each frame it polls the
+        // async strip readback and the background worker, uploads a finished
+        // field, and — on Studio's ~30-frame cadence, only when nothing is in
+        // flight — kicks the next estimate; the draw below picks the flow variant
+        // and reads whatever field the worker last returned, HELD between updates
+        // ([`Self::flow_step`]). The env path (`kjerag-spike --bin band`) uploads
+        // its own field and leaves the toggle off, so the machinery is gated on
+        // the toggle alone. The environment arm may select the legacy draw for
+        // other routes, but never for selected ONE X2.
+        if selected_one_xs {
+            self.flow_step(device, queue, false, None);
+            self.flow_draw = FlowDraw::Nothing;
+        } else {
+            let selected_camera = reframe.is_one_xs_pair();
+            let player_flow = player_flow(primitive.flow, selected_camera);
+            self.flow_step(device, queue, player_flow, showing.as_ref());
+            self.flow_draw =
+                FlowDraw::prepared(legacy_flow_draw(primitive.flow, flow_on(), selected_camera));
+        }
+        // A captured dense map is one prepared-frame instrument state. Any
+        // ordinary prepare restores playback's own selection.
+        self.map_oracle = None;
 
         // After the uniform write, and only after it: the write lands at the
         // next submit on this queue, and the capture's own submit is that
         // one. Taken here rather than in `draw` because this is the call
         // that has a device to render with.
-        if let Some(request) = primitive.shutter.take() {
+        if !selected_one_xs && let Some(request) = primitive.shutter.take() {
             self.shoot(device, queue, request, aspect, showing.as_ref());
         }
+        bound_frames
+    }
+
+    /// One frame's worth of the ASYNCHRONOUS optical-flow estimate and apply
+    /// (§35), behind the player's runtime toggle. **The render thread never runs
+    /// the DIS.** Called from [`Self::prepare`] after the band is measured.
+    ///
+    /// Per frame, in order:
+    /// - **collect**: if the strip readback started earlier has landed (checked
+    ///   with a non-blocking [`wgpu::PollType::Poll`], no stall), take its two
+    ///   strips off the mapped buffer and hand them to the background worker;
+    /// - **upload**: if the worker has returned a finished [`crate::flow::compose::Displacement`],
+    ///   [`Band::upload_flow`] it so the draw applies it — this is the only flow
+    ///   work on the render/queue thread, and it is a cheap `write_buffer`;
+    /// - **kick**: tick Studio's cadence ([`Cadence`], period 30) once per new
+    ///   frame, and only when it is due AND nothing is already in flight, START a
+    ///   new async strip readback ([`Band::strips_kickoff`]) — never a blocking
+    ///   `band_strips`.
+    ///
+    /// The draw reads whatever field was last uploaded, HELD between updates. Off,
+    /// or on a frame with no bound seam pair, none of this runs and the flow
+    /// buffer keeps its held (or zeroed) field.
+    ///
+    /// A toggle in either direction is an edge that clears the in-flight work and
+    /// restarts the cadence, so a just-enabled seam re-estimates on its first
+    /// frame ([`Cadence::start`]) rather than holding an empty field for a second.
+    fn flow_step(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        on: bool,
+        showing: Option<&View>,
+    ) {
+        // A toggle edge (either direction): clean slate. Drop the in-flight strip
+        // readback, drain any stale field the worker already returned, and reset
+        // the cadence so an off→on enable re-estimates at once.
+        if on != self.flow.enabled_last {
+            self.flow.cadence = Cadence::start();
+            self.flow.readback = None;
+            self.flow.estimating = false;
+            self.flow.ticked_at = None;
+            if let Some(worker) = &self.flow.worker {
+                worker.drain();
+            }
+            self.flow.enabled_last = on;
+        }
+        if !on {
+            return;
+        }
+
+        // collect: has the async strip readback landed? A non-blocking poll drives
+        // the map callback; the render thread does not wait on it.
+        if self.flow.readback.is_some() {
+            let _ = device.poll(wgpu::PollType::Poll);
+            match self.flow.readback.as_ref().and_then(FlowReadback::poll) {
+                Some(Ok(())) => {
+                    let readback = self.flow.readback.take().unwrap();
+                    let (strip0, strip1) = readback.take_strips();
+                    let worker = self.flow.worker.get_or_insert_with(FlowWorker::spawn);
+                    self.flow.estimating = worker.submit(strip0, strip1);
+                }
+                // The map failed (a lost device): abandon this readback and let
+                // the cadence start another. Nothing panics.
+                Some(Err(e)) => {
+                    eprintln!("kjerag: optical-flow strip readback failed: {e}");
+                    self.flow.readback = None;
+                }
+                // Still mapping — hold the last field and try again next frame.
+                None => {}
+            }
+        }
+
+        // upload: a finished field from the worker. The only flow work on the
+        // queue thread, and a cheap `write_buffer`. Held until the next one lands.
+        if let Some(disp) = self.flow.worker.as_ref().and_then(FlowWorker::try_recv) {
+            self.band.upload_flow(queue, &disp);
+            self.flow.estimating = false;
+            self.flow.uploaded += 1;
+        }
+
+        // kick: Studio's cadence, ticked once per NEW frame, and only starting an
+        // estimate when the previous one has fully drained (readback done AND the
+        // worker idle). A due frame that arrives with work still in flight simply
+        // holds the last field — the compute-limited case, expected while the CPU
+        // DIS costs more than one cadence period.
+        let seam_bound = showing.is_some_and(|view| view.lenses.len() > 1 && self.is_bound(view));
+        if seam_bound {
+            let ts = showing.map(|view| view.frames.timestamp);
+            let due = if self.flow.ticked_at != ts {
+                self.flow.ticked_at = ts;
+                self.flow.cadence.tick(true) == Estimate::Reestimate
+            } else {
+                false
+            };
+            if due && self.flow.readback.is_none() && !self.flow.estimating {
+                self.flow.readback =
+                    Some(self.band.strips_kickoff(device, queue, &self.bind_group));
+            }
+        }
+    }
+
+    /// How many finished optical-flow fields the worker has produced and this
+    /// pipeline has uploaded, for a headless instrument to confirm the field
+    /// updates on the cadence. Nothing in the player reads it.
+    pub fn flow_uploads(&self) -> u64 {
+        self.flow.uploaded
     }
 
     /// Draws the view a second time, offscreen, at the size the capture
@@ -1648,9 +2813,33 @@ impl ScenePipeline {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_pipeline(&self.pipeline);
+        // Plain and both typed flow variants share the picture bindings. Only
+        // flow draws bind the displacement buffer; their separate shader
+        // pipelines keep the incompatible legacy and ONE X2 coordinate laws
+        // from becoming a runtime reinterpretation of the same bytes.
+        let (pipeline, read) = match self.flow_draw {
+            FlowDraw::Nothing => return,
+            FlowDraw::Plain => (&self.pipeline, &self.band.read),
+            FlowDraw::Legacy => (&self.flow_pipeline, &self.band.flow_read),
+            FlowDraw::OneXs => (&self.one_xs_flow_pipeline, &self.band.one_xs_flow_read),
+            FlowDraw::DirectOneXs => {
+                let draw = self
+                    .direct_one_xs_map
+                    .as_ref()
+                    .expect("direct ONE X2 draw must own exact map resources");
+                (&draw.pipeline, &draw.read)
+            }
+            FlowDraw::MapOracle => {
+                let oracle = self
+                    .map_oracle
+                    .as_ref()
+                    .expect("map-oracle selection must own its draw resources");
+                (&oracle.pipeline, &oracle.read)
+            }
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_bind_group(1, &self.band.read, &[]);
+        pass.set_bind_group(1, read, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -1710,8 +2899,15 @@ impl ScenePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Fallible<(band::Along, Vec<band::Cell>)> {
-        let (_, along, cells) = self.band.read(device, queue)?;
+        let (_, along, cells, _) = self.band.read(device, queue)?;
         Ok((along, cells))
+    }
+
+    /// The solved chromatic field and the retained band metric, for an
+    /// instrument. Same readback and the same caveat as [`Self::band_state`]:
+    /// it stalls the queue, and no shipped path takes it.
+    pub fn band_chroma(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<band::Field> {
+        Ok(self.band.read(device, queue)?.3)
     }
 
     /// The pooled exposure the pass is drawing with, for an instrument
@@ -1719,6 +2915,281 @@ impl ScenePipeline {
     /// shipped path takes it.
     pub fn band_tone(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<band::Tone> {
         Ok(self.band.read(device, queue)?.0)
+    }
+
+    /// The two rectified seam line-image strips, lens 0 then lens 1, each
+    /// [`band::STRIP_W`] × [`band::STRIP_H`] luma samples in row-major order,
+    /// with a negative sentinel where that lens has no picture
+    /// (docs/research/studio-seam-re.md §35).
+    ///
+    /// **An instrument, and dispatched only here.** It rectifies the pair the
+    /// bind group currently points at — the last frame `prepare` bound — through
+    /// the same calibration the picture is drawn with, in its own encoder, and
+    /// never runs in [`Self::measure`] or the draw. So the shipped picture is
+    /// untouched: nothing but this method reaches the `strip` entry point.
+    ///
+    /// It stalls the queue on the readback, like [`Self::band_state`], and no
+    /// shipped path takes it.
+    pub fn band_strips(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Fallible<(Vec<f32>, Vec<f32>)> {
+        self.band.strips(device, queue, &self.bind_group)
+    }
+
+    /// Upload the composed per-lens flow displacement maps so the next draw
+    /// applies them (chunk 4, §37).
+    ///
+    /// Only meaningful when the flow is compiled in (`KJERAG_FLOW` set): off,
+    /// the buffer this writes is not bound into the draw, so the write is inert
+    /// and the picture is the byte-identical shipped one. The instrument sets
+    /// the knob, composes the field, and calls this before it draws.
+    pub fn upload_flow(&self, queue: &wgpu::Queue, disp: &crate::flow::compose::Displacement) {
+        self.band.upload_flow(queue, disp);
+    }
+
+    /// Upload native selected ONE X2 retained fields and make the next draw use
+    /// their 1080-by-60 coordinate contract.
+    ///
+    /// This is a headless-oracle boundary, not player production wiring. The
+    /// caller first prepares the exact media frame, then calls this method and
+    /// draws without another [`Self::prepare`]. A later prepare deliberately
+    /// restores the ordinary plain/legacy selection, so an external captured
+    /// field cannot leak into playback state.
+    pub fn upload_one_xs_flow(
+        &mut self,
+        queue: &wgpu::Queue,
+        disp: &crate::flow::one_xs::Displacement,
+    ) {
+        self.band.upload_one_xs_flow(queue, disp);
+        self.flow_draw = FlowDraw::OneXs;
+    }
+
+    /// Install one dense owner-view captured-map product for the next draw.
+    ///
+    /// The caller must first call [`Self::prepare`] for the decoded frame it
+    /// wants to reuse, then upload a map rasterized for the target's exact
+    /// extent, and draw without preparing again. This is instrument-only and
+    /// deliberately has no `Scene` or playback selector.
+    pub fn upload_map_oracle(&mut self, device: &wgpu::Device, map: &crate::map_oracle::DenseMap) {
+        self.upload_dense_map(
+            device,
+            map,
+            "owner-view captured map oracle",
+            draw_wgsl_map_oracle(map.size.width),
+        );
+    }
+
+    /// Submit the readable selected type-2 consumer for the exact picture most
+    /// recently prepared into one complete origin-zero target.
+    ///
+    /// The raster must have been derived through [`crate::OneXsMapFrame`] for
+    /// this exact preparation. The actual texture supplies extent, shape,
+    /// format and usage; validation precedes every type-2 map-resource
+    /// allocation. This method creates and submits the command buffer itself,
+    /// so a caller cannot substitute a nonzero viewport/scissor or re-prepare
+    /// the shared uniform before submission. It never changes the pipeline's
+    /// ordinary draw state, and normal playback has no route that calls it.
+    pub fn submit_one_xs_map(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::Texture,
+        map: &OneXsMapRaster,
+    ) -> Result<wgpu::SubmissionIndex, MapBindError> {
+        MapBindError::require(map.prepared(), self.prepared_picture.as_ref())?;
+        if map.uncovered() != 0 {
+            return Err(MapBindError::Uncovered {
+                count: map.uncovered(),
+            });
+        }
+        MapBindError::require_target(map.size(), target, self.format)?;
+
+        let draw = self.dense_map_draw(
+            device,
+            map.dense(),
+            "frame-bound ONE X2 type-2 map",
+            draw_wgsl_map_oracle(map.size().width),
+        );
+        let view = target.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("frame-bound ONE X2 type-2 map"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&draw.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &draw.read, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        Ok(queue.submit([encoder.finish()]))
+    }
+
+    /// Submit the selected type-2 consumer directly from its native 200 by
+    /// 100 resources. No output-sized dense map is constructed or uploaded.
+    ///
+    /// This is an instrument boundary only. It retains the exact delivered
+    /// [`FrameStamp`] check, replaces the legacy band read group for this draw
+    /// with the two native map buffers, and uses interpolated fullscreen UV so
+    /// the result does not depend on an iced widget's framebuffer origin.
+    /// Alternate target extents with the prepared aspect are valid because
+    /// the native sphere map is independent of output resolution.
+    pub fn submit_one_xs_map_direct(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::Texture,
+        map: &crate::OneXsMapFrame,
+    ) -> Result<wgpu::SubmissionIndex, MapBindError> {
+        MapBindError::require_frame(map.frame(), self.prepared_picture.as_ref())?;
+        let prepared = self
+            .prepared_picture
+            .as_ref()
+            .expect("frame requirement established a prepared picture");
+        MapBindError::require_direct_target(prepared, target, self.format)?;
+        let draw = self
+            .direct_one_xs_map
+            .get_or_insert_with(|| DirectMapDraw::new(device, &self.layout, self.format));
+        draw.upload(queue, map);
+        debug_assert_eq!(draw.bound_frame(), Some(map.frame()));
+        let view = target.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ONE X2 direct type-2 map"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&draw.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &draw.read, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        Ok(queue.submit([encoder.finish()]))
+    }
+
+    /// Install one dense owner-view map while retaining Kjerag's normal
+    /// decoded-source and colour path for the next draw.
+    ///
+    /// This differs from [`Self::upload_map_oracle`] only after the map has
+    /// supplied the two source coordinates and colour weight: the ordinary
+    /// `picture` function still performs Kjerag's NV12 sampling, range
+    /// conversion and chromatic lookup. It is instrument-only and has no
+    /// `Scene` or playback selector.
+    pub fn upload_map_geometry_oracle(
+        &mut self,
+        device: &wgpu::Device,
+        map: &crate::map_oracle::DenseMap,
+    ) {
+        self.upload_dense_map(
+            device,
+            map,
+            "owner-view map geometry oracle",
+            draw_wgsl_map_geometry_oracle(map.size.width),
+        );
+    }
+
+    fn upload_dense_map(
+        &mut self,
+        device: &wgpu::Device,
+        map: &crate::map_oracle::DenseMap,
+        label: &'static str,
+        shader: String,
+    ) {
+        self.map_oracle = Some(self.dense_map_draw(device, map, label, shader));
+        self.flow_draw = FlowDraw::MapOracle;
+    }
+
+    fn dense_map_draw(
+        &self,
+        device: &wgpu::Device,
+        map: &crate::map_oracle::DenseMap,
+        label: &'static str,
+        shader: String,
+    ) -> MapOracleDraw {
+        use wgpu::util::DeviceExt as _;
+
+        let bytes = map.bytes();
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let reading = read_layout(device, Some(bytes.len() as u64));
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label),
+            bind_group_layouts: &[&self.layout, &reading],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &reading,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: band::STATE_BINDING,
+                    resource: self.band.state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.band.shown.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: FLOW_BINDING,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+        MapOracleDraw {
+            pipeline,
+            _buffer: buffer,
+            read,
+        }
     }
 
     /// Imports a newly delivered pair and points the bind group at it. A
@@ -1753,10 +3224,16 @@ impl ScenePipeline {
                 );
                 self.live.push_front(Live {
                     frames: view.frames.clone(),
-                    _planes: planes,
+                    planes,
                 });
                 self.live.truncate(RETAINED);
-                primitive.shown.keep(view);
+                // Selected ONE X2 is not "shown" merely because its source
+                // imported. The exact map upload below is the presentation
+                // boundary; recording it here would let an unstitched View
+                // replace the last successfully presented one.
+                if !ONE_XS_PLAYBACK_ENABLED || view.one_xs.is_none() {
+                    primitive.shown.keep(view);
+                }
             }
             Err(e) => {
                 primitive
@@ -1784,7 +3261,13 @@ impl Band {
             // through the calibration the picture is drawn with rather than
             // through a second copy of it.
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{}", projection::wgsl(), band::wgsl()).into(),
+                format!(
+                    "{}\n{}\n{}",
+                    projection::wgsl(),
+                    band::wgsl(),
+                    chroma::wgsl(),
+                )
+                .into(),
             ),
         });
         let layout = band_layout(device);
@@ -1793,7 +3276,12 @@ impl Band {
             bind_group_layouts: &[scene, &layout],
             immediate_size: 0,
         });
-        let reading = read_layout(device);
+        let reading = read_layout(device, None);
+        let reading_flow = read_layout(device, Some(band::FLOW_BYTES));
+        let reading_one_xs = read_layout(
+            device,
+            Some(crate::flow::one_xs::Displacement::BYTES as u64),
+        );
         let compute = |entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("band"),
@@ -1807,12 +3295,54 @@ impl Band {
         let pipeline = compute("measure");
         let pool = compute("pool");
         let pool_along = compute("pool_along");
+        // Studio's grid: read the evidence band, admit and weigh it, solve the
+        // 5,088-node system, then blur, ramp and ease what it produced.
+        let grid_gate = compute("chroma_gate");
+        let grid_read = compute("chroma_read");
+        let grid_blur = compute("chroma_blur");
+        let grid_admit = compute("chroma_admit");
+        let grid_solve = compute("chroma_solve");
+        let grid_finish = compute("chroma_finish");
+        // Studio's line-image strip, an instrument on its own entry point.
+        let strip = compute("strip");
         let state = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             // Zeroed, and zero is the state that bends nothing: a file's first
             // frame is drawn exactly as stage 1 drew it.
+            mapped_at_creation: false,
+        });
+        let buffer = |label: &str, size: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                // Zeroed, and zero is the field that corrects nothing: a
+                // file's first frame draws exactly as it drew before this arm.
+                mapped_at_creation: false,
+            })
+        };
+        let evidence = buffer("chroma evidence", chroma::EVIDENCE_BYTES);
+        let field = buffer("chroma field", chroma::FIELD_BYTES);
+        let work = buffer("chroma work", chroma::WORK_BYTES);
+        let control = buffer("chroma control", chroma::CONTROL_BYTES);
+        let shown = buffer("chroma shown", chroma::FIELD_BYTES);
+        // The strips buffer: STORAGE for the pass to write, COPY_SRC for the
+        // instrument to read back. Nothing shipped reads or dispatches it.
+        let strips = buffer("band strips", band::STRIP_BYTES);
+        // The composed flow displacement, uploaded from the CPU (COPY_DST) and
+        // read by the draw (STORAGE). Zeroed, which displaces nothing.
+        let flow = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("band flow"),
+            size: band::FLOW_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let one_xs_flow = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 flow oracle"),
+            size: crate::flow::one_xs::Displacement::BYTES as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let watch = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1833,24 +3363,108 @@ impl Band {
                     binding: band::WATCH_BINDING,
                     resource: watch.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: evidence.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: field.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: work.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: control.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: shown.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: band::STRIP_BINDING,
+                    resource: strips.as_entire_binding(),
+                },
             ],
         });
+        // Three read groups over the shared band/chromatic state: the plain one
+        // the shipped draw takes, the legacy-flow one with the estimator's
+        // displacement, and the instrument-only ONE X2 one with its own typed
+        // displacement allocation.
         let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("band read"),
             layout: &reading,
-            entries: &[wgpu::BindGroupEntry {
-                binding: band::STATE_BINDING,
-                resource: state.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: band::STATE_BINDING,
+                    resource: state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: shown.as_entire_binding(),
+                },
+            ],
+        });
+        let flow_read = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("band read flow"),
+            layout: &reading_flow,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: band::STATE_BINDING,
+                    resource: state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: shown.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: FLOW_BINDING,
+                    resource: flow.as_entire_binding(),
+                },
+            ],
+        });
+        let one_xs_flow_read = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("band read ONE X2 flow"),
+            layout: &reading_one_xs,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: band::STATE_BINDING,
+                    resource: state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: shown.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: FLOW_BINDING,
+                    resource: one_xs_flow.as_entire_binding(),
+                },
+            ],
         });
         Self {
             pipeline,
             pool,
             pool_along,
+            control,
+            shown,
+            grid_gate,
+            grid_read,
+            grid_blur,
+            grid_admit,
+            grid_solve,
+            grid_finish,
+            strip,
+            strips,
+            flow,
+            one_xs_flow,
             state,
             watch,
             group,
             read,
+            flow_read,
+            one_xs_flow_read,
             held: false,
             tone_held: false,
             repeats: 1,
@@ -1890,11 +3504,7 @@ impl Band {
 
     /// The state copied back to the CPU. For instruments only: see
     /// [`ScenePipeline::band_state`].
-    fn read(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Fallible<(band::Tone, band::Along, Vec<band::Cell>)> {
+    fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<BandState> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("band"),
             size: band::BYTES,
@@ -1934,10 +3544,433 @@ impl Band {
                 }
             })
             .collect();
+        // The solved chromatic field, and the metric that set the solve's
+        // weight scale and its budget. Read out because an arm nobody can see
+        // the numbers of is an arm that gets reasoned about instead of
+        // measured, which is how it shipped painting the whole sphere.
+        // The grid's control block, on its own small readback.
+        let gate = {
+            let back = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chroma control"),
+                size: chroma::CONTROL_BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(&self.control, 0, &back, 0, chroma::CONTROL_BYTES);
+            let done = queue.submit([encoder.finish()]);
+            let slice = back.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::PollType::Wait {
+                submission_index: Some(done),
+                timeout: None,
+            })?;
+            let held = slice.get_mapped_range();
+            let at = |i: usize| {
+                f32::from_ne_bytes([
+                    held[4 * i],
+                    held[4 * i + 1],
+                    held[4 * i + 2],
+                    held[4 * i + 3],
+                ])
+            };
+            // `by_row` is declared before `baseline`, so it starts right after
+            // the eight scalars. Reading it past the baselines returned the
+            // gate's own strip means as residuals - negative lengths and
+            // 150-code values, which is what caught it.
+            let rows: Vec<f32> = (0..chroma::WINDOW_ROWS).map(|row| at(8 + row)).collect();
+            let out = (at(3), at(4), at(5), at(0), at(6), at(7), rows);
+            drop(held);
+            back.unmap();
+            out
+        };
+        // The grid's applied field, one [R, G, B] per node.
+        let grid = {
+            let back = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chroma shown"),
+                size: chroma::FIELD_BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(&self.shown, 0, &back, 0, chroma::FIELD_BYTES);
+            let done = queue.submit([encoder.finish()]);
+            let slice = back.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::PollType::Wait {
+                submission_index: Some(done),
+                timeout: None,
+            })?;
+            let held = slice.get_mapped_range();
+            let at = |i: usize| {
+                f32::from_ne_bytes([
+                    held[4 * i],
+                    held[4 * i + 1],
+                    held[4 * i + 2],
+                    held[4 * i + 3],
+                ])
+            };
+            let out: Vec<[f32; 3]> = (0..chroma::NODES)
+                .map(|node| std::array::from_fn(|channel| at(channel * chroma::NODES + node)))
+                .collect();
+            drop(held);
+            back.unmap();
+            out
+        };
+        let field = band::Field {
+            // The APPLIED field, which is the eased one: what the picture took
+            // rather than what the solve last produced. An instrument that
+            // reported the raw iterate would report a flicker the draw never
+            // showed, and miss one it did.
+            // The GRID's applied field, out of the grid's own buffer. This
+            // used to walk the RING's arrays and report them as the
+            // correction, which is an instrument lying about the one thing it
+            // exists to watch - and it was still doing it while the grid was
+            // already drawing.
+            per_direction: grid,
+            level: gate.3,
+            triggers: gate.0,
+            frames: gate.1,
+            motion: gate.2,
+            step: gate.4,
+            residual: gate.5,
+            by_row: gate.6,
+        };
         drop(mapped);
         readback.unmap();
-        Ok((tone, along, cells))
+        Ok((tone, along, cells, field))
     }
+
+    /// Dispatch the strip pass once over the pair `scene` points at, then read
+    /// the two strips back. For instruments only: see
+    /// [`ScenePipeline::band_strips`].
+    ///
+    /// One dispatch, one submit, one map: it runs in an encoder of its own, so
+    /// nothing about the measurement or the draw is on the same submit and the
+    /// shipped path is not so much as reordered by it.
+    /// Write the composed flow displacement into the buffer the draw's read
+    /// group binds (chunk 4, §37). `write_buffer` and no submit of its own: the
+    /// upload rides the next frame's queue.
+    fn upload_flow(&self, queue: &wgpu::Queue, disp: &crate::flow::compose::Displacement) {
+        queue.write_buffer(&self.flow, 0, disp.bytes());
+    }
+
+    /// Write the selected native ONE X2 retained-field layout into its exact
+    /// dedicated allocation. [`ScenePipeline::upload_one_xs_flow`] switches
+    /// the matching buffer and shader together as one instrument operation.
+    fn upload_one_xs_flow(&self, queue: &wgpu::Queue, disp: &crate::flow::one_xs::Displacement) {
+        debug_assert_eq!(disp.bytes().len(), crate::flow::one_xs::Displacement::BYTES);
+        queue.write_buffer(&self.one_xs_flow, 0, disp.bytes());
+    }
+
+    fn strips(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &wgpu::BindGroup,
+    ) -> Fallible<(Vec<f32>, Vec<f32>)> {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("band strip"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.strip);
+            pass.set_bind_group(0, scene, &[]);
+            pass.set_bind_group(1, &self.group, &[]);
+            pass.dispatch_workgroups(band::STRIP_GROUPS, 1, 1);
+        }
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("band strip"),
+            size: band::STRIP_BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&self.strips, 0, &readback, 0, band::STRIP_BYTES);
+        let submission = queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })?;
+        let mapped = slice.get_mapped_range();
+        let samples: Vec<f32> = mapped
+            .chunks_exact(4)
+            .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        drop(mapped);
+        readback.unmap();
+        let per_strip = band::STRIP_W * band::STRIP_H;
+        Ok((
+            samples[..per_strip].to_vec(),
+            samples[per_strip..2 * per_strip].to_vec(),
+        ))
+    }
+
+    /// Dispatch the strip pass over the pair `scene` points at and START an
+    /// asynchronous readback of the result: submit the copy, then `map_async`
+    /// **without waiting**. The player's [`ScenePipeline::flow_step`] polls the
+    /// returned [`FlowReadback`] on later frames (a non-blocking device poll) and
+    /// pulls the strips off once the map lands, so the render thread never stalls
+    /// on the GPU→CPU readback — the one difference from the synchronous
+    /// [`Self::strips`] instrument, which is otherwise the same dispatch.
+    fn strips_kickoff(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &wgpu::BindGroup,
+    ) -> FlowReadback {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("band strip async"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.strip);
+            pass.set_bind_group(0, scene, &[]);
+            pass.set_bind_group(1, &self.group, &[]);
+            pass.dispatch_workgroups(band::STRIP_GROUPS, 1, 1);
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("band strip async"),
+            size: band::STRIP_BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&self.strips, 0, &buffer, 0, band::STRIP_BYTES);
+        queue.submit([encoder.finish()]);
+        // The callback fires from a device poll (the non-blocking `Poll` in
+        // `flow_step`), not from a `Wait`, so nothing here blocks. The channel
+        // carries the map result to the render thread.
+        let (done_tx, done) = mpsc::channel();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = done_tx.send(result);
+            });
+        FlowReadback {
+            buffer,
+            done: Mutex::new(done),
+        }
+    }
+}
+
+/// The player's asynchronous optical-flow state (§35): Studio's cadence, the
+/// background DIS worker, the in-flight strip readback, and the little phase the
+/// render thread keeps so it ticks the cadence once per new frame and never
+/// blocks. Default: idle — no worker thread until flow is first used, no field
+/// ever produced, so flow-OFF costs nothing.
+struct Flow {
+    cadence: Cadence,
+    /// The DIS worker, spawned the first time a strip readback lands and kept for
+    /// the pipeline's life. `None` until then, so a player that never turns flow
+    /// on never spawns a thread.
+    worker: Option<FlowWorker>,
+    /// The strip readback started on the last due frame, awaiting its map. `None`
+    /// when nothing is in flight.
+    readback: Option<FlowReadback>,
+    /// Whether a job is currently with the worker — sent, result not yet taken.
+    /// Gates the cadence so only one estimate is ever in flight.
+    estimating: bool,
+    /// The toggle's value last frame, to spot a toggle edge in either direction.
+    enabled_last: bool,
+    /// The frame timestamp the cadence last ticked on, so a redraw of the same
+    /// frame does not advance Studio's period — the cadence counts frames.
+    ticked_at: Option<Duration>,
+    /// How many finished fields the worker has produced and the pipeline has
+    /// uploaded, for the headless instrument ([`ScenePipeline::flow_uploads`]).
+    uploaded: u64,
+}
+
+impl Flow {
+    fn new() -> Self {
+        Self {
+            cadence: Cadence::start(),
+            worker: None,
+            readback: None,
+            estimating: false,
+            enabled_last: false,
+            ticked_at: None,
+            uploaded: 0,
+        }
+    }
+}
+
+/// One in-flight strip readback: the `MAP_READ` buffer and the channel the
+/// `map_async` callback signals through. Dropping it before the map lands is
+/// safe — destroying the buffer cancels the pending map and the callback's send
+/// fails silently.
+///
+/// The `Mutex` around the receiver is only to make the pipeline `Sync` (iced's
+/// `shader::Pipeline` requires it); the channel is touched from the render thread
+/// alone, so the lock is always uncontended and never poisoned.
+struct FlowReadback {
+    buffer: wgpu::Buffer,
+    done: Mutex<mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+}
+
+impl FlowReadback {
+    /// The map's outcome, or `None` while it is still pending: `Some(Ok)` mapped
+    /// and ready to read, `Some(Err)` failed (a lost device).
+    fn poll(&self) -> Option<Result<(), wgpu::BufferAsyncError>> {
+        self.done.lock().ok()?.try_recv().ok()
+    }
+
+    /// The two strips off the mapped buffer, lens 0 then lens 1. Called once the
+    /// map has landed; unmaps and lets the buffer drop after. Same read as the
+    /// synchronous [`Band::strips`], minus the wait.
+    fn take_strips(self) -> (Vec<f32>, Vec<f32>) {
+        let slice = self.buffer.slice(..);
+        let mapped = slice.get_mapped_range();
+        let samples: Vec<f32> = mapped
+            .chunks_exact(4)
+            .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        drop(mapped);
+        self.buffer.unmap();
+        let per = band::STRIP_W * band::STRIP_H;
+        (samples[..per].to_vec(), samples[per..2 * per].to_vec())
+    }
+}
+
+/// The background thread that runs the CPU DIS. Given the two strips it runs
+/// [`estimate_flow`] (mask + two DIS fields + compose) and returns the
+/// [`crate::flow::compose::Displacement`], never touching the GPU. One job is
+/// ever in flight ([`Flow::estimating`] gates it), so the unbounded channels
+/// never back up. Dropped with the pipeline: the job sender is closed and the
+/// thread joined, so nothing leaks and nothing deadlocks.
+///
+/// The two channels are behind `Mutex` for the same reason as [`FlowReadback`]'s:
+/// to keep the pipeline `Sync`. Only the render thread touches them, so the locks
+/// are uncontended.
+struct FlowWorker {
+    /// The job channel, in an `Option` so [`Drop`] can close it (drop the sender)
+    /// before joining — the worker's blocking `recv` returns only once it is gone.
+    jobs: Mutex<Option<mpsc::Sender<Strips>>>,
+    /// Finished fields back from the worker.
+    done: Mutex<mpsc::Receiver<crate::flow::compose::Displacement>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+/// The two rectified seam strips the render thread hands the worker, lens 0 then
+/// lens 1, each [`band::STRIP_W`] × [`band::STRIP_H`] luma samples.
+type Strips = (Vec<f32>, Vec<f32>);
+
+impl FlowWorker {
+    fn spawn() -> Self {
+        let (jobs_tx, jobs_rx) = mpsc::channel::<Strips>();
+        let (done_tx, done) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name("kjerag-flow".to_owned())
+            .spawn(move || {
+                // Blocks until a job arrives and exits when the sender is dropped
+                // (pipeline drop). One estimate at a time; a failed `send` means
+                // the pipeline is gone, so stop.
+                while let Ok((strip0, strip1)) = jobs_rx.recv() {
+                    let disp = estimate_flow(&strip0, &strip1);
+                    if done_tx.send(disp).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn the optical-flow worker thread");
+        Self {
+            jobs: Mutex::new(Some(jobs_tx)),
+            done: Mutex::new(done),
+            handle: Some(handle),
+        }
+    }
+
+    /// Hand the worker a pair of strips to estimate. `false` only if the worker
+    /// is gone (after a drop), which the caller reads as "nothing in flight".
+    fn submit(&self, strip0: Vec<f32>, strip1: Vec<f32>) -> bool {
+        match self.jobs.lock() {
+            Ok(jobs) => jobs
+                .as_ref()
+                .is_some_and(|tx| tx.send((strip0, strip1)).is_ok()),
+            Err(_) => false,
+        }
+    }
+
+    /// A finished field, if the worker has one ready.
+    fn try_recv(&self) -> Option<crate::flow::compose::Displacement> {
+        self.done.lock().ok()?.try_recv().ok()
+    }
+
+    /// Discard any field the worker has already returned — a toggle edge's clean
+    /// slate, so a stale field is never taken as the first one after an enable.
+    fn drain(&self) {
+        if let Ok(done) = self.done.lock() {
+            while done.try_recv().is_ok() {}
+        }
+    }
+}
+
+impl Drop for FlowWorker {
+    fn drop(&mut self) {
+        // Close the job channel FIRST so the worker's `recv` returns and its loop
+        // exits, THEN join. Struct fields drop after this body runs, so clearing
+        // the sender here is what lets the join finish rather than deadlock against
+        // a still-open channel. The join waits at most one in-progress estimate.
+        if let Ok(jobs) = self.jobs.get_mut() {
+            *jobs = None;
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The pure-CPU optical-flow estimate the worker runs (§35/§59/§62): Studio's
+/// per-lens coverage masks off the two rectified strips, the two separately-
+/// estimated DIS fields through the faithful [`crate::flow::dis::DisFlow`], and
+/// the composed [`crate::flow::compose::Displacement`] the draw applies. **No
+/// GPU.** This is the sequence that used to run inline on the render thread and
+/// the same one `kjerag-spike --bin band mode=flowrender` runs (§93); moving it
+/// here, verbatim, is the whole of the async change on the estimate side.
+fn estimate_flow(strip0: &[f32], strip1: &[f32]) -> crate::flow::compose::Displacement {
+    // Studio's per-lens COVERAGE MASK (§59/§61/§62): a belt pixel is valid for a
+    // lens iff that lens has real content there (the strip's own −1 no-picture
+    // sentinel) AND it lies within the reliable seam band. The clip is the
+    // faithful ONE-SIDED erode (§62's `erodeBeltMasksUsingFisheyeMask` 96°): lens
+    // 0's far (high-θ) edge is clipped inward by `MASK_HALF_DEG`, lens 1's low-θ
+    // edge the same, each near side kept full.
+    let theta_of = |row: usize| row as f32 * 180.0 / (band::STRIP_H as f32 - 1.0);
+    let mut mask0 = vec![false; band::STRIP_W * band::STRIP_H];
+    let mut mask1 = vec![false; band::STRIP_W * band::STRIP_H];
+    for row in 0..band::STRIP_H {
+        let off = theta_of(row) - 90.0;
+        let in0 = off <= MASK_HALF_DEG; // lens 0: clip its high-θ far edge
+        let in1 = off >= -MASK_HALF_DEG; // lens 1: clip its low-θ far edge
+        for col in 0..band::STRIP_W {
+            let i = row * band::STRIP_W + col;
+            mask0[i] = in0 && strip0[i] >= 0.0;
+            mask1[i] = in1 && strip1[i] >= 0.0;
+        }
+    }
+    // The RE'd FDSFlow parameter block (§44.3): `DisConfig::default` is
+    // `finest_scale = 1` and the §47 reliability gate on. Two separately-estimated
+    // fields, the belt images swapped (§38): l2r = DIS(lens0, lens1) is lens 1's
+    // field, r2l the reverse; `IsInMask` gates each on both lens masks.
+    let dis = crate::flow::dis::DisFlow::new(crate::flow::dis::DisConfig::default());
+    let l2r = dis.calc(
+        strip0,
+        strip1,
+        band::STRIP_W,
+        band::STRIP_H,
+        None,
+        Some((&mask0, &mask1)),
+    );
+    let r2l = dis.calc(
+        strip1,
+        strip0,
+        band::STRIP_W,
+        band::STRIP_H,
+        None,
+        Some((&mask1, &mask0)),
+    );
+    crate::flow::compose::Displacement::compose(&l2r, &r2l)
 }
 
 /// The uniform block, then each lens's luma and chroma planes in lens order,
@@ -2025,10 +4058,14 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 
 /// The state buffer alone, as the draw sees it: read-only, on a group of its
 /// own (see [`band::STATE_BINDING`]).
-fn read_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("band read"),
-        entries: &[wgpu::BindGroupLayoutEntry {
+fn read_layout(device: &wgpu::Device, flow_bytes: Option<u64>) -> wgpu::BindGroupLayout {
+    // The grid rides in this group and not one of its own: the app's device
+    // reports max_bind_groups = 2, so zero and one are the whole budget. The
+    // flow displacement rides here too, on binding 3, and only in a typed flow
+    // layout built with that payload's exact size, so the plain layout the
+    // shipped draw uses is untouched.
+    let mut entries = vec![
+        wgpu::BindGroupLayoutEntry {
             binding: band::STATE_BINDING,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
@@ -2037,7 +4074,28 @@ fn read_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 min_binding_size: NonZeroU64::new(band::BYTES),
             },
             count: None,
-        }],
+        },
+        chroma::read_entry(),
+    ];
+    if let Some(flow_bytes) = flow_bytes {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: FLOW_BINDING,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                // Each flow pipeline and bind group declare the lower bound of
+                // their own payload contract. The selected ONE X2 allocation
+                // can therefore be exact-sized without weakening the legacy
+                // layout's validation.
+                min_binding_size: NonZeroU64::new(flow_bytes),
+            },
+            count: None,
+        });
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("band read"),
+        entries: &entries,
     })
 }
 
@@ -2067,6 +4125,25 @@ fn band_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            chroma::entries()[0],
+            chroma::entries()[1],
+            chroma::entries()[2],
+            chroma::entries()[3],
+            chroma::entries()[4],
+            // The strips buffer, on binding 7. Declared for every pipeline this
+            // layout serves, but named only by the `strip` entry point: wgpu
+            // validates the bindings a shader USES, so `measure`, `pool` and the
+            // grid are unaffected by its presence.
+            wgpu::BindGroupLayoutEntry {
+                binding: band::STRIP_BINDING,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(band::STRIP_BYTES),
+                },
+                count: None,
+            },
         ],
     })
 }
@@ -2092,9 +4169,544 @@ fn blank_planes(device: &wgpu::Device) -> Planes {
     }
 }
 
-/// The half of the shader that belongs to this file. `projection::WGSL`
-/// declares the uniform block, the view ray and the forward map, and is
-/// concatenated ahead of this.
+/// The draw's whole module, with the flow apply forced on or off. In dependency
+/// order so nothing is used before it is declared: `projection::wgsl` declares
+/// the uniform block, the view ray and the forward map; then the band's lookup
+/// into it, the sampling, and this file's own entry points. The pipeline builds
+/// it both ways ([`ScenePipeline::new`]) and the runtime toggle picks between
+/// the two.
+///
+/// A function rather than an expression inside the pipeline, so a test can
+/// compile it without a pipeline (the twin does, both ways): this is the module
+/// the chromatic lookup lands in, and nothing reached it until one did.
+///
+/// **Off is byte-for-byte the shipped shader** (chunk 4, §37): the string is
+/// returned unchanged, so the rendered picture is identical to the pass before
+/// the flow existed. Only on does the fragment recompute each covered lens's
+/// sample landing at its flow-displaced ray and the flow buffer get declared.
+/// See [`flow_on`], [`flow_wgsl`].
+pub(crate) fn draw_wgsl_flow(flow: bool) -> String {
+    let core = draw_wgsl_core();
+    if !flow {
+        return core;
+    }
+    let injected = inject_flow_blend(core);
+    format!("{injected}\n{}", flow_wgsl())
+}
+
+/// The selected native ONE X2 retained-field draw used by the detached V6
+/// oracle. It is a separate shader module rather than a runtime branch over an
+/// untyped buffer: the legacy and selected layouts disagree about dimensions,
+/// axis order and the coordinate law that turns a grid sample back into a ray.
+pub(crate) fn draw_wgsl_one_xs_flow() -> String {
+    let injected = inject_flow_blend(draw_wgsl_core());
+    format!("{injected}\n{}", one_xs_flow_wgsl())
+}
+
+/// Owner-view captured-map consumer. Geometry and map interpolation are
+/// precomputed by the readable CPU oracle; this fragment performs the READ
+/// selected aggregate-atlas, box filter and YUV-matrix source route.
+fn draw_wgsl_map_oracle(width: u32) -> String {
+    const PICTURE_CALL: &str = "  let lens = picture(mix, ratio, look.xyz);";
+    const ORACLE_CALL: &str = "  let lens = oracle_picture(in.pos.xy);";
+    let core = draw_wgsl_core();
+    let injected = core.replace(PICTURE_CALL, ORACLE_CALL);
+    assert_ne!(injected, core, "the map-oracle picture anchor moved");
+    format!("{injected}\n{}", map_oracle_wgsl(width))
+}
+
+/// Dense recovered map geometry followed by Kjerag's ordinary source and
+/// colour consumer. The only replacement in the core is the source-coordinate
+/// producer that normally calls `blend`.
+fn draw_wgsl_map_geometry_oracle(width: u32) -> String {
+    const GEOMETRY_CALL: &str =
+        "  if look.w > 0.0 {\n    mix = geometry_oracle_blend(in.pos.xy);\n  }";
+    let core = draw_wgsl_core();
+    let injected = core.replace(FS_BLEND, GEOMETRY_CALL);
+    assert_ne!(injected, core, "the map-geometry blend anchor moved");
+    format!("{injected}\n{}", map_geometry_oracle_wgsl(width))
+}
+
+fn map_geometry_oracle_wgsl(width: u32) -> String {
+    format!(
+        r#"@group(1) @binding({binding}) var<storage, read> geometry_map: array<f32>;
+const GEOMETRY_WIDTH = {width}u;
+const GEOMETRY_STRIDE = 8u;
+
+fn geometry_oracle_blend(position: vec2<f32>) -> Blend {{
+  let pixel = u32(position.y) * GEOMETRY_WIDTH + u32(position.x);
+  let at = pixel * GEOMETRY_STRIDE;
+  let covered = geometry_map[at + 5u];
+  var out: Blend;
+  if covered <= 0.5 {{ return out; }}
+
+  // The recovered packed map stores lens A in the left half and lens B in
+  // the right half of one virtual atlas. Convert each back to its local
+  // normalized source coordinate, then to the pixel-centre convention that
+  // Kjerag's ordinary `frame_uv` reverses inside `picture`.
+  let local_a = vec2<f32>(2.0 * geometry_map[at], geometry_map[at + 1u]);
+  let local_b = vec2<f32>(2.0 * geometry_map[at + 2u] - 1.0, geometry_map[at + 3u]);
+  let frame = vec2<f32>(reframe.frame_width, reframe.frame_height);
+  out.landings[0].pixel = local_a * frame - vec2<f32>(0.5);
+  out.landings[1].pixel = local_b * frame - vec2<f32>(0.5);
+  out.landings[0].inside = true;
+  out.landings[1].inside = true;
+  out.weights[0] = geometry_map[at + 4u];
+  out.weights[1] = 1.0 - out.weights[0];
+  return out;
+}}
+"#,
+        binding = FLOW_BINDING,
+    )
+}
+
+fn map_oracle_wgsl(width: u32) -> String {
+    format!(
+        r#"@group(1) @binding({binding}) var<storage, read> oracle_map: array<f32>;
+const ORACLE_WIDTH = {width}u;
+const ORACLE_STRIDE = 8u;
+
+// Exact captured TextureParam bit anchors. The compiled selected helper uses
+// 1.1 (0x3f8ccccd), not the 2.0 found in an unselected bundled generic shader.
+const ORACLE_BOX_FAST: f32 = 1.1000000238418579;
+const ORACLE_BOX_SIZE: f32 = 1.7881766557693481;
+const ORACLE_BOX_FALLBACK_AREA: f32 = 0.0010000000474974513;
+const ORACLE_CHROMA_OFFSET: f32 = 0.50196081399917603;
+const ORACLE_R_CR: f32 = 1.4019999504089355;
+const ORACLE_G_CB: f32 = -0.34400001168251038;
+const ORACLE_G_CR: f32 = -0.71399998664855957;
+const ORACLE_B_CB: f32 = 1.7719999551773071;
+
+// Aggregate double-fisheye atlas tap routing over Kjerag's two decoded
+// textures. The selected sampler is normalized, linear, clamp-to-edge, with
+// no mip level. Clamp every tap against the full virtual atlas before routing
+// it: a footprint crossing the internal split reads both physical lenses.
+fn atlas_load(a: texture_2d<f32>, b: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {{
+  let dims = textureDimensions(a);
+  let x = clamp(p.x, 0, i32(2u * dims.x) - 1);
+  let y = clamp(p.y, 0, i32(dims.y) - 1);
+  if x < i32(dims.x) {{
+    return textureLoad(a, vec2<i32>(x, y), 0);
+  }}
+  return textureLoad(b, vec2<i32>(x - i32(dims.x), y), 0);
+}}
+
+fn atlas_linear(a: texture_2d<f32>, b: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {{
+  let dims = textureDimensions(a);
+  let p = uv * vec2<f32>(f32(2u * dims.x), f32(dims.y)) - vec2<f32>(0.5);
+  let base = vec2<i32>(floor(p));
+  let f = fract(p);
+  let top = mix(atlas_load(a, b, base), atlas_load(a, b, base + vec2<i32>(1, 0)), f.x);
+  let bottom = mix(atlas_load(a, b, base + vec2<i32>(0, 1)), atlas_load(a, b, base + vec2<i32>(1, 1)), f.x);
+  return mix(top, bottom, f.y);
+}}
+
+// Selected boxSampling: both-axis fast gate, otherwise a row-major walk from
+// floor(start) in two-texel steps. Every cell is clipped to the box and sampled
+// at its clipped midpoint, then area weighted. The final direct sample is only
+// the READ <= 0.001-area fallback.
+fn oracle_box_sample(
+  a: texture_2d<f32>,
+  b: texture_2d<f32>,
+  uv: vec2<f32>,
+  logical_size: vec2<f32>,
+) -> vec4<f32> {{
+  let box_size = vec2<f32>(ORACLE_BOX_SIZE);
+  if box_size.x <= ORACLE_BOX_FAST && box_size.y <= ORACLE_BOX_FAST {{
+    return atlas_linear(a, b, uv);
+  }}
+  let box_start = uv * logical_size - box_size * 0.5;
+  let box_end = box_start + box_size;
+  var weighted = vec4<f32>(0.0);
+  var area = 0.0;
+  var cell_y = floor(box_start.y);
+  loop {{
+    if cell_y >= box_end.y {{ break; }}
+    let low_y = max(cell_y, box_start.y);
+    let high_y = min(cell_y + 2.0, box_end.y);
+    var cell_x = floor(box_start.x);
+    loop {{
+      if cell_x >= box_end.x {{ break; }}
+      let low_x = max(cell_x, box_start.x);
+      let high_x = min(cell_x + 2.0, box_end.x);
+      let cell_area = (high_x - low_x) * (high_y - low_y);
+      let sample_uv = vec2<f32>(
+        (low_x + high_x) * 0.5 / logical_size.x,
+        (low_y + high_y) * 0.5 / logical_size.y,
+      );
+      weighted += atlas_linear(a, b, sample_uv) * cell_area;
+      area += cell_area;
+      cell_x += 2.0;
+    }}
+    cell_y += 2.0;
+  }}
+  if area <= ORACLE_BOX_FALLBACK_AREA {{
+    return atlas_linear(a, b, uv);
+  }}
+  return weighted / area;
+}}
+
+// Exact selected full-range matrix. Luma uses logical size 2880 by 2880;
+// chroma uses 1440 by 1440 at the same normalized coordinate, with no
+// half-texel chroma shift. There is no levels(), packed-wide-word path or
+// validity suppression on this instrument route.
+fn oracle_ycbcr(uv: vec2<f32>) -> vec3<f32> {{
+  let l = oracle_box_sample(luma0, luma1, uv, vec2<f32>(2880.0, 2880.0));
+  let ch = oracle_box_sample(chroma0, chroma1, uv, vec2<f32>(1440.0, 1440.0));
+  let y = l.r;
+  let c = ch.rg - vec2<f32>(ORACLE_CHROMA_OFFSET);
+  return vec3<f32>(
+    y + ORACLE_R_CR * c.g,
+    y + ORACLE_G_CB * c.r + ORACLE_G_CR * c.g,
+    y + ORACLE_B_CB * c.r,
+  );
+}}
+
+fn oracle_picture(position: vec2<f32>) -> vec4<f32> {{
+  let pixel = u32(position.y) * ORACLE_WIDTH + u32(position.x);
+  let at = pixel * ORACLE_STRIDE;
+  let atlas_a = vec2<f32>(oracle_map[at], oracle_map[at + 1u]);
+  let atlas_b = vec2<f32>(oracle_map[at + 2u], oracle_map[at + 3u]);
+  let alpha = oracle_map[at + 4u];
+  let covered = oracle_map[at + 5u];
+  // Preserve the selected unconditional two-source fetch and alpha mix.
+  let color_b = oracle_ycbcr(atlas_b);
+  let color_a = oracle_ycbcr(atlas_a);
+  let rgb = mix(color_b, color_a, alpha);
+  return select(vec4<f32>(0.0), vec4<f32>(rgb, 1.0), covered > 0.5);
+}}
+"#,
+        binding = FLOW_BINDING,
+    )
+}
+
+fn draw_wgsl_core() -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{SHADER}",
+        projection::wgsl(),
+        band::lookup_wgsl(),
+        chroma::lookup_wgsl(),
+        sampling::wgsl(),
+    )
+}
+
+fn inject_flow_blend(core: String) -> String {
+    let injected = core.replace(FS_BLEND, FS_BLEND_FLOW);
+    assert_ne!(
+        injected, core,
+        "the flow apply anchor moved in the fragment shader"
+    );
+    injected
+}
+
+/// The `KJERAG_FLOW` env knob (chunk 4, §37), the instrument's flow switch.
+/// It is NO LONGER a compile-time gate: the pipeline builds both draw variants
+/// unconditionally and the runtime toggle ([`Scene::set_flow`]) picks between
+/// them. This survives as an OR term in [`ScenePipeline::prepare`] for routes
+/// allowed to use the legacy draw, so `kjerag-spike --bin band` stays armed
+/// without starting the player's worker. Selected ONE X2 refuses it. Default
+/// OFF: the shipped player leaves it unset, so its toggle governs alone and
+/// starts off. Read once, cached.
+pub(crate) fn flow_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("KJERAG_FLOW")
+            .map(|value| value != "0" && !value.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// The per-lens coverage mask half-width, in degrees of colatitude off the seam
+/// (§59/§62): each lens's far vignette edge is eroded inward by this before the
+/// DIS runs, clipping the belt to its reliable clean-content edge. Studio's
+/// `erodeBeltMasksUsingFisheyeMask` 96° (= 90 + 6). RE'd, not tuned — the same
+/// value the spike's `flowrender` masks with, mirrored here for [`estimate_flow`].
+const MASK_HALF_DEG: f32 = 6.0;
+
+/// The draw's read-only view of the composed per-lens flow displacement maps,
+/// on the draw's group 1 beside the band state (binding 0) and the chromatic
+/// field (binding 2). Bound into the flow read group ([`ScenePipeline::draw`]).
+pub(crate) const FLOW_BINDING: u32 = 3;
+
+/// The fragment's plain blend, the anchor the flow apply is injected around.
+const FS_BLEND: &str = "  if look.w > 0.0 {\n    mix = blend(look.xyz);\n  }";
+
+/// The same, with the flow apply: each covered lens samples at its
+/// flow-displaced belt coordinate. Legacy routes also take the colour blend
+/// weight from their 32-degree SphereAlpha gate (§42.1/§80). ONE X2 uses its
+/// captured 16-degree common gate for displacement and keeps its separately
+/// uploaded static alpha for colour. Rust twin:
+/// [`projection::Reframe::blend_flow`].
+const FS_BLEND_FLOW: &str = "  if look.w > 0.0 {\n    mix = blend_flow(look.xyz);\n  }";
+
+/// The flow apply's own WGSL, appended to the draw only when [`flow_on`]: the
+/// flow buffer, its bilinear sampler, and `flow_shift` — the twin of
+/// [`projection::Reframe::flow_shift`], the same belt inversion, the same
+/// sample-coordinate displacement by both flow components, and the same forward
+/// strip law back to a ray (§40).
+pub(crate) fn flow_wgsl() -> String {
+    format!(
+        "@group(1) @binding({binding}) var<storage, read> flow_disp: array<f32>;\n\
+         const FLOW_W = {w}u;\n\
+         const FLOW_H = {h}u;\n\
+         const FLOW_TAU = {tau:?};\n\
+         const FLOW_PI = {pi:?};\n\
+         const FLOW_GATE_W = {gate_w:?};\n\
+         const FLOW_ONE_XS_GATE_W = {one_xs_gate_w:?};\n\
+         // Rust twin: Displacement::sample, over the field in the same layout\n\
+         // compose writes: the u plane then the v plane, row-major.\n\
+         fn flow_at(plane: u32, c: i32, r: i32) -> f32 {{\n\
+         \x20 // Both axes clamp to belt dims — Studio's kernel clamps, not wraps (§40).\n\
+         \x20 let cw = clamp(c, 0, i32(FLOW_W) - 1);\n\
+         \x20 let rc = clamp(r, 0, i32(FLOW_H) - 1);\n\
+         \x20 return flow_disp[plane * FLOW_W * FLOW_H + u32(rc) * FLOW_W + u32(cw)];\n\
+         }}\n\
+         fn flow_sample(lens: u32, col: f32, row: f32) -> vec2<f32> {{\n\
+         \x20 let c0 = floor(col);\n\
+         \x20 let r0 = floor(row);\n\
+         \x20 let fc = col - c0;\n\
+         \x20 let fr = row - r0;\n\
+         \x20 let ci = i32(c0);\n\
+         \x20 let ri = i32(r0);\n\
+         \x20 var out = vec2<f32>(0.0, 0.0);\n\
+         \x20 // Lens 0 reads planes 0,1 (r2l [0xae8]); lens 1 reads planes 2,3 (l2r [0xa88]).\n\
+         \x20 let base = lens * 2u;\n\
+         \x20 for (var comp = 0u; comp < 2u; comp += 1u) {{\n\
+         \x20   let plane = base + comp;\n\
+         \x20   let a = flow_at(plane, ci, ri);\n\
+         \x20   let b = flow_at(plane, ci + 1, ri);\n\
+         \x20   let cc = flow_at(plane, ci, ri + 1);\n\
+         \x20   let dd = flow_at(plane, ci + 1, ri + 1);\n\
+         \x20   let top = a + (b - a) * fc;\n\
+         \x20   let bot = cc + (dd - cc) * fc;\n\
+         \x20   out[comp] = top + (bot - top) * fr;\n\
+         \x20 }}\n\
+         \x20 return out;\n\
+         }}\n\
+         // Rust twin: Reframe::flow_shift.\n\
+         fn flow_shift(lens: u32, ray: vec3<f32>, alpha: f32) -> vec3<f32> {{\n\
+         \x20 if reframe.lens_count <= 1.0 {{ return ray; }}\n\
+         \x20 if !(alpha > 0.0 && alpha < 1.0) {{ return ray; }}\n\
+         \x20 let body = reframe.view_to_body * ray;\n\
+         \x20 let len = length(body);\n\
+         \x20 if len <= 0.0 {{ return ray; }}\n\
+         \x20 let phi = atan2(body.y, body.x);\n\
+         \x20 let phi_mod = phi - FLOW_TAU * floor(phi / FLOW_TAU);\n\
+         \x20 // c = coordinate(ray): FULL colatitude belt law, no half-pixel (§42.3).\n\
+         \x20 // CLAMP c to belt dims on both axes (§40/§41 MED: clamp, not wrap/cut).\n\
+         \x20 let theta = acos(clamp(body.z / len, -1.0, 1.0));\n\
+         \x20 let col = clamp(f32(FLOW_W) * (FLOW_TAU - phi_mod) / FLOW_TAU, 0.0, f32(FLOW_W) - 1.0);\n\
+         \x20 let row = clamp(theta * (f32(FLOW_H) - 1.0) / FLOW_PI, 0.0, f32(FLOW_H) - 1.0);\n\
+         \x20 // Lens 0 samples r2l, lens 1 samples l2r — two separate fields (§38/§40).\n\
+         \x20 let f = flow_sample(lens, col, row);\n\
+         \x20 if f.x == 0.0 && f.y == 0.0 {{ return ray; }}\n\
+         \x20 // POSITIVE add for BOTH lenses; the direction is in the two fields (§40).\n\
+         \x20 // CLAMP q to belt dims on both axes.\n\
+         \x20 let w = 1.0 - alpha;\n\
+         \x20 let qcol = clamp(col + w * f.x, 0.0, f32(FLOW_W) - 1.0);\n\
+         \x20 let qrow = clamp(row + w * f.y, 0.0, f32(FLOW_H) - 1.0);\n\
+         \x20 let nphi = FLOW_TAU - qcol / f32(FLOW_W) * FLOW_TAU;\n\
+         \x20 let ntheta = qrow / (f32(FLOW_H) - 1.0) * FLOW_PI;\n\
+         \x20 let nb = vec3<f32>(cos(nphi) * sin(ntheta), sin(nphi) * sin(ntheta), cos(ntheta));\n\
+         \x20 return transpose(reframe.view_to_body) * nb;\n\
+         }}\n\
+         // Rust twin: Reframe::gate_alpha — selected common flow-coverage gate (§42.1).\n\
+         fn gate_alpha(ray: vec3<f32>) -> f32 {{\n\
+         \x20 if reframe.lens_count <= 1.0 {{ return 1.0; }}\n\
+         \x20 let body = reframe.view_to_body * ray;\n\
+         \x20 let len = length(body);\n\
+         \x20 if len <= 0.0 {{ return 1.0; }}\n\
+         \x20 let theta_deg = acos(clamp(body.z / len, -1.0, 1.0)) * (180.0 / FLOW_PI);\n\
+         \x20 let gate_w = select(FLOW_GATE_W, FLOW_ONE_XS_GATE_W, reframe.one_xs > 0.5);\n\
+         \x20 return clamp(((90.0 + gate_w) - theta_deg) / (2.0 * gate_w), 0.0, 1.0);\n\
+         }}\n\
+         // Rust twin: Reframe::blend_flow. The selected common SphereAlpha gate\n\
+         // (32 degrees legacy, 16 ONE X2) drives displacement (§42.1/§80). It also\n\
+         // drives legacy colour; ONE X2's\n\
+         // final colour share is its separately uploaded static alpha map.\n\
+         fn blend_flow(ray: vec3<f32>) -> Blend {{\n\
+         \x20 var out: Blend;\n\
+         \x20 var total = 0.0;\n\
+         \x20 let reach = length(ray);\n\
+         \x20 let axis0 = axis_of(reframe.lenses[0], ray);\n\
+         \x20 let axis1 = axis_of(reframe.lenses[1], ray);\n\
+         \x20 let flow_alpha_a = gate_alpha(ray);\n\
+         \x20 var colour_alpha_a = flow_alpha_a;\n\
+         \x20 if reframe.one_xs > 0.5 {{\n\
+         \x20   colour_alpha_a = one_xs_alpha(normalize(reframe.lenses[0].view_to_lens * ray));\n\
+         \x20 }}\n\
+         \x20 for (var index = 0u; index < MAX_LENSES; index += 1u) {{\n\
+         \x20   let lens = reframe.lenses[index];\n\
+         \x20   var landing: Landing;\n\
+         \x20   var claimed = 0.0;\n\
+         \x20   if within(lens, select(axis1, axis0, index == 0u), reach) {{\n\
+         \x20     let flow_alpha_lens = select(1.0 - flow_alpha_a, flow_alpha_a, index == 0u);\n\
+         \x20     let colour_alpha_lens = select(1.0 - colour_alpha_a, colour_alpha_a, index == 0u);\n\
+         \x20     landing = project(lens, flow_shift(index, ray, flow_alpha_lens));\n\
+         \x20     // §80: displaced sample on an invalid/border fisheye UV -> keep base.\n\
+         \x20     if (!landing.inside) {{ landing = project(lens, ray); }}\n\
+         \x20     let one_xs_claim = select(0.0, colour_alpha_lens, landing.inside);\n\
+         \x20     let lens_claim = select(claim(landing, colour_alpha_lens), one_xs_claim, reframe.one_xs > 0.5);\n\
+         \x20     claimed = select(0.0, lens_claim, f32(index) < reframe.lens_count);\n\
+         \x20   }}\n\
+         \x20   out.landings[index] = landing;\n\
+         \x20   out.weights[index] = claimed;\n\
+         \x20   total += claimed;\n\
+         \x20 }}\n\
+         \x20 if total > 0.0 {{\n\
+         \x20   for (var index = 0u; index < MAX_LENSES; index += 1u) {{\n\
+         \x20     out.weights[index] = share(out.weights[index], total);\n\
+         \x20   }}\n\
+         \x20 }}\n\
+         \x20 return out;\n\
+         }}\n",
+        binding = FLOW_BINDING,
+        w = band::STRIP_W,
+        h = band::STRIP_H,
+        tau = std::f32::consts::TAU,
+        pi = std::f32::consts::PI,
+        gate_w = 0.5 * projection::GATE_WIDTH_DEG,
+        one_xs_gate_w = 0.5 * projection::ONE_XS_FLOW_GATE_WIDTH_DEG,
+    )
+}
+
+/// The selected ONE X2 retained-field apply. The storage planes have the same
+/// semantic order as [`crate::flow::one_xs::Displacement`]: lens A/B, then
+/// d-column/d-row. Rows unroll 400 degrees along the seam; columns are the
+/// gnomonic across-seam coordinate. The scalar common SphereAlpha gate remains
+/// separate from the final OneXS Template colour alpha.
+pub(crate) fn one_xs_flow_wgsl() -> String {
+    format!(
+        r#"@group(1) @binding({binding}) var<storage, read> flow_disp: array<f32>;
+const FLOW_W = {cols}u;
+const FLOW_H = {rows}u;
+const FLOW_PI = {pi:?};
+const FLOW_DEG_PER_ROW = {degrees_per_row:?};
+const FLOW_CENTRE_COL = {centre_col:?};
+const FLOW_GNOMONIC_PIXELS = {gnomonic_pixels:?};
+const FLOW_ONE_XS_GATE_W = {gate_w:?};
+
+// Rust twin: one_xs::Displacement::sample. Both retained coordinates clamp.
+fn flow_at(plane: u32, col: i32, row: i32) -> f32 {{
+  let c = clamp(col, 0, i32(FLOW_W) - 1);
+  let r = clamp(row, 0, i32(FLOW_H) - 1);
+  return flow_disp[plane * FLOW_W * FLOW_H + u32(r) * FLOW_W + u32(c)];
+}}
+
+fn flow_sample(lens: u32, col: f32, row: f32) -> vec2<f32> {{
+  let c0 = floor(col);
+  let r0 = floor(row);
+  let fc = col - c0;
+  let fr = row - r0;
+  let ci = i32(c0);
+  let ri = i32(r0);
+  var out = vec2<f32>(0.0);
+  let base = lens * 2u;
+  for (var component = 0u; component < 2u; component += 1u) {{
+    let plane = base + component;
+    let top = mix(flow_at(plane, ci, ri), flow_at(plane, ci + 1, ri), fc);
+    let bottom = mix(flow_at(plane, ci, ri + 1), flow_at(plane, ci + 1, ri + 1), fc);
+    out[component] = mix(top, bottom, fr);
+  }}
+  return out;
+}}
+
+// Rust twin: Reframe::one_xs_flow_shift. The shared +0x810 line coordinate
+// is recovered from the body ray, displaced in final 1080x60 grid units, then
+// converted back to the body direction consumed by the per-lens base map.
+fn flow_shift(lens: u32, ray: vec3<f32>, alpha: f32) -> vec3<f32> {{
+  if reframe.lens_count <= 1.0 || reframe.one_xs <= 0.5 {{ return ray; }}
+  if !(alpha > 0.0 && alpha < 1.0) {{ return ray; }}
+
+  let body = reframe.view_to_body * ray;
+  let line = vec3<f32>(-body.x, body.z, body.y);
+  let rho = length(line.xz);
+  // `!(rho > 0)` rejects zero and NaN. The uniform matrix and fragment ray
+  // are finite, so infinity is not reachable at this boundary.
+  if !(rho > 0.0) {{ return ray; }}
+
+  let phi_deg = atan2(line.x, line.z) * (180.0 / FLOW_PI);
+  let row = clamp((phi_deg + 200.0) / FLOW_DEG_PER_ROW, 0.0, f32(FLOW_H) - 1.0);
+  let col = clamp(
+    FLOW_CENTRE_COL - FLOW_GNOMONIC_PIXELS * line.y / rho,
+    0.0,
+    f32(FLOW_W) - 1.0,
+  );
+  let displacement = flow_sample(lens, col, row);
+  if displacement.x == 0.0 && displacement.y == 0.0 {{ return ray; }}
+
+  let weight = 1.0 - alpha;
+  let qcol = clamp(col + weight * displacement.x, 0.0, f32(FLOW_W) - 1.0);
+  let qrow = clamp(row + weight * displacement.y, 0.0, f32(FLOW_H) - 1.0);
+
+  let qphi = (-200.0 + qrow * FLOW_DEG_PER_ROW) * (FLOW_PI / 180.0);
+  let tangent = (FLOW_CENTRE_COL - qcol) / FLOW_GNOMONIC_PIXELS;
+  let qrho = 1.0 / sqrt(1.0 + tangent * tangent);
+  let qline = vec3<f32>(sin(qphi) * qrho, tangent * qrho, cos(qphi) * qrho);
+  let qbody = vec3<f32>(-qline.x, qline.z, qline.y);
+  return transpose(reframe.view_to_body) * qbody;
+}}
+
+// The captured 16-degree common SphereAlpha, lens A's share.
+fn gate_alpha(ray: vec3<f32>) -> f32 {{
+  if reframe.lens_count <= 1.0 {{ return 1.0; }}
+  let body = reframe.view_to_body * ray;
+  let reach = length(body);
+  if reach <= 0.0 {{ return 1.0; }}
+  let theta_deg = acos(clamp(body.z / reach, -1.0, 1.0)) * (180.0 / FLOW_PI);
+  return clamp(
+    ((90.0 + FLOW_ONE_XS_GATE_W) - theta_deg) / (2.0 * FLOW_ONE_XS_GATE_W),
+    0.0,
+    1.0,
+  );
+}}
+
+// Rust twin: Reframe::blend_one_xs_flow. Displacement and final colour use
+// different captured alpha resources on this type-2 route.
+fn blend_flow(ray: vec3<f32>) -> Blend {{
+  var out: Blend;
+  var total = 0.0;
+  let reach = length(ray);
+  let axis0 = axis_of(reframe.lenses[0], ray);
+  let axis1 = axis_of(reframe.lenses[1], ray);
+  let flow_alpha_a = gate_alpha(ray);
+  let colour_alpha_a = one_xs_alpha(normalize(reframe.lenses[0].view_to_lens * ray));
+
+  for (var index = 0u; index < MAX_LENSES; index += 1u) {{
+    let lens = reframe.lenses[index];
+    var landing: Landing;
+    var claimed = 0.0;
+    if within(lens, select(axis1, axis0, index == 0u), reach) {{
+      let flow_alpha_lens = select(1.0 - flow_alpha_a, flow_alpha_a, index == 0u);
+      let colour_alpha_lens = select(1.0 - colour_alpha_a, colour_alpha_a, index == 0u);
+      landing = project(lens, flow_shift(index, ray, flow_alpha_lens));
+      if !landing.inside {{ landing = project(lens, ray); }}
+      claimed = select(0.0, colour_alpha_lens, landing.inside && f32(index) < reframe.lens_count);
+    }}
+    out.landings[index] = landing;
+    out.weights[index] = claimed;
+    total += claimed;
+  }}
+  if total > 0.0 {{
+    for (var index = 0u; index < MAX_LENSES; index += 1u) {{
+      out.weights[index] = share(out.weights[index], total);
+    }}
+  }}
+  return out;
+}}
+"#,
+        binding = FLOW_BINDING,
+        cols = crate::flow::one_xs::COLS,
+        rows = crate::flow::one_xs::ROWS,
+        pi = std::f32::consts::PI,
+        degrees_per_row = crate::flow::one_xs::DEGREES_PER_ROW,
+        centre_col = crate::flow::one_xs::CENTRE_COL,
+        gnomonic_pixels = crate::flow::one_xs::GNOMONIC_PIXELS,
+        gate_w = 0.5 * projection::ONE_XS_FLOW_GATE_WIDTH_DEG,
+    )
+}
+
 const SHADER: &str = r#"
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
@@ -2120,39 +4732,36 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 @group(0) @binding(4) var chroma1: texture_2d<f32>;
 @group(0) @binding(5) var samp: sampler;
 
-// Each lens's picture at that ray, mixed by its weight, or the room where no
-// lens has the ray. A lens weighted zero is not sampled at all, so outside the
-// overlap this is the single fetch the hard pick took before issue #7, and
-// the second fetch is what the blend band costs.
-//
-// The alpha rides back with the colour: 1 for a picture, and the room's own
-// for the room, which is what the target then blends by.
-//
-// `ratio` is each lens's magnification at its own landing, in delivered-frame
-// texels per output pixel (issue #11). It arrives as an argument because the
-// derivatives it comes from have to be read where the control flow is
-// uniform, which is the entry point and not here.
-//
-// WGSL has no texture array to index here, so the lenses are named rather
-// than looped. The explicit mip level is what makes that legal: a
-// `textureSample` computes its own level from derivatives and needs uniform
-// control flow to do it, and every one of these textures has a single level
-// anyway.
-fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
+
+
+fn picture(mix: Blend, ratio: vec2<f32>, look: vec3<f32>) -> vec4<f32> {
   var rgb = vec3<f32>(0.0);
   var total = 0.0;
-  // What the two lenses' exposures have to be brought together by, split
-  // between them (issue #103, stage 3). One uniform read for the whole draw,
-  // and exactly 1.0 on both sides until something has been measured, so the
-  // weights below are the weights this pass has always used and a picture
-  // with no reading behind it is the picture stage 2 drew.
-  let tone = tone_split();
+  // Stage 3's pooled luma gain is NOT applied any more (owner ruling
+  // 2026-08-12). The pass is to carry exactly two modifications: the chromatic
+  // correction below, and the mechanical hand-over between the lenses. A
+  // brightness gain is a third, and while it was measured and it worked, it
+  // was in the way of judging the second and third by eye.
+  //
+  // The measurement is still taken and still pooled - `--bin expose` and the
+  // band's own trace read it - it simply does not reach the picture.
+  // What the two lenses' COLOUR has to be brought together by at this
+  // direction, split between them the same way the exposure is. Zero until
+  // something has been measured, so a picture with no reading behind it is the
+  // picture the pass drew before the chromatic arm existed.
+  // Studio's grid, sampled per lens at this ray's own place in the fusion
+  // window. Each lens carries its OWN correction over its own 12-row block -
+  // they are separate nodes even where the blocks overlap - so this is two
+  // lookups and not one field applied twice with opposite signs.
+  let body = reframe.view_to_body * look;
   if mix.weights[0] > 0.0 {
-    rgb += (mix.weights[0] * tone.x) * ycbcr(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x);
+    let fix = grid_fix(0u, body);
+    rgb += mix.weights[0] * ycbcr(luma0, chroma0, frame_uv(mix.landings[0].pixel), ratio.x, fix);
     total += mix.weights[0];
   }
   if mix.weights[1] > 0.0 {
-    rgb += (mix.weights[1] * tone.y) * ycbcr(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y);
+    let fix = grid_fix(1u, body);
+    rgb += mix.weights[1] * ycbcr(luma1, chroma1, frame_uv(mix.landings[1].pixel), ratio.y, fix);
     total += mix.weights[1];
   }
   // The room around the ball, written rather than painted: transparent black,
@@ -2169,7 +4778,7 @@ fn picture(mix: Blend, ratio: vec2<f32>) -> vec4<f32> {
 // conclusions from it, because they are not the same size: `plane` scales the
 // ratio by the grid it is sampling (`sampling::plane_ratio`), so the chroma
 // plane upgrades an octave of zoom before the luma plane does.
-fn ycbcr(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f32) -> vec3<f32> {
+fn ycbcr(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f32, fix: vec3<f32>) -> vec3<f32> {
   let l = plane(luma, samp, uv, ratio, reframe.sharpen_luma);
   let ch = plane(chroma, samp, uv, ratio, reframe.sharpen_chroma);
   // NV12: one byte of luma, and a pair of bytes of chroma.
@@ -2180,67 +4789,34 @@ fn ycbcr(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f
     raw = vec3<f32>(plane_word(l.rg), plane_word(ch.rg), plane_word(ch.ba));
   }
   let range = levels();
-  let y = raw.x * range.luma.x + range.luma.y;
-  let c = raw.yz * range.chroma.x + vec2<f32>(range.chroma.y);
+  // The chromatic correction, in Studio's own space: an additive offset in
+  // Y'CbCr CODES, applied before the matrix.
+  //
+  // **The pedestal ratio reduces to exactly this, and the algebra is worth
+  // writing down.** Studio's map holds `r = (lens + S + 255) / (lens + 255)`
+  // and applies it as `recoverData3f = (c + 1) * r - 1` on a normalized `c`.
+  // Substituting `c = lens/255`:
+  //
+  //   (lens/255 + 1) * (lens + S + 255)/(lens + 255) - 1
+  //     = (lens + 255)/255 * (lens + S + 255)/(lens + 255) - 1
+  //     = (lens + S + 255)/255 - 1
+  //     = (lens + S)/255
+  //
+  // So the ratio form is a pure ADDITIVE offset of `S` codes at the cell it
+  // was computed from. It reads as gain-like only because the map is
+  // low-resolution and resampled: a ratio formed at a map cell is applied to
+  // full-resolution pixels near it whose values differ. Carrying `S` directly
+  // is the same correction without the encode-and-decode, and it is why this
+  // solves in codes rather than in a log ratio - Studio's `PENALTY = 0.1` and
+  // `TOLERANCE = 1e-4` are numbers in codes, and the ring's log-RGB units made
+  // them mean something else entirely.
+  let y = raw.x * range.luma.x + range.luma.y + fix.x / 255.0;
+  let c = raw.yz * range.chroma.x + vec2<f32>(range.chroma.y) + fix.yz / 255.0;
   return vec3<f32>(
     y + 1.5748 * c.g,
     y - 0.1873 * c.r - 0.4681 * c.g,
     y + 1.8556 * c.r,
   );
-}
-
-// A 16-bit little endian word read back out of the two 8-bit components it
-// was imported as, against P010's own full scale.
-//
-// 255 puts each component back on its own byte, 256 puts the high one where
-// it belongs, and 65472 is 1023 shifted up by six, which is where P010 keeps
-// full scale: its ten bits sit at the top of the word and the low six are
-// zero. Interpolation is linear, so a filtered pair recombines into exactly
-// the filtered word.
-fn plane_word(pair: vec2<f32>) -> f32 {
-  return (pair.x + pair.y * 256.0) * 255.0 / 65472.0;
-}
-
-// A scale and an offset per channel, taking a sampled plane value to Y, Cb
-// and Cr.
-//
-// Full range is the identity on luma and a half off chroma, which is what
-// every Insta360 capture is and what this pass did before there was a second
-// answer. Studio swing is the other one, and its endpoints scale with the
-// plane's own depth: black is 16 of 255 at eight bits and 64 of 1023 at ten,
-// which is the same 16 shifted up rather than the same fraction.
-//
-// **Both rows carry a whole excursion, not half of one.** The full-range row
-// above sets the convention the matrix in `ycbcr` is written for: chroma
-// arrives as `raw - 0.5`, so it runs -1/2 to +1/2 across the whole plane. A
-// studio-swing chroma plane runs 16 to 240 at eight bits, which is 224 codes
-// end to end, so 224 is what takes it to that same -1/2 to +1/2 - the same way
-// 219 rather than 109.5 takes studio-swing luma to 0 to 1 one line up. Written
-// as 112 this doubled every colour a DJI capture had and left every Insta360
-// one alone, because only studio swing comes through here: greens went neon
-// and the owner's eye caught it on the first `.OSV` played (2026-08-08).
-// Measured on `1 8k30p standard 10bit iso max 800-003.OSV` frame 0, over 451
-// flat patches against swscale's own decode of the same frame: mean absolute
-// error per channel fell from 45.4 / 8.0 / 0.9 codes to 2.0 / 1.8 / 0.9, and
-// the mean chroma spread from 171.4 to 124.1 against swscale's 125.1.
-struct Levels {
-  luma: vec2<f32>,
-  chroma: vec2<f32>,
-};
-
-fn levels() -> Levels {
-  var out: Levels;
-  out.luma = vec2<f32>(1.0, 0.0);
-  out.chroma = vec2<f32>(1.0, -0.5);
-  if reframe.limited > 0.5 {
-    let full = select(255.0, 1023.0, reframe.wide > 0.5);
-    let step = select(1.0, 4.0, reframe.wide > 0.5);
-    let span = 219.0 * step;
-    let reach = 224.0 * step;
-    out.luma = vec2<f32>(full / span, -16.0 * step / span);
-    out.chroma = vec2<f32>(full / reach, -128.0 * step / reach);
-  }
-  return out;
 }
 
 fn linearize(c: vec3<f32>) -> vec3<f32> {
@@ -2267,7 +4843,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     texel_ratio(mix.landings[0].pixel),
     texel_ratio(mix.landings[1].pixel),
   );
-  let lens = picture(mix, ratio);
+  let lens = picture(mix, ratio, look.xyz);
   return vec4<f32>(
     select(lens.rgb, linearize(lens.rgb), reframe.linearize > 0.5),
     lens.a,
@@ -2277,8 +4853,561 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::mpsc;
+
     use super::*;
     use kjerag_meta::{Filter, GyroSample, GyroTrack, Sweep};
+
+    #[test]
+    fn selected_type2_source_shader_parses_and_validates() {
+        use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
+
+        let source = draw_wgsl_map_oracle(2160);
+        let module = wgpu::naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|error| panic!("selected type-2 source WGSL did not parse: {error}"));
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|error| {
+                panic!("selected type-2 source WGSL did not validate: {error}")
+            });
+
+        let oracle = map_oracle_wgsl(2160);
+        let yuv = oracle
+            .split_once("fn oracle_ycbcr")
+            .expect("selected source function exists")
+            .1
+            .split_once("fn oracle_picture")
+            .expect("selected source function has a bounded body")
+            .0;
+        assert!(yuv.contains("vec2<f32>(2880.0, 2880.0)"));
+        assert!(yuv.contains("vec2<f32>(1440.0, 1440.0)"));
+        assert!(!yuv.contains("levels("));
+        assert!(!yuv.contains("plane_word"));
+        assert!(!yuv.contains("reframe.wide"));
+        let picture = oracle
+            .split_once("fn oracle_picture")
+            .expect("selected picture function exists")
+            .1;
+        let b = picture.find("let color_b = oracle_ycbcr(atlas_b)").unwrap();
+        let a = picture.find("let color_a = oracle_ycbcr(atlas_a)").unwrap();
+        let blend = picture.find("mix(color_b, color_a, alpha)").unwrap();
+        assert!(b < a && a < blend);
+    }
+
+    #[test]
+    fn map_geometry_shader_keeps_kjerag_picture_consumer() {
+        use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
+
+        let source = draw_wgsl_map_geometry_oracle(2160);
+        let module = wgpu::naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|error| panic!("map geometry WGSL did not parse: {error}"));
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("map geometry WGSL did not validate: {error}"));
+        assert!(source.contains("mix = geometry_oracle_blend(in.pos.xy)"));
+        assert!(source.contains("let lens = picture(mix, ratio, look.xyz)"));
+        assert!(source.contains("ycbcr(luma0, chroma0"));
+        assert!(source.contains("let range = levels()"));
+        assert!(!source.contains("oracle_ycbcr"));
+        assert!(!source.contains("oracle_box_sample"));
+    }
+
+    #[test]
+    fn normal_prepare_clears_instrument_oracle_selections() {
+        let mut draw = FlowDraw::OneXs;
+        assert_eq!(draw, FlowDraw::OneXs);
+        draw = FlowDraw::prepared(false);
+        assert_eq!(draw, FlowDraw::Plain);
+
+        draw = FlowDraw::OneXs;
+        assert_eq!(draw, FlowDraw::OneXs);
+        draw = FlowDraw::prepared(true);
+        assert_eq!(draw, FlowDraw::Legacy);
+
+        draw = FlowDraw::MapOracle;
+        assert_eq!(draw, FlowDraw::MapOracle);
+        draw = FlowDraw::prepared(false);
+        assert_eq!(draw, FlowDraw::Plain);
+
+        draw = FlowDraw::MapOracle;
+        assert_eq!(draw, FlowDraw::MapOracle);
+        draw = FlowDraw::prepared(true);
+        assert_eq!(draw, FlowDraw::Legacy);
+
+        draw = FlowDraw::DirectOneXs;
+        assert_eq!(draw, FlowDraw::DirectOneXs);
+        draw = FlowDraw::prepared(false);
+        assert_eq!(draw, FlowDraw::Plain);
+
+        draw = FlowDraw::Nothing;
+        assert_eq!(draw, FlowDraw::Nothing);
+        draw = FlowDraw::prepared(true);
+        assert_eq!(draw, FlowDraw::Legacy);
+    }
+
+    #[test]
+    fn selected_playback_requires_both_the_evidence_gate_and_capture_state() {
+        assert!(!one_xs_playback_selected(false, false));
+        assert!(!one_xs_playback_selected(false, true));
+        assert!(!one_xs_playback_selected(true, false));
+        assert!(one_xs_playback_selected(true, true));
+    }
+
+    #[test]
+    fn selected_player_waits_only_for_an_unacknowledged_current_frame() {
+        // No offered frame is the initial admission for frame zero.
+        assert!(!one_xs_frame_waiting(true, true, None));
+        // An exact ready-map acknowledgement admits the successor.
+        assert!(!one_xs_frame_waiting(true, true, Some(true)));
+        // The current selected frame remains offered until that exact map is
+        // capture-owned, independently of whether it has ever been shown.
+        assert!(one_xs_frame_waiting(true, true, Some(false)));
+
+        for current_ready in [None, Some(false), Some(true)] {
+            assert!(!one_xs_frame_waiting(false, true, current_ready));
+            assert!(!one_xs_frame_waiting(true, false, current_ready));
+        }
+    }
+
+    #[test]
+    fn selected_seek_reuses_only_the_exact_current_transaction() {
+        assert_eq!(
+            one_xs_replay_start(Some(8), Some(8), true, true, 8),
+            ReplayStart::Continue
+        );
+        assert_eq!(
+            one_xs_replay_start(Some(8), Some(9), false, true, 9),
+            ReplayStart::Continue
+        );
+        assert_eq!(
+            one_xs_replay_start(Some(8), Some(9), false, true, 10),
+            ReplayStart::Continue
+        );
+        for start in [
+            one_xs_replay_start(None, Some(0), false, false, 9),
+            one_xs_replay_start(Some(8), Some(8), false, true, 8),
+            one_xs_replay_start(Some(8), Some(9), false, false, 9),
+            one_xs_replay_start(Some(8), Some(9), false, true, 8),
+            one_xs_replay_start(Some(9), Some(9), true, true, 4),
+        ] {
+            assert_eq!(start, ReplayStart::FrameZero);
+        }
+
+        assert_eq!(
+            selected_replay_start(ReplayStart::Continue, false, false, Some(9), 10),
+            ReplayStart::FrameZero,
+            "an arbitrary forward seek restarts video and retargets audio"
+        );
+        assert_eq!(
+            selected_replay_start(ReplayStart::Continue, true, false, Some(9), 10),
+            ReplayStart::Continue,
+            "one forward step keeps the proven adjacent audio splice"
+        );
+        assert_eq!(
+            selected_replay_start(ReplayStart::Continue, false, false, Some(9), 9),
+            ReplayStart::Continue,
+            "the exact offered transaction needs no decoder seek"
+        );
+        assert_eq!(
+            selected_replay_start(ReplayStart::Continue, false, true, Some(7), 7),
+            ReplayStart::FrameZero,
+            "retargeting an active replay must also retarget its audio"
+        );
+    }
+
+    #[test]
+    fn a_step_during_replay_is_relative_to_the_requested_target() {
+        assert_eq!(replay_step_base(Some(100), Some(7)), Some(100));
+        assert_eq!(replay_step_base(None, Some(7)), Some(7));
+    }
+
+    #[test]
+    fn paused_target_landing_keeps_redrawing_until_its_map_is_acknowledged() {
+        assert_eq!(
+            next_after_pump(true, false, false, None),
+            Next::Refresh,
+            "the Player has landed, but the Scene transaction is still pending"
+        );
+        assert_eq!(
+            next_after_pump(false, false, false, None),
+            Next::Never,
+            "only target-map acknowledgement retires the Scene replay"
+        );
+    }
+
+    #[test]
+    fn terminal_stop_retires_the_scene_owned_replay() {
+        let replay = RefCell::new(Some(OneXsReplay {
+            target: 100,
+            position: Duration::from_secs(4),
+            playing: true,
+        }));
+        retire_replay(&replay);
+        assert!(replay.borrow().is_none());
+    }
+
+    #[test]
+    fn diagnostic_display_requires_the_exact_shown_delivery_and_capture() {
+        #[derive(PartialEq, Eq)]
+        struct Stamp {
+            index: u64,
+            pair: u64,
+        }
+        let current = Stamp {
+            index: 6_369,
+            pair: 10,
+        };
+        let same_numbers_other_delivery = Stamp {
+            index: 6_369,
+            pair: 11,
+        };
+
+        assert!(exact_selected_display(&current, Some(&current), true));
+        assert!(!exact_selected_display(
+            &current,
+            Some(&same_numbers_other_delivery),
+            true
+        ));
+        assert!(!exact_selected_display(&current, Some(&current), false));
+        assert!(!exact_selected_display(&current, None, true));
+        assert!(Scene::blank().diagnostic_one_xs_map().unwrap().is_none());
+    }
+
+    #[test]
+    fn selected_draw_stays_empty_until_an_exact_map_is_ready() {
+        assert_eq!(FlowDraw::selected_map(false), FlowDraw::Nothing);
+        assert_eq!(FlowDraw::selected_map(true), FlowDraw::DirectOneXs);
+    }
+
+    #[test]
+    fn a_still_requested_after_an_empty_stop_fails_with_the_retained_raw_error() {
+        let scene = Scene::blank();
+        scene
+            .stalled
+            .fail_now("ONE X2 stitch rejected source frame 0");
+        // The alert is an independent one-shot and may already have consumed
+        // its copy before the pilot asks for a still.
+        assert_eq!(
+            scene.stalled.take(),
+            Some(Stall::new("ONE X2 stitch rejected source frame 0"))
+        );
+
+        let (sent, received) = mpsc::channel();
+        scene.capture(Request {
+            width: 3840,
+            then: Box::new(move |result| {
+                sent.send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+            }),
+        });
+
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err("ONE X2 stitch rejected source frame 0".to_owned())
+        );
+        assert!(scene.shutter.take().is_none());
+    }
+
+    #[test]
+    fn an_armed_still_gets_the_acknowledgement_failure_once_off_thread() {
+        let scene = Scene::blank();
+        let caller = std::thread::current().id();
+        let (sent, received) = mpsc::channel();
+        scene.capture(Request {
+            width: 3840,
+            then: Box::new(move |result| {
+                sent.send((
+                    std::thread::current().id(),
+                    result.map(|_| ()).map_err(|error| error.to_string()),
+                ))
+                .unwrap();
+            }),
+        });
+
+        let error = "ONE X2 stitch state lost its acknowledgement for source frame 41";
+        scene.stalled.fail_now(error);
+        scene.fail_terminal_shutter_without_display();
+        let (callback, result) = received.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_ne!(callback, caller);
+        assert_eq!(result, Err(error.to_owned()));
+
+        scene.fail_terminal_shutter_without_display();
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn an_observed_terminal_stop_resolves_an_armed_still_once() {
+        let scene = Scene::blank();
+        let (sent, received) = mpsc::channel();
+        scene.capture(Request {
+            width: 3840,
+            then: Box::new(move |result| {
+                sent.send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+            }),
+        });
+
+        let error = "ONE X2 stitch rejected source frame 0";
+        scene.stalled.fail_now(error);
+        let stall = scene.stalled.take().expect("terminal stop was not raised");
+        assert_eq!(
+            scene.finish_observed_terminal_stop(stall),
+            Stall::new(error)
+        );
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(error.to_owned())
+        );
+        assert!(scene.shutter.take().is_none());
+
+        scene.finish_observed_terminal_stop(Stall::new(error));
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn a_pending_selected_still_waits_until_the_capture_is_terminal() {
+        let shutter = Shutter::default();
+        let stalled = Stalled::default();
+        let (sent, received) = mpsc::channel();
+        shutter.arm(Request {
+            width: 3840,
+            then: Box::new(move |result| {
+                sent.send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+            }),
+        });
+
+        assert!(resolve_selected_shutter(&shutter, &stalled, false).is_none());
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        stalled.fail_now("ONE X2 stitch rejected source frame 0");
+        assert!(resolve_selected_shutter(&shutter, &stalled, false).is_none());
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err("ONE X2 stitch rejected source frame 0".to_owned())
+        );
+    }
+
+    #[test]
+    fn selected_display_replaces_only_after_an_exact_success() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Stamp {
+            index: u64,
+            epoch: u64,
+            pair: u64,
+        }
+
+        let a = Stamp {
+            index: 8,
+            epoch: 1,
+            pair: 80,
+        };
+        let b = Stamp {
+            index: 9,
+            epoch: 1,
+            pair: 90,
+        };
+        let wrong_b = Stamp {
+            index: 9,
+            epoch: 1,
+            pair: 91,
+        };
+        let mut display = ExactDisplay::default();
+
+        assert!(display.commit(&a, &a));
+        assert_eq!(display.recovery_index(&a, Some(&a), [(0, true)]), Some(0));
+
+        // Merely staging B changes no completed display. A failed B whose map
+        // names another delivery is refused before it can replace A.
+        assert_eq!(display.recovery_index(&a, Some(&a), [(0, true)]), Some(0));
+        assert!(!display.commit(&b, &wrong_b));
+        assert_eq!(display.recovery_index(&a, Some(&a), [(0, true)]), Some(0));
+
+        assert!(display.commit(&b, &b));
+        assert_eq!(display.recovery_index(&a, Some(&a), [(0, true)]), None);
+        assert_eq!(display.recovery_index(&b, Some(&b), [(0, true)]), Some(0));
+    }
+
+    #[test]
+    fn selected_display_recovery_requires_the_complete_exact_tuple() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Stamp {
+            index: u64,
+            epoch: u64,
+            pair: u64,
+        }
+
+        let complete = Stamp {
+            index: 6_369,
+            epoch: 4,
+            pair: 10,
+        };
+        let same_numbers_other_delivery = Stamp {
+            index: 6_369,
+            epoch: 4,
+            pair: 11,
+        };
+        let mut display = ExactDisplay::default();
+        assert!(display.commit(&complete, &complete));
+
+        assert_eq!(
+            display.recovery_index(&complete, Some(&complete), [(0, false), (1, true)]),
+            Some(1)
+        );
+        assert_eq!(
+            display.recovery_index(&complete, Some(&complete), [(0, false), (1, false)]),
+            None
+        );
+        assert_eq!(display.recovery_index(&complete, None, [(0, true)]), None);
+        assert_eq!(
+            display.recovery_index(&complete, Some(&same_numbers_other_delivery), [(0, true)],),
+            None
+        );
+        assert_eq!(
+            display.recovery_index(
+                &same_numbers_other_delivery,
+                Some(&same_numbers_other_delivery),
+                [(0, true)],
+            ),
+            None
+        );
+        assert_eq!(
+            display.recovery_index(&complete, Some(&complete), [(0, true)]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn an_exact_held_display_services_a_shutter_after_terminal_failure() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Stamp(u64);
+
+        let complete = Stamp(6_369);
+        let mut display = ExactDisplay::default();
+        assert!(display.commit(&complete, &complete));
+        let restorable = display
+            .recovery_index(&complete, Some(&complete), [(0, true)])
+            .is_some();
+
+        let shutter = Shutter::default();
+        let stalled = Stalled::default();
+        stalled.fail_now("successor stitch failed");
+        let (sent, received) = mpsc::channel();
+        shutter.arm(Request {
+            width: 3840,
+            then: Box::new(move |result| {
+                sent.send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+            }),
+        });
+
+        let request = resolve_selected_shutter(&shutter, &stalled, restorable)
+            .expect("the exact held display must service this request");
+        (request.then)(Ok(capture::Shot {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 255],
+            index: 6_369,
+            time: Duration::from_secs(212),
+        }));
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(())
+        );
+        assert!(shutter.take().is_none());
+    }
+
+    #[test]
+    fn ordinary_prepare_never_constructs_the_source_readback_pipeline() {
+        let Ok((device, queue)) = test_gpu() else {
+            eprintln!("no GPU available for the source readback laziness test");
+            return;
+        };
+        let mut pipeline = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        assert!(pipeline.one_xs_luma.is_none());
+
+        let scene = Scene::blank();
+        pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+        assert!(pipeline.one_xs_luma.is_none());
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        loop {
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(answer) => return answer,
+                std::task::Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn test_gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .next()
+            .ok_or("no Vulkan adapter")?;
+        block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("source readback laziness test"),
+            required_features: wgpu::Features::empty(),
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn player_flow_refuses_the_selected_one_xs_route() {
+        assert!(!player_flow(false, false));
+        assert!(!player_flow(false, true));
+        assert!(player_flow(true, false));
+        assert!(!player_flow(true, true));
+
+        for requested in [false, true] {
+            for environment in [false, true] {
+                assert!(
+                    !legacy_flow_draw(requested, environment, true),
+                    "selected ONE X2 admitted requested={requested}, environment={environment}",
+                );
+            }
+        }
+        assert!(!legacy_flow_draw(false, false, false));
+        assert!(legacy_flow_draw(true, false, false));
+        assert!(legacy_flow_draw(false, true, false));
+        assert!(legacy_flow_draw(true, true, false));
+    }
+
+    #[test]
+    fn scene_capability_uses_the_projection_owned_one_xs_identity() {
+        assert!(supports_player_flow(None));
+
+        let mut lenses = projection::tests::one_xs_lenses();
+        let selected_type = lenses[0].lens_type;
+        assert!(!supports_player_flow(Some(&lenses)));
+
+        lenses[1].lens_type = 0;
+        assert!(!supports_player_flow(Some(&lenses)));
+
+        lenses[0].lens_type = 0;
+        assert!(supports_player_flow(Some(&lenses)));
+
+        lenses[1].lens_type = selected_type;
+        assert!(supports_player_flow(Some(&lenses)));
+    }
 
     /// A camera rolling at a constant rate, as an orientation track: enough
     /// for the one question this module owns, which is whether a frame's
@@ -2319,8 +5448,8 @@ mod tests {
     }
 
     /// And a camera whose readout direction has not been measured is the same
-    /// case, which today is everything that is not an X4: `Sweep::Unknown` is
-    /// a zero axis and there is nothing to apply it along.
+    /// case. Cameras outside the measured X4 and ONE X2 families still use
+    /// `Sweep::Unknown`, a zero axis with nothing to apply along.
     #[test]
     fn an_unknown_sweep_gets_no_readout() {
         let held = motion(turning(90.0));

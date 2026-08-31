@@ -3,8 +3,8 @@
 //! was not fitted on (issue #103, stage 9).
 //!
 //! ```sh
-//! # what one flight's pose leaves, azimuth by azimuth, under the app's own
-//! cargo run --release -p kjerag-spike --bin table -- <a.insv> seam=pool
+//! # what one flight's pose leaves, azimuth by azimuth (pose fitted on it)
+//! cargo run --release -p kjerag-spike --bin table -- <a.insv>
 //! # a table off several flights, written down
 //! cargo run --release -p kjerag-spike --bin table -- <a.insv> <b.insv> <c.insv> \
 //!   seam=<stored> out=scratch/stage9/table.txt
@@ -15,15 +15,13 @@
 //! cargo run --release -p kjerag-spike --bin table -- plant=0.10:6 out=scratch/stage9/plant.txt
 //! ```
 //!
-//! **One pose for every capture.** `seam=file` is prohibited: a fit off each
-//! capture's own frames absorbs that scene's own content into the pose, and the
-//! leftovers of two such fits are not the same quantity measured twice.
-//! `seam=pool` is the pose the app itself draws these captures with and is what
-//! a reading meant to be quoted later should use; five knobs written out are
-//! the same thing pinned to a date. Name neither and one pose is fitted on
-//! every capture's readings at once, which is what a per-camera pool is when
-//! there is no pool yet. The app has exactly one fit per camera and so does
-//! this.
+//! **One pose for every capture.** A fit off each capture's own frames absorbs
+//! that scene's own content into the pose, and the leftovers of two such fits
+//! are not the same quantity measured twice, which is why the per-capture seam
+//! fit was removed from the player (2026-08-15) and why this instrument never
+//! offered it. Name no `seam=` and one pose is fitted on every capture's
+//! readings at once, which is what a per-camera pool was when there was no pool
+//! yet; or pin a pose with five knobs written out (`seam=<stored>`).
 //!
 //! **The readings are the shipped fit's own.** Nothing here re-derives a seam
 //! measurement: it calls `kjerag_render::seam::measure`, which is the function
@@ -1045,14 +1043,11 @@ impl Options {
         if matches!(options.mode, Mode::Fit) && options.inputs.is_empty() {
             return Err(USAGE.into());
         }
-        // After the loop, because `seam=pool` is resolved against a capture
-        // and the captures may be named anywhere on the line. The first is
-        // enough: the pool is keyed by camera and this instrument is a
-        // per-camera reading already. `read=` and `plant=` runs name no
-        // capture at all, and `fit_arg` only wants one for `pool`.
+        // The five knobs written out, or nothing and one pose is fitted on
+        // every capture at once (`corpus_pose`). The `file` and `pool` values
+        // this once took were the non-parity per-capture fit and are gone.
         if let Some(value) = seam {
-            let input = options.inputs.first().map(PathBuf::as_path);
-            options.seam = Some(fit_arg(&value, input)?);
+            options.seam = Some(fit_arg(&value)?);
         }
         Ok(options)
     }
@@ -1074,11 +1069,11 @@ fn planted(value: &str) -> Fallible<Mode> {
     })
 }
 
-const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] [seam=pool|roll:0.8,yaw:-2.3,\
+const USAGE: &str = "usage: table <file.insv> [<file.insv> ...] [seam=roll:0.8,yaw:-2.3,\
 pitch:-0.9,cx:-3.3,cy:-11.9] [through=table.txt] [hold=<file.insv>] [smooth=deg] [gate=mads|0] [places=n] [frames=n] [patches=n] [out=path] [field=path] [dump=path.csv] \
 | read=path | plant=size_deg:cycles [out=path]";
 
-const USAGE_SEAM: &str = "this instrument needs one stored fit for every capture: a fit off each \
+const USAGE_SEAM: &str = "this instrument needs one pose for every capture: a fit off each \
 capture's own frames absorbs that scene into the pose, and two such fits do not leave the same \
-quantity behind. seam=pool, which is the one the app draws with, or \
+quantity behind. Name no seam= and one pose is fitted on every capture at once, or pin one with \
 seam=roll:..,yaw:..,pitch:..,cx:..,cy:..";

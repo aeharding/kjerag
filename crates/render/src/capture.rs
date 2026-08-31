@@ -90,6 +90,22 @@ impl Shutter {
     pub(crate) fn take(&self) -> Option<Request> {
         self.0.lock().ok()?.take()
     }
+
+    /// Fails the armed request, if there is one, on the same worker-thread
+    /// boundary as every other capture result. Taking first makes the
+    /// terminal answer one-shot even when later redraws see the same stop.
+    pub(crate) fn fail(&self, why: impl fmt::Display) {
+        if let Some(request) = self.take() {
+            reject(request, why);
+        }
+    }
+}
+
+/// Answers a request that cannot be armed because its capture is already
+/// terminal. Kept beside [`deliver`] so success and failure callbacks share
+/// the same off-render-thread contract.
+pub(crate) fn reject(request: Request, why: impl fmt::Display) {
+    deliver(Err(why.to_string().into()), request.then);
 }
 
 impl fmt::Debug for Shutter {
@@ -224,6 +240,7 @@ fn tighten(mapped: &[u8], size: Size, stride: u32, order: Order) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::RecvTimeoutError;
 
     /// What `crates/render/src/scene.rs`'s `linearize` does in WGSL, in
     /// Rust, so the round trip below can be checked without a GPU. The
@@ -321,5 +338,30 @@ mod tests {
         assert_eq!(stride(3840), 3840 * 4);
         assert_eq!(stride(100), 512);
         assert_eq!(stride(64), 256);
+    }
+
+    #[test]
+    fn a_terminal_failure_answers_an_armed_shutter_exactly_once() {
+        let shutter = Shutter::default();
+        let (sent, received) = mpsc::channel();
+        shutter.arm(Request {
+            width: 3840,
+            then: Box::new(move |result| {
+                sent.send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+            }),
+        });
+
+        shutter.fail("ONE X2 stitch rejected source frame 0");
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err("ONE X2 stitch rejected source frame 0".to_owned())
+        );
+
+        shutter.fail("replacement error");
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(20)),
+            Err(RecvTimeoutError::Disconnected)
+        );
     }
 }

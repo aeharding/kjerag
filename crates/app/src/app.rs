@@ -60,7 +60,7 @@ use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executo
 use kjerag_render::capture_set::{self, Missing};
 use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, Stall, Stats};
 
-use crate::config::{self, AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
+use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
 use crate::fail::{Alert, Failure};
 use crate::key_bind::{Action, JUMP, key_binds};
@@ -182,6 +182,9 @@ pub enum Message {
     LockHorizon,
     /// A view change from the `View` menu or its keys.
     Look(Nudge),
+    /// Turn the Studio optical-flow seam correction on or off (default off,
+    /// `View > Optical flow`).
+    OpticalFlow,
     PlayPause,
     Quit,
     /// Five seconds have passed and playback has a line to print.
@@ -469,7 +472,7 @@ impl cosmic::Application for App {
         };
         // A view named on the command line lands with no toast. Nothing was
         // pasted and nobody needs telling what they just typed; the window
-        // opening at that view is the whole of the answer.
+        // opening at that view is the answer.
         if let Some(at) = flags.at {
             app.place(at);
         }
@@ -515,6 +518,7 @@ impl cosmic::Application for App {
                 // The settings can change from outside this window, so the
                 // scene is told again rather than only on the toggle.
                 self.hold_horizon();
+                self.hold_flow();
                 self.hold_sound();
                 return cosmic::command::set_theme(self.stored.config.app_theme.theme());
             }
@@ -551,7 +555,6 @@ impl cosmic::Application for App {
                 self.stored.write_state();
             }
             Message::FileClose => {
-                self.pool_seam();
                 self.open = None;
                 self.show_controls(now);
                 return self.retitle();
@@ -616,6 +619,19 @@ impl cosmic::Application for App {
                 if let Some(open) = &self.open {
                     open.scene.nudge(nudge);
                 }
+            }
+            Message::OpticalFlow => {
+                // The selected ONE X2 path is not allowed to fall through the
+                // legacy solver. The menu is disabled for it, and this repeats
+                // the gate for a key binding or queued message.
+                if let Some(next) =
+                    toggled_optical_flow(self.stored.config.optical_flow, self.can_flow())
+                {
+                    self.stored.config.optical_flow = next;
+                    self.stored.write_config();
+                    self.hold_flow();
+                }
+                self.show_controls(now);
             }
             Message::PlayPause => {
                 if let Some(open) = &mut self.open {
@@ -686,13 +702,7 @@ impl cosmic::Application for App {
                 }
                 self.show_controls(now);
             }
-            Message::Quit => {
-                // Before the exit, because the exit is a real one: nothing
-                // below this runs any shutdown, so a fit that landed during
-                // this file would be thrown away with the process.
-                self.pool_seam();
-                std::process::exit(0)
-            }
+            Message::Quit => std::process::exit(0),
             Message::Stalled(stall) => {
                 // The scene has already stopped the file, sound and all: what
                 // is left is saying so (issue #124). The controls come back
@@ -710,14 +720,7 @@ impl cosmic::Application for App {
                 self.alert.raise(Failure::Stopped(open.path.clone(), stall));
                 self.show_controls(now);
             }
-            Message::Report => {
-                self.report(now);
-                // The fit lands on a thread of its own with no message to
-                // announce it, and the pilot may never close the file: five
-                // seconds is soon enough and `seam_harvest` takes rather than
-                // reads, so this is a lock on every report and nothing more.
-                self.pool_seam();
-            }
+            Message::Report => self.report(now),
             Message::ShowControls => self.show_controls(now),
             Message::Surface(action) => {
                 return cosmic::task::message(cosmic::Action::Cosmic(
@@ -801,13 +804,25 @@ impl cosmic::Application for App {
     /// either a transport control, which belongs in the overlay, or a menu
     /// item. No header title either, so the picture has the window to itself.
     fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
+        let can_transport = self.open.is_some();
+        let horizon_locked = self
+            .open
+            .as_ref()
+            .map_or(self.stored.config.horizon_lock, |open| {
+                matches!(open.scene.horizon(), Horizon::Locked)
+            });
         vec![menu::menu_bar(
             &self.core,
             &self.stored.state,
             &self.key_binds,
-            self.open.is_some(),
-            self.stored.config.horizon_lock,
-            self.can_lock(),
+            menu::MenuState {
+                has_file: self.open.is_some(),
+                can_transport,
+                can_go_to_view: true,
+                horizon_locked,
+                can_lock: self.can_lock(),
+                flow: self.can_flow().then_some(self.stored.config.optical_flow),
+            },
         )]
     }
 
@@ -989,11 +1004,9 @@ impl App {
     /// file finds its other half, because the chooser hands over a document
     /// with nothing beside it (issue #123).
     fn load_with(&mut self, path: &Path, alongside: &[PathBuf]) {
-        self.pool_seam();
         match Scene::open_with(path, alongside) {
             Ok(scene) => {
                 self.alert.close();
-                self.hold_seam(&scene);
                 self.say_handover(&scene);
                 self.open = Some(Open {
                     path: path.to_path_buf(),
@@ -1004,6 +1017,7 @@ impl App {
                 self.stored.state.remember(path);
                 self.stored.write_state();
                 self.hold_horizon();
+                self.hold_flow();
                 self.hold_sound();
             }
             Err(e) => self.alert.raise(Failure::Open(path.to_path_buf(), e)),
@@ -1024,6 +1038,15 @@ impl App {
             .is_none_or(|open| open.scene.has_orientation())
     }
 
+    /// Whether the open camera is allowed to use the available legacy
+    /// optical-flow route. With no file open the persisted preference remains
+    /// editable for the next file.
+    fn can_flow(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_none_or(|open| open.scene.supports_optical_flow())
+    }
+
     /// Hand the horizon setting to the scene, which is where the picture is
     /// held. A file with no IMU record takes it and does nothing with it.
     fn hold_horizon(&self) {
@@ -1037,43 +1060,19 @@ impl App {
             });
     }
 
-    /// Hand this camera's pooled seam calibration to the scene, before its
-    /// first frame is drawn (issue #48).
-    ///
-    /// A camera the pool knows nothing about falls back to a fit off this
-    /// file's own frames, which is the weaker answer for the reason 6.8
-    /// measures: a flight's own seam carries that flight's parallax, and a fit
-    /// taken through it absorbs some. That is the whole of the difference
-    /// between the two paths here, and it is why the fallback's answer is
-    /// pooled rather than believed.
-    ///
-    /// Nothing is asked of the pilot either way (AGENTS.md, zero-config
-    /// playback). The terminal line is the whole of what is said about it.
-    fn hold_seam(&self, scene: &Scene) {
-        let Some(camera) = scene.camera_key() else {
-            return;
-        };
-        let pooled = self.stored.state.seam_pooled(camera);
-        if let Some(fit) = self.stored.state.seam(camera) {
-            println!(
-                "seam:   lens 1 roll {:+.3}, yaw {:+.3}, pitch {:+.3} deg, cx {:+.2}, \
-                 cy {:+.2} px (pooled over {pooled} fits of this camera)",
-                fit.roll_deg, fit.yaw_deg, fit.pitch_deg, fit.cx_px, fit.cy_px,
-            );
-            scene.use_seam(fit);
-        }
-        // The pool keeps growing until it has enough fits to choose between,
-        // and this is the whole of "calibrate by watching": a camera with one
-        // fit in it is drawn with that fit and still learns from the next
-        // file, because one fit is one flight's parallax and nothing beside it
-        // can say so.
-        if pooled < config::POOL_ENOUGH {
-            scene.fit_seam(pooled == 0);
+    /// Hand the optical-flow setting to a camera allowed to use the available
+    /// legacy route. An open ONE X2 is forced off until its selected estimator
+    /// inputs are closed.
+    fn hold_flow(&self) {
+        if let Some(open) = &self.open {
+            open.scene.set_flow(applied_optical_flow(
+                self.stored.config.optical_flow,
+                open.scene.supports_optical_flow(),
+            ));
         }
     }
 
-    /// Say how wide this file hands the picture over, once, after its stored
-    /// calibration has landed.
+    /// Say how wide this file hands the picture over, once.
     ///
     /// **The width is the camera's since 2026-08-05** and there is nowhere else
     /// a pilot or an agent could read it: the projection asks for 8 degrees and
@@ -1089,50 +1088,16 @@ impl App {
     /// the handover reaches half its own width and no further, and 9.19 pays
     /// for the 8 the picture asks for with 0.60 a side to spare.
     ///
-    /// After [`Self::hold_seam`], because a seam correction moves the principal
-    /// point and therefore the overlap. A camera with nothing pooled yet has no
-    /// correction to land there, so what this prints on its first file is the
-    /// **factory** calibration's width and a fallback fit can move it a second
-    /// later. `kjerag_render`'s own fit path says that second line, and only
-    /// when the width actually moved.
+    /// The width is the **factory** calibration's, because that is the only
+    /// base the player draws now: the per-capture seam fit that once moved the
+    /// principal point (and with it the overlap, and with that this number) was
+    /// the non-parity mechanism and is gone (2026-08-15). So this is said once,
+    /// off the calibration the camera wrote, and nothing lands later to move it.
     fn say_handover(&self, scene: &Scene) {
         let Some(width) = scene.handover_deg() else {
             return;
         };
         println!("blend:  the two lenses hand the picture over across {width:.2} deg");
-    }
-
-    /// Fold whatever the open file taught us about its camera's seam into that
-    /// camera's pool, on the way out.
-    ///
-    /// Called when a file is closed or replaced rather than when the fit
-    /// lands, because a fit that landed one second into a file the pilot then
-    /// scrubbed through is the same evidence as one that landed and was
-    /// watched: what makes it worth keeping is its own quality, which travels
-    /// with it, and waiting until the file is done costs nothing.
-    fn pool_seam(&mut self) {
-        let Some(open) = &self.open else {
-            return;
-        };
-        let (Some(camera), Some(harvest)) = (open.scene.camera_key(), open.scene.seam_harvest())
-        else {
-            return;
-        };
-        if !self.stored.state.harvest(camera, harvest) {
-            return;
-        }
-        let pooled = self.stored.state.seam_pooled(camera);
-        println!(
-            "seam:   kept that fit, {} azimuths leaving {:.3} deg; this camera's pool is {pooled}",
-            harvest.patches, harvest.residual_deg,
-        );
-        self.stored.write_state();
-        // The pooled answer may have moved to another fit, so the picture
-        // follows it. Walked, not landed: there has been a picture on screen
-        // for seconds by now.
-        if let Some(fit) = self.stored.state.seam(camera) {
-            open.scene.aim_seam(fit);
-        }
     }
 
     /// Hand the volume and the mute to the scene, which is where the sound is
@@ -1308,7 +1273,11 @@ impl App {
             return Task::none();
         };
         let framing = Framing {
-            at: open.scene.frame().map_or(open.position, |(_, time)| time),
+            at: copied_view_time(
+                open.scene.displayed_frame(),
+                open.scene.frame(),
+                open.position,
+            ),
             camera: open.scene.viewpoint().camera(),
             horizon: open.scene.horizon(),
         };
@@ -1360,6 +1329,17 @@ impl App {
     /// there is one horizon setting and a view that was copied held is not
     /// the same view unheld.
     fn place(&mut self, framing: Framing) {
+        self.orient(framing);
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        println!("goto:   {}", framing.printed(&open.path));
+        open.position = framing.at.min(open.duration);
+        open.scene.seek(open.position, Accuracy::Exact);
+    }
+
+    /// Apply and persist the horizon and camera part of an ordinary view.
+    fn orient(&mut self, framing: Framing) {
         let locked = matches!(framing.horizon, Horizon::Locked);
         if self.stored.config.horizon_lock != locked {
             self.stored.config.horizon_lock = locked;
@@ -1369,9 +1349,6 @@ impl App {
         let Some(open) = &mut self.open else {
             return;
         };
-        println!("goto:   {}", framing.printed(&open.path));
-        open.position = framing.at.min(open.duration);
-        open.scene.seek(open.position, Accuracy::Exact);
         open.scene.nudge(Nudge::Point(framing.camera));
     }
 
@@ -1752,6 +1729,17 @@ fn shift(from: Duration, seconds: f64) -> Duration {
     }
 }
 
+/// The time named by a copied view: first the picture actually committed to
+/// display, then the source delivery used before any picture has completed,
+/// and finally the shell clock before the source has offered even that.
+fn copied_view_time(
+    displayed: Option<(u64, Duration)>,
+    offered: Option<(u64, Duration)>,
+    position: Duration,
+) -> Duration {
+    displayed.or(offered).map_or(position, |(_, time)| time)
+}
+
 /// Whether this path is the document portal's rather than the pilot's.
 ///
 /// A file picked in a sandbox's chooser comes back as
@@ -1839,6 +1827,18 @@ fn about() -> About {
         ])
 }
 
+/// A menu/key request changes the saved preference only when the open camera
+/// is allowed to use the available legacy route.
+fn toggled_optical_flow(current: bool, available: bool) -> Option<bool> {
+    available.then_some(!current)
+}
+
+/// A saved preference never reaches a scene whose route is unavailable. The
+/// saved value itself remains untouched for the next supported camera.
+fn applied_optical_flow(saved: bool, available: bool) -> bool {
+    saved && available
+}
+
 /// What the shell decides on its own: what a paste turns out to be asking
 /// for, and the three rules of the toast queue, which is ours now rather than
 /// libcosmic's and so is tested rather than taken on trust. Which line a
@@ -1846,6 +1846,36 @@ fn about() -> About {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_view_names_the_displayed_frame_before_a_newer_offered_one() {
+        let displayed = Duration::from_secs_f64(212.512_3);
+        let offered = Duration::from_secs_f64(212.545_667);
+        let position = Duration::from_secs_f64(212.6);
+
+        assert_eq!(
+            copied_view_time(Some((6_369, displayed)), Some((6_370, offered)), position),
+            displayed
+        );
+        assert_eq!(
+            copied_view_time(None, Some((6_370, offered)), position),
+            offered
+        );
+        assert_eq!(copied_view_time(None, None, position), position);
+    }
+
+    #[test]
+    fn unavailable_optical_flow_neither_toggles_nor_reaches_the_scene() {
+        assert_eq!(toggled_optical_flow(false, false), None);
+        assert_eq!(toggled_optical_flow(true, false), None);
+        assert_eq!(toggled_optical_flow(false, true), Some(true));
+        assert_eq!(toggled_optical_flow(true, true), Some(false));
+
+        assert!(!applied_optical_flow(false, false));
+        assert!(!applied_optical_flow(false, true));
+        assert!(!applied_optical_flow(true, false));
+        assert!(applied_optical_flow(true, true));
+    }
 
     /// What the room around the ball is made of (issue #100), read out of the
     /// theme the way iced reads it. The pass writes that room transparent, so

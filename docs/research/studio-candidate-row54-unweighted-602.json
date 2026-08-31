@@ -1,0 +1,146 @@
+{
+  "schema": "kjerag.studio-unweighted-candidate-boundary-oracle.v1",
+  "studio_version": "6.0.2",
+  "worker_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+  "claim": "Authenticated A-to-B level-two pass-zero masked-unweighted candidate competition at output row 54 column 2, its earliest-minimum winner, and the matching first-descent gate seed.",
+  "parity_claimed": false,
+  "coordinates": {
+    "pass": 0,
+    "descent": 0,
+    "output_row": 54,
+    "output_col": 2,
+    "source_row": 162,
+    "source_col": 6,
+    "row_mode": "masked_unweighted"
+  },
+  "authenticated_inputs": {
+    "source_image_sha256": "fa0ab394af7068edbe72fb9d176f017aa082c33e9d866a12148e5f4db23ca0ed",
+    "target_image_sha256": "625b6fe9e3597ff97bb32b91e17f24ad0e6b2fc33c39ee1deb2e559e935e9963",
+    "source_mask_sha256": "e30f604d1d1edb23dab753dfca8724b3caf070aeb4fd3a9a3accb306cd173ce9",
+    "target_mask_sha256": "e30f604d1d1edb23dab753dfca8724b3caf070aeb4fd3a9a3accb306cd173ce9",
+    "zero_plane_sha256": "9dd76d9311e87123c936ab0d956e9ead34dae3fb68beb075b6ee6fee9b08d9e0",
+    "level_two_work_rows_sha256": "23b16ea2aab8780bee8a8b761fc9916b38bca0e23270cfe711e347ecbc0fceb6",
+    "output_row_weighted": false,
+    "patch_side": 8,
+    "patch_stride": 3
+  },
+  "captured_hint_state": {
+    "candidate_present": true,
+    "stack_skip_u32": 0,
+    "fds_0x9c": 0
+  },
+  "captured_candidates": {
+    "candidate_order": ["current", "hint", "horizontal", "vertical"],
+    "current": {
+      "flow": ["0x00000000", "0x00000000"],
+      "score": "0x46fd89f8"
+    },
+    "hint": {
+      "flow": ["0x00000000", "0x00000000"],
+      "score": "0x46fd89f8"
+    },
+    "horizontal": {
+      "flow": ["0xbec7b2b5", "0x3d6ffe86"],
+      "score": "0x46f54a4a"
+    },
+    "vertical": {
+      "flow": ["0x00000000", "0x00000000"],
+      "score": "0x46fd89f8"
+    },
+    "winner": "horizontal",
+    "winner_destination": [54, 2]
+  },
+  "captured_first_descent_gate": {
+    "seed": ["0xbec7b2b5", "0x3d6ffe86"],
+    "winner_seed_exact": true
+  },
+  "valid_sparse_snapshot_prefix": {
+    "inclusive_indices": [0, 164],
+    "f32_values_per_plane": 165,
+    "bytes_per_plane": 660,
+    "studio_sha256": {
+      "u_f32le": "15398af08dbcdb5889f7455a10558de446b836f19dd8198bacdd3414d2fc8675",
+      "v_f32le": "56b443a2e97873c3980bcb569eb114ff2966645d2a17c27c163d443664052040",
+      "u_then_v_f32le": "5b0daba50f9baadb73afbf9a22c6d5a805759b279af07657428785f0c52c23a9"
+    },
+    "kjerag_sha256": {
+      "u_f32le": "f4861ce39b34508c42ce526b73d152e6bc024daece1faf652f8a1ecb635e16b0",
+      "v_f32le": "91eea5488d1637ef25d217d06f6c6fc4a54a3e1883073472cf774ce5c8cae75e",
+      "u_then_v_f32le": "3837c79ec6f8932606e111342d5349bca3147894293599334c142d0296fd4e91"
+    },
+    "earliest_mismatch": {
+      "index": 0,
+      "row": 0,
+      "col": 0,
+      "row_mode": "weighted",
+      "studio_flow": ["0xbd45b00c", "0x3d4b8b89"],
+      "kjerag_flow": ["0xbd45b011", "0x3d4b8b8b"]
+    },
+    "excluded_suffix": {
+      "inclusive_indices": [165, 263],
+      "reason": "These cells had not been initialized at the captured post-current-score stop and are not evidence."
+    }
+  },
+  "scalar_comparison": {
+    "implementation": "kjerag_scalar_hypothesis",
+    "source_commit": "eecce321a4a7ebc3a1ba879ca650b5bfb848da06",
+    "current": {
+      "flow": ["0x00000000", "0x00000000"],
+      "score": "0x46fd89f8"
+    },
+    "hint": null,
+    "horizontal": {
+      "flow": ["0xbec464c4", "0x3d715044"],
+      "score": "0x46f56322"
+    },
+    "vertical": {
+      "flow": ["0x3f376f4d", "0xbed14b8f"],
+      "score": "0x46eaeffe"
+    },
+    "winner": "vertical",
+    "first_descent_seed": ["0x3f376f4d", "0xbed14b8f"]
+  },
+  "finding": {
+    "candidate_and_gate_binding": "Studio has one unique horizontal winner, and the following gate seed is the same flow. Kjerag selects vertical.",
+    "localization": "The valid prefix already differs at the first weighted cell, row 0 column 0. The row-54 candidate law and the separately closed masked-unweighted helper cannot be the origin of that inherited divergence.",
+    "next_boundary": "The leading hypothesis is a remaining weighted arithmetic gap. This oracle does not identify the exact operation."
+  },
+  "capture_provenance": {
+    "run": "unweighted-candidate-boundary-eecce321-02",
+    "source_commit": "eecce321a4a7ebc3a1ba879ca650b5bfb848da06",
+    "status": "success",
+    "elapsed_seconds": 64.507393334,
+    "evidence_sha256": "69ffba28ea42dd57d5e67a39e29be2c73d34b31adc3268807c8d8287bc5189ce",
+    "report_sha256": "0db4a1685bff1277e0f954d6d6574d60a10577f61a79ae6d47769e782735fe57",
+    "launch_receipt_sha256": "0b1b67341ad880fb696d0a8b062a8767dbe635e632fa7938f1003d2940978a0b",
+    "source_manifest_sha256": "808c53a197be4641a9e8450f016151ad965d103c517b7936a7681b91702da4f5",
+    "packet_log_sha256": "f3f53e14b84827e9115c322743bb020a27a7904dc35a80fd2211348906ab4a4e",
+    "packet_log_bytes": 40191164,
+    "pins_sha256": "6805cce6d90f3664bdb8b8e9fd73565e1c68e4df382b0fc0acee0a9e8440e09f",
+    "caches_found": 0,
+    "pins_verified": true,
+    "postflight_revalidation": "pass",
+    "lifecycle": {
+      "capture_complete": true,
+      "teardown_complete": true,
+      "detached": true,
+      "debugger_state_restored": true,
+      "process_group_empty": true,
+      "timed_out": false,
+      "returncode": 0
+    },
+    "source_hash_scope": "Stable source bytes were hashed after capture arm and before the first workload continue. This is not external source attestation or proof that imported bytecode was compiled from those bytes."
+  },
+  "prior_refusal": {
+    "run": "unweighted-candidate-boundary-eecce321-01",
+    "status": "refused",
+    "reason": "The shared loader enforced the first-descent template key set against the candidate extension before attach.",
+    "resolution": "Commit eecce321a4a7ebc3a1ba879ca650b5bfb848da06 passes the candidate key set into the shared strict loader and adds a real candidate-request regression test. No bytes from the refused run are evidence."
+  },
+  "limitations": [
+    "The captured sparse snapshot is evidence only through index 164. Indices 165 through 263 were uninitialized at this stop and are excluded.",
+    "This is one cold candidate transaction, not full-field parity, warm-state replay, target-time replay, Studio output pixels, playback wiring or a fix.",
+    "The local replay has no hint object, while Studio's live stack state executes a zero-flow hint candidate. The comparison does not claim hint-plumbing parity.",
+    "The first weighted-cell mismatch makes weighted arithmetic the leading remaining boundary, but this capture does not pinpoint the differing operation."
+  ]
+}

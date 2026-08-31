@@ -12,7 +12,8 @@
 //! ffmpeg -i shot.jpg -vf scale=320:-1,format=gray -f rawvideo -y shot.gray
 //! cargo run --release -p kjerag-spike --bin proof -- <file.insv> \
 //!   time=9.576 lock=1 shot=shot.gray shape=320x225 \
-//!   before=factory after=pool out=after.png
+//!   before=factory \
+//!   after=roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9 out=after.png
 //! ```
 //!
 //! The screenshot arrives as raw 8-bit luma at a stated size rather than as a
@@ -436,8 +437,8 @@ impl Options {
                         _ => Horizon::Locked,
                     }
                 }
-                "before" => before = Seam::parse(value, &input)?,
-                "after" => after = Seam::parse(value, &input)?,
+                "before" => before = Seam::parse(value)?,
+                "after" => after = Seam::parse(value)?,
                 "scan" => scan = value.parse::<u32>()? > 0,
                 "shot" => shot = Some(PathBuf::from(value)),
                 "shape" => shape = Some(pixels(value)?),
@@ -478,4 +479,4 @@ fn pixels(value: &str) -> Fallible<Size> {
 const USAGE: &str = "usage: proof <file.insv> [time=seconds | frame=n] [lock=0] \
      [shot=<gray.raw> shape=320x225] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [aspect=w/h] \
      [scan=1] [out=prefix] \
-     before=factory|file|pool|roll:..,yaw:..,pitch:..,cx:..,cy:.. after=<the same>";
+     before=factory|roll:..,yaw:..,pitch:..,cx:..,cy:.. after=<the same>";

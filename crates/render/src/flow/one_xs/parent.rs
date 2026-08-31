@@ -1,0 +1,386 @@
+//! Source-derived selected ONE X2 parent-map construction.
+//!
+//! The fixed sphere basis, calibration packing, 51-pose schedule and Metal
+//! law are READ from Studio. Kjerag's orientation track remains Kjerag's pose
+//! provider; this module does not claim that provider is Studio's unresolved
+//! `PrecomputeStabilization` producer. The caller supplies the exact delivered
+//! frame through [`FrameStamp`], so a numeric frame index or timestamp cannot
+//! authenticate stale work after a seek.
+
+use std::error::Error;
+use std::fmt;
+use std::time::Duration;
+
+use kjerag_media::FrameStamp;
+use kjerag_meta::{CalibrationSet, OrientationTrack, Quat, Readout};
+
+use super::LensPair;
+use super::base_map::FlowstateRoi;
+use super::metal_calc_map::{MetalCalcMapParams, diagnostic_metal_calc_map};
+use super::parent_inputs::{
+    POSE_COUNT, ScanAxis, SelectedModel3Static, diagnostic_pose_times, diagnostic_selected_static,
+};
+
+/// Why the selected ONE X2 parent map could not be built for one delivery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentMapError(String);
+
+impl fmt::Display for ParentMapError {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output.write_str(&self.0)
+    }
+}
+
+impl Error for ParentMapError {}
+
+fn fail(message: impl Into<String>) -> ParentMapError {
+    ParentMapError(message.into())
+}
+
+/// Calibration-owned reusable inputs for the selected ONE X2 parent mapper.
+///
+/// Construction performs the bounded camera/model packing once. A frame
+/// owner can then build each map pair from its orientation track, readout and
+/// exact authenticated container center without repeating static work.
+#[derive(Clone, Debug)]
+pub struct ParentMapBuilder {
+    selected: LensPair<SelectedModel3Static>,
+    readout: Readout,
+}
+
+impl ParentMapBuilder {
+    /// Pack the static selected ONE X2 inputs from one capture calibration.
+    pub fn new(calibration: &CalibrationSet) -> Result<Self, ParentMapError> {
+        let readout = calibration.readout();
+        if !readout.seconds.is_finite() || readout.seconds <= 0.0 {
+            return Err(fail(
+                "selected ONE X2 parent readout is not finite and positive",
+            ));
+        }
+        let selected = diagnostic_selected_static(calibration)
+            .map_err(|error| fail(format!("selected ONE X2 parent input: {error}")))?;
+        Ok(Self { selected, readout })
+    }
+
+    /// Build the map pair for one exact delivered frame identity.
+    pub fn build_for_frame(
+        &self,
+        orientation: &OrientationTrack,
+        frame: &FrameStamp,
+        readout: Readout,
+    ) -> Result<LensPair<FlowstateRoi>, ParentMapError> {
+        self.build(orientation, frame.timestamp(), readout)
+    }
+
+    /// Build from a container center already authenticated by a frame owner.
+    ///
+    /// This narrow form lets a forensic instrument exercise the production
+    /// arithmetic without decoding. Runtime callers retain and bind the
+    /// `FrameStamp` which authenticated `center` to the resulting map.
+    pub fn build(
+        &self,
+        orientation: &OrientationTrack,
+        center: Duration,
+        readout: Readout,
+    ) -> Result<LensPair<FlowstateRoi>, ParentMapError> {
+        if readout.seconds.to_bits() != self.readout.seconds.to_bits()
+            || readout.sweep != self.readout.sweep
+        {
+            return Err(fail(
+                "selected ONE X2 parent readout does not match its calibration",
+            ));
+        }
+        build_at_center(&self.selected, orientation, center, readout)
+    }
+}
+
+fn build_at_center(
+    selected: &LensPair<SelectedModel3Static>,
+    orientation: &OrientationTrack,
+    center: Duration,
+    readout: Readout,
+) -> Result<LensPair<FlowstateRoi>, ParentMapError> {
+    if orientation.is_empty() {
+        return Err(fail("selected ONE X2 parent orientation provider is empty"));
+    }
+
+    let center_seconds = center.as_secs_f64();
+    let pose_times = diagnostic_pose_times(center_seconds, readout.seconds);
+    let lookup_us = pose_times.map(|seconds| seconds * 1_000_000.0);
+    require_lookup_range(orientation, &lookup_us)?;
+
+    // READ ONE X2 parent sphere mapping:
+    // (body.x, body.y, body.z) -> (body.z, body.x, body.y).
+    let sphere_from_body = Quat {
+        w: 0.5,
+        v: [0.5, 0.5, 0.5],
+    };
+    let center_world = orientation_at_fractional_us(orientation, center_seconds * 1_000_000.0)?;
+    let provider_center = sphere_from_body
+        .times(center_world.conjugate())
+        .normalized();
+    let mapping_base = provider_center.conjugate();
+    let poses = lookup_us.map(|time| {
+        quat_f32_xyzw(
+            sphere_from_body
+                .times(
+                    orientation_at_fractional_us(orientation, time)
+                        .expect("the complete fractional lookup range was checked")
+                        .conjugate(),
+                )
+                .normalized(),
+        )
+    });
+    let mapping_base = quat_f32_xyzw(mapping_base);
+
+    Ok(LensPair {
+        a: diagnostic_metal_calc_map(&parameters(&selected.a, mapping_base), &poses),
+        b: diagnostic_metal_calc_map(&parameters(&selected.b, mapping_base), &poses),
+    })
+}
+
+fn parameters(selected: &SelectedModel3Static, mapping_base: [f32; 4]) -> MetalCalcMapParams {
+    MetalCalcMapParams {
+        center: selected.center,
+        focal: selected.focal,
+        src_size: selected.source_size,
+        inv_src_size: [1.0, 1.0],
+        qci: selected.lens_quaternion_xyzw,
+        qwm: mapping_base,
+        // Both READ initial provider calls request the center instant from the
+        // same provider, so their frame-local mean removes that pose. Keeping
+        // the calibration sign avoids a target-specific quaternion sign.
+        q_c0_f0: selected.lens_quaternion_xyzw,
+        shift: [0.0, 0.0],
+        xi: selected.xi,
+        is_horizon_sweep: selected.scan_axis == ScanAxis::Horizontal,
+        flip: 1.0,
+        max_fov: f32::from_bits(0x4006_0a92),
+        distort_coeffs: selected.distortion,
+        pos_scale: selected.source_size,
+    }
+}
+
+fn require_lookup_range(
+    track: &OrientationTrack,
+    lookup_us: &[f64; POSE_COUNT],
+) -> Result<(), ParentMapError> {
+    if lookup_us
+        .windows(2)
+        .any(|pair| !pair[0].is_finite() || pair[0] >= pair[1])
+        || !lookup_us[POSE_COUNT - 1].is_finite()
+    {
+        return Err(fail(
+            "selected ONE X2 parent pose instants are not finite and strictly increasing",
+        ));
+    }
+    let first = track
+        .samples()
+        .first()
+        .ok_or_else(|| fail("selected ONE X2 parent orientation provider is empty"))?
+        .offset_us as f64;
+    let last = track.samples().last().unwrap().offset_us as f64;
+    if lookup_us[0] < first || lookup_us[POSE_COUNT - 1] > last {
+        return Err(fail(format!(
+            "selected ONE X2 parent pose lookup [{}, {}] is outside orientation track [{first}, {last}]",
+            lookup_us[0],
+            lookup_us[POSE_COUNT - 1]
+        )));
+    }
+    Ok(())
+}
+
+fn orientation_at_fractional_us(
+    track: &OrientationTrack,
+    offset_us: f64,
+) -> Result<Quat, ParentMapError> {
+    if !offset_us.is_finite() {
+        return Err(fail(
+            "selected ONE X2 parent fractional pose lookup is not finite",
+        ));
+    }
+    let samples = track.samples();
+    let first = samples
+        .first()
+        .ok_or_else(|| fail("selected ONE X2 parent orientation provider is empty"))?;
+    let last = samples.last().unwrap();
+    if offset_us < first.offset_us as f64 || offset_us > last.offset_us as f64 {
+        return Err(fail(format!(
+            "selected ONE X2 parent fractional pose lookup {offset_us} is outside orientation track [{}, {}]",
+            first.offset_us, last.offset_us
+        )));
+    }
+    let after = samples.partition_point(|sample| (sample.offset_us as f64) < offset_us);
+    let Some(next) = samples.get(after) else {
+        return Ok(last.world_from_body);
+    };
+    let Some(previous) = after.checked_sub(1).and_then(|index| samples.get(index)) else {
+        return Ok(next.world_from_body);
+    };
+    let span = (next.offset_us - previous.offset_us) as f64;
+    if span <= 0.0 {
+        return Err(fail(
+            "selected ONE X2 parent orientation sample times are not increasing",
+        ));
+    }
+    let fraction = (offset_us - previous.offset_us as f64) / span;
+    Ok(previous
+        .world_from_body
+        .nlerp(next.world_from_body, fraction))
+}
+
+fn quat_f32_xyzw(quaternion: Quat) -> [f32; 4] {
+    [
+        quaternion.v[0] as f32,
+        quaternion.v[1] as f32,
+        quaternion.v[2] as f32,
+        quaternion.w as f32,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use kjerag_meta::{
+        CalibrationSet, ExposureTrack, GyroConfig, GyroEncoding, GyroTrack, OrientationSample,
+        Size, Sweep,
+    };
+    use sha2::{Digest as _, Sha256};
+
+    use super::*;
+    use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+
+    const CENTER: Duration = Duration::from_micros(2_000_000);
+
+    fn calibration() -> CalibrationSet {
+        CalibrationSet {
+            camera_model: "Insta360 ONE X2".to_owned(),
+            firmware: "synthetic".to_owned(),
+            dimension: Size {
+                width: ONE_XS_FRAME.width,
+                height: ONE_XS_FRAME.height,
+            },
+            lenses: one_xs_lenses(),
+            rolling_shutter_ms: 20.0,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Scaled,
+                imu_orientation: "Zxy",
+                first_frame_timestamp: 0,
+                gyro_timestamp: None,
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
+            calibration_canvas: Size {
+                width: 6_080,
+                height: 3_040,
+            },
+        }
+    }
+
+    fn orientation() -> OrientationTrack {
+        OrientationTrack::from_samples(
+            (1_980_000..=2_020_000)
+                .step_by(2_000)
+                .map(|offset_us| OrientationSample {
+                    offset_us,
+                    world_from_body: Quat::from_rotation_vector([
+                        (offset_us - 2_000_000) as f64 * 1.0e-7,
+                        (offset_us - 2_000_000) as f64 * -0.5e-7,
+                        (offset_us - 2_000_000) as f64 * 0.25e-7,
+                    ]),
+                })
+                .collect(),
+        )
+    }
+
+    fn map_digest(maps: &LensPair<FlowstateRoi>) -> String {
+        let bytes = maps
+            .a
+            .row_major_values()
+            .iter()
+            .chain(maps.b.row_major_values())
+            .flat_map(|node| node.iter())
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn synthetic_parent_pair_is_deterministic() {
+        let calibration = calibration();
+        let builder = ParentMapBuilder::new(&calibration).unwrap();
+        let first = builder
+            .build(&orientation(), CENTER, calibration.readout())
+            .unwrap();
+        let second = builder
+            .build(&orientation(), CENTER, calibration.readout())
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.a.rows(), 100);
+        assert_eq!(first.a.cols(), 200);
+        assert_eq!(first.b.rows(), 100);
+        assert_eq!(first.b.cols(), 200);
+        assert_eq!(
+            map_digest(&first),
+            "b03ed396eef59e54aaac55db16817bd8f55030d781cc08ccb109b3224de05481"
+        );
+    }
+
+    #[test]
+    fn center_and_fractional_motion_both_affect_the_pair() {
+        let calibration = calibration();
+        let builder = ParentMapBuilder::new(&calibration).unwrap();
+        let base = builder
+            .build(&orientation(), CENTER, calibration.readout())
+            .unwrap();
+        let moved = builder
+            .build(
+                &orientation(),
+                CENTER + Duration::from_micros(1),
+                calibration.readout(),
+            )
+            .unwrap();
+
+        assert_ne!(map_digest(&base), map_digest(&moved));
+    }
+
+    #[test]
+    fn readout_must_be_the_calibrated_selected_readout() {
+        let calibration = calibration();
+        let builder = ParentMapBuilder::new(&calibration).unwrap();
+        let error = builder
+            .build(
+                &orientation(),
+                CENTER,
+                Readout {
+                    seconds: calibration.readout().seconds,
+                    sweep: Sweep::Up,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "selected ONE X2 parent readout does not match its calibration"
+        );
+    }
+
+    #[test]
+    fn lookup_refuses_a_track_that_does_not_cover_the_readout() {
+        let calibration = calibration();
+        let short = OrientationTrack::from_samples(vec![OrientationSample {
+            offset_us: 2_000_000,
+            world_from_body: Quat::IDENTITY,
+        }]);
+        let error = ParentMapBuilder::new(&calibration)
+            .unwrap()
+            .build(&short, CENTER, calibration.readout())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("is outside orientation track"));
+    }
+}

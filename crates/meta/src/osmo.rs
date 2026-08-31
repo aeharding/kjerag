@@ -1104,16 +1104,19 @@ fn lens(entry: &[u8], dimension: Size) -> Result<Lens, Error> {
         k[index] = take(number, "lens coefficient")?;
     }
 
+    let intrinsics = Intrinsics {
+        // No mirror parameter: the model is a theta polynomial and `xi`
+        // belongs to the Mei one.
+        xi: 0.0,
+        fx: take(field::FX, "fx")?,
+        fy: take(field::FY, "fy")?,
+        cx: take(field::CX, "cx")?,
+        cy: take(field::CY, "cy")?,
+    };
     Ok(Lens {
-        intrinsics: Intrinsics {
-            // No mirror parameter: the model is a theta polynomial and `xi`
-            // belongs to the Mei one.
-            xi: 0.0,
-            fx: take(field::FX, "fx")?,
-            fy: take(field::FY, "fy")?,
-            cx: take(field::CX, "cx")?,
-            cy: take(field::CY, "cy")?,
-        },
+        crop_centre: [intrinsics.cx, intrinsics.cy],
+        image_circle_centre: [intrinsics.cx as f32, intrinsics.cy as f32],
+        intrinsics,
         // Brown-Conrady on a normalized plane, which is Insta360's model and
         // not this one. This lens's five coefficients are a polynomial in the
         // angle off the axis and travel on [`Model::Theta`] with it.

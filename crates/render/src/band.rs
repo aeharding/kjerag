@@ -1038,6 +1038,7 @@ impl Cell {
                     Some(eighth) => eighth.ok()?,
                     None => cell.believed(),
                 };
+                // The two chroma columns take the same rule for the same
                 numbers.next().is_none().then_some(cell)
             })
             .collect()
@@ -1317,10 +1318,10 @@ impl Ring {
 
 /// Where the second lens sits, in the camera body's frame, in metres.
 ///
-/// 33 mm of it is along the body's z on every camera in the format study,
-/// which is what makes the seam a stereo pair at all. A file with one lens
-/// stream has no second pose and no baseline, and everything above then reads
-/// zero, which switches the band off rather than dividing by it.
+/// The value comes from lens 1's recorded pose and is what makes the seam a
+/// stereo pair at all. A file with one lens stream has no second pose and no
+/// baseline, and everything above then reads zero, which switches the band off
+/// rather than dividing by it.
 pub fn baseline(lenses: &[Lens]) -> [f32; 3] {
     lenses
         .get(1)
@@ -1461,6 +1462,120 @@ pub fn reach(width_rad: f32) -> f32 {
     0.5 * width_rad
 }
 
+// ------------------------------------------------------------ the strip
+
+/// The along-seam width of a rectified seam line-image strip, in columns:
+/// **longitude** unrolled across the whole seam circle, one column each — the
+/// belt's along-seam axis in Studio's decoded `projectPanoPointToBelt`
+/// (`0x182899850`, docs/research/studio-seam-re.md §37).
+///
+/// **The belt LAW is HARD; this exact pixel count pends one gdb dump.** §37
+/// read the belt as a rotated-equirect frame; the FDSFlow ctor's own working
+/// dims are `[+0xc]=1080, [+0x10]=180, [+0x14]=3240`, and the accuracy presets
+/// are `{15,54,30,972}` (972×54) and `{45,162,90,2916}` (2916×162) — every one
+/// **18:1**, which is HARD. Which preset the owner's accuracy level selects is
+/// UNREAD (a `getBeltImages().size()` dump). 2916×162 is the high-accuracy
+/// preset, taken as the concrete stand-in; the 18:1 aspect and the belt law
+/// are not provisional, only the scale is.
+pub const STRIP_W: usize = 2916;
+
+/// The across-seam height of a strip, in rows: the **FULL colatitude** of the
+/// belt, `theta = row·π/(H−1)` from 0 (belt north pole, row 0) to π (belt south
+/// pole, last row), one row each (§37/§41 item 2). This is NOT the ±6° band the
+/// refuted first strip used, and NOT the baseline-epipolar axis — Studio's
+/// `projectPanoPointToBelt` (`0x182899850`) reads the across-seam coordinate as
+/// equirect colatitude about a single rotation R, spanning the WHOLE sphere.
+///
+/// The seam is the belt EQUATOR (`θ = π/2`, the middle row): `θ < π/2` is lens
+/// 0's hemisphere (rows `0..(H−1)/2`), `θ > π/2` is lens 1's. At `H = 162` the
+/// across-seam scale is `180/(H−1) ≈ 1.117°/row` — the 18:1 anisotropic belt
+/// §37 decoded, 15× the reach and 15× the coarseness of the retired band.
+///
+/// **R = identity, DISCLOSED: §42.2** — the belt-equator=seam invariant is what
+/// fixes the across-seam scale; R's calibration rotation is unread (9 floats,
+/// gdb-infeasible) and only reorients globally, so keeping the seam at the belt
+/// equator is R-independent and exact for the across-seam scale.
+///
+/// 162 with [`STRIP_W`] = 2916 is the decoded 18:1 DISPLAY preset (HARD aspect,
+/// scale pends the dump).
+const DISPLAY_STRIP_H: usize = 162;
+
+/// Studio's seam DIS does NOT run on the display belt — it runs on a SEPARATE
+/// flow belt built at **3×** the display belt's ACROSS-seam resolution (highest
+/// optical-flow accuracy; `getBeltImages` flow rows = display rows ×
+/// `[+0x3b4]/[+0x3ac]` = 1620/540, along-seam ×1; docs/research/studio-seam-re.md
+/// §92). On the 162-row belt the ±6° CLEAN overlap is only ~11 rows — thinner
+/// than the 8px DIS patch — so the cold estimator votes 0 and starves (§90/§91).
+/// At 3× the clean overlap is ~33 rows and the SAME faithful estimator locks the
+/// ~2-row parallax cold (§93 confirming experiment: l2r −0.00→−3.99, CONVERGE
+/// ~0→+41%, decoy nulls pass). The ×3 is the RE'd invariant; 162 is the decoded
+/// display preset. Flow-OFF is byte-identical (STRIP_H never enters the
+/// shipped/flow-OFF draw). Residual: cold single-frame flow still tears sharp
+/// near edges (§93 wing tear) — a separate limitation, flow is default-OFF.
+pub const FLOW_ACROSS_MULT: usize = 3;
+
+/// The belt strip's across-seam row count — the FLOW belt's resolution (§92/§93).
+pub const STRIP_H: usize = DISPLAY_STRIP_H * FLOW_ACROSS_MULT;
+
+/// The cosine of Studio's fisheye off-axis coverage cap, the belt strip's
+/// per-lens validity boundary (docs/research/studio-seam-re.md §44.2).
+///
+/// The MAIN render clips a lens at the delivered image circle (`landed`'s
+/// `depth > 0`), which for this camera family populates the belt only to
+/// ~±6° either side of the seam — 8–12 mutual-overlap rows, thinner than the
+/// DIS patch, so the flow had no across-seam data and returned 0 (§43). Studio
+/// populates each lens out to its calibration's coverage cap: fisheye fn
+/// `0x183b8e281`, lens code 131 → 200.0, gives the valid half-angle as
+/// `Z/|ray| ≥ cos(0.5·(200·π/180·1.05)) − 0.01`. That is `cos(105°) − 0.01 =
+/// −0.26882`, whose `acos` is **105.6° off axis (~211° FOV)**; a lens covers
+/// colatitude ≤ 105.6°, so the two lenses share θ ∈ [74.4°, 105.6°] = ±15.6°
+/// ≈ 28 rows — the width the ±16° blend gate (`[owner+0x3d0]` = 32, §42.1)
+/// reads and can only feather where both lenses have content.
+///
+/// **This is the belt strip's boundary ALONE.** The main render's `inside` /
+/// coverage / `claim` are untouched, so the shipped stitch and flow-OFF stay
+/// byte-identical (§44.4). The strip still returns the −1 sentinel truly off
+/// the delivered frame (`tap_belt`'s UV bound), so the widening reaches to the
+/// cap and not into black beyond the real image circle; where the real lens
+/// content ends before the cap, the achieved overlap is what the content
+/// bounds it to (MEASURED, not forced).
+pub(crate) const BELT_COS_CAP: f32 = -0.268_82;
+
+/// How many `f32` the two strips occupy: [`STRIP_W`] × [`STRIP_H`] luma samples
+/// per lens, two lenses. Strip 0 first, then strip 1.
+pub(crate) const STRIP_BYTES: u64 = (2 * STRIP_W * STRIP_H * std::mem::size_of::<f32>()) as u64;
+
+/// How many bytes the composed flow buffer occupies: TWO fields (lens 0 = r2l,
+/// lens 1 = l2r, §38/§40), each two components, [`STRIP_W`] × [`STRIP_H`] — four
+/// planes total. Twice [`STRIP_BYTES`]; the flow buffer the draw binds is this
+/// size, not the strip size (`compose::Displacement`).
+pub(crate) const FLOW_BYTES: u64 = (4 * STRIP_W * STRIP_H * std::mem::size_of::<f32>()) as u64;
+
+/// Where the strip buffer binds in the band's compute group. It rides in the
+/// same group the measurement writes (group 1), after the grid's bindings
+/// (0–6).
+pub(crate) const STRIP_BINDING: u32 = 7;
+
+/// How many workgroups the strip pass dispatches: one invocation per strip
+/// pixel, [`THREADS`] to a workgroup.
+pub(crate) const STRIP_GROUPS: u32 = ((STRIP_W * STRIP_H) as u32).div_ceil(THREADS as u32);
+
+/// Where the inactive ONE X2 GPU instrument reads two explicitly admitted
+/// retained maps. No player pipeline creates or dispatches this entry point.
+#[cfg(test)]
+pub(crate) const ONE_XS_BASE_BINDING: u32 = 8;
+
+/// The instrument's two 1080-by-60 solver belts: one `f32` per byte-valued
+/// sample, lens A then lens B.
+#[cfg(test)]
+pub(crate) const ONE_XS_BELT_BYTES: u64 =
+    (2 * crate::flow::one_xs::ROWS * crate::flow::one_xs::COLS * std::mem::size_of::<f32>()) as u64;
+
+/// One instrument invocation per solver-belt pixel.
+#[cfg(test)]
+pub(crate) const ONE_XS_BELT_GROUPS: u32 =
+    ((crate::flow::one_xs::ROWS * crate::flow::one_xs::COLS) as u32).div_ceil(THREADS as u32);
+
 // ------------------------------------------------------------ the shader
 
 /// The compute half: one workgroup per direction, reading both lenses'
@@ -1508,8 +1623,12 @@ pub(crate) fn wgsl() -> String {
          const PATCH = {patch}u;\n\
          const BACK_ALONG = {back_along}u;\n\
          const BACK_ACROSS = {back_across}u;\n\
+         const STRIP_W = {STRIP_W}u;\n\
+         const STRIP_H = {STRIP_H}u;\n\
+         const BELT_COS_CAP = {belt_cos_cap:?};\n\
          const TAU = {tau:?};\n\
          {photometry}{CELL}{RING}{WGSL}",
+        belt_cos_cap = BELT_COS_CAP,
         tau = std::f32::consts::TAU,
         step = STEP_DEG.to_radians(),
         perp_steps = PERP_STEPS,
@@ -1522,6 +1641,25 @@ pub(crate) fn wgsl() -> String {
         patch = (2 * half + 1) * (2 * half + 1),
         back_along = (2 * half + 1) as isize + 2 * PERP_STEPS as isize * perp,
         back_across = (2 * half + 1) as isize + near - far,
+    )
+}
+
+/// The ordinary compute module plus the inactive ONE X2 belt instrument.
+///
+/// Kept behind `cfg(test)` so normal player shader modules do not contain the
+/// rejected playback experiment. The caller supplies retained maps explicitly.
+#[cfg(test)]
+pub(crate) fn one_xs_belt_wgsl() -> String {
+    format!(
+        "{}\n\
+         const XS_ROWS = {rows}u;\n\
+         const XS_COLS = {cols}u;\n\
+         const XS_AREA = {area}u;\n\
+         {ONE_XS_BELT}",
+        wgsl(),
+        rows = crate::flow::one_xs::ROWS,
+        cols = crate::flow::one_xs::COLS,
+        area = crate::flow::one_xs_belt::AREA_SCALE,
     )
 }
 
@@ -1548,10 +1686,7 @@ pub(crate) fn lookup_wgsl() -> String {
     // `KEEP` is `believed`'s, which the draw does not call but `CELL`
     // declares, and a WGSL module is validated whole rather than from its
     // entry points: an identifier a dead function names still has to exist.
-    format!(
-        "const AZIMUTHS = {AZIMUTHS}u;\nconst KEEP = {KEEP:?};\n\
-         const LIMIT_LN = {LIMIT_LN:?};\n{CELL}{LOOKUP}"
-    )
+    format!("const AZIMUTHS = {AZIMUTHS}u;\nconst KEEP = {KEEP:?};\n{CELL}{LOOKUP}")
 }
 
 /// The state buffer's binding, on a group of its own.
@@ -1570,9 +1705,49 @@ pub(crate) const STATE_BINDING: u32 = 0;
 /// for how old the state is.
 pub(crate) const WATCH_BINDING: u32 = 1;
 
+/// The solved chromatic correction as an instrument reads it back.
+///
+/// This exists because the arm shipped without it. Every wrong turn the
+/// chromatic work took between 2026-08-09 and 2026-08-12 - the field painted
+/// over the whole sphere, the regularizer that did not regularize, the metric
+/// that measured coverage instead of colour - was diagnosed by ARGUING about
+/// the numbers rather than by reading them, and two of those arguments were
+/// wrong. A field nobody can print is a field that gets reasoned about.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    /// One `[R, G, B]` log correction per direction, in the order the ring is
+    /// measured in, as the solve left it - so BEFORE the halving the draw
+    /// applies and before the corridor weights it.
+    pub per_direction: Vec<[f32; 3]>,
+    /// The retained band metric, Studio's `Metric::level`, in `[20, 100]`.
+    pub level: f32,
+    /// How many frames the content gate let through, and how many it saw.
+    /// The gate's value is entirely in how often it says no.
+    pub triggers: f32,
+    pub frames: f32,
+    /// Mean absolute change of the applied field, in codes, on the last frame
+    /// the gate let through. The flicker as a number.
+    pub motion: f32,
+    /// The seam's own colour step in codes, and what the correction leaves of
+    /// it.
+    pub step: f32,
+    pub residual: f32,
+    /// The residual at each window row, so the rows nothing was measured on
+    /// can be seen.
+    pub by_row: Vec<f32>,
+}
+
 /// How many bytes the state buffer is: the pooled [`Tone`], the pooled
 /// [`Along`], then one [`Cell`] per direction.
 pub(crate) const BYTES: u64 = (CELLS_AT + AZIMUTHS * std::mem::size_of::<Cell>()) as u64;
+
+/// [`Cell`] is ten `f32` and the WGSL `Cell` is the same ten, in the same
+/// order. The readback walks the buffer at `size_of::<Cell>()` per direction,
+/// so a field added to one half and not the other does not fail to compile —
+/// it silently reads the next direction's disparity as this one's last column.
+/// That is the failure this crate keeps [`super::twin`] for, and this is the
+/// half of it a test on a real GPU cannot reach: a size, at compile time.
+const _: () = assert!(std::mem::size_of::<Cell>() == 8 * std::mem::size_of::<f32>());
 
 /// Where the along-seam field starts in that buffer.
 pub(crate) const ALONG_AT: usize = std::mem::size_of::<Tone>();
@@ -1651,6 +1826,7 @@ fn along_at(field: Along, cos: f32, sin: f32) -> f32 {
     + field.terms[3] * (cos * cos - sin * sin)
     + field.terms[4] * (2.0 * cos * sin);
 }
+
 "#;
 
 /// The seam circle's geometry, shared by both shaders. Rust twin: `Ring`.
@@ -1707,35 +1883,22 @@ fn ring_at(centre: vec3<f32>) -> Ring {
 const LOOKUP: &str = r#"
 @group(1) @binding(0) var<storage, read> band: State;
 
-// What each lens's picture is multiplied by, lens 0 first (issue #103,
-// stage 3). Rust twin: `Tone::split`.
-//
-// The split is symmetric because the seam cannot say which lens is wrong: a
-// correction of +x on one and -x on the other is the same picture at the
-// handover, and halving it is what keeps either hemisphere from carrying the
-// whole change. It is applied to the RGB the two planes decode to rather than
-// to the luma alone, so a hue is scaled with its own brightness and nothing
-// shifts colour.
-//
-// Exactly one on both sides when nothing has been measured, and by an
-// equality rather than by trusting `exp(0.0)`: a file with one lens stream, a
-// seam that has never correlated and every frame before the first reading all
-// reach that line, and every pixel they draw is the one stage 2 drew.
-fn tone_split() -> vec2<f32> {
-  let half = 0.5 * clamp(band.tone.log_gain, -LIMIT_LN, LIMIT_LN);
-  if half == 0.0 {
-    return vec2<f32>(1.0, 1.0);
-  }
-  return vec2<f32>(exp(half), exp(-half));
-}
-
 "#;
 
 const WGSL: &str = r#"
 // The same group the draw binds, so the band correlates the very pictures the
-// frame after it will sample. The chroma planes are not declared: a doubled
-// edge is geometry and geometry is in the luma, and a bind group may carry
-// bindings a shader has no use for.
+// frame after it will sample.
+//
+// The chroma planes are declared now and were not before. The correlation
+// still does not want them - a doubled edge is geometry, geometry is in the
+// luma, and chroma is a quarter of the resolution the search needs - but the
+// photometry does: what the two lenses disagree about that is NOT common to
+// all three channels is a hue step, and stage 3's one multiplier over three
+// channels cannot see it, let alone correct it (docs/research/chromatic.md,
+// and the owner's eye naming it the worst thing left at the seam). This is a
+// declaration only, at the numbers the draw already binds: no layout change,
+// no second sample of the luma, and nothing extra fetched on a frame whose
+// chromatic arm is off.
 @group(0) @binding(1) var luma0: texture_2d<f32>;
 @group(0) @binding(3) var luma1: texture_2d<f32>;
 @group(0) @binding(5) var samp: sampler;
@@ -1746,6 +1909,12 @@ const WGSL: &str = r#"
 // storage buffer out of the fragment stage, which not every device allows.
 @group(1) @binding(0) var<storage, read_write> band: State;
 @group(1) @binding(1) var<uniform> watch: Watch;
+
+// The legacy flow-input allocation. `strip` writes both rectified strips. The
+// test-only ONE X2 belt instrument reuses the front of a buffer with this same
+// binding. It rides in this group because the app's device reports
+// max_bind_groups = 2.
+@group(1) @binding(7) var<storage, read_write> strips: array<f32>;
 
 // Luma only. A doubled edge is geometry and geometry is in the luma, and the
 // chroma planes are a quarter of the resolution the correlation wants.
@@ -1796,6 +1965,9 @@ var<workgroup> textured: bool;
 var<workgroup> lit0: array<f32, THREADS>;
 var<workgroup> lit1: array<f32, THREADS>;
 var<workgroup> lit_n: array<f32, THREADS>;
+// The same lanes' chroma sums, Cb and Cr together. Two more workgroup arrays
+// and no change to the search's own memory: `front` and `back` still hold
+// luma only.
 // The pooling's own two, because it is a second entry point over the same
 // buffer and not a second use of the same patch: what these hold is one
 // number per LANE over the whole ring, not one per sample of one direction.
@@ -1832,6 +2004,31 @@ fn tap(index: u32, aim: mat3x3<f32>, ray: vec3<f32>) -> f32 {
   return luma_at(index, frame_uv(landing.pixel));
 }
 
+// The BELT strip's own sample of one lens, widened to Studio's fisheye
+// coverage cap (docs/research/studio-seam-re.md §44.2, const `BELT_COS_CAP`).
+// It is a SEPARATE function from `tap`: `tap`, `measure` and the whole shipped
+// draw keep the main render's `inside` (image-circle) boundary, so the stitch
+// and flow-OFF are byte-identical. Only the belt colour image widens.
+//
+// `landing.axis` is `mei`'s `p.z`, the cosine of the angle between the ray and
+// this lens's optical axis (`dir·lensAxis / |dir|`, since the aimed ray is
+// normalised). A ray is in the belt while that cosine is at or above the cap
+// (105.6° off axis); the sample is still the −1 sentinel truly off the
+// delivered frame, so the widening reaches the vignetted edge the main render
+// clips but not into the black beyond the real image circle. Where the real
+// lens content ends before the cap the UV bound stops it there.
+fn tap_belt(index: u32, aim: mat3x3<f32>, ray: vec3<f32>) -> f32 {
+  let landing = look(index, aim, ray);
+  if landing.axis < BELT_COS_CAP {
+    return -1.0;
+  }
+  let uv = frame_uv(landing.pixel);
+  if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+    return -1.0;
+  }
+  return luma_at(index, uv);
+}
+
 @compute @workgroup_size(THREADS)
 fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
   // Every `stride`-th direction, one further round each frame - and every
@@ -1848,6 +2045,13 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
     let b = f32(i32(i / u32(2 * HALF + 1)) - HALF) * STEP;
     front[i] = tap(0u, aim0, at.centre + a * at.perp + b * at.epi);
   }
+  // Every lane's share of `front` has to be written before lane 0 reads all of
+  // it. Without this barrier lane 0 can reach `has_picture` while other lanes
+  // are still filling their stride of the patch, which makes the contrast gate
+  // read uninitialised workgroup memory. It survives on this box because RADV
+  // runs a 64-thread workgroup as one wave in lockstep; it is wrong on any
+  // device with a narrower wave.
+  workgroupBarrier();
   if lane == 0u {
     textured = has_picture();
   }
@@ -1883,7 +2087,7 @@ fn measure(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
   // The two lenses' brightness on the SAME content, which is what the shift
   // above just established and what no earlier exposure measurement in this
   // project had. Cooperative, so it costs a seventh of a sample per lane.
-  photometry(lane, winner);
+  photometry(lane, winner, at, aim0, aim1);
   workgroupBarrier();
 
   if lane == 0u {
@@ -1904,9 +2108,17 @@ fn peak() -> u32 {
   return found;
 }
 
-// Each lane's share of the two patches' brightness at the winning shift,
-// clipped samples left out in pairs.
-fn photometry(lane: u32, found: u32) {
+
+// Each lane's share of the two patches' brightness AND colour at the winning
+// shift, clipped samples left out in pairs.
+//
+// The chroma is read here rather than at fetch time for one reason: the shift
+// is not known until the correlation has run, and a colour comparison taken at
+// the same screen position rather than the same content is measuring parallax.
+// So the luma comes out of the arrays the search already filled and the chroma
+// is sampled fresh at the two directions the winner names. Same samples, same
+// admissions, same count - three channels instead of one.
+fn photometry(lane: u32, found: u32, at: Ring, aim0: mat3x3<f32>, aim1: mat3x3<f32>) {
   let epi = found / PERP_SHIFTS;
   let perp = (found % PERP_SHIFTS) * u32(PERP_STEP);
   let width = u32(2 * HALF + 1);
@@ -1928,6 +2140,14 @@ fn photometry(lane: u32, found: u32) {
     sum0 += a;
     sum1 += b;
     count += 1.0;
+
+    // The front sample's own direction, rebuilt exactly as the fetch built it,
+    // and the back sample's the same with the winner's shift folded in - which
+    // is what makes these two the same content.
+    let pa = f32(i32(column) - HALF) * STEP;
+    let pb = f32(i32(row) - HALF) * STEP;
+    let qa = f32(i32(perp + column) - HALF - PERP_STEPS * PERP_STEP) * STEP;
+    let qb = f32(i32(row + epi) - HALF + EPI_FAR) * STEP;
   }
   lit0[lane] = sum0;
   lit1[lane] = sum1;
@@ -2146,21 +2366,9 @@ fn parabola(minus: f32, best: f32, plus: f32) -> f32 {
   return clamp(0.5 * (minus - plus) / curve, -1.0, 1.0);
 }
 
-// What the two lenses' pictures of this patch differ by in brightness at the
-// shift that made them the same content, as a natural log, or the reading
-// this direction already had where clipping left no pair to read.
-//
-// A ratio of MEANS rather than a mean of ratios or a regression slope: it is
-// the statistic the correction inverts. What the pass applies is one
-// multiplier over a whole hemisphere, so the number it wants is the one whose
-// inverse makes the two patches' totals equal, and that is this and nothing
-// else. The instrument prints the other two beside it
-// (`kjerag-spike --bin expose`) precisely so that claim can be checked rather
-// than believed.
-//
-// In the video's own gamma-coded luma, and the correction is applied in that
-// same space, so no transfer function is assumed at either end: what is
-// measured is a brightness match and it is inverted as one.
+
+
+
 fn read_photometry(held: ptr<function, Cell>) {
   var sum0 = 0.0;
   var sum1 = 0.0;
@@ -2179,6 +2387,7 @@ fn read_photometry(held: ptr<function, Cell>) {
   (*held).tone = log(sum1 / sum0);
   (*held).lit = sum0 / count;
 }
+
 
 // The pooled exposure, over the whole ring and over media time. Rust twin:
 // `pooled_gain`.
@@ -2346,6 +2555,167 @@ fn ease(seconds: f32, tau: f32) -> f32 {
   }
   return seconds / (tau + seconds);
 }
+
+// The two rectified seam line-image strips, one invocation per strip pixel
+// (docs/research/studio-seam-re.md §35). It unrolls the seam neighbourhood: the
+// column is azimuth phi round the seam circle, the row is signed angular offset
+// across the seam along the epipolar axis, and each lens is tapped at the body-
+// frame ray that lands there. A lens with no picture of that ray leaves `tap`'s
+// negative sentinel, so a reader can tell no-picture from black.
+//
+// It reuses `ring_of`, `body_to_lens` and `tap` exactly as `measure` does, so
+// the strip is rectified through the very calibration the picture is drawn
+// with. Live legacy flow and `ScenePipeline::band_strips` share this producer.
+// It writes only the flow-input buffer, so the dispatch itself moves no pixel
+// the draw or the measurement produces.
+@compute @workgroup_size(THREADS)
+fn strip(@builtin(global_invocation_id) id: vec3<u32>) {
+  let index = id.x;
+  if index >= STRIP_W * STRIP_H {
+    return;
+  }
+  let col = index % STRIP_W;
+  let row = index / STRIP_W;
+  // Studio's belt law, decoded instruction-exact from projectPanoPointToBelt
+  // (0x182899850, studio-seam-re.md §37/§41 item 2): the belt is a
+  // ROTATED-EQUIRECT frame spanning the FULL colatitude, not the ±6deg band the
+  // refuted first strip built. Along-seam = longitude, across-seam = FULL
+  // COLATITUDE about body-z. NO half-pixel on EITHER axis (§37/adversarial):
+  //   phi = 2*pi - col*2*pi/W,  theta = row*pi/(H-1)
+  // dir = (cos phi sin theta, sin phi sin theta, cos theta). Seam = belt EQUATOR
+  // (theta = pi/2 = the middle row); theta<pi/2 is lens 0's hemisphere,
+  // theta>pi/2 is lens 1's. R = identity, DISCLOSED (§42.2): the
+  // belt-equator=seam invariant fixes the across-seam scale; R's calibration
+  // rotation is unread (9 floats, gdb-infeasible) and only reorients globally.
+  let phi = TAU - f32(col) / f32(STRIP_W) * TAU;
+  let theta = f32(row) / f32(STRIP_H - 1u) * (TAU * 0.5);
+  let st = sin(theta);
+  let dir = vec3<f32>(cos(phi) * st, sin(phi) * st, cos(theta));
+  // `tap_belt`, not `tap`: the belt is populated to Studio's fisheye cap
+  // (§44.2), the wide overlap the DIS flow reads across the seam. The main
+  // render's narrower `inside` boundary is untouched.
+  strips[index] = tap_belt(0u, body_to_lens(0u), dir);
+  strips[STRIP_W * STRIP_H + index] = tap_belt(1u, body_to_lens(1u), dir);
+}
+"#;
+
+/// GPU semantic instrument for the recovered selected ONE X2 line-image law
+/// (docs/research/studio-seam-re.md §114D/K).
+///
+/// Native Panotype 5 projects each lens's own source through its persistent
+/// `+0x8d0/+0x930` base map into a 3240-row by 180-column `CV_8UC1` staging
+/// belt, then reduces every aligned 3-by-3 cell with `INTER_AREA` into the
+/// 1080-by-60 solver input. This test-only entry folds the two steps: it evaluates
+/// the nine staging samples of one solver pixel and reduces them, so the
+/// readback carries 1080 by 60 rather than 3240 by 180. The integer reduction
+/// is exact: `(sum + 4) / 9` on the nine truncated bytes.
+///
+/// The sampler implements the read coordinate, gate, clamp and truncation law:
+/// the base map is read at `(col/3, row/3)` with no half-pixel, and the ordered
+/// `u > 0 && v > 0` gate precedes source sampling. Ordinary WGSL may contract
+/// or reassociate its bilinear expressions relative to the CPU oracle's READ
+/// FMA order. The complete synthetic corpus requires a maximum error of one
+/// code and prints the mismatch census for each adapter. A half-pixel negative
+/// control differs by as much as 84 codes. This is therefore a bounded
+/// semantic instrument, not a bit-exact native payload claim.
+///
+/// Rust twin: `one_xs_belt::sample_source_belts` followed by
+/// `SourceBelts::reduce_area_3x3`.
+#[cfg(test)]
+const ONE_XS_BELT: &str = r#"
+@group(1) @binding(8) var<storage, read> xs_base: array<vec2<f32>>;
+
+fn xs_base_at(lens: u32, row: i32, col: i32) -> vec2<f32> {
+  let r = clamp(row, 0, i32(XS_ROWS) - 1);
+  let c = clamp(col, 0, i32(XS_COLS) - 1);
+  return xs_base[lens * XS_ROWS * XS_COLS + u32(r) * XS_COLS + u32(c)];
+}
+
+// Clamp-to-edge bilinear on one lens's persistent base map, no half-pixel.
+// Rust twin: `RetainedBaseMaps::sample_clamped`.
+fn xs_base_sample(lens: u32, row: f32, col: f32) -> vec2<f32> {
+  let r = clamp(row, 0.0, f32(XS_ROWS) - 1.0);
+  let c = clamp(col, 0.0, f32(XS_COLS) - 1.0);
+  let r0 = floor(r);
+  let c0 = floor(c);
+  let fr = r - r0;
+  let fc = c - c0;
+  let ri = i32(r0);
+  let ci = i32(c0);
+  let a = xs_base_at(lens, ri, ci);
+  let b = xs_base_at(lens, ri, ci + 1);
+  let cc = xs_base_at(lens, ri + 1, ci);
+  let dd = xs_base_at(lens, ri + 1, ci + 1);
+  let top = a + (b - a) * fc;
+  let bot = cc + (dd - cc) * fc;
+  return top + (bot - top) * fr;
+}
+
+// One delivered-frame texel as the byte it is. The Y plane is R8, so scaling
+// the unorm back by 255 recovers the stored byte exactly.
+fn xs_texel(lens: u32, row: i32, col: i32, dim: vec2<i32>) -> f32 {
+  let r = clamp(row, 0, dim.y - 1);
+  let c = clamp(col, 0, dim.x - 1);
+  if lens == 0u {
+    return round(textureLoad(luma0, vec2<i32>(c, r), 0).r * 255.0);
+  }
+  return round(textureLoad(luma1, vec2<i32>(c, r), 0).r * 255.0);
+}
+
+// One staging sample: the ordered strict-positive gate, then clamp bilinear on
+// the lens's own source, truncated to a byte. Rust twin: `sample_source_uv`.
+fn xs_source(lens: u32, uv: vec2<f32>) -> f32 {
+  if !(uv.x > 0.0 && uv.y > 0.0) {
+    return 0.0;
+  }
+  var dim: vec2<i32>;
+  if lens == 0u {
+    dim = vec2<i32>(textureDimensions(luma0));
+  } else {
+    dim = vec2<i32>(textureDimensions(luma1));
+  }
+  let x = clamp(uv.x * f32(dim.x), 0.0, f32(dim.x) - 1.0);
+  let y = clamp(uv.y * f32(dim.y), 0.0, f32(dim.y) - 1.0);
+  let x0 = floor(x);
+  let y0 = floor(y);
+  let fx = x - x0;
+  let fy = y - y0;
+  let xi = i32(x0);
+  let yi = i32(y0);
+  let a = xs_texel(lens, yi, xi, dim);
+  let b = xs_texel(lens, yi, xi + 1, dim);
+  let c = xs_texel(lens, yi + 1, xi, dim);
+  let d = xs_texel(lens, yi + 1, xi + 1, dim);
+  let top = a + (b - a) * fx;
+  let bot = c + (d - c) * fx;
+  // Native `fcvtzs` truncates this nonnegative result toward zero.
+  return floor(top + (bot - top) * fy);
+}
+
+@compute @workgroup_size(THREADS)
+fn one_xs_belt(@builtin(global_invocation_id) id: vec3<u32>) {
+  let index = id.x;
+  if index >= XS_ROWS * XS_COLS {
+    return;
+  }
+  let row = index / XS_COLS;
+  let col = index % XS_COLS;
+  let area = XS_AREA * XS_AREA;
+  for (var lens = 0u; lens < 2u; lens += 1u) {
+    var sum = 0u;
+    for (var dr = 0u; dr < XS_AREA; dr += 1u) {
+      for (var dc = 0u; dc < XS_AREA; dc += 1u) {
+        let srow = row * XS_AREA + dr;
+        let scol = col * XS_AREA + dc;
+        let uv = xs_base_sample(lens, f32(srow) / f32(XS_AREA), f32(scol) / f32(XS_AREA));
+        sum += u32(xs_source(lens, uv));
+      }
+    }
+    // OpenCV's exact integer-ratio INTER_AREA: the block mean, rounded half
+    // away from zero, which for nine bytes is `(sum + 4) / 9`.
+    strips[lens * XS_ROWS * XS_COLS + index] = f32((sum * 2u + area) / (area * 2u));
+  }
+}
 "#;
 
 // ------------------------------------------------------------ arithmetic
@@ -2380,6 +2750,51 @@ mod tests {
 
     /// The fixture's own baseline: 33 mm, dominated by z.
     const BASELINE: [f32; 3] = [0.000_2, -0.000_1, -0.033_284];
+
+    #[test]
+    fn the_one_xs_belt_entry_exists_only_in_the_test_instrument_module() {
+        use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
+
+        let parse = |band: String| {
+            let source = format!("{}\n{band}", crate::projection::wgsl());
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("ONE X2 belt WGSL did not parse: {error}"));
+            Validator::new(ValidationFlags::all(), Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|error| panic!("ONE X2 belt WGSL did not validate: {error}"));
+            module
+        };
+        assert!(
+            parse(wgsl())
+                .entry_points
+                .iter()
+                .all(|entry| entry.name != "one_xs_belt")
+        );
+        let instrument = parse(one_xs_belt_wgsl());
+        assert!(
+            instrument
+                .entry_points
+                .iter()
+                .any(|entry| entry.name == "one_xs_belt")
+        );
+        let base = instrument
+            .global_variables
+            .iter()
+            .map(|(_, variable)| variable)
+            .find(|variable| {
+                variable.binding.as_ref().is_some_and(|binding| {
+                    binding.group == 1 && binding.binding == ONE_XS_BASE_BINDING
+                })
+            })
+            .expect("ONE X2 instrument has no explicit retained-map binding");
+        assert_eq!(
+            base.space,
+            wgpu::naga::AddressSpace::Storage {
+                access: wgpu::naga::StorageAccess::LOAD,
+            },
+            "the ONE X2 retained maps must be read-only storage",
+        );
+    }
 
     #[test]
     fn a_distance_displaces_content_towards_the_front_lens_at_every_azimuth() {
@@ -2787,7 +3202,7 @@ mod tests {
     /// and the answer is the overlap itself.
     ///
     /// **What it asserts now**, and it is a real change to a real picture: the
-    /// X2 overlaps by 9.19 degrees, which is over the 8 the picture asks for,
+    /// X2 overlaps by 9.19 degrees, which is over the 6 the picture asks for,
     /// so **the ONE X2 draws the full 8.00** where it drew 4.18. Every X4 Air
     /// in the corpus was already roomy and is roomier; all seven files now
     /// afford more than the ask, so the clamp fires on nothing in the corpus
@@ -2827,13 +3242,13 @@ mod tests {
         // own calibration (the owner's captures, 2026-08-05), and what each
         // one draws at the 8 degrees the picture asks for.
         for (file, overlap, draws) in [
-            ("VID_20251018_191318_00_002 (ONE X2)", 9.19f32, 8.0f32),
-            ("VID_20260501_183417_00_002", 14.56, 8.0),
-            ("VID_20260725_194424_00_002", 14.60, 8.0),
-            ("VID_20260802_191029_00_002", 14.61, 8.0),
-            ("VID_20260526_191025_00_004", 14.68, 8.0),
-            ("VID_20260714_193252_00_006", 14.89, 8.0),
-            ("VID_20260725_194424_00_001", 15.02, 8.0),
+            ("VID_20251018_191318_00_002 (ONE X2)", 9.19f32, 6.0f32),
+            ("VID_20260501_183417_00_002", 14.56, 6.0),
+            ("VID_20260725_194424_00_002", 14.60, 6.0),
+            ("VID_20260802_191029_00_002", 14.61, 6.0),
+            ("VID_20260526_191025_00_004", 14.68, 6.0),
+            ("VID_20260714_193252_00_006", 14.89, 6.0),
+            ("VID_20260725_194424_00_001", 15.02, 6.0),
         ] {
             let width = crate::projection::CROSSOVER_DEG.min(overlap);
             assert!(

@@ -4,13 +4,18 @@
 //!
 //! ```sh
 //! # the decomposition round the ring: per channel, per content class, with every control
-//! cargo run --release -p kjerag-spike --bin colour -- <file.insv> from=488.855 count=8
+//! cargo run --release -p kjerag-spike --bin colour -- <file.insv> \
+//!   from=488.855 count=8 fit=1
 //! # what a drawn view's three channels do as they cross the seam - the acceptance evidence
 //! cargo run --release -p kjerag-spike --bin colour -- <file.insv> mode=profile \
 //!   from=488.855 yaw=-5.17 pitch=2.56 fov=60 lock=1 out=scratch/stage7
 //! # the same statistic on somebody else's stitch, from an equirectangular export
 //! cargo run --release -p kjerag-spike --bin colour -- <export.mp4> mode=studio at=12.0
 //! ```
+//!
+//! `fit=1` is a disclosed research-only alignment for comparing the same
+//! content in the two source lenses. It does not represent or feed the player
+//! seam. Factory calibration is the default and the only automatic base.
 //!
 //! **`lock=1` is written out because it is the default and a bare `yaw=` does
 //! not say which frame it is in.** Since 2026-08-06 that frame is world-fixed:
@@ -675,8 +680,10 @@ fn slope(columns: &[Column], channel: usize) -> Option<f64> {
 
 // ------------------------------------------------------------ the run
 
-/// The calibration this file is drawn through, corrected the way the app
-/// corrects it.
+/// The calibration this measurement samples through.
+///
+/// Factory is the default. `fit=1` explicitly asks this research instrument
+/// for a per-file content fit; the player never takes this branch.
 fn calibrated(options: &Options) -> Fallible<(CalibrationSet, Vec<Lens>, Size)> {
     let calibration = CalibrationSet::from_insv(&options.input)?;
     let frame = Size::new(calibration.dimension.width, calibration.dimension.height);
@@ -689,7 +696,7 @@ fn calibrated(options: &Options) -> Fallible<(CalibrationSet, Vec<Lens>, Size)> 
     let Some(fitted) = seam::fit_reported(&files, &lenses, frame, &seam::Plan::default()) else {
         return Ok((calibration, lenses, frame));
     };
-    println!("seam:   {}", fitted.describe(0.0));
+    println!("fit:    research-only per-file {}", fitted.describe(0.0));
     let corrected = fitted.fit.applied(&lenses);
     Ok((calibration, corrected, frame))
 }
@@ -1331,7 +1338,6 @@ fn profile(options: &Options) -> Fallible<()> {
             true => Horizon::Locked,
             false => Horizon::Free,
         });
-        scene.fit_seam(true);
         scene.use_table(options.table);
         let mut shot = None;
         for _ in 0..options.count.max(1) {
@@ -2283,7 +2289,6 @@ fn trace(options: &Options) -> Fallible<()> {
         true => Horizon::Locked,
         false => Horizon::Free,
     });
-    scene.fit_seam(true);
     scene.use_table(options.table);
     let size = Size::new(256, 256);
     // Per frame: the three gains, then the field evaluated at four azimuths a
@@ -2551,7 +2556,7 @@ impl Options {
             places: 1,
             patches: 72,
             keep: 0.80,
-            fit: true,
+            fit: false,
             verbose: false,
             yaw: 90.0,
             pitch: 0.0,
@@ -2583,22 +2588,9 @@ impl Options {
                 Some(("patches", value)) => options.patches = value.parse()?,
                 Some(("keep", value)) => options.keep = value.parse()?,
                 Some(("table", value)) => options.table = kjerag_spike::seam_table(value)?,
-                // Two paths only, and anything else is refused rather than
-                // read as one of them: `value != "factory"` took `seam=pool`
-                // and every typo for `file` and drew a pose nobody asked for.
-                Some(("seam", value)) => {
-                    options.fit = match value {
-                        "factory" => false,
-                        "file" => true,
-                        _ => {
-                            return Err(format!(
-                                "this instrument fits the file or leaves the factory \
-                                 calibration alone: seam=file or seam=factory, not {value}"
-                            )
-                            .into());
-                        }
-                    }
-                }
+                // A disclosed research operation, never an automatic seam
+                // base. Factory is the default.
+                Some(("fit", value)) => options.fit = value.parse::<u32>()? != 0,
                 Some(("verbose", value)) => options.verbose = value.parse::<u32>()? != 0,
                 Some(("yaw", value)) => options.yaw = value.parse()?,
                 Some(("pitch", value)) => options.pitch = value.parse()?,
@@ -2683,6 +2675,26 @@ fn pair(value: &str) -> Fallible<(f64, f64)> {
 }
 
 const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|studio|trace] \
-     [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [seam=file|factory] [verbose=1] \
+     [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [fit=1] [verbose=1] \
      [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg] \
      [rows=lo:hi] [cols=lo:hi] [box=left:top:right:bottom] [table=table.txt]";
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Fallible<Options> {
+        Options::parse(
+            std::iter::once("capture.insv")
+                .chain(extra.iter().copied())
+                .map(str::to_owned),
+        )
+    }
+
+    #[test]
+    fn factory_is_the_default_and_file_fit_is_explicit() {
+        assert!(!parse(&[]).unwrap().fit);
+        assert!(parse(&["fit=1"]).unwrap().fit);
+        assert!(parse(&["seam=file"]).is_err());
+    }
+}

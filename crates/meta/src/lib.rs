@@ -121,16 +121,21 @@ impl From<prost::DecodeError> for Error {
     }
 }
 
-/// The real X4 Air trailer with serial number, GPS and capture times
-/// stripped, as checked in by the format study. Both halves of this
-/// module test against it: the calibration maths directly, and the
-/// trailer walk by re-encoding it into a synthetic `.insv`.
+/// Real calibration metadata with serial number, GPS and capture times
+/// stripped, as checked in by the format study. Both halves of this module
+/// test against it: the calibration maths directly, and the trailer walk by
+/// re-encoding it into a synthetic `.insv`.
 #[cfg(test)]
 mod fixture {
     pub const JSON: &str = include_str!("../../../docs/research/x4air-calibration.json");
+    pub const ONE_X2_JSON: &str = include_str!("../../../docs/research/onex2-calibration.json");
 
     pub fn metadata() -> super::trailer::ExtraMetadata {
         serde_json::from_str(JSON).expect("fixture matches the metadata shape")
+    }
+
+    pub fn one_x2_metadata() -> super::trailer::ExtraMetadata {
+        serde_json::from_str(ONE_X2_JSON).expect("ONE X2 fixture matches the metadata shape")
     }
 }
 

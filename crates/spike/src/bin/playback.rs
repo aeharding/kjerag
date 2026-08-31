@@ -219,12 +219,10 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
     println!("gpu:    {}", gpu.adapter.get_info().name);
     println!("device: {}", dmabuf::device_report(&gpu.device));
 
-    // An instrument has no stored calibration to read: the app keeps that in
-    // its own config, and this is not the app. So the seam is fitted off this
-    // file, which is what every instrument did before the calibration moved
-    // to the camera (issue #48).
+    // An instrument has no stored calibration to read, and this is not the
+    // app. It draws the factory calibration, the parity base: the per-capture
+    // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
     let mut scene = Scene::open(input)?;
-    scene.fit_seam(true);
     if let (Some(forced), Some(file)) = (forced(readout), scene.readout()) {
         scene.set_readout(Some(forced(file)));
     }

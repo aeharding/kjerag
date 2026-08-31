@@ -29,20 +29,16 @@
 //! own frame. A locked view answers a different question and would have
 //! silently changed what every command in that section renders.
 //!
-//! `seam=` picks which of the app's three seam paths the render draws with:
-//! `file` fits off this file's own frames and is the default, because that is
-//! what every command in 4.8, 4.9 and 6.8 was measured with; `factory` leaves
-//! the camera's own calibration alone; and five numbers apply a **stored
-//! per-camera calibration** through `Scene::use_seam`, which is the path the
-//! app takes at open and the only way to look at what a pilot's own config
-//! draws. Whichever path is taken prints what it applied, so a render can be
-//! checked against what is stored rather than assumed to match it.
+//! `seam=` picks which seam base the render draws with: `factory` leaves the
+//! camera's own calibration alone and is the default and the parity base; five
+//! numbers apply a **stored per-camera calibration** through `Scene::use_seam`,
+//! the manual path for RE and testing. Whichever is taken prints what it
+//! applied, so a render can be checked against what is stored rather than
+//! assumed to match it.
 //!
-//! `seam=pool` is those five numbers read out of this box's own saved state
-//! rather than typed, which is the pose the app itself would draw this file
-//! with today (`crates/spike/src/seam.rs`). Prefer it to a typed copy in
-//! anything meant to stay true: a copy is a pose taken on a date, and the
-//! app's answer moves as its pool grows.
+//! The old `file` (fit off this file's own frames) and `pool` (the app's saved
+//! per-camera fit) paths were the non-parity mechanism and were removed
+//! (2026-08-15); the app now draws `factory`.
 //!
 //! PNGs land in ./scratch/, which is gitignored: frames from real footage
 //! are personal video and this repo is public.
@@ -120,7 +116,7 @@ impl Options {
         let mut edge = DEFAULT_EDGE;
         let mut format = FORMAT;
         let mut horizon = Horizon::Free;
-        let mut seam = Seam::File;
+        let mut seam = Seam::Factory;
         let mut out = None;
 
         for arg in args {
@@ -144,7 +140,7 @@ impl Options {
                         _ => Horizon::Locked,
                     }
                 }
-                "seam" => seam = Seam::parse(value, &input)?,
+                "seam" => seam = Seam::parse(value)?,
                 "out" => out = Some(value.to_owned()),
                 _ => return Err(format!("unknown argument {key}. {USAGE}").into()),
             }
@@ -177,7 +173,7 @@ impl Options {
 
 const USAGE: &str = "usage: reframe <file.insv> [yaw=deg] [pitch=deg] [fov=deg] \
      [frame=n | time=seconds] [size=px] [srgb=1] [lock=1] \
-     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] [out=name.png]";
+     [seam=factory|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] [out=name.png]";
 
 /// The app's copied view line is a command line for this binary, and the only
 /// way to know that is to hand one to the parser above.

@@ -592,6 +592,138 @@ mod tests {
         assert!((calibration.lenses[1].intrinsics.cx - 1935.35).abs() < 0.01);
     }
 
+    /// The PII-free ONE X2 fixture takes the whole production path: JSON into
+    /// the protobuf record, the camera's tight unindexed trailer walk, and
+    /// `offset_v3` into delivered-frame calibration. This prevents a hand-made
+    /// renderer fixture from silently disagreeing with what the owner's file
+    /// actually parses to.
+    #[test]
+    fn the_one_x2_fixture_yields_its_exact_calibration_and_readout() {
+        let trailer = trailer_of(Capture::of(&fixture::one_x2_metadata()).insv()).unwrap();
+        let calibration = CalibrationSet::from_trailer(&trailer).unwrap();
+
+        assert_eq!(calibration.camera_model, "Insta360 ONE X2");
+        assert_eq!(calibration.firmware, "v1.0.62_build2");
+        assert_eq!(
+            calibration.dimension,
+            crate::Size {
+                width: 2880,
+                height: 2880,
+            }
+        );
+        assert_eq!(
+            calibration.calibration_canvas,
+            crate::Size {
+                width: 6080,
+                height: 3040,
+            }
+        );
+        assert_eq!(calibration.lenses.len(), 2);
+        assert_eq!(
+            calibration
+                .lenses
+                .iter()
+                .map(|lens| lens.crop_centre.map(f64::to_bits))
+                .collect::<Vec<_>>(),
+            [
+                [0x4096_a7ae_147a_e148, 0x4096_a847_ae14_7ae1],
+                [0x4096_7cf5_c28f_5c28, 0x4096_5dae_147a_e148],
+            ]
+        );
+        assert_eq!(
+            calibration
+                .lenses
+                .iter()
+                .map(|lens| lens.crop_centre.map(|value| (value as f32).to_bits()))
+                .collect::<Vec<_>>(),
+            [[0x44b5_3d71, 0x44b5_423d], [0x44b3_e7ae, 0x44b2_ed71],]
+        );
+        assert_eq!(
+            calibration
+                .lenses
+                .iter()
+                .map(|lens| lens.image_circle_centre.map(f32::to_bits))
+                .collect::<Vec<_>>(),
+            [[0x44b5_3d71, 0x44b5_423d], [0x44b3_e7b0, 0x44b2_ed71],]
+        );
+
+        let expected = [
+            (
+                [1.72859, 2326.25, 2325.95, 1_449.397_894_736_842, 1449.54],
+                [
+                    0.226_921_54,
+                    -0.144_496_89,
+                    -0.978_097_2,
+                    -0.000_850_27,
+                    0.000_308_11,
+                ],
+                [0.957, -0.884, -179.717],
+                [0.0, 0.0, 0.0],
+            ),
+            (
+                [1.72859, 2321.46, 2321.70, 1439.28, 1_431.871_578_947_368],
+                [
+                    0.251_100_33,
+                    -0.283_471_35,
+                    -0.744_952_14,
+                    0.000_647_61,
+                    -0.000_561_68,
+                ],
+                [-0.889, -1.236, 0.963],
+                [0.000_292, -0.001_511, -0.021_103],
+            ),
+        ];
+        for (lens, (intrinsics, distortion, angles, translation)) in
+            calibration.lenses.iter().zip(expected)
+        {
+            assert_eq!(lens.lens_type, 41);
+            assert_eq!(lens.model, crate::Model::Mei);
+            assert!(lens.mounting.is_none());
+
+            let actual_intrinsics = [
+                lens.intrinsics.xi,
+                lens.intrinsics.fx,
+                lens.intrinsics.fy,
+                lens.intrinsics.cx,
+                lens.intrinsics.cy,
+            ];
+            let actual_distortion = [
+                lens.distortion.k1,
+                lens.distortion.k2,
+                lens.distortion.k3,
+                lens.distortion.p1,
+                lens.distortion.p2,
+            ];
+            let actual_angles = [lens.pose.yaw_deg, lens.pose.pitch_deg, lens.pose.roll_deg];
+            for (actual, expected) in actual_intrinsics
+                .into_iter()
+                .chain(actual_distortion)
+                .chain(actual_angles)
+                .chain(lens.pose.translation_m)
+                .zip(
+                    intrinsics
+                        .into_iter()
+                        .chain(distortion)
+                        .chain(angles)
+                        .chain(translation),
+                )
+            {
+                assert!(
+                    (actual - expected).abs() <= 1e-12,
+                    "{actual} is not the fixture value {expected}"
+                );
+            }
+        }
+
+        assert_eq!(calibration.gyro.encoding, crate::GyroEncoding::Scaled);
+        assert_eq!(calibration.gyro.imu_orientation, "Zxy");
+        assert!((calibration.rolling_shutter_ms - 23.516_071_319_580_078).abs() <= 1e-12);
+        let readout = calibration.readout();
+        assert!((readout.seconds - 0.023_516_071_319_580_08).abs() <= 1e-15);
+        assert_eq!(readout.sweep, crate::Sweep::Down);
+        assert_eq!(readout.sweep.axis(), [0.0, 1.0]);
+    }
+
     /// Records 4 and 12 are two lenses and stay two. Reading them into one
     /// key, as telemetry-parser does, leaves lens 0's shutters replaced by
     /// lens 1's and no way to tell that has happened: here that would show

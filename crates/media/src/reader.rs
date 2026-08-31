@@ -28,6 +28,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ffmpeg_next as ff;
@@ -156,6 +157,100 @@ pub struct Frames {
     /// container's answer and not the descriptor's: the DRM format says how
     /// wide a sample is and nothing at all about what range it is in.
     pub samples: Samples,
+    /// Opaque identity of this exact delivered lens pair.
+    ///
+    /// Index and timestamp repeat after a seek and across captures. This
+    /// token is minted only after every lane has been aligned and mapped, so
+    /// a consumer can bind derived work to these exact delivered surfaces
+    /// without retaining the decoder surfaces themselves.
+    pub(crate) stamp: FrameStamp,
+}
+
+/// Identity of one exact delivery of an aligned lens pair.
+///
+/// The readable index and timestamp are report fields. Equality additionally
+/// requires the private allocation minted for this delivery, so seeking back
+/// to the same instant or opening another capture cannot make an old result
+/// look current. A separate private identity is shared by deliveries from one
+/// reader until its next seek attempt; callers can compare it but cannot mint
+/// it. A clone retains both allocations without retaining any decoded surface.
+#[derive(Clone)]
+pub struct FrameStamp {
+    pair: Arc<()>,
+    decode_epoch: Arc<()>,
+    index: u64,
+    timestamp: Duration,
+}
+
+impl FrameStamp {
+    #[cfg(test)]
+    pub(crate) fn new(index: u64, timestamp: Duration) -> Self {
+        DecodeEpoch::new().stamp(index, timestamp)
+    }
+
+    /// Whether two deliveries came from one reader without an intervening
+    /// seek attempt.
+    ///
+    /// This is source continuity evidence, not frame adjacency. Callers must
+    /// still compare the readable indices before advancing sequential state.
+    pub fn same_decode_epoch(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.decode_epoch, &other.decode_epoch)
+    }
+
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        self.timestamp
+    }
+}
+
+/// Private issuer for one uninterrupted `Reader` run.
+///
+/// Opening a reader creates one issuer. A seek attempt replaces it before
+/// touching demuxer or decoder state, so a failed or partial seek cannot make
+/// a later delivery attest continuity with the position it tried to leave.
+struct DecodeEpoch(Arc<()>);
+
+impl DecodeEpoch {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn stamp(&self, index: u64, timestamp: Duration) -> FrameStamp {
+        FrameStamp {
+            pair: Arc::new(()),
+            decode_epoch: self.0.clone(),
+            index,
+            timestamp,
+        }
+    }
+}
+
+impl PartialEq for FrameStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+            && self.timestamp == other.timestamp
+            && Arc::ptr_eq(&self.pair, &other.pair)
+    }
+}
+
+impl Eq for FrameStamp {}
+
+impl std::fmt::Debug for FrameStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameStamp")
+            .field("index", &self.index)
+            .field("timestamp", &self.timestamp)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Frames {
+    pub fn stamp(&self) -> FrameStamp {
+        self.stamp.clone()
+    }
 }
 
 impl std::fmt::Debug for Frames {
@@ -193,6 +288,8 @@ pub struct Reader {
     /// first picture comes out, which is 24 ms of a 46 ms scrub on this
     /// camera. A seek gives that up once and fills the pipeline behind it.
     landing: bool,
+    /// Identity shared by deliveries since open or the most recent seek attempt.
+    decode_epoch: DecodeEpoch,
     /// Held so the device outlives the decoders that reference it.
     _hw: HwDevice,
 }
@@ -372,6 +469,27 @@ impl Reader {
         Self::over(sources, hw)
     }
 
+    /// Opens an already selected two-file capture in lens order.
+    ///
+    /// This is the descriptor-bound path used by offline instruments: the
+    /// caller has already selected and authenticated both leaves, so this
+    /// does not rediscover either one by name. Unlike [`Reader::open_with`],
+    /// disagreement is an error rather than a one-lens fallback.
+    pub fn open_pair(first: &Path, second: &Path) -> Fallible<Self> {
+        ff::init()?;
+        let hw = HwDevice::vaapi()?;
+        let first = Opened::new(first)?;
+        let second = Opened::new(second)?;
+        let shape = first.shape().ok_or("first file has no video stream")?;
+        if !second
+            .shape()
+            .is_some_and(|second| shape.pairs_with(second))
+        {
+            return Err("the explicitly selected files are not two lenses of one capture".into());
+        }
+        Self::over(vec![first, second], hw)
+    }
+
     /// One decoder per video stream of every source, and the timing the
     /// whole capture is read on.
     fn over(sources: Vec<Opened>, hw: HwDevice) -> Fallible<Self> {
@@ -426,6 +544,7 @@ impl Reader {
             lookahead: 0,
             skip_before: 0,
             landing: false,
+            decode_epoch: DecodeEpoch::new(),
             _hw: hw,
         })
     }
@@ -598,6 +717,11 @@ impl Reader {
     /// of that table would buy nothing;
     /// `cargo run --release -p kjerag-spike --bin seek` is the measurement.
     pub fn seek(&mut self, at: Cue, accuracy: Accuracy) -> Fallible<()> {
+        // Rotate before the first mutation. A seek can fail after moving one
+        // source or flushing part of the retained state; any later delivery
+        // must then refuse continuity with the position this call tried to
+        // leave.
+        self.decode_epoch = DecodeEpoch::new();
         let index = at.index(self.timing);
         // Stream index -1 means the timestamp is in AV_TIME_BASE units,
         // which is microseconds, and `..ts` asks for the keyframe at or
@@ -626,6 +750,32 @@ impl Reader {
             // Nothing to walk to: the picture is whatever the seek landed on.
             Accuracy::Keyframe => 0,
         };
+        self.landing = true;
+        Ok(())
+    }
+
+    /// Start a causal video replay at exact frame zero while positioning the
+    /// independent sound demuxer at the eventual target.
+    ///
+    /// Video must traverse every frame for a sequential consumer. Audio has
+    /// no such estimator state; filling its bounded ring from frame zero
+    /// would leave stale sound waiting when the target finally completed.
+    pub(crate) fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()> {
+        self.decode_epoch = DecodeEpoch::new();
+        let video_target = self.timing.time_of(0).as_micros() as i64;
+        for source in &mut self.sources {
+            source.input.seek(video_target, ..video_target)?;
+            source.drained = false;
+        }
+        for lane in &mut self.lanes {
+            lane.decoder.flush();
+            lane.queue.clear();
+        }
+        if let Some(track) = &mut self.track {
+            let target = self.timing.time_of(audio_at.index(self.timing)).as_micros() as i64;
+            track.seek(target)?;
+        }
+        self.skip_before = 0;
         self.landing = true;
         Ok(())
     }
@@ -709,6 +859,7 @@ impl Reader {
                     lenses,
                     size: self.size,
                     samples: self.samples,
+                    stamp: self.decode_epoch.stamp(index, timestamp),
                 }));
             }
             // Decoded on the way to a cue. Dropping it here, before the map,
@@ -947,6 +1098,45 @@ fn partner(path: &Path, first: &Opened, alongside: &[PathBuf]) -> Option<Opened>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_stamp_names_one_delivery_not_one_timestamp() {
+        let at = Duration::from_micros(212_512_300);
+        let delivered = FrameStamp::new(6_369, at);
+        let same_delivery = delivered.clone();
+        let reseeked = FrameStamp::new(6_369, at);
+
+        assert_eq!(delivered, same_delivery);
+        assert_ne!(delivered, reseeked);
+        assert_ne!(delivered, FrameStamp::new(6_370, at));
+        assert_ne!(
+            delivered,
+            FrameStamp::new(6_369, at + Duration::from_micros(1))
+        );
+    }
+
+    #[test]
+    fn a_decode_epoch_names_one_uninterrupted_reader_run_not_adjacency() {
+        let epoch = DecodeEpoch::new();
+        let first = epoch.stamp(6_369, Duration::from_micros(212_512_300));
+        let next = epoch.stamp(6_370, Duration::from_micros(212_545_667));
+        let gap = epoch.stamp(6_400, Duration::from_micros(213_546_667));
+        let after_seek = DecodeEpoch::new().stamp(next.index(), next.timestamp());
+
+        assert!(first.same_decode_epoch(&next));
+        assert!(first.same_decode_epoch(&gap));
+        assert!(!first.same_decode_epoch(&after_seek));
+        assert_ne!(next, after_seek);
+    }
+
+    #[test]
+    fn retaining_a_frame_stamp_prevents_aba_identity_reuse() {
+        let held = FrameStamp::new(7, Duration::from_secs(1));
+        for _ in 0..10_000 {
+            let another = FrameStamp::new(7, Duration::from_secs(1));
+            assert_ne!(held, another);
+        }
+    }
 
     fn ntsc() -> Timing {
         Timing::new(ff::Rational::new(30000, 1001), 53940).unwrap()
@@ -1190,6 +1380,7 @@ mod tests {
             reader.seek(Cue::Time(at), Accuracy::Exact).unwrap();
             let exact = reader.next_frames().unwrap().unwrap();
             assert_eq!(exact.index, wanted, "exact seek to {at:?}");
+            let exact_stamp = exact.stamp();
 
             reader.seek(Cue::Time(at), Accuracy::Keyframe).unwrap();
             let key = reader.next_frames().unwrap().unwrap();
@@ -1198,19 +1389,35 @@ mod tests {
                 "keyframe seek to {at:?} landed on {} for {wanted}",
                 key.index
             );
+            let key_stamp = key.stamp();
+            assert!(
+                !exact_stamp.same_decode_epoch(&key_stamp),
+                "a seek must rotate source continuity"
+            );
 
             // Giving a read up must cost nothing but the time already spent:
             // the lanes keep what they decoded, so the frame the abandoned
             // read was reaching for is the one the next read hands over.
+            let mut checks = 0;
             assert!(matches!(
-                reader.read_until(|| true).unwrap(),
+                reader
+                    .read_until(|| {
+                        checks += 1;
+                        checks == 2
+                    })
+                    .unwrap(),
                 Read::Interrupted
             ));
+            assert_eq!(checks, 2, "one packet must be pumped before interruption");
 
             // And reading on from a landing carries on in order, which is
             // what playing after a scrub depends on.
             let next = reader.next_frames().unwrap().unwrap();
             assert_eq!(next.index, key.index + 1);
+            assert!(
+                key_stamp.same_decode_epoch(&next.stamp()),
+                "an interrupted read must preserve source continuity"
+            );
         }
     }
 }

@@ -4,13 +4,11 @@
 //! itself is docs/UI.md's, which is the design this crate implements and
 //! which cites a first-party COSMIC app for every call it makes.
 //!
-//! **Why the shell has a library face at all**: so the headless instruments
-//! can draw with the app's own saved seam pool rather than with a copy of it.
-//! `crates/spike`'s `seam=pool` reads [`config::state`] and applies
-//! [`config::SeamPool::answer`], and a second reader of that file would be a
-//! second answer to the question "what does the app draw this camera with",
-//! which is the question an acceptance line exists to hold still
-//! (docs/research/reference-views.md).
+//! The modules are `pub` so `src/main.rs` can drive them; nothing outside this
+//! crate reads them. The headless instruments once did, through the saved seam
+//! pool `crates/spike`'s `seam=pool` read, but that per-capture fit was the
+//! non-parity mechanism and was removed (2026-08-15): the player draws the
+//! factory calibration, which needs no saved state and nothing to read it out.
 
 pub mod app;
 pub mod args;

@@ -903,7 +903,10 @@ mod tests {
         height: 320,
     };
 
-    fn lenses(back_pitch_deg: f64) -> Vec<Lens> {
+    /// A pair with either lens pitched off nominal, which is what makes the
+    /// handover a circle the tracer has to find rather than one it could
+    /// assume. Which lens matters: see [`map`] and [`front_pitched`].
+    fn lenses(pitch: Pitches) -> Vec<Lens> {
         let intrinsics = Intrinsics {
             xi: 2.31494,
             fx: 3665.9397,
@@ -927,26 +930,57 @@ mod tests {
         vec![
             Lens {
                 intrinsics,
+                crop_centre: [intrinsics.cx, intrinsics.cy],
+                image_circle_centre: [intrinsics.cx as f32, intrinsics.cy as f32],
                 distortion,
                 model: kjerag_meta::Model::Mei,
                 mounting: None,
-                pose: pose(0.0, [0.0; 3]),
+                pose: pose(pitch.front_deg, [0.0; 3]),
                 lens_type: 131,
             },
             Lens {
                 intrinsics,
+                crop_centre: [intrinsics.cx, intrinsics.cy],
+                image_circle_centre: [intrinsics.cx as f32, intrinsics.cy as f32],
                 distortion,
                 model: kjerag_meta::Model::Mei,
                 mounting: None,
-                pose: pose(back_pitch_deg, BASELINE),
+                pose: pose(pitch.back_deg, BASELINE),
                 lens_type: 131,
             },
         ]
     }
 
+    /// Which lens is off nominal, in degrees of pitch.
+    #[derive(Clone, Copy, Default)]
+    struct Pitches {
+        front_deg: f64,
+        back_deg: f64,
+    }
+
+    /// The rig every response test traces, asymmetric in the back lens.
     fn map(back_pitch_deg: f64) -> Reframe {
+        pitched(Pitches {
+            front_deg: 0.0,
+            back_deg: back_pitch_deg,
+        })
+    }
+
+    /// The same rig asymmetric in the front lens instead.
+    ///
+    /// Studio's 50/50 surface follows the front lens axis, so the contour test
+    /// must move that lens. Response tests still move lens 1, whose landing
+    /// they measure.
+    fn front_pitched(pitch_deg: f64) -> Reframe {
+        pitched(Pitches {
+            front_deg: pitch_deg,
+            back_deg: 0.0,
+        })
+    }
+
+    fn pitched(pitch: Pitches) -> Reframe {
         Reframe::new(
-            &lenses(back_pitch_deg),
+            &lenses(pitch),
             Size::new(3840, 3840),
             kjerag_render::Camera {
                 yaw: 90.0_f32.to_radians(),
@@ -1186,16 +1220,23 @@ mod tests {
         planted().into_iter().filter_map(Result::ok).collect()
     }
 
-    /// The traced contour is the pass's own handover, which an asymmetric lens
-    /// pose moves off the nominal `body.z = 0` circle. A tracer that took the
-    /// nominal circle would read the same everywhere here.
+    /// The traced contour is the pass's own handover, not an assumed nominal
+    /// circle. A lens-following surface moves with the front lens; a nominal
+    /// surface deliberately does not.
     #[test]
     fn the_traced_contour_follows_the_pose_and_not_nominal_body_z_zero() {
-        let displaced = sites(&map(3.0))
+        let displaced = sites(&front_pitched(3.0))
             .iter()
             .map(|site| site.node.centre[2].abs())
             .fold(0.0_f64, f64::max);
-        assert!(displaced > 0.01, "the crossover did not move: {displaced}");
+        match kjerag_render::seam_follows_a_lens() {
+            true => assert!(displaced > 0.01, "the crossover did not move: {displaced}"),
+            false => assert!(
+                displaced < 0.01,
+                "a nominal surface should not follow a lens pose, but the contour moved \
+                 {displaced}",
+            ),
+        }
     }
 
     /// The arc resolution is the caller's, and each bin holds at most one
@@ -1225,8 +1266,11 @@ mod tests {
             // one says a centre was aimed at rather than landed on by chance.
             assert!(off_centre < 0.25, "site sits {off_centre} bins off centre");
             let weights = map.blend(site.view_ray).weights;
+            // Studio's front-axis surface adds one transcendental to the root
+            // calculation. The measured residual is 1.311e-6, while the score
+            // difference needed to choose between candidates is a whole half.
             assert!(
-                (weights[0].min(weights[1]) - 0.5).abs() < 1e-6,
+                (weights[0].min(weights[1]) - 0.5).abs() < 3e-6,
                 "the replaced score was not constant after all: {weights:?}"
             );
         }

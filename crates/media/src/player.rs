@@ -39,6 +39,23 @@ const QUEUED: usize = 2;
 /// engine holds 9 of the 20 surfaces in a decoder's pool.
 const LOOKAHEAD: usize = 2;
 
+/// What playback values when presenting decoded frames.
+///
+/// This is explicit because the two useful answers have different promises:
+/// realtime playback preserves elapsed media time, while correctness-first
+/// processing preserves every decoded picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PresentationPolicy {
+    /// Keep pace with the media clock, dropping overdue frames when needed.
+    #[default]
+    Realtime,
+    /// Present every decoded frame in order, slowing playback when processing
+    /// cannot keep pace. The clock is re-anchored after each frame so a slow
+    /// synchronous stage advances one frame at a time instead of continually
+    /// trying to catch up.
+    EveryFrame,
+}
+
 /// What playback did, for the report the app prints and the instrument
 /// measures. Every count here is a defect except `presented`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -120,6 +137,10 @@ enum Command {
         to: Cue,
         accuracy: Accuracy,
     },
+    Replay {
+        epoch: u64,
+        audio_at: Cue,
+    },
 }
 
 /// A file, decoding on its own thread, and the clock that decides which of
@@ -143,6 +164,10 @@ pub struct Player {
     ended: bool,
     /// Which frames may go on screen, and which seek is still owed one.
     epochs: Epochs,
+    /// A correctness-first forward walk whose intermediate frames are all
+    /// presentation frames. Selected causal consumers use this after an
+    /// exact frame-zero decoder seek instead of jumping over estimator input.
+    replay_target: Option<u64>,
 }
 
 /// What the picture is waiting for, which is what decides which frames may
@@ -249,7 +274,18 @@ impl Player {
     /// one, which is how a capture picked in a sandbox's file chooser finds
     /// its other lens ([`Reader::open_with`], issue #123).
     pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
-        let mut reader = Reader::open_with(path, alongside)?.lookahead(LOOKAHEAD);
+        Self::from_reader(Reader::open_with(path, alongside)?)
+    }
+
+    /// Starts live playback from an already selected two-file capture in
+    /// explicit lens order. Evidence instruments use this with retained
+    /// descriptor aliases so the decode thread cannot reopen mutable names.
+    pub fn open_pair(first: &Path, second: &Path) -> Fallible<Self> {
+        Self::from_reader(Reader::open_pair(first, second)?)
+    }
+
+    fn from_reader(reader: Reader) -> Fallible<Self> {
+        let mut reader = reader.lookahead(LOOKAHEAD);
         let (timing, size) = (reader.timing(), reader.size());
         let (lenses, files) = (reader.lenses(), reader.paths());
         let beat = Arc::new(Beat::default());
@@ -286,6 +322,7 @@ impl Player {
             failure: None,
             ended: false,
             epochs: Epochs::default(),
+            replay_target: None,
         })
     }
 
@@ -314,6 +351,20 @@ impl Player {
 
     pub fn is_playing(&self) -> bool {
         self.presenter.clock.is_playing()
+    }
+
+    /// Select how decoded frames are presented.
+    ///
+    /// Returns `false` and leaves the policy unchanged while playback is
+    /// running. A caller that discovers the capture kind after open can set
+    /// the policy before its first [`Self::play`] without reopening media.
+    #[must_use]
+    pub fn set_presentation_policy(&mut self, policy: PresentationPolicy) -> bool {
+        if self.is_playing() {
+            return false;
+        }
+        self.presenter.policy = policy;
+        true
     }
 
     /// Whether this file has a sound track that a device took. `false` is
@@ -402,6 +453,7 @@ impl Player {
     /// return immediately: the seek happens on the decode thread, and
     /// [`Player::is_seeking`] is true until its first frame arrives.
     pub fn seek(&mut self, to: Cue, accuracy: Accuracy) {
+        self.replay_target = None;
         let epoch = self.epochs.ask();
         self.ended = false;
         self.hush();
@@ -420,6 +472,49 @@ impl Player {
         // drops them, and emptying the channel here is what lets the thread
         // reach the command.
         while self.notes.try_recv().is_ok() {}
+    }
+
+    /// Walk every decoded frame to `to`, optionally restarting the decoder at
+    /// exact frame zero first.
+    ///
+    /// The real clock is paused while intermediate frames are admitted one
+    /// per pump. The outer causal consumer owns requested play intent and
+    /// resumes only after the target's derived transaction is acknowledged.
+    pub fn replay_to(&mut self, to: Cue, restart_from_zero: bool) -> Fallible<()> {
+        let target = to.index(self.timing).min(self.last_index());
+        if !restart_from_zero && self.index() == Some(target) {
+            self.replay_target = None;
+            self.pause(Instant::now());
+            return Ok(());
+        }
+
+        self.replay_target = Some(target);
+        self.ended = false;
+        // Intermediate frames are estimator input, not timed playback. Keep
+        // the real clock and Beat stopped until the target map is acknowledged
+        // by the outer Scene; that owner restores the requested play intent.
+        self.pause(Instant::now());
+        if restart_from_zero {
+            let epoch = self.epochs.ask();
+            self.hush();
+            self.presenter.reseek(Duration::ZERO);
+            if self
+                .commands
+                .send(Command::Replay {
+                    epoch,
+                    audio_at: Cue::Index(target),
+                })
+                .is_err()
+            {
+                self.replay_target = None;
+                self.epochs.give_up();
+                return Err("ONE X2 replay decoder stopped before accepting frame zero".into());
+            }
+            while self.notes.try_recv().is_ok() {}
+        } else {
+            self.epochs.owe();
+        }
+        Ok(())
     }
 
     /// One frame forward or back, which is what `.` and `,` do.
@@ -469,12 +564,25 @@ impl Player {
     /// The frame that belongs on screen at `now`, or `None` when the picture
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
-        let (notes, failure, ended) = (&self.notes, &mut self.failure, &mut self.ended);
+        let (notes, failure, ended, replay_target) = (
+            &self.notes,
+            &mut self.failure,
+            &mut self.ended,
+            &mut self.replay_target,
+        );
         let epochs = &mut self.epochs;
         let owed = epochs.is_seeking();
         let shown = self.presenter.advance(now, owed, || {
             loop {
                 match notes.try_recv() {
+                    // Ordinary scrub landings may show an overtaken epoch as
+                    // forward progress. A causal replay may not: its fresh
+                    // frame-zero owner belongs only to the newest restart.
+                    Ok(Note::Frames(tag, _))
+                        if replay_target.is_some() && !epochs.is_newest(tag) =>
+                    {
+                        continue;
+                    }
                     Ok(Note::Frames(tag, frames)) if epochs.accepts(tag) => {
                         epochs.showed(tag);
                         return Some(frames);
@@ -483,6 +591,15 @@ impl Player {
                     // showing it would run the picture backwards.
                     Ok(Note::Frames(..)) => continue,
                     Ok(Note::Ended(tag)) => {
+                        if epochs.is_newest(tag)
+                            && let Some(target) = replay_target.take()
+                        {
+                            *failure = Some(
+                                format!("ONE X2 replay ended before target frame {target}").into(),
+                            );
+                            epochs.give_up();
+                            return None;
+                        }
                         *ended = epochs.is_newest(tag);
                         return None;
                     }
@@ -492,12 +609,32 @@ impl Player {
                     }
                     Err(TryRecvError::Empty) => return None,
                     Err(TryRecvError::Disconnected) => {
+                        if let Some(target) = replay_target.take() {
+                            *failure = Some(
+                                format!(
+                                    "ONE X2 replay decoder stopped before target frame {target}"
+                                )
+                                .into(),
+                            );
+                            epochs.give_up();
+                            return None;
+                        }
                         *ended = true;
                         return None;
                     }
                 }
             }
         });
+        if let (Some(target), Some(frames)) = (*replay_target, shown.as_ref()) {
+            if frames.index < target {
+                // Keep a paused clock moving and preserve EveryFrame's one
+                // delivery per pump. The Scene's map acknowledgement is a
+                // separate outer gate before the next pump is allowed.
+                epochs.owe();
+            } else {
+                *replay_target = None;
+            }
+        }
         match self.failure.take() {
             Some(e) => Err(e),
             None => Ok(shown),
@@ -511,12 +648,17 @@ impl Player {
 /// 38 GB of footage.
 trait Source {
     fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()>;
+    fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()>;
     fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read>;
 }
 
 impl Source for Reader {
     fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()> {
         Reader::seek(self, to, accuracy)
+    }
+
+    fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()> {
+        Reader::replay_from_zero(self, audio_at)
     }
 
     fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read> {
@@ -554,15 +696,26 @@ fn decode_ahead(mut reader: impl Source, notes: &SyncSender<Note>, commands: &Re
         }
         // Set while this read is the landing the newest command asked for.
         let landing = order.is_some();
-        if let Some(Command::Seek {
-            epoch: to,
-            to: cue,
-            accuracy,
-        }) = order
-        {
-            epoch = to;
+        if let Some(order) = order {
+            let result = match order {
+                Command::Seek {
+                    epoch: to,
+                    to: cue,
+                    accuracy,
+                } => {
+                    epoch = to;
+                    reader.seek(cue, accuracy)
+                }
+                Command::Replay {
+                    epoch: to,
+                    audio_at,
+                } => {
+                    epoch = to;
+                    reader.replay_from_zero(audio_at)
+                }
+            };
             ended = false;
-            if let Err(e) = reader.seek(cue, accuracy) {
+            if let Err(e) = result {
                 let _ = notes.send(Note::Failed(e));
                 return;
             }
@@ -613,6 +766,7 @@ fn decode_ahead(mut reader: impl Source, notes: &SyncSender<Note>, commands: &Re
 struct Presenter {
     clock: Clock,
     interval: Duration,
+    policy: PresentationPolicy,
     current: Option<Arc<Frames>>,
     /// Pulled from the queue, not due yet.
     peeked: Option<Frames>,
@@ -621,9 +775,14 @@ struct Presenter {
 
 impl Presenter {
     fn new(interval: Duration, beat: Arc<Beat>) -> Self {
+        Self::with_policy(interval, beat, PresentationPolicy::default())
+    }
+
+    fn with_policy(interval: Duration, beat: Arc<Beat>, policy: PresentationPolicy) -> Self {
         Self {
             clock: Clock::new(beat),
             interval,
+            policy,
             current: None,
             peeked: None,
             stats: Stats::default(),
@@ -673,6 +832,9 @@ impl Presenter {
             // a fast one.
             if shown.replace(frames).is_some() {
                 self.stats.dropped += 1;
+            }
+            if self.policy == PresentationPolicy::EveryFrame {
+                break;
             }
             // Paused, one frame is a picture rather than playback.
             if !self.clock.is_playing() {
@@ -727,6 +889,9 @@ impl Presenter {
         let late = self.clock.position(now).saturating_sub(frames.timestamp);
         self.stats.worst_late = self.stats.worst_late.max(late);
         self.stats.presented += 1;
+        if self.policy == PresentationPolicy::EveryFrame {
+            self.clock.anchor(now, frames.timestamp);
+        }
         let frames = Arc::new(frames);
         self.current = Some(frames.clone());
         frames
@@ -854,6 +1019,7 @@ mod tests {
             lenses: Vec::new(),
             size: Size::new(3840, 3840),
             samples: Default::default(),
+            stamp: crate::reader::FrameStamp::new(index, NTSC * index as u32),
         }
     }
 
@@ -866,9 +1032,17 @@ mod tests {
         }
     }
 
+    fn presenter() -> Presenter {
+        Presenter::with_policy(
+            NTSC,
+            Arc::new(Beat::default()),
+            PresentationPolicy::default(),
+        )
+    }
+
     #[test]
     fn a_60_hz_redraw_shows_29_97_content_without_dropping_a_frame() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -891,7 +1065,8 @@ mod tests {
 
     #[test]
     fn a_display_slower_than_the_content_drops_rather_than_falls_behind() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
+        assert_eq!(presenter.policy, PresentationPolicy::Realtime);
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -907,8 +1082,40 @@ mod tests {
     }
 
     #[test]
+    fn every_frame_policy_presents_late_frames_sequentially() {
+        let mut presenter = Presenter::with_policy(
+            NTSC,
+            Arc::new(Beat::default()),
+            PresentationPolicy::EveryFrame,
+        );
+        presenter.clock.play();
+        let start = Instant::now();
+        let late = start + NTSC * 10;
+        let mut next = 0;
+
+        let first = presenter
+            .advance(start, false, feed(&mut next))
+            .map(|frames| frames.index);
+        let second = presenter
+            .advance(late, false, feed(&mut next))
+            .map(|frames| frames.index);
+
+        // Presenting the late frame re-anchors its due time. Another redraw
+        // at the same instant cannot consume the next queued frame too.
+        assert!(presenter.advance(late, false, feed(&mut next)).is_none());
+        let third = presenter
+            .advance(late + NTSC, false, feed(&mut next))
+            .map(|frames| frames.index);
+
+        assert_eq!([first, second, third], [Some(0), Some(1), Some(2)]);
+        assert_eq!(presenter.stats.presented, 3);
+        assert_eq!(presenter.stats.dropped, 0);
+        assert_eq!(presenter.stats.starved, 0);
+    }
+
+    #[test]
     fn a_stalled_decoder_starves_and_never_drops() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
         presenter.clock.play();
         let start = Instant::now();
 
@@ -928,7 +1135,7 @@ mod tests {
 
     #[test]
     fn pause_freezes_the_position_and_resume_carries_on_from_it() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -954,7 +1161,7 @@ mod tests {
 
     #[test]
     fn the_first_frame_shows_however_long_the_decoder_took_to_produce_it() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
         presenter.clock.play();
         let start = Instant::now();
         let mut next = 0;
@@ -975,7 +1182,7 @@ mod tests {
     /// that matters most, because dragging the scrubber pauses.
     #[test]
     fn a_seek_while_paused_shows_one_frame_and_then_stands_still() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
         let start = Instant::now();
         let mut next = 0;
         presenter.advance(start, false, feed(&mut next));
@@ -1001,7 +1208,7 @@ mod tests {
     /// request would make the next frame look late and drop it.
     #[test]
     fn the_clock_takes_the_landing_time_and_not_the_request() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
         presenter.clock.play();
         let start = Instant::now();
 
@@ -1015,7 +1222,7 @@ mod tests {
 
     #[test]
     fn a_paused_player_still_takes_one_frame_so_there_is_a_picture() {
-        let mut presenter = Presenter::new(NTSC, Arc::new(Beat::default()));
+        let mut presenter = presenter();
         let start = Instant::now();
         let mut next = 0;
 
@@ -1042,6 +1249,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Did {
         Seek(u64, Accuracy),
+        Replay(u64),
         Read(u64),
         Gave(u64),
     }
@@ -1077,6 +1285,15 @@ mod tests {
             };
             self.at = index;
             self.note(Did::Seek(index, accuracy));
+            Ok(())
+        }
+
+        fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()> {
+            let Cue::Index(target) = audio_at else {
+                return Err("the fake source replays by index".into());
+            };
+            self.at = 0;
+            self.note(Did::Replay(target));
             Ok(())
         }
 
@@ -1143,6 +1360,20 @@ mod tests {
             to: Cue::Index(index),
             accuracy,
         }
+    }
+
+    #[test]
+    fn replay_command_seeks_video_zero_and_carries_the_audio_target() {
+        let (shown, did) = decode(
+            vec![Command::Replay {
+                epoch: 4,
+                audio_at: Cue::Index(317),
+            }],
+            vec![None, None],
+        );
+
+        assert_eq!(shown, [(4, 0), (4, 1)]);
+        assert_eq!(did, [Did::Replay(317), Did::Read(0), Did::Read(1)]);
     }
 
     /// The refill after a landing is three pair decodes for a position the
@@ -1332,7 +1563,11 @@ mod tests {
                 player: Player {
                     notes,
                     commands,
-                    presenter: Presenter::new(timing.interval(), Arc::new(Beat::default())),
+                    presenter: Presenter::with_policy(
+                        timing.interval(),
+                        Arc::new(Beat::default()),
+                        PresentationPolicy::default(),
+                    ),
                     sound: None,
                     timing,
                     size: Size::new(3840, 3840),
@@ -1341,6 +1576,7 @@ mod tests {
                     failure: None,
                     ended: false,
                     epochs: Epochs::default(),
+                    replay_target: None,
                 },
                 notes: sender,
                 commands: orders,
@@ -1362,9 +1598,128 @@ mod tests {
         fn asked(&self) -> Vec<(u64, Accuracy)> {
             self.commands
                 .try_iter()
-                .map(|Command::Seek { to, accuracy, .. }| (to.index(self.player.timing), accuracy))
+                .filter_map(|command| match command {
+                    Command::Seek { to, accuracy, .. } => {
+                        Some((to.index(self.player.timing), accuracy))
+                    }
+                    Command::Replay { .. } => None,
+                })
                 .collect()
         }
+
+        fn replay_orders(&self) -> Vec<(u64, u64)> {
+            self.commands
+                .try_iter()
+                .filter_map(|command| match command {
+                    Command::Replay { epoch, audio_at } => {
+                        Some((epoch, audio_at.index(self.player.timing)))
+                    }
+                    Command::Seek { .. } => None,
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn presentation_policy_changes_only_while_stopped() {
+        let mut bench = Bench::new();
+
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::EveryFrame)
+        );
+        assert_eq!(
+            bench.player.presenter.policy,
+            PresentationPolicy::EveryFrame
+        );
+
+        bench.player.play();
+        assert!(
+            !bench
+                .player
+                .set_presentation_policy(PresentationPolicy::Realtime)
+        );
+        assert_eq!(
+            bench.player.presenter.policy,
+            PresentationPolicy::EveryFrame
+        );
+    }
+
+    #[test]
+    fn replay_pauses_the_real_clock_and_presents_every_frame_to_the_target() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::EveryFrame)
+        );
+        bench.player.play();
+        bench.player.replay_to(Cue::Index(3), true).unwrap();
+
+        assert!(
+            !bench.player.is_playing(),
+            "intermediate audio stays paused"
+        );
+        assert_eq!(bench.replay_orders(), [(1, 3)]);
+        for index in 0..=3 {
+            bench.decoded(1, index);
+            assert_eq!(bench.redraw(now), Some(index));
+            assert_eq!(bench.player.is_seeking(), index != 3);
+            assert!(!bench.player.is_playing());
+        }
+        assert_eq!(bench.player.stats().presented, 4);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn replay_retarget_before_frame_zero_uses_only_the_newest_epoch_and_target() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+        bench.player.replay_to(Cue::Index(5), true).unwrap();
+        bench.player.replay_to(Cue::Index(7), true).unwrap();
+        assert_eq!(bench.replay_orders(), [(1, 5), (2, 7)]);
+
+        bench.decoded(1, 0);
+        assert_eq!(bench.redraw(now), None, "retired replay epoch");
+        for index in 0..=7 {
+            bench.decoded(2, index);
+            assert_eq!(bench.redraw(now), Some(index));
+        }
+        assert_eq!(bench.player.index(), Some(7));
+        assert!(!bench.player.is_seeking());
+    }
+
+    #[test]
+    fn replay_command_disconnect_is_an_immediate_error() {
+        let Bench {
+            mut player,
+            commands,
+            ..
+        } = Bench::new();
+        drop(commands);
+        let error = player.replay_to(Cue::Index(9), true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 replay decoder stopped before accepting frame zero"
+        );
+        assert!(!player.is_seeking());
+    }
+
+    #[test]
+    fn replay_eof_before_the_target_is_a_terminal_error() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+        bench.player.replay_to(Cue::Index(9), true).unwrap();
+        let _ = bench.replay_orders();
+        bench.notes.send(Note::Ended(1)).unwrap();
+        let error = bench.player.pump(now).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 replay ended before target frame 9"
+        );
+        assert!(!bench.player.is_seeking());
     }
 
     /// The whole of issue #55. Every position is asked for before the last

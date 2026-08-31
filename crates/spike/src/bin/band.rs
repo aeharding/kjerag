@@ -2689,7 +2689,8 @@ struct Options {
     /// the same calibration, and until stage 6 this instrument always fitted
     /// the file while `--bin seam mode=residual` always took the factory
     /// numbers, so the two were read side by side across two different
-    /// calibration paths (docs/research/seam-two-axis.md).
+    /// calibration paths (docs/research/seam-two-axis.md). The default is now
+    /// `factory`, the parity base; a fit is pasted in as `seam=roll:..,yaw:..`.
     seam: Seam,
 }
 
@@ -2711,10 +2712,10 @@ impl Options {
             save: None,
             region: [0, 0, 0, 0],
             arc: (93.0, 125.0),
-            seam: Seam::File,
+            seam: Seam::Factory,
             plant: Plant::None,
         };
-        let mut seam = String::from("file");
+        let mut seam = String::from("factory");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
@@ -2763,11 +2764,9 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        // Deferred out of the loop because `seam=pool` is resolved against the
-        // file and the file may be named anywhere on the line, but resolved
-        // before the rest of the checks so a bad `seam=` is still the first
-        // thing a bad line is told about.
-        options.seam = Seam::parse(&seam, &options.input)?;
+        // Resolved before the rest of the checks so a bad `seam=` is still the
+        // first thing a bad line is told about.
+        options.seam = Seam::parse(&seam)?;
         Ok(options)
     }
 
@@ -2804,4 +2803,4 @@ const USAGE: &str = "usage: band <file.insv> [mode=field|trace|sequence|render|c
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
      [out=dir] [save=state.txt] [box=x,y,w,h] \
      [plant=none|cell:<cell>:<deg>|commit:<frame>:<deg>|arrive:<cell>:<frame>|hold:<frame>|still] \
-     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
+     [seam=factory|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
