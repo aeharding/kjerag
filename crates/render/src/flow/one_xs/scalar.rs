@@ -20,6 +20,7 @@ use std::error::Error;
 use std::fmt;
 #[cfg(test)]
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use super::dense::{self, DirectedImages, PublicDenseField};
 use super::l2_seed::into_l1_initial_grid;
@@ -477,11 +478,11 @@ impl MaskPyramid {
 }
 
 pub(super) struct LevelInputs {
-    image: LensPair<Vec<u8>>,
-    mask: LensPair<Vec<u8>>,
-    gradient_col: Vec<f32>,
-    gradient_row: Vec<f32>,
-    raw_weight: Vec<f32>,
+    image: LensPair<Arc<Vec<u8>>>,
+    mask: LensPair<Arc<Vec<u8>>>,
+    gradient_col: Arc<Vec<f32>>,
+    gradient_row: Arc<Vec<f32>>,
+    raw_weight: Arc<Vec<f32>>,
 }
 
 /// Direction-labelled weighted-SSD rows derived from the finest classifier.
@@ -547,16 +548,16 @@ impl LevelInputs {
 
         Self {
             image: LensPair {
-                a: image_a,
-                b: image_b,
+                a: Arc::new(image_a),
+                b: Arc::new(image_b),
             },
             mask: LensPair {
-                a: mask_a,
-                b: mask_b,
+                a: Arc::new(mask_a),
+                b: Arc::new(mask_b),
             },
-            gradient_col,
-            gradient_row,
-            raw_weight,
+            gradient_col: Arc::new(gradient_col),
+            gradient_row: Arc::new(gradient_row),
+            raw_weight: Arc::new(raw_weight),
         }
     }
 
@@ -569,19 +570,19 @@ impl LevelInputs {
             .iter()
             .filter(|mode| matches!(mode, CostMode::Weighted))
             .count();
-        let input = Input::<D>::from_native_order(
+        let input = Input::<D>::from_shared_native_order(
             level,
             LensPair {
-                a: self.image.a.clone(),
-                b: self.image.b.clone(),
+                a: Arc::clone(&self.image.a),
+                b: Arc::clone(&self.image.b),
             },
             LensPair {
-                a: self.mask.a.clone(),
-                b: self.mask.b.clone(),
+                a: Arc::clone(&self.mask.a),
+                b: Arc::clone(&self.mask.b),
             },
-            self.gradient_col.clone(),
-            self.gradient_row.clone(),
-            self.raw_weight.clone(),
+            Arc::clone(&self.gradient_col),
+            Arc::clone(&self.gradient_row),
+            Arc::clone(&self.raw_weight),
             cost_modes,
         )
         .expect("scalar preparation satisfies the selected PIS input contract")
@@ -2147,19 +2148,19 @@ mod tests {
     }
 
     fn ab_l2_input(prepared: &LevelInputs, modes: Vec<CostMode>) -> Input<AtoB> {
-        Input::<AtoB>::from_native_order(
+        Input::<AtoB>::from_shared_native_order(
             Level::Two,
             LensPair {
-                a: prepared.image.a.clone(),
-                b: prepared.image.b.clone(),
+                a: Arc::clone(&prepared.image.a),
+                b: Arc::clone(&prepared.image.b),
             },
             LensPair {
-                a: prepared.mask.a.clone(),
-                b: prepared.mask.b.clone(),
+                a: Arc::clone(&prepared.mask.a),
+                b: Arc::clone(&prepared.mask.b),
             },
-            prepared.gradient_col.clone(),
-            prepared.gradient_row.clone(),
-            prepared.raw_weight.clone(),
+            Arc::clone(&prepared.gradient_col),
+            Arc::clone(&prepared.gradient_row),
+            Arc::clone(&prepared.raw_weight),
             modes,
         )
         .expect("authenticated V9 planes must form a valid L2 PIS input")
@@ -2522,16 +2523,19 @@ mod tests {
         }
         let prepared = LevelInputs {
             image: LensPair {
-                a: Vec::new(),
-                b: Vec::new(),
+                a: Arc::new(Vec::new()),
+                b: Arc::new(Vec::new()),
             },
             mask: LensPair {
-                a: source,
-                b: vec![if target_mask_full { u8::MAX } else { 0 }; level.pixels()],
+                a: Arc::new(source),
+                b: Arc::new(vec![
+                    if target_mask_full { u8::MAX } else { 0 };
+                    level.pixels()
+                ]),
             },
-            gradient_col: Vec::new(),
-            gradient_row: Vec::new(),
-            raw_weight: Vec::new(),
+            gradient_col: Arc::new(Vec::new()),
+            gradient_row: Arc::new(Vec::new()),
+            raw_weight: Arc::new(Vec::new()),
         };
         prepared.small_disparity_block_mask(level)[0]
     }
@@ -3889,7 +3893,7 @@ mod tests {
                 &bytes,
                 Level::Two.pixels(),
             );
-            assert_eq!(prepared.raw_weight, studio);
+            assert_eq!(prepared.raw_weight.as_slice(), studio);
             println!(
                 r#"{{"boundary":"ab_l2_raw_weight_plane","implementation":"kjerag_scalar_exact_selected_gaussian","studio_sha256":"08fa436db72c82ca823189965c4d8316d32f917abf40b1882005ce77aa4efff5","kjerag_sha256":"{}","values":{},"mismatches":0}}"#,
                 raw_weight_hash,

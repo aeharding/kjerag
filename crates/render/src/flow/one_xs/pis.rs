@@ -26,6 +26,7 @@
 use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use super::{COLS, Direction, LensPair, PATCH_SIZE, PATCH_STRIDE, ROWS};
 
@@ -219,13 +220,13 @@ impl DisparityInterval {
 #[derive(Clone, Debug)]
 pub struct Input<D: PisDirection> {
     level: Level,
-    source: Box<[u8]>,
-    target: Box<[u8]>,
-    source_slot_mask: Box<[u8]>,
-    target_slot_mask: Box<[u8]>,
-    gradient_col: Box<[f32]>,
-    gradient_row: Box<[f32]>,
-    raw_weight: Box<[f32]>,
+    source: Arc<Vec<u8>>,
+    target: Arc<Vec<u8>>,
+    source_slot_mask: Arc<Vec<u8>>,
+    target_slot_mask: Arc<Vec<u8>>,
+    gradient_col: Arc<Vec<f32>>,
+    gradient_row: Arc<Vec<f32>>,
+    raw_weight: Arc<Vec<f32>>,
     patch_weight_sums: Box<[f32]>,
     cost_modes: Box<[CostMode]>,
     disparity: Option<DisparityInterval>,
@@ -272,6 +273,33 @@ impl<D: PisDirection> Input<D> {
         raw_weight: Vec<f32>,
         cost_modes: Vec<CostMode>,
     ) -> Result<Self, InputError> {
+        Self::from_shared_native_order(
+            level,
+            LensPair {
+                a: Arc::new(images.a),
+                b: Arc::new(images.b),
+            },
+            LensPair {
+                a: Arc::new(masks.a),
+                b: Arc::new(masks.b),
+            },
+            Arc::new(gradient_col),
+            Arc::new(gradient_row),
+            Arc::new(raw_weight),
+            cost_modes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_shared_native_order(
+        level: Level,
+        images: LensPair<Arc<Vec<u8>>>,
+        masks: LensPair<Arc<Vec<u8>>>,
+        gradient_col: Arc<Vec<f32>>,
+        gradient_row: Arc<Vec<f32>>,
+        raw_weight: Arc<Vec<f32>>,
+        cost_modes: Vec<CostMode>,
+    ) -> Result<Self, InputError> {
         let expected = level.pixels();
         for (part, actual) in [
             ("lens A image", images.a.len()),
@@ -304,9 +332,9 @@ impl<D: PisDirection> Input<D> {
         }
 
         for (part, values, require_nonnegative) in [
-            ("column gradient", gradient_col.as_slice(), false),
-            ("row gradient", gradient_row.as_slice(), false),
-            ("raw SSD weight", raw_weight.as_slice(), true),
+            ("column gradient", &gradient_col[..], false),
+            ("row gradient", &gradient_row[..], false),
+            ("raw SSD weight", &raw_weight[..], true),
         ] {
             for (index, value) in values.iter().copied().enumerate() {
                 if !value.is_finite() {
@@ -339,13 +367,13 @@ impl<D: PisDirection> Input<D> {
 
         Ok(Self {
             level,
-            source: source.into_boxed_slice(),
-            target: target.into_boxed_slice(),
-            source_slot_mask: source_slot_mask.into_boxed_slice(),
-            target_slot_mask: target_slot_mask.into_boxed_slice(),
-            gradient_col: gradient_col.into_boxed_slice(),
-            gradient_row: gradient_row.into_boxed_slice(),
-            raw_weight: raw_weight.into_boxed_slice(),
+            source,
+            target,
+            source_slot_mask,
+            target_slot_mask,
+            gradient_col,
+            gradient_row,
+            raw_weight,
             patch_weight_sums: patch_weight_sums.into_boxed_slice(),
             cost_modes: cost_modes.into_boxed_slice(),
             disparity: None,
@@ -2458,6 +2486,132 @@ mod tests {
             raw_weight,
             vec![CostMode::Unweighted; level.patch_rows()],
         )
+    }
+
+    #[test]
+    fn shared_preparation_reuses_planes_and_keeps_every_solver_result_bit() {
+        fn assert_flow_bits(actual: Flow, expected: Flow) {
+            assert_eq!(actual.dcol.to_bits(), expected.dcol.to_bits());
+            assert_eq!(actual.drow.to_bits(), expected.drow.to_bits());
+        }
+
+        fn assert_grid_bits(actual: &PatchGrid<AtoB>, expected: &PatchGrid<AtoB>) {
+            assert_eq!(actual.level, expected.level);
+            assert_eq!(actual.patches.len(), expected.patches.len());
+            for (actual, expected) in actual.patches.iter().zip(&expected.patches) {
+                assert_flow_bits(actual.flow, expected.flow);
+                assert_eq!(actual.residual.to_bits(), expected.residual.to_bits());
+                for (actual, expected) in actual.passes.iter().zip(&expected.passes) {
+                    assert_eq!(actual.winner, expected.winner);
+                    assert_eq!(actual.descent_admitted, expected.descent_admitted);
+                    assert_eq!(actual.descent_iterations, expected.descent_iterations);
+                    assert_eq!(
+                        actual.stopped_on_no_improvement,
+                        expected.stopped_on_no_improvement
+                    );
+                    assert_eq!(actual.guarded, expected.guarded);
+                    assert_flow_bits(actual.stored_flow, expected.stored_flow);
+                    for (actual, expected) in actual.candidates.iter().zip(&expected.candidates) {
+                        match (actual, expected) {
+                            (Some(actual), Some(expected)) => {
+                                assert_flow_bits(actual.flow, expected.flow);
+                                assert_eq!(
+                                    actual.score.value.to_bits(),
+                                    expected.score.value.to_bits()
+                                );
+                                assert_eq!(actual.score.survivors, expected.score.survivors);
+                            }
+                            (None, None) => {}
+                            _ => panic!("shared and owned candidate presence differs"),
+                        }
+                    }
+                }
+            }
+        }
+
+        let level = Level::Two;
+        let pixels = level.pixels();
+        let image_a = Arc::new((0..pixels).map(|index| index as u8).collect());
+        let image_b = Arc::new(
+            (0..pixels)
+                .map(|index| (index as u8).wrapping_mul(3))
+                .collect(),
+        );
+        let mask_a = Arc::new(vec![u8::MAX; pixels]);
+        let mask_b = Arc::new(vec![u8::MAX; pixels]);
+        let gradient_col = Arc::new((0..pixels).map(|index| (index % 13) as f32 - 6.0).collect());
+        let gradient_row = Arc::new((0..pixels).map(|index| 4.0 - (index % 9) as f32).collect());
+        let raw_weight = Arc::new(
+            (0..pixels)
+                .map(|index| ((index % 17) + 1) as f32 / 17.0)
+                .collect(),
+        );
+        let modes = (0..level.patch_rows())
+            .map(|row| {
+                if row % 2 == 0 {
+                    CostMode::Weighted
+                } else {
+                    CostMode::Unweighted
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let shared = Input::<AtoB>::from_shared_native_order(
+            level,
+            LensPair {
+                a: Arc::clone(&image_a),
+                b: Arc::clone(&image_b),
+            },
+            LensPair {
+                a: Arc::clone(&mask_a),
+                b: Arc::clone(&mask_b),
+            },
+            Arc::clone(&gradient_col),
+            Arc::clone(&gradient_row),
+            Arc::clone(&raw_weight),
+            modes.clone(),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&shared.source, &image_a));
+        assert!(Arc::ptr_eq(&shared.target, &image_b));
+        assert!(Arc::ptr_eq(&shared.source_slot_mask, &mask_a));
+        assert!(Arc::ptr_eq(&shared.target_slot_mask, &mask_b));
+        assert!(Arc::ptr_eq(&shared.gradient_col, &gradient_col));
+        assert!(Arc::ptr_eq(&shared.gradient_row, &gradient_row));
+        assert!(Arc::ptr_eq(&shared.raw_weight, &raw_weight));
+
+        let owned = Input::<AtoB>::from_native_order(
+            level,
+            LensPair {
+                a: image_a.to_vec(),
+                b: image_b.to_vec(),
+            },
+            LensPair {
+                a: mask_a.to_vec(),
+                b: mask_b.to_vec(),
+            },
+            gradient_col.to_vec(),
+            gradient_row.to_vec(),
+            raw_weight.to_vec(),
+            modes,
+        )
+        .unwrap();
+        let shared_result = solve_with_descent_admission(
+            &shared,
+            InitialGrid::coarse_zeros(),
+            None,
+            DescentAdmission::EveryPatch,
+        )
+        .unwrap();
+        let owned_result = solve_with_descent_admission(
+            &owned,
+            InitialGrid::coarse_zeros(),
+            None,
+            DescentAdmission::EveryPatch,
+        )
+        .unwrap();
+
+        assert_grid_bits(&shared_result, &owned_result);
     }
 
     #[test]
