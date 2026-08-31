@@ -34,6 +34,8 @@
 
 use std::error::Error;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::thread;
 
 use super::one_xs::{self, Lens, LensPair};
 use crate::projection::Reframe;
@@ -867,19 +869,57 @@ fn sample_source_uv(source: &SourceImage, [u, v]: [f32; 2]) -> u8 {
 /// positive values above one clamp to the final source pixel. Selected
 /// intensity adjustment is disabled, so this output passes directly to the
 /// separately exact 3-by-3 area reduction.
+///
+/// Scheduling is direction-neutral: lens A fills the first final-storage
+/// slice on the caller while a scoped worker fills lens B's disjoint second
+/// slice. Both retain their original row-then-column order, and both join
+/// before the A-then-B [`SourceBelts`] can be returned.
 pub fn sample_source_belts(
     sources: &LensPair<SourceImage>,
     base_maps: &RetainedBaseMaps,
 ) -> SourceBelts {
     const RETAINED_SCALE: f32 = 1.0 / AREA_SCALE as f32;
-    SourceBelts::from_fn(|lens, row, col| {
-        let [u, v] = base_maps.sample_clamped(
-            lens,
-            row as f32 * RETAINED_SCALE,
-            col as f32 * RETAINED_SCALE,
-        );
-        sample_source_uv(sources.get(lens), [u, v])
-    })
+    let mut pixels = vec![0; SourceBelts::BYTES];
+    let (a, b) = pixels.split_at_mut(SourceBelts::BYTES / LENSES);
+    run_lenses_scoped(
+        || sample_source_lens(a, Lens::A, sources, base_maps, RETAINED_SCALE),
+        || sample_source_lens(b, Lens::B, sources, base_maps, RETAINED_SCALE),
+    );
+    SourceBelts {
+        pixels: pixels.into_boxed_slice(),
+    }
+}
+
+fn sample_source_lens(
+    output: &mut [u8],
+    lens: Lens,
+    sources: &LensPair<SourceImage>,
+    base_maps: &RetainedBaseMaps,
+    retained_scale: f32,
+) {
+    debug_assert_eq!(output.len(), one_xs::SOURCE_ROWS * one_xs::SOURCE_COLS);
+    for row in 0..one_xs::SOURCE_ROWS {
+        for col in 0..one_xs::SOURCE_COLS {
+            let [u, v] = base_maps.sample_clamped(
+                lens,
+                row as f32 * retained_scale,
+                col as f32 * retained_scale,
+            );
+            output[row * one_xs::SOURCE_COLS + col] = sample_source_uv(sources.get(lens), [u, v]);
+        }
+    }
+}
+
+fn run_lenses_scoped(a: impl FnOnce() + Send, b: impl FnOnce() + Send) {
+    thread::scope(|scope| {
+        let b_worker = scope.spawn(b);
+        let a = catch_unwind(AssertUnwindSafe(a));
+        let b = b_worker.join();
+        match (a, b) {
+            (Ok(()), Ok(())) => {}
+            (Err(panic), _) | (Ok(()), Err(panic)) => resume_unwind(panic),
+        }
+    });
 }
 
 /// A pair of fixed-shape single-channel images, lens A followed by lens B in
@@ -1090,6 +1130,9 @@ pub fn reduction_wgsl() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
     use super::*;
 
     const RAY_PROBE: &str = r#"
@@ -1113,6 +1156,21 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
             // expected output is easy to state independently of the reducer.
             let base = lens.index() * 40 + (row / 3 % 5) * 20 + (col / 3 % 7) * 2;
             (base + row % 3 + col % 3) as u8
+        })
+    }
+
+    fn sample_source_belts_serial(
+        sources: &LensPair<SourceImage>,
+        base_maps: &RetainedBaseMaps,
+    ) -> SourceBelts {
+        const RETAINED_SCALE: f32 = 1.0 / AREA_SCALE as f32;
+        SourceBelts::from_fn(|lens, row, col| {
+            let [u, v] = base_maps.sample_clamped(
+                lens,
+                row as f32 * RETAINED_SCALE,
+                col as f32 * RETAINED_SCALE,
+            );
+            sample_source_uv(sources.get(lens), [u, v])
         })
     }
 
@@ -1622,6 +1680,87 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
         let value = weights.bottom_left.mul_add(pixels[2] as f32, value);
         let top_left_first = weights.bottom_right.mul_add(pixels[3] as f32, value) as u8;
         assert_eq!(top_left_first, 189);
+    }
+
+    #[test]
+    fn parallel_source_lenses_match_asymmetric_serial_sample_and_reduction() {
+        let sources = LensPair {
+            a: compact_source(193, 257, |row, col| {
+                ((row * 17 + col * 29 + row * col * 3 + 11) & 0xff) as u8
+            }),
+            b: compact_source(271, 211, |row, col| {
+                ((row * 43 + col * 7 + (row ^ col) * 13 + 97) & 0xff) as u8
+            }),
+        };
+        let map_for = |lens: Lens| {
+            (0..RetainedBaseMaps::NODES_PER_LENS)
+                .map(|index| {
+                    let row = index / one_xs::COLS;
+                    let col = index % one_xs::COLS;
+                    if (row * 19 + col * 31 + lens.index()).is_multiple_of(313) {
+                        [0.0, 0.5]
+                    } else if (row * 23 + col * 11 + lens.index()).is_multiple_of(431) {
+                        [f32::NAN, 0.75]
+                    } else if (row * 29 + col * 5 + lens.index()).is_multiple_of(487) {
+                        [-0.25, 0.625]
+                    } else if (row * 7 + col * 37 + lens.index()).is_multiple_of(557) {
+                        [1.25, 1.5]
+                    } else {
+                        let u = 1 + (row * 5 + col * 17 + lens.index() * 29) % 997;
+                        let v = 1 + (row * 13 + col * 3 + lens.index() * 41) % 991;
+                        [u as f32 / 997.0, v as f32 / 991.0]
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let maps = RetainedBaseMaps::from_lenses(LensPair {
+            a: map_for(Lens::A),
+            b: map_for(Lens::B),
+        })
+        .unwrap();
+
+        let serial = sample_source_belts_serial(&sources, &maps);
+        let parallel = sample_source_belts(&sources, &maps);
+        assert_eq!(parallel.bytes(), serial.bytes());
+        assert_eq!(
+            parallel.reduce_area_3x3().bytes(),
+            serial.reduce_area_3x3().bytes(),
+        );
+    }
+
+    #[test]
+    fn scoped_lens_join_resumes_caller_panic_after_worker_finishes() {
+        let rendezvous = Arc::new(Barrier::new(2));
+        let worker_finished = Arc::new(AtomicBool::new(false));
+        let panic = std::panic::catch_unwind({
+            let a_rendezvous = Arc::clone(&rendezvous);
+            let b_rendezvous = Arc::clone(&rendezvous);
+            let worker_finished = Arc::clone(&worker_finished);
+            move || {
+                run_lenses_scoped(
+                    move || {
+                        a_rendezvous.wait();
+                        panic!("lens A panic");
+                    },
+                    move || {
+                        b_rendezvous.wait();
+                        worker_finished.store(true, Ordering::SeqCst);
+                        panic!("lens B panic");
+                    },
+                );
+            }
+        })
+        .expect_err("both synthetic lens tasks must panic");
+
+        assert!(
+            worker_finished.load(Ordering::SeqCst),
+            "the B worker must be joined before the A panic resumes",
+        );
+        assert_eq!(
+            panic.downcast_ref::<&'static str>(),
+            Some(&"lens A panic"),
+            "simultaneous failures must deterministically resume caller A",
+        );
     }
 
     #[test]
