@@ -1,13 +1,20 @@
 # The seam over time: what to build next, and the one thing not to
 
-**Status:** a design memo, and since 2026-08-08 also the record behind a
-shipped change: increments 1 and 2 plus the arrival staging are the app's
-default behaviour, and section 9 is what they measured on the way in. The
-rest is still a proposal. **Date:** 2026-08-08.
+**Historical status, 2026-08-08:** a design memo and the record behind the
+legacy temporal-band change as it stood on that date. All statements below
+that say `main`, `current`, `today`, `ships`, `shipped` or `default` describe
+that historical checkout, not current product behavior. Runnable
+`seam=pool` examples are also historical and now refuse; current instruments
+default to `seam=factory`. The rest was a proposal.
 **Audience:** the owner, as the checkpoint before any of it is.
 **Scope:** what to do about the seam on his May-01 downward views, after
 issue #171 was refused on the clock and the four-tier Studio session gave a
 reference to aim at.
+
+The selected ONE X2 Studio-derived route does not use this legacy temporal
+band. This memo remains the design and evidence record for the legacy seam
+route; current ONE X2 playback status is recorded in
+`docs/research/studio-seam-re.md`.
 
 **How to read the evidence.** Every number below carries its domain and one
 of three labels. **Measured** means an instrument produced it and the run is
@@ -224,6 +231,12 @@ Present on `main` at the same line.
 
 ### 2.4 Studio, and what we actually know about it
 
+**Superseded evidence warning, 2026-08-09.** This subsection predates the
+instruction-level pass recorded in `studio-seam-re.md`. The cadence and
+boundary claims below are retained as a record of what informed this memo,
+but they are not approved reverse-engineering facts and must not be used as
+an implementation specification. The live evidence ledger is the authority.
+
 Measured by static analysis of `studio_worker.dll`, corroborated where noted:
 
 - **Nothing is measured at open.** Stored calibration; dense flow from frame
@@ -375,8 +388,8 @@ new state machine, new failure mode.
 a monotone decay and no step; for 1b, a planted step must produce **exactly
 one** committed transition and a planted drift below the deadband must produce
 **none**. Then the delivered-path instruments against `main` (`--bin step`,
-`--bin shear`, band-live, `seam=pool`) plus the null byte-identity. Then his
-eyes, per section 5.
+`--bin shear`, band-live, historical `seam=pool`) plus the null byte-identity.
+That argument is no longer runnable. Then his eyes, per section 5.
 
 ### C2. Per-session per-azimuth across-seam displacement, accumulated live
 
@@ -408,7 +421,7 @@ clock lives entirely there.
 
 | when | what is correct |
 | --- | --- |
-| t = 0, first ever open of a file | calibration plus the pooled pose, which is what `main` draws today, plus C4's pooled sinusoid if it ships. **The per-session field is absent.** |
+| t = 0, first ever open of a file | calibration plus the pooled pose, which the 2026-08-08 checkout drew, plus C4's pooled sinusoid if it shipped. **The per-session field is absent.** |
 | t = 0, any later open of the same file | the persisted field, applied whole at frame zero. **Correct immediately.** |
 | first open, during playback | the field accumulates and walks in gently under C1's cadence |
 
@@ -764,13 +777,13 @@ md5-equal with the band LIVE over 40 frames. Each toggle moves the picture.
 
 ---
 
-## 9. What shipped, and what it cost (2026-08-08)
+## 9. What the 2026-08-08 checkout shipped, and what it cost
 
-Increments 1 and 2 plus the arrival staging are the app's **default
-behaviour**. The three research environment variables are gone: not turned
-off, deleted, along with the code they used to select. An A/B harness that
-wants the old picture builds the old commit, which it can always do; a
-configuration switch nothing reads is complexity with no reader.
+At that historical boundary, increments 1 and 2 plus the arrival staging were
+the app's **default behaviour**. The three research environment variables
+were gone: not turned off, deleted, along with the code they used to select.
+An A/B harness that wanted the old picture built the old commit; a
+configuration switch nothing read was complexity with no reader.
 
 ### 9.1 The owner's verdict, which is why this shipped
 

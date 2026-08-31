@@ -10,10 +10,10 @@ a dependency it does not declare, so the diagram below is enforced by
 crates/app      kjerag         libcosmic shell + window. The view is an
                                `iced::widget::shader` around a Scene, and
                                the mouse reaches it through that widget.
-crates/render   kjerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
-                               RGB + Mei reprojection + seam blend),
-                               camera state (drag = yaw/pitch, scroll = FOV),
-                               offscreen render for screenshots
+crates/render   kjerag-render  wgpu: dmabuf import, final WGSL pass (NV12 ->
+                               RGB + projection); selected ONE X2 CPU luma
+                               analysis and native-map construction; camera
+                               state and offscreen screenshot rendering
 crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
                                frames by index or timestamp. One demuxer per
@@ -34,16 +34,11 @@ That last one is the point of the split: `cargo test -p kjerag-meta` passes
 on a box with no libav headers, and a CI job that installs nothing proves it
 on every push.
 
-`spike -> app` is the one edge that points up that list, and it is one
-function wide: `seam=pool` (`crates/spike/src/seam.rs`) reads the saved seam
-pool through `kjerag::config::state` and answers off it with
-`SeamPool::answer`, so an instrument draws the pose the app draws. Copying
-either the file's shape or the medoid rule into the instruments would be a
-second answer to "what pose does the app draw this camera with", and a second
-answer is exactly the defect it was added for: two acceptance lines in
-docs/research/reference-views.md, and four copies of them, spent two days
-quoting a pose the app had stopped drawing. The app crate has a `src/lib.rs`
-for this and for nothing else; `src/main.rs` is the same thin binary it was.
+`spike` has no dependency on `app`. Its stitch instruments default to the
+factory calibration, which is the parity base. A research run may name the
+five seam knobs explicitly, but the removed `file` and `pool` values cannot
+silently select a content-fitted pose. The app's saved seam pool and the
+upward dependency that exposed it to instruments are gone.
 
 `media -> meta` is one function wide and it is issue #79's: a capture is not
 always one file, and which file holds the other lens is a fact about `.insv`
@@ -131,7 +126,7 @@ Deliberately not in the funnel: a capture that could not be written says so in
 a toast, because the picture is still there and the pilot is still watching it
 (docs/UI.md). The funnel is for the failures that leave him with no video.
 
-## The frame path (zero-copy)
+## The frame path
 
 ```
 VA-API decode (two 3840x3840 HEVC streams, one demuxer)
@@ -140,18 +135,17 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
   -> two single-plane wgpu textures per frame:
        R8Unorm  from layer 0 (luma,   DRM_FORMAT_R8)
        Rg8Unorm from layer 1 (chroma, DRM_FORMAT_GR88 - note GR, not RG)
-  -> single fragment pass: Mei-project the ray into each lens that can have
-     it, weigh them, sample each lens that carries any of the pixel,
-     YUV->RGB, to swapchain at display resolution
+  -> imported textures remain the render sources
+  -> one fragment pass to the swapchain at display resolution
 ```
 
-The shader consumes both lenses (issue #27), so a view anywhere on the
-sphere has a picture in it, and it mixes them across a crossover on the seam
-that is 8 degrees wide on an X4-class file and the camera's own width on any
-other (issues #7 and #48, and 2026-08-05 for the width). Outside that crossover
-one lens weighs exactly 1 and the other exactly 0 and only the first is
-fetched: a pixel away from the seam costs what it cost before the blend, down
-to the bits it writes.
+On the generic projection path the shader consumes both lenses (issue #27),
+so a view anywhere on the sphere has a picture in it, and it mixes them across
+a crossover on the seam that is 8 degrees wide on an X4-class file and the
+camera's own width on any other (issues #7 and #48, and 2026-08-05 for the
+width). Outside that crossover one lens weighs exactly 1 and the other exactly
+0 and only the first is fetched: a pixel away from the seam costs what it cost
+before the blend, down to the bits it writes.
 
 Since issue #10 the second lens is not projected there either. Each lens's
 picture is one cap around its own axis, and how wide that cap is comes out of
@@ -177,6 +171,13 @@ delivery (18.4 fps) in the M0 spike: it cannot sustain realtime for even
 one lens. Zero-copy import is a requirement, not an optimization. (An
 earlier research note put `vaDeriveImage` at 0.53 ms/frame; that was the
 map call alone, with nothing reading the pixels through it.)
+
+The selected ONE X2 path keeps those imported textures as its render inputs,
+but its stitch analysis is not zero-copy. A compute pass copies each frame's
+R8 luma into CPU memory for the capture-owned estimator described below. The
+final native map is then uploaded and the original decoded textures are drawn
+once. "Zero-copy" therefore describes decoded picture delivery, not the ONE
+X2 analysis step.
 
 ## Playback (issue #4)
 
@@ -230,6 +231,45 @@ up at the camera's own timestamp for that frame
 (`ExposureTrack::frame_time_us`), which drifts from the container's nominal
 grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
 (issue #8, docs/research/insv-format.md 8.6).
+
+### ONE X2 Studio-derived stitch path
+
+An ordinary open of a supported ONE X2 selects this route automatically.
+There is no calibration step, setup ritual or quality toggle. The Optical
+Flow setting controls only the legacy solver and does not select or modify
+this route.
+
+The player changes to `PresentationPolicy::EveryFrame`, and one capture-owned
+`FrameOwner` starts cold at frame zero. For each adjacent decoded pair, the
+renderer reads both luma planes, constructs the camera masks and source belts,
+advances the recovered cold or warm estimator, and materializes the native
+200 by 100 packed type-2 map with its copied-pole alpha. The decoded pair and
+the completed map carry the same opaque `FrameStamp`. Only that exact match
+can become `FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek
+or another open cannot impersonate it.
+
+A discontinuous seek builds a new owner and causally replays from frame zero
+to the requested target. The displayed frame is retained until its exact map
+is acknowledged. The direct type-2 draw consumes the native map and alpha
+without routing through the legacy seam-band displacement.
+
+The selected ONE X2 basis, calibration packing, 51-pose schedule and Metal
+parent-map law are READ from Studio. Kjerag uses its existing orientation
+track in place of Studio's unrecovered `PrecomputeStabilization` pose-cache
+producer, an owner-approved implementation substitution recorded in
+`docs/research/studio-seam-re.md`. The masks, cold and warm estimator, map
+materialization, alpha and type-2 consumer implement the recovered semantics
+around that boundary. This is a disclosed implementation difference, not a
+claim that Kjerag reproduces Studio's internal provider.
+
+The bounded visual gate covers the owner's reported riser-continuity defect
+at the reported view over frames 6339 through 6399. The owner reported
+"Looks good" on that sequence and again after the first internal concurrency
+change. Later archived candidates were measured byte-identical over that
+61-frame production, map, alpha and computed-trace boundary, but the latest
+exact build still needs its own owner verdict. This does not establish
+whole-video, Studio-internal, seek/reset, real-time or continuous-sound
+parity.
 
 ## Trap list (each verified in the 2026-07 study)
 
@@ -310,6 +350,12 @@ grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
   8-bit rounding of the round trip and nothing else.
 
 ## Projection
+
+The generic camera geometry below is shared, but its crossover, adaptive band
+and research calibration knobs are not the selected ONE X2 handover. A
+supported ONE X2 instead consumes the recovered native type-2 map and alpha
+through the direct route described under Playback. That map owns its handover;
+the legacy band cannot modify it.
 
 Insta360 stores a full Mei/UCM camera model per lens in the trailer
 (`offset_v3`): xi, fx/fy, cx/cy, k1-k3, p1/p2, per-lens extrinsics
@@ -399,41 +445,18 @@ A file with **one** lens stream takes no crossover at all: it has no seam to
 hand over at, and its picture runs to the edge of its own coverage, 7 degrees
 past where a seam would have been.
 
-### The seam is calibrated per camera (issue #48)
+### Factory seam and explicit research correction
 
-The camera's own calibration is out by degrees at the seam on the owner's
-unit: 2.4 across it, which is 43 px of the delivered frame and reads as a
-doubled tree trunk. It is a relative lens tilt with a principal-point error
-under it, and `kjerag_render::seam` measures and corrects it **per camera**,
-because that is what it is: fitted file by file the same pair of lenses asks
-for five answers 15 view pixels apart, while one answer fitted on a capture
-from a camera standing still reads the same along-seam number on three and a
-half months of the owner's flights as their own fits do
-(docs/research/insv-format.md 6.8).
+The production app fits and stores no seam calibration. It uses the factory
+calibration as the parity base, and supported ONE X2 playback replaces the
+generic handover with its recovered type-2 map. The former per-file fallback,
+saved per-camera pool and calibration action are removed.
 
-The fit is the phase-1 instrument's own measurement, in the shipped map's
-units: both lenses sampled on the same angular grid at 72 azimuths on the seam
-circle over frames spread through the file, each calibration field turned by a
-probe amount to build the design matrix, three Gauss-Newton rounds because one
-is 2 percent short at this size. Five knobs, a relative rotation and a
-principal point, with the point held towards zero by a ridge and a fit refused
-below twice the knob count in azimuths: those two are what keep a capture with
-little far-field content from asking for 54 px of principal point.
-
-**Nothing is fitted at open.** The answer is five numbers under a serial-free
-camera key (`CalibrationSet::camera_key`) in cosmic-config state, so a file
-opens corrected before its first frame with nothing to decode. `View >
-Calibrate seam from this video` is what puts one there, on the file the pilot
-has open, off the main thread, about two seconds.
-
-A camera with no stored calibration falls back to fitting off the file being
-played, on its own thread, landing a second or two in and saying so in the
-report line. That is weaker for a measured reason and not just in principle:
-a flight's across-seam column carries that flight's parallax, and a fit
-through it absorbs some into a number that is then applied to the whole
-sphere. A file the fit cannot read -- a legacy one-stream capture, a seam with
-nothing far-field on it, an answer too big to be a calibration -- keeps the
-factory calibration.
+The renderer retains `Scene::use_seam` for explicit research correction only.
+Headless instruments may name all five knobs, but no omitted argument can
+select a content-fitted pose. The historical fit method and its measured
+transfer results remain in docs/research/insv-format.md 6.8; they are evidence
+about the legacy generic route, not selected product behavior.
 
 Nothing is shown from neither lens: the two 97.4-degree caps overlap by
 about 14 degrees, which is checked over the whole sphere by `cargo test`
@@ -773,17 +796,12 @@ on the X4 Air).
   composition is settled (above); the order is not, and no known camera can
   distinguish it, because every one of them records sub-degree yaw and
   pitch (docs/research/insv-format.md 4.8).
-- What is left of the seam. Settled and shipped for the geometry: the 2.4
-  degrees **across** the seam and the along-seam one cycle under it were both
-  calibration, and both come out of a five-knob fit stored per camera
-  (above). On the far-field control the whole thing is down to 0.02 along and
-  0.11 across, which is under two view pixels. What is left on **flights** is
-  0.15 to 0.22 along and 0.49 to 0.92 across, and the second of those two
-  numbers is parallax rather than calibration: it is the axis a baseline can
-  reach, it moves with what the camera was looking at, and no correction
-  applied to the whole sphere can take it out. That is the next thing on this
-  seam and it wants depth, not knobs.
-  docs/research/insv-format.md 6.8 has the numbers and the transfer table.
+- What remains on the legacy generic seam. Historical fitting isolated a
+  repeatable calibration component and a content-dependent component on
+  flights. The production app no longer fits or stores that five-knob
+  correction. docs/research/insv-format.md 6.8 retains the measurements and
+  transfer table; the selected ONE X2 route is the recovered type-2 map
+  described above rather than a continuation of that fitting design.
 - **Exposure across the seam is still not corrected** (6.3), and when the
   crossover was narrowed from 10 degrees to 2 there was less band to hide a
   brightness step in. Measured then on the flattest, brightest content in this

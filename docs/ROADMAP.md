@@ -3,6 +3,36 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**ONE X2 Studio-derived playback, 2026-08-31, shipping branch:** ordinary
+zero-config playback now selects the capture-owned causal ONE X2 route
+automatically. It consumes every decoded pair from frame zero, carries warm
+state across adjacent frames, builds the packed map and copied-pole alpha, and
+draws them through the direct type-2 consumer. The Optical Flow control is a
+separate legacy solver and does not gate this route. A discontinuous seek
+starts a new owner and causally replays from frame zero.
+
+The implementation uses Kjerag's orientation track as the owner-approved
+substitution for Studio's unread internal stabilization provider. That
+difference is disclosed and is not a Studio-provider parity claim.
+
+The owner reported "Looks good" for the riser-continuity defect over exact
+frames 6339 through 6399 at the reported view. The first optimized build also
+received that bounded verdict. Subsequent archived candidates were measured
+byte-identical over that 61-frame production-picture, packed-map, alpha-map
+and computed-trace boundary, but the newest exact build still requires its
+own owner-eye verdict.
+
+The latest controlled 200-completed-frame prefix measured 17.992537313 fps
+against a 29.97-fps source clock, about 60.04% of real time. It is a
+single-machine, single-clip observation and is neither portable nor
+statistically significant. Continuous sound remains unresolved.
+
+Before merge: run the complete workspace and GPU gates, exercise ordinary
+player and installed Flatpak playback, regenerate the causal range and trace
+with the exact shipping build, and obtain the owner's verdict on that build.
+No whole-video, Studio-internal, seek/reset, real-time, continuous-sound or
+merge-readiness claim is made.
+
 **Status 2026-07-31:** feasibility study complete (docs/research/), repo
 bootstrapped, M0 done, M1 done, and the horizon holds still.
 `cargo run --release -p kjerag-spike -- <file.insv>` decodes one 3840x3840
@@ -380,15 +410,12 @@ parallax cannot reach, so it is calibration and nothing else. On the
 far-field control the per-camera answer leaves **0.022 degrees along and 0.106
 across**, which is 1.8 view pixels, against 6.7 for the per-file rotation.
 
-That deletes three things this milestone used to carry: the two second wait
-before a first play was corrected, the cache under the file's own hash, and
-the thin-file failure mode where a capture with seven usable azimuths got a
-fit of its own. `View > Calibrate seam from this video` is the one action, on
-a worker thread, about two seconds, with a toast when it lands; a camera with
-nothing stored still gets a best-effort fit off the file being played, which
-is the old path demoted to a fallback and labelled as one in the report line.
-The store is cosmic-config **state**, keyed by a serial-free camera key: the
-model, the delivered frame size and the factory calibration string, hashed.
+At this historical milestone, one explicit calibration action replaced the
+old open-time wait and stored a serial-free per-camera answer. That entire
+product mechanism was later retired: the current app exposes no calibration
+action, saved pool or per-file fallback. Factory calibration is the parity
+base, and supported ONE X2 playback uses the recovered direct type-2 route
+recorded at the top of this file.
 
 **Then the crossover, 2 degrees instead of the 14-degree overlap.** On flight
 footage the doubled band goes from 10.60 degrees to 1.50 and its sharpness
@@ -535,11 +562,12 @@ be seen from.
   **M2 is complete**: issue #48 reopened the seam, and both halves of it have
   now shipped. The two lenses were misaligned by up to 2.7 degrees across the
   seam; phase 1 measured that and attributed it to a relative lens tilt, and
-  phase 2 calibrates it per camera off a capture the pilot points at and hands
-  the picture over in a 2 degree crossover instead of the whole 14 degree
-  overlap. What was left at the seam on flight footage is parallax, which is
-  depth rather than geometry, and **stage 2 of issue #103 now measures it on
-  every frame the pass draws**: a compute pass over the two imported textures
+  the now-retired phase 2 calibrated the legacy generic route from an explicit
+  capture before handing the picture over in a 2 degree crossover instead of
+  the whole 14 degree overlap. What was left at the seam on flight footage is
+  parallax, which is depth rather than geometry, and **stage 2 of issue #103
+  now measures it on every frame the pass draws**: a compute pass over the
+  two imported textures
   reads the overlap band as the stereo pair it is, along the axis the file's
   own 33 mm baseline names, and each lens's ray is bent by the other lens's
   blend weight times what the two disagree by. Far field and near field take
@@ -1344,15 +1372,13 @@ live, no keyframe UI ever.
   `config`'s own fixture test and by a `--bin reframe seam=pool` run on the
   owner's Jul-14 capture.
 
-  The durable half is `seam=pool`, which every instrument that takes a `seam=`
-  now takes: it reads this box's saved state through the app's own reader and
-  applies the app's own `SeamPool::answer`, so a line written with it cannot go
-  stale against the app at all. It refuses loudly rather than falling back when
-  the pool holds nothing for that camera. That needed one new edge in the
-  workspace, `spike -> app` (docs/ARCHITECTURE.md), because the alternative was
-  a second copy of the pool's format and rule in the instruments, which is the
-  shape of the defect itself. Six instruments shared one `enum Seam` in the
-  same change; there had been six copies of it and two of the knob parser.
+  At that milestone `seam=pool` was the durable acceptance argument: it read
+  the app's saved state through the app's own reader and refused rather than
+  falling back when the pool held nothing. It required the temporary
+  `spike -> app` workspace edge. The pool, argument and upward dependency are
+  now retired with the product calibration mechanism; current instruments
+  default to `seam=factory` and accept only an explicitly named five-knob
+  research correction.
 
   **The recorded readings on those three lines were measured through the old
   string and have not been re-read at the drawn pose.** They stay, flagged in

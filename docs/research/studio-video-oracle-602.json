@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "producer": {
+    "application": "Insta360 Studio",
+    "version": "6.0.2",
+    "export_route": "ordinary UI, 360 Video, Match Source 5760x2880, Match Source Frame Rate 30000/1001, H.265"
+  },
+  "source": {
+    "files": [
+      {
+        "name": "VID_20251018_191318_00_002.insv",
+        "bytes": 1730601828,
+        "sha256": "d690e7889345d8d8441fbc4fdb9f4ad3cf170003c01811b91d297ae6fe6545ef"
+      },
+      {
+        "name": "VID_20251018_191318_10_002.insv",
+        "bytes": 1719664640,
+        "sha256": "fd9bb5865576a76a5c8e52a7536e7acdcefd90b2224f5065488f5d0001f09ca6"
+      }
+    ],
+    "authenticated_target": {
+      "frame_index": 6369,
+      "pts": 6375369,
+      "time_base": "1/30000",
+      "seconds": "212.512300"
+    }
+  },
+  "artifacts": {
+    "flow_on": {
+      "optical_flow": true,
+      "video": {
+        "name": "studio602-flow-on-360-native-source-rate.mp4",
+        "bytes": 3431316800,
+        "sha256": "ab7b6ec972767a4fa53d71cd6ff069dab885057cbd70f55c4c123f4ef44f633d"
+      },
+      "project": {
+        "name": "flow-on-footage_project.insprj",
+        "bytes": 12830,
+        "sha256": "d6878b13b53fadf82e644ffbf36be4baeff44fe193590bab237e44b3b83a4d5f"
+      }
+    },
+    "flow_off": {
+      "optical_flow": false,
+      "video": {
+        "name": "studio602-flow-off-360-native-source-rate.mp4",
+        "bytes": 3431324667,
+        "sha256": "a2d061cdf429c7734cdefe405f28cac5fc9384134d2b98d95e8f6708e834361f"
+      },
+      "project": {
+        "name": "flow-off-footage_project.insprj",
+        "bytes": 12831,
+        "sha256": "618af93115869422876b3a9fc353ed2e903c063ecfc265b9debb6e9d23bf3cb3"
+      }
+    }
+  },
+  "media_contract": {
+    "stream_count": 2,
+    "video": {
+      "codec_name": "hevc",
+      "profile": "Main",
+      "codec_tag_string": "hvc1",
+      "width": 5760,
+      "height": 2880,
+      "pix_fmt": "yuvj420p",
+      "color_range": "pc",
+      "color_space": "bt709",
+      "color_transfer": "bt709",
+      "color_primaries": "bt709",
+      "chroma_location": "left",
+      "has_b_frames": 0,
+      "refs": 1,
+      "r_frame_rate": "30000/1001",
+      "avg_frame_rate": "30000/1001",
+      "time_base": "1/30000",
+      "start_pts": 0,
+      "duration_ts": 8210202,
+      "duration": "273.673400",
+      "nb_frames": "8202"
+    },
+    "audio": {
+      "codec_name": "aac",
+      "profile": "LC",
+      "codec_tag_string": "mp4a",
+      "sample_rate": "48000",
+      "channels": 2,
+      "channel_layout": "stereo",
+      "time_base": "1/48000",
+      "start_pts": 0,
+      "duration_ts": 13135872,
+      "duration": "273.664000",
+      "nb_frames": "12829"
+    },
+    "format": {
+      "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+      "start_time": "0.000000",
+      "duration": "273.673400",
+      "major_brand": "isom",
+      "encoder": "Lavf60.3.100"
+    },
+    "spherical_mapping": {
+      "projection": "equirectangular",
+      "yaw": 0,
+      "pitch": 0,
+      "roll": 0
+    },
+    "stereo_3d": {
+      "type": "2D",
+      "inverted": 0,
+      "view": "packed",
+      "primary_eye": "none"
+    }
+  },
+  "packet_grid": {
+    "count": 8202,
+    "first_index": 0,
+    "last_index": 8201,
+    "step": 1001,
+    "duration": 1001,
+    "last_pts": 8209201,
+    "canonical_csv_sha256": "7e306d3b12f468ac52501b6460811ffb835622dbd7dd9e60aa1e1367359e0d65"
+  },
+  "project_contract": {
+    "inclusive_endpoint": 8201,
+    "fps": 29.97002997002997,
+    "allowed_flow_on_off_differences": [
+      "$.projects[0].clip.stitching_optimization.enableOpticalFlowStitching",
+      "$.projects[0].modifiedTime"
+    ]
+  },
+  "target_picture_authentication": {
+    "purpose": "source/output time identity only; the candidate-symmetric held-out registrations supply no stitch or output-view semantic",
+    "studio_frame_index": 6369,
+    "source_candidates": [
+      6368,
+      6369,
+      6370
+    ],
+    "unique_source_winner": 6369,
+    "opencv_version": "5.0.0",
+    "studio_projection": {
+      "input": "equirect",
+      "output": "flat",
+      "yaw": 71.13,
+      "pitch": -13.99,
+      "horizontal_fov": 57.95,
+      "vertical_fov": 57.95
+    },
+    "kjerag_view": {
+      "yaw": 71.13,
+      "pitch": -13.99,
+      "fov": 57.95,
+      "lock": 1,
+      "seam": "factory"
+    },
+    "reframe_build": {
+      "commit": "554a8d53dadfcee1485f87fe63f98bb334112207",
+      "tree": "a4ba7b06f2710d6d0aec1e0b3538efcda90da271",
+      "cargo_lock_sha256": "aba8c3a0dc15325afe7d64258ab707e071e3a4d5730a46b412618f0e0344b118",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--frozen",
+        "-p",
+        "kjerag-spike",
+        "--bin",
+        "reframe"
+      ],
+      "binary": "release/reframe"
+    },
+    "image_shape": [
+      1024,
+      1024
+    ],
+    "images": {
+      "studio_flow_on": {
+        "name": "studio-flow-on-f6369-owner-fixed.png",
+        "bytes": 1301369,
+        "sha256": "edf5b6168faa68f9d101c803c161e31e3ee96ee7adacb7899bc2902243987ca4"
+      },
+      "studio_flow_off": {
+        "name": "studio-flow-off-f6369-owner-fixed.png",
+        "bytes": 1296890,
+        "sha256": "78f651174a518dd4256e5a44821dc95f2f67b02062230266c6ff3880a3b82fc4"
+      },
+      "source_6368": {
+        "name": "kjerag-f6368-owner.png",
+        "bytes": 1798593,
+        "sha256": "81863a5a50307fcf82b5f9450424960d4a3fbb8f2351e6867489f85af741c871"
+      },
+      "source_6369": {
+        "name": "kjerag-f6369-owner.png",
+        "bytes": 1563704,
+        "sha256": "a897213cac33a5c36911e739605246f43990e1d60076189629b105a418c930c9"
+      },
+      "source_6370": {
+        "name": "kjerag-f6370-owner.png",
+        "bytes": 1560327,
+        "sha256": "8866ef3e25fc00f37c1859c78fc5110729bf4787afb98a76874683cd05b0f3d5"
+      }
+    },
+    "method": {
+      "studio_x_half_open": [
+        16,
+        700
+      ],
+      "studio_y_bands_half_open": {
+        "A_north": [
+          32,
+          480
+        ],
+        "B_south": [
+          544,
+          992
+        ]
+      },
+      "sift_nfeatures": 12000,
+      "sift_contrast_threshold": 0.01,
+      "sift_edge_threshold": 12,
+      "ratio_threshold": 0.7,
+      "bidirectional_mutual_matches": true,
+      "rng_seed": 20260830,
+      "ransac_threshold": 2.0,
+      "held_out_thresholds": [
+        2.0,
+        3.0
+      ]
+    },
+    "results": {
+      "flow_on": {
+        "source_6368": {
+          "mutual": 285,
+          "band_matches": [185, 71],
+          "A_to_B": [162, 52, 69],
+          "B_to_A": [70, 31, 58]
+        },
+        "source_6369": {
+          "mutual": 575,
+          "band_matches": [356, 177],
+          "A_to_B": [339, 161, 173],
+          "B_to_A": [171, 216, 314]
+        },
+        "source_6370": {
+          "mutual": 247,
+          "band_matches": [159, 60],
+          "A_to_B": [141, 44, 58],
+          "B_to_A": [57, 7, 25]
+        }
+      },
+      "flow_off": {
+        "source_6368": {
+          "mutual": 285,
+          "band_matches": [204, 52],
+          "A_to_B": [187, 22, 37],
+          "B_to_A": [49, 10, 35]
+        },
+        "source_6369": {
+          "mutual": 587,
+          "band_matches": [387, 157],
+          "A_to_B": [380, 154, 155],
+          "B_to_A": [153, 173, 264]
+        },
+        "source_6370": {
+          "mutual": 257,
+          "band_matches": [164, 61],
+          "A_to_B": [152, 26, 45],
+          "B_to_A": [58, 76, 120]
+        }
+      }
+    }
+  },
+  "claim_boundary": [
+    "The artifacts preserve ordinary Studio stitched equirectangular pixels and an exact native-rate output sample grid.",
+    "Output frame 6369 has the same index and PTS as Kjerag's independently authenticated delivered source frame 6369, and a seam-remote adjacent-frame decoy test uniquely selects source-frame content 6369 in both exports.",
+    "The direct picture test covers the target and its adjacent decoys, not every output picture. It does not prove Studio internal parent-clock semantics, owner-view pixel registration, seam parity, or a Kjerag fix."
+  ]
+}
