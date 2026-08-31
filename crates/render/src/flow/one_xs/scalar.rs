@@ -1,9 +1,10 @@
 //! Readable cold scalar producer for the selected ONE X2 flow pair.
 //!
-//! This is a correctness oracle, not the playback implementation. It owns both
-//! directions and runs each recovered level-two then level-one chain without
-//! arithmetic optimization. The independent directions run concurrently; the
-//! selected configuration is explicit:
+//! The selected playback owner uses this producer for its cold transaction,
+//! and the detached corpus also exercises it as a readable correctness oracle.
+//! It owns both directions and runs each recovered level-two then level-one
+//! chain without arithmetic optimization. The independent directions run
+//! concurrently; the selected configuration is explicit:
 //! twelve descents split six per spatial pass, active levels two and one, and
 //! zero variational iterations. Derivative preparation and variational
 //! refinement therefore do not appear in this module.
@@ -234,14 +235,14 @@ pub struct ColdEstimate {
     pub weighted_rows: WorkRowCounts,
 }
 
-/// Candidate next-frame state composed by the inactive cold oracle.
+/// Candidate next-frame state composed by the cold transaction.
 ///
 /// V3 authenticates the complete native cold transaction's three calls and
 /// terminal direction-owned state, and the detached corpus oracle compares
-/// this complete Rust output at that boundary. Decoded-source authority and a
-/// production owner remain separate. Keeping this type distinct from
-/// [`super::warm::KnownWarmNext`] prevents an inactive reconstruction from
-/// being described as a playback checkpoint.
+/// this complete Rust output at that boundary. [`super::player::FrameOwner`]
+/// supplies decoded-source authority around the numeric owner. Keeping this
+/// type distinct from [`super::warm::KnownWarmNext`] records the cold-to-warm
+/// ownership boundary explicitly.
 #[must_use = "the candidate ONE X2 cold next state has not been retained or checked"]
 #[derive(Debug)]
 pub struct ColdNextCandidate {
@@ -303,8 +304,9 @@ impl ColdNextCandidate {
 /// One cold estimate paired with every READ next-state component it computes.
 ///
 /// The native terminal state is authenticated and the detached corpus oracle
-/// compares this composition exactly. It is not connected to playback.
-#[must_use = "the inactive ONE X2 cold transition has not been consumed"]
+/// compares this composition exactly. The pair owner consumes it only after
+/// the production frame owner has validated the decoded delivery.
+#[must_use = "the ONE X2 cold transition has not been consumed"]
 #[derive(Debug)]
 pub struct ColdTransition {
     pub estimate: ColdEstimate,
@@ -327,10 +329,10 @@ impl ColdPair {
 
     /// Run one cold pair and retain the complete candidate next state.
     ///
-    /// This is an inactive composition boundary. The native transaction is
-    /// READ and its detached terminal corpus exactly checks this result, but
-    /// the returned state is deliberately not a `KnownWarmNext` because no
-    /// production decoded-frame owner consumes it yet.
+    /// The native transaction is READ and its detached terminal corpus exactly
+    /// checks this result. The returned cold state remains distinct until the
+    /// numeric owner validates adjacency and converts it for the first warm
+    /// calculation.
     pub fn transition(self, retained: &ColdInputs) -> ColdTransition {
         let masks = MaskPyramid::build(retained);
         let a_to_b_finest_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::One);

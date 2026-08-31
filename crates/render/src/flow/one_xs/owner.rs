@@ -1,14 +1,14 @@
 //! Pair-atomic numeric lineage for the selected ONE X2 estimator.
 //!
-//! This module owns numeric continuity only. A future decoded-source caller
-//! must mint one [`Continuity`] per uninterrupted decode epoch, submit every
-//! aligned source pair in order, and separately retain the delivery's
+//! This module owns numeric continuity only. The production [`super::player::FrameOwner`]
+//! mints one [`Continuity`] per uninterrupted decode epoch, submits every
+//! aligned source pair in order, and separately retains the delivery's
 //! `FrameStamp` for type-2 map binding. This owner rejects a declared numeric
 //! discontinuity but does not choose Studio's still-open seek/gap reset
-//! semantics. The public tokens do not authenticate decoded input bytes or
-//! prevent a caller from starting another lineage. Low-level oracle APIs also
-//! remain public. This type makes one chosen owner path linear and pair-atomic;
-//! source authority remains a separate production boundary.
+//! semantics. Its public tokens alone do not authenticate decoded input bytes
+//! or prevent another caller from starting a lineage. Low-level oracle APIs
+//! also remain public. This type makes one chosen owner path linear and
+//! pair-atomic; source authority remains a separate production boundary.
 
 use std::error::Error;
 use std::fmt;
@@ -124,9 +124,9 @@ pub struct PairOwner {
 impl PairOwner {
     /// Compute the cold entry for this linear owner path.
     ///
-    /// A future source authority remains responsible for binding `at` to
-    /// `input` and selecting this cold entry only where separately recovered
-    /// reset semantics require it.
+    /// The production frame owner binds `at` to `input` and admits this cold
+    /// entry only for frame zero. Lower-level callers retain responsibility for
+    /// providing an equivalent source-authority boundary.
     pub fn start(at: PairPosition, input: ColdInputs) -> PairStep {
         let transition = ColdPair::new().transition(&input);
         PairStep {

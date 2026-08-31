@@ -1,4 +1,4 @@
-//! Readable composition of one restored ONE X2 warm checkpoint.
+//! Readable composition of one ONE X2 warm transition.
 //!
 //! This module starts after Studio's selected input Gaussian. It computes the
 //! current motion mask from the restored previous blurred belts, restores the
@@ -8,11 +8,11 @@
 //! from [`WarmCheckpointInputs`], so captured outputs cannot be fed back as
 //! current inputs.
 //!
-//! This is a checkpoint composition oracle, not a sequential producer. It
-//! runs the separate masked `calcHintFlow` and retained-row updates, then
-//! exports their next direction-owned state together with blurred references,
-//! public fields, temporal medians, and cadence counters. This module is
-//! inactive and is not connected to Scene or the renderer.
+//! The selected playback owner consumes this transition sequentially after the
+//! cold frame. Detached checkpoint fixtures exercise the same code as an
+//! oracle. It runs the separate masked `calcHintFlow` and retained-row updates,
+//! then exports their next direction-owned state together with blurred
+//! references, public fields, temporal medians, and cadence counters.
 
 use std::error::Error;
 use std::fmt;
@@ -697,7 +697,7 @@ impl WarmCheckpointInputs {
     }
 }
 
-/// One complete checkpoint-only warm result.
+/// One complete warm pair result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WarmEstimate {
     pub displacement: Displacement,
@@ -705,7 +705,7 @@ pub struct WarmEstimate {
     pub weighted_rows: WorkRowCounts,
 }
 
-/// The next-frame warm state produced by this inactive checkpoint oracle.
+/// The next-frame state produced by one warm transaction.
 #[must_use = "the ONE X2 warm next state has not been retained or checked"]
 #[derive(Debug)]
 pub struct KnownWarmNext {
@@ -784,7 +784,7 @@ pub struct WarmTransition {
     pub known_next: KnownWarmNext,
 }
 
-/// Stateless owner for one restored warm checkpoint composition.
+/// Stateless owner for one warm checkpoint composition.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WarmPair;
 
