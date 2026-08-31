@@ -233,8 +233,8 @@ const ONE_XS_LENS_TYPE: u32 = 0x29;
 /// Whether these calibrated streams are the selected two-lens ONE X2 route.
 ///
 /// Camera identity stays beside the projection's own type constant. The scene
-/// and shell use this shared answer to refuse the legacy optical-flow solver
-/// for a route whose retained maps, masks and warm state are not yet closed.
+/// and shell use this shared answer to keep ONE X2 on its automatic selected
+/// route and out of the legacy optical-flow solver.
 /// [`Reframe`] packs at most [`MAX_LENSES`], so an extra supplied stream does
 /// not change the selected identity of the first complete pair.
 pub(crate) fn is_one_xs_lens_pair(lenses: &[Lens]) -> bool {
@@ -564,9 +564,9 @@ pub struct Reframe {
     /// from each [`LensBlock`]'s projection principal point because the two
     /// native paths apply different coordinate conversions.
     ///
-    /// No shader reads this yet. The inactive ONE X2 camera-mask
-    /// reconstruction reads the same uniform block on the CPU, keeping one
-    /// calibration object rather than introducing a second side channel.
+    /// No shader reads this. The capture-owned ONE X2 camera-mask producer
+    /// reads the same uniform block on the CPU, keeping one calibration object
+    /// rather than introducing a second side channel.
     /// WGSL twin: `Reframe::image_circle_centres`.
     image_circle_centres: [f32; 4],
     // The three scalars before `image_circle_centres` occupy the words that

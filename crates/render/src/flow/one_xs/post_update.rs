@@ -16,16 +16,15 @@
 //! U8 `INTER_AREA` reduction can produce further byte values. The update tests
 //! only exact zero versus any nonzero byte.
 //!
-//! Like the surrounding inactive references, this is a readable correctness
-//! oracle. The recursive U8 reductions, selected retained-public float resize
-//! and retained-blend arithmetic reproduce their authenticated target
-//! boundaries bit for bit. The float claim is deliberately limited to the
-//! selected 1080-by-60 direct L1/L2 topology and its observed OpenCV arm64
-//! operation order. This module remains disconnected from Scene and the
-//! production renderer.
+//! The cold/warm production lineage uses this readable stage. The recursive U8
+//! reductions, selected retained-public float resize and retained-blend
+//! arithmetic reproduce their authenticated target boundaries bit for bit.
+//! The float claim is deliberately limited to the selected 1080-by-60 direct
+//! L1/L2 topology and its observed OpenCV arm64 operation order.
 //!
-//! Cold/warm epoch selection remains private to the ONE X2 module family until
-//! the pair-level estimator owns reference-history provenance:
+//! Cold/warm epoch selection remains private to the ONE X2 module family. The
+//! production pair-level estimator owns reference-history provenance; external
+//! callers cannot invoke its private entries:
 //!
 //! ```compile_fail
 //! use kjerag_render::flow::one_xs::post_update::preserve_without_retained;
@@ -37,7 +36,7 @@
 
 #![allow(
     dead_code,
-    reason = "inactive stage is intentionally sealed until the pair-level estimator owns it"
+    reason = "the module retains sealed oracle entry points beside its production path"
 )]
 
 use std::error::Error;

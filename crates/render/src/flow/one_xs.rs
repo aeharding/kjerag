@@ -20,15 +20,12 @@ use super::{FlowLayout, GridAxis, SeamAxis, StorageOrder};
 pub mod temporal;
 
 /// The selected two-pass sparse patch-search CPU oracle.
-///
-/// This remains inactive until the dedicated ONE X2 producer can wire the
-/// complete pyramid, densification, variational and GPU path together.
+/// The capture-owned ONE X2 producer uses it in both cold and warm solves.
 pub mod pis;
 
 /// The selected finest-level, component-zero temporal median.
-///
-/// This remains an inactive building block until the dedicated ONE X2 FDS
-/// producer can place it between patch solving and densification.
+/// The capture-owned ONE X2 producer places it between patch solving and
+/// densification.
 pub mod temporal_median;
 
 /// The selected scalar sparse-to-dense and pyramid-resize oracle.
@@ -36,10 +33,12 @@ pub mod dense;
 
 #[cfg(test)]
 mod native_chain;
-/// Readable cold pair-level estimator used by the correctness oracle.
+/// Readable cold pair-level estimator used by production and its correctness
+/// oracle.
 pub mod scalar;
 
-/// Readable target-checkpoint warm pair composition.
+/// Readable warm pair composition used by production and target-checkpoint
+/// replay.
 pub mod warm;
 
 /// Pair-atomic cold-first and warm-sequential estimator ownership.
@@ -51,7 +50,8 @@ pub mod derivative_prep;
 /// The selected inactive scalar variational-refinement oracle.
 pub mod variational;
 
-/// The selected inactive post-VR retained-public-flow update.
+/// The selected post-VR retained-public-flow update used by the cold/warm
+/// production lineage.
 pub mod post_update;
 
 /// The selected CPU periodic-boundary blend on each public flow field.
@@ -60,10 +60,10 @@ pub mod public_blend;
 /// The selected level-two post-update to level-one PIS seed adapter.
 pub mod l2_seed;
 
-/// Inactive readable oracle for the ordinary right line-map patch call.
+/// The selected bilateral map materializer.
 pub mod map_patch;
 
-/// Inactive finite-coordinate specialization of Studio's pre-filter map merge.
+/// The selected finite-coordinate pre-filter map merge.
 pub mod base_map;
 
 /// Static resources shared by every frame of a selected ONE X2 capture.
@@ -74,16 +74,16 @@ pub(crate) mod player;
 
 /// Readable source-level transcription of Studio's selected Metal parent map.
 ///
-/// This remains an inactive diagnostic until the general per-frame input owner
-/// is wired.  It intentionally models the recovered Metal source, not the
-/// separate binary64 CPU alternative.
+/// The Kjerag parent-map builder uses this transcription. It models the
+/// recovered Metal source, not the separate binary64 CPU alternative.
 #[doc(hidden)]
 pub mod metal_calc_map;
 
 /// Read selected ONE X2 calibration packing and captured parent schedule.
 ///
-/// This remains an inactive diagnostic.  It stops before Studio's unresolved
-/// pose provider and retained mapping operand.
+/// The parent-map builder consumes this packing and schedule. Kjerag's
+/// owner-approved orientation provider remains an explicit difference from
+/// Studio's unresolved pose provider.
 #[doc(hidden)]
 pub mod parent_inputs;
 

@@ -66,10 +66,10 @@ pub struct Config {
     ///
     /// **Off by default.** The available legacy route estimates on a background
     /// worker at its recovered cadence and holds the last completed field.
-    /// Shipping it off keeps the ordinary pass byte-identical; a pilot can turn
-    /// it on from `View > Optical flow`. The selected ONE X2 route is disabled
-    /// until its retained maps, masks and warm state are authenticated; it
-    /// never falls through the legacy solver.
+    /// Shipping it off keeps the ordinary legacy pass byte-identical; a pilot
+    /// can turn it on from `View > Optical flow`. The selected ONE X2 route runs
+    /// automatically and never falls through this legacy solver; this
+    /// preference controls only supported legacy routes.
     pub optical_flow: bool,
     /// Loudness, 0 to 1 (issue #13).
     ///

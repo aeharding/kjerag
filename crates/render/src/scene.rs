@@ -1137,8 +1137,8 @@ impl Scene {
 
     /// Whether the player's optical-flow toggle may use the available legacy
     /// route for this file. With nothing open it remains a persisted
-    /// preference; an open ONE X2 refuses the legacy solver until its selected
-    /// maps, masks and warm state are authenticated.
+    /// preference; an open ONE X2 refuses the legacy solver because its
+    /// selected route runs automatically.
     pub fn supports_optical_flow(&self) -> bool {
         supports_player_flow(self.show.as_ref().map(|show| show.lenses.as_ref()))
     }
@@ -1733,25 +1733,25 @@ pub struct ScenePipeline {
     /// plain `pipeline` above draws the byte-identical shipped picture.
     flow_pipeline: wgpu::RenderPipeline,
     /// The same draw with the selected native ONE X2 1080-by-60 retained-field
-    /// apply compiled in. This is instrument-only until a complete selected
-    /// producer exists: normal playback never selects it, while the V6 oracle
-    /// can upload captured fields and exercise the real render pass.
+    /// apply compiled in. This remains instrument-only: normal selected
+    /// playback uses the direct type-2 draw, while the V6 oracle can upload
+    /// captured fields and exercise this retained-field pass.
     one_xs_flow_pipeline: wgpu::RenderPipeline,
     /// A one-shot dense captured-map draw installed only by older headless
     /// oracles. The typed frame-bound consumer owns its draw separately, so it
     /// cannot become pipeline or playback state.
     map_oracle: Option<MapOracleDraw>,
     /// Exact final projection and delivered pair written by the latest
-    /// [`Self::prepare_one_xs_picture`]. A fresh identity on every typed
-    /// preparation keeps a map from surviving a changed view of the same
-    /// frame. Ordinary preparation leaves this empty.
+    /// typed preparation, including selected playback. A fresh identity on
+    /// every such preparation keeps a map from surviving a changed view of
+    /// the same frame. Other ordinary routes leave this empty.
     prepared_picture: Option<PreparedPicture>,
-    /// Lazy, instrument-only access to the exact bound R8 source pair.
-    /// Ordinary playback constructs no pipeline and allocates no readback.
+    /// Lazy access to the exact bound R8 source pair, used by selected
+    /// playback and diagnostics.
     one_xs_luma: Option<Box<LumaReadbackPipeline>>,
-    /// Lazily built native-grid type-2 consumer. Its pipeline and exact-size
-    /// buffers are reused; only the two map payloads and their CPU-side frame
-    /// association change between instrument submissions.
+    /// Lazily built production/direct type-2 consumer. Its pipeline and
+    /// exact-size buffers are reused; only the two map payloads and their
+    /// CPU-side frame association change between frames and diagnostics.
     direct_one_xs_map: Option<DirectMapDraw>,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -1779,10 +1779,11 @@ pub struct ScenePipeline {
     /// `None` until the first redraw.
     anchor: Option<SeamAnchor>,
     /// Which displacement contract the next draw reads. [`Self::prepare`]
-    /// selects plain or legacy exactly as before. The V6 instrument can replace
-    /// that choice after preparation with [`Self::upload_one_xs_flow`]; a later
-    /// prepare restores normal playback selection, so captured corpus data can
-    /// never become held player state accidentally.
+    /// selects plain or legacy for other cameras and direct ONE X2 or nothing
+    /// for selected playback. The V6 instrument can replace only its own
+    /// one-draw choice after preparation with [`Self::upload_one_xs_flow`]; a
+    /// later prepare restores normal playback selection, so captured corpus
+    /// data can never become held player state accidentally.
     flow_draw: FlowDraw,
     /// The exact selected ONE X2 delivery whose source, projection uniform and
     /// native map completed as one display transaction. The GPU objects stay
@@ -1993,10 +1994,11 @@ impl ScenePipeline {
         //
         // Three draw pipelines, built unconditionally: the plain shipped pass,
         // the audited legacy-flow pass, and the selected ONE X2 retained-flow
-        // pass used only by its headless oracle. Normal playback selects only
-        // the first two. Off, only the plain pipeline is ever bound, so the
-        // shipped picture is byte-identical. The two flow variants use the same
-        // binding number but separate typed storage allocations and shaders.
+        // pass used only by its headless oracle. Selected playback additionally
+        // builds the direct type-2 map draw lazily. With legacy flow off, other
+        // cameras bind only the plain pipeline. The two retained-flow variants
+        // use the same binding number but separate typed storage allocations
+        // and shaders.
         let (pipeline, flow_pipeline, one_xs_flow_pipeline) = {
             let build = |label: &'static str, source: String, flow_bytes: Option<u64>| {
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2229,12 +2231,11 @@ impl ScenePipeline {
         }
     }
 
-    /// Prepare through the ordinary picture path and return an inactive
+    /// Prepare through the ordinary picture path and return a diagnostic
     /// capability for the exact final projection it wrote.
     ///
-    /// This is the only route that pays for preparation identity. The widget
-    /// and normal playback call [`Self::prepare`] and allocate no preparation
-    /// identity.
+    /// Selected playback also creates preparation identity internally. Other
+    /// ordinary routes allocate none.
     pub fn prepare_one_xs_picture(
         &mut self,
         primitive: &ScenePrimitive,
@@ -2407,13 +2408,13 @@ impl ScenePipeline {
         }
     }
 
-    /// Prepare the ordinary picture and submit an inactive readback of the
-    /// exact R8 lens pair it actually bound.
+    /// Diagnostic wrapper around the same exact R8 readback selected playback
+    /// uses for the lens pair it actually bound.
     ///
     /// Selection and submission are one transaction. If a newer offered frame
     /// cannot be imported, this captures the held frame the draw still samples,
-    /// not the newer offer. Normal playback has no caller and never constructs
-    /// the lazy compute pipeline.
+    /// not the newer offer. Selected playback calls [`Self::submit_one_xs_luma`]
+    /// directly.
     pub fn prepare_one_xs_luma(
         &mut self,
         primitive: &ScenePrimitive,

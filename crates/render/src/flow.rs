@@ -5,9 +5,8 @@
 //! [`compose`] and [`Cadence`]. Native Mac Studio 6.0.2's selected ONE X2 VIDEO
 //! route instead uses the 1080-row by 60-column narrow field in [`one_xs`],
 //! with its captured-staging-to-solver reduction closed in [`one_xs_belt`].
-//! That new route remains inactive until its closed source contract, masks and
-//! estimator can be wired as one tested path
-//! (`docs/research/studio-seam-re.md` section 114).
+//! The ONE X2 route is wired into ordinary playback as a capture-owned,
+//! sequential source-to-map transaction.
 //!
 //! **This module is the replacement for the deleted belt/strip scaffold.**
 //! Everything the old scaffold invented - a patch-NCC search, a ring solve,
@@ -64,9 +63,8 @@ pub mod one_xs;
 /// selected ONE X2 route. Panotype 5 projects two ordered per-lens inputs
 /// through the ordered `+0x8d0/+0x930` maps into 3240-by-180 `CV_8UC1`
 /// staging belts, then reduces them exactly to ordered 1080-by-60 `CV_8UC1`
-/// solver inputs. Player integration remains deliberately unimplemented until
-/// the exact target-frame source bytes and history/calibration-dependent state
-/// are captured or faithfully replayed.
+/// solver inputs. Ordinary ONE X2 playback consumes this boundary on every
+/// frame through its capture-owned producer.
 pub mod one_xs_belt;
 
 /// Chunk 4, the composition the draw applies: the TWO separately-estimated DIS
@@ -80,9 +78,8 @@ pub mod compose;
 
 /// Which coordinate/payload contract an optical-flow estimate belongs to.
 ///
-/// This does not switch the active scene pipeline yet. It gives the later
-/// producer a typed selection boundary so the ONE X2 field can be introduced
-/// atomically without interpreting a legacy field with the native grid law.
+/// This gives producers a typed selection boundary so a ONE X2 field cannot be
+/// interpreted with the legacy grid law.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowRoute {
     /// The existing 2916 by 486 rotated-equirect belt.

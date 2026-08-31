@@ -18,12 +18,10 @@
 //! captured. [`one_xs_static_coordinates`] transcribes that producer below,
 //! but deliberately does not claim that this host's transcendental
 //! functions are bit-identical to macOS `libm` and the selected FPCR.
-//! [`FilteredLineMap`] is still not a
-//! [`RetainedBaseMaps`](crate::flow::one_xs_belt::RetainedBaseMaps):
-//! the selected flowstate arithmetic is transcribed in `metal_calc_map`, but
-//! Studio's upstream pose-cache producer remains unread and its general
-//! per-frame owner remains unwired. This module is inactive and is not
-//! connected to playback.
+//! The capture-owned frame transaction converts [`FilteredLineMap`] into
+//! [`RetainedBaseMaps`](crate::flow::one_xs_belt::RetainedBaseMaps). Studio's
+//! upstream pose-cache producer remains unread; playback uses the documented
+//! owner-approved Kjerag orientation substitution.
 
 use std::error::Error;
 use std::fmt;

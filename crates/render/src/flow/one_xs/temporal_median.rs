@@ -19,8 +19,9 @@
 //! The owned state below retains the native histogram and FIFO semantics but
 //! deliberately omits its incremental-search caches. Scanning the histogram
 //! produces the same selected result and reproduces both directions of the
-//! authenticated target transition bit for bit. This remains an inactive
-//! correctness-oracle stage.
+//! authenticated target transition bit for bit. This state is owned by the
+//! selected cold/warm production lineage; the authenticated target transition
+//! remains its bit-exact oracle.
 
 use std::error::Error;
 use std::fmt;

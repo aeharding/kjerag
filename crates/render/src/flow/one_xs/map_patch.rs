@@ -1,17 +1,17 @@
 //! Readable CPU materializer for Studio's bilateral ordinary map patch.
 //!
-//! This module is deliberately inactive. Lens A consumes the B-to-A field and
-//! lens B consumes the A-to-B field. Both native wrappers use `1-g`; the
+//! Lens A consumes the B-to-A field and lens B consumes the A-to-B field.
+//! Both native wrappers use `1-g`; the
 //! captured right gate is already `1-a`, so that wrapper's effective factor is
 //! `a`. A rejected node is not filled: its captured pre-call local UV is
 //! retained bit for bit.
 //!
 //! The scalar weight construction, TR-first multiply/FMA accumulation, and
-//! flow FMA are READ from the target. This remains an inactive diagnostic, not
-//! production-path authority; its output is not by itself an authenticated
-//! target packed payload. The tap chain and final scalar guards have different
-//! unordered behavior; authenticated target inputs are finite, but both native
-//! branches are represented here.
+//! flow FMA are READ from the target. The capture-owned frame transaction uses
+//! this materializer; its output is authoritative only while bound to that
+//! transaction's exact source/map identity. The tap chain and final scalar
+//! guards have different unordered behavior; authenticated target inputs are
+//! finite, but both native branches are represented here.
 
 use std::error::Error;
 use std::fmt;

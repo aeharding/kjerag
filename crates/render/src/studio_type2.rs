@@ -1,11 +1,11 @@
-//! Inactive, frame-bound boundary for Studio's selected ONE X2 type-2 map.
+//! Frame-bound resources for Studio's selected ONE X2 type-2 map.
 //!
 //! The map and alpha payloads stay in their recovered 200-by-100 grids. A
-//! [`OneXsMapFrame`] binds the caller-supplied resources to one exact delivered
-//! pair. Its dense first implementation can only be made from the exact final
-//! projection written by one
-//! [`crate::ScenePipeline::prepare_one_xs_picture`] call. Normal playback has
-//! no selector for either type.
+//! [`OneXsMapFrame`] binds production or diagnostic resources to one exact
+//! delivered pair. Ordinary playback uploads it through the direct type-2
+//! draw. Dense rasterization and submission remain detached diagnostics made
+//! from the exact final projection written by one
+//! [`crate::ScenePipeline::prepare_one_xs_picture`] call.
 
 use std::fmt;
 use std::sync::Arc;

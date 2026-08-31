@@ -7,14 +7,14 @@
 //! order below follows the pinned arm64 body: the partner term is rounded
 //! first and the row term is fused with [`f32::mul_add`].
 //!
-//! This remains an inactive correctness-oracle stage.  It is not connected to
-//! Scene or the production renderer. Bit identity is established for the
-//! authenticated finite target fields, not for NaN payload or flush-to-zero
-//! behavior under another floating-point control mode.
+//! The selected cold/warm production lineage uses this stage. Bit identity is
+//! established for the authenticated finite target fields, not for NaN
+//! payload or flush-to-zero behavior under another floating-point control
+//! mode.
 
 #![allow(
     dead_code,
-    reason = "inactive stage is intentionally sealed until the pair-level estimator owns it"
+    reason = "the module retains sealed oracle entry points beside its production path"
 )]
 
 use super::dense::PublicDenseField;

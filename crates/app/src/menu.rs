@@ -128,10 +128,10 @@ pub fn menu_bar<'a>(
                                 Action::LockHorizon,
                             ),
                         },
-                        // The selected ONE X2 flow inputs are not closed, and
-                        // that camera must not fall through the legacy route.
-                        // The preference remains editable with no file open or
-                        // with a camera whose route is supported.
+                        // The selected ONE X2 route runs automatically and must
+                        // not fall through the legacy route. The preference
+                        // remains editable with no file open or with a camera
+                        // whose legacy route is supported.
                         optical_flow(menu.flow),
                         Item::Divider,
                         Item::Button(strings::FULLSCREEN.to_owned(), None, Action::Fullscreen),

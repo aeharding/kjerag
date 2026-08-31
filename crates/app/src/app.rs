@@ -1060,9 +1060,9 @@ impl App {
             });
     }
 
-    /// Hand the optical-flow setting to a camera allowed to use the available
-    /// legacy route. An open ONE X2 is forced off until its selected estimator
-    /// inputs are closed.
+    /// Hand the optical-flow setting only to cameras that use the available
+    /// legacy route. A ONE X2 runs its selected route independently of this
+    /// preference.
     fn hold_flow(&self) {
         if let Some(open) = &self.open {
             open.scene.set_flow(applied_optical_flow(
