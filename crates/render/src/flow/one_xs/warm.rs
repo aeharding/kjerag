@@ -17,6 +17,7 @@
 use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use super::dense::{self, PublicDenseField};
 use super::l2_seed::into_l1_initial_grid;
@@ -802,6 +803,19 @@ impl WarmPair {
 
     /// Compose one checkpoint and export the exact known next-state subset.
     pub fn transition(self, inputs: WarmCheckpointInputs) -> WarmTransition {
+        self.transition_with_schedule(inputs, DirectionSchedule::Parallel)
+    }
+
+    #[cfg(test)]
+    fn transition_serial(self, inputs: WarmCheckpointInputs) -> WarmTransition {
+        self.transition_with_schedule(inputs, DirectionSchedule::Serial)
+    }
+
+    fn transition_with_schedule(
+        self,
+        inputs: WarmCheckpointInputs,
+        schedule: DirectionSchedule,
+    ) -> WarmTransition {
         let WarmCheckpointInputs {
             current_post_blur,
             prior_references,
@@ -843,50 +857,84 @@ impl WarmPair {
             .prepare_lack_on_first_calc(&a_to_b_finest_inputs, a_to_b_cadence.calc_count());
         let b_to_a_rows = b_to_a_rows
             .prepare_lack_on_first_calc(&b_to_a_finest_inputs, b_to_a_cadence.calc_count());
-        let a_to_b_effective_rows = a_to_b_rows.effective();
-        let b_to_a_effective_rows = b_to_a_rows.effective();
-
-        let (a_to_b_seed, a_to_b_l2) = solve_coarse::<AtoB>(
-            &current_post_blur,
-            &masks,
-            &a_to_b_retained,
-            &motion,
-            &a_to_b_effective_rows,
-            &a_to_b_incoming_hints,
-            a_to_b_admission,
-        );
-        let (b_to_a_seed, b_to_a_l2) = solve_coarse::<BtoA>(
-            &current_post_blur,
-            &masks,
-            &b_to_a_retained,
-            &motion,
-            &b_to_a_effective_rows,
-            &b_to_a_incoming_hints,
-            b_to_a_admission,
-        );
-
-        let a_to_b_block_mask = a_to_b_finest_inputs.small_disparity_block_mask(Level::One);
-        let b_to_a_block_mask = b_to_a_finest_inputs.small_disparity_block_mask(Level::One);
-        let (a_to_b_grid, a_to_b_l1) = solve_finest::<AtoB>(
-            &a_to_b_finest_inputs,
-            a_to_b_seed,
-            &a_to_b_effective_rows,
-            &a_to_b_incoming_hints,
-            a_to_b_admission,
-        );
-        let a_to_b_hint_images = a_to_b_finest_inputs.directed_images::<AtoB>(Level::One);
-        let a_to_b_next_hints =
-            a_to_b_incoming_hints.replace_from_current_finest(&a_to_b_hint_images, &a_to_b_grid);
-        let (b_to_a_grid, b_to_a_l1) = solve_finest::<BtoA>(
-            &b_to_a_finest_inputs,
-            b_to_a_seed,
-            &b_to_a_effective_rows,
-            &b_to_a_incoming_hints,
-            b_to_a_admission,
-        );
-        let b_to_a_hint_images = b_to_a_finest_inputs.directed_images::<BtoA>(Level::One);
-        let b_to_a_next_hints =
-            b_to_a_incoming_hints.replace_from_current_finest(&b_to_a_hint_images, &b_to_a_grid);
+        let (a_to_b_pre, b_to_a_pre) = match schedule {
+            DirectionSchedule::Parallel => std::thread::scope(|scope| {
+                let b_to_a = scope.spawn(|| {
+                    solve_pre_median::<BtoA>(
+                        &current_post_blur,
+                        &masks,
+                        &b_to_a_retained,
+                        &motion,
+                        b_to_a_finest_inputs,
+                        b_to_a_rows,
+                        b_to_a_incoming_hints,
+                        b_to_a_admission,
+                    )
+                });
+                // Always join the sibling before crossing into paired median
+                // state. Preserve the caller lane's original panic, with
+                // A-to-B priority if both independent solves fail.
+                let a_to_b = catch_unwind(AssertUnwindSafe(|| {
+                    solve_pre_median::<AtoB>(
+                        &current_post_blur,
+                        &masks,
+                        &a_to_b_retained,
+                        &motion,
+                        a_to_b_finest_inputs,
+                        a_to_b_rows,
+                        a_to_b_incoming_hints,
+                        a_to_b_admission,
+                    )
+                }));
+                let b_to_a = b_to_a.join();
+                match (a_to_b, b_to_a) {
+                    (Ok(a_to_b), Ok(b_to_a)) => (a_to_b, b_to_a),
+                    (Err(a_to_b), _) => resume_unwind(a_to_b),
+                    (Ok(_), Err(b_to_a)) => resume_unwind(b_to_a),
+                }
+            }),
+            #[cfg(test)]
+            DirectionSchedule::Serial => (
+                solve_pre_median::<AtoB>(
+                    &current_post_blur,
+                    &masks,
+                    &a_to_b_retained,
+                    &motion,
+                    a_to_b_finest_inputs,
+                    a_to_b_rows,
+                    a_to_b_incoming_hints,
+                    a_to_b_admission,
+                ),
+                solve_pre_median::<BtoA>(
+                    &current_post_blur,
+                    &masks,
+                    &b_to_a_retained,
+                    &motion,
+                    b_to_a_finest_inputs,
+                    b_to_a_rows,
+                    b_to_a_incoming_hints,
+                    b_to_a_admission,
+                ),
+            ),
+        };
+        let DirectionPreMedian {
+            finest_inputs: a_to_b_finest_inputs,
+            rows: a_to_b_rows,
+            grid: a_to_b_grid,
+            block_mask: a_to_b_block_mask,
+            next_hints: a_to_b_next_hints,
+            l2_weighted: a_to_b_l2,
+            l1_weighted: a_to_b_l1,
+        } = a_to_b_pre;
+        let DirectionPreMedian {
+            finest_inputs: b_to_a_finest_inputs,
+            rows: b_to_a_rows,
+            grid: b_to_a_grid,
+            block_mask: b_to_a_block_mask,
+            next_hints: b_to_a_next_hints,
+            l2_weighted: b_to_a_l2,
+            l1_weighted: b_to_a_l1,
+        } = b_to_a_pre;
 
         let filtered = temporal_medians
             .run(DirectedPatchGrids::new(a_to_b_grid, b_to_a_grid))
@@ -958,6 +1006,60 @@ impl WarmPair {
                 b_to_a_cadence: b_to_a_cadence.after_calc(),
             },
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DirectionSchedule {
+    Parallel,
+    #[cfg(test)]
+    Serial,
+}
+
+struct DirectionPreMedian<D: PisDirection> {
+    finest_inputs: LevelInputs,
+    rows: RetainedWorkRows<D>,
+    grid: PatchGrid<D>,
+    block_mask: Box<[u8]>,
+    next_hints: HintPyramid<D>,
+    l2_weighted: usize,
+    l1_weighted: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_pre_median<D: PisDirection>(
+    current: &ColdInputs,
+    masks: &MaskPyramid,
+    retained: &RetainedPublicPyramids<D>,
+    motion: &MotionPyramid,
+    finest_inputs: LevelInputs,
+    rows: RetainedWorkRows<D>,
+    hints: HintPyramid<D>,
+    admission: DescentAdmission,
+) -> DirectionPreMedian<D> {
+    let effective_rows = rows.effective();
+    let (seed, l2_weighted) = solve_coarse::<D>(
+        current,
+        masks,
+        retained,
+        motion,
+        &effective_rows,
+        &hints,
+        admission,
+    );
+    let block_mask = finest_inputs.small_disparity_block_mask(Level::One);
+    let (grid, l1_weighted) =
+        solve_finest::<D>(&finest_inputs, seed, &effective_rows, &hints, admission);
+    let hint_images = finest_inputs.directed_images::<D>(Level::One);
+    let next_hints = hints.replace_from_current_finest(&hint_images, &grid);
+    DirectionPreMedian {
+        finest_inputs,
+        rows,
+        grid,
+        block_mask,
+        next_hints,
+        l2_weighted,
+        l1_weighted,
     }
 }
 
@@ -1673,6 +1775,191 @@ mod tests {
             cadence,
         );
         WarmCheckpointInputs::new(current, references, a_to_b, b_to_a, TemporalMedians::new())
+    }
+
+    fn asymmetric_checkpoint(
+        a_to_b_calc_count: i32,
+        b_to_a_calc_count: i32,
+    ) -> WarmCheckpointInputs {
+        let pixels = ROWS * COLS;
+        let image_a = (0..pixels)
+            .map(|index| {
+                let row = index / COLS;
+                let col = index % COLS;
+                ((row * 3 + col * 5) % 251) as u8
+            })
+            .collect::<Vec<_>>();
+        let image_b = (0..pixels)
+            .map(|index| {
+                let row = index / COLS;
+                let col = index % COLS;
+                ((row * 11 + col * 7 + 19) % 253) as u8
+            })
+            .collect::<Vec<_>>();
+        let mask_a = (0..pixels)
+            .map(|index| if index.is_multiple_of(17) { 0 } else { 255 })
+            .collect::<Vec<_>>();
+        let mask_b = (0..pixels)
+            .map(|index| if index.is_multiple_of(23) { 0 } else { 255 })
+            .collect::<Vec<_>>();
+        let current = ColdInputs::from_prepared(
+            LensPair {
+                a: image_a,
+                b: image_b,
+            },
+            LensPair {
+                a: mask_a,
+                b: mask_b,
+            },
+        )
+        .unwrap();
+        let references = synthetic_current(vec![37; pixels]).blurred_belts();
+
+        let a_to_b_rows = RetainedWorkRows::from_lsb0_bytes(
+            Some(&encoded_rows(Level::One, &[1, 9, 77, 150])),
+            &encoded_rows(Level::One, &[3, 31, 92]),
+        )
+        .unwrap();
+        let b_to_a_rows = RetainedWorkRows::from_lsb0_bytes(
+            Some(&encoded_rows(Level::One, &[4, 18, 103, 166])),
+            &encoded_rows(Level::One, &[12, 64, 120]),
+        )
+        .unwrap();
+        let a_to_b = WarmDirection::new(
+            PublicDenseField::<AtoB>::from_row_major_components(
+                (0..pixels)
+                    .map(|index| (index % COLS) as f32 * 0.03125)
+                    .collect(),
+                (0..pixels)
+                    .map(|index| -((index / COLS) as f32) * 0.000_976_562_5)
+                    .collect(),
+            )
+            .unwrap(),
+            a_to_b_rows,
+            zero_hints(),
+            EmptyOverrideCadence::new(a_to_b_calc_count, 10).unwrap(),
+        );
+        let b_to_a = WarmDirection::new(
+            PublicDenseField::<BtoA>::from_row_major_components(
+                (0..pixels)
+                    .map(|index| -((index % COLS) as f32) * 0.015625)
+                    .collect(),
+                (0..pixels)
+                    .map(|index| (index / COLS) as f32 * 0.001_953_125)
+                    .collect(),
+            )
+            .unwrap(),
+            b_to_a_rows,
+            zero_hints(),
+            EmptyOverrideCadence::new(b_to_a_calc_count, 10).unwrap(),
+        );
+        WarmCheckpointInputs::new(current, references, a_to_b, b_to_a, TemporalMedians::new())
+    }
+
+    fn assert_f32_bits_eq(actual: &[f32], expected: &[f32], label: &str) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{label} bit mismatch at {index}",
+            );
+        }
+    }
+
+    fn assert_median_bits_eq<D: PisDirection>(
+        actual: &MedianState<D>,
+        expected: &MedianState<D>,
+        label: &str,
+    ) {
+        assert_eq!(
+            actual.histogram(),
+            expected.histogram(),
+            "{label} histogram"
+        );
+        assert_eq!(actual.offsets(), expected.offsets(), "{label} offsets");
+        assert_f32_bits_eq(actual.values(), expected.values(), label);
+    }
+
+    fn assert_transition_bit_exact(actual: WarmTransition, expected: WarmTransition) {
+        assert_eq!(actual.estimate, expected.estimate);
+        let actual = actual.known_next;
+        let expected = expected.known_next;
+        assert_eq!(actual.references.bytes(), expected.references.bytes());
+        for (actual, expected, label) in [
+            (
+                actual.a_to_b_public.dcol(),
+                expected.a_to_b_public.dcol(),
+                "A-to-B public dcol",
+            ),
+            (
+                actual.a_to_b_public.drow(),
+                expected.a_to_b_public.drow(),
+                "A-to-B public drow",
+            ),
+            (
+                actual.b_to_a_public.dcol(),
+                expected.b_to_a_public.dcol(),
+                "B-to-A public dcol",
+            ),
+            (
+                actual.b_to_a_public.drow(),
+                expected.b_to_a_public.drow(),
+                "B-to-A public drow",
+            ),
+        ] {
+            assert_f32_bits_eq(actual, expected, label);
+        }
+        assert_median_bits_eq(
+            &actual.a_to_b_median,
+            &expected.a_to_b_median,
+            "A-to-B temporal median values",
+        );
+        assert_median_bits_eq(
+            &actual.b_to_a_median,
+            &expected.b_to_a_median,
+            "B-to-A temporal median values",
+        );
+        assert_eq!(actual.a_to_b_work_rows, expected.a_to_b_work_rows);
+        assert_eq!(actual.b_to_a_work_rows, expected.b_to_a_work_rows);
+        for (actual, expected, label) in [
+            (
+                actual.a_to_b_hints.level(Level::One),
+                expected.a_to_b_hints.level(Level::One),
+                "A-to-B L1 hints",
+            ),
+            (
+                actual.a_to_b_hints.level(Level::Two),
+                expected.a_to_b_hints.level(Level::Two),
+                "A-to-B L2 hints",
+            ),
+            (
+                actual.b_to_a_hints.level(Level::One),
+                expected.b_to_a_hints.level(Level::One),
+                "B-to-A L1 hints",
+            ),
+            (
+                actual.b_to_a_hints.level(Level::Two),
+                expected.b_to_a_hints.level(Level::Two),
+                "B-to-A L2 hints",
+            ),
+        ] {
+            assert_f32_bits_eq(actual.dcol(), expected.dcol(), label);
+            assert_f32_bits_eq(actual.drow(), expected.drow(), label);
+        }
+        assert_eq!(actual.a_to_b_cadence, expected.a_to_b_cadence);
+        assert_eq!(actual.b_to_a_cadence, expected.b_to_a_cadence);
+    }
+
+    #[test]
+    fn asymmetric_parallel_warm_solve_is_bit_exact_to_serial_across_barriers() {
+        for (a_to_b_calc_count, b_to_a_calc_count) in [(0, 3), (6_370, 6_372)] {
+            let serial = WarmPair::new()
+                .transition_serial(asymmetric_checkpoint(a_to_b_calc_count, b_to_a_calc_count));
+            let parallel = WarmPair::new()
+                .transition(asymmetric_checkpoint(a_to_b_calc_count, b_to_a_calc_count));
+            assert_transition_bit_exact(parallel, serial);
+        }
     }
 
     #[test]
