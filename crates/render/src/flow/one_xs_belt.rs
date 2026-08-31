@@ -870,54 +870,85 @@ fn sample_source_uv(source: &SourceImage, [u, v]: [f32; 2]) -> u8 {
 /// intensity adjustment is disabled, so this output passes directly to the
 /// separately exact 3-by-3 area reduction.
 ///
-/// Scheduling is direction-neutral: lens A fills the first final-storage
-/// slice on the caller while a scoped worker fills lens B's disjoint second
-/// slice. Both retain their original row-then-column order, and both join
-/// before the A-then-B [`SourceBelts`] can be returned.
+/// Scheduling is direction-neutral: the two physical-lens images are each
+/// split into two equal contiguous row lanes. The first A lane runs on the
+/// caller while three scoped workers fill the other disjoint final-storage
+/// slices. Every lane retains its original row-then-column order, and all four
+/// join before the A-then-B [`SourceBelts`] can be returned.
 pub fn sample_source_belts(
     sources: &LensPair<SourceImage>,
     base_maps: &RetainedBaseMaps,
 ) -> SourceBelts {
     const RETAINED_SCALE: f32 = 1.0 / AREA_SCALE as f32;
+    const LANE_ROWS: usize = one_xs::SOURCE_ROWS / 2;
+    const LANE_BYTES: usize = LANE_ROWS * one_xs::SOURCE_COLS;
+    const LENS_BYTES: usize = one_xs::SOURCE_ROWS * one_xs::SOURCE_COLS;
+    debug_assert_eq!(one_xs::SOURCE_ROWS, 2 * LANE_ROWS);
+    debug_assert_eq!(LANE_BYTES, 291_600);
     let mut pixels = vec![0; SourceBelts::BYTES];
-    let (a, b) = pixels.split_at_mut(SourceBelts::BYTES / LENSES);
-    run_lenses_scoped(
-        || sample_source_lens(a, Lens::A, sources, base_maps, RETAINED_SCALE),
-        || sample_source_lens(b, Lens::B, sources, base_maps, RETAINED_SCALE),
+    let (a, b) = pixels.split_at_mut(LENS_BYTES);
+    let (a0, a1) = a.split_at_mut(LANE_BYTES);
+    let (b0, b1) = b.split_at_mut(LANE_BYTES);
+    run_source_lanes_scoped(
+        || sample_source_lane(a0, Lens::A, 0, sources, base_maps, RETAINED_SCALE),
+        || sample_source_lane(a1, Lens::A, LANE_ROWS, sources, base_maps, RETAINED_SCALE),
+        || sample_source_lane(b0, Lens::B, 0, sources, base_maps, RETAINED_SCALE),
+        || sample_source_lane(b1, Lens::B, LANE_ROWS, sources, base_maps, RETAINED_SCALE),
     );
     SourceBelts {
         pixels: pixels.into_boxed_slice(),
     }
 }
 
-fn sample_source_lens(
+fn sample_source_lane(
     output: &mut [u8],
     lens: Lens,
+    start_row: usize,
     sources: &LensPair<SourceImage>,
     base_maps: &RetainedBaseMaps,
     retained_scale: f32,
 ) {
-    debug_assert_eq!(output.len(), one_xs::SOURCE_ROWS * one_xs::SOURCE_COLS);
-    for row in 0..one_xs::SOURCE_ROWS {
+    debug_assert_eq!(output.len(), one_xs::SOURCE_ROWS / 2 * one_xs::SOURCE_COLS);
+    debug_assert!(start_row + output.len() / one_xs::SOURCE_COLS <= one_xs::SOURCE_ROWS);
+    for local_row in 0..output.len() / one_xs::SOURCE_COLS {
+        let row = start_row + local_row;
         for col in 0..one_xs::SOURCE_COLS {
             let [u, v] = base_maps.sample_clamped(
                 lens,
                 row as f32 * retained_scale,
                 col as f32 * retained_scale,
             );
-            output[row * one_xs::SOURCE_COLS + col] = sample_source_uv(sources.get(lens), [u, v]);
+            output[local_row * one_xs::SOURCE_COLS + col] =
+                sample_source_uv(sources.get(lens), [u, v]);
         }
     }
 }
 
-fn run_lenses_scoped(a: impl FnOnce() + Send, b: impl FnOnce() + Send) {
+fn run_source_lanes_scoped(
+    a0: impl FnOnce() + Send,
+    a1: impl FnOnce() + Send,
+    b0: impl FnOnce() + Send,
+    b1: impl FnOnce() + Send,
+) {
     thread::scope(|scope| {
-        let b_worker = scope.spawn(b);
-        let a = catch_unwind(AssertUnwindSafe(a));
-        let b = b_worker.join();
-        match (a, b) {
-            (Ok(()), Ok(())) => {}
-            (Err(panic), _) | (Ok(()), Err(panic)) => resume_unwind(panic),
+        let a1_worker = scope.spawn(a1);
+        let b0_worker = scope.spawn(b0);
+        let b1_worker = scope.spawn(b1);
+        let a0 = catch_unwind(AssertUnwindSafe(a0));
+        let a1 = a1_worker.join();
+        let b0 = b0_worker.join();
+        let b1 = b1_worker.join();
+        if let Err(panic) = a0 {
+            resume_unwind(panic);
+        }
+        if let Err(panic) = a1 {
+            resume_unwind(panic);
+        }
+        if let Err(panic) = b0 {
+            resume_unwind(panic);
+        }
+        if let Err(panic) = b1 {
+            resume_unwind(panic);
         }
     });
 }
@@ -1683,7 +1714,7 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     #[test]
-    fn parallel_source_lenses_match_asymmetric_serial_sample_and_reduction() {
+    fn four_lane_source_sampler_matches_asymmetric_serial_sample_and_reduction() {
         let sources = LensPair {
             a: compact_source(193, 257, |row, col| {
                 ((row * 17 + col * 29 + row * col * 3 + 11) & 0xff) as u8
@@ -1720,46 +1751,94 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
         .unwrap();
 
         let serial = sample_source_belts_serial(&sources, &maps);
-        let parallel = sample_source_belts(&sources, &maps);
-        assert_eq!(parallel.bytes(), serial.bytes());
+        let four_lane = sample_source_belts(&sources, &maps);
+        assert_eq!(four_lane.bytes(), serial.bytes());
         assert_eq!(
-            parallel.reduce_area_3x3().bytes(),
+            four_lane.reduce_area_3x3().bytes(),
             serial.reduce_area_3x3().bytes(),
         );
     }
 
     #[test]
-    fn scoped_lens_join_resumes_caller_panic_after_worker_finishes() {
-        let rendezvous = Arc::new(Barrier::new(2));
-        let worker_finished = Arc::new(AtomicBool::new(false));
+    fn scoped_lane_join_resumes_a0_panic_after_all_workers_finish() {
+        let rendezvous = Arc::new(Barrier::new(4));
+        let a1_finished = Arc::new(AtomicBool::new(false));
+        let b0_finished = Arc::new(AtomicBool::new(false));
+        let b1_finished = Arc::new(AtomicBool::new(false));
         let panic = std::panic::catch_unwind({
-            let a_rendezvous = Arc::clone(&rendezvous);
-            let b_rendezvous = Arc::clone(&rendezvous);
-            let worker_finished = Arc::clone(&worker_finished);
+            let a0_rendezvous = Arc::clone(&rendezvous);
+            let a1_rendezvous = Arc::clone(&rendezvous);
+            let b0_rendezvous = Arc::clone(&rendezvous);
+            let b1_rendezvous = Arc::clone(&rendezvous);
+            let a1_finished = Arc::clone(&a1_finished);
+            let b0_finished = Arc::clone(&b0_finished);
+            let b1_finished = Arc::clone(&b1_finished);
             move || {
-                run_lenses_scoped(
+                run_source_lanes_scoped(
                     move || {
-                        a_rendezvous.wait();
-                        panic!("lens A panic");
+                        a0_rendezvous.wait();
+                        panic!("lane A0 panic");
                     },
                     move || {
-                        b_rendezvous.wait();
-                        worker_finished.store(true, Ordering::SeqCst);
-                        panic!("lens B panic");
+                        a1_rendezvous.wait();
+                        a1_finished.store(true, Ordering::SeqCst);
+                        panic!("lane A1 panic");
+                    },
+                    move || {
+                        b0_rendezvous.wait();
+                        b0_finished.store(true, Ordering::SeqCst);
+                        panic!("lane B0 panic");
+                    },
+                    move || {
+                        b1_rendezvous.wait();
+                        b1_finished.store(true, Ordering::SeqCst);
+                        panic!("lane B1 panic");
                     },
                 );
             }
         })
-        .expect_err("both synthetic lens tasks must panic");
+        .expect_err("all four synthetic lane tasks must panic");
 
-        assert!(
-            worker_finished.load(Ordering::SeqCst),
-            "the B worker must be joined before the A panic resumes",
-        );
+        assert!(a1_finished.load(Ordering::SeqCst));
+        assert!(b0_finished.load(Ordering::SeqCst));
+        assert!(b1_finished.load(Ordering::SeqCst));
         assert_eq!(
             panic.downcast_ref::<&'static str>(),
-            Some(&"lens A panic"),
-            "simultaneous failures must deterministically resume caller A",
+            Some(&"lane A0 panic"),
+            "simultaneous failures must deterministically resume caller A0",
+        );
+    }
+
+    #[test]
+    fn scoped_lane_join_resumes_a1_panic_when_a0_succeeds() {
+        let b0_finished = Arc::new(AtomicBool::new(false));
+        let b1_finished = Arc::new(AtomicBool::new(false));
+        let panic = std::panic::catch_unwind({
+            let b0_finished = Arc::clone(&b0_finished);
+            let b1_finished = Arc::clone(&b1_finished);
+            move || {
+                run_source_lanes_scoped(
+                    || {},
+                    || panic!("lane A1 panic"),
+                    move || {
+                        b0_finished.store(true, Ordering::SeqCst);
+                        panic!("lane B0 panic");
+                    },
+                    move || {
+                        b1_finished.store(true, Ordering::SeqCst);
+                        panic!("lane B1 panic");
+                    },
+                );
+            }
+        })
+        .expect_err("the three synthetic worker lanes must panic");
+
+        assert!(b0_finished.load(Ordering::SeqCst));
+        assert!(b1_finished.load(Ordering::SeqCst));
+        assert_eq!(
+            panic.downcast_ref::<&'static str>(),
+            Some(&"lane A1 panic"),
+            "A1 must have priority when caller A0 succeeds",
         );
     }
 
