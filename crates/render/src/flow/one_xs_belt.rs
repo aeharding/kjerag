@@ -816,7 +816,7 @@ impl ClampedAxis {
         // wide. Keep the helper total even beyond f32's exact-integer range:
         // `(length - 1) as f32` can round up to `length`, so clamp the integer
         // conversion once more before indexing.
-        let lo = (value.trunc() as usize).min(length - 1);
+        let lo = (value as usize).min(length - 1);
         Self {
             lo,
             hi: (lo + 1).min(length - 1),
@@ -1714,6 +1714,133 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
             weights.bottom_right.mul_add(quad[1][1][component], value)
         });
         assert_ne!(sampled.map(f32::to_bits), top_left_first.map(f32::to_bits));
+    }
+
+    #[test]
+    fn direct_axis_cast_matches_explicit_truncation_across_f32_bits_and_lengths() {
+        fn next_up(value: f32) -> f32 {
+            if value.is_nan() || value == f32::INFINITY {
+                return value;
+            }
+            if value == 0.0 {
+                return f32::from_bits(1);
+            }
+            let bits = value.to_bits();
+            f32::from_bits(if value > 0.0 { bits + 1 } else { bits - 1 })
+        }
+
+        fn next_down(value: f32) -> f32 {
+            if value.is_nan() || value == f32::NEG_INFINITY {
+                return value;
+            }
+            if value == 0.0 {
+                return f32::from_bits(0x8000_0001);
+            }
+            let bits = value.to_bits();
+            f32::from_bits(if value > 0.0 { bits - 1 } else { bits + 1 })
+        }
+
+        fn assert_equivalent(input: f32, length: usize) {
+            let value = input.clamp(0.0, (length - 1) as f32);
+            let explicit_truncation = (value.trunc() as usize).min(length - 1);
+            let direct_cast = (value as usize).min(length - 1);
+            assert_eq!(
+                direct_cast,
+                explicit_truncation,
+                "input bits {:#010x}, clamped bits {:#010x}, length {length}",
+                input.to_bits(),
+                value.to_bits(),
+            );
+            assert_eq!(
+                ClampedAxis::new(input, length).lo,
+                explicit_truncation,
+                "ClampedAxis input bits {:#010x}, length {length}",
+                input.to_bits(),
+            );
+        }
+
+        let lengths = [
+            1,
+            2,
+            3,
+            one_xs::COLS,
+            one_xs::ROWS,
+            MAX_EXACT_F32_DIMENSION,
+            usize::MAX,
+        ];
+        let special_bits = [
+            0x0000_0000, // positive zero
+            0x8000_0000, // negative zero
+            0x0000_0001, // least positive subnormal
+            0x007f_ffff, // greatest positive subnormal
+            0x8000_0001, // least negative subnormal
+            0x807f_ffff, // greatest negative subnormal
+            0x7f80_0000, // positive infinity
+            0xff80_0000, // negative infinity
+            0x7f80_0001, // positive signalling NaN, minimum payload
+            0x7fbf_ffff, // positive signalling NaN, maximum payload
+            0x7fc0_0000, // positive quiet NaN, minimum payload
+            0x7fff_ffff, // positive quiet NaN, maximum payload
+            0xff80_0001, // negative signalling NaN, minimum payload
+            0xffbf_ffff, // negative signalling NaN, maximum payload
+            0xffc0_0000, // negative quiet NaN, minimum payload
+            0xffff_ffff, // negative quiet NaN, maximum payload
+        ];
+        for length in lengths {
+            for bits in special_bits {
+                assert_equivalent(f32::from_bits(bits), length);
+            }
+
+            let upper = (length - 1) as f32;
+            for value in [next_down(upper), upper, next_up(upper)] {
+                assert_equivalent(value, length);
+            }
+        }
+
+        let integer_boundaries = [
+            0,
+            1,
+            2,
+            3,
+            59,
+            60,
+            61,
+            1_078,
+            1_079,
+            1_080,
+            (1 << 23) - 1,
+            1 << 23,
+            (1 << 23) + 1,
+            (1 << 24) - 1,
+            1 << 24,
+            (1 << 24) + 1,
+            usize::MAX / 2,
+            usize::MAX - 1,
+            usize::MAX,
+        ];
+        for integer in integer_boundaries {
+            let boundary = integer as f32;
+            for value in [next_down(boundary), boundary, next_up(boundary)] {
+                for length in lengths {
+                    assert_equivalent(value, length);
+                    assert_equivalent(-value, length);
+                }
+            }
+        }
+
+        // Fixed xorshift32 traversal supplies a broad, repeatable sample of
+        // all sign, exponent and significand fields without depending on a
+        // random-number crate or a host seed.
+        let mut bits = 0x6d2b_79f5_u32;
+        for _ in 0..(1 << 18) {
+            bits ^= bits << 13;
+            bits ^= bits >> 17;
+            bits ^= bits << 5;
+            let value = f32::from_bits(bits);
+            for length in lengths {
+                assert_equivalent(value, length);
+            }
+        }
     }
 
     #[test]
