@@ -1,8 +1,9 @@
 //! Readable cold scalar producer for the selected ONE X2 flow pair.
 //!
 //! This is a correctness oracle, not the playback implementation. It owns both
-//! directions and runs the recovered level-two then level-one chain without
-//! optimization or concurrency. The selected configuration is explicit:
+//! directions and runs each recovered level-two then level-one chain without
+//! arithmetic optimization. The independent directions run concurrently; the
+//! selected configuration is explicit:
 //! twelve descents split six per spatial pass, active levels two and one, and
 //! zero variational iterations. Derivative preparation and variational
 //! refinement therefore do not appear in this module.
@@ -20,7 +21,9 @@ use std::error::Error;
 use std::fmt;
 #[cfg(test)]
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
+use std::thread;
 
 use super::dense::{self, DirectedImages, PublicDenseField};
 use super::l2_seed::into_l1_initial_grid;
@@ -31,7 +34,9 @@ use super::pis::{
 use super::post_update::preserve_without_variational_or_retained;
 use super::public_blend::blend_periodic_boundary;
 use super::temporal;
-use super::temporal_median::{DirectedPatchGrids, FilteredPatchGrid, MedianState, TemporalMedians};
+use super::temporal_median::{
+    AtoBMedian, BtoAMedian, FilteredPatchGrid, MedianState, TemporalMedians,
+};
 use super::warm::{
     EffectiveWorkRows, EmptyOverrideCadence, HintPyramid, RetainedWorkRows, WarmCheckpointInputs,
     WarmDirection,
@@ -335,111 +340,152 @@ impl ColdPair {
 
         // The first inner call derives +0x120 before PIS. The next two retain
         // it, while +0x108 remains absent for pre-counts zero through two.
-        let a_to_b_next_rows = RetainedWorkRows::after_cold_calc(&a_to_b_finest_inputs);
-        let b_to_a_next_rows = RetainedWorkRows::after_cold_calc(&b_to_a_finest_inputs);
-        let a_to_b_effective_rows = a_to_b_next_rows.effective();
-        let b_to_a_effective_rows = b_to_a_next_rows.effective();
-        let mut a_to_b_next_hints = HintPyramid::cold_zeros();
-        let mut b_to_a_next_hints = HintPyramid::cold_zeros();
-        let mut a_to_b_cadence = EmptyOverrideCadence::new(0, COLD_EMPTY_OVERRIDE_CADENCE)
-            .expect("selected cold cadence is nonzero");
-        let mut b_to_a_cadence = EmptyOverrideCadence::new(0, COLD_EMPTY_OVERRIDE_CADENCE)
-            .expect("selected cold cadence is nonzero");
-        let mut medians = TemporalMedians::new();
-        let mut a_to_b_raw = None;
-        let mut b_to_a_raw = None;
-        let mut weighted_rows = WorkRowCounts::default();
-
-        for _ in 0..COLD_INNER_CALCULATIONS {
-            // One pre-increment decision is shared by both spatial levels.
-            let a_to_b_admission = a_to_b_cadence.admission();
-            let b_to_a_admission = b_to_a_cadence.admission();
-            let (a_to_b_seed, a_to_b_l2) = coarse_seed::<AtoB>(
-                &a_to_b_coarse_inputs,
-                &a_to_b_effective_rows,
-                &a_to_b_next_hints,
-                a_to_b_admission,
-            );
-            let (b_to_a_seed, b_to_a_l2) = coarse_seed::<BtoA>(
-                &b_to_a_coarse_inputs,
-                &b_to_a_effective_rows,
-                &b_to_a_next_hints,
-                b_to_a_admission,
-            );
-            let (a_to_b_grid, a_to_b_l1) = finest_solve::<AtoB>(
-                &a_to_b_finest_inputs,
-                a_to_b_seed,
-                &a_to_b_effective_rows,
-                &a_to_b_next_hints,
-                a_to_b_admission,
-            );
-            let (b_to_a_grid, b_to_a_l1) = finest_solve::<BtoA>(
-                &b_to_a_finest_inputs,
-                b_to_a_seed,
-                &b_to_a_effective_rows,
-                &b_to_a_next_hints,
-                b_to_a_admission,
-            );
-
-            // `calcHintFlow` consumes the raw L1 sparse result before the
-            // persistent temporal median filters that result for densifying.
-            let a_to_b_hint_images = a_to_b_finest_inputs.directed_images::<AtoB>(Level::One);
-            a_to_b_next_hints = HintPyramid::from_current_finest(&a_to_b_hint_images, &a_to_b_grid);
-            let b_to_a_hint_images = b_to_a_finest_inputs.directed_images::<BtoA>(Level::One);
-            b_to_a_next_hints = HintPyramid::from_current_finest(&b_to_a_hint_images, &b_to_a_grid);
-
-            let filtered = medians
-                .run(DirectedPatchGrids::new(a_to_b_grid, b_to_a_grid))
-                .expect("selected finest grids have the temporal median's level");
-            let (a_to_b_filtered, b_to_a_filtered) = filtered.into_parts();
-            // Native recognizes and repackages the previous public destination
-            // before calls two and three. Cold motion is `noArray`, though, so
-            // its empty-pyramid guard returns before reading those retained
-            // numerics. Overwriting the destination preserves the selected
-            // output semantics without inventing a retained-flow feed.
-            a_to_b_raw = Some(finish_direction(&a_to_b_finest_inputs, a_to_b_filtered));
-            b_to_a_raw = Some(finish_direction(&b_to_a_finest_inputs, b_to_a_filtered));
-            weighted_rows = WorkRowCounts {
-                a_to_b_l2,
-                b_to_a_l2,
-                a_to_b_l1,
-                b_to_a_l1,
-            };
-            a_to_b_cadence = a_to_b_cadence.after_calc();
-            b_to_a_cadence = b_to_a_cadence.after_calc();
-        }
-
-        // Native publishes only the third raw destination. Periodic repair is
-        // an outer transaction step, after all three FDS calls in both
-        // directions.
-        let a_to_b = finish_cold_public(a_to_b_raw.expect("cold fold runs three calls"));
-        let b_to_a = finish_cold_public(b_to_a_raw.expect("cold fold runs three calls"));
-        let (a_to_b_median, b_to_a_median) = {
-            let (a_to_b, b_to_a) = medians.split_mut();
-            (a_to_b.state(), b_to_a.state())
-        };
-        let (fields, invalid_nodes) = DirectedFields::from_public_dense_ref(&a_to_b, &b_to_a);
+        // Each task owns its median and every other mutable direction state.
+        // Neither result can reach the pair transition unless both tasks join,
+        // so a sibling panic publishes no partial cold state. Each solve below
+        // constructs only finest grids before its direction-local median runs.
+        let (a_to_b, b_to_a) = thread::scope(|scope| {
+            let b_to_a_worker = scope.spawn(|| {
+                run_cold_direction::<BtoA, BtoAMedian>(&b_to_a_finest_inputs, &b_to_a_coarse_inputs)
+            });
+            let a_to_b = catch_unwind(AssertUnwindSafe(|| {
+                run_cold_direction::<AtoB, AtoBMedian>(&a_to_b_finest_inputs, &a_to_b_coarse_inputs)
+            }));
+            let b_to_a = b_to_a_worker.join();
+            match (a_to_b, b_to_a) {
+                (Ok(a_to_b), Ok(b_to_a)) => (a_to_b, b_to_a),
+                (Err(panic), _) | (Ok(_), Err(panic)) => resume_unwind(panic),
+            }
+        });
+        let (fields, invalid_nodes) =
+            DirectedFields::from_public_dense_ref(&a_to_b.public, &b_to_a.public);
 
         ColdTransition {
             estimate: ColdEstimate {
                 displacement: Displacement::compose(&fields),
                 invalid_nodes,
-                weighted_rows,
+                weighted_rows: WorkRowCounts {
+                    a_to_b_l2: a_to_b.weighted_l2,
+                    b_to_a_l2: b_to_a.weighted_l2,
+                    a_to_b_l1: a_to_b.weighted_l1,
+                    b_to_a_l1: b_to_a.weighted_l1,
+                },
             },
             candidate_next: ColdNextCandidate {
                 references: retained.blurred_belts(),
-                a_to_b_public: a_to_b,
-                b_to_a_public: b_to_a,
-                a_to_b_median,
-                b_to_a_median,
-                a_to_b_work_rows: a_to_b_next_rows,
-                b_to_a_work_rows: b_to_a_next_rows,
-                a_to_b_hints: a_to_b_next_hints,
-                b_to_a_hints: b_to_a_next_hints,
-                a_to_b_cadence,
-                b_to_a_cadence,
+                a_to_b_public: a_to_b.public,
+                b_to_a_public: b_to_a.public,
+                a_to_b_median: a_to_b.median,
+                b_to_a_median: b_to_a.median,
+                a_to_b_work_rows: a_to_b.work_rows,
+                b_to_a_work_rows: b_to_a.work_rows,
+                a_to_b_hints: a_to_b.hints,
+                b_to_a_hints: b_to_a.hints,
+                a_to_b_cadence: a_to_b.cadence,
+                b_to_a_cadence: b_to_a.cadence,
             },
         }
+    }
+}
+
+struct ColdDirectionResult<D: PisDirection> {
+    public: PublicDenseField<D>,
+    median: MedianState<D>,
+    work_rows: RetainedWorkRows<D>,
+    hints: HintPyramid<D>,
+    cadence: EmptyOverrideCadence,
+    weighted_l2: usize,
+    weighted_l1: usize,
+}
+
+trait ColdMedian<D: PisDirection>: Sized {
+    fn new() -> Self;
+    fn run(&mut self, grid: PatchGrid<D>) -> FilteredPatchGrid<D>;
+    fn state(&self) -> MedianState<D>;
+}
+
+impl ColdMedian<AtoB> for AtoBMedian {
+    fn new() -> Self {
+        Self::new()
+    }
+
+    fn run(&mut self, grid: PatchGrid<AtoB>) -> FilteredPatchGrid<AtoB> {
+        self.run(grid)
+            .expect("selected finest grid has the temporal median's level")
+    }
+
+    fn state(&self) -> MedianState<AtoB> {
+        self.state()
+    }
+}
+
+impl ColdMedian<BtoA> for BtoAMedian {
+    fn new() -> Self {
+        Self::new()
+    }
+
+    fn run(&mut self, grid: PatchGrid<BtoA>) -> FilteredPatchGrid<BtoA> {
+        self.run(grid)
+            .expect("selected finest grid has the temporal median's level")
+    }
+
+    fn state(&self) -> MedianState<BtoA> {
+        self.state()
+    }
+}
+
+fn run_cold_direction<D, M>(
+    finest_inputs: &LevelInputs,
+    coarse_inputs: &LevelInputs,
+) -> ColdDirectionResult<D>
+where
+    D: PisDirection,
+    M: ColdMedian<D>,
+{
+    let work_rows = RetainedWorkRows::after_cold_calc(finest_inputs);
+    let effective_rows = work_rows.effective();
+    let mut hints = HintPyramid::cold_zeros();
+    let mut cadence = EmptyOverrideCadence::new(0, COLD_EMPTY_OVERRIDE_CADENCE)
+        .expect("selected cold cadence is nonzero");
+    let mut median = M::new();
+    let mut raw = None;
+    let mut weighted_l2 = 0;
+    let mut weighted_l1 = 0;
+
+    for _ in 0..COLD_INNER_CALCULATIONS {
+        // One pre-increment decision is shared by both spatial levels.
+        let admission = cadence.admission();
+        let (seed, current_weighted_l2) =
+            coarse_seed::<D>(coarse_inputs, &effective_rows, &hints, admission);
+        let (grid, current_weighted_l1) =
+            finest_solve::<D>(finest_inputs, seed, &effective_rows, &hints, admission);
+
+        // `calcHintFlow` consumes the raw L1 sparse result before the
+        // persistent temporal median filters that result for densifying.
+        let hint_images = finest_inputs.directed_images::<D>(Level::One);
+        hints = HintPyramid::from_current_finest(&hint_images, &grid);
+        let filtered = median.run(grid);
+
+        // Native recognizes and repackages the previous public destination
+        // before calls two and three. Cold motion is `noArray`, though, so its
+        // empty-pyramid guard returns before reading those retained numerics.
+        raw = Some(finish_direction(finest_inputs, filtered));
+        weighted_l2 = current_weighted_l2;
+        weighted_l1 = current_weighted_l1;
+        cadence = cadence.after_calc();
+    }
+
+    ColdDirectionResult {
+        // Native publishes only the third raw destination. Periodic repair is
+        // an outer transaction step, after all three FDS calls in this
+        // direction and, at the pair boundary, after both tasks have joined.
+        public: finish_cold_public(raw.expect("cold fold runs three calls")),
+        median: median.state(),
+        work_rows,
+        hints,
+        cadence,
+        weighted_l2,
+        weighted_l1,
     }
 }
 
@@ -905,6 +951,105 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    fn serial_cold_transition(retained: &ColdInputs) -> ColdTransition {
+        let masks = MaskPyramid::build(retained);
+        let a_to_b_finest_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::One);
+        let b_to_a_finest_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::One);
+        let a_to_b_coarse_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::Two);
+        let b_to_a_coarse_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::Two);
+        let a_to_b =
+            run_cold_direction::<AtoB, AtoBMedian>(&a_to_b_finest_inputs, &a_to_b_coarse_inputs);
+        let b_to_a =
+            run_cold_direction::<BtoA, BtoAMedian>(&b_to_a_finest_inputs, &b_to_a_coarse_inputs);
+        let (fields, invalid_nodes) =
+            DirectedFields::from_public_dense_ref(&a_to_b.public, &b_to_a.public);
+
+        ColdTransition {
+            estimate: ColdEstimate {
+                displacement: Displacement::compose(&fields),
+                invalid_nodes,
+                weighted_rows: WorkRowCounts {
+                    a_to_b_l2: a_to_b.weighted_l2,
+                    b_to_a_l2: b_to_a.weighted_l2,
+                    a_to_b_l1: a_to_b.weighted_l1,
+                    b_to_a_l1: b_to_a.weighted_l1,
+                },
+            },
+            candidate_next: ColdNextCandidate {
+                references: retained.blurred_belts(),
+                a_to_b_public: a_to_b.public,
+                b_to_a_public: b_to_a.public,
+                a_to_b_median: a_to_b.median,
+                b_to_a_median: b_to_a.median,
+                a_to_b_work_rows: a_to_b.work_rows,
+                b_to_a_work_rows: b_to_a.work_rows,
+                a_to_b_hints: a_to_b.hints,
+                b_to_a_hints: b_to_a.hints,
+                a_to_b_cadence: a_to_b.cadence,
+                b_to_a_cadence: b_to_a.cadence,
+            },
+        }
+    }
+
+    fn assert_f32_bits_eq(actual: &[f32], expected: &[f32], label: &str) {
+        assert_eq!(actual.len(), expected.len(), "{label} length differs");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{label} differs at sample {index}",
+            );
+        }
+    }
+
+    fn assert_public_bits_eq<D: PisDirection>(
+        actual: &PublicDenseField<D>,
+        expected: &PublicDenseField<D>,
+        label: &str,
+    ) {
+        assert_f32_bits_eq(actual.dcol(), expected.dcol(), &format!("{label} dcol"));
+        assert_f32_bits_eq(actual.drow(), expected.drow(), &format!("{label} drow"));
+    }
+
+    fn assert_hint_bits_eq<D: PisDirection>(
+        actual: &HintPyramid<D>,
+        expected: &HintPyramid<D>,
+        label: &str,
+    ) {
+        for level in [Level::One, Level::Two] {
+            let actual = actual.level(level);
+            let expected = expected.level(level);
+            assert_f32_bits_eq(
+                actual.dcol(),
+                expected.dcol(),
+                &format!("{label} {level} dcol"),
+            );
+            assert_f32_bits_eq(
+                actual.drow(),
+                expected.drow(),
+                &format!("{label} {level} drow"),
+            );
+        }
+    }
+
+    fn assert_median_bits_eq<D: PisDirection>(
+        actual: &MedianState<D>,
+        expected: &MedianState<D>,
+        label: &str,
+    ) {
+        assert_eq!(
+            actual.histogram(),
+            expected.histogram(),
+            "{label} histogram"
+        );
+        assert_eq!(actual.offsets(), expected.offsets(), "{label} offsets");
+        assert_f32_bits_eq(
+            actual.values(),
+            expected.values(),
+            &format!("{label} values"),
+        );
+    }
 
     const RUN06_PAYLOAD_BYTES: usize = 7_238_679;
     const RUN06_PAYLOAD_SHA256: &str =
@@ -4586,6 +4731,96 @@ mod tests {
         assert_eq!(a_to_b.gradient_row[interior], 0.0);
         assert_eq!(b_to_a.gradient_col[interior], 0.0);
         assert!(b_to_a.gradient_row[interior] > 0.0);
+    }
+
+    #[test]
+    fn cold_direction_parallelism_is_bit_exact_against_asymmetric_serial_reference() {
+        let pixels = ROWS * COLS;
+        let image_a = (0..pixels)
+            .map(|index| {
+                let row = index / COLS;
+                let col = index % COLS;
+                ((row * 17 + col * 29 + row * col * 3) & 0xff) as u8
+            })
+            .collect::<Vec<_>>();
+        let image_b = (0..pixels)
+            .map(|index| {
+                let row = index / COLS;
+                let col = index % COLS;
+                ((row * 43 + col * 7 + (row ^ col) * 11 + 19) & 0xff) as u8
+            })
+            .collect::<Vec<_>>();
+        let mask_a = (0..pixels)
+            .map(|index| {
+                let row = index / COLS;
+                let col = index % COLS;
+                if (row + 2 * col) % 37 < 3 { 0 } else { 255 }
+            })
+            .collect::<Vec<_>>();
+        let mask_b = (0..pixels)
+            .map(|index| {
+                let row = index / COLS;
+                let col = index % COLS;
+                if (3 * row + col + 5) % 41 < 4 { 0 } else { 255 }
+            })
+            .collect::<Vec<_>>();
+        let inputs = ColdInputs::from_prepared(
+            LensPair {
+                a: image_a,
+                b: image_b,
+            },
+            LensPair {
+                a: mask_a,
+                b: mask_b,
+            },
+        )
+        .unwrap();
+
+        let expected = serial_cold_transition(&inputs);
+        let actual = ColdPair::new().transition(&inputs);
+        assert_f32_bits_eq(
+            actual.estimate.displacement.planes(),
+            expected.estimate.displacement.planes(),
+            "composed displacement",
+        );
+        assert_eq!(
+            actual.estimate.invalid_nodes,
+            expected.estimate.invalid_nodes
+        );
+        assert_eq!(
+            actual.estimate.weighted_rows,
+            expected.estimate.weighted_rows
+        );
+
+        let actual = actual.candidate_next;
+        let expected = expected.candidate_next;
+        assert_eq!(actual.references, expected.references);
+        assert_public_bits_eq(
+            &actual.a_to_b_public,
+            &expected.a_to_b_public,
+            "A-to-B public",
+        );
+        assert_public_bits_eq(
+            &actual.b_to_a_public,
+            &expected.b_to_a_public,
+            "B-to-A public",
+        );
+        assert_median_bits_eq(
+            &actual.a_to_b_median,
+            &expected.a_to_b_median,
+            "A-to-B median",
+        );
+        assert_median_bits_eq(
+            &actual.b_to_a_median,
+            &expected.b_to_a_median,
+            "B-to-A median",
+        );
+        assert_eq!(actual.a_to_b_work_rows, expected.a_to_b_work_rows);
+        assert_eq!(actual.b_to_a_work_rows, expected.b_to_a_work_rows);
+        assert_hint_bits_eq(&actual.a_to_b_hints, &expected.a_to_b_hints, "A-to-B hints");
+        assert_hint_bits_eq(&actual.b_to_a_hints, &expected.b_to_a_hints, "B-to-A hints");
+        assert_eq!(actual.a_to_b_cadence, expected.a_to_b_cadence);
+        assert_eq!(actual.b_to_a_cadence, expected.b_to_a_cadence);
     }
 
     #[test]
