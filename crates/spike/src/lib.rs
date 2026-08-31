@@ -23,6 +23,7 @@ mod offscreen;
 mod picture;
 pub mod registration;
 mod seam;
+pub mod seam_trace;
 mod skyline;
 
 pub use kjerag_media::{Chroma, Pair, Plane, Walk};

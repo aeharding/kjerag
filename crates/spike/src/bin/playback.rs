@@ -21,19 +21,31 @@
 //! report underneath it, so the number this instrument exists to produce is
 //! dropped and starved with a capture burst running.
 //!
-//! Nothing is written to disk unless `shots` asks for captures, which land
-//! in ./scratch/ (gitignored): frames of real footage are personal video
-//! and this repo is public.
+//! `range=START:COUNT out-dir=NEW_DIRECTORY` is the exact consecutive-frame
+//! diagnostic. It runs the selected production player causally from frame
+//! zero, consumes every frame, and captures each displayed frame in the
+//! requested range at [`SHOT_WIDTH`]. It publishes the PNGs and a receipt
+//! together only after the complete range has passed its frame and run checks.
+//!
+//! Timed `shots` land in ./scratch/ (gitignored). Exact target and range
+//! modes write only to their named outputs. Frames of real footage are
+//! personal video and this repo is public.
 
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use kjerag_media::{Fallible, Reader};
 use kjerag_render::{
-    Camera, Extent, Next, Readout, Request, Sampling, Scene, ScenePipeline, Shot, Size, Sweep,
-    dmabuf,
+    Camera, Extent, Horizon, Next, OneXsMapFrame, Readout, Request, Sampling, Scene, ScenePipeline,
+    Shot, Size, Sweep, dmabuf,
 };
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// Not sRGB, so the pass writes the video's own numbers: the same choice the
 /// `reframe` instrument makes.
@@ -55,64 +67,258 @@ const SHOT_WIDTH: u32 = 3840;
 
 fn main() -> Fallible<()> {
     let args: Vec<String> = std::env::args().collect();
-    let input = PathBuf::from(args.get(1).ok_or(USAGE)?);
-    let seconds: u64 = parse(&args, 2, 60)?;
-    let hz: u32 = parse(&args, 3, 60)?;
-    let shots: u32 = parse(&args, 4, 0)?;
-    // Degrees, and the reason it is here is the captures: a view down a
-    // lens axis holds one lens, and only a view across the seam proves a
-    // still carries both.
-    let yaw: f32 = parse(&args, 5, 0.0)?;
-    // Issue #9's cost: the file's own readout is what the app uses, `off` is
-    // the pass as it was before issue #9, and a named sweep forces a
-    // direction over a file's own. Now that an X4's direction is measured and
-    // the correction ships on, `off` is the arm the cost is measured against.
-    let readout: String = parse(&args, 6, "file".to_owned())?;
-    // Degrees. A wide view is the one that puts a large area of both lenses on
-    // screen at once, which is where the cost of sampling two of them is
-    // largest (issue #10).
-    let fov: f32 = parse(&args, 7, Camera::default().fov.to_degrees())?;
-    // Issue #11's cost: `bilinear` is the pass as it sampled before it,
-    // which is what the ms/redraw of the upgrade is measured against, and
-    // `luma` is the half of the upgrade the delivered frame's own grid asks
-    // for.
-    let sample: String = parse(&args, 8, "sharp".to_owned())?;
-    // Issue #103's cost: `noband` holds the per-frame seam measurement off and
-    // `notone` holds stage 3's exposure pooling off while leaving the
-    // measurement on, so each stage's own share of a redraw is the difference
-    // between two runs of this binary rather than between two builds of it.
-    let band: String = parse(&args, 9, "band".to_owned())?;
-
-    for lookahead in [0, 2, 4] {
-        println!("{}", drain(&input, lookahead)?);
+    let options = Options::parse(&args)?;
+    let evidence = options
+        .evidence_out
+        .as_deref()
+        .map(|out| EvidenceRun::authenticate(&options.input, out))
+        .transpose()?;
+    if let (Some(_), Some(out)) = (options.range, options.out_dir.as_deref()) {
+        ensure_range_destination(out)?;
     }
-    println!();
+    let range_sources = options
+        .range
+        .map(|_| AuthenticatedPair::open(&options.input))
+        .transpose()?;
+    let range_provenance = options
+        .range
+        .map(|_| RangeProvenance::authenticate())
+        .transpose()?;
+
+    if options.bench {
+        for lookahead in [0, 2, 4] {
+            println!("{}", drain(&options.input, lookahead)?);
+        }
+        println!();
+    }
     let camera = Camera {
-        yaw: yaw.to_radians(),
-        fov: fov.to_radians(),
-        ..Camera::default()
+        yaw: options.yaw.to_radians(),
+        pitch: options.pitch.to_radians(),
+        fov: options.fov.to_radians(),
     };
     play(
-        &input,
-        Duration::from_secs(seconds),
-        hz,
-        shots,
+        &options.input,
+        Run::new(&options),
+        options.hz,
+        options.shots,
         Drawn {
             camera,
-            readout: &readout,
-            sampling: match sample.as_str() {
+            horizon: if options.lock {
+                Horizon::Locked
+            } else {
+                Horizon::Free
+            },
+            readout: &options.readout,
+            sampling: match options.sample.as_str() {
                 "bilinear" => Sampling::Bilinear,
                 "luma" => Sampling::Luma,
                 _ => Sampling::Sharp,
             },
-            band: band != "noband",
-            tone: band != "notone" && band != "noband",
+            band: options.band != "noband",
+            tone: options.band != "notone" && options.band != "noband",
+        },
+        RunBindings {
+            evidence,
+            range_sources,
+            range_provenance,
         },
     )
 }
 
 const USAGE: &str = "usage: playback <file.insv> [seconds] [hz] [shots] [yaw] \
-     [file|off|right|left|down|up] [fov] [bilinear|luma|sharp] [band|noband]";
+     [file|off|right|left|down|up] [fov] [bilinear|luma|sharp] [band|noband] \
+     [target=N] [bench=0|1] [yaw=deg] [pitch=deg] [fov=deg] [lock=0|1] [out=PNG] \
+     [evidence-out=NEW-DIRECTORY] [range=START:COUNT out-dir=NEW-DIRECTORY]";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RangeSpec {
+    start: u64,
+    count: u64,
+    end: u64,
+}
+
+impl RangeSpec {
+    fn parse(raw: &str) -> Fallible<Self> {
+        let (start, count) = raw.split_once(':').ok_or("range= must be START:COUNT")?;
+        if start.is_empty() || count.is_empty() || count.contains(':') {
+            return Err("range= must be START:COUNT".into());
+        }
+        let start = start
+            .parse::<u64>()
+            .map_err(|error| format!("bad range start: {error}"))?;
+        let count = count
+            .parse::<u64>()
+            .map_err(|error| format!("bad range count: {error}"))?;
+        if count == 0 {
+            return Err("range count must be greater than zero".into());
+        }
+        let exclusive = start
+            .checked_add(count)
+            .ok_or("range end cannot be counted by presentation statistics")?;
+        let end = exclusive - 1;
+        Ok(Self { start, count, end })
+    }
+}
+
+struct Options {
+    input: PathBuf,
+    seconds: u64,
+    hz: u32,
+    shots: u32,
+    yaw: f32,
+    pitch: f32,
+    readout: String,
+    fov: f32,
+    sample: String,
+    band: String,
+    target: Option<u64>,
+    bench: bool,
+    lock: bool,
+    out: Option<PathBuf>,
+    evidence_out: Option<PathBuf>,
+    range: Option<RangeSpec>,
+    out_dir: Option<PathBuf>,
+}
+
+impl Options {
+    fn parse(args: &[String]) -> Fallible<Self> {
+        let input = PathBuf::from(args.get(1).ok_or(USAGE)?);
+        let mut positional = Vec::new();
+        let mut named = std::collections::HashMap::new();
+        for argument in args.iter().skip(2) {
+            let Some((name, value)) = argument.split_once('=') else {
+                positional.push(argument.as_str());
+                continue;
+            };
+            if value.is_empty() {
+                return Err(format!("{name}= needs a value").into());
+            }
+            if named.insert(name, value).is_some() {
+                return Err(format!("{name}= was named more than once").into());
+            }
+        }
+        if positional.len() > 8 {
+            return Err(USAGE.into());
+        }
+        for name in named.keys() {
+            if !matches!(
+                *name,
+                "target"
+                    | "bench"
+                    | "yaw"
+                    | "pitch"
+                    | "fov"
+                    | "lock"
+                    | "out"
+                    | "evidence-out"
+                    | "range"
+                    | "out-dir"
+            ) {
+                return Err(format!("unknown playback option {name}=").into());
+            }
+        }
+
+        let value = |index: usize| positional.get(index).copied();
+        let seconds = parsed(value(0), 60, "seconds")?;
+        let hz = parsed(value(1), 60, "hz")?;
+        let shots = parsed(value(2), 0, "shots")?;
+        let yaw = parsed(named.get("yaw").copied().or_else(|| value(3)), 0.0, "yaw")?;
+        let pitch = parsed(named.get("pitch").copied(), 0.0, "pitch")?;
+        let readout = value(4).unwrap_or("file").to_owned();
+        let fov = parsed(
+            named.get("fov").copied().or_else(|| value(5)),
+            Camera::default().fov.to_degrees(),
+            "fov",
+        )?;
+        let sample = value(6).unwrap_or("sharp").to_owned();
+        let band = value(7).unwrap_or("band").to_owned();
+        let target = named
+            .get("target")
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|error| format!("bad target: {error}"))
+            })
+            .transpose()?;
+        let bench = bit(named.get("bench").copied(), true, "bench")?;
+        let lock = bit(named.get("lock").copied(), true, "lock")?;
+        let out = named.get("out").map(PathBuf::from);
+        let evidence_out = named.get("evidence-out").map(PathBuf::from);
+        let range = named
+            .get("range")
+            .map(|value| RangeSpec::parse(value))
+            .transpose()?;
+        let out_dir = named.get("out-dir").map(PathBuf::from);
+
+        if target.is_none() && (out.is_some() || evidence_out.is_some()) {
+            return Err("out= and evidence-out= are only valid with target=".into());
+        }
+        if target.is_some() && range.is_some() {
+            return Err("target= and range= are mutually exclusive".into());
+        }
+        if target.is_some() && shots != 0 {
+            return Err("target= owns its exact capture; positional shots must be 0".into());
+        }
+        if range.is_some() && shots != 0 {
+            return Err("range= owns its exact captures; positional shots must be 0".into());
+        }
+        if range.is_some() && evidence_out.is_some() {
+            return Err("range= and evidence-out= are mutually exclusive".into());
+        }
+        if range.is_some() != out_dir.is_some() {
+            return Err("range= and out-dir= must be supplied together".into());
+        }
+        if evidence_out.is_some() && bench {
+            return Err(
+                "evidence-out= requires bench=0 so only descriptor-bound playback decodes".into(),
+            );
+        }
+        if hz == 0 {
+            return Err("hz must be greater than zero".into());
+        }
+
+        Ok(Self {
+            input,
+            seconds,
+            hz,
+            shots,
+            yaw,
+            pitch,
+            readout,
+            fov,
+            sample,
+            band,
+            target,
+            bench,
+            lock,
+            out,
+            evidence_out,
+            range,
+            out_dir,
+        })
+    }
+}
+
+fn parsed<T: std::str::FromStr>(raw: Option<&str>, fallback: T, name: &str) -> Fallible<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match raw {
+        None => Ok(fallback),
+        Some(raw) => raw
+            .parse()
+            .map_err(|error| format!("bad {name}: {error}").into()),
+    }
+}
+
+fn bit(raw: Option<&str>, fallback: bool, name: &str) -> Fallible<bool> {
+    match raw {
+        None => Ok(fallback),
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(format!("{name}= must be 0 or 1").into()),
+    }
+}
 
 /// What the readout argument does to the file's own (issue #9): a direction
 /// forces that one, `off` is a readout of no length at all, which is the pass
@@ -141,18 +347,6 @@ fn forced(readout: &str) -> Option<fn(Readout) -> Readout> {
             ..file
         }),
         _ => None,
-    }
-}
-
-fn parse<T: std::str::FromStr>(args: &[String], i: usize, fallback: T) -> Fallible<T>
-where
-    T::Err: std::fmt::Display,
-{
-    match args.get(i) {
-        None => Ok(fallback),
-        Some(raw) => raw
-            .parse()
-            .map_err(|e| format!("bad argument {i}: {e}").into()),
     }
 }
 
@@ -196,6 +390,7 @@ fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
 /// describe the picture rather than the measurement.
 struct Drawn<'a> {
     camera: Camera,
+    horizon: Horizon,
     readout: &'a str,
     sampling: Sampling,
     /// Whether the per-frame seam band measures (issue #103). Off is the pass
@@ -207,14 +402,84 @@ struct Drawn<'a> {
     tone: bool,
 }
 
-fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> Fallible<()> {
+enum Run {
+    Timed(Duration),
+    Target(Target),
+    Range(RangeRun),
+}
+
+struct Target {
+    index: u64,
+    out: PathBuf,
+    evidence_out: Option<PathBuf>,
+}
+
+struct RangeRun {
+    spec: RangeSpec,
+    out_dir: PathBuf,
+}
+
+struct RunBindings {
+    evidence: Option<EvidenceRun>,
+    range_sources: Option<AuthenticatedPair>,
+    range_provenance: Option<RangeProvenance>,
+}
+
+impl Run {
+    fn new(options: &Options) -> Self {
+        match (options.target, options.range) {
+            (Some(index), None) => Self::Target(Target {
+                index,
+                out: options.out.clone().unwrap_or_else(|| {
+                    PathBuf::from("scratch").join(format!("playback-frame{index}.png"))
+                }),
+                evidence_out: options.evidence_out.clone(),
+            }),
+            (None, Some(spec)) => Self::Range(RangeRun {
+                spec,
+                out_dir: options
+                    .out_dir
+                    .clone()
+                    .expect("parsed range mode has an output directory"),
+            }),
+            (None, None) => Self::Timed(Duration::from_secs(options.seconds)),
+            (Some(_), Some(_)) => unreachable!("parser rejects target and range together"),
+        }
+    }
+
+    fn duration(&self) -> Option<Duration> {
+        match self {
+            Self::Timed(duration) => Some(*duration),
+            Self::Target(_) | Self::Range(_) => None,
+        }
+    }
+}
+
+fn play(
+    input: &Path,
+    run: Run,
+    hz: u32,
+    shots: u32,
+    drawn: Drawn<'_>,
+    bindings: RunBindings,
+) -> Fallible<()> {
+    let RunBindings {
+        evidence,
+        range_sources,
+        range_provenance,
+    } = bindings;
     let Drawn {
         camera,
+        horizon,
         readout,
         sampling,
         band,
         tone,
     } = drawn;
+    let mut range_output = match &run {
+        Run::Range(range) => Some(RangeOutput::begin(&range.out_dir, range.spec)?),
+        _ => None,
+    };
     let gpu = Gpu::new()?;
     println!("gpu:    {}", gpu.adapter.get_info().name);
     println!("device: {}", dmabuf::device_report(&gpu.device));
@@ -222,7 +487,25 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
     // An instrument has no stored calibration to read, and this is not the
     // app. It draws the factory calibration, the parity base: the per-capture
     // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
-    let mut scene = Scene::open(input)?;
+    let mut scene = match (&evidence, &range_sources) {
+        (Some(evidence), None) => {
+            let [first, second] = evidence.sources.descriptor_paths()?;
+            Scene::open_pair(&first, &second)?
+        }
+        (None, Some(sources)) => {
+            let [first, second] = sources.descriptor_paths()?;
+            Scene::open_pair(&first, &second)?
+        }
+        (None, None) => Scene::open(input)?,
+        (Some(_), Some(_)) => unreachable!("range and evidence modes are mutually exclusive"),
+    };
+    if let Some(sources) = &range_sources {
+        let actual = scene
+            .source_paths()
+            .ok_or("range scene has no admitted source paths")?;
+        sources.require_descriptor_order(&actual)?;
+    }
+    scene.set_horizon(horizon);
     if let (Some(forced), Some(file)) = (forced(readout), scene.readout()) {
         scene.set_readout(Some(forced(file)));
     }
@@ -234,22 +517,52 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
     pipeline.hold_tone(!tone);
     println!("seam:   band {band}, exposure {tone}");
     let refresh = Duration::from_secs_f64(1.0 / f64::from(hz));
-    println!(
-        "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{} at yaw {:.0}, \
-         fov {:.0}",
-        run.as_secs(),
-        OUTPUT.width,
-        OUTPUT.height,
-        camera.yaw.to_degrees(),
-        camera.fov.to_degrees(),
-    );
+    match &run {
+        Run::Timed(duration) => println!(
+            "pace:   due-time redraws on a {hz} Hz display for {} s, rendering {}x{} at yaw \
+             {:.0}, fov {:.0}",
+            duration.as_secs(),
+            OUTPUT.width,
+            OUTPUT.height,
+            camera.yaw.to_degrees(),
+            camera.fov.to_degrees(),
+        ),
+        Run::Target(target) => println!(
+            "pace:   every live frame from 0 through {}, rendering {}x{} at yaw {:.2}, pitch \
+             {:.2}, fov {:.2}, lock {}; no seek",
+            target.index,
+            OUTPUT.width,
+            OUTPUT.height,
+            camera.yaw.to_degrees(),
+            camera.pitch.to_degrees(),
+            camera.fov.to_degrees(),
+            u8::from(horizon == Horizon::Locked),
+        ),
+        Run::Range(range) => println!(
+            "pace:   every live frame from 0 through {}, capturing {}..={} at {} px, yaw \
+             {:.2}, pitch {:.2}, fov {:.2}, lock {}; no seek",
+            range.spec.end,
+            range.spec.start,
+            range.spec.end,
+            SHOT_WIDTH,
+            camera.yaw.to_degrees(),
+            camera.pitch.to_degrees(),
+            camera.fov.to_degrees(),
+            u8::from(horizon == Horizon::Locked),
+        ),
+    }
 
     let start = Instant::now();
     let cpu = Cpu::now();
     let (mut redraws, mut render) = (0u64, Duration::ZERO);
-    let mut burst = Burst::new(shots, run);
+    let mut burst = Burst::new(shots, run.duration().unwrap_or_default());
+    let (exact_written, exact_report) = mpsc::channel();
+    let mut last_progress = None;
 
-    while start.elapsed() < run {
+    while run
+        .duration()
+        .is_none_or(|duration| start.elapsed() < duration)
+    {
         let now = Instant::now();
         let next = match scene.pump(now) {
             Next::At(due) => due,
@@ -259,13 +572,83 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
             // has a terminal and a run to end, and a run whose picture died
             // part way through must not be reported as a clean one.
             Next::Stopped(stall) => {
+                match &run {
+                    Run::Target(_) => {
+                        return Err(format!("target playback stopped: {stall}").into());
+                    }
+                    Run::Range(_) => {
+                        return Err(format!("range playback stopped: {stall}").into());
+                    }
+                    Run::Timed(_) => {}
+                }
                 eprintln!("play:   stopped: {stall}");
                 break;
             }
         };
-        let armed = burst.due(start.elapsed());
+        let offered = scene.frame();
+        let target_hit = match (&run, offered) {
+            (Run::Target(target), Some((index, _))) => index == target.index,
+            _ => false,
+        };
+        let range_hit = match (&run, offered, range_output.as_ref()) {
+            (Run::Range(range), Some((index, _)), Some(output)) => {
+                if output.next_index() <= range.spec.end && index > output.next_index() {
+                    return Err(format!(
+                        "range skipped displayed frame {}; next required frame is {}",
+                        index,
+                        output.next_index()
+                    )
+                    .into());
+                }
+                index == output.next_index() && index <= range.spec.end
+            }
+            _ => false,
+        };
+        if let (Run::Target(target), Some((index, timestamp))) = (&run, offered)
+            && last_progress != Some(index)
+            && (index == 0 || index % 100 == 0 || index == target.index)
+        {
+            let elapsed = start.elapsed().as_secs_f64();
+            let rate = (index + 1) as f64 / elapsed.max(f64::EPSILON);
+            let left = target.index.saturating_sub(index) as f64 / rate;
+            println!(
+                "frame:  {index}/{} at {:.6} s, {:.2} frames/s, ETA {:.0} s",
+                target.index,
+                timestamp.as_secs_f64(),
+                rate,
+                left,
+            );
+            last_progress = Some(index);
+        }
+        if let (Run::Range(range), Some((index, timestamp))) = (&run, offered)
+            && last_progress != Some(index)
+            && (index == 0 || index % 100 == 0 || index == range.spec.end)
+        {
+            let elapsed = start.elapsed().as_secs_f64();
+            let rate = (index + 1) as f64 / elapsed.max(f64::EPSILON);
+            let left = range.spec.end.saturating_sub(index) as f64 / rate;
+            println!(
+                "frame:  {index}/{} at {:.6} s, {:.2} frames/s, ETA {:.0} s",
+                range.spec.end,
+                timestamp.as_secs_f64(),
+                rate,
+                left,
+            );
+            last_progress = Some(index);
+        }
+
+        let armed = !target_hit && !range_hit && burst.due(start.elapsed());
         if armed {
             scene.capture(burst.request());
+        }
+        if target_hit || range_hit {
+            let written = exact_written.clone();
+            scene.capture(Request {
+                width: SHOT_WIDTH,
+                then: Box::new(move |shot| {
+                    let _ = written.send(shot);
+                }),
+            });
         }
         let primitive = scene.primitive(camera);
 
@@ -282,6 +665,187 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
         gpu.render(&pipeline)?;
         render += drawn.elapsed();
         redraws += 1;
+
+        if target_hit || range_hit {
+            let capture_label = if range_hit { "range" } else { "target" };
+            let (expected_index, expected_timestamp) =
+                offered.expect("exact capture hit has a source frame");
+            let shot = exact_report
+                .recv_timeout(Duration::from_secs(30))
+                .map_err(|error| {
+                    format!("{capture_label} capture did not finish within 30 s: {error}")
+                })??;
+            if shot.index != expected_index {
+                return Err(format!(
+                    "{capture_label} capture holds frame {} but frame {expected_index} was prepared",
+                    shot.index
+                )
+                .into());
+            }
+            if shot.time != expected_timestamp {
+                return Err(format!(
+                    "{capture_label} capture time {:.9} differs from prepared frame time {:.9}",
+                    shot.time.as_secs_f64(),
+                    expected_timestamp.as_secs_f64()
+                )
+                .into());
+            }
+
+            if range_hit {
+                if scene.displayed_frame() != Some((expected_index, expected_timestamp)) {
+                    return Err(format!(
+                        "range frame {expected_index} was captured without that exact frame being displayed"
+                    )
+                    .into());
+                }
+                let current_stamp = scene
+                    .frame_stamp()
+                    .ok_or("range scene lost its exact delivered frame stamp")?;
+                if current_stamp.index() != expected_index
+                    || current_stamp.timestamp() != expected_timestamp
+                {
+                    return Err("range scene stamp changed after the picture was displayed".into());
+                }
+                let map = scene.diagnostic_one_xs_map()?.ok_or(
+                    "range scene has no shown selected ONE X2 map for its current delivery",
+                )?;
+                if map.frame() != &current_stamp {
+                    return Err(
+                        "range ONE X2 map differs from the scene's exact shown delivery".into(),
+                    );
+                }
+                let output = range_output
+                    .as_mut()
+                    .expect("range mode created its staged output");
+                output.save(&shot, &map)?;
+                let range = match &run {
+                    Run::Range(range) => range,
+                    _ => unreachable!("range hit belongs to range mode"),
+                };
+                if expected_index == range.spec.end {
+                    let stats = scene.stats().ok_or("no player")?;
+                    let expected_presented = range
+                        .spec
+                        .end
+                        .checked_add(1)
+                        .ok_or("range end cannot be counted")?;
+                    if stats.presented != expected_presented
+                        || stats.dropped != 0
+                        || stats.starved != 0
+                    {
+                        return Err(format!(
+                            "range ended after {} presented, {} dropped and {} starved; expected \
+                             {expected_presented} presented, 0 dropped and 0 starved",
+                            stats.presented, stats.dropped, stats.starved
+                        )
+                        .into());
+                    }
+                    let sources = range_sources
+                        .as_ref()
+                        .ok_or("range source pair was not authenticated before playback")?;
+                    sources.verify()?;
+                    let provenance = range_provenance
+                        .as_ref()
+                        .ok_or("range build provenance was not authenticated before playback")?;
+                    let build = provenance.verify()?;
+                    output.publish(RangeReceipt {
+                        camera,
+                        horizon,
+                        output: OUTPUT,
+                        stats,
+                        redraws,
+                        elapsed: start.elapsed(),
+                        sources: sources.receipt(),
+                        readout: readout.to_owned(),
+                        sampling: format!("{sampling:?}"),
+                        band,
+                        tone,
+                        build,
+                    })?;
+                    println!(
+                        "range:  frames {}..={} at {} px, {} presented, 0 dropped, 0 starved, {}",
+                        range.spec.start,
+                        range.spec.end,
+                        SHOT_WIDTH,
+                        stats.presented,
+                        range.out_dir.display(),
+                    );
+                    return Ok(());
+                }
+                if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                continue;
+            }
+
+            let target = match &run {
+                Run::Target(target) => target,
+                Run::Timed(_) | Run::Range(_) => unreachable!("target hit belongs to target mode"),
+            };
+            if shot.index != target.index {
+                return Err(format!(
+                    "target capture holds frame {} but frame {expected_index} was prepared",
+                    shot.index
+                )
+                .into());
+            }
+            write_png_to(&shot, &target.out)?;
+            let stats = scene.stats().ok_or("no player")?;
+            let expected_presented = target
+                .index
+                .checked_add(1)
+                .ok_or("target frame cannot be counted")?;
+            if stats.presented != expected_presented || stats.dropped != 0 {
+                return Err(format!(
+                    "target frame {} rendered after {} presented and {} dropped; expected {} \
+                     presented and 0 dropped",
+                    target.index, stats.presented, stats.dropped, expected_presented
+                )
+                .into());
+            }
+            if let Some(out) = &target.evidence_out {
+                let evidence = evidence
+                    .as_ref()
+                    .ok_or("target evidence was not authenticated before playback")?;
+                let current_stamp = scene
+                    .frame_stamp()
+                    .ok_or("target scene lost its exact delivered frame stamp")?;
+                let map = scene.diagnostic_one_xs_map()?.ok_or(
+                    "target scene has no shown selected ONE X2 map for its current delivery",
+                )?;
+                if map.frame() != &current_stamp {
+                    return Err(
+                        "diagnostic ONE X2 map differs from the scene's exact current delivery"
+                            .into(),
+                    );
+                }
+                if current_stamp.index() != expected_index
+                    || current_stamp.timestamp() != expected_timestamp
+                {
+                    return Err("target scene stamp changed after the picture was prepared".into());
+                }
+                let sources = scene
+                    .source_paths()
+                    .ok_or("target scene has no admitted source paths")?;
+                evidence.sources.require_descriptor_order(&sources)?;
+                persist_target_evidence(TargetEvidence {
+                    out,
+                    evidence,
+                    png: &target.out,
+                    map: &map,
+                    expected: (expected_index, expected_timestamp),
+                    stats,
+                })?;
+            }
+            println!(
+                "target: frame {} at {:.9} s, {} presented, 0 dropped, {}",
+                shot.index,
+                shot.time.as_secs_f64(),
+                stats.presented,
+                target.out.display(),
+            );
+            return Ok(());
+        }
 
         if let Some(wait) = next.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
@@ -303,7 +867,19 @@ fn play(input: &Path, run: Duration, hz: u32, shots: u32, drawn: Drawn<'_>) -> F
     );
     burst.report();
     pause(&mut scene, Duration::from_secs(1));
-    Ok(())
+    match run {
+        Run::Timed(_) => Ok(()),
+        Run::Target(target) => Err(format!(
+            "file ended before target frame {} was rendered",
+            target.index
+        )
+        .into()),
+        Run::Range(range) => Err(format!(
+            "file ended before complete range {}..={} was displayed",
+            range.spec.start, range.spec.end
+        )
+        .into()),
+    }
 }
 
 /// A run of captures during playback, and what they cost the redraw they
@@ -421,13 +997,7 @@ impl Burst {
 fn write_png(shot: &Shot) -> Fallible<String> {
     let began = Instant::now();
     let out = PathBuf::from("scratch").join(format!("playback-frame{}.png", shot.index));
-    std::fs::create_dir_all("scratch")?;
-
-    let file = std::io::BufWriter::new(std::fs::File::create(&out)?);
-    let mut encoder = png::Encoder::new(file, shot.width, shot.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header()?.write_image_data(&shot.rgba)?;
+    write_png_to(shot, &out)?;
 
     Ok(format!(
         "{} at {:.3} s, {}x{}, encoded in {:.0} ms",
@@ -437,6 +1007,1009 @@ fn write_png(shot: &Shot) -> Fallible<String> {
         shot.height,
         began.elapsed().as_secs_f64() * 1000.0,
     ))
+}
+
+fn write_png_to(shot: &Shot, out: &Path) -> Fallible<()> {
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::io::BufWriter::new(std::fs::File::create(out)?);
+    let mut encoder = png::Encoder::new(file, shot.width, shot.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&shot.rgba)?;
+    Ok(())
+}
+
+const RANGE_RECEIPT: &str = "range-receipt.json";
+
+struct RangeOutput {
+    out: PathBuf,
+    stage: Option<PathBuf>,
+    spec: RangeSpec,
+    next: u64,
+    frames: Vec<Value>,
+    capture_height: Option<u32>,
+}
+
+struct RangeReceipt {
+    camera: Camera,
+    horizon: Horizon,
+    output: Size,
+    stats: kjerag_render::Stats,
+    redraws: u64,
+    elapsed: Duration,
+    sources: Vec<Value>,
+    readout: String,
+    sampling: String,
+    band: bool,
+    tone: bool,
+    build: Value,
+}
+
+impl RangeOutput {
+    fn begin(out: &Path, spec: RangeSpec) -> Fallible<Self> {
+        ensure_range_destination(out)?;
+        let stage = range_stage(out)?;
+        if let Some(parent) = out.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::create_dir(&stage).map_err(|error| {
+            format!(
+                "range staging directory {} must be new: {error}",
+                stage.display()
+            )
+        })?;
+        Ok(Self {
+            out: out.to_owned(),
+            stage: Some(stage),
+            spec,
+            next: spec.start,
+            frames: Vec::new(),
+            capture_height: None,
+        })
+    }
+
+    fn next_index(&self) -> u64 {
+        self.next
+    }
+
+    fn save(&mut self, shot: &Shot, map: &OneXsMapFrame) -> Fallible<()> {
+        if shot.index != self.next {
+            return Err(format!(
+                "range capture returned frame {} while frame {} was required",
+                shot.index, self.next
+            )
+            .into());
+        }
+        if shot.width != SHOT_WIDTH {
+            return Err(format!(
+                "range frame {} has capture width {}, expected {SHOT_WIDTH}",
+                shot.index, shot.width
+            )
+            .into());
+        }
+        match self.capture_height {
+            Some(height) if height != shot.height => {
+                return Err(format!(
+                    "range frame {} has capture height {}, expected {height}",
+                    shot.index, shot.height
+                )
+                .into());
+            }
+            None => self.capture_height = Some(shot.height),
+            Some(_) => {}
+        }
+        if map.frame().index() != shot.index || map.frame().timestamp() != shot.time {
+            return Err(format!(
+                "range frame {} picture and production map identify different deliveries",
+                shot.index
+            )
+            .into());
+        }
+        let stage = self
+            .stage
+            .as_deref()
+            .ok_or("range output was already published")?;
+        let stem = format!("frame-{:010}", shot.index);
+        let name = format!("{stem}.png");
+        let packed_name = format!("{stem}.packed-f32le.bin");
+        let alpha_name = format!("{stem}.alpha-f32le.bin");
+        let encoded = encode_png(shot)?;
+        let image_sha256 = digest_hex(Sha256::digest(&encoded));
+        let packed = map.packed().bytes();
+        let alpha = map.alpha().bytes();
+        write_new(&stage.join(&name), &encoded)?;
+        write_new(&stage.join(&packed_name), packed)?;
+        write_new(&stage.join(&alpha_name), alpha)?;
+        self.frames.push(json!({
+            "index": shot.index,
+            "timestamp_seconds": shot.time.as_secs(),
+            "timestamp_nanoseconds": shot.time.subsec_nanos(),
+            "image": {
+                "file": name,
+                "width": shot.width,
+                "height": shot.height,
+                "bytes": encoded.len(),
+                "sha256": image_sha256
+            },
+            "production_map": {
+                "packed": {
+                    "file": packed_name,
+                    "bytes": packed.len(),
+                    "sha256": digest_hex(Sha256::digest(packed))
+                },
+                "alpha": {
+                    "file": alpha_name,
+                    "bytes": alpha.len(),
+                    "sha256": digest_hex(Sha256::digest(alpha))
+                }
+            }
+        }));
+        self.next = self
+            .next
+            .checked_add(1)
+            .ok_or("captured range cannot advance past the frame index limit")?;
+        Ok(())
+    }
+
+    fn publish(&mut self, run: RangeReceipt) -> Fallible<()> {
+        if self.frames.len() as u64 != self.spec.count || self.next != self.spec.end + 1 {
+            return Err(format!(
+                "range output is incomplete: captured {} of {} requested frames",
+                self.frames.len(),
+                self.spec.count
+            )
+            .into());
+        }
+        let capture_height = self
+            .capture_height
+            .ok_or("complete range output has no capture height")?;
+        let receipt = json!({
+            "schema": "kjerag.playback-consecutive-range.v1",
+            "claim": "exact consecutive displayed production frames from one causal frame-zero run",
+            "limitations": {
+                "studio_parity_claimed": false,
+                "temporal_parity_claimed": false,
+                "dense_seam_trace_included": false
+            },
+            "request": {
+                "start": self.spec.start,
+                "count": self.spec.count,
+                "end_inclusive": self.spec.end,
+                "no_seek": true,
+                "cold_start_at_range_boundary": false,
+                "every_source_frame_consumed": true,
+                "captured_map_substitution": false
+            },
+            "view": {
+                "yaw_radians": run.camera.yaw,
+                "pitch_radians": run.camera.pitch,
+                "fov_radians": run.camera.fov,
+                "yaw_degrees": run.camera.yaw.to_degrees(),
+                "pitch_degrees": run.camera.pitch.to_degrees(),
+                "fov_degrees": run.camera.fov.to_degrees(),
+                "horizon_locked": run.horizon == Horizon::Locked,
+                "readout": run.readout,
+                "sampling": run.sampling,
+                "seam_band": run.band,
+                "exposure_tone": run.tone,
+                "render_format": "rgba8unorm",
+                "render_width": run.output.width,
+                "render_height": run.output.height,
+                "capture_width": SHOT_WIDTH,
+                "capture_height": capture_height
+            },
+            "source": run.sources,
+            "build": run.build,
+            "frames": &self.frames,
+            "run": {
+                "presented": run.stats.presented,
+                "dropped": run.stats.dropped,
+                "starved": run.stats.starved,
+                "scene_redraws": run.stats.redraws,
+                "instrument_redraws": run.redraws,
+                "elapsed_seconds": run.elapsed.as_secs(),
+                "elapsed_nanoseconds": run.elapsed.subsec_nanos()
+            }
+        });
+        let mut encoded = serde_json::to_vec_pretty(&receipt)?;
+        encoded.push(b'\n');
+        let stage = self
+            .stage
+            .as_deref()
+            .ok_or("range output was already published")?;
+        // The receipt is deliberately the last leaf. The directory is not
+        // visible under its requested name until every PNG and this complete
+        // receipt are durable.
+        write_new(&stage.join(RANGE_RECEIPT), &encoded)?;
+        sync_directory(stage)?;
+        rename_noreplace(stage, &self.out)?;
+        sync_directory(self.out.parent().unwrap_or(Path::new(".")))?;
+        self.stage = None;
+        Ok(())
+    }
+}
+
+impl Drop for RangeOutput {
+    fn drop(&mut self) {
+        if let Some(stage) = &self.stage {
+            let _ = fs::remove_dir_all(stage);
+        }
+    }
+}
+
+fn range_stage(out: &Path) -> Fallible<PathBuf> {
+    let parent = out.parent().unwrap_or(Path::new("."));
+    let name = out
+        .file_name()
+        .ok_or("out-dir must name a directory")?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{name}.range-tmp-{}", std::process::id())))
+}
+
+fn ensure_range_destination(out: &Path) -> Fallible<()> {
+    if out.exists() {
+        return Err(format!("out-dir directory {} already exists", out.display()).into());
+    }
+    let stage = range_stage(out)?;
+    if stage.exists() {
+        return Err(format!("range staging directory {} must be new", stage.display()).into());
+    }
+    Ok(())
+}
+
+fn encode_png(shot: &Shot) -> Fallible<Vec<u8>> {
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, shot.width, shot.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header()?.write_image_data(&shot.rgba)?;
+    }
+    Ok(encoded)
+}
+
+const PACKED_EVIDENCE: &str = "production-packed-f32le.bin";
+const ALPHA_EVIDENCE: &str = "production-alpha-f32le.bin";
+const RECEIPT_EVIDENCE: &str = "production-map-receipt.json";
+const BUILD_GIT_HEAD: &str = env!("KJERAG_BUILD_GIT_HEAD");
+const BUILD_GIT_TREE: &str = env!("KJERAG_BUILD_GIT_TREE");
+const BUILD_GIT_DIRTY: &str = env!("KJERAG_BUILD_GIT_DIRTY");
+
+/// Seal the exact selected map after target playback has already proved the
+/// source/map/display association in memory. The opaque `FrameStamp` cannot
+/// be serialized; the receipt records that its exact equality check passed
+/// and then records only readable report fields and content identities.
+struct TargetEvidence<'a> {
+    out: &'a Path,
+    evidence: &'a EvidenceRun,
+    png: &'a Path,
+    map: &'a OneXsMapFrame,
+    expected: (u64, Duration),
+    stats: kjerag_render::Stats,
+}
+
+fn persist_target_evidence(evidence: TargetEvidence<'_>) -> Fallible<()> {
+    let TargetEvidence {
+        out,
+        evidence,
+        png,
+        map,
+        expected: (expected_index, expected_timestamp),
+        stats,
+    } = evidence;
+    if !cfg!(target_endian = "little") {
+        return Err("production map evidence requires a little-endian host".into());
+    }
+    if map.frame().index() != expected_index || map.frame().timestamp() != expected_timestamp {
+        return Err("production map differs from the exact requested target frame".into());
+    }
+    let packed_bytes = map.packed().bytes();
+    let alpha_bytes = map.alpha().bytes();
+    if packed_bytes.len() != kjerag_render::studio_type2::PACKED_BYTES {
+        return Err("production packed map has the wrong byte size".into());
+    }
+    if alpha_bytes.len() != kjerag_render::studio_type2::ALPHA_BYTES {
+        return Err("production alpha map has the wrong byte size".into());
+    }
+    ensure_evidence_destination(out)?;
+
+    // Re-read both retained descriptors after playback. No source pathname is
+    // reopened for receipt identity: the bytes the decoder saw are the bytes
+    // authenticated before playback and verified here through the same fds.
+    evidence.sources.verify()?;
+
+    // Compute every identity before creating the staging directory. A source
+    // or build failure therefore leaves no partial evidence tree behind.
+    let source = evidence.sources.receipt();
+    let picture_identity = file_identity(png)?;
+    let packed_identity = bytes_identity(PACKED_EVIDENCE, packed_bytes);
+    let alpha_identity = bytes_identity(ALPHA_EVIDENCE, alpha_bytes);
+    let executable_identity = evidence.executable.identity()?;
+    let cargo_lock = evidence.workspace.join("Cargo.lock");
+    let cargo_lock_identity = file_identity(&cargo_lock)?;
+
+    let receipt = json!({
+        "schema": "kjerag.playback-production-map.v1",
+        "claim": "one exact production FrameOwner map bound in-process to the selected current Scene delivery",
+        "limitations": {
+            "opaque_frame_stamp_serialized": false,
+            "video_parity_claimed": false,
+            "owner_verdict_claimed": false
+        },
+        "binding": {
+            "exact_map_scene_frame_stamp_equality": true,
+            "exact_map_shown_view_frame_stamp_and_capture_equality": true,
+            "uninterrupted_target_mode_from_frame_zero": true,
+            "index": map.frame().index(),
+            "timestamp_seconds": map.frame().timestamp().as_secs(),
+            "timestamp_nanoseconds": map.frame().timestamp().subsec_nanos(),
+            "presented": stats.presented,
+            "dropped": stats.dropped,
+            "starved": stats.starved
+        },
+        "source": source,
+        "build": {
+            "package_version": env!("CARGO_PKG_VERSION"),
+            "embedded_git_commit": BUILD_GIT_HEAD,
+            "embedded_git_tree": BUILD_GIT_TREE,
+            "embedded_git_dirty": BUILD_GIT_DIRTY,
+            "dirty_at_build": false,
+            "runtime_git_commit": evidence.runtime_head,
+            "runtime_git_tree": evidence.runtime_tree,
+            "runtime_tracked_tree_clean": true,
+            "cargo_lock": cargo_lock_identity,
+            "executable": executable_identity
+        },
+        "artifacts": {
+            "picture": picture_identity,
+            "packed": packed_identity,
+            "alpha": alpha_identity
+        }
+    });
+    let mut encoded = serde_json::to_vec_pretty(&receipt)?;
+    encoded.push(b'\n');
+    evidence.verify_checkout()?;
+    publish_evidence(out, packed_bytes, alpha_bytes, &encoded)?;
+    println!(
+        "evidence: exact production map receipt {}",
+        out.join(RECEIPT_EVIDENCE).display()
+    );
+    Ok(())
+}
+
+fn publish_evidence(out: &Path, packed: &[u8], alpha: &[u8], receipt: &[u8]) -> Fallible<()> {
+    ensure_evidence_destination(out)?;
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let stage = evidence_stage(out)?;
+    fs::create_dir(&stage).map_err(|error| {
+        format!(
+            "evidence staging directory {} must be new: {error}",
+            stage.display()
+        )
+    })?;
+    let write_result = (|| -> Fallible<()> {
+        write_new(&stage.join(PACKED_EVIDENCE), packed)?;
+        write_new(&stage.join(ALPHA_EVIDENCE), alpha)?;
+        write_new(&stage.join(RECEIPT_EVIDENCE), receipt)?;
+        sync_directory(&stage)?;
+        rename_noreplace(&stage, out)?;
+        sync_directory(out.parent().unwrap_or(Path::new(".")))?;
+        Ok(())
+    })();
+    if write_result.is_err() && stage.exists() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    write_result?;
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Fallible<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(from: &Path, to: &Path) -> Fallible<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let from = CString::new(from.as_os_str().as_bytes())?;
+    let to = CString::new(to.as_os_str().as_bytes())?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace(_from: &Path, _to: &Path) -> Fallible<()> {
+    Err("production evidence no-replace publication requires Linux renameat2".into())
+}
+
+/// Build and executable identity retained before a range run starts. This is
+/// separate from `EvidenceRun` only because range mode owns `out-dir=` and
+/// must not require or pretend to publish target `evidence-out=` artifacts.
+struct RangeProvenance {
+    workspace: PathBuf,
+    runtime_head: String,
+    runtime_tree: String,
+    executable: RetainedFile,
+    executable_identity: Value,
+}
+
+impl RangeProvenance {
+    fn authenticate() -> Fallible<Self> {
+        let workspace = workspace_path()?;
+        let (runtime_head, runtime_tree) = checkout_state(&workspace)?;
+        validate_build_provenance(
+            BUILD_GIT_HEAD,
+            BUILD_GIT_TREE,
+            BUILD_GIT_DIRTY,
+            &runtime_head,
+            &runtime_tree,
+        )?;
+        let executable = RetainedFile::open_running_executable()?;
+        let executable_identity = executable.identity()?;
+        Ok(Self {
+            workspace,
+            runtime_head,
+            runtime_tree,
+            executable,
+            executable_identity,
+        })
+    }
+
+    /// Recheck the exact retained executable and checkout immediately before
+    /// publication, then return only the identities already bound before
+    /// playback. A changed value refuses rather than silently updating the
+    /// receipt to describe a different run environment.
+    fn verify(&self) -> Fallible<Value> {
+        let current_executable = self.executable.identity()?;
+        require_bound_identity(
+            &self.executable_identity,
+            &current_executable,
+            "running executable",
+        )?;
+        let (head, tree) = checkout_state(&self.workspace)?;
+        validate_build_provenance(
+            BUILD_GIT_HEAD,
+            BUILD_GIT_TREE,
+            BUILD_GIT_DIRTY,
+            &head,
+            &tree,
+        )?;
+        if head != self.runtime_head || tree != self.runtime_tree {
+            return Err("runtime checkout changed during range playback".into());
+        }
+        Ok(range_build_receipt(
+            &self.runtime_head,
+            &self.runtime_tree,
+            self.executable_identity.clone(),
+        ))
+    }
+}
+
+fn require_bound_identity(bound: &Value, current: &Value, label: &str) -> Fallible<()> {
+    if bound != current {
+        return Err(format!("{label} identity changed during range playback").into());
+    }
+    Ok(())
+}
+
+fn range_build_receipt(runtime_head: &str, runtime_tree: &str, executable: Value) -> Value {
+    json!({
+        "package_version": env!("CARGO_PKG_VERSION"),
+        "embedded_git_commit": BUILD_GIT_HEAD,
+        "embedded_git_tree": BUILD_GIT_TREE,
+        "embedded_git_dirty": BUILD_GIT_DIRTY,
+        "dirty_at_build": false,
+        "runtime_git_commit": runtime_head,
+        "runtime_git_tree": runtime_tree,
+        "runtime_tracked_tree_clean": true,
+        "executable": executable
+    })
+}
+
+struct EvidenceRun {
+    workspace: PathBuf,
+    runtime_head: String,
+    runtime_tree: String,
+    sources: AuthenticatedPair,
+    executable: RetainedFile,
+}
+
+impl EvidenceRun {
+    fn authenticate(input: &Path, out: &Path) -> Fallible<Self> {
+        ensure_evidence_destination(out)?;
+        let workspace = workspace_path()?;
+        let (runtime_head, runtime_tree) = checkout_state(&workspace)?;
+        validate_build_provenance(
+            BUILD_GIT_HEAD,
+            BUILD_GIT_TREE,
+            BUILD_GIT_DIRTY,
+            &runtime_head,
+            &runtime_tree,
+        )?;
+        let executable = RetainedFile::open_running_executable()?;
+        let sources = AuthenticatedPair::open(input)?;
+        Ok(Self {
+            workspace,
+            runtime_head,
+            runtime_tree,
+            sources,
+            executable,
+        })
+    }
+
+    fn verify_checkout(&self) -> Fallible<()> {
+        let (head, tree) = checkout_state(&self.workspace)?;
+        validate_build_provenance(
+            BUILD_GIT_HEAD,
+            BUILD_GIT_TREE,
+            BUILD_GIT_DIRTY,
+            &head,
+            &tree,
+        )?;
+        if head != self.runtime_head || tree != self.runtime_tree {
+            return Err("runtime checkout changed during evidence playback".into());
+        }
+        Ok(())
+    }
+}
+
+fn workspace_path() -> Fallible<PathBuf> {
+    Ok(Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("spike manifest is not inside the workspace")?
+        .to_owned())
+}
+
+fn checkout_state(workspace: &Path) -> Fallible<(String, String)> {
+    let head = command_line(workspace, &["rev-parse", "--verify", "HEAD"])?;
+    let tree = command_line(workspace, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+    let status = command_line(
+        workspace,
+        &["status", "--porcelain=v1", "--untracked-files=no"],
+    )?;
+    if !status.is_empty() {
+        return Err("evidence-out requires a clean tracked runtime worktree".into());
+    }
+    Ok((head, tree))
+}
+
+fn validate_build_provenance(
+    build_head: &str,
+    build_tree: &str,
+    build_dirty: &str,
+    runtime_head: &str,
+    runtime_tree: &str,
+) -> Fallible<()> {
+    if build_dirty != "false" {
+        return Err(format!(
+            "evidence-out requires a clean build, but build-time tracked-tree state is {build_dirty}"
+        )
+        .into());
+    }
+    if build_head != runtime_head || build_tree != runtime_tree {
+        return Err(format!(
+            "build provenance {build_head}/{build_tree} differs from runtime checkout {runtime_head}/{runtime_tree}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+struct AuthenticatedPair {
+    sources: [AuthenticatedSource; 2],
+}
+
+impl AuthenticatedPair {
+    fn open(input: &Path) -> Fallible<Self> {
+        require_exact_canonical_path(input, "picked source")?;
+        let reader = Reader::open(input)?;
+        let admitted = reader.paths();
+        drop(reader);
+        if admitted.len() != 2 {
+            return Err(format!(
+                "production ONE X2 evidence requires the admitted two-file source pair, got {} files",
+                admitted.len()
+            )
+            .into());
+        }
+        let picked = fs::canonicalize(input)?;
+        let mut picked_count = 0usize;
+        let sources = admitted
+            .iter()
+            .enumerate()
+            .map(|(lane, path)| {
+                let is_picked = fs::canonicalize(path)? == picked;
+                picked_count += usize::from(is_picked);
+                AuthenticatedSource::open(path, lane, is_picked)
+            })
+            .collect::<Fallible<Vec<_>>>()?;
+        if picked_count != 1 {
+            return Err(format!(
+                "picked source must occur exactly once in admitted decoder order, got {picked_count}"
+            )
+            .into());
+        }
+        Ok(Self {
+            sources: sources
+                .try_into()
+                .map_err(|_| "admitted source pair did not retain two lanes")?,
+        })
+    }
+
+    fn descriptor_paths(&self) -> Fallible<[PathBuf; 2]> {
+        Ok([
+            self.sources[0].descriptor_path()?,
+            self.sources[1].descriptor_path()?,
+        ])
+    }
+
+    fn require_descriptor_order(&self, actual: &[PathBuf]) -> Fallible<()> {
+        let expected = self.descriptor_paths()?;
+        if actual != expected {
+            return Err(format!(
+                "live decoder source order {actual:?} differs from authenticated lens order {expected:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn verify(&self) -> Fallible<()> {
+        for source in &self.sources {
+            source.verify()?;
+        }
+        Ok(())
+    }
+
+    fn receipt(&self) -> Vec<Value> {
+        self.sources
+            .iter()
+            .map(AuthenticatedSource::receipt)
+            .collect()
+    }
+}
+
+struct AuthenticatedSource {
+    path: PathBuf,
+    decoder_lane: usize,
+    picked: bool,
+    retained: RetainedFile,
+    sha256: String,
+}
+
+impl AuthenticatedSource {
+    fn open(path: &Path, decoder_lane: usize, picked: bool) -> Fallible<Self> {
+        require_exact_canonical_path(path, "admitted source")?;
+        let before = fs::symlink_metadata(path)?;
+        if !before.is_file() {
+            return Err(format!("{} is not a regular source file", path.display()).into());
+        }
+        let mut file = open_nofollow(path)?;
+        let opened = file.metadata()?;
+        if stable_identity(&before) != stable_identity(&opened) {
+            return Err(format!("{} changed while opening", path.display()).into());
+        }
+        let sha256 = sha256_file(&mut file)?;
+        let after = file.metadata()?;
+        let named_after = fs::symlink_metadata(path)?;
+        if stable_identity(&before) != stable_identity(&after)
+            || stable_identity(&after) != stable_identity(&named_after)
+        {
+            return Err(format!("{} changed while authenticating", path.display()).into());
+        }
+        file.seek(SeekFrom::Start(0))?;
+        Ok(Self {
+            path: path.to_owned(),
+            decoder_lane,
+            picked,
+            retained: RetainedFile {
+                file,
+                identity: stable_identity(&after),
+                label: path.display().to_string(),
+            },
+            sha256,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn descriptor_path(&self) -> Fallible<PathBuf> {
+        use std::os::fd::AsRawFd as _;
+        self.retained.require_identity()?;
+        let path = PathBuf::from(format!("/proc/self/fd/{}", self.retained.file.as_raw_fd()));
+        if stable_identity(&fs::metadata(&path)?) != self.retained.identity {
+            return Err(format!("{} descriptor alias changed", self.path.display()).into());
+        }
+        Ok(path)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn descriptor_path(&self) -> Fallible<PathBuf> {
+        Err("descriptor-bound production playback requires Linux /proc/self/fd".into())
+    }
+
+    fn verify(&self) -> Fallible<()> {
+        let actual = self.retained.sha256()?;
+        if actual != self.sha256 {
+            return Err(format!("{} retained source bytes changed", self.path.display()).into());
+        }
+        Ok(())
+    }
+
+    fn receipt(&self) -> Value {
+        json!({
+            "path": self.path,
+            "bytes": self.retained.identity.len,
+            "sha256": self.sha256,
+            "stable_identity": self.retained.identity.receipt(),
+            "decoder_lane": self.decoder_lane,
+            "picked": self.picked
+        })
+    }
+}
+
+struct RetainedFile {
+    file: File,
+    identity: StableIdentity,
+    label: String,
+}
+
+impl RetainedFile {
+    #[cfg(target_os = "linux")]
+    fn open_running_executable() -> Fallible<Self> {
+        let file = File::open("/proc/self/exe")?;
+        let metadata = file.metadata()?;
+        Ok(Self {
+            file,
+            identity: stable_identity(&metadata),
+            label: "/proc/self/exe".to_owned(),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn open_running_executable() -> Fallible<Self> {
+        Err("production evidence requires Linux /proc/self/exe".into())
+    }
+
+    fn require_identity(&self) -> Fallible<()> {
+        if stable_identity(&self.file.metadata()?) != self.identity {
+            return Err(format!("{} retained descriptor changed", self.label).into());
+        }
+        Ok(())
+    }
+
+    fn sha256(&self) -> Fallible<String> {
+        self.require_identity()?;
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        let sha256 = sha256_file(&mut file)?;
+        if stable_identity(&file.metadata()?) != self.identity {
+            return Err(format!("{} changed while hashing", self.label).into());
+        }
+        Ok(sha256)
+    }
+
+    fn identity(&self) -> Fallible<Value> {
+        Ok(json!({
+            "file": self.label,
+            "bytes": self.identity.len,
+            "sha256": self.sha256()?,
+            "stable_identity": self.identity.receipt()
+        }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StableIdentity {
+    len: u64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    nlink: u64,
+    #[cfg(unix)]
+    uid: u32,
+    #[cfg(unix)]
+    mtime: i64,
+    #[cfg(unix)]
+    mtime_nsec: i64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+}
+
+impl StableIdentity {
+    fn receipt(&self) -> Value {
+        #[cfg(unix)]
+        return json!({
+            "device": self.dev,
+            "inode": self.ino,
+            "mode": self.mode,
+            "links": self.nlink,
+            "uid": self.uid,
+            "mtime_seconds": self.mtime,
+            "mtime_nanoseconds": self.mtime_nsec,
+            "ctime_seconds": self.ctime,
+            "ctime_nanoseconds": self.ctime_nsec
+        });
+        #[cfg(not(unix))]
+        json!({})
+    }
+}
+
+fn stable_identity(metadata: &fs::Metadata) -> StableIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        StableIdentity {
+            len: metadata.len(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            mode: metadata.mode(),
+            nlink: metadata.nlink(),
+            uid: metadata.uid(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+    #[cfg(not(unix))]
+    StableIdentity {
+        len: metadata.len(),
+    }
+}
+
+fn require_exact_canonical_path(path: &Path, label: &str) -> Fallible<()> {
+    if !path.is_absolute() || fs::canonicalize(path)?.as_os_str() != path.as_os_str() {
+        return Err(format!("{label} must be an exact absolute non-symlink path").into());
+    }
+    Ok(())
+}
+
+fn open_nofollow(path: &Path) -> Fallible<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    Ok(options.open(path)?)
+}
+
+fn sha256_file(file: &mut File) -> Fallible<String> {
+    let mut sha = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        sha.update(&buffer[..read]);
+    }
+    Ok(digest_hex(sha.finalize()))
+}
+
+fn ensure_evidence_destination(out: &Path) -> Fallible<()> {
+    if out.exists() {
+        return Err(format!("evidence-out directory {} already exists", out.display()).into());
+    }
+    let stage = evidence_stage(out)?;
+    if stage.exists() {
+        return Err(format!("evidence staging directory {} must be new", stage.display()).into());
+    }
+    Ok(())
+}
+
+fn evidence_stage(out: &Path) -> Fallible<PathBuf> {
+    let parent = out.parent().unwrap_or(Path::new("."));
+    let name = out
+        .file_name()
+        .ok_or("evidence-out must name a directory")?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{name}.tmp-{}", std::process::id())))
+}
+
+fn bytes_identity(name: &str, bytes: &[u8]) -> Value {
+    json!({
+        "file": name,
+        "bytes": bytes.len(),
+        "sha256": digest_hex(Sha256::digest(bytes))
+    })
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Fallible<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn file_identity(path: &Path) -> Fallible<Value> {
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() {
+        return Err(format!("{} is not a regular evidence input", path.display()).into());
+    }
+    let mut file = open_nofollow(path)?;
+    let opened = file.metadata()?;
+    if stable_identity(&before) != stable_identity(&opened) {
+        return Err(format!("{} changed while opening", path.display()).into());
+    }
+    let sha256 = sha256_file(&mut file)?;
+    let after = file.metadata()?;
+    let named_after = fs::symlink_metadata(path)?;
+    if stable_identity(&before) != stable_identity(&after)
+        || stable_identity(&after) != stable_identity(&named_after)
+    {
+        return Err(format!("{} changed while hashing", path.display()).into());
+    }
+    Ok(json!({
+        "file": path.file_name().ok_or("evidence file has no basename")?.to_string_lossy(),
+        "bytes": after.len(),
+        "sha256": sha256,
+        "stable_identity": stable_identity(&after).receipt()
+    }))
+}
+
+fn command_line(workspace: &Path, args: &[&str]) -> Fallible<String> {
+    let output = Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn digest_hex(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to a string cannot fail");
+            output
+        })
 }
 
 /// What the space bar does, without a keyboard: the clock stops where it is
@@ -566,5 +2139,360 @@ impl Gpu {
             timeout: None,
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn options(arguments: &[&str]) -> Fallible<Options> {
+        let mut words = vec!["playback".to_owned()];
+        words.extend(arguments.iter().map(|word| (*word).to_owned()));
+        Options::parse(&words)
+    }
+
+    #[test]
+    fn positional_playback_keeps_its_existing_defaults_and_order() {
+        let parsed = options(&[
+            "flight.insv",
+            "12",
+            "50",
+            "3",
+            "71.5",
+            "left",
+            "58.0",
+            "luma",
+            "notone",
+        ])
+        .unwrap();
+        assert_eq!(parsed.input, Path::new("flight.insv"));
+        assert_eq!(parsed.seconds, 12);
+        assert_eq!(parsed.hz, 50);
+        assert_eq!(parsed.shots, 3);
+        assert_eq!(parsed.yaw, 71.5);
+        assert_eq!(parsed.pitch, 0.0);
+        assert_eq!(parsed.readout, "left");
+        assert_eq!(parsed.fov, 58.0);
+        assert_eq!(parsed.sample, "luma");
+        assert_eq!(parsed.band, "notone");
+        assert_eq!(parsed.target, None);
+        assert!(parsed.bench);
+        assert!(parsed.lock);
+        assert_eq!(parsed.out, None);
+        assert_eq!(parsed.evidence_out, None);
+        assert_eq!(parsed.range, None);
+        assert_eq!(parsed.out_dir, None);
+    }
+
+    #[test]
+    fn consecutive_range_has_an_inclusive_checked_end_and_no_timed_end() {
+        let parsed = options(&[
+            "flight.insv",
+            "range=6367:3",
+            "out-dir=scratch/frames6367-6369",
+            "bench=0",
+            "yaw=71.13",
+            "pitch=-13.99",
+            "fov=57.95",
+            "lock=1",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.range,
+            Some(RangeSpec {
+                start: 6367,
+                count: 3,
+                end: 6369
+            })
+        );
+        assert_eq!(
+            parsed.out_dir.as_deref(),
+            Some(Path::new("scratch/frames6367-6369"))
+        );
+        let Run::Range(range) = Run::new(&parsed) else {
+            panic!("range mode must not have a wall-clock end");
+        };
+        assert_eq!(range.spec.end, 6369);
+        assert_eq!(range.out_dir, Path::new("scratch/frames6367-6369"));
+    }
+
+    #[test]
+    fn consecutive_range_rejects_bad_counts_overflow_and_competing_modes() {
+        for range in ["0:0", "0", ":1", "1:", "1:2:3", "x:1", "1:x"] {
+            assert!(
+                options(&[
+                    "flight.insv",
+                    &format!("range={range}"),
+                    "out-dir=scratch/r"
+                ])
+                .is_err(),
+                "accepted {range}"
+            );
+        }
+        assert!(
+            options(&[
+                "flight.insv",
+                "range=18446744073709551615:1",
+                "out-dir=scratch/r"
+            ])
+            .is_err()
+        );
+        assert!(options(&["flight.insv", "range=1:2"]).is_err());
+        assert!(options(&["flight.insv", "out-dir=scratch/r"]).is_err());
+        assert!(options(&["flight.insv", "range=1:2", "out-dir=scratch/r", "target=2"]).is_err());
+        assert!(
+            options(&[
+                "flight.insv",
+                "1",
+                "60",
+                "1",
+                "range=1:2",
+                "out-dir=scratch/r"
+            ])
+            .is_err()
+        );
+        assert!(
+            options(&[
+                "flight.insv",
+                "range=1:2",
+                "out-dir=scratch/r",
+                "evidence-out=scratch/evidence"
+            ])
+            .is_err()
+        );
+        assert!(
+            options(&[
+                "flight.insv",
+                "range=1:2",
+                "out-dir=scratch/r",
+                "out=scratch/frame.png"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn target_view_is_named_and_has_no_timed_end() {
+        let parsed = options(&[
+            "flight.insv",
+            "target=6369",
+            "bench=0",
+            "yaw=71.13",
+            "pitch=-13.99",
+            "fov=57.95",
+            "lock=1",
+            "out=scratch/exact.png",
+            "evidence-out=scratch/frame6369-evidence",
+        ])
+        .unwrap();
+        assert_eq!(parsed.target, Some(6369));
+        assert!(!parsed.bench);
+        assert_eq!(parsed.yaw, 71.13);
+        assert_eq!(parsed.pitch, -13.99);
+        assert_eq!(parsed.fov, 57.95);
+        assert!(parsed.lock);
+        assert_eq!(parsed.out.as_deref(), Some(Path::new("scratch/exact.png")));
+        assert_eq!(
+            parsed.evidence_out.as_deref(),
+            Some(Path::new("scratch/frame6369-evidence"))
+        );
+
+        let Run::Target(target) = Run::new(&parsed) else {
+            panic!("target mode must not have a wall-clock end");
+        };
+        assert_eq!(target.index, 6369);
+        assert_eq!(target.out, Path::new("scratch/exact.png"));
+        assert_eq!(
+            target.evidence_out.as_deref(),
+            Some(Path::new("scratch/frame6369-evidence"))
+        );
+    }
+
+    #[test]
+    fn target_capture_cannot_compete_with_a_timed_burst() {
+        let error = options(&["flight.insv", "1", "60", "1", "target=7"])
+            .err()
+            .expect("target plus positional shots must be refused")
+            .to_string();
+        assert!(error.contains("shots must be 0"), "{error}");
+    }
+
+    #[test]
+    fn named_bits_and_output_are_strict() {
+        assert!(options(&["flight.insv", "target=0", "lock=2"]).is_err());
+        assert!(options(&["flight.insv", "bench=false"]).is_err());
+        assert!(options(&["flight.insv", "out=scratch/lost.png"]).is_err());
+        assert!(options(&["flight.insv", "evidence-out=scratch/lost"]).is_err());
+        assert!(
+            options(&["flight.insv", "target=1", "evidence-out=scratch/lost"])
+                .err()
+                .expect("evidence must disable the path-based benchmark")
+                .to_string()
+                .contains("bench=0")
+        );
+        assert!(options(&["flight.insv", "target=1", "target=2"]).is_err());
+        assert!(options(&["flight.insv", "surprise=1"]).is_err());
+    }
+
+    #[test]
+    fn evidence_publish_refuses_existing_and_partial_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "kjerag-playback-evidence-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let out = root.join("evidence");
+
+        publish_evidence(&out, b"packed", b"alpha", b"receipt").unwrap();
+        assert_eq!(fs::read(out.join(PACKED_EVIDENCE)).unwrap(), b"packed");
+        assert_eq!(fs::read(out.join(ALPHA_EVIDENCE)).unwrap(), b"alpha");
+        assert_eq!(fs::read(out.join(RECEIPT_EVIDENCE)).unwrap(), b"receipt");
+        fs::remove_dir_all(&out).unwrap();
+
+        fs::create_dir(&out).unwrap();
+        let error = publish_evidence(&out, b"replacement", b"replacement", b"replacement")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
+        fs::remove_dir_all(&out).unwrap();
+
+        #[cfg(target_os = "linux")]
+        {
+            let race_stage = root.join("race-stage");
+            fs::create_dir(&race_stage).unwrap();
+            fs::write(race_stage.join("payload"), b"must not replace").unwrap();
+            fs::create_dir(&out).unwrap();
+            assert!(rename_noreplace(&race_stage, &out).is_err());
+            assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
+            assert_eq!(
+                fs::read(race_stage.join("payload")).unwrap(),
+                b"must not replace"
+            );
+            fs::remove_dir_all(&out).unwrap();
+            fs::remove_dir_all(&race_stage).unwrap();
+        }
+
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("partial"), b"belongs to the refused directory").unwrap();
+        let error = publish_evidence(&out, b"packed", b"alpha", b"receipt")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(
+            fs::read(out.join("partial")).unwrap(),
+            b"belongs to the refused directory"
+        );
+        assert!(!out.join(RECEIPT_EVIDENCE).exists());
+
+        fs::remove_dir_all(&out).unwrap();
+        let stage = root.join(format!(".evidence.tmp-{}", std::process::id()));
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("partial"), b"unfinished earlier attempt").unwrap();
+        let error = publish_evidence(&out, b"packed", b"alpha", b"receipt")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("staging directory"), "{error}");
+        assert!(!out.exists());
+        assert_eq!(
+            fs::read(stage.join("partial")).unwrap(),
+            b"unfinished earlier attempt"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn range_output_refuses_existing_destinations_and_removes_incomplete_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "kjerag-playback-range-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let out = root.join("range");
+        fs::create_dir(&out).unwrap();
+        let spec = RangeSpec::parse("4:2").unwrap();
+        let error = RangeOutput::begin(&out, spec).err().unwrap().to_string();
+        assert!(error.contains("already exists"), "{error}");
+        fs::remove_dir(&out).unwrap();
+
+        let output = RangeOutput::begin(&out, spec).unwrap();
+        let stage = output.stage.clone().unwrap();
+        assert!(stage.is_dir());
+        drop(output);
+        assert!(!stage.exists());
+        assert!(!out.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn evidence_build_requires_clean_matching_generated_provenance() {
+        validate_build_provenance("commit", "tree", "false", "commit", "tree").unwrap();
+        assert!(validate_build_provenance("commit", "tree", "true", "commit", "tree").is_err());
+        assert!(validate_build_provenance("commit", "tree", "unknown", "commit", "tree").is_err());
+        assert!(validate_build_provenance("stale", "tree", "false", "commit", "tree").is_err());
+        assert!(validate_build_provenance("commit", "stale", "false", "commit", "tree").is_err());
+    }
+
+    #[test]
+    fn range_build_refuses_dirty_stale_or_changed_identity() {
+        validate_build_provenance("commit", "tree", "false", "commit", "tree").unwrap();
+        assert!(validate_build_provenance("commit", "tree", "true", "commit", "tree").is_err());
+        assert!(validate_build_provenance("stale", "tree", "false", "commit", "tree").is_err());
+        assert!(validate_build_provenance("commit", "stale", "false", "commit", "tree").is_err());
+
+        let bound = json!({"bytes": 10, "sha256": "bound"});
+        require_bound_identity(&bound, &bound, "running executable").unwrap();
+        let changed = json!({"bytes": 10, "sha256": "changed"});
+        let error = require_bound_identity(&bound, &changed, "running executable")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("identity changed"), "{error}");
+    }
+
+    #[test]
+    fn range_build_receipt_names_embedded_runtime_and_executable_identity() {
+        let executable = json!({
+            "file": "/proc/self/exe",
+            "bytes": 123,
+            "sha256": "exact-executable",
+            "stable_identity": {"device": 4, "inode": 7}
+        });
+        let receipt = range_build_receipt("runtime-commit", "runtime-tree", executable.clone());
+        assert_eq!(receipt["embedded_git_commit"], BUILD_GIT_HEAD);
+        assert_eq!(receipt["embedded_git_tree"], BUILD_GIT_TREE);
+        assert_eq!(receipt["embedded_git_dirty"], BUILD_GIT_DIRTY);
+        assert_eq!(receipt["runtime_git_commit"], "runtime-commit");
+        assert_eq!(receipt["runtime_git_tree"], "runtime-tree");
+        assert_eq!(receipt["runtime_tracked_tree_clean"], true);
+        assert_eq!(receipt["executable"], executable);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authenticated_source_decode_alias_keeps_the_exact_opened_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "kjerag-playback-source-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("lens.insv");
+        let saved = root.join("authenticated.insv");
+        fs::write(&path, b"authenticated source bytes").unwrap();
+        let source = AuthenticatedSource::open(&path, 0, true).unwrap();
+        let alias = source.descriptor_path().unwrap();
+
+        fs::rename(&path, &saved).unwrap();
+        fs::write(&path, b"replacement path bytes").unwrap();
+        assert_eq!(fs::read(alias).unwrap(), b"authenticated source bytes");
+        assert!(source.verify().unwrap_err().to_string().contains("changed"));
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

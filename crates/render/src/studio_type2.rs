@@ -163,6 +163,17 @@ impl PreparedPicture {
         &self.binding.frame
     }
 
+    /// Whether this preparation carries the projection contract consumed by
+    /// a selected ONE X2 type-2 map.
+    ///
+    /// Detached evidence tools decode a fresh exact source delivery rather
+    /// than restoring playback state. They use this narrow check to refuse a
+    /// future ordinary-path change that would add a legacy seam shift or
+    /// prepare a different camera family under an authenticated type-2 map.
+    pub fn uses_one_xs_type2_projection(&self) -> bool {
+        self.reframe.is_one_xs_pair() && self.reframe.handover_shift().to_bits() == 0.0f32.to_bits()
+    }
+
     pub(crate) fn aspect(&self) -> f32 {
         self.aspect
     }
