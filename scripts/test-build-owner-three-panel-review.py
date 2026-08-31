@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import hashlib, importlib.util, json, os, struct, tempfile, unittest
+import hashlib, importlib.util, json, os, struct, sys, tempfile, unittest
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -86,11 +86,12 @@ class Tests(unittest.TestCase):
     def test_refusal_closes_descriptors(self):
         before=len(os.listdir("/proc/self/fd"))
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d);good=root/"good";good.write_text("{}");bad=root/"bad";bad.write_text("{")
+            root=Path(d);good=root/"good";good.write_text("{}");bad=root/"bad";bad.write_text("{");array=root/"array";array.write_text("[]")
             with self.assertRaises(M.Refusal),ExitStack() as stack:
                 stack.enter_context(M.PinnedReceipt(good,sha(good),"first"));stack.enter_context(M.PinnedReceipt(bad,sha(bad),"second"))
             with self.assertRaises(M.Refusal),ExitStack() as stack:
                 stack.enter_context(M.PinnedReceipt(good,sha(good),"first"));stack.enter_context(M.PinnedReceipt(good,sha(good),"second"));stack.enter_context(M.PinnedReceipt(bad,sha(bad),"third"))
+            with self.assertRaises(M.Refusal):M.PinnedReceipt(array,sha(array),"non-object")
             with self.assertRaises(M.Refusal):M.PinnedFile(bad,"0"*64,"bad hash")
         self.assertEqual(len(os.listdir("/proc/self/fd")),before)
     def test_x264_graph_and_sanitized_environment(self):
@@ -98,5 +99,15 @@ class Tests(unittest.TestCase):
         graph=M.filter_graph(Path("/private/font"));self.assertIn(M.FOOTER,graph);self.assertNotIn("rotate=",graph)
         env=M.clean_environment();self.assertEqual(env["PATH"],"/nonexistent")
         for key in ("LD_PRELOAD","LD_LIBRARY_PATH","FFREPORT","FONTCONFIG_FILE","FONTCONFIG_PATH"):self.assertNotIn(key,env)
+    def test_trace_child_resolves_only_private_pinned_git(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);private=root/"private";hostile=root/"hostile";private.mkdir();hostile.mkdir();marker=root/"hostile-ran"
+            pinned_git=private/"git";pinned_git.write_text("#!/bin/sh\nprintf pinned-private-git\n");pinned_git.chmod(0o500)
+            hostile_git=hostile/"git";hostile_git.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf hostile-git\n");hostile_git.chmod(0o500)
+            child=root/"trace-child.py";child.write_text("import subprocess\nprint(subprocess.check_output(['git']).decode())\n")
+            base=M.clean_environment();base["PATH"]=str(hostile)
+            env=M.private_path_environment(base,private)
+            result=M.run([sys.executable,str(child)],env=env)
+            self.assertIn(b"pinned-private-git",result.stdout);self.assertFalse(marker.exists())
 
 if __name__=="__main__":unittest.main()

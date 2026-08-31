@@ -273,7 +273,7 @@ class PinnedReceipt(PinnedFile):
         super().__init__(path, expected, label)
         try:
             self.value = obj(json.loads(self.raw.decode("utf-8")), label)
-        except (UnicodeError, json.JSONDecodeError) as error:
+        except (UnicodeError, json.JSONDecodeError, Refusal) as error:
             self.close()
             raise Refusal(f"cannot parse {label}: {error}") from error
 
@@ -598,6 +598,11 @@ def clean_environment() -> dict[str, str]:
     return result
 
 
+def private_path_environment(clean_env: dict[str, str], private_bin: Path) -> dict[str, str]:
+    require(private_bin.is_absolute(), "private executable directory must be absolute")
+    return {**clean_env, "PATH": os.fspath(private_bin)}
+
+
 def x264_core(output: bytes, label: str) -> str:
     matches = re.findall(rb"264 - core ([0-9]+ r[0-9]+ [0-9a-f]+)", output)
     require(matches, f"{label} did not report the loaded libx264 core identity")
@@ -770,6 +775,7 @@ def build(args: argparse.Namespace) -> Path:
             kjerag_receipt.materialize(private_k_path, 0o400)
             private_k = stack.enter_context(PinnedReceipt(private_k_path, kjerag_receipt.sha256, "private Kjerag receipt"))
             studio = validate_studio(studio_receipt, inputs / "studio-supplied", kjerag)
+            private_tool_env = private_path_environment(clean_env, inputs / "bin")
             derived_receipt, derivation = derive_studio(args.oracle_dir, inputs / "canonical-projector", kjerag,
                                                          inputs / "bin", clean_env)
             try:
@@ -785,7 +791,7 @@ def build(args: argparse.Namespace) -> Path:
                     "supplied range-trace binary size differs from trace receipt")
             private_trace_receipt, trace_derivation = derive_trace(private_trace, inputs / "canonical-trace", private_k,
                                                                     kjerag, args.expected_commit, args.expected_tree,
-                                                                    args.expected_range_trace_sha256, clean_env)
+                                                                    args.expected_range_trace_sha256, private_tool_env)
             try:
                 derived_trace = validate_trace(private_trace_receipt, inputs / "trace", private_k, kjerag,
                                                args.expected_commit, args.expected_tree,
@@ -794,7 +800,7 @@ def build(args: argparse.Namespace) -> Path:
                 private_trace_receipt.verify()
             finally:
                 private_trace_receipt.close()
-            encode_env = {**clean_env, "PATH": os.fspath(inputs / "bin"), "LD_PRELOAD": os.fspath(private_x264)}
+            encode_env = {**private_tool_env, "LD_PRELOAD": os.fspath(private_x264)}
             ffmpeg_version = run([os.fspath(private_ffmpeg), "-version"], env=encode_env).stdout.decode(errors="replace").splitlines()
             ffprobe_version = run([os.fspath(private_ffprobe), "-version"], env=clean_env).stdout.decode(errors="replace").splitlines()
             require(ffmpeg_version and ffprobe_version, "private ffmpeg tools did not print versions")
