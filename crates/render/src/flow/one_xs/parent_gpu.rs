@@ -12,6 +12,7 @@ use super::super::gpu_context::OneXsGpuContext;
 use super::super::metal_calc_map::MetalCalcMapParams;
 use super::super::parent::{ParentMapBuilder, PreparedParentMap};
 use super::super::pis::gpu::GpuPisFlight;
+use super::resident_frame_gpu::GpuResidentReservation;
 use crate::Fallible;
 
 const PARAM_WORDS: usize = 33;
@@ -40,6 +41,7 @@ pub(super) struct EncodedGpuParentMaps {
     pub(super) flight: GpuPisFlight,
     pub(super) encoder: wgpu::CommandEncoder,
     pub(super) resident: ResidentGpuParentMaps,
+    pub(super) reservation: GpuResidentReservation,
 }
 
 impl EncodedGpuParentMaps {
@@ -139,19 +141,21 @@ impl GpuParentMapPipeline {
         &self,
         builder: &ParentMapBuilder,
         orientation: &OrientationTrack,
-        flight: GpuPisFlight,
+        reservation: GpuResidentReservation,
         readout: Readout,
     ) -> Fallible<EncodedGpuParentMaps> {
+        let flight = reservation.flight().clone();
         let center = flight.frame.timestamp();
         let prepared = builder.prepare(orientation, center, readout)?;
         prepared.require_linear_gpu_slerp()?;
-        Ok(self.encode_prepared(&prepared, flight))
+        Ok(self.encode_prepared(&prepared, flight, reservation))
     }
 
     fn encode_prepared(
         &self,
         prepared: &PreparedParentMap,
         flight: GpuPisFlight,
+        reservation: GpuResidentReservation,
     ) -> EncodedGpuParentMaps {
         #[cfg(test)]
         self.encode_count
@@ -209,6 +213,7 @@ impl GpuParentMapPipeline {
                 storage: output,
                 _resources: bind_group,
             },
+            reservation,
         }
     }
 

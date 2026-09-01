@@ -13,11 +13,14 @@ use std::sync::mpsc;
 use std::{error::Error, fmt};
 
 use super::gpu_context::OneXsGpuContext;
+use super::parent::ParentMapBuilder;
 use super::pis::gpu::GpuPisFlight;
 use super::temporal::{BlurredBelts, gaussian_blur};
 use super::{Lens, LensPair};
 use crate::Fallible;
 use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
+use kjerag_media::FrameStamp;
+use kjerag_meta::{OrientationTrack, Readout};
 
 /// Resident PIS preparation is nested under the belt owner so its only
 /// boundary can consume the whole private producer token atomically.
@@ -37,11 +40,48 @@ mod parent_gpu;
 #[path = "one_xs/map_patch_gpu.rs"]
 mod map_patch_gpu;
 
+/// Capture-root reservation, successor and future ready-install ownership.
+///
+/// The types stay private to this resident owner. Scene cannot reserve or
+/// publish this path, and the motion child receives only a linear reservation.
+#[path = "one_xs/resident_frame_gpu.rs"]
+#[allow(dead_code)]
+mod resident_frame_gpu;
+
 /// Geometry is nested under the belt owner so its only production boundary
 /// can append belt work and mint the one lease atomically.
 #[path = "one_xs/geometry_gpu.rs"]
 #[allow(dead_code)]
 mod geometry_gpu;
+
+/// The only production admission point for a resident frame front half.
+/// Reservation happens before parent preparation, allocation or encoding.
+#[allow(dead_code)]
+struct GpuResidentFramePipeline {
+    parent: parent_gpu::GpuParentMapPipeline,
+}
+
+#[allow(dead_code)]
+impl GpuResidentFramePipeline {
+    fn new(context: OneXsGpuContext) -> Fallible<Self> {
+        Ok(Self {
+            parent: parent_gpu::GpuParentMapPipeline::new(context)?,
+        })
+    }
+
+    fn begin_parent(
+        &self,
+        capture: &resident_frame_gpu::GpuResidentCapture,
+        frame: FrameStamp,
+        builder: &ParentMapBuilder,
+        orientation: &OrientationTrack,
+        readout: Readout,
+    ) -> Fallible<parent_gpu::EncodedGpuParentMaps> {
+        let reservation = capture.reserve(frame)?;
+        self.parent
+            .encode(builder, orientation, reservation, readout)
+    }
+}
 
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;

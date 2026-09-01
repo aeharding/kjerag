@@ -16,6 +16,7 @@ use super::super::pis::gpu::GpuPisFlight;
 use super::super::{COLS, LensPair, ROWS};
 use super::parent_gpu::{EncodedGpuParentMaps, ResidentGpuParentMaps};
 use super::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
+use super::resident_frame_gpu::GpuResidentReservation;
 use super::{GpuBlurredBelts, GpuSolverBeltPipeline, SourceTextures};
 use crate::Fallible;
 use crate::flow::one_xs_belt::{RetainedBaseMaps, base_support_masks};
@@ -47,6 +48,7 @@ pub(crate) struct GpuRetainedGeometry {
     retained: wgpu::Buffer,
     masks: wgpu::Buffer,
     _resources: wgpu::BindGroup,
+    reservation: Option<GpuResidentReservation>,
 }
 
 enum ParentRetention {
@@ -73,6 +75,7 @@ pub(crate) struct GpuGeometryFrameOwner<K> {
 pub(crate) struct GpuGeometryBelts<K> {
     pub(super) belts: GpuBlurredBelts<GpuGeometryFrameOwner<K>>,
     pub(super) masks: wgpu::Buffer,
+    pub(super) reservation: Option<GpuResidentReservation>,
 }
 
 impl<K> GpuGeometryBelts<K> {
@@ -82,6 +85,11 @@ impl<K> GpuGeometryBelts<K> {
         self,
         front_end: &GpuPisFrontEnd,
     ) -> Fallible<GpuPreparedFrame<GpuGeometryFrameOwner<K>>> {
+        if self.reservation.is_some() {
+            return Err(
+                "ONE X2 resident geometry must enter motion before the PIS front end".into(),
+            );
+        }
         front_end.prepare_geometry(self)
     }
 }
@@ -112,11 +120,18 @@ impl EncodedGpuGeometry {
             .expect("production GPU geometry carries one exact capture flight");
         let retained = self.geometry.retained.clone();
         let masks = self.geometry.masks.clone();
+        pipeline.context.ensure_same(&self.context)?;
+        sources.validate()?;
+        let reservation = self.geometry.reservation.take();
+        if let Some(reservation) = &reservation
+            && reservation.flight() != &flight
+        {
+            return Err("ONE X2 resident geometry flight differs from its root reservation".into());
+        }
         let owner = GpuGeometryFrameOwner {
             _source_owner: source_owner,
             _geometry: self.geometry,
         };
-        pipeline.context.ensure_same(&self.context)?;
         let belts = pipeline
             .submit_inner_with_map(
                 sources,
@@ -129,7 +144,11 @@ impl EncodedGpuGeometry {
                 Some(self.encoder),
             )?
             .into_resident(flight);
-        Ok(GpuGeometryBelts { belts, masks })
+        Ok(GpuGeometryBelts {
+            belts,
+            masks,
+            reservation,
+        })
     }
 
     /// Qualification is the only local submission. Ordinary work leaves this
@@ -264,6 +283,7 @@ impl GpuGeometryPipeline {
             parent_buffer.clone(),
             ParentRetention::Uploaded(parent_buffer),
             flight,
+            None,
             encoder,
         )
     }
@@ -281,11 +301,13 @@ impl GpuGeometryPipeline {
             flight,
             encoder,
             resident,
+            reservation,
         } = parents;
         self.encode_buffer(
             resident.storage.clone(),
             ParentRetention::Resident(resident),
             Some(flight),
+            Some(reservation),
             encoder,
         )
     }
@@ -295,6 +317,7 @@ impl GpuGeometryPipeline {
         parent_buffer: wgpu::Buffer,
         parent_retention: ParentRetention,
         flight: Option<GpuPisFlight>,
+        reservation: Option<GpuResidentReservation>,
         mut encoder: wgpu::CommandEncoder,
     ) -> Fallible<EncodedGpuGeometry> {
         let device = self.context.device();
@@ -358,6 +381,7 @@ impl GpuGeometryPipeline {
                 retained,
                 masks,
                 _resources: resources,
+                reservation,
             },
         })
     }

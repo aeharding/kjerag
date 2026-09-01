@@ -9,8 +9,8 @@ use kjerag_meta::{
 };
 
 use super::super::geometry_gpu::GpuGeometryPipeline;
-use super::super::pis_frontend_gpu::GpuPisFrontEnd;
-use super::super::{GpuSolverBeltPipeline, SourceTextures};
+use super::super::resident_frame_gpu::GpuResidentCapture;
+use super::super::{GpuResidentFramePipeline, GpuSolverBeltPipeline, SourceTextures};
 use super::*;
 use crate::flow::one_xs::LensPair;
 use crate::flow::one_xs::base_map::one_xs_static_coordinates;
@@ -120,10 +120,13 @@ fn assert_case_readout(
         .prepare(orientation, flight.frame.timestamp(), readout)
         .unwrap();
     let expected = expected_words(&prepared);
+    let capture = GpuResidentCapture::new();
+    let reservation = capture.reserve(flight.frame.clone()).unwrap();
     let encoded = pipeline
-        .encode(builder, orientation, flight.clone(), readout)
+        .encode(builder, orientation, reservation, readout)
         .unwrap();
-    assert_eq!(encoded.flight, flight);
+    assert_eq!(encoded.flight.generation, 1);
+    assert_eq!(encoded.flight.frame, flight.frame);
     let actual = encoded.read_qualification(context).unwrap();
     if let Some((word, (&actual, &expected))) = actual
         .iter()
@@ -229,16 +232,18 @@ fn parent_transition_seals_flight_and_refuses_foreign_geometry_and_nonlinear_sle
     let context = OneXsGpuContext::new(&device, &queue);
     let pipeline = GpuParentMapPipeline::new(context.clone()).unwrap();
     let builder = ParentMapBuilder::new(&calibration()).unwrap();
+    let capture = GpuResidentCapture::new();
     let owner = flight(20, 50, CENTER);
     let encoded = pipeline
         .encode(
             &builder,
             &orientation(1.0),
-            owner.clone(),
+            capture.reserve(owner.frame.clone()).unwrap(),
             calibration().readout(),
         )
         .unwrap();
-    assert_eq!(encoded.flight, owner);
+    assert_eq!(encoded.flight.generation, 1);
+    assert_eq!(encoded.flight.frame, owner.frame);
     assert_eq!(pipeline.encoded_transitions(), 1);
 
     let (foreign_device, foreign_queue) = request_device(&adapter).unwrap();
@@ -251,11 +256,63 @@ fn parent_transition_seals_flight_and_refuses_foreign_geometry_and_nonlinear_sle
     let error = refused(pipeline.encode(
         &builder,
         &orientation(3_000.0),
-        owner,
+        capture.reserve(owner.frame).unwrap(),
         calibration().readout(),
     ));
     assert!(error.to_string().contains("nonlinear interpolation"));
     assert_eq!(pipeline.encoded_transitions(), 1);
+}
+
+#[test]
+fn duplicate_front_half_is_refused_before_a_second_parent_encode() {
+    let (device, queue, _, _) = match gpu() {
+        Ok(gpu) => gpu,
+        Err(_) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => return,
+        Err(why) => panic!("GPU required: {why}"),
+    };
+    let context = OneXsGpuContext::new(&device, &queue);
+    let resident = GpuResidentFramePipeline::new(context).unwrap();
+    let capture = GpuResidentCapture::new();
+    let builder = ParentMapBuilder::new(&calibration()).unwrap();
+    let first = resident
+        .begin_parent(
+            &capture,
+            flight(40, 40, CENTER).frame,
+            &builder,
+            &orientation(1.0),
+            calibration().readout(),
+        )
+        .unwrap();
+    assert_eq!(resident.parent.encoded_transitions(), 1);
+    let error = refused(resident.begin_parent(
+        &capture,
+        flight(41, 41, CENTER).frame,
+        &builder,
+        &orientation(1.0),
+        calibration().readout(),
+    ));
+    assert!(error.to_string().contains("in-flight frame"), "{error}");
+    assert_eq!(resident.parent.encoded_transitions(), 1);
+    let state = capture.snapshot();
+    assert_eq!(state.generation, 1);
+    assert!(state.pending);
+    assert!(state.committed.is_none());
+    assert!(!state.ready);
+    drop(first);
+    assert!(!capture.snapshot().pending);
+
+    let error = refused(resident.begin_parent(
+        &capture,
+        flight(42, 42, CENTER).frame,
+        &builder,
+        &orientation(3_000.0),
+        calibration().readout(),
+    ));
+    assert!(error.to_string().contains("nonlinear interpolation"));
+    let state = capture.snapshot();
+    assert_eq!(state.generation, 2);
+    assert!(!state.pending);
+    assert_eq!(resident.parent.encoded_transitions(), 1);
 }
 
 #[test]
@@ -333,8 +390,10 @@ fn qualification_rejects_planted_parent_semantic_mutations() {
         let source = source.replacen(needle, replacement, 1);
         let pipeline = GpuParentMapPipeline::new_with_shader(context.clone(), source).unwrap();
         let owner = flight(100 + number as u64, 100 + number as u64, CENTER);
+        let capture = GpuResidentCapture::new();
+        let reservation = capture.reserve(owner.frame).unwrap();
         let encoded = pipeline
-            .encode(&builder, &poses, owner, calibration().readout())
+            .encode(&builder, &poses, reservation, calibration().readout())
             .unwrap();
         let actual = encoded.read_qualification(&context).unwrap();
         assert_ne!(
@@ -353,13 +412,15 @@ fn parent_geometry_and_belts_share_one_pre_submission_owner_chain() {
         Err(why) => panic!("GPU required: {why}"),
     };
     let context = OneXsGpuContext::new(&device, &queue);
-    let flight = flight(900, 901, CENTER);
-    let parent = GpuParentMapPipeline::new(context.clone())
-        .unwrap()
-        .encode(
+    let initial_flight = flight(900, 901, CENTER);
+    let capture = GpuResidentCapture::new();
+    let resident = GpuResidentFramePipeline::new(context.clone()).unwrap();
+    let parent = resident
+        .begin_parent(
+            &capture,
+            initial_flight.frame,
             &ParentMapBuilder::new(&calibration()).unwrap(),
             &orientation(1.0),
-            flight,
             calibration().readout(),
         )
         .unwrap();
@@ -408,13 +469,22 @@ fn parent_geometry_and_belts_share_one_pre_submission_owner_chain() {
         )
         .unwrap();
     assert_eq!(Arc::strong_count(&source_owner), 2);
-    belts
-        .prepare_front_end(&GpuPisFrontEnd::new(context).unwrap())
-        .unwrap()
-        .acknowledge_terminal()
-        .unwrap();
+    let state = capture.snapshot();
+    assert_eq!(state.generation, 1);
+    assert!(state.pending);
+    let error = refused(resident.begin_parent(
+        &capture,
+        flight(901, 902, CENTER).frame,
+        &ParentMapBuilder::new(&calibration()).unwrap(),
+        &orientation(1.0),
+        calibration().readout(),
+    ));
+    assert!(error.to_string().contains("in-flight frame"), "{error}");
+    assert_eq!(resident.parent.encoded_transitions(), 1);
+    drop(belts);
     assert_eq!(Arc::strong_count(&source_owner), 1);
-    eprintln!("ONE X2 GPU parent, geometry and belts completed one owner chain on {adapter}");
+    assert!(!capture.snapshot().pending);
+    eprintln!("ONE X2 GPU parent, geometry and belts retained one root reservation on {adapter}");
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

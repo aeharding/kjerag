@@ -60,6 +60,36 @@ failure text, foreign frame/context refusal, the packed-map CPU twin and all
 20 accepted live shader mutations. Final-map arithmetic, dispatch dimensions
 and mutation gates remain unchanged. A fresh post-commit receipt follows in a
 documentation-only successor.
+**Root-reserved resident ONE X2 frame chain, 2026-09-01, implementation
+branch only [FORCED RADV; PRIVATE OWNER; NO READY PUBLICATION]:** one private
+capture root now owns the monotonic generation, exact pending seal, committed
+successor, future-ready placeholder and quarantine state under one mutex. Its
+linear reservation is minted before parent encoding and moves unchanged
+through parent, geometry, the first and only belt submission and motion. No
+second motion reservation or caller-generated flight exists. Motion derives
+cold/warm state and its exact prior reference only from the reservation's
+immutable allocation-identical `Arc` snapshot; the candidate successor owns
+the next motion references and private space for later post-L1 storage.
+
+Drop and explicit refusal clear only the exact pending seal. Stale or poisoned
+rollback fails closed, retains affected prior/successor allocations and
+quarantines reuse; generation is never rewound, and seek/reset constructs a
+new capture. The submission carrier is structurally dropped first at every
+motion transaction/frame boundary, including unwind and submit failure, so its
+exact lease waits or quarantines before the reservation, prior or successor
+can be released. A GPU witness observes completed polling while the root is
+still pending and the prior snapshot is still retained for ordinary drop,
+explicit abort and unwind on both transaction and frame tokens.
+
+Tests also prove first-frame cold state, committed-prior warm state, exact
+drop/retry, stale-token isolation, allocation identity rather than stamp
+equality, foreign-context refusal, early duplicate/front-half admission
+refusal, and the absence of production ready publication. Scene and final-map
+installation remain deliberately unwired. The authenticated receipt is
+`docs/research/gpu-root-capture-state-qualification.md`; it binds code commit
+`7f0af2c91d1f842e4ed200eac6b513b228147448`, tree
+`487de81c0fcda9148754e22ede951aa3bd3a494e`, fresh build/lint gates and 41/41
+forced-RADV tests on AMD Radeon 760M Graphics (RADV PHOENIX), Mesa 26.1.6.
 
 **Pre-submission resident ONE X2 parent maps, 2026-09-01, implementation
 branch only [BIT-EXACT ON FORCED RADV; PRIVATE OWNER; NO SCENE WIRING]:** the
