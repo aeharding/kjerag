@@ -56,7 +56,9 @@ use super::flow::one_xs::scalar::{
     PairedPisSolver, PairedSolveRequest,
 };
 use super::flow::one_xs::temporal::BlurredBelts;
-use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
+use super::flow::one_xs_belt_gpu::{
+    GpuSolverBeltPipeline, IcedInstalledDrawAdapter, PendingBlurredBelts, SourceTextures,
+};
 use super::flow::{Cadence, Estimate};
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
@@ -2293,6 +2295,9 @@ pub struct ScenePipeline {
     /// The authoritative iced device and queue pair for every selected ONE X2
     /// resident stage owned by this renderer pipeline.
     one_xs_gpu: OneXsGpuContext,
+    /// Bounded render-pass retirement for the unselected installed-resident
+    /// route. No production prepare path stages it yet.
+    installed_one_xs_draw: IcedInstalledDrawAdapter,
     pipeline: wgpu::RenderPipeline,
     /// The same draw with the Studio optical-flow apply compiled in, chosen per
     /// draw when the runtime flow toggle is on ([`ScenePipeline::draw`]). Built
@@ -2668,6 +2673,7 @@ impl ScenePipeline {
 
         Self {
             one_xs_gpu,
+            installed_one_xs_draw: IcedInstalledDrawAdapter::new(device),
             pipeline,
             flow_pipeline,
             one_xs_flow_pipeline,
@@ -2793,6 +2799,11 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         aspect: f32,
     ) {
+        if let Err(error) = self.installed_one_xs_draw.poll_prepare() {
+            self.flow_draw = FlowDraw::Nothing;
+            primitive.stalled.fail_now(error);
+            return;
+        }
         let selected_one_xs = one_xs_playback_selected(
             ONE_XS_PLAYBACK_ENABLED,
             primitive
@@ -3566,6 +3577,9 @@ impl ScenePipeline {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.installed_one_xs_draw.arm_and_draw(pass) {
+            return;
+        }
         // Plain and both typed flow variants share the picture bindings. Only
         // flow draws bind the displacement buffer; their separate shader
         // pipelines keep the incompatible legacy and ONE X2 coordinate laws

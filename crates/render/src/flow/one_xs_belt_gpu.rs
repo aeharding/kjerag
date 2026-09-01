@@ -9,7 +9,7 @@
 //! boundary. No staging allocation or full CPU luma readback lies between the
 //! imported R8 textures and those inputs.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::{error::Error, fmt};
 
 use super::gpu_context::OneXsGpuContext;
@@ -389,6 +389,101 @@ impl InstalledOneXsReady {
         pass: &mut wgpu::RenderPass<'pass>,
     ) {
         retirements.arm_and_draw(self.permit, pass, self.draw, |draw, pass| draw.draw(pass));
+    }
+}
+
+/// Iced's bounded, one-redraw staging owner for an installed resident draw.
+///
+/// Preparation polls completed render submissions without waiting, then
+/// writes the exact installed picture's retained uniform before placing one
+/// linear draw capability in the cell. Drawing takes that capability and
+/// attaches its retirement proof to iced's live render pass. A second prepare
+/// before draw drops the undispatched permit before reserving another one.
+/// It changes no capture history.
+#[allow(dead_code)] // private prerequisite; the resident producer remains unselected
+pub(crate) struct IcedInstalledDrawAdapter {
+    retirements: IcedDrawRetirements<InstalledOneXsDraw>,
+    staged: Mutex<Option<InstalledOneXsReady>>,
+}
+
+#[allow(dead_code)]
+impl IcedInstalledDrawAdapter {
+    /// The qualified adapter bounds in-flight decoder-backed pictures at two.
+    const RETIREMENT_CAPACITY: usize = 2;
+
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        Self {
+            retirements: IcedDrawRetirements::new(device, Self::RETIREMENT_CAPACITY),
+            staged: Mutex::new(None),
+        }
+    }
+
+    /// Poll only. Scene calls this from every prepare even while the resident
+    /// route is unselected, so a future selected producer cannot accidentally
+    /// make draw-time polling part of the contract.
+    pub(crate) fn poll_prepare(&self) -> Fallible<usize> {
+        match self.retirements.poll() {
+            Ok(retired) => Ok(retired),
+            Err(error) => {
+                self.staged().take();
+                Err(error)
+            }
+        }
+    }
+
+    /// Stage the capability returned by a successful atomic install.
+    ///
+    /// The permit was reserved before publication. Updating through this
+    /// capability therefore reaches the source's retained uniform after a
+    /// separate pipeline and legacy uniform allocation have been created.
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_installed(
+        &self,
+        ready: InstalledOneXsReady,
+        reframe: &crate::Reframe,
+    ) {
+        self.staged().take();
+        ready.write_reframe(reframe);
+        self.staged().replace(ready);
+    }
+
+    /// Stage a fresh draw of the root's exact installed payload.
+    ///
+    /// Retirement exhaustion remains typed retryable backpressure. The
+    /// staged cell is empty before admission, so refusal cannot draw an older
+    /// capability or become a terminal playback failure.
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_redraw(
+        &self,
+        root: &resident_frame_gpu::GpuResidentCapture,
+        reframe: &crate::Reframe,
+    ) -> Result<bool, DrawRetirementError> {
+        self.staged().take();
+        let Some(ready) = root.ready_for_draw(&self.retirements)? else {
+            return Ok(false);
+        };
+        ready.write_reframe(reframe);
+        self.staged().replace(ready);
+        Ok(true)
+    }
+
+    /// Consume the one staged capability into iced's exact render pass.
+    pub(crate) fn arm_and_draw(&self, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(ready) = self.staged().take() else {
+            return false;
+        };
+        ready.arm_and_draw(&self.retirements, pass);
+        true
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn retirements(
+        &self,
+    ) -> &IcedDrawRetirements<InstalledOneXsDraw> {
+        &self.retirements
+    }
+
+    fn staged(&self) -> std::sync::MutexGuard<'_, Option<InstalledOneXsReady>> {
+        self.staged
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 }
 
@@ -2310,6 +2405,59 @@ mod tests {
         ] {
             assert!(!installed.contains(forbidden), "found {forbidden}");
         }
+
+        let adapter = source
+            .split_once("pub(crate) struct IcedInstalledDrawAdapter")
+            .unwrap()
+            .1
+            .split_once("impl ResidentInstallCandidate")
+            .unwrap()
+            .0;
+        assert!(adapter.contains("IcedDrawRetirements<InstalledOneXsDraw>"));
+        assert!(adapter.contains("Mutex<Option<InstalledOneXsReady>>"));
+        assert!(adapter.contains("fn poll_prepare(&self) -> Fallible<usize>"));
+        assert!(adapter.contains("fn prepare_redraw("));
+        assert!(adapter.contains("-> Result<bool, DrawRetirementError>"));
+        assert!(
+            adapter.find("self.staged().take();").unwrap()
+                < adapter
+                    .find("root.ready_for_draw(&self.retirements)?")
+                    .unwrap()
+        );
+        assert!(adapter.contains("ready.write_reframe(reframe);"));
+        assert!(adapter.contains("ready.arm_and_draw(&self.retirements, pass);"));
+        assert!(!adapter.contains("PollType::Wait"));
+
+        let scene = include_str!("../scene.rs");
+        assert!(scene.contains("installed_one_xs_draw: IcedInstalledDrawAdapter"));
+        assert!(scene.contains("IcedInstalledDrawAdapter::new(device)"));
+        let prepare = scene
+            .split_once("pub fn prepare(")
+            .unwrap()
+            .1
+            .split_once("pub fn diagnostic_one_xs_direct_frame")
+            .unwrap()
+            .0;
+        assert!(prepare.contains("self.installed_one_xs_draw.poll_prepare()"));
+        let draw = scene
+            .split_once("pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>)")
+            .unwrap()
+            .1
+            .split_once("fn is_bound")
+            .unwrap()
+            .0;
+        assert!(draw.contains("self.installed_one_xs_draw.arm_and_draw(pass)"));
+
+        let retirement = include_str!("../draw_retirement.rs");
+        let poll = retirement
+            .split_once("pub(crate) fn poll(&mut self) -> Fallible<usize>")
+            .unwrap()
+            .1
+            .split_once("let polled =")
+            .unwrap()
+            .0;
+        assert!(poll.contains("if self.pending.is_empty()"));
+        assert!(poll.contains("return Ok(0);"));
 
         let candidate = source
             .split_once("pub(crate) struct ResidentInstallCandidate")

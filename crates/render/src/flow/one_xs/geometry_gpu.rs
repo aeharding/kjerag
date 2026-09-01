@@ -1235,12 +1235,14 @@ mod tests {
             &picture_layout,
             wgpu::TextureFormat::Rgba8Unorm,
         ));
-        let retirements = crate::draw_retirement::IcedDrawRetirements::new(context.device(), 2);
+        let iced_draw =
+            crate::flow::one_xs_belt_gpu::IcedInstalledDrawAdapter::new(context.device());
+        let retirements = iced_draw.retirements();
         let witness = Arc::new(AtomicU8::new(0));
         let install = crate::flow::one_xs_belt_gpu::prepare_resident_install(
             ready,
             Arc::clone(&direct),
-            &retirements,
+            retirements,
         )
         .unwrap();
         let installed = install.install().unwrap();
@@ -1403,7 +1405,7 @@ mod tests {
         let warm_install = crate::flow::one_xs_belt_gpu::prepare_resident_install(
             warm_ready,
             Arc::clone(&direct),
-            &retirements,
+            retirements,
         )
         .unwrap();
         let warm_installed = warm_install.install().unwrap();
@@ -1514,7 +1516,7 @@ mod tests {
         let mut later_install = crate::flow::one_xs_belt_gpu::prepare_resident_install(
             later_ready,
             Arc::clone(&direct),
-            &retirements,
+            retirements,
         )
         .unwrap();
         later_install.observe_draw_drop(Arc::clone(&witness));
@@ -1676,7 +1678,7 @@ mod tests {
         let error = match crate::flow::one_xs_belt_gpu::prepare_resident_install(
             full_ready,
             Arc::clone(&direct),
-            &retirements,
+            retirements,
         ) {
             Ok(_) => panic!("full retirement admitted a materialized warm install"),
             Err(error) => error,
@@ -1711,7 +1713,7 @@ mod tests {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let draw_once = |ready: crate::flow::one_xs_belt_gpu::InstalledOneXsReady| {
+        let draw_once = || {
             let mut encoder =
                 context
                     .device()
@@ -1735,21 +1737,69 @@ mod tests {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            ready.arm_and_draw(&retirements, &mut pass);
+            assert!(iced_draw.arm_and_draw(&mut pass));
             drop(pass);
-            context.queue().submit([encoder.finish()]);
+            context.queue().submit([encoder.finish()])
+        };
+        iced_draw.prepare_installed(warm_installed, &reframe);
+        let _first_draw = draw_once();
+        let redraw_reframe = crate::Reframe::blank(0.5, true);
+        iced_draw.prepare_installed(later_installed, &redraw_reframe);
+        assert_eq!(read_uniform(&context, &uniforms), redraw_reframe.bytes());
+        assert_eq!(
+            read_uniform(&context, &recreated_uniforms),
+            recreated_reframe.bytes()
+        );
+        let second_draw = draw_once();
+        let error = iced_draw
+            .prepare_redraw(&capture, &reframe)
+            .expect_err("full iced retirement admitted a third draw");
+        assert_eq!(error, crate::draw_retirement::DrawRetirementError::Full);
+        let mut refused_encoder =
             context
                 .device()
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .unwrap();
-            assert_eq!(retirements.poll().unwrap(), 1);
-        };
-        draw_once(warm_installed);
-        draw_once(later_installed);
-        draw_once(capture.ready_for_draw(&retirements).unwrap().unwrap());
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("resident refused iced draw"),
+                });
+        let refused_view = target.create_view(&Default::default());
+        let mut refused_pass = refused_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("resident refused iced draw"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &refused_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        assert!(!iced_draw.arm_and_draw(&mut refused_pass));
+        drop(refused_pass);
+        drop(refused_encoder);
+        context
+            .device()
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(second_draw),
+                timeout: None,
+            })
+            .unwrap();
+        assert_eq!(iced_draw.poll_prepare().unwrap(), 2);
+        assert!(iced_draw.prepare_redraw(&capture, &reframe).unwrap());
+        assert_eq!(read_uniform(&context, &uniforms), reframe.bytes());
+        let third_draw = draw_once();
+        context
+            .device()
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(third_draw),
+                timeout: None,
+            })
+            .unwrap();
+        assert_eq!(iced_draw.poll_prepare().unwrap(), 1);
         let redraw_snapshot = capture.snapshot();
         assert!(later_snapshot.same_ready(&redraw_snapshot));
         assert!(Arc::ptr_eq(
@@ -1760,7 +1810,7 @@ mod tests {
         // Remove the root's final Arc only through a purpose-specific test
         // capability, then prove an install refusal drops that whole carrier
         // before the candidate begins reservation rollback.
-        let ready = capture.take_ready_for_drop_order_test(&retirements);
+        let ready = capture.take_ready_for_drop_order_test(retirements);
         let refusal = capture
             .reserve(FrameStamp::for_test(76, Duration::from_millis(76), None))
             .unwrap();

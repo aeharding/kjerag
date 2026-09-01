@@ -39,6 +39,38 @@ preserves the old committed successor and ready draw. Studio remains the
 frozen correctness oracle; no reverse engineering or optimization was
 performed.
 
+**Iced installed-resident draw adapter, 2026-09-01, implementation branch
+only [PRIVATE AND UNSELECTED; NO PRODUCER, PLAYBACK, PERFORMANCE OR PARITY
+CLAIM]:** `ScenePipeline` now owns one bounded
+`IcedDrawRetirements<InstalledOneXsDraw>` adapter and one mutex-protected
+staged `InstalledOneXsReady`. Every iced prepare checks retirement completion
+without waiting; the empty unselected owner returns before device polling. A
+future resident prepare can either move the capability from an atomic install
+or snapshot the capture root's exact ready allocation with a fresh permit,
+then write that draw's own retained `Reframe`. `ScenePipeline::draw` consumes
+the one-shot capability through `arm_and_draw` on iced's live render pass.
+Replacing a staged but never drawn capability drops its unused permit first.
+Retirement-full remains typed retryable backpressure and leaves no staged
+draw; terminal retirement failures keep their raw error and select no draw.
+
+The existing forced-RADV resident chain now exercises the adapter over two
+real render-pass submissions. It proves repeated redraw of the same installed
+allocation without a history recommit, explicit full backpressure with no
+draw, and updates to the installed picture's old retained uniform after a
+separate pipeline and uniform are created. The separate uniform remains
+unchanged. It also proves continued carrier/source retention through render
+retirement. Carrier-before-root install ordering is unchanged. The adapter is
+owned by one `ScenePipeline`; this checkpoint does not preserve it across
+pipeline destruction or recreation. A later capture-shared facade must keep
+retirement ownership alive across recreation so fail-closed pending payloads
+cannot accumulate decoder surfaces.
+
+No resident producer is connected to Scene, so normal selected ONE X2
+playback still uses its existing CPU-retained/direct-map path. This change
+does not touch warm-join code, expose a wgpu or dmabuf handle, wait in ordinary
+code, read back frame data, add a fallback or perform optimization reverse
+engineering. Studio remains the frozen correctness oracle.
+
 **Allocation-identical installed warm prior and temporal continuation,
 2026-09-01, implementation branch only [PRIVATE AND UNSELECTED; THROUGH WARM
 L1 TERMINAL ONLY; NO WARM POST-L1 JOIN, FINAL MAP, SCENE, PERFORMANCE OR
