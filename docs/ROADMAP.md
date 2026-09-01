@@ -5,8 +5,8 @@ GitHub issues; this doc is the map, issues are the tasks.
 
 **Authenticated paired PIS GPU checkpoint, 2026-09-01 [6,400 GPU
 TRANSACTIONS; ZERO CPU FALLBACK; BYTE-IDENTICAL TO THE FROZEN KJERAG CPU
-BOUNDARY; 10.6% MEDIAN THROUGHPUT GAIN; NOT REALTIME; OWNERSHIP FIX REQUIRED
-BEFORE INTEGRATION]:** exact clean commit
+BOUNDARY; 10.6% MEDIAN THROUGHPUT GAIN; NOT REALTIME; OWNERSHIP FIXED;
+FINAL-HEAD RANGE PENDING]:** exact clean commit
 `a1594c6fc458dbee248ba2a9d0a4f9f419a22304` causally processed frames zero
 through 6399 of the owner clip at the reported 71.13 yaw, -13.99 pitch and
 57.95-degree locked view, Sharp sampling, band and tone enabled, and the
@@ -48,16 +48,30 @@ visual-quality claim. It remains only 69.55% of the 29.97-fps source rate. The
 complete receipt hash list has SHA-256
 `1b047196e2a32523b6d53621f8ff8155a5cfa0867ea6d3744ed31082cccb80bd`.
 
-An independent ownership audit then found that the submitted belt token can
+An independent ownership audit then found that the submitted belt token could
 be dropped on the selected Scene's exact-frame rejection path before waiting
 for its GPU submission, returning an aliased decoder surface to the pool too
-early. The unused resident token also ignores a failed completion poll before
-releasing that owner. Numerical authentication above remains valid, but this
-commit is not an integration candidate until a fail-closed submission lease,
-early-drop regression and exact owner-clip rerun land. The next performance
-slice keeps the post-Gaussian belts resident, constructs estimator levels and
-prepared models on the GPU, and binds them directly to paired PIS rather than
-reconstructing CPU `Input` behind an adapter.
+early. Integration commit
+`fb177d6011a1ea66229aca3fb716ed253eca696b` fixes that production path with
+one qualified device/queue owner and a non-cloneable exact-submission lease.
+Successful completion releases the decoder owner once and disarms the lease;
+early return waits for the exact submission, while a returned poll error or
+native-backend poll panic retains the owner rather than permitting unproved
+reuse. Explicit completion preserves the raw error or original panic, and
+destructor-time panic is swallowed only after fail-closed retention.
+
+Five focused lease regressions, the forced-RADV byte-exact belt twin and the
+exact real owner-clip Scene ABA path passed. The two GPU logs have SHA-256
+`2169499a509da9d24fe09c8fb9aa681c30ace9825ac9d8247d8251582e0e74af`
+and `10fd8dbb3747c6168ce7f1b6d64265c3d6454d95ed821614a12de582f4de7163`.
+An independent re-audit accepted the fix at the exact integration tree. The
+full causal range above still authenticates `a1594c6`, so the eventual
+shipping head needs a fresh range after the wider GPU migration. The separate
+unselected resident-token checkpoint still requires this lease to be carried
+through an explicit terminal acknowledgement before it can be selected. The
+next performance slice keeps the post-Gaussian belts resident, constructs
+estimator levels and prepared models on the GPU, and binds them directly to
+paired PIS rather than reconstructing CPU `Input` behind an adapter.
 
 **Production ONE X2 paired PIS GPU wiring, 2026-09-01, authenticated checkpoint
 [TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; RANGE AND
