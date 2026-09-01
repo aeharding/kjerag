@@ -12,7 +12,7 @@
 use std::sync::mpsc;
 use std::{error::Error, fmt};
 
-use super::one_xs::temporal::{BlurredBelts as CpuBlurredBelts, gaussian_blur};
+use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
 use super::one_xs::{Lens, LensPair};
 use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
 use crate::Fallible;
@@ -42,7 +42,7 @@ struct QualificationFixture {
     sources: LensPair<SourceImage>,
     maps: RetainedBaseMaps,
     expected_preblur: SolverBelts,
-    expected_blurred: CpuBlurredBelts,
+    expected_blurred: BlurredBelts,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -553,7 +553,7 @@ impl GpuSolverBeltPipeline {
         sources: SourceTextures<'_>,
         maps: &RetainedBaseMaps,
         source_owner: K,
-    ) -> Fallible<PendingSolverBelts<K>> {
+    ) -> Fallible<PendingBlurredBelts<K>> {
         self.submit_inner(
             device,
             queue,
@@ -574,7 +574,7 @@ impl GpuSolverBeltPipeline {
         maps: &RetainedBaseMaps,
         source_owner: K,
         input: SubmissionInput<'_>,
-    ) -> Fallible<PendingSolverBelts<K>> {
+    ) -> Fallible<PendingBlurredBelts<K>> {
         let qualify_intermediates = matches!(
             input,
             SubmissionInput::Sampled {
@@ -704,7 +704,7 @@ impl GpuSolverBeltPipeline {
         }
         encoder.copy_buffer_to_buffer(&packed, 0, &readback, 0, OUTPUT_BYTES);
         let submission = queue.submit([encoder.finish()]);
-        Ok(PendingSolverBelts {
+        Ok(PendingBlurredBelts {
             device: device.clone(),
             _source_owner: source_owner,
             _map: map,
@@ -721,7 +721,7 @@ impl GpuSolverBeltPipeline {
 
 /// One submitted GPU solver-belt transaction.
 #[must_use = "the submitted ONE X2 solver belts have not been consumed"]
-pub(crate) struct PendingSolverBelts<K> {
+pub(crate) struct PendingBlurredBelts<K> {
     device: wgpu::Device,
     _source_owner: K,
     _map: wgpu::Buffer,
@@ -735,7 +735,7 @@ pub(crate) struct PendingSolverBelts<K> {
     submission: wgpu::SubmissionIndex,
 }
 
-impl<K> PendingSolverBelts<K> {
+impl<K> PendingBlurredBelts<K> {
     /// The compact GPU-resident A-then-B payload, four U8 codes per word.
     #[cfg(test)]
     pub(crate) fn packed(&self) -> &wgpu::Buffer {
@@ -744,15 +744,13 @@ impl<K> PendingSolverBelts<K> {
 
     /// Wait for and consume the exact compact post-Gaussian payload.
     ///
-    /// This temporary external `SolverBelts` signature keeps this isolated
-    /// module commit buildable. The typed-handoff change immediately following
-    /// it replaces this with the already-blurred boundary consumed by the
-    /// estimator, so this value cannot be blurred a second time.
-    pub(crate) fn read(self) -> Fallible<SolverBelts> {
+    /// The distinct return type prevents the CPU estimator from applying the
+    /// selected Gaussian for a second time.
+    pub(crate) fn read(self) -> Fallible<BlurredBelts> {
         Ok(self.read_inner()?.0)
     }
 
-    fn read_qualification(self) -> Fallible<(SolverBelts, SolverBelts, [u32; 2])> {
+    fn read_qualification(self) -> Fallible<(BlurredBelts, SolverBelts, [u32; 2])> {
         let (blurred, preblur, witness) = self.read_inner()?;
         Ok((
             blurred,
@@ -761,7 +759,7 @@ impl<K> PendingSolverBelts<K> {
         ))
     }
 
-    fn read_inner(self) -> Fallible<(SolverBelts, Option<SolverBelts>, Option<[u32; 2]>)> {
+    fn read_inner(self) -> Fallible<(BlurredBelts, Option<SolverBelts>, Option<[u32; 2]>)> {
         let slice = self.readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -795,13 +793,13 @@ impl<K> PendingSolverBelts<K> {
             answer.recv()??;
         }
         let mapped = slice.get_mapped_range();
-        let belts = unpack_belts(&mapped)?;
+        let belts = unpack_blurred_belts(&mapped)?;
         drop(mapped);
         self.readback.unmap();
         let preblur = preblur
             .map(|(slice, _)| {
                 let mapped = slice.get_mapped_range();
-                let belts = unpack_belts(&mapped);
+                let belts = unpack_solver_belts(&mapped);
                 drop(mapped);
                 self.preblur_readback
                     .as_ref()
@@ -827,17 +825,26 @@ impl<K> PendingSolverBelts<K> {
     }
 }
 
-fn unpack_belts(words: &[u8]) -> Fallible<SolverBelts> {
+fn unpack_belt_lenses(words: &[u8]) -> LensPair<Vec<u8>> {
     let bytes = words
         .chunks_exact(size_of::<u32>())
         .flat_map(|word| u32::from_ne_bytes(word.try_into().unwrap()).to_le_bytes())
         .collect::<Vec<_>>();
     debug_assert_eq!(bytes.len(), SolverBelts::BYTES);
-    SolverBelts::from_lenses(LensPair {
+    LensPair {
         a: bytes[..RetainedBaseMaps::NODES_PER_LENS].to_vec(),
         b: bytes[RetainedBaseMaps::NODES_PER_LENS..].to_vec(),
-    })
-    .map_err(Box::<dyn Error + Send + Sync>::from)
+    }
+}
+
+fn unpack_solver_belts(words: &[u8]) -> Fallible<SolverBelts> {
+    SolverBelts::from_lenses(unpack_belt_lenses(words))
+        .map_err(Box::<dyn Error + Send + Sync>::from)
+}
+
+fn unpack_blurred_belts(words: &[u8]) -> Fallible<BlurredBelts> {
+    BlurredBelts::from_lenses(unpack_belt_lenses(words))
+        .map_err(Box::<dyn Error + Send + Sync>::from)
 }
 
 fn pack_belts(belts: &SolverBelts) -> Vec<u8> {

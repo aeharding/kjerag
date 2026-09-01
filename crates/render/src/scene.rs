@@ -45,8 +45,8 @@ use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
 use super::flow::one_xs::player::{FrameOwner, FrameResult, PreparedFrame};
-use super::flow::one_xs::temporal::{BlurredBelts, gaussian_blur};
-use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingSolverBelts, SourceTextures};
+use super::flow::one_xs::temporal::BlurredBelts;
+use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
@@ -375,12 +375,12 @@ enum OneXsPreparation {
 
 /// One submitted compact solver input and the exact delivery it sampled.
 ///
-/// [`PendingSolverBelts`] retains the decoder surfaces themselves. This outer
+/// [`PendingBlurredBelts`] retains the decoder surfaces themselves. This outer
 /// token retains their opaque numeric identity as well, so the readback cannot
 /// be committed to geometry prepared for another delivery.
 struct PendingOneXsBlurredBelts {
     frame: FrameStamp,
-    pending: PendingSolverBelts<Arc<Frames>>,
+    pending: PendingBlurredBelts<Arc<Frames>>,
 }
 
 impl PendingOneXsBlurredBelts {
@@ -394,11 +394,7 @@ impl PendingOneXsBlurredBelts {
             )
             .into());
         }
-        // Temporary adapter for the first GPU producer. The next producer
-        // returns `BlurredBelts` directly, at which point this is only
-        // `self.pending.read()`. There is no runtime fallback: either the exact
-        // submitted payload is read and blurred once, or the transaction fails.
-        Ok(gaussian_blur(&self.pending.read()?))
+        self.pending.read()
     }
 }
 
@@ -5541,6 +5537,7 @@ mod tests {
         );
         pipeline.prepare(&first_primitive, &device, &queue, 1.0);
         assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
+        assert_eq!(pipeline.diagnostic_one_xs_direct_frame(), Some(&first));
         assert_eq!(
             pipeline
                 .direct_one_xs_map
@@ -5618,12 +5615,23 @@ mod tests {
             FlowDraw::Nothing,
             "the failed successor selected a legacy or unstitched fallback"
         );
+        assert!(pipeline.diagnostic_one_xs_direct_frame().is_none());
+        assert_eq!(
+            second_primitive
+                .shown
+                .get()
+                .expect("failed successor lost the last complete display")
+                .frames
+                .stamp(),
+            first
+        );
 
         // The rejected receipt consumed no estimator history. The ordinary
         // production entry point can prepare, sample, commit, upload and
         // acknowledge the same real successor exactly once.
         pipeline.prepare(&second_primitive, &device, &queue, 1.0);
         assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
+        assert_eq!(pipeline.diagnostic_one_xs_direct_frame(), Some(&second));
         assert_eq!(
             pipeline
                 .direct_one_xs_map
