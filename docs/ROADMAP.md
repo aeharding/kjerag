@@ -36,6 +36,41 @@ the complete 4/4 run log to
 and the post-run receipt to
 `dc1039b41b68df250f0e9bb10a6e05584c64094b2ab8067d9bf6636eb407f777`.
 
+**Context-bound GPU ONE X2 retained geometry, 2026-09-01, implementation
+branch only [UNSELECTED; NO SCENE WIRING; SEALED TRANSITIONS]:** the
+shared `OneXsGpuContext` now owns a correctness-first geometry pipeline for
+both 1,080-by-60 periodic map merges, the selected directional continuity
+filters, physical validity seed, 9-by-9 erosion and A/B mask unification.
+Static line coordinates upload once. The temporary input boundary uploads the
+two CPU-built 100-by-200 parent maps into private token-owned storage; the
+incoming resident-parent producer can replace only that private owner and
+binding without changing any geometry arithmetic or downstream layout.
+
+The output is one non-cloneable opaque encoded token containing its exact GPU
+context, unfinished command encoder, full frame flight, both parent preimages,
+both retained float2 maps, both physical masks and all bind groups. It exposes
+no raw buffer, queue, submission index, detached flight or ordinary completion
+hook. The geometry stage neither submits nor creates a competing lease. Its
+only production handoff appends exact belt sampling and Gaussian commands to
+that unfinished encoder; the belt owner then performs the one submission and
+mints the chain's sole source-surface lease. A second purpose-specific
+transition binds the token's packed masks directly into the sealed frontend.
+The geometry allocation and imported source owner remain inseparable inside
+that lease through PIS and final materialization. None of the rejected
+separable flight, packed-buffer, generic-submit or completion hooks return.
+
+The physical masks use the frontend's exact packed layout: four U8 codes per
+word, lens A then lens B, followed by its explicit runtime-zero word. Belt
+sampling consumes the retained map directly and the frontend consumes the
+packed masks directly, with no map or mask reupload or layout conversion.
+Construction compares every retained float word and packed mask word with the
+selected CPU oracle on the actual adapter, including signed zero, exceptional
+parent payloads, periodic edges and the native ordered FMA schedule. Four live
+shader mutations cover FMA operand association, the strict directional
+threshold, erosion radius and lens unification. This checkpoint makes no
+playback, performance, Studio-parity, owner-eye or final ownership-readiness
+claim.
+
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
 READINESS CLAIM]:** the qualified paired GPU PIS kernel has a concrete

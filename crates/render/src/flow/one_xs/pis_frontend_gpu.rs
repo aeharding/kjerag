@@ -9,6 +9,7 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
+use super::geometry_gpu::{GpuGeometryBelts, GpuGeometryFrameOwner};
 use crate::Fallible;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::pis::gpu::{
@@ -606,6 +607,52 @@ impl GpuPisFrontEnd {
             _weight_horizontal: outputs.weight_horizontal,
             _resources: resources,
             belts,
+        })
+    }
+
+    /// Consume the private geometry-backed belt owner atomically. The packed
+    /// physical-mask buffer binds directly; no raw handle or separable
+    /// retention component crosses the belt ownership module.
+    pub(super) fn prepare_geometry<K>(
+        &self,
+        mut geometry: GpuGeometryBelts<K>,
+    ) -> Fallible<GpuPreparedFrame<GpuGeometryFrameOwner<K>>> {
+        geometry.belts.lease.validate_provenance(&self.context)?;
+        if geometry.masks.size() != words_bytes(2 * MASK_WORDS_PER_LENS + 1) {
+            return Err(format!(
+                "ONE X2 GPU geometry mask buffer is {} bytes, expected {}",
+                geometry.masks.size(),
+                words_bytes(2 * MASK_WORDS_PER_LENS + 1)
+            )
+            .into());
+        }
+        let device = self.context.device();
+        let outputs = OutputBuffers::new(device);
+        let resources = self.resources(device, &geometry.belts.packed, &geometry.masks, &outputs);
+        let command = self.encode_command(device, &resources);
+        geometry
+            .belts
+            .lease
+            .submit_after(&self.context, |_| command)?;
+        let flight = geometry
+            .belts
+            .flight
+            .take()
+            .expect("GPU-resident geometry belts transfer their flight exactly once");
+        Ok(GpuPreparedFrame {
+            context: self.context.clone(),
+            flight,
+            shared_images: outputs.shared_images,
+            shared_masks: outputs.shared_masks,
+            gradients: outputs.gradients,
+            raw_weights: outputs.raw_weights,
+            patch_weight_sums: outputs.patch_weight_sums,
+            models: outputs.models,
+            l1_lack_rows: outputs.l1_lack_rows,
+            l1_block_mask: outputs.l1_block_mask,
+            _weight_horizontal: outputs.weight_horizontal,
+            _resources: resources,
+            belts: geometry.belts,
         })
     }
 }
