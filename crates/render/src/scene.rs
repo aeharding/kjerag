@@ -44,7 +44,7 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
-use super::flow::one_xs::player::{FrameOwner, FrameResult, PreparedFrame};
+use super::flow::one_xs::player::{FrameOwner, FrameOwnerError, FrameResult, PreparedFrame};
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
@@ -345,10 +345,11 @@ struct Motion {
 ///
 /// iced owns [`ScenePipeline`] independently from [`Scene`], so the sequential
 /// CPU owner cannot live only in either one. A live [`View`] carries this
-/// shared capture identity across that boundary. The mutex is not for parallel
-/// estimation, which is deliberately absent in the first implementation; it
-/// makes the ownership explicit and keeps a recreated pipeline from restarting
-/// or duplicating the capture's numeric lineage.
+/// shared capture identity across that boundary. The mutex protects only the
+/// short reservation and installation boundaries. A reservation moves the
+/// sequential owner out, so GPU waits and estimator work hold no capture lock;
+/// its generation keeps a recreated pipeline from restarting or duplicating
+/// the capture's numeric lineage.
 struct OneXsCapture {
     state: Mutex<OneXsCaptureState>,
 }
@@ -364,14 +365,106 @@ struct OneXsCaptureState {
     /// Ordinary playback. The last completed resources are retained so a
     /// redraw of the exact same delivered pair does not consume the
     /// sequential owner twice.
-    owner: Box<FrameOwner>,
-    ready: Option<OneXsMapFrame>,
+    owner: Option<Box<FrameOwner>>,
+    ready: Option<Arc<OneXsMapFrame>>,
+    generation: u64,
+    in_flight: Option<OneXsFlight>,
+    /// A transaction that could not be restored or installed makes this
+    /// lineage terminal. The old ready display remains available, but it is
+    /// not a truthful base for another successor transaction.
+    terminal: bool,
+    /// Owners from stale tokens are quarantined rather than allowed to
+    /// overwrite the owner leased to a different current flight.
+    quarantined_owners: Vec<FrameOwner>,
 }
 
 enum OneXsPreparation {
-    Ready(OneXsMapFrame),
-    Prepared(Box<PreparedFrame>),
+    Ready(Arc<OneXsMapFrame>),
+    Reserved(OneXsReservation),
+    InFlight(Option<Arc<OneXsMapFrame>>),
 }
+
+/// Opaque authority for one lock-free estimator transaction.
+///
+/// Full [`FrameStamp`] equality prevents an index/time ABA, while generation
+/// prevents a delayed completion from impersonating a later reservation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OneXsFlight {
+    generation: u64,
+    frame: FrameStamp,
+}
+
+/// The exact old owner and prepared geometry leased out of one capture.
+///
+/// Future staged GPU PIS work may retain this value across all of its waits.
+/// Until [`Self::commit_scalar`] succeeds, aborting it restores the exact box
+/// that was installed before the reservation; no estimator clone is involved.
+struct OneXsReservation {
+    capture: Arc<OneXsCapture>,
+    flight: OneXsFlight,
+    previous_ready: Option<Arc<OneXsMapFrame>>,
+    owner: Option<Box<FrameOwner>>,
+    prepared: Option<Box<PreparedFrame>>,
+}
+
+struct CompletedOneXsReservation {
+    capture: Arc<OneXsCapture>,
+    flight: OneXsFlight,
+    previous_ready: Option<Arc<OneXsMapFrame>>,
+    owner: Option<Box<FrameOwner>>,
+    result: Option<FrameResult>,
+}
+
+struct RejectedOneXsReservation {
+    reservation: OneXsReservation,
+    error: FrameOwnerError,
+}
+
+struct RejectedOneXsAbort {
+    reservation: OneXsReservation,
+    reason: String,
+}
+
+struct RejectedOneXsInstall {
+    completion: CompletedOneXsReservation,
+    reason: String,
+}
+
+impl std::fmt::Debug for RejectedOneXsInstall {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("RejectedOneXsInstall")
+            .field("flight", &self.completion.flight)
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for RejectedOneXsInstall {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for RejectedOneXsInstall {}
+
+impl std::fmt::Debug for RejectedOneXsAbort {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("RejectedOneXsAbort")
+            .field("flight", &self.reservation.flight)
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for RejectedOneXsAbort {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for RejectedOneXsAbort {}
 
 /// One submitted compact solver input and the exact delivery it sampled.
 ///
@@ -404,12 +497,126 @@ impl std::fmt::Debug for OneXsCapture {
     }
 }
 
+fn same_ready_map(left: Option<&Arc<OneXsMapFrame>>, right: Option<&Arc<OneXsMapFrame>>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        _ => false,
+    }
+}
+
+impl OneXsReservation {
+    fn prepared(&self) -> &PreparedFrame {
+        self.prepared
+            .as_deref()
+            .expect("a live ONE X2 reservation owns prepared geometry")
+    }
+
+    /// Restore the exact pre-transaction owner after submission or readback
+    /// fails. The ready map is validated by allocation identity and is never
+    /// replaced by rollback.
+    fn abort(mut self) -> Result<(), Box<RejectedOneXsAbort>> {
+        self.prepared.take();
+        let capture = self.capture.clone();
+        if let Err(error) =
+            capture.restore(&self.flight, self.previous_ready.as_ref(), &mut self.owner)
+        {
+            return Err(Box::new(RejectedOneXsAbort {
+                reservation: self,
+                reason: error.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Run today's scalar estimator without the capture mutex.
+    ///
+    /// `FrameOwner::commit` leaves its owner usable on every current error.
+    /// Returning the reservation on rejection preserves that fact at the
+    /// capture boundary instead of dropping the leased owner.
+    fn commit_scalar(
+        mut self,
+        blurred_belts: BlurredBelts,
+    ) -> Result<CompletedOneXsReservation, RejectedOneXsReservation> {
+        let prepared = self
+            .prepared
+            .take()
+            .expect("a live ONE X2 reservation owns prepared geometry");
+        let owner = self
+            .owner
+            .as_deref_mut()
+            .expect("a live ONE X2 reservation owns the old estimator");
+        match owner.commit(*prepared, blurred_belts) {
+            Ok(result) => Ok(CompletedOneXsReservation {
+                capture: self.capture.clone(),
+                flight: self.flight.clone(),
+                previous_ready: self.previous_ready.clone(),
+                owner: Some(
+                    self.owner
+                        .take()
+                        .expect("the successful scalar transaction retains its next owner"),
+                ),
+                result: Some(result),
+            }),
+            Err(error) => Err(RejectedOneXsReservation {
+                reservation: self,
+                error,
+            }),
+        }
+    }
+}
+
+impl Drop for OneXsReservation {
+    fn drop(&mut self) {
+        if self.owner.is_none() {
+            return;
+        }
+        let capture = self.capture.clone();
+        if capture
+            .restore(&self.flight, self.previous_ready.as_ref(), &mut self.owner)
+            .is_err()
+        {
+            capture.retain_failed_reservation(self);
+        }
+    }
+}
+
+impl CompletedOneXsReservation {
+    fn install(mut self) -> Result<Arc<OneXsMapFrame>, Box<RejectedOneXsInstall>> {
+        let capture = self.capture.clone();
+        match capture.install(&mut self) {
+            Ok(map) => Ok(map),
+            Err(reason) => Err(Box::new(RejectedOneXsInstall {
+                completion: self,
+                reason,
+            })),
+        }
+    }
+}
+
+impl Drop for CompletedOneXsReservation {
+    fn drop(&mut self) {
+        if self.owner.is_none() {
+            return;
+        }
+        let capture = self.capture.clone();
+        if capture.install(self).is_err() {
+            // A successful scalar transition cannot reconstruct its old
+            // estimator without cloning the multi-megabyte state. If corrupt
+            // completion metadata prevents publication, retain the advanced
+            // owner in the terminal capture instead of silently dropping the
+            // only usable estimator. The ready map remains the old display.
+            capture.retain_failed_completion(self);
+        }
+    }
+}
+
 impl OneXsCapture {
     fn replay_start(&self, offered: Option<&FrameStamp>, target: u64) -> Fallible<ReplayStart> {
         let state = self.state.lock().map_err(
             |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
         )?;
-        let ready = state.ready.as_ref().map(OneXsMapFrame::frame);
+        let ready = state.ready.as_deref().map(OneXsMapFrame::frame);
         Ok(one_xs_replay_start(
             ready.map(FrameStamp::index),
             offered.map(FrameStamp::index),
@@ -426,8 +633,12 @@ impl OneXsCapture {
     fn new(calibration: &CalibrationSet) -> Fallible<Self> {
         Ok(Self {
             state: Mutex::new(OneXsCaptureState {
-                owner: Box::new(FrameOwner::new(calibration)?),
+                owner: Some(Box::new(FrameOwner::new(calibration)?)),
                 ready: None,
+                generation: 0,
+                in_flight: None,
+                terminal: false,
+                quarantined_owners: Vec::new(),
             }),
         })
     }
@@ -442,7 +653,7 @@ impl OneXsCapture {
             .is_some_and(|ready| ready.frame() == frame))
     }
 
-    fn ready(&self, frame: &FrameStamp) -> Fallible<Option<OneXsMapFrame>> {
+    fn ready(&self, frame: &FrameStamp) -> Fallible<Option<Arc<OneXsMapFrame>>> {
         let state = self.state.lock().map_err(
             |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
         )?;
@@ -453,42 +664,103 @@ impl OneXsCapture {
             .cloned())
     }
 
-    /// Return an existing exact result or prepare its successor atomically.
+    /// Return an existing exact result or reserve its successor atomically.
     ///
-    /// This closes the ready/prepare gap for a recreated pipeline. The mutex
-    /// is released before GPU submission or waiting. The current GPU bridge is
-    /// deliberately synchronous, so no prepared transaction survives its
-    /// `prepare_one_xs_playback` call; a future asynchronous bridge must add a
-    /// shared in-flight state before allowing transactions to overlap.
-    fn prepare_or_ready(&self, frame: &FrameStamp, size: Size) -> Fallible<OneXsPreparation> {
-        let state = self.state.lock().map_err(
+    /// The owner and prepared geometry move into the reservation. A recreated
+    /// pipeline therefore observes `InFlight` and cannot submit the same or an
+    /// ABA delivery while the original pipeline waits or computes.
+    fn reserve(self: &Arc<Self>, frame: &FrameStamp, size: Size) -> Fallible<OneXsPreparation> {
+        let mut state = self.state.lock().map_err(
             |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
         )?;
         if let Some(ready) = state.ready.as_ref().filter(|ready| ready.frame() == frame) {
             return Ok(OneXsPreparation::Ready(ready.clone()));
         }
-        Ok(OneXsPreparation::Prepared(Box::new(
-            state.owner.prepare(frame, size)?,
-        )))
+        if state.terminal {
+            return Err(
+                "ONE X2 stitch capture stopped after a transaction could not be published".into(),
+            );
+        }
+        if state.in_flight.is_some() {
+            return Ok(OneXsPreparation::InFlight(state.ready.clone()));
+        }
+        let prepared = state
+            .owner
+            .as_ref()
+            .ok_or("ONE X2 stitch owner is absent without an active reservation")?
+            .prepare(frame, size)?;
+        let generation = state
+            .generation
+            .checked_add(1)
+            .ok_or("ONE X2 stitch reservation generation is exhausted")?;
+        let flight = OneXsFlight {
+            generation,
+            frame: frame.clone(),
+        };
+        state.generation = generation;
+        state.in_flight = Some(flight.clone());
+        let previous_ready = state.ready.clone();
+        let owner = state
+            .owner
+            .take()
+            .expect("the checked idle capture owns its estimator");
+        Ok(OneXsPreparation::Reserved(OneXsReservation {
+            capture: self.clone(),
+            flight,
+            previous_ready,
+            owner: Some(owner),
+            prepared: Some(Box::new(prepared)),
+        }))
     }
 
-    /// Commit compact solver inputs after their GPU transaction has completed.
-    fn commit(
+    fn restore(
         &self,
-        prepared: PreparedFrame,
-        blurred_belts: BlurredBelts,
-    ) -> Fallible<OneXsMapFrame> {
+        flight: &OneXsFlight,
+        previous_ready: Option<&Arc<OneXsMapFrame>>,
+        owner: &mut Option<Box<FrameOwner>>,
+    ) -> Fallible<()> {
         let mut state = self.state.lock().map_err(
             |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
         )?;
-        if let Some(ready) = state
-            .ready
-            .as_ref()
-            .filter(|ready| ready.frame() == prepared.frame())
-        {
-            return Ok(ready.clone());
+        if state.in_flight.as_ref() != Some(flight) {
+            return Err("ONE X2 stitch rollback names a stale reservation generation".into());
         }
-        let OneXsCaptureState { owner, ready } = &mut *state;
+        if state.owner.is_some() {
+            return Err("ONE X2 stitch rollback found another installed owner".into());
+        }
+        if !same_ready_map(state.ready.as_ref(), previous_ready) {
+            return Err("ONE X2 stitch rollback found a changed ready map".into());
+        }
+        state.owner = Some(
+            owner
+                .take()
+                .expect("a restored ONE X2 reservation owns its estimator"),
+        );
+        state.in_flight = None;
+        Ok(())
+    }
+
+    /// Atomically publish the already-complete scalar owner and map.
+    ///
+    /// Every fallible estimator operation precedes this lock. Generation,
+    /// full delivery identity and the previous ready allocation are checked
+    /// before either shared slot changes.
+    fn install(
+        &self,
+        completion: &mut CompletedOneXsReservation,
+    ) -> Result<Arc<OneXsMapFrame>, String> {
+        let mut state = self.state.lock().map_err(
+            |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
+        )?;
+        if state.in_flight.as_ref() != Some(&completion.flight) {
+            return Err("ONE X2 stitch completion names a stale reservation generation".into());
+        }
+        if state.owner.is_some() {
+            return Err("ONE X2 stitch completion found another installed owner".into());
+        }
+        if !same_ready_map(state.ready.as_ref(), completion.previous_ready.as_ref()) {
+            return Err("ONE X2 stitch completion found a changed ready map".to_owned());
+        }
         let FrameResult {
             map,
             phase,
@@ -497,7 +769,19 @@ impl OneXsCapture {
             weighted_rows,
             lens_a_census,
             lens_b_census,
-        } = owner.commit(prepared, blurred_belts)?;
+        } = completion
+            .result
+            .as_ref()
+            .expect("a pending ONE X2 completion owns its frame result");
+        if map.frame() != &completion.flight.frame {
+            return Err(crate::studio_type2::FrameMapMismatch::new(
+                "reservation",
+                &completion.flight.frame,
+                "map",
+                map.frame(),
+            )
+            .to_string());
+        }
         // Preserve access to the complete transaction diagnostics without
         // making a pooled number a picture verdict. They remain available for
         // the exact-frame regression and do not gate drawing.
@@ -509,8 +793,52 @@ impl OneXsCapture {
             lens_a_census,
             lens_b_census,
         );
-        *ready = Some(map.clone());
+        let FrameResult { map, .. } = completion
+            .result
+            .take()
+            .expect("the validated ONE X2 completion retains its frame result");
+        let map = Arc::new(map);
+        state.owner = Some(
+            completion
+                .owner
+                .take()
+                .expect("the validated ONE X2 completion retains its estimator"),
+        );
+        state.ready = Some(map.clone());
+        state.in_flight = None;
         Ok(map)
+    }
+
+    fn retain_failed_completion(&self, completion: &mut CompletedOneXsReservation) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.terminal = true;
+        let exact_flight = state.in_flight.as_ref() == Some(&completion.flight);
+        let exact_ready = same_ready_map(state.ready.as_ref(), completion.previous_ready.as_ref());
+        if exact_flight && exact_ready && state.owner.is_none() {
+            state.owner = completion.owner.take();
+            state.in_flight = None;
+        } else if let Some(owner) = completion.owner.take() {
+            state.quarantined_owners.push(*owner);
+        }
+    }
+
+    fn retain_failed_reservation(&self, reservation: &mut OneXsReservation) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.terminal = true;
+        let exact_flight = state.in_flight.as_ref() == Some(&reservation.flight);
+        let exact_ready = same_ready_map(state.ready.as_ref(), reservation.previous_ready.as_ref());
+        if exact_flight && exact_ready && state.owner.is_none() {
+            state.owner = reservation.owner.take();
+            state.in_flight = None;
+        } else if let Some(owner) = reservation.owner.take() {
+            state.quarantined_owners.push(*owner);
+        }
     }
 }
 
@@ -873,7 +1201,7 @@ impl Scene {
         if !exact_selected_display(&current, Some(&shown_stamp), same_capture) {
             return Ok(None);
         }
-        capture.ready(&current)
+        Ok(capture.ready(&current)?.map(|map| map.as_ref().clone()))
     }
 
     /// Takes whichever frame belongs on screen at `now`, and says when to
@@ -2370,16 +2698,51 @@ impl ScenePipeline {
             .as_ref()
             .ok_or("ONE X2 playback lost its capture-owned stitch state")?;
 
-        let map = match capture.prepare_or_ready(&frames.stamp(), frames.size)? {
+        let map = match capture.reserve(&frames.stamp(), frames.size)? {
             OneXsPreparation::Ready(map) => map,
-            OneXsPreparation::Prepared(prepared) => {
-                let pending =
-                    self.submit_one_xs_solver_belts(device, queue, frames.clone(), &prepared)?;
+            OneXsPreparation::InFlight(ready) => {
+                self.flow_draw = FlowDraw::Nothing;
+                // `prepare_inner` may already have made the offered successor
+                // frontmost. Seed a recreated pipeline from the capture-owned
+                // completed map, then put the last exact source/map/uniform
+                // tuple back without making a second estimator submission.
+                self.seed_one_xs_display(primitive, device, queue, ready.as_deref());
+                self.restore_one_xs_display(primitive, device, queue, aspect);
+                return Ok(());
+            }
+            OneXsPreparation::Reserved(reservation) => {
+                let pending = match self.submit_one_xs_solver_belts(
+                    device,
+                    queue,
+                    frames.clone(),
+                    reservation.prepared(),
+                ) {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        reservation.abort()?;
+                        return Err(error);
+                    }
+                };
                 // The presentation policy admits only one frame at a time.
                 // Waiting occurs outside the capture mutex, and retained CPU
-                // history is consumed only after this exact readback succeeds.
-                let blurred_belts = pending.read(&prepared)?;
-                capture.commit(*prepared, blurred_belts)?
+                // history is leased only after this exact readback succeeds.
+                let blurred_belts = match pending.read(reservation.prepared()) {
+                    Ok(blurred_belts) => blurred_belts,
+                    Err(error) => {
+                        reservation.abort()?;
+                        return Err(error);
+                    }
+                };
+                match reservation.commit_scalar(blurred_belts) {
+                    Ok(completed) => completed
+                        .install()
+                        .map_err(|rejected| rejected as Box<dyn std::error::Error + Send + Sync>)?,
+                    Err(rejected) => {
+                        let RejectedOneXsReservation { reservation, error } = rejected;
+                        reservation.abort()?;
+                        return Err(error.into());
+                    }
+                }
             }
         };
         MapBindError::require_frame(map.frame(), self.prepared_picture.as_ref())?;
@@ -2422,6 +2785,41 @@ impl ScenePipeline {
     /// map all name the same opaque [`FrameStamp`]. It then makes that retained
     /// source frontmost again and rebuilds the uniform for the current camera
     /// and target aspect before selecting the direct draw.
+    fn seed_one_xs_display(
+        &mut self,
+        primitive: &ScenePrimitive,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ready: Option<&OneXsMapFrame>,
+    ) {
+        let Some(ready) = ready else {
+            return;
+        };
+        let Some(view) = primitive
+            .shown
+            .get()
+            .filter(|view| view.frames.stamp() == *ready.frame())
+        else {
+            return;
+        };
+
+        // A genuinely recreated iced pipeline has no retained import or map
+        // resource of its own. Both are reconstructible from capture-owned
+        // state without touching the in-flight estimator reservation.
+        self.show(device, &view, primitive);
+        if !self.is_bound(&view) {
+            return;
+        }
+        let draw = self
+            .direct_one_xs_map
+            .get_or_insert_with(|| DirectMapDraw::new(device, &self.layout, self.format));
+        if draw.bound_frame() != Some(ready.frame()) {
+            draw.upload(queue, ready);
+        }
+        let source = view.frames.stamp();
+        let _ = self.one_xs_display.commit(&source, ready.frame());
+    }
+
     fn restore_one_xs_display(
         &mut self,
         primitive: &ScenePrimitive,
@@ -4995,7 +5393,95 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use kjerag_meta::{Filter, GyroSample, GyroTrack, Sweep};
+    use kjerag_meta::{
+        CalibrationSet, ExposureTrack, Filter, GyroConfig, GyroEncoding, GyroSample, GyroTrack,
+        OrientationSample, OrientationTrack, Quat, Sweep,
+    };
+
+    use crate::flow::one_xs::{COLS, LensPair, ROWS};
+    use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+
+    fn reservation_calibration() -> CalibrationSet {
+        CalibrationSet {
+            camera_model: "Insta360 ONE X2".to_owned(),
+            firmware: "synthetic".to_owned(),
+            dimension: kjerag_meta::Size {
+                width: ONE_XS_FRAME.width,
+                height: ONE_XS_FRAME.height,
+            },
+            lenses: one_xs_lenses(),
+            rolling_shutter_ms: 23.516_071_319_580_078,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Scaled,
+                imu_orientation: "Zxy",
+                first_frame_timestamp: 0,
+                gyro_timestamp: None,
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::from_samples(
+                (1_900_000..=2_100_000)
+                    .step_by(2_000)
+                    .map(|offset_us| OrientationSample {
+                        offset_us,
+                        world_from_body: Quat::IDENTITY,
+                    })
+                    .collect(),
+            ),
+            calibration_canvas: kjerag_meta::Size {
+                width: 6_080,
+                height: 3_040,
+            },
+        }
+    }
+
+    fn reservation_capture() -> Arc<OneXsCapture> {
+        Arc::new(OneXsCapture::new(&reservation_calibration()).unwrap())
+    }
+
+    fn reservation_stamp(index: u64, previous: Option<&FrameStamp>) -> FrameStamp {
+        FrameStamp::for_test(index, Duration::from_secs(2), previous)
+    }
+
+    fn reservation_blurred(code: u8) -> BlurredBelts {
+        BlurredBelts::from_lenses(LensPair {
+            a: vec![code; ROWS * COLS],
+            b: vec![code.wrapping_add(83); ROWS * COLS],
+        })
+        .unwrap()
+    }
+
+    fn reserve_frame(capture: &Arc<OneXsCapture>, frame: &FrameStamp) -> OneXsReservation {
+        match capture
+            .reserve(
+                frame,
+                Size {
+                    width: ONE_XS_FRAME.width,
+                    height: ONE_XS_FRAME.height,
+                },
+            )
+            .unwrap()
+        {
+            OneXsPreparation::Reserved(reservation) => reservation,
+            OneXsPreparation::Ready(_) => panic!("test frame was already ready"),
+            OneXsPreparation::InFlight(_) => panic!("test frame was already reserved"),
+        }
+    }
+
+    fn complete_frame(
+        capture: &Arc<OneXsCapture>,
+        frame: &FrameStamp,
+        code: u8,
+    ) -> Arc<OneXsMapFrame> {
+        let reservation = reserve_frame(capture, frame);
+        let completed = match reservation.commit_scalar(reservation_blurred(code)) {
+            Ok(completed) => completed,
+            Err(rejected) => panic!("test scalar commit failed: {}", rejected.error),
+        };
+        completed
+            .install()
+            .unwrap_or_else(|rejected| panic!("test install failed: {rejected}"))
+    }
 
     #[test]
     fn selected_type2_source_shader_parses_and_validates() {
@@ -5505,6 +5991,312 @@ mod tests {
         assert!(pipeline.one_xs_belts.is_none());
     }
 
+    #[test]
+    fn dropped_reservation_restores_the_exact_owner_and_advances_generation() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let owner_before = {
+            let state = capture.state.lock().unwrap();
+            std::ptr::from_ref(state.owner.as_deref().expect("fresh capture has its owner"))
+        };
+
+        let reservation = reserve_frame(&capture, &first);
+        assert_eq!(reservation.flight.generation, 1);
+        {
+            let state = capture.state.lock().unwrap();
+            assert!(state.owner.is_none());
+            assert_eq!(state.in_flight.as_ref(), Some(&reservation.flight));
+        }
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _reservation = reservation;
+            panic!("injected panic while the reservation owns the estimator");
+        }));
+        assert!(unwound.is_err());
+
+        let restored = capture.state.lock().unwrap();
+        assert_eq!(
+            std::ptr::from_ref(restored.owner.as_deref().expect("drop restored the owner"),),
+            owner_before
+        );
+        assert!(restored.in_flight.is_none());
+        drop(restored);
+
+        let second_reservation = reserve_frame(&capture, &first);
+        assert_eq!(second_reservation.flight.generation, 2);
+        second_reservation.abort().unwrap();
+    }
+
+    #[test]
+    fn completed_reservation_drop_during_panic_publishes_the_usable_owner_and_map() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let reservation = reserve_frame(&capture, &first);
+        let completed = match reservation.commit_scalar(reservation_blurred(59)) {
+            Ok(completed) => completed,
+            Err(rejected) => panic!("cold scalar commit failed: {}", rejected.error),
+        };
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _completed = completed;
+            panic!("injected panic after scalar success and before install");
+        }));
+        assert!(unwound.is_err());
+
+        let state = capture.state.lock().unwrap();
+        assert!(state.owner.is_some());
+        assert!(state.in_flight.is_none());
+        assert_eq!(
+            state.ready.as_deref().map(OneXsMapFrame::frame),
+            Some(&first)
+        );
+    }
+
+    #[test]
+    fn concurrent_recreated_pipeline_and_aba_delivery_get_no_second_reservation() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let reservation = reserve_frame(&capture, &first);
+        let imposter = reservation_stamp(0, None);
+        assert_ne!(imposter, first);
+
+        for offered in [&first, &imposter] {
+            assert!(matches!(
+                capture
+                    .reserve(offered, Size::new(ONE_XS_FRAME.width, ONE_XS_FRAME.height))
+                    .unwrap(),
+                OneXsPreparation::InFlight(_)
+            ));
+        }
+        let state = capture.state.lock().unwrap();
+        assert_eq!(state.generation, 1);
+        assert_eq!(state.in_flight.as_ref(), Some(&reservation.flight));
+        assert!(state.owner.is_none());
+        drop(state);
+        reservation.abort().unwrap();
+    }
+
+    #[test]
+    fn install_rejections_retain_the_completed_owner_result_and_original_flight() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let reservation = reserve_frame(&capture, &first);
+        let mut completed = match reservation.commit_scalar(reservation_blurred(61)) {
+            Ok(completed) => completed,
+            Err(rejected) => panic!("cold scalar commit failed: {}", rejected.error),
+        };
+        let actual_flight = completed.flight.clone();
+
+        completed.flight.generation += 1;
+        let rejected = completed
+            .install()
+            .expect_err("wrong generation installed a completion");
+        assert!(rejected.completion.owner.is_some());
+        assert!(rejected.completion.result.is_some());
+        assert!(rejected.reason.contains("stale reservation generation"));
+        let mut completed = rejected.completion;
+        completed.flight = actual_flight.clone();
+
+        completed.flight.frame = reservation_stamp(0, None);
+        let rejected = completed
+            .install()
+            .expect_err("wrong opaque frame installed a completion");
+        assert!(rejected.completion.owner.is_some());
+        assert!(rejected.completion.result.is_some());
+        assert!(rejected.reason.contains("stale reservation generation"));
+        let mut completed = rejected.completion;
+        completed.flight = actual_flight.clone();
+
+        completed.previous_ready = Some(Arc::new(
+            completed
+                .result
+                .as_ref()
+                .expect("rejected completion retained its result")
+                .map
+                .clone(),
+        ));
+        let rejected = completed
+            .install()
+            .expect_err("wrong ready allocation installed a completion");
+        assert!(rejected.completion.owner.is_some());
+        assert!(rejected.completion.result.is_some());
+        assert!(rejected.reason.contains("changed ready map"));
+        let mut completed = rejected.completion;
+        completed.previous_ready = None;
+
+        {
+            let state = capture.state.lock().unwrap();
+            assert_eq!(state.in_flight.as_ref(), Some(&actual_flight));
+            assert!(state.owner.is_none());
+            assert!(state.ready.is_none());
+        }
+        let installed = completed.install().unwrap();
+        let ready = capture.ready(&first).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&installed, &ready));
+        assert_eq!(installed.packed().bytes(), ready.packed().bytes());
+    }
+
+    #[test]
+    fn dropped_install_rejection_retains_the_advanced_owner_and_old_ready_map() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let second = reservation_stamp(1, Some(&first));
+        let first_ready = complete_frame(&capture, &first, 61);
+        let reservation = reserve_frame(&capture, &second);
+        let mut completed = match reservation.commit_scalar(reservation_blurred(67)) {
+            Ok(completed) => completed,
+            Err(rejected) => panic!("warm scalar commit failed: {}", rejected.error),
+        };
+        completed.flight.generation += 1;
+        let rejected = completed
+            .install()
+            .expect_err("wrong generation installed a completion");
+        drop(rejected);
+
+        let state = capture.state.lock().unwrap();
+        assert!(
+            state.owner.is_none(),
+            "a stale completion overwrote the owner slot for the recorded flight"
+        );
+        assert!(state.in_flight.is_some());
+        assert!(state.terminal);
+        assert_eq!(state.quarantined_owners.len(), 1);
+        assert!(Arc::ptr_eq(
+            state.ready.as_ref().expect("old ready map was lost"),
+            &first_ready
+        ));
+        assert_eq!(state.ready.as_deref().unwrap().frame(), &first);
+        drop(state);
+
+        assert!(matches!(
+            capture
+                .reserve(
+                    &first,
+                    Size::new(ONE_XS_FRAME.width, ONE_XS_FRAME.height)
+                )
+                .unwrap(),
+            OneXsPreparation::Ready(ready) if Arc::ptr_eq(&ready, &first_ready)
+        ));
+        let error =
+            match capture.reserve(&second, Size::new(ONE_XS_FRAME.width, ONE_XS_FRAME.height)) {
+                Err(error) => error,
+                Ok(_) => panic!("terminal capture reserved another successor"),
+            };
+        assert!(error.to_string().contains("could not be published"));
+    }
+
+    #[test]
+    fn stale_completed_drop_does_not_overwrite_or_clear_a_newer_flight() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let reservation = reserve_frame(&capture, &first);
+        let completed = match reservation.commit_scalar(reservation_blurred(69)) {
+            Ok(completed) => completed,
+            Err(rejected) => panic!("cold scalar commit failed: {}", rejected.error),
+        };
+        let newer = OneXsFlight {
+            generation: completed.flight.generation + 1,
+            frame: reservation_stamp(1, Some(&first)),
+        };
+        {
+            let mut state = capture.state.lock().unwrap();
+            state.in_flight = Some(newer.clone());
+        }
+
+        drop(completed);
+
+        let state = capture.state.lock().unwrap();
+        assert_eq!(state.in_flight.as_ref(), Some(&newer));
+        assert!(state.owner.is_none());
+        assert!(state.terminal);
+        assert_eq!(state.quarantined_owners.len(), 1);
+    }
+
+    #[test]
+    fn abort_error_and_poison_retain_the_exact_owner_without_double_panic() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let reservation = reserve_frame(&capture, &first);
+        let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let capture = capture.clone();
+            move || {
+                let _state = capture.state.lock().unwrap();
+                panic!("injected capture-lock poison");
+            }
+        }));
+        assert!(poisoned.is_err());
+
+        let rejected = reservation
+            .abort()
+            .expect_err("poisoned capture lock accepted rollback");
+        assert!(rejected.reason.contains("owner stopped unexpectedly"));
+        drop(rejected);
+
+        let state = capture
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.terminal);
+        assert!(state.in_flight.is_none());
+        assert_eq!(state.quarantined_owners.len(), 0);
+        assert_eq!(
+            state.owner.as_deref().unwrap() as *const FrameOwner,
+            owner_pointer
+        );
+    }
+
+    #[test]
+    fn rejected_scalar_commit_restores_ready_arc_and_exact_successor_state() {
+        let control = reservation_capture();
+        let trial = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let second = reservation_stamp(1, Some(&first));
+        let third = reservation_stamp(2, Some(&second));
+        let control_first = complete_frame(&control, &first, 71);
+        let trial_first = complete_frame(&trial, &first, 71);
+        let ready_before = trial.ready(&first).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&trial_first, &ready_before));
+
+        let mut reservation = reserve_frame(&trial, &second);
+        match trial
+            .reserve(&second, Size::new(ONE_XS_FRAME.width, ONE_XS_FRAME.height))
+            .unwrap()
+        {
+            OneXsPreparation::InFlight(Some(ready)) => {
+                assert!(Arc::ptr_eq(&ready_before, &ready));
+            }
+            _ => panic!("duplicate pipeline did not receive the retained ready allocation"),
+        }
+        reservation
+            .prepared
+            .as_deref_mut()
+            .unwrap()
+            .replace_frame_for_test(first.clone());
+        let rejected = match reservation.commit_scalar(reservation_blurred(79)) {
+            Ok(_) => panic!("duplicate prepared frame advanced the estimator"),
+            Err(rejected) => rejected,
+        };
+        assert!(rejected.error.to_string().contains("repeats frame 0"));
+        rejected.reservation.abort().unwrap();
+
+        let ready_after = trial.ready(&first).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&ready_before, &ready_after));
+        assert!(Arc::ptr_eq(&trial_first, &ready_after));
+        assert_eq!(trial.state.lock().unwrap().generation, 2);
+
+        let control_second = complete_frame(&control, &second, 79);
+        let trial_second = complete_frame(&trial, &second, 79);
+        assert_eq!(control_second.packed(), trial_second.packed());
+        assert_eq!(control_second.alpha(), trial_second.alpha());
+
+        let control_third = complete_frame(&control, &third, 83);
+        let trial_third = complete_frame(&trial, &third, 83);
+        assert_eq!(control_third.packed(), trial_third.packed());
+        assert_eq!(control_third.alpha(), trial_third.alpha());
+        assert_eq!(control_first.frame(), trial_first.frame());
+    }
+
     /// Opt-in because this is the production dmabuf path: it needs a target
     /// Vulkan adapter, VA-API decode and an actual paired ONE X2 capture.
     /// `KJERAG_ONE_X2_TEST_MEDIA` names either half; media owns sibling
@@ -5569,15 +6361,37 @@ mod tests {
             .as_ref()
             .and_then(|view| view.one_xs.as_ref())
             .expect("selected frame lost its capture owner");
-        let prepared = match capture
-            .prepare_or_ready(&second, frames.size)
-            .expect("could not prepare frame one")
+        let reservation = match capture
+            .reserve(&second, frames.size)
+            .expect("could not reserve frame one")
         {
-            OneXsPreparation::Prepared(prepared) => prepared,
+            OneXsPreparation::Reserved(reservation) => reservation,
             OneXsPreparation::Ready(_) => panic!("frame one was committed before its GPU belts"),
+            OneXsPreparation::InFlight(_) => panic!("frame one already had a reservation"),
         };
+
+        // iced may recreate its pipeline while the capture-owned transaction
+        // is waiting. The new pipeline has neither the prior import nor its
+        // direct-map resource, but it must reconstruct and retain that exact
+        // completed display without making a second solver submission.
+        let mut recreated = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        recreated.prepare(&second_primitive, &device, &queue, 1.0);
+        assert_eq!(recreated.flow_draw, FlowDraw::DirectOneXs);
+        assert_eq!(recreated.diagnostic_one_xs_direct_frame(), Some(&first));
+        assert_eq!(
+            recreated
+                .direct_one_xs_map
+                .as_ref()
+                .and_then(DirectMapDraw::bound_frame),
+            Some(&first)
+        );
+        assert!(
+            recreated.one_xs_belts.is_none(),
+            "recreated pipeline submitted a second solver transaction"
+        );
+
         let mut pending = pipeline
-            .submit_one_xs_solver_belts(&device, &queue, frames, &prepared)
+            .submit_one_xs_solver_belts(&device, &queue, frames, reservation.prepared())
             .expect("could not submit frame one's exact retained maps and bound source");
 
         // Same report fields and decode epoch, different opaque delivered
@@ -5594,12 +6408,15 @@ mod tests {
         );
         pending.frame = imposter;
         let error = pending
-            .read(&prepared)
+            .read(reservation.prepared())
             .expect_err("a different delivered pair impersonated prepared geometry");
         assert_eq!(
             error.downcast_ref::<crate::studio_type2::FrameMapMismatch>(),
             Some(&mismatch)
         );
+        reservation
+            .abort()
+            .expect("rejected receipt did not restore the exact owner");
 
         assert!(capture.ready(&first).unwrap().is_some());
         assert!(capture.ready(&second).unwrap().is_none());

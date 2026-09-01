@@ -68,6 +68,14 @@ impl PreparedFrame {
         &self.retained
     }
 
+    /// Replace only the opaque delivery identity for capture-transaction
+    /// rollback tests. Geometry remains deliberately untouched so the test can
+    /// force the second commit validation to reject before estimator work.
+    #[cfg(test)]
+    pub(crate) fn replace_frame_for_test(&mut self, frame: FrameStamp) {
+        self.frame = frame;
+    }
+
     #[cfg(test)]
     fn sample_solver_belts(&self, frame: &OneXsLumaFrame) -> Result<SolverBelts, FrameOwnerError> {
         if frame.frame() != self.frame() {

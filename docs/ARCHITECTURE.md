@@ -253,6 +253,25 @@ completed map carry the same opaque `FrameStamp`. Only that exact match can
 become `FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek or
 another open cannot impersonate it.
 
+The capture mutex covers only reservation and atomic installation. Reserving
+a frame moves the exact sequential owner and prepared geometry into a linear
+token, records the full opaque stamp and a monotonically increasing capture
+generation, then releases the lock before GPU submission, waiting or scalar
+estimation. A recreated render pipeline sees the shared in-flight reservation,
+submits nothing and restores the last exact source/map display. Submission,
+readback or estimator rejection explicitly returns the same boxed owner and
+leaves the ready map's `Arc` unchanged; dropping an unfinished reservation has
+the same rollback behavior. After successful estimation, dropping the completed
+token installs its usable next owner and map; corrupt completion metadata that
+cannot publish instead leaves that advanced owner retained in the terminal
+capture and keeps the old ready map. A stale token is quarantined without
+clearing a different current flight, and terminal state is explicit so the old
+display cannot become the base of another successor. Successful work validates
+generation, opaque frame identity and the previous ready allocation before
+installing the next owner and map together. This boundary is deliberately able
+to retain later staged GPU PIS work across multiple waits without widening the
+lock.
+
 WGSL does not guarantee the fused arithmetic this producer requires. Its lazy
 constructor therefore compares all 129,600 adversarial sampled pre-blur bytes,
 the retained-map FMA bit discriminator and all resulting post-blur bytes with
