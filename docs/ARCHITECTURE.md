@@ -203,6 +203,12 @@ constructor for an independent second queue on that same device. Tests
 therefore prove cloned-pair acceptance and independently requested-pair
 refusal. The context nevertheless compares both structural handles because
 the device-and-queue pair, not either handle alone, is the ownership boundary.
+Selected Scene preparation authenticates that pair before terminal-display or
+in-flight recovery can bind, write or encode anything. After authentication,
+all selected work uses the retained context handles. A mismatch selects no
+draw, preserves the last complete display untouched and surfaces the raw
+identity error. Diagnostic picture preparation and full-luma readback are
+context-owned too; their per-frame APIs accept no replacement device or queue.
 
 ## Playback (issue #4)
 

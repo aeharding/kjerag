@@ -2793,11 +2793,23 @@ impl ScenePipeline {
                     .is_some_and(|view| view.one_xs.is_some()),
         );
         if selected_one_xs {
+            let gpu = self.one_xs_gpu.clone();
+            if let Err(error) = gpu.ensure_same(&OneXsGpuContext::new(device, queue)) {
+                // A foreign pair cannot touch retained imports, bind groups,
+                // uniforms or recovery state. Preserve the failure site's raw
+                // identity error and leave the last complete display owned by
+                // the authoritative context.
+                self.flow_draw = FlowDraw::Nothing;
+                primitive.stalled.fail_now(error);
+                return;
+            }
+            let device = gpu.device();
+            let queue = gpu.queue();
             if primitive.stalled.stopped() {
                 self.restore_one_xs_display(primitive, device, queue, aspect);
                 return;
             }
-            if let Err(error) = self.prepare_one_xs_playback(primitive, device, queue, aspect) {
+            if let Err(error) = self.prepare_one_xs_playback(primitive, aspect) {
                 primitive.stalled.fail_now(error);
                 self.restore_one_xs_display(primitive, device, queue, aspect);
             } else if self.flow_draw != FlowDraw::DirectOneXs {
@@ -2836,10 +2848,11 @@ impl ScenePipeline {
     pub fn prepare_one_xs_picture(
         &mut self,
         primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         aspect: f32,
     ) -> Option<PreparedPicture> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let _ = self.prepare_inner(primitive, device, queue, aspect, true);
         self.prepared_picture.clone()
     }
@@ -2851,15 +2864,10 @@ impl ScenePipeline {
     /// construction and upload of each prepared source model remain explicit.
     /// Source bindings, prepared geometry, sequential retained state, solver
     /// receipts, uploaded map and draw all name the same full [`FrameStamp`].
-    fn prepare_one_xs_playback(
-        &mut self,
-        primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        aspect: f32,
-    ) -> Fallible<()> {
-        self.one_xs_gpu
-            .ensure_same(&OneXsGpuContext::new(device, queue))?;
+    fn prepare_one_xs_playback(&mut self, primitive: &ScenePrimitive, aspect: f32) -> Fallible<()> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, true) else {
             self.flow_draw = FlowDraw::Nothing;
             return Ok(());
@@ -3102,26 +3110,25 @@ impl ScenePipeline {
     pub fn prepare_one_xs_luma(
         &mut self,
         primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         aspect: f32,
     ) -> Fallible<Option<PendingOneXsLuma>> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, false) else {
             return Ok(None);
         };
-        Ok(Some(self.submit_one_xs_luma(device, queue, frames)?))
+        Ok(Some(self.submit_one_xs_luma(frames)?))
     }
 
     /// Submit source extraction for the exact pair already bound by this
     /// preparation. Keeping this separate lets live playback prepare once,
     /// then wait for and consume that same binding without another import or
     /// uniform write between source and map ownership.
-    fn submit_one_xs_luma(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        frames: Arc<Frames>,
-    ) -> Fallible<PendingOneXsLuma> {
+    fn submit_one_xs_luma(&mut self, frames: Arc<Frames>) -> Fallible<PendingOneXsLuma> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let shape = {
             let live = self
                 .live
@@ -6895,9 +6902,10 @@ mod tests {
             eprintln!("skipping selected ONE X2 scene transaction: set KJERAG_ONE_X2_TEST_MEDIA");
             return;
         };
-        let (device, queue) = test_import_gpu().unwrap_or_else(|error| {
-            panic!("could not open the target dmabuf Vulkan device: {error}")
-        });
+        let ((device, queue), (foreign_device, foreign_queue)) = test_import_gpu_and_foreign()
+            .unwrap_or_else(|error| {
+                panic!("could not open the target dmabuf Vulkan device: {error}")
+            });
         let mut scene = Scene::open(&path)
             .unwrap_or_else(|error| panic!("could not open ONE X2 test capture: {error}"));
         // This is also required by the opt-in test's invocation contract: run
@@ -7091,6 +7099,45 @@ mod tests {
                 .pis_backend(),
             PisBackend::Gpu
         );
+
+        // Even a terminal selected redraw may recover the retained display.
+        // Authenticate before that branch: a different valid pair must touch
+        // no old resource, and the failure's raw context error must survive.
+        assert_ne!(device, foreign_device);
+        let retained_live = Arc::as_ptr(&pipeline.live.front().unwrap().frames);
+        let retained_prepared = pipeline.prepared_picture.as_ref().unwrap().frame().clone();
+        let foreign_scope = foreign_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        pipeline.prepare(&second_primitive, &foreign_device, &foreign_queue, 1.0);
+        let foreign_gpu_error = block_on(foreign_scope.pop());
+        assert!(
+            foreign_gpu_error.is_none(),
+            "foreign Scene recovery reached GPU validation: {foreign_gpu_error:?}"
+        );
+        assert_eq!(pipeline.flow_draw, FlowDraw::Nothing);
+        assert_eq!(
+            pipeline
+                .direct_one_xs_map
+                .as_ref()
+                .and_then(DirectMapDraw::bound_frame),
+            Some(&second)
+        );
+        assert_eq!(pipeline.one_xs_display.complete.as_ref(), Some(&second));
+        assert_eq!(
+            Arc::as_ptr(&pipeline.live.front().unwrap().frames),
+            retained_live
+        );
+        assert_eq!(
+            pipeline.prepared_picture.as_ref().unwrap().frame(),
+            &retained_prepared
+        );
+        assert_eq!(
+            second_primitive.stalled.take().unwrap().to_string(),
+            "ONE X2 GPU submission crossed a different device or queue"
+        );
+        assert_eq!(
+            second_primitive.stalled.terminal().unwrap().to_string(),
+            "ONE X2 GPU submission crossed a different device or queue"
+        );
         scene.pause(Instant::now());
     }
 
@@ -7123,7 +7170,9 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
-    fn test_import_gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
+    type GpuPair = (wgpu::Device, wgpu::Queue);
+
+    fn test_import_gpu_and_foreign() -> Result<(GpuPair, GpuPair), String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
@@ -7133,7 +7182,15 @@ mod tests {
             ..Default::default()
         }))
         .map_err(|error| error.to_string())?;
-        dmabuf::open_device(&adapter).map_err(|error| error.to_string())
+        let primary = dmabuf::open_device(&adapter).map_err(|error| error.to_string())?;
+        let foreign = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("foreign selected ONE X2 Scene context"),
+            required_features: wgpu::Features::empty(),
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .map_err(|error| error.to_string())?;
+        Ok((primary, foreign))
     }
 
     fn wait_for_new_scene_frame(scene: &Scene, previous: Option<&FrameStamp>) -> FrameStamp {

@@ -18,6 +18,11 @@ an encoding closure only after context validation, submits on the lease's own
 queue and replaces its internal completion index; callers cannot provide a
 detached `SubmissionIndex`. Existing explicit completion, early-drop,
 poll-error, poll-panic and double-unwind quarantine behavior is unchanged.
+Selected Scene preparation validates the supplied renderer pair before even a
+stopped or in-flight display can enter recovery, then uses only the context's
+retained handles. A mismatch touches no retained GPU resource, selects no draw
+and surfaces its raw identity error. Diagnostic picture and full-luma paths
+are also context-owned and no longer accept per-call device or queue handles.
 This foundation deliberately does not transplant the resident PIS front end,
 direct PIS, L2 bridge or final-map materializer, and it does not remove any of
 the selected path's current CPU readbacks or uploads.
