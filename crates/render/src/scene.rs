@@ -44,7 +44,10 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
-use super::flow::one_xs::player::{FrameOwner, FrameOwnerError, FrameResult, PreparedFrame};
+use super::flow::one_xs::player::{
+    FrameCommitError, FrameOwner, FrameOwnerError, FrameResult, PreparedFrame,
+};
+use super::flow::one_xs::scalar::PairedPisSolver;
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
@@ -420,6 +423,14 @@ struct RejectedOneXsReservation {
     error: FrameOwnerError,
 }
 
+// This is the dormant production boundary for the next GPU integration slice.
+// This slice proves it through tests without changing the selected route yet.
+#[allow(dead_code)]
+struct RejectedOneXsSolverReservation<E> {
+    reservation: OneXsReservation,
+    error: FrameCommitError<E>,
+}
+
 struct RejectedOneXsAbort {
     reservation: OneXsReservation,
     reason: String,
@@ -562,6 +573,44 @@ impl OneXsReservation {
                 reservation: self,
                 error,
             }),
+        }
+    }
+
+    /// Run a fallible paired solver while retaining the outer reservation.
+    ///
+    /// `FrameOwner::commit_with_solver` restores the exact old estimator on
+    /// every solver and stamp error. Returning this reservation lets the
+    /// capture restore that owner and its allocation-identical ready map.
+    #[allow(dead_code)]
+    fn commit_with_solver<S: PairedPisSolver>(
+        mut self,
+        blurred_belts: BlurredBelts,
+        solver: &mut S,
+    ) -> Result<CompletedOneXsReservation, Box<RejectedOneXsSolverReservation<S::Error>>> {
+        let prepared = self
+            .prepared
+            .take()
+            .expect("a live ONE X2 reservation owns prepared geometry");
+        let owner = self
+            .owner
+            .as_deref_mut()
+            .expect("a live ONE X2 reservation owns the old estimator");
+        match owner.commit_with_solver(*prepared, blurred_belts, solver) {
+            Ok(result) => Ok(CompletedOneXsReservation {
+                capture: self.capture.clone(),
+                flight: self.flight.clone(),
+                previous_ready: self.previous_ready.clone(),
+                owner: Some(
+                    self.owner
+                        .take()
+                        .expect("the successful solver transaction retains its next owner"),
+                ),
+                result: Some(result),
+            }),
+            Err(error) => Err(Box::new(RejectedOneXsSolverReservation {
+                reservation: self,
+                error,
+            })),
         }
     }
 }
@@ -5398,8 +5447,114 @@ mod tests {
         OrientationSample, OrientationTrack, Quat, Sweep,
     };
 
+    use crate::flow::one_xs::pis::Level;
+    use crate::flow::one_xs::scalar::{
+        CpuPairedPisSolver, PairSolveError, PairSolveStage, PairedPatchGrids, PairedSolveRequest,
+    };
     use crate::flow::one_xs::{COLS, LensPair, ROWS};
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct InjectedSolverFailure;
+
+    impl std::fmt::Display for InjectedSolverFailure {
+        fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            out.write_str("injected paired PIS failure")
+        }
+    }
+
+    impl std::error::Error for InjectedSolverFailure {}
+
+    #[derive(Clone, Copy)]
+    enum SolverInjection {
+        Failure,
+        Stamp,
+    }
+
+    struct InjectingSolver {
+        at: PairSolveStage,
+        injection: SolverInjection,
+        cpu: CpuPairedPisSolver,
+    }
+
+    struct PanickingSolver {
+        at: PairSolveStage,
+        cpu: CpuPairedPisSolver,
+    }
+
+    impl PairedPisSolver for InjectingSolver {
+        type Error = InjectedSolverFailure;
+
+        fn solve(
+            &mut self,
+            mut request: PairedSolveRequest,
+        ) -> Result<PairedPatchGrids, Self::Error> {
+            if request.stage == self.at {
+                match self.injection {
+                    SolverInjection::Failure => return Err(InjectedSolverFailure),
+                    SolverInjection::Stamp => {
+                        request.stage = mismatched_stage(request.stage);
+                    }
+                }
+            }
+            Ok(self.cpu.solve(request).unwrap())
+        }
+    }
+
+    impl PairedPisSolver for PanickingSolver {
+        type Error = InjectedSolverFailure;
+
+        fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
+            if request.stage == self.at {
+                panic!("injected paired PIS panic at {}", request.stage);
+            }
+            Ok(self.cpu.solve(request).unwrap())
+        }
+    }
+
+    fn mismatched_stage(stage: PairSolveStage) -> PairSolveStage {
+        match stage {
+            PairSolveStage::Cold { calculation, level } => PairSolveStage::Cold {
+                calculation: (calculation + 1) % 3,
+                level,
+            },
+            PairSolveStage::Warm { level } => PairSolveStage::Cold {
+                calculation: 0,
+                level,
+            },
+        }
+    }
+
+    fn solver_stages() -> [PairSolveStage; 8] {
+        [
+            PairSolveStage::Cold {
+                calculation: 0,
+                level: Level::Two,
+            },
+            PairSolveStage::Cold {
+                calculation: 0,
+                level: Level::One,
+            },
+            PairSolveStage::Cold {
+                calculation: 1,
+                level: Level::Two,
+            },
+            PairSolveStage::Cold {
+                calculation: 1,
+                level: Level::One,
+            },
+            PairSolveStage::Cold {
+                calculation: 2,
+                level: Level::Two,
+            },
+            PairSolveStage::Cold {
+                calculation: 2,
+                level: Level::One,
+            },
+            PairSolveStage::Warm { level: Level::Two },
+            PairSolveStage::Warm { level: Level::One },
+        ]
+    }
 
     fn reservation_calibration() -> CalibrationSet {
         CalibrationSet {
@@ -5481,6 +5636,152 @@ mod tests {
         completed
             .install()
             .unwrap_or_else(|rejected| panic!("test install failed: {rejected}"))
+    }
+
+    fn assert_solver_reservation_recovers(stage: PairSolveStage, injection: SolverInjection) {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let (offered, old_ready, code) = match stage {
+            PairSolveStage::Cold { .. } => (first.clone(), None, 91),
+            PairSolveStage::Warm { .. } => {
+                let ready = complete_frame(&capture, &first, 89);
+                let second = reservation_stamp(1, Some(&first));
+                (second, Some(ready), 97)
+            }
+        };
+        let reservation = reserve_frame(&capture, &offered);
+        let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+        let mut solver = InjectingSolver {
+            at: stage,
+            injection,
+            cpu: CpuPairedPisSolver,
+        };
+        let rejected = match reservation.commit_with_solver(reservation_blurred(code), &mut solver)
+        {
+            Ok(_) => panic!("injected {stage} transaction unexpectedly succeeded"),
+            Err(rejected) => rejected,
+        };
+        match (&injection, &rejected.error) {
+            (
+                SolverInjection::Failure,
+                FrameCommitError::Solver(PairSolveError::Solver {
+                    stage: actual,
+                    source,
+                }),
+            ) => {
+                assert_eq!(*actual, stage);
+                assert_eq!(*source, InjectedSolverFailure);
+                assert_eq!(
+                    rejected.error.to_string(),
+                    format!("ONE X2 paired PIS failed at {stage}: injected paired PIS failure")
+                );
+            }
+            (
+                SolverInjection::Stamp,
+                FrameCommitError::Solver(PairSolveError::Stamp { stage: actual, .. }),
+            ) => {
+                assert_eq!(*actual, stage);
+                assert!(
+                    rejected
+                        .error
+                        .to_string()
+                        .starts_with(&format!("ONE X2 paired PIS stamp failed at {stage}:"))
+                );
+            }
+            _ => panic!("injected {stage} returned the wrong typed failure"),
+        }
+        rejected.reservation.abort().unwrap();
+
+        {
+            let state = capture.state.lock().unwrap();
+            assert_eq!(
+                state.owner.as_deref().unwrap() as *const FrameOwner,
+                owner_pointer,
+                "{stage} did not restore the exact old owner allocation"
+            );
+            assert!(state.in_flight.is_none());
+            match (&old_ready, &state.ready) {
+                (None, None) => {}
+                (Some(expected), Some(actual)) => assert!(
+                    Arc::ptr_eq(expected, actual),
+                    "{stage} replaced the last complete map allocation"
+                ),
+                _ => panic!("{stage} changed whether a ready map exists"),
+            }
+        }
+
+        let retried = complete_frame(&capture, &offered, code);
+        assert!(Arc::ptr_eq(
+            &retried,
+            &capture.ready(&offered).unwrap().unwrap()
+        ));
+        let successor = reservation_stamp(offered.index() + 1, Some(&offered));
+        let successor_ready = complete_frame(&capture, &successor, code.wrapping_add(3));
+        assert!(Arc::ptr_eq(
+            &successor_ready,
+            &capture.ready(&successor).unwrap().unwrap()
+        ));
+    }
+
+    fn assert_warm_solver_panic_recovers(level: Level) {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let second = reservation_stamp(1, Some(&first));
+        let third = reservation_stamp(2, Some(&second));
+        let ready_before = complete_frame(&capture, &first, 101);
+        let reservation = reserve_frame(&capture, &second);
+        let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut solver = PanickingSolver {
+                at: PairSolveStage::Warm { level },
+                cpu: CpuPairedPisSolver,
+            };
+            let _ = reservation.commit_with_solver(reservation_blurred(103), &mut solver);
+        }));
+        assert!(unwound.is_err());
+
+        {
+            let state = capture.state.lock().unwrap();
+            assert_eq!(
+                state.owner.as_deref().unwrap() as *const FrameOwner,
+                owner_pointer,
+                "warm {level} panic did not retain the exact old owner allocation"
+            );
+            assert!(state.in_flight.is_none());
+            assert!(Arc::ptr_eq(state.ready.as_ref().unwrap(), &ready_before));
+        }
+
+        let retried = complete_frame(&capture, &second, 103);
+        assert!(Arc::ptr_eq(
+            &retried,
+            &capture.ready(&second).unwrap().unwrap()
+        ));
+        let successor = complete_frame(&capture, &third, 107);
+        assert!(Arc::ptr_eq(
+            &successor,
+            &capture.ready(&third).unwrap().unwrap()
+        ));
+    }
+
+    #[test]
+    fn every_solver_stage_failure_restores_the_production_reservation() {
+        for stage in solver_stages() {
+            assert_solver_reservation_recovers(stage, SolverInjection::Failure);
+        }
+    }
+
+    #[test]
+    fn every_solver_stage_stamp_error_restores_the_production_reservation() {
+        for stage in solver_stages() {
+            assert_solver_reservation_recovers(stage, SolverInjection::Stamp);
+        }
+    }
+
+    #[test]
+    fn warm_solver_panics_leave_the_exact_production_reservation_retryable() {
+        for level in [Level::Two, Level::One] {
+            assert_warm_solver_panic_recovers(level);
+        }
     }
 
     #[test]

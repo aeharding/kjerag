@@ -25,9 +25,11 @@ use crate::flow::one_xs_belt::{SolverBelts, sample_source_belts};
 
 use super::base_map::{FilterError, MergeError, filter_fisheye_line_pair, map_merge};
 use super::map_patch::{self, BaseMap, BilateralInputs, Census, FlowMap, PreimageMap, SideInputs};
-use super::owner::{Continuity, PairOwner, PairPosition, Phase};
+use super::owner::{AdvanceFailure, Continuity, PairOwner, PairPosition, Phase};
 use super::resources::{OneXsResources, ResourceError};
-use super::scalar::{ColdInputs, WorkRowCounts};
+use super::scalar::{
+    ColdInputs, CpuPairedPisSolver, PairSolveError, PairedPisSolver, WorkRowCounts,
+};
 use super::temporal::BlurredBelts;
 #[cfg(test)]
 use super::temporal::gaussian_blur;
@@ -207,15 +209,38 @@ impl FrameOwner {
     /// Consume one prepared delivery and its exact post-blur solver belts.
     ///
     /// The second delivery check rejects a stale prepared transaction before
-    /// retained history is touched. Once history is taken, the existing
-    /// fixed-shape transition and materializer cannot fail; state is committed
-    /// at the same final point as the original monolithic transaction.
+    /// retained history is touched. The existing history stays installed while
+    /// the injected transition and fixed-shape materializer build a complete
+    /// successor; state is replaced only at the original final commit point.
     pub(crate) fn commit(
         &mut self,
         prepared: PreparedFrame,
         blurred_belts: BlurredBelts,
     ) -> Result<FrameResult, FrameOwnerError> {
-        self.validate_delivery(&prepared.frame)?;
+        match self.commit_with_solver(prepared, blurred_belts, &mut CpuPairedPisSolver) {
+            Ok(result) => Ok(result),
+            Err(FrameCommitError::Owner(error)) => Err(error),
+            Err(FrameCommitError::Solver(PairSolveError::Solver { source, .. })) => match source {},
+            Err(FrameCommitError::Solver(PairSolveError::Stamp { source, .. })) => {
+                panic!("CPU paired solver returned its own invalid stamp: {source}")
+            }
+        }
+    }
+
+    /// Commit through an injected paired sparse solver without losing history.
+    ///
+    /// Geometry and post-blur input are consumed by the attempt. The retained
+    /// numeric owner is restored exactly when any cold or warm solver call, or
+    /// any returned solver stamp, fails. A caller can therefore roll its outer
+    /// capture reservation back and retry the same decoded delivery.
+    pub(crate) fn commit_with_solver<S: PairedPisSolver>(
+        &mut self,
+        prepared: PreparedFrame,
+        blurred_belts: BlurredBelts,
+        solver: &mut S,
+    ) -> Result<FrameResult, FrameCommitError<S::Error>> {
+        self.validate_delivery(&prepared.frame)
+            .map_err(FrameCommitError::Owner)?;
         let PreparedFrame {
             frame,
             patch_base,
@@ -227,26 +252,30 @@ impl FrameOwner {
 
         let input = ColdInputs::from_blurred_belts_and_masks(blurred_belts, masks);
 
-        // All fallible source, geometry and mask work is complete. Consume the
-        // retained estimator only now, then finish through fixed-size values.
+        // Keep the retained estimator installed while the injected solver is
+        // fallible. A warm success produces a distinct next owner; a failure
+        // or panic leaves this exact old allocation in place.
         let position = PairPosition::new(&self.continuity, frame.index());
-        let previous_state = std::mem::replace(&mut self.state, State::NeedFrameZero);
-        let step = match previous_state {
-            State::NeedFrameZero => PairOwner::start(position, input),
-            State::Running {
-                previous,
-                estimator,
-            } => match (*estimator).advance(position, input) {
-                Ok(step) => step,
-                Err(rejected) => {
-                    let reason = rejected.reason;
-                    self.state = State::Running {
-                        previous,
-                        estimator: Box::new(rejected.owner),
-                    };
-                    return Err(FrameOwnerError::EstimatorContinuity(reason));
+        let step = match &self.state {
+            State::NeedFrameZero => {
+                match PairOwner::try_start_with_solver(position, input, solver) {
+                    Ok(step) => step,
+                    Err(failed) => return Err(FrameCommitError::Solver(failed.source)),
                 }
-            },
+            }
+            State::Running { estimator, .. } => {
+                match estimator.try_advance_borrowed_with_solver(&position, &input, solver) {
+                    Ok(step) => step,
+                    Err(reason) => {
+                        return Err(match reason {
+                            AdvanceFailure::Continuity(reason) => FrameCommitError::Owner(
+                                FrameOwnerError::EstimatorContinuity(reason),
+                            ),
+                            AdvanceFailure::Solver(error) => FrameCommitError::Solver(error),
+                        });
+                    }
+                }
+            }
         };
 
         let planes = step.output.displacement.planes();
@@ -311,6 +340,31 @@ impl FrameOwner {
             ),
         }
         .map_err(FrameOwnerError::Sequence)
+    }
+}
+
+/// A frame transaction failed before its retained owner could advance.
+#[derive(Debug)]
+pub(crate) enum FrameCommitError<E> {
+    Owner(FrameOwnerError),
+    Solver(PairSolveError<E>),
+}
+
+impl<E: fmt::Display> fmt::Display for FrameCommitError<E> {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Owner(error) => error.fmt(out),
+            Self::Solver(error) => error.fmt(out),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for FrameCommitError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Owner(error) => Some(error),
+            Self::Solver(error) => Some(error),
+        }
     }
 }
 

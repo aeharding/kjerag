@@ -214,15 +214,31 @@ impl PairOwner {
         input: ColdInputs,
         solver: &mut S,
     ) -> Result<PairStep, Box<FailedAdvance<S::Error>>> {
-        if let Err(reason) = self.require_adjacent(&offered) {
-            return Err(Box::new(FailedAdvance {
+        match self.try_advance_borrowed_with_solver(&offered, &input, solver) {
+            Ok(step) => Ok(step),
+            Err(reason) => Err(Box::new(FailedAdvance {
                 owner: self,
                 offered,
                 input,
-                reason: AdvanceFailure::Continuity(reason),
-            }));
+                reason,
+            })),
         }
+    }
 
+    /// Compute a successor while the caller retains the exact prior owner.
+    ///
+    /// All warm checkpoint state is derived from borrows. Keeping this owner
+    /// borrowed across the injected call makes a solver panic unwind without
+    /// dropping the only retained estimator. Success returns a distinct next
+    /// owner that the caller can install atomically.
+    pub(crate) fn try_advance_borrowed_with_solver<S: PairedPisSolver>(
+        &self,
+        offered: &PairPosition,
+        input: &ColdInputs,
+        solver: &mut S,
+    ) -> Result<PairStep, AdvanceFailure<S::Error>> {
+        self.require_adjacent(offered)
+            .map_err(AdvanceFailure::Continuity)?;
         let checkpoint = match &self.next {
             NextState::AfterCold(next) => next.checkpoint_from_borrowed(input.clone()),
             NextState::AfterWarm(next) => next.checkpoint_from_borrowed(input.clone()),
@@ -235,12 +251,7 @@ impl PairOwner {
                     source,
                 } = *error;
                 drop(failed_checkpoint);
-                return Err(Box::new(FailedAdvance {
-                    owner: self,
-                    offered,
-                    input,
-                    reason: AdvanceFailure::Solver(source),
-                }));
+                return Err(AdvanceFailure::Solver(source));
             }
         };
         Ok(PairStep {
@@ -251,7 +262,7 @@ impl PairOwner {
                 weighted_rows: transition.estimate.weighted_rows,
             },
             owner: Self {
-                at: offered,
+                at: offered.clone(),
                 next: NextState::AfterWarm(transition.known_next),
             },
         })
