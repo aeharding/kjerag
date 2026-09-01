@@ -59,7 +59,7 @@ pub use sampling::Sampling;
 pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, SeamFit};
 pub use stall::{STUCK_FOR, Stall};
-pub use studio_type2::{MapBindError, OneXsMapFrame, OneXsMapRaster, PreparedPicture};
+pub use studio_type2::{MapBindError, OneXsMapFrame, OneXsMapRaster, PisBackend, PreparedPicture};
 
 /// A frame [`Size`] as wgpu wants it. This is a trait rather than a method on
 /// `Size` because `Size` belongs to `kjerag-media`, which has no wgpu.

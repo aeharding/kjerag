@@ -434,6 +434,7 @@ mod tests {
 
     impl PairedPisSolver for FailingSolver {
         type Error = InjectedFailure;
+        const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
 
         fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
             if request.stage == self.fail_at {
@@ -463,6 +464,7 @@ mod tests {
 
     impl PairedPisSolver for RecordingSolver {
         type Error = InjectedFailure;
+        const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
 
         fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
             self.calls.push((
@@ -476,6 +478,7 @@ mod tests {
 
     impl PairedPisSolver for CorruptingSolver {
         type Error = InjectedFailure;
+        const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
 
         fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
             let stage = request.stage;

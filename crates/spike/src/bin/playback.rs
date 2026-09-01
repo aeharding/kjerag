@@ -48,8 +48,8 @@ use std::time::{Duration, Instant};
 
 use kjerag_media::{Fallible, Reader};
 use kjerag_render::{
-    Camera, Extent, Horizon, Next, OneXsMapFrame, Readout, Request, Sampling, Scene, ScenePipeline,
-    Shot, Size, Sweep, dmabuf,
+    Camera, Extent, Horizon, Next, OneXsMapFrame, PisBackend, Readout, Request, Sampling, Scene,
+    ScenePipeline, Shot, Size, Sweep, dmabuf,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -821,6 +821,12 @@ fn play(
         gpu.render(&pipeline)?;
         render += drawn.elapsed();
         redraws += 1;
+
+        if let Some(output) = range_output.as_mut()
+            && let Some(map) = scene.diagnostic_one_xs_map()?
+        {
+            output.observe_transaction(&map)?;
+        }
 
         if target_hit || range_hit {
             let capture_label = if range_hit { "range" } else { "target" };
@@ -1672,6 +1678,9 @@ struct RangeOutput {
     next: u64,
     frames: Vec<Value>,
     capture_height: Option<u32>,
+    next_transaction: u64,
+    gpu_pis_transactions: u64,
+    cpu_pis_transactions: u64,
 }
 
 struct RangeReceipt {
@@ -1711,7 +1720,33 @@ impl RangeOutput {
             next: spec.start,
             frames: Vec::new(),
             capture_height: None,
+            next_transaction: 0,
+            gpu_pis_transactions: 0,
+            cpu_pis_transactions: 0,
         })
+    }
+
+    fn observe_transaction(&mut self, map: &OneXsMapFrame) -> Fallible<()> {
+        let index = map.frame().index();
+        if index.checked_add(1) == Some(self.next_transaction) {
+            return Ok(());
+        }
+        if index != self.next_transaction {
+            return Err(format!(
+                "range backend provenance has frame {index}, expected transaction {}",
+                self.next_transaction
+            )
+            .into());
+        }
+        match map.pis_backend() {
+            PisBackend::Gpu => self.gpu_pis_transactions += 1,
+            PisBackend::Cpu => self.cpu_pis_transactions += 1,
+        }
+        self.next_transaction = self
+            .next_transaction
+            .checked_add(1)
+            .ok_or("range backend transaction count overflows")?;
+        Ok(())
     }
 
     fn next_index(&self) -> u64 {
@@ -1778,6 +1813,7 @@ impl RangeOutput {
                 "sha256": image_sha256
             },
             "production_map": {
+                "pis_backend": map.pis_backend().as_str(),
                 "packed": {
                     "file": packed_name,
                     "bytes": packed.len(),
@@ -1809,8 +1845,21 @@ impl RangeOutput {
         let capture_height = self
             .capture_height
             .ok_or("complete range output has no capture height")?;
+        if self.next_transaction != run.stats.presented
+            || self.gpu_pis_transactions != run.stats.presented
+            || self.cpu_pis_transactions != 0
+        {
+            return Err(format!(
+                "range backend provenance records {} GPU and {} CPU transactions through frame {}, expected {} GPU and 0 CPU",
+                self.gpu_pis_transactions,
+                self.cpu_pis_transactions,
+                self.next_transaction.saturating_sub(1),
+                run.stats.presented
+            )
+            .into());
+        }
         let receipt = json!({
-            "schema": "kjerag.playback-consecutive-range.v1",
+            "schema": "kjerag.playback-consecutive-range.v2",
             "claim": "exact consecutive displayed production frames from one causal frame-zero run",
             "limitations": {
                 "studio_parity_claimed": false,
@@ -1853,6 +1902,8 @@ impl RangeOutput {
                 "starved": run.stats.starved,
                 "scene_redraws": run.stats.redraws,
                 "instrument_redraws": run.redraws,
+                "gpu_pis_transactions": self.gpu_pis_transactions,
+                "cpu_pis_transactions": self.cpu_pis_transactions,
                 "elapsed_seconds": run.elapsed.as_secs(),
                 "elapsed_nanoseconds": run.elapsed.subsec_nanos()
             }

@@ -44,10 +44,13 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
-use super::flow::one_xs::player::{
-    FrameCommitError, FrameOwner, FrameOwnerError, FrameResult, PreparedFrame,
+use super::flow::one_xs::pis::gpu::{
+    GpuPisFlight, GpuPisPipeline, GpuPisStageOutput, GpuPisStageReceipt,
 };
-use super::flow::one_xs::scalar::PairedPisSolver;
+#[cfg(test)]
+use super::flow::one_xs::player::FrameOwnerError;
+use super::flow::one_xs::player::{FrameCommitError, FrameOwner, FrameResult, PreparedFrame};
+use super::flow::one_xs::scalar::{PairedPatchGrids, PairedPisSolver, PairedSolveRequest};
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
@@ -56,7 +59,9 @@ use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 use super::sampling::{self, Sampling};
 use super::seam::{Correction, SeamFit};
 use super::stall::{Stall, Stalled};
-use super::studio_type2::{MapBindError, OneXsMapFrame, OneXsMapRaster, PreparedPicture};
+use super::studio_type2::{
+    MapBindError, OneXsMapFrame, OneXsMapRaster, PisBackend, PreparedPicture,
+};
 use super::{Camera, Extent, Fallible, Nudge, Planes, Size, Viewpoint, dmabuf};
 
 /// The sampler binding, which sits after every lens's two planes.
@@ -371,7 +376,7 @@ struct OneXsCaptureState {
     owner: Option<Box<FrameOwner>>,
     ready: Option<Arc<OneXsMapFrame>>,
     generation: u64,
-    in_flight: Option<OneXsFlight>,
+    in_flight: Option<GpuPisFlight>,
     /// A transaction that could not be restored or installed makes this
     /// lineage terminal. The old ready display remains available, but it is
     /// not a truthful base for another successor transaction.
@@ -387,24 +392,14 @@ enum OneXsPreparation {
     InFlight(Option<Arc<OneXsMapFrame>>),
 }
 
-/// Opaque authority for one lock-free estimator transaction.
-///
-/// Full [`FrameStamp`] equality prevents an index/time ABA, while generation
-/// prevents a delayed completion from impersonating a later reservation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OneXsFlight {
-    generation: u64,
-    frame: FrameStamp,
-}
-
 /// The exact old owner and prepared geometry leased out of one capture.
 ///
 /// Future staged GPU PIS work may retain this value across all of its waits.
-/// Until [`Self::commit_scalar`] succeeds, aborting it restores the exact box
+/// Until [`Self::commit_with_solver`] succeeds, aborting it restores the exact box
 /// that was installed before the reservation; no estimator clone is involved.
 struct OneXsReservation {
     capture: Arc<OneXsCapture>,
-    flight: OneXsFlight,
+    flight: GpuPisFlight,
     previous_ready: Option<Arc<OneXsMapFrame>>,
     owner: Option<Box<FrameOwner>>,
     prepared: Option<Box<PreparedFrame>>,
@@ -412,20 +407,19 @@ struct OneXsReservation {
 
 struct CompletedOneXsReservation {
     capture: Arc<OneXsCapture>,
-    flight: OneXsFlight,
+    flight: GpuPisFlight,
     previous_ready: Option<Arc<OneXsMapFrame>>,
     owner: Option<Box<FrameOwner>>,
     result: Option<FrameResult>,
+    pis_backend: PisBackend,
 }
 
+#[cfg(test)]
 struct RejectedOneXsReservation {
     reservation: OneXsReservation,
     error: FrameOwnerError,
 }
 
-// This is the dormant production boundary for the next GPU integration slice.
-// This slice proves it through tests without changing the selected route yet.
-#[allow(dead_code)]
 struct RejectedOneXsSolverReservation<E> {
     reservation: OneXsReservation,
     error: FrameCommitError<E>,
@@ -487,6 +481,89 @@ struct PendingOneXsBlurredBelts {
     pending: PendingBlurredBelts<Arc<Frames>>,
 }
 
+/// Failure before a GPU PIS result can re-enter its capture reservation.
+#[derive(Debug)]
+enum GpuPisSolverError {
+    Pipeline(Box<dyn std::error::Error + Send + Sync>),
+    Receipt {
+        expected: GpuPisStageReceipt,
+        actual: GpuPisStageReceipt,
+    },
+}
+
+impl std::fmt::Display for GpuPisSolverError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pipeline(source) => source.fmt(output),
+            Self::Receipt { expected, actual } => write!(
+                output,
+                "ONE X2 GPU PIS completion receipt is {actual:?}, expected {expected:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GpuPisSolverError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Pipeline(source) => Some(source.as_ref()),
+            Self::Receipt { .. } => None,
+        }
+    }
+}
+
+/// The only production adapter from one reservation into the GPU kernel.
+struct ReservationGpuPisSolver<'a> {
+    flight: GpuPisFlight,
+    pipeline: &'a GpuPisPipeline,
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    submissions: &'a mut u64,
+}
+
+impl PairedPisSolver for ReservationGpuPisSolver<'_> {
+    type Error = GpuPisSolverError;
+    const BACKEND: super::studio_type2::PisBackend = super::studio_type2::PisBackend::Gpu;
+
+    fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
+        let expected = GpuPisStageReceipt {
+            flight: self.flight.clone(),
+            stage: request.stage,
+        };
+        let output = self
+            .pipeline
+            .solve_request(self.device, self.queue, expected.clone(), request)
+            .map_err(GpuPisSolverError::Pipeline)?;
+        *self.submissions = self
+            .submissions
+            .checked_add(1)
+            .expect("ONE X2 GPU PIS submission counter is exhausted");
+        finish_gpu_pis_stage(&expected, output)
+    }
+}
+
+fn finish_gpu_pis_stage(
+    expected: &GpuPisStageReceipt,
+    output: GpuPisStageOutput,
+) -> Result<PairedPatchGrids, GpuPisSolverError> {
+    validate_gpu_pis_receipt(expected, &output.receipt)?;
+    Ok(output.grids)
+}
+
+fn validate_gpu_pis_receipt(
+    expected: &GpuPisStageReceipt,
+    actual: &GpuPisStageReceipt,
+) -> Result<(), GpuPisSolverError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(GpuPisSolverError::Receipt {
+            expected: expected.clone(),
+            actual: actual.clone(),
+        })
+    }
+}
+
 impl PendingOneXsBlurredBelts {
     fn read(self, prepared: &PreparedFrame) -> Fallible<BlurredBelts> {
         if &self.frame != prepared.frame() {
@@ -545,6 +622,7 @@ impl OneXsReservation {
     /// `FrameOwner::commit` leaves its owner usable on every current error.
     /// Returning the reservation on rejection preserves that fact at the
     /// capture boundary instead of dropping the leased owner.
+    #[cfg(test)]
     fn commit_scalar(
         mut self,
         blurred_belts: BlurredBelts,
@@ -568,6 +646,8 @@ impl OneXsReservation {
                         .expect("the successful scalar transaction retains its next owner"),
                 ),
                 result: Some(result),
+                pis_backend:
+                    <super::flow::one_xs::scalar::CpuPairedPisSolver as PairedPisSolver>::BACKEND,
             }),
             Err(error) => Err(RejectedOneXsReservation {
                 reservation: self,
@@ -581,7 +661,6 @@ impl OneXsReservation {
     /// `FrameOwner::commit_with_solver` restores the exact old estimator on
     /// every solver and stamp error. Returning this reservation lets the
     /// capture restore that owner and its allocation-identical ready map.
-    #[allow(dead_code)]
     fn commit_with_solver<S: PairedPisSolver>(
         mut self,
         blurred_belts: BlurredBelts,
@@ -606,6 +685,7 @@ impl OneXsReservation {
                         .expect("the successful solver transaction retains its next owner"),
                 ),
                 result: Some(result),
+                pis_backend: S::BACKEND,
             }),
             Err(error) => Err(Box::new(RejectedOneXsSolverReservation {
                 reservation: self,
@@ -742,7 +822,7 @@ impl OneXsCapture {
             .generation
             .checked_add(1)
             .ok_or("ONE X2 stitch reservation generation is exhausted")?;
-        let flight = OneXsFlight {
+        let flight = GpuPisFlight {
             generation,
             frame: frame.clone(),
         };
@@ -764,7 +844,7 @@ impl OneXsCapture {
 
     fn restore(
         &self,
-        flight: &OneXsFlight,
+        flight: &GpuPisFlight,
         previous_ready: Option<&Arc<OneXsMapFrame>>,
         owner: &mut Option<Box<FrameOwner>>,
     ) -> Fallible<()> {
@@ -830,6 +910,13 @@ impl OneXsCapture {
                 map.frame(),
             )
             .to_string());
+        }
+        if map.pis_backend() != completion.pis_backend {
+            return Err(format!(
+                "ONE X2 stitch completion map backend is {}, expected {}",
+                map.pis_backend().as_str(),
+                completion.pis_backend.as_str()
+            ));
         }
         // Preserve access to the complete transaction diagnostics without
         // making a pooled number a picture verdict. They remain available for
@@ -2186,6 +2273,12 @@ pub struct ScenePipeline {
     /// the imported R8 pair and returns only the two compact 1080-by-60 U8
     /// solver inputs; retained estimator state remains capture-owned on CPU.
     one_xs_belts: Option<Box<GpuSolverBeltPipeline>>,
+    /// Lazily built, device-qualified paired PIS kernel. CPU preparation of
+    /// each source model remains the explicit producer boundary.
+    one_xs_pis: Option<Box<GpuPisPipeline>>,
+    /// Frame-path instrumentation counts actual paired stage submissions, not
+    /// reservations or map installs.
+    one_xs_gpu_pis_submissions: u64,
     /// Lazily built production/direct type-2 consumer. Its pipeline and
     /// exact-size buffers are reused; only the two map payloads and their
     /// CPU-side frame association change between frames and diagnostics.
@@ -2532,6 +2625,8 @@ impl ScenePipeline {
             prepared_picture: None,
             one_xs_luma: None,
             one_xs_belts: None,
+            one_xs_pis: None,
+            one_xs_gpu_pis_submissions: 0,
             direct_one_xs_map: None,
             layout,
             sampler,
@@ -2713,11 +2808,11 @@ impl ScenePipeline {
 
     /// Correctness-first live selected ONE X2 transaction.
     ///
-    /// The first GPU slice samples retained maps and performs exact 3-by-3
-    /// reduction on the imported R8 pair, then waits for only the compact
-    /// solver belts. The scalar estimator remains synchronous on this redraw.
-    /// Source bindings, prepared geometry, sequential CPU state, uploaded map
-    /// and draw all name the same full [`FrameStamp`].
+    /// The GPU samples retained maps, performs exact 3-by-3 reduction on the
+    /// imported R8 pair, then executes every selected paired PIS stage. CPU
+    /// construction and upload of each prepared source model remain explicit.
+    /// Source bindings, prepared geometry, sequential retained state, solver
+    /// receipts, uploaded map and draw all name the same full [`FrameStamp`].
     fn prepare_one_xs_playback(
         &mut self,
         primitive: &ScenePrimitive,
@@ -2760,6 +2855,19 @@ impl ScenePipeline {
                 return Ok(());
             }
             OneXsPreparation::Reserved(reservation) => {
+                // Qualify every pipeline required by this transaction before
+                // submitting any per-frame GPU work. `InFlight` returned
+                // above without constructing it.
+                if self.one_xs_pis.is_none() {
+                    let pipeline = match GpuPisPipeline::new(device, queue) {
+                        Ok(pipeline) => pipeline,
+                        Err(error) => {
+                            reservation.abort()?;
+                            return Err(error);
+                        }
+                    };
+                    self.one_xs_pis = Some(Box::new(pipeline));
+                }
                 let pending = match self.submit_one_xs_solver_belts(
                     device,
                     queue,
@@ -2782,12 +2890,22 @@ impl ScenePipeline {
                         return Err(error);
                     }
                 };
-                match reservation.commit_scalar(blurred_belts) {
+                let mut solver = ReservationGpuPisSolver {
+                    flight: reservation.flight.clone(),
+                    pipeline: self
+                        .one_xs_pis
+                        .as_deref()
+                        .expect("the selected reservation initialized GPU PIS"),
+                    device,
+                    queue,
+                    submissions: &mut self.one_xs_gpu_pis_submissions,
+                };
+                match reservation.commit_with_solver(blurred_belts, &mut solver) {
                     Ok(completed) => completed
                         .install()
                         .map_err(|rejected| rejected as Box<dyn std::error::Error + Send + Sync>)?,
                     Err(rejected) => {
-                        let RejectedOneXsReservation { reservation, error } = rejected;
+                        let RejectedOneXsSolverReservation { reservation, error } = *rejected;
                         reservation.abort()?;
                         return Err(error.into());
                     }
@@ -5482,8 +5600,14 @@ mod tests {
         cpu: CpuPairedPisSolver,
     }
 
+    struct WrongReceiptSolver {
+        flight: GpuPisFlight,
+        cpu: CpuPairedPisSolver,
+    }
+
     impl PairedPisSolver for InjectingSolver {
         type Error = InjectedSolverFailure;
+        const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
 
         fn solve(
             &mut self,
@@ -5503,12 +5627,35 @@ mod tests {
 
     impl PairedPisSolver for PanickingSolver {
         type Error = InjectedSolverFailure;
+        const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
 
         fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
             if request.stage == self.at {
                 panic!("injected paired PIS panic at {}", request.stage);
             }
             Ok(self.cpu.solve(request).unwrap())
+        }
+    }
+
+    impl PairedPisSolver for WrongReceiptSolver {
+        type Error = GpuPisSolverError;
+        const BACKEND: PisBackend = PisBackend::Gpu;
+
+        fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
+            let expected = GpuPisStageReceipt {
+                flight: self.flight.clone(),
+                stage: request.stage,
+            };
+            let grids = self.cpu.solve(request).unwrap();
+            let mut actual = expected.clone();
+            actual.flight.generation += 1;
+            finish_gpu_pis_stage(
+                &expected,
+                GpuPisStageOutput {
+                    receipt: actual,
+                    grids,
+                },
+            )
         }
     }
 
@@ -5775,6 +5922,72 @@ mod tests {
         for stage in solver_stages() {
             assert_solver_reservation_recovers(stage, SolverInjection::Stamp);
         }
+    }
+
+    #[test]
+    fn gpu_pis_receipt_requires_exact_generation_frame_and_stage() {
+        let first = reservation_stamp(0, None);
+        let expected = GpuPisStageReceipt {
+            flight: GpuPisFlight {
+                generation: 7,
+                frame: first.clone(),
+            },
+            stage: PairSolveStage::Cold {
+                calculation: 1,
+                level: Level::Two,
+            },
+        };
+        assert!(validate_gpu_pis_receipt(&expected, &expected).is_ok());
+
+        let mut wrong_generation = expected.clone();
+        wrong_generation.flight.generation += 1;
+        assert!(validate_gpu_pis_receipt(&expected, &wrong_generation).is_err());
+
+        let mut wrong_frame = expected.clone();
+        wrong_frame.flight.frame = reservation_stamp(0, None);
+        assert_ne!(wrong_frame.flight.frame, first);
+        assert!(validate_gpu_pis_receipt(&expected, &wrong_frame).is_err());
+
+        let mut wrong_stage = expected.clone();
+        wrong_stage.stage = mismatched_stage(expected.stage);
+        assert!(validate_gpu_pis_receipt(&expected, &wrong_stage).is_err());
+    }
+
+    #[test]
+    fn rejected_gpu_receipt_restores_owner_and_ready_without_cpu_fallback() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let second = reservation_stamp(1, Some(&first));
+        let ready = complete_frame(&capture, &first, 113);
+        assert_eq!(ready.pis_backend(), PisBackend::Cpu);
+        let reservation = reserve_frame(&capture, &second);
+        let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+        let mut solver = WrongReceiptSolver {
+            flight: reservation.flight.clone(),
+            cpu: CpuPairedPisSolver,
+        };
+        let rejected = match reservation.commit_with_solver(reservation_blurred(127), &mut solver) {
+            Ok(_) => panic!("wrong GPU receipt committed a map"),
+            Err(rejected) => rejected,
+        };
+        assert!(matches!(
+            rejected.error,
+            FrameCommitError::Solver(PairSolveError::Solver {
+                source: GpuPisSolverError::Receipt { .. },
+                ..
+            })
+        ));
+        rejected.reservation.abort().unwrap();
+
+        let state = capture.state.lock().unwrap();
+        assert_eq!(
+            state.owner.as_deref().unwrap() as *const FrameOwner,
+            owner_pointer
+        );
+        assert!(state.in_flight.is_none());
+        assert!(Arc::ptr_eq(state.ready.as_ref().unwrap(), &ready));
+        assert_eq!(state.ready.as_ref().unwrap().frame(), &first);
+        assert_eq!(state.ready.as_ref().unwrap().pis_backend(), PisBackend::Cpu);
     }
 
     #[test]
@@ -6424,6 +6637,16 @@ mod tests {
         let mut completed = rejected.completion;
         completed.previous_ready = None;
 
+        completed.pis_backend = PisBackend::Gpu;
+        let rejected = completed
+            .install()
+            .expect_err("wrong solver backend installed a completion");
+        assert!(rejected.completion.owner.is_some());
+        assert!(rejected.completion.result.is_some());
+        assert!(rejected.reason.contains("map backend is cpu, expected gpu"));
+        let mut completed = rejected.completion;
+        completed.pis_backend = PisBackend::Cpu;
+
         {
             let state = capture.state.lock().unwrap();
             assert_eq!(state.in_flight.as_ref(), Some(&actual_flight));
@@ -6494,7 +6717,7 @@ mod tests {
             Ok(completed) => completed,
             Err(rejected) => panic!("cold scalar commit failed: {}", rejected.error),
         };
-        let newer = OneXsFlight {
+        let newer = GpuPisFlight {
             generation: completed.flight.generation + 1,
             frame: reservation_stamp(1, Some(&first)),
         };
@@ -6647,7 +6870,17 @@ mod tests {
             &first
         );
         assert!(pipeline.one_xs_belts.is_some());
+        assert!(pipeline.one_xs_pis.is_some());
+        assert_eq!(pipeline.one_xs_gpu_pis_submissions, 6);
         assert!(pipeline.one_xs_luma.is_none());
+        assert_eq!(
+            scene
+                .diagnostic_one_xs_map()
+                .unwrap()
+                .unwrap()
+                .pis_backend(),
+            PisBackend::Gpu
+        );
 
         let second = wait_for_new_scene_frame(&scene, Some(&first));
         let second_primitive = scene.primitive(Camera::default());
@@ -6690,6 +6923,8 @@ mod tests {
             recreated.one_xs_belts.is_none(),
             "recreated pipeline submitted a second solver transaction"
         );
+        assert!(recreated.one_xs_pis.is_none());
+        assert_eq!(recreated.one_xs_gpu_pis_submissions, 0);
 
         let mut pending = pipeline
             .submit_one_xs_solver_belts(&device, &queue, frames, reservation.prepared())
@@ -6750,6 +6985,7 @@ mod tests {
         pipeline.prepare(&second_primitive, &device, &queue, 1.0);
         assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
         assert_eq!(pipeline.diagnostic_one_xs_direct_frame(), Some(&second));
+        assert_eq!(pipeline.one_xs_gpu_pis_submissions, 8);
         assert_eq!(
             pipeline
                 .direct_one_xs_map
@@ -6764,6 +7000,14 @@ mod tests {
                 .expect("the recovered transaction did not commit")
                 .frame(),
             &second
+        );
+        assert_eq!(
+            scene
+                .diagnostic_one_xs_map()
+                .unwrap()
+                .unwrap()
+                .pis_backend(),
+            PisBackend::Gpu
         );
         scene.pause(Instant::now());
     }

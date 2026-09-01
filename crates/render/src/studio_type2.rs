@@ -84,14 +84,37 @@ pub struct OneXsMapFrame {
     frame: FrameStamp,
     packed: PackedMap,
     alpha: AlphaMap,
+    pis_backend: PisBackend,
+}
+
+/// Sparse-solver backend that produced one committed production map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PisBackend {
+    Cpu,
+    Gpu,
+}
+
+impl PisBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
 }
 
 impl OneXsMapFrame {
-    pub fn new(frame: FrameStamp, packed: PackedMap, alpha: AlphaMap) -> Self {
+    pub fn new(
+        frame: FrameStamp,
+        packed: PackedMap,
+        alpha: AlphaMap,
+        pis_backend: PisBackend,
+    ) -> Self {
         Self {
             frame,
             packed,
             alpha,
+            pis_backend,
         }
     }
 
@@ -105,6 +128,10 @@ impl OneXsMapFrame {
 
     pub fn alpha(&self) -> &AlphaMap {
         &self.alpha
+    }
+
+    pub const fn pis_backend(&self) -> PisBackend {
+        self.pis_backend
     }
 
     /// Rasterize the READ type-2 sphere for the exact picture a pipeline has

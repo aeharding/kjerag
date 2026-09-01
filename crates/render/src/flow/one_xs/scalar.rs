@@ -415,6 +415,7 @@ pub(crate) struct PairedPatchGrids {
 /// Injected boundary for the only fallible work in a scalar transaction.
 pub(crate) trait PairedPisSolver {
     type Error;
+    const BACKEND: crate::studio_type2::PisBackend;
 
     fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error>;
 }
@@ -497,6 +498,7 @@ pub(crate) struct CpuPairedPisSolver;
 
 impl PairedPisSolver for CpuPairedPisSolver {
     type Error = Infallible;
+    const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
 
     fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
         let PairedSolveRequest {

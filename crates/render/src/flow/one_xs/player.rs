@@ -27,9 +27,9 @@ use super::base_map::{FilterError, MergeError, filter_fisheye_line_pair, map_mer
 use super::map_patch::{self, BaseMap, BilateralInputs, Census, FlowMap, PreimageMap, SideInputs};
 use super::owner::{AdvanceFailure, Continuity, PairOwner, PairPosition, Phase};
 use super::resources::{OneXsResources, ResourceError};
-use super::scalar::{
-    ColdInputs, CpuPairedPisSolver, PairSolveError, PairedPisSolver, WorkRowCounts,
-};
+#[cfg(test)]
+use super::scalar::CpuPairedPisSolver;
+use super::scalar::{ColdInputs, PairSolveError, PairedPisSolver, WorkRowCounts};
 use super::temporal::BlurredBelts;
 #[cfg(test)]
 use super::temporal::gaussian_blur;
@@ -212,6 +212,7 @@ impl FrameOwner {
     /// retained history is touched. The existing history stays installed while
     /// the injected transition and fixed-shape materializer build a complete
     /// successor; state is replaced only at the original final commit point.
+    #[cfg(test)]
     pub(crate) fn commit(
         &mut self,
         prepared: PreparedFrame,
@@ -307,7 +308,12 @@ impl FrameOwner {
         let packed =
             PackedMap::new(maps.packed).expect("bilateral materializer has the fixed type-2 shape");
         let result = FrameResult {
-            map: OneXsMapFrame::new(frame.clone(), packed, self.resources.alpha().clone()),
+            map: OneXsMapFrame::new(
+                frame.clone(),
+                packed,
+                self.resources.alpha().clone(),
+                S::BACKEND,
+            ),
             phase: step.output.phase,
             camera_mask,
             invalid_nodes: step.output.invalid_nodes,

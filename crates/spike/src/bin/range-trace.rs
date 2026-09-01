@@ -14,15 +14,17 @@ use std::time::Duration;
 
 use kjerag_media::Fallible;
 use kjerag_render::studio_type2::{ALPHA_BYTES, AlphaMap, PACKED_BYTES, PackedMap};
-use kjerag_render::{Camera, Cue, Horizon, OneXsMapFrame, Sampling, Scene, ScenePipeline, Size};
+use kjerag_render::{
+    Camera, Cue, Horizon, OneXsMapFrame, PisBackend, Sampling, Scene, ScenePipeline, Size,
+};
 use kjerag_spike::{Gpu, Seam, seam_trace::trace_alpha};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const SCHEMA: &str = "kjerag.playback-consecutive-range.v1";
+const SCHEMA: &str = "kjerag.playback-consecutive-range.v2";
 const CLAIM: &str = "exact consecutive displayed production frames from one causal frame-zero run";
-const OUTPUT_SCHEMA: &str = "kjerag.playback-output-seam-trace.v1";
+const OUTPUT_SCHEMA: &str = "kjerag.playback-output-seam-trace.v2";
 const OUTPUT_CLAIM: &str =
     "actual selected-alpha 0.5 four-neighbour crossings over authenticated Kjerag output PNGs";
 const OUTPUT_RECEIPT: &str = "range-trace-receipt.json";
@@ -88,7 +90,14 @@ fn main() -> Fallible<()> {
         if (stamp.index(), stamp.timestamp()) != (frame.index, timestamp) {
             return Err(format!("frame {} opaque frame binding changed", frame.index).into());
         }
-        let map = OneXsMapFrame::new(stamp, packed, alpha);
+        let backend = match frame.production_map.pis_backend.as_str() {
+            "gpu" => PisBackend::Gpu,
+            "cpu" => PisBackend::Cpu,
+            _ => {
+                return Err(format!("frame {} names an unknown PIS backend", frame.index).into());
+            }
+        };
+        let map = OneXsMapFrame::new(stamp, packed, alpha, backend);
         if map.packed().bytes() != packed_bytes || map.alpha().bytes() != alpha_bytes {
             return Err(format!(
                 "frame {} authenticated map bytes changed while decoding",
@@ -575,6 +584,11 @@ impl FrameRecord {
             ALPHA_BYTES,
             "alpha map",
         )?;
+        if self.production_map.pis_backend != "gpu" {
+            return Err(
+                format!("range frame {expected} production map did not use GPU PIS").into(),
+            );
+        }
         for file in [
             &self.image.file,
             &self.production_map.packed.file,
@@ -615,6 +629,7 @@ impl ImageRecord {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProductionMap {
+    pis_backend: String,
     packed: LeafRecord,
     alpha: LeafRecord,
 }
@@ -645,6 +660,8 @@ struct Run {
     starved: u64,
     scene_redraws: u64,
     instrument_redraws: u64,
+    gpu_pis_transactions: u64,
+    cpu_pis_transactions: u64,
     elapsed_seconds: u64,
     elapsed_nanoseconds: u32,
 }
@@ -668,6 +685,8 @@ impl Run {
             // three distinct counters to be identical.
             || self.scene_redraws < self.presented
             || self.instrument_redraws < self.scene_redraws
+            || self.gpu_pis_transactions != self.presented
+            || self.cpu_pis_transactions != 0
             || self.elapsed_nanoseconds >= 1_000_000_000
             || (self.elapsed_seconds == 0 && self.elapsed_nanoseconds == 0)
         {
@@ -1607,6 +1626,7 @@ mod tests {
             "timestamp_nanoseconds": nanoseconds,
             "image": {"file": format!("{stem}.png"), "width": WIDTH, "height": HEIGHT, "bytes": 1, "sha256": "1".repeat(64)},
             "production_map": {
+                "pis_backend": "gpu",
                 "packed": {"file": format!("{stem}.packed-f32le.bin"), "bytes": PACKED_BYTES, "sha256": "2".repeat(64)},
                 "alpha": {"file": format!("{stem}.alpha-f32le.bin"), "bytes": ALPHA_BYTES, "sha256": "3".repeat(64)}
             }
@@ -1626,7 +1646,7 @@ mod tests {
             ],
             "build": {"package_version": "0.2.0", "embedded_git_commit": "6".repeat(40), "embedded_git_tree": "7".repeat(40), "embedded_git_dirty": "false", "dirty_at_build": false, "runtime_git_commit": "6".repeat(40), "runtime_git_tree": "7".repeat(40), "runtime_tracked_tree_clean": true, "executable": {"file": "/proc/self/exe", "bytes": 1, "sha256": "8".repeat(64), "stable_identity": identity(4)}},
             "frames": [frame(7, 100), frame(8, 200)],
-            "run": {"presented": 9, "dropped": 0, "starved": 0, "scene_redraws": 9, "instrument_redraws": 9, "elapsed_seconds": 1, "elapsed_nanoseconds": 0}
+            "run": {"presented": 9, "dropped": 0, "starved": 0, "scene_redraws": 9, "instrument_redraws": 9, "gpu_pis_transactions": 9, "cpu_pis_transactions": 0, "elapsed_seconds": 1, "elapsed_nanoseconds": 0}
         })
     }
 
@@ -1651,6 +1671,47 @@ mod tests {
         false_claim["request"]["no_seek"] = json!(false);
         let receipt: Receipt = serde_json::from_value(false_claim).unwrap();
         assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn receipt_rejects_cpu_or_incomplete_gpu_pis_provenance() {
+        let (_temp, value) = fixture();
+
+        let mut cpu_frame = value.clone();
+        cpu_frame["frames"][0]["production_map"]["pis_backend"] = json!("cpu");
+        let receipt: Receipt = serde_json::from_value(cpu_frame).unwrap();
+        assert!(receipt.validate().is_err());
+
+        let mut missing_gpu = value.clone();
+        missing_gpu["run"]["gpu_pis_transactions"] = json!(8);
+        let receipt: Receipt = serde_json::from_value(missing_gpu).unwrap();
+        assert!(receipt.validate().is_err());
+
+        let mut cpu_count = value;
+        cpu_count["run"]["cpu_pis_transactions"] = json!(1);
+        let receipt: Receipt = serde_json::from_value(cpu_count).unwrap();
+        assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn historical_v1_without_backend_provenance_cannot_claim_gpu_only_execution() {
+        let (_temp, mut value) = fixture();
+        value["schema"] = json!("kjerag.playback-consecutive-range.v1");
+        value["run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("gpu_pis_transactions");
+        value["run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cpu_pis_transactions");
+        for frame in value["frames"].as_array_mut().unwrap() {
+            frame["production_map"]
+                .as_object_mut()
+                .unwrap()
+                .remove("pis_backend");
+        }
+        assert!(serde_json::from_value::<Receipt>(value).is_err());
     }
 
     #[test]

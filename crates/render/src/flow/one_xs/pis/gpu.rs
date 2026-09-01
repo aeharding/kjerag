@@ -13,15 +13,44 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
+use kjerag_media::FrameStamp;
+
 use super::{
     AtoB, BtoA, CostMode, DescentAdmission, Direction, Flow, HintGrid, InitialGrid, Input, Level,
     PisDirection, solve_with_descent_admission,
 };
 use crate::Fallible;
+use crate::flow::one_xs::scalar::{
+    PairSolveStage, PairedPatchGrids, PairedSolveRequest, SolveStamp, StampedPatchGrid,
+};
 
 const HEADER_WORDS: usize = 32;
 const OUTPUT_WORDS_PER_PATCH: usize = 2;
 const DIAGNOSTIC_WORDS: usize = 0;
+
+/// One capture-owned GPU sparse-solver transaction.
+///
+/// The full decoded-pair identity prevents index/time ABA, and the monotonic
+/// generation prevents a delayed completion from impersonating a later
+/// reservation of that same delivery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GpuPisFlight {
+    pub(crate) generation: u64,
+    pub(crate) frame: FrameStamp,
+}
+
+/// Identity of one paired solve inside a reserved GPU transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GpuPisStageReceipt {
+    pub(crate) flight: GpuPisFlight,
+    pub(crate) stage: PairSolveStage,
+}
+
+/// Typed terminal grids and the exact reservation/stage that submitted them.
+pub(crate) struct GpuPisStageOutput {
+    pub(crate) receipt: GpuPisStageReceipt,
+    pub(crate) grids: PairedPatchGrids,
+}
 
 /// Exact terminal component bits for one direction and selected level.
 #[derive(Debug, PartialEq, Eq)]
@@ -202,6 +231,62 @@ impl GpuPisPipeline {
     /// Build and qualify the actual production shader entry on this device.
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Self> {
         Self::from_shader(device, queue, SHADER, true)
+    }
+
+    /// Solve one scalar transaction stage while preserving its outer receipt.
+    ///
+    /// CPU construction of the prepared source models and their upload remain
+    /// the explicit producer boundary. The receipt is not shader arithmetic;
+    /// it binds the synchronous readback to the capture reservation that owns
+    /// the request before typed grids can re-enter the scalar transaction.
+    pub(crate) fn solve_request(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        receipt: GpuPisStageReceipt,
+        request: PairedSolveRequest,
+    ) -> Fallible<GpuPisStageOutput> {
+        if receipt.stage != request.stage {
+            return Err(format!(
+                "ONE X2 GPU PIS receipt names {}, but its request names {}",
+                receipt.stage, request.stage
+            )
+            .into());
+        }
+        let PairedSolveRequest {
+            stage,
+            a_to_b,
+            b_to_a,
+        } = request;
+        let terminal = self.solve_pair(
+            device,
+            queue,
+            &a_to_b.input,
+            a_to_b.initial,
+            Some(&a_to_b.hint),
+            &b_to_a.input,
+            b_to_a.initial,
+            Some(&b_to_a.hint),
+            a_to_b.admission,
+            b_to_a.admission,
+        )?;
+        let grids = PairedPatchGrids {
+            a_to_b: StampedPatchGrid::new(
+                SolveStamp {
+                    direction: Direction::AtoB,
+                    stage,
+                },
+                terminal.a_to_b.into_patch_grid()?,
+            ),
+            b_to_a: StampedPatchGrid::new(
+                SolveStamp {
+                    direction: Direction::BtoA,
+                    stage,
+                },
+                terminal.b_to_a.into_patch_grid()?,
+            ),
+        };
+        Ok(GpuPisStageOutput { receipt, grids })
     }
 
     fn from_shader(
