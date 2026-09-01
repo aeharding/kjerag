@@ -10,6 +10,7 @@ use std::marker::PhantomData;
 use std::sync::mpsc;
 
 use super::geometry_gpu::{GpuGeometryBelts, GpuGeometryFrameOwner};
+use super::resident_frame_gpu::GpuResidentIdentity;
 use crate::Fallible;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::pis::gpu::{
@@ -33,8 +34,8 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) mod resident_l2_post_seal {
 }
 
 pub(in crate::flow::one_xs::one_xs_belt_gpu) use l2_gpu::{
-    GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls, GpuL2PostPisBridge,
-    GpuResidentLevelTwoPost,
+    GpuCold0Terminal, GpuColdLoopControls, GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls,
+    GpuL2PostPisBridge, GpuResidentLevelTwoPost,
 };
 
 const MODEL_WORDS_PER_PATCH: usize = 5;
@@ -250,8 +251,47 @@ pub(crate) struct GpuPreparedTerminal<K> {
 
 /// Resident fail-closed state carried through every downstream consumer.
 /// Only the eventual publication policy may consume and validate its word.
-struct GpuResidentValidity {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuResidentValidity {
     buffer: wgpu::Buffer,
+    context: OneXsGpuContext,
+    flight: GpuPisFlight,
+    resident: Option<GpuResidentIdentity>,
+}
+
+impl GpuResidentValidity {
+    fn new(
+        context: OneXsGpuContext,
+        flight: GpuPisFlight,
+        resident: Option<GpuResidentIdentity>,
+        buffer: wgpu::Buffer,
+    ) -> Self {
+        Self {
+            buffer,
+            context,
+            flight,
+            resident,
+        }
+    }
+
+    fn ensure_identity(
+        &self,
+        context: &OneXsGpuContext,
+        flight: &GpuPisFlight,
+        resident: Option<&GpuResidentIdentity>,
+    ) -> Fallible<()> {
+        self.context.ensure_same(context)?;
+        if &self.flight != flight {
+            return Err("ONE X2 resident validity names a different root flight".into());
+        }
+        match (self.resident.as_ref(), resident) {
+            (Some(a), Some(b)) if a.matches(b) => {}
+            (None, None) => {}
+            _ => {
+                return Err("ONE X2 resident validity belongs to a different capture root".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<K> GpuPreparedTerminal<K> {
@@ -1573,6 +1613,7 @@ mod tests {
     use crate::flow::one_xs::pis::{CostMode, DescentAdmission, Flow, HintGrid, InitialGrid};
     use crate::flow::one_xs::scalar::PairSolveStage;
     use crate::flow::one_xs_belt::{RetainedBaseMaps, SourceImage, sample_source_belts};
+    use crate::flow::one_xs_belt_gpu::resident_frame_gpu::GpuResidentCapture;
     use crate::flow::one_xs_belt_gpu::{
         GpuSolverBeltPipeline, SourceTextures, resident_qualification_fixture,
     };
@@ -1581,6 +1622,39 @@ mod tests {
     struct DropProbe {
         wait_state: Arc<AtomicU8>,
         dropped: mpsc::Sender<u8>,
+    }
+
+    #[test]
+    fn resident_validity_rejects_an_equal_flight_from_a_distinct_capture_root() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping resident validity root identity: {why}");
+                return;
+            }
+            Err(why) => panic!("GPU required for resident validity root identity: {why}"),
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let stamp = FrameStamp::for_test(101, Duration::from_millis(101), None);
+        let a = GpuResidentCapture::new().reserve(stamp.clone()).unwrap();
+        let b = GpuResidentCapture::new().reserve(stamp).unwrap();
+        assert_eq!(a.flight(), b.flight());
+        let validity = GpuResidentValidity::new(
+            context.clone(),
+            a.flight().clone(),
+            Some(a.identity()),
+            storage_buffer(&device, "resident validity root identity", 1),
+        );
+        validity
+            .ensure_identity(&context, a.flight(), Some(&a.identity()))
+            .unwrap_or_else(|error| panic!("same-root validity failed on {adapter}: {error}"));
+        let error = validity
+            .ensure_identity(&context, b.flight(), Some(&b.identity()))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 resident validity belongs to a different capture root"
+        );
     }
 
     impl Drop for DropProbe {

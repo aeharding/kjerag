@@ -724,7 +724,7 @@ mod tests {
     use super::*;
     use crate::flow::one_xs::base_map::one_xs_static_coordinates;
     use crate::flow::one_xs::one_xs_belt_gpu::pis_frontend_gpu::{
-        GpuL1Controls, GpuL2Controls, GpuL2PostPisBridge,
+        GpuColdLoopControls, GpuL1Controls, GpuL2Controls, GpuL2PostPisBridge,
     };
     use crate::flow::one_xs::pis::gpu::GpuPisPipeline;
     use crate::flow::one_xs::pis::{CostMode, DisparityInterval, Level};
@@ -904,19 +904,56 @@ mod tests {
         let costs =
             |level: Level| vec![CostMode::Unweighted; level.patch_rows()].into_boxed_slice();
         let disparity = DisparityInterval::new([-8.0, -8.0], [8.0, 8.0]);
-        let terminal = belts
+        let controls = GpuColdLoopControls::new(
+            GpuL2Controls::resident(costs(Level::Two), disparity, costs(Level::Two), disparity),
+            GpuL1Controls::resident(costs(Level::One), disparity, costs(Level::One), disparity),
+        );
+        let cold0 = belts
             .prepare_motion(&motion)
             .unwrap()
-            .submit_resident_l2_l1(
+            .submit_resident_cold0(
                 &front,
                 &solver,
-                GpuL2Controls::resident(costs(Level::Two), disparity, costs(Level::Two), disparity),
                 &bridge,
                 GpuColdPriorPublicLevelTwo::new(context),
-                GpuL1Controls::resident(costs(Level::One), disparity, costs(Level::One), disparity),
+                controls,
             )
-            .unwrap_or_else(|error| panic!("resident Cold0 chain failed on {adapter}: {error}"));
-        drop(terminal);
+            .unwrap_or_else(|error| panic!("resident Cold0 chain failed on {adapter}: {error}"))
+            .complete(&bridge)
+            .unwrap_or_else(|error| panic!("resident Cold0 post-L1 failed on {adapter}: {error}"));
+        let cold0_state = cold0
+            .snapshot_for_test()
+            .unwrap_or_else(|error| panic!("resident Cold0 snapshot failed on {adapter}: {error}"));
+        let cold1 = cold0
+            .resume(&bridge, &solver)
+            .unwrap_or_else(|error| panic!("resident Cold1 chain failed on {adapter}: {error}"));
+        let cold1_state = cold1
+            .snapshot_for_test()
+            .unwrap_or_else(|error| panic!("resident Cold1 snapshot failed on {adapter}: {error}"));
+        let successor = cold1
+            .resume(&bridge, &solver)
+            .unwrap_or_else(|error| panic!("resident Cold2 chain failed on {adapter}: {error}"));
+        let cold2_state = successor
+            .snapshot_for_test()
+            .unwrap_or_else(|error| panic!("resident Cold2 snapshot failed on {adapter}: {error}"));
+        assert_eq!(cold0_state.calculation, 1);
+        assert_eq!(cold1_state.calculation, 2);
+        assert_eq!(cold2_state.calculation, 3);
+        assert_eq!(cold0_state.cadence, [1, 1]);
+        assert_eq!(cold1_state.cadence, [2, 2]);
+        assert_eq!(cold2_state.cadence, [3, 3]);
+        assert_eq!(cold0_state.lack_rows.len(), 2 * 178);
+        assert_eq!(cold0_state.lack_rows, cold1_state.lack_rows);
+        assert_eq!(cold1_state.lack_rows, cold2_state.lack_rows);
+        for state in [&cold0_state, &cold1_state, &cold2_state] {
+            assert_eq!(state.small_rows, vec![0; 2 * 178]);
+            assert!(!state.small_present);
+            assert_eq!(state.validity, u32::MAX);
+        }
+        assert!(cold0_state.same_root(&cold1_state));
+        assert!(cold1_state.same_root(&cold2_state));
+        assert!(capture.snapshot().pending);
+        drop(successor);
         assert!(!capture.snapshot().pending);
     }
 

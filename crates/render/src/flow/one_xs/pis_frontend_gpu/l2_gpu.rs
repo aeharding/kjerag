@@ -27,6 +27,10 @@ use crate::flow::one_xs::pis::{AtoB, BtoA, CostMode, DisparityInterval, Level, P
 use crate::flow::one_xs::post_update::RetainedPublicPyramids;
 use crate::flow::one_xs::scalar::PairSolveStage;
 
+#[path = "post_l1.rs"]
+mod post_l1;
+pub(in crate::flow::one_xs::one_xs_belt_gpu) use post_l1::GpuCold0Terminal;
+
 const L2_ROWS: usize = 270;
 const L2_COLS: usize = 15;
 const L2_PIXELS: usize = L2_ROWS * L2_COLS;
@@ -124,6 +128,13 @@ pub(crate) enum LevelTwoPostUpdate {
 pub(in crate::flow::one_xs::one_xs_belt_gpu) trait GpuResidentLevelTwoPost:
     super::resident_l2_post_seal::Sealed + Sized
 {
+    fn resident_identity(
+        &self,
+    ) -> Fallible<
+        Option<crate::flow::one_xs::one_xs_belt_gpu::resident_frame_gpu::GpuResidentIdentity>,
+    > {
+        Ok(None)
+    }
     fn context(&self) -> &OneXsGpuContext;
     fn is_warm(&self) -> bool;
     fn admissions(&self) -> GpuAdmittedSnapshot;
@@ -192,21 +203,47 @@ impl super::resident_l2_post_seal::Sealed for BorrowedProductionMotionPost<'_> {
 
 /// L1 controls deliberately omit the initial grid. The only initial accepted
 /// by this transition is the resident seed allocation produced by L2.
+#[derive(Clone)]
 pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuL1DirectionControls<D: PisDirection> {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) cost_modes: Box<[CostMode]>,
     pub(in crate::flow::one_xs::one_xs_belt_gpu) disparity: DisparityInterval,
     direction: PhantomData<D>,
 }
 
+#[derive(Clone)]
 pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuL1Controls {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) a_to_b: GpuL1DirectionControls<AtoB>,
     pub(in crate::flow::one_xs::one_xs_belt_gpu) b_to_a: GpuL1DirectionControls<BtoA>,
 }
 
 /// Direction controls whose exact L2 stage is derived by the temporal owner.
+#[derive(Clone)]
 pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuL2Controls {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) a_to_b: GpuL1DirectionControls<AtoB>,
     pub(in crate::flow::one_xs::one_xs_belt_gpu) b_to_a: GpuL1DirectionControls<BtoA>,
+}
+
+#[derive(Clone)]
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuColdLoopControls {
+    l2: GpuL2Controls,
+    l1: GpuL1Controls,
+}
+
+impl GpuColdLoopControls {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn new(
+        l2: GpuL2Controls,
+        l1: GpuL1Controls,
+    ) -> Self {
+        Self { l2, l1 }
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn l2(&self) -> GpuL2Controls {
+        self.l2.clone()
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn l1(&self) -> GpuL1Controls {
+        self.l1.clone()
+    }
 }
 
 impl GpuL2Controls {
@@ -290,7 +327,7 @@ impl GpuL1Controls {
 /// Linear cold-call identity derived only from the preceding sealed L2
 /// receipt. No caller can construct an integer ordinal or change its order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GpuL1Ordinal {
+pub(super) enum GpuL1Ordinal {
     Warm,
     Cold0,
     Cold1,
@@ -617,6 +654,7 @@ impl<K> GpuPreparedFrame<K> {
         controls: GpuL2Controls,
         stage: PairSolveStage,
         post: P,
+        inherited_validity: Option<GpuResidentValidity>,
     ) -> Fallible<GpuL2BridgeOutput<K, P>> {
         let mut joined = PreparedPostGuard::new(self, post);
         let prepared = joined
@@ -632,6 +670,18 @@ impl<K> GpuPreparedFrame<K> {
                 .expect("L2 PIS join lost its post")
                 .context(),
         )?;
+        if let Some(validity) = inherited_validity.as_ref() {
+            let resident_identity = joined
+                .post
+                .as_ref()
+                .expect("L2 PIS join lost its post")
+                .resident_identity()?;
+            validity.ensure_identity(
+                &prepared.context,
+                &prepared.flight,
+                resident_identity.as_ref(),
+            )?;
+        }
         let admissions = joined
             .post
             .as_ref()
@@ -759,7 +809,7 @@ impl<K> GpuPreparedFrame<K> {
             _output: output,
             _output_span_words: dispatch.output_span_words,
             _b_output_base_words: dispatch.b_output_base_words,
-            resident_validity: None,
+            resident_validity: inherited_validity,
             prepared,
         }
         .submit_l2_bridge_admitted(bridge, post, admissions)
@@ -1252,6 +1302,7 @@ pub(crate) struct GpuL2PostPisBridge {
     seed_pipeline: wgpu::ComputePipeline,
     hint_layout: wgpu::BindGroupLayout,
     hint_pipeline: wgpu::ComputePipeline,
+    post_l1: post_l1::GpuColdPostL1Pipeline,
 }
 
 impl GpuL2PostPisBridge {
@@ -1391,6 +1442,8 @@ impl GpuL2PostPisBridge {
                     hint_pipeline,
                 )
             })?;
+        let post_l1 = post_l1::GpuColdPostL1Pipeline::new(context.clone())
+            .map_err(|error| BridgeGpuError::Scoped(error.to_string()))?;
         Ok(Self {
             context,
             plane_stride,
@@ -1400,6 +1453,7 @@ impl GpuL2PostPisBridge {
             seed_pipeline,
             hint_layout,
             hint_pipeline,
+            post_l1,
         })
     }
 
@@ -1482,9 +1536,6 @@ impl<K> GpuPreparedTerminal<K> {
         let mut joined = TerminalPostGuard::new(self, post);
         bridge.context.ensure_same(&joined.terminal().context)?;
         bridge.context.ensure_same(joined.post().context())?;
-        if joined.terminal().resident_validity.is_some() {
-            return Err("ONE X2 L2 PIS terminal already carries resident validity".into());
-        }
         let receipt = GpuL2BridgeReceipt::from_terminal(joined.terminal().receipt.clone())?;
         let stage_is_warm = matches!(receipt.0.stage, PairSolveStage::Warm { .. });
         if stage_is_warm != joined.post().is_warm() {
@@ -1520,14 +1571,32 @@ impl<K> GpuPreparedTerminal<K> {
             "L2 bridge config",
             &u32_bytes(&config),
         );
-        let (seeds, validity) = bridge.allocate_outputs();
+        let (seeds, fresh_validity) = bridge.allocate_outputs();
+        let resident_identity = joined.post().resident_identity()?;
+        let validity = joined
+            .terminal_mut()
+            .resident_validity
+            .take()
+            .unwrap_or_else(|| {
+                GpuResidentValidity::new(
+                    bridge.context.clone(),
+                    receipt.0.flight.clone(),
+                    resident_identity.clone(),
+                    fresh_validity,
+                )
+            });
+        validity.ensure_identity(
+            &bridge.context,
+            &receipt.0.flight,
+            resident_identity.as_ref(),
+        )?;
         let (command, resources) = bridge.encode(
             joined.post(),
             &config,
             &joined.terminal().prepared.shared_images,
             &joined.terminal()._output,
             &seeds,
-            &validity,
+            &validity.buffer,
         );
         let context = joined.terminal().context.clone();
         joined
@@ -1543,9 +1612,10 @@ impl<K> GpuPreparedTerminal<K> {
             _output: terminal_buffer,
             _output_span_words: _,
             _b_output_base_words: _,
-            resident_validity: _,
+            resident_validity,
             prepared,
         } = terminal;
+        debug_assert!(resident_validity.is_none());
         Ok(GpuL2BridgeOutput {
             receipt,
             seeds: GpuPairedLevelOneInitialBuffer {
@@ -1553,7 +1623,7 @@ impl<K> GpuPreparedTerminal<K> {
                 plane_stride: bridge.plane_stride,
                 context: context.clone(),
             },
-            validity: GpuResidentValidity { buffer: validity },
+            validity,
             admissions,
             _terminal: terminal_buffer,
             _config: config,
@@ -3183,6 +3253,7 @@ mod tests {
                     level: Level::Two,
                 },
                 bridge.cold_post(),
+                None,
             )
             .unwrap();
         let zero_l2_hint = vec![Flow::ZERO; L2_PATCHES];
@@ -3337,6 +3408,7 @@ mod tests {
                 ),
                 PairSolveStage::Warm { level: Level::Two },
                 post,
+                None,
             )
             .unwrap();
         let l2_hint_grid = |col_base: usize, row_base: usize| {

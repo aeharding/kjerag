@@ -8,11 +8,12 @@
 #[cfg(test)]
 use super::super::GpuBlurredBelts;
 use super::super::pis_frontend_gpu::{
-    GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls, GpuL2PostPisBridge, GpuPisFrontEnd,
-    GpuResidentLevelTwoPost,
+    GpuCold0Terminal, GpuColdLoopControls, GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls,
+    GpuL2PostPisBridge, GpuPisFrontEnd, GpuResidentLevelTwoPost,
 };
 use super::super::resident_frame_gpu::{
-    GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, ResidentSuccessor,
+    GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, ResidentPostL1Storage,
+    ResidentSuccessor,
 };
 use super::GpuGeometryBelts;
 use super::GpuGeometryFrameOwner;
@@ -33,6 +34,11 @@ const BASE_BYTES: usize = ROWS * COLS;
 const L1_BYTES: usize = Level::One.pixels();
 const L2_BYTES: usize = Level::Two.pixels();
 const BELT_BYTES: usize = SolverBelts::BYTES;
+const POST_HIST_WORDS: usize = 2 * Level::One.patches() * 159;
+const POST_FIFO_WORDS: usize = 2 * Level::One.patches() * 5;
+const POST_PUBLIC_WORDS: usize = 2 * ROWS * COLS * 2;
+const POST_HINT_WORDS: usize = 275_400;
+const POST_SMALL_WORDS: usize = 2 * Level::One.patch_rows();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GpuMotionHistory {
@@ -85,7 +91,7 @@ pub(crate) struct GpuMotionStage {
     layout: wgpu::BindGroupLayout,
 }
 
-struct GpuMotionCandidate {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuMotionCandidate {
     reservation: Option<GpuResidentReservation>,
     receipt: GpuMotionReceipt,
     current: wgpu::Buffer,
@@ -120,6 +126,20 @@ struct EncodedGpuMotion {
     candidate: Option<GpuMotionCandidate>,
 }
 
+struct MotionSubmissionGuard<C> {
+    carrier: Option<C>,
+    encoded: Option<EncodedGpuMotion>,
+}
+
+impl<C> MotionSubmissionGuard<C> {
+    fn new(carrier: C, encoded: EncodedGpuMotion) -> Self {
+        Self {
+            carrier: Some(carrier),
+            encoded: Some(encoded),
+        }
+    }
+}
+
 /// Candidate second slot. Drop is rollback; transfer only seals the successor.
 #[must_use = "the GPU motion transaction must enter a frame candidate or roll back"]
 pub(crate) struct GpuMotionTransaction<C> {
@@ -148,7 +168,9 @@ mod prior_public_l2 {
 /// Exact private input from the capture-owned resident public L2 slot. It
 /// creates complete bind groups, so neither retained state nor successor hint
 /// storage can detach from the capture owner.
-pub(super) trait GpuPriorPublicLevelTwo: prior_public_l2::Sealed + Sized {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) trait GpuPriorPublicLevelTwo:
+    prior_public_l2::Sealed + Sized
+{
     fn context(&self) -> &OneXsGpuContext;
     fn is_warm(&self) -> bool;
     fn cadence(&self) -> GpuPairedCadence;
@@ -178,7 +200,7 @@ pub(super) trait GpuPriorPublicLevelTwo: prior_public_l2::Sealed + Sized {
 /// levels consume these pre-increment values; only post-L1 may replace the
 /// owner with `after_call`. Keeping the directions distinct is load-bearing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct GpuPairedCadence {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuPairedCadence {
     a_to_b: EmptyOverrideCadence,
     b_to_a: EmptyOverrideCadence,
 }
@@ -203,25 +225,37 @@ impl GpuPairedCadence {
     }
 
     #[allow(dead_code)] // consumed by the private post-L1 successor checkpoint
-    fn after_call(self) -> Self {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn after_call(self) -> Self {
         Self::new(self.a_to_b.after_calc(), self.b_to_a.after_calc())
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn counts(self) -> [i32; 2] {
+        [self.a_to_b.calc_count(), self.b_to_a.calc_count()]
     }
 }
 
 /// Real cold prior-public owner for the first selected calculation. Its zero
 /// resident allocations are initialized by GPU clears in the inherited
 /// submission; no CPU grid or raw handle crosses the transition.
-pub(super) struct GpuColdPriorPublicLevelTwo {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuColdPriorPublicLevelTwo {
     context: OneXsGpuContext,
     cadence: GpuPairedCadence,
+    calculation: u8,
     retained: wgpu::Buffer,
+    public: wgpu::Buffer,
     hints: wgpu::Buffer,
+    histogram: wgpu::Buffer,
+    fifo: wgpu::Buffer,
+    small_rows: wgpu::Buffer,
+    small_present: bool,
+    lack_rows: wgpu::Buffer,
 }
 
 impl GpuColdPriorPublicLevelTwo {
     pub(super) fn new(context: OneXsGpuContext) -> Self {
         Self {
             cadence: GpuPairedCadence::cold_root(),
+            calculation: 0,
             retained: buffer(
                 context.device(),
                 "ONE X2 cold prior-public L2 state",
@@ -230,7 +264,33 @@ impl GpuColdPriorPublicLevelTwo {
             hints: buffer(
                 context.device(),
                 "ONE X2 cold resident successor hints",
-                275_400 * size_of::<u32>(),
+                POST_HINT_WORDS * size_of::<u32>(),
+            ),
+            public: buffer(
+                context.device(),
+                "ONE X2 cold resident public fields",
+                POST_PUBLIC_WORDS * size_of::<u32>(),
+            ),
+            histogram: buffer(
+                context.device(),
+                "ONE X2 cold resident temporal histograms",
+                POST_HIST_WORDS * size_of::<u32>(),
+            ),
+            fifo: buffer(
+                context.device(),
+                "ONE X2 cold resident temporal FIFOs",
+                POST_FIFO_WORDS * size_of::<u32>(),
+            ),
+            small_rows: buffer(
+                context.device(),
+                "ONE X2 cold resident small rows",
+                POST_SMALL_WORDS * size_of::<u32>(),
+            ),
+            small_present: false,
+            lack_rows: buffer(
+                context.device(),
+                "ONE X2 cold retained lack rows",
+                POST_SMALL_WORDS * size_of::<u32>(),
             ),
             context,
         }
@@ -238,6 +298,156 @@ impl GpuColdPriorPublicLevelTwo {
 }
 
 impl prior_public_l2::Sealed for GpuColdPriorPublicLevelTwo {}
+
+impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cold_lifecycle_for_test(
+        &self,
+    ) -> (
+        &wgpu::Buffer,
+        &wgpu::Buffer,
+        [i32; 2],
+        u8,
+        bool,
+        super::super::resident_frame_gpu::GpuResidentIdentity,
+    ) {
+        (
+            &self.prior.lack_rows,
+            &self.prior.small_rows,
+            self.prior.cadence.counts(),
+            self.prior.calculation,
+            self.prior.small_present,
+            self.motion
+                .reservation
+                .as_ref()
+                .expect("cold lifecycle retains its reservation")
+                .identity(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_cold_post_l1(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        terminal: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        histogram: &wgpu::Buffer,
+        fifo: &wgpu::Buffer,
+        hints: &wgpu::Buffer,
+        filtered: &wgpu::Buffer,
+        dense: &wgpu::Buffer,
+        horizontal: &wgpu::Buffer,
+        public: &wgpu::Buffer,
+        quantized_values: &wgpu::Buffer,
+        retained_l2: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 resident cold post-L1"),
+            layout,
+            entries: &[
+                entry(0, terminal),
+                entry(1, images),
+                entry(3, histogram),
+                entry(4, fifo),
+                entry(7, hints),
+                entry(9, filtered),
+                entry(11, dense),
+                entry(12, horizontal),
+                entry(13, public),
+                entry(14, quantized_values),
+                entry(16, retained_l2),
+                entry(17, validity),
+            ],
+        })
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn encode_cold_post_l1_copies(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        histogram: &wgpu::Buffer,
+        fifo: &wgpu::Buffer,
+        lack_rows: &wgpu::Buffer,
+        captured_lack_rows: &wgpu::Buffer,
+        calculation: u8,
+    ) {
+        encoder.copy_buffer_to_buffer(
+            &self.prior.histogram,
+            0,
+            histogram,
+            0,
+            (POST_HIST_WORDS * size_of::<u32>()) as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.prior.fifo,
+            0,
+            fifo,
+            0,
+            (POST_FIFO_WORDS * size_of::<u32>()) as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            if calculation == 0 {
+                captured_lack_rows
+            } else {
+                &self.prior.lack_rows
+            },
+            0,
+            lack_rows,
+            0,
+            (POST_SMALL_WORDS * size_of::<u32>()) as u64,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn commit_cold_post_l1(
+        &mut self,
+        histogram: wgpu::Buffer,
+        fifo: wgpu::Buffer,
+        hints: wgpu::Buffer,
+        small_rows: wgpu::Buffer,
+        lack_rows: wgpu::Buffer,
+        public: wgpu::Buffer,
+        retained_l2: Option<wgpu::Buffer>,
+        calculation: u8,
+    ) {
+        self.prior.histogram = histogram;
+        self.prior.fifo = fifo;
+        self.prior.hints = hints;
+        self.prior.small_rows = small_rows;
+        self.prior.lack_rows = lack_rows;
+        self.prior.public = public;
+        if let Some(retained_l2) = retained_l2 {
+            self.prior.retained = retained_l2;
+        }
+        self.prior.cadence = self.prior.cadence.after_call();
+        self.prior.calculation = calculation + 1;
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn attach_cold_successor(
+        &mut self,
+    ) -> Fallible<()> {
+        let storage = ResidentPostL1Storage::after_cold(
+            self.prior.public.clone(),
+            self.prior.retained.clone(),
+            self.prior.histogram.clone(),
+            self.prior.fifo.clone(),
+            self.prior.hints.clone(),
+            self.prior.lack_rows.clone(),
+            self.prior.small_rows.clone(),
+            self.prior.small_present,
+            self.prior.cadence.counts(),
+        );
+        let successor = self
+            .motion
+            .successor
+            .as_mut()
+            .ok_or("resident cold loop lost its motion successor")?;
+        successor
+            .attach_post_l1(storage)
+            .map_err(|error| error.to_string().into())
+    }
+}
 
 impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
     fn context(&self) -> &OneXsGpuContext {
@@ -253,8 +463,15 @@ impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
     }
 
     fn initialize(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.clear_buffer(&self.retained, 0, None);
-        encoder.clear_buffer(&self.hints, 0, None);
+        if self.calculation == 0 {
+            encoder.clear_buffer(&self.retained, 0, None);
+            encoder.clear_buffer(&self.public, 0, None);
+            encoder.clear_buffer(&self.hints, 0, None);
+            encoder.clear_buffer(&self.histogram, 0, None);
+            encoder.clear_buffer(&self.fifo, 0, None);
+            encoder.clear_buffer(&self.small_rows, 0, None);
+            encoder.clear_buffer(&self.lack_rows, 0, None);
+        }
     }
 
     fn bind_l2_bridge(
@@ -301,7 +518,9 @@ impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
 /// Pending temporal successor fused to the prior-public L2 owner. The root
 /// reservation remains opaque and unsealed inside `motion` until a later
 /// whole-frame candidate owns every downstream result.
-pub(super) struct GpuMotionResidentL2Post<P: GpuPriorPublicLevelTwo> {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuMotionResidentL2Post<
+    P: GpuPriorPublicLevelTwo,
+> {
     motion: GpuMotionCandidate,
     prior: P,
 }
@@ -312,6 +531,17 @@ impl<P: GpuPriorPublicLevelTwo> super::super::pis_frontend_gpu::resident_l2_post
 }
 
 impl<P: GpuPriorPublicLevelTwo> GpuResidentLevelTwoPost for GpuMotionResidentL2Post<P> {
+    fn resident_identity(
+        &self,
+    ) -> Fallible<Option<super::super::resident_frame_gpu::GpuResidentIdentity>> {
+        self.motion
+            .reservation
+            .as_ref()
+            .map(GpuResidentReservation::identity)
+            .map(Some)
+            .ok_or_else(|| "ONE X2 resident post lost its root reservation".into())
+    }
+
     fn context(&self) -> &OneXsGpuContext {
         self.prior.context()
     }
@@ -357,10 +587,10 @@ impl<P: GpuPriorPublicLevelTwo> GpuResidentLevelTwoPost for GpuMotionResidentL2P
         config: &wgpu::Buffer,
         dynamic: &wgpu::Buffer,
     ) -> Option<wgpu::BindGroup> {
-        self.prior.is_warm().then(|| {
+        Some(
             self.prior
-                .bind_l1_hint_fill(device, layout, config, dynamic)
-        })
+                .bind_l1_hint_fill(device, layout, config, dynamic),
+        )
     }
 }
 
@@ -636,7 +866,11 @@ impl<C> GpuMotionTransaction<C> {
                     .expect("motion transaction lost its submission lease"),
             ),
             motion,
-            root_candidate: Some(reservation.seal(successor)),
+            root_candidate: Some(
+                reservation
+                    .seal(successor)
+                    .expect("motion successor was minted from this exact reservation"),
+            ),
         }
     }
 
@@ -666,6 +900,25 @@ impl<C> GpuMotionTransaction<C> {
 }
 
 impl<K> GpuMotionTransaction<GpuGeometryBelts<K>> {
+    pub(super) fn submit_resident_cold0(
+        self,
+        front_end: &GpuPisFrontEnd,
+        solver: &GpuPisPipeline,
+        bridge: &GpuL2PostPisBridge,
+        prior: GpuColdPriorPublicLevelTwo,
+        controls: GpuColdLoopControls,
+    ) -> Fallible<GpuCold0Terminal<K>> {
+        let terminal = self.submit_resident_l2_l1(
+            front_end,
+            solver,
+            controls.l2(),
+            bridge,
+            prior,
+            controls.l1(),
+        )?;
+        Ok(GpuCold0Terminal::new(terminal, controls))
+    }
+
     /// Consume the root-carried motion transaction directly through front end,
     /// L2 PIS, resident post-L2 and L1 PIS. The root reservation is neither
     /// cloned nor sealed into a separately publishable candidate here.
@@ -709,7 +962,7 @@ impl<K> GpuMotionTransaction<GpuGeometryBelts<K>> {
             .expect("resident L2 transition lost its source submission lease");
         carrier
             .prepare_front_end(front_end)?
-            .submit_resident_l2_bridge(solver, bridge, l2, l2_stage, post)?
+            .submit_resident_l2_bridge(solver, bridge, l2, l2_stage, post, None)?
             .submit_l1_pis(bridge, solver, l1)
     }
 }
@@ -737,24 +990,22 @@ impl<K> GpuGeometryBelts<K> {
         if reservation.flight() != &flight {
             return Err("ONE X2 resident motion flight differs from its root reservation".into());
         }
-        let mut encoded = stage.encode_resident_transition(reservation, &self.belts.packed)?;
-        if let Err(error) = self
+        let encoded = stage.encode_resident_transition(reservation, &self.belts.packed)?;
+        let mut joined = MotionSubmissionGuard::new(self, encoded);
+        let carrier = joined.carrier.as_mut().ok_or("motion join lost carrier")?;
+        let encoded = joined.encoded.as_mut().ok_or("motion join lost command")?;
+        carrier
             .belts
             .lease
-            .submit_after(context, |_| encoded.take_command())
-        {
-            // The belt carrier may own source allocations referenced by its
-            // prior submission. Retire it before rolling back the root-held
-            // candidate encoded for the failed chained submission.
-            drop(self);
-            drop(encoded);
-            return Err(error);
-        }
+            .submit_after(context, |_| encoded.take_command())?;
+        let self_carrier = joined.carrier.take().expect("checked motion carrier");
+        let encoded = joined.encoded.take().expect("checked motion command");
         // The exact flight remains inside the carrier. Motion adds resident
         // state to that aggregate; only the later PIS front end may take the
         // original token, so no clone can be reassociated with another frame.
         Ok(GpuMotionTransaction::from_resident_transition(
-            encoded, self,
+            encoded,
+            self_carrier,
         ))
     }
 }
@@ -762,7 +1013,7 @@ impl<K> GpuGeometryBelts<K> {
 #[cfg(test)]
 impl<K> GpuBlurredBelts<K> {
     fn prepare_motion(
-        mut self,
+        self,
         stage: &GpuMotionStage,
         reservation: GpuResidentReservation,
     ) -> Fallible<GpuMotionTransaction<Self>> {
@@ -776,16 +1027,20 @@ impl<K> GpuBlurredBelts<K> {
         if reservation.flight() != &flight {
             return Err("ONE X2 test motion flight differs from its root reservation".into());
         }
-        let mut encoded = stage.encode_resident_transition(reservation, &self.packed)?;
-        if let Err(error) = self.lease.submit_after(context, |_| encoded.take_command()) {
-            drop(self);
-            drop(encoded);
-            return Err(error);
-        }
+        let encoded = stage.encode_resident_transition(reservation, &self.packed)?;
+        let mut joined = MotionSubmissionGuard::new(self, encoded);
+        let carrier = joined.carrier.as_mut().ok_or("motion join lost carrier")?;
+        let encoded = joined.encoded.as_mut().ok_or("motion join lost command")?;
+        carrier
+            .lease
+            .submit_after(context, |_| encoded.take_command())?;
+        let self_carrier = joined.carrier.take().expect("checked motion carrier");
+        let encoded = joined.encoded.take().expect("checked motion command");
         // Qualification follows the production ownership shape: retain the
         // original flight in the carrier for the eventual consuming stage.
         Ok(GpuMotionTransaction::from_resident_transition(
-            encoded, self,
+            encoded,
+            self_carrier,
         ))
     }
 }

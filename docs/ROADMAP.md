@@ -74,7 +74,27 @@ admission, internal stamp/context derivation and the absence of raw resource
 accessors. Existing GPU lease tests remain the proof that a source owner is
 retained until exact submission completion. This checkpoint does not
 fabricate dmabuf success and does not install a resident result.
+**Resident ONE X2 Cold0 through Cold2 post-L1 checkpoint, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
+PERFORMANCE OR WARM-TAIL CLAIM]:** the accepted paired L1 terminal now remains
+under its original imported-frame lease, source owner, root reservation and
+four-byte validity allocation through three internally typed cold ordinals.
+Each ordinal emits raw L1 then propagated L2 successor hints into the full
+275,400-word planar GPU allocation before temporal median, advances the paired
+cadence only after successful submission, densifies without warm retained
+blending, and performs the exact x2 public resize. Cold0 and Cold1 retain only
+unpublished scratch public fields. Cold2 alone repairs the periodic boundary,
+derives the next warm L2 retained field, and attaches public, temporal history,
+hints, direction-owned lack rows, absent small rows and cadence `[3, 3]` to the
+opaque pending motion successor.
 
+The ordinary path adds no frame-sized CPU readback or upload. Warm post-L1
+execution, final validity mapping, ready installation and Scene selection stay
+excluded; this checkpoint constructs only their purpose-specific typed owner.
+Cold work-mode preparation is also still excluded: the typed loop currently
+retains fixed controls minted at Cold0, while the autonomous GPU derivation of
+direction-owned lack-row L1 modes and their exact L2 propagation remains the
+next resident input checkpoint. No CPU readback or caller setup is proposed.
 **Sealed ONE X2 source-import ownership prerequisite, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
 PERFORMANCE OR PARITY CLAIM]:** the direct type-2 module now owns one private

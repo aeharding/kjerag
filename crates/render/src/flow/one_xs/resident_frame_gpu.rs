@@ -6,7 +6,7 @@
 //! ready capability. GPU work happens only after a linear reservation has
 //! taken an immutable snapshot of the committed successor.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::Fallible;
 use crate::flow::one_xs::pis::gpu::GpuPisFlight;
@@ -22,7 +22,44 @@ pub(super) struct ResidentSuccessor {
     _post_l1: Option<ResidentPostL1Storage>,
 }
 
-struct ResidentPostL1Storage;
+pub(super) struct ResidentPostL1Storage {
+    _public: wgpu::Buffer,
+    _retained_l2: wgpu::Buffer,
+    _histogram: wgpu::Buffer,
+    _fifo: wgpu::Buffer,
+    _hints: wgpu::Buffer,
+    _lack_rows: wgpu::Buffer,
+    _small_rows: wgpu::Buffer,
+    _small_present: bool,
+    _cadence_counts: [i32; 2],
+}
+
+impl ResidentPostL1Storage {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn after_cold(
+        public: wgpu::Buffer,
+        retained_l2: wgpu::Buffer,
+        histogram: wgpu::Buffer,
+        fifo: wgpu::Buffer,
+        hints: wgpu::Buffer,
+        lack_rows: wgpu::Buffer,
+        small_rows: wgpu::Buffer,
+        small_present: bool,
+        cadence_counts: [i32; 2],
+    ) -> Self {
+        Self {
+            _public: public,
+            _retained_l2: retained_l2,
+            _histogram: histogram,
+            _fifo: fifo,
+            _hints: hints,
+            _lack_rows: lack_rows,
+            _small_rows: small_rows,
+            _small_present: small_present,
+            _cadence_counts: cadence_counts,
+        }
+    }
+}
 
 impl ResidentSuccessor {
     pub(super) fn from_motion(flight: GpuPisFlight, motion_references: wgpu::Buffer) -> Self {
@@ -37,6 +74,14 @@ impl ResidentSuccessor {
     /// exposes this allocation to Scene or another flow sibling.
     pub(super) fn motion_reference(&self) -> &wgpu::Buffer {
         &self.motion_references
+    }
+
+    pub(super) fn attach_post_l1(&mut self, storage: ResidentPostL1Storage) -> Fallible<()> {
+        if self._post_l1.is_some() {
+            return Err("ONE X2 resident successor already owns post-L1 state".into());
+        }
+        self._post_l1 = Some(storage);
+        Ok(())
     }
 }
 
@@ -63,6 +108,17 @@ struct RootState {
 
 struct SharedRoot {
     state: Mutex<RootState>,
+}
+
+#[derive(Clone)]
+pub(super) struct GpuResidentIdentity {
+    shared: Weak<SharedRoot>,
+}
+
+impl GpuResidentIdentity {
+    pub(super) fn matches(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.shared, &other.shared)
+    }
 }
 
 /// Non-cloneable root owner for one open capture.
@@ -150,6 +206,11 @@ impl GpuResidentCapture {
 }
 
 impl GpuResidentReservation {
+    pub(super) fn identity(&self) -> GpuResidentIdentity {
+        GpuResidentIdentity {
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
     pub(super) fn generation(&self) -> u64 {
         self.seal.generation
     }
@@ -164,12 +225,15 @@ impl GpuResidentReservation {
         &self.prior
     }
 
-    pub(super) fn seal(self, successor: ResidentSuccessor) -> GpuResidentCandidate {
-        GpuResidentCandidate {
+    pub(super) fn seal(self, successor: ResidentSuccessor) -> Fallible<GpuResidentCandidate> {
+        if successor.flight != self.seal.flight {
+            return Err("ONE X2 resident successor does not match its root reservation".into());
+        }
+        Ok(GpuResidentCandidate {
             reservation: Some(self),
             successor: Arc::new(successor),
             disarmed: false,
-        }
+        })
     }
 
     pub(super) fn abort(mut self) -> Fallible<()> {
@@ -333,6 +397,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn root_identity_distinguishes_equal_flights_from_distinct_captures() {
+        let stamp = frame(7);
+        let a = GpuResidentCapture::new().reserve(stamp.clone()).unwrap();
+        let b = GpuResidentCapture::new().reserve(stamp).unwrap();
+        assert_eq!(a.flight(), b.flight());
+        assert!(a.identity().matches(&a.identity()));
+        assert!(!a.identity().matches(&b.identity()));
+    }
+
+    #[test]
     fn stale_reservation_cannot_clear_a_newer_pending_seal() {
         let capture = GpuResidentCapture::new();
         let first = capture.reserve(frame(1)).unwrap();
@@ -407,7 +481,8 @@ mod tests {
         let first = capture
             .reserve(first_flight.frame.clone())
             .unwrap()
-            .seal(successor(&device, first_flight.clone()));
+            .seal(successor(&device, first_flight.clone()))
+            .unwrap();
         let first = first.install_successor_only_for_test().unwrap();
         drop(first);
 
@@ -421,6 +496,7 @@ mod tests {
 
         let error = second
             .seal(successor(&device, second_flight))
+            .unwrap()
             .install_successor_only_for_test()
             .err()
             .expect("allocation-substituted prior was accepted");
