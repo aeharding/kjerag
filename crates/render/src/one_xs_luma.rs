@@ -4,10 +4,8 @@
 //! instrument therefore reads their luma planes through a tiny compute pass,
 //! packs four byte codes into each storage word, and copies that buffer back.
 //! Other camera paths never construct the pipeline or allocate a buffer. The
-//! first correctness-first selected ONE X2 player waits for this readback on
-//! the render thread so no later frame can pass its causal estimator. That is
-//! a disclosed performance limitation, not the final scheduling design; the
-//! same exact token can move to a bounded worker without changing semantics.
+//! selected ONE X2 player now uses the compact GPU solver-belt producer;
+//! full-frame luma readback remains an oracle/diagnostic capability only.
 
 use std::sync::{Arc, mpsc};
 
@@ -82,11 +80,9 @@ impl PendingOneXsLuma {
 
     /// Wait for and consume this exact-frame readback.
     ///
-    /// The correctness-first ONE X2 player deliberately runs this on the
-    /// render thread to preserve the simplest source/map transaction. It can
-    /// visibly lower frame rate. A later bounded worker may consume the same
-    /// token, but it must preserve every-frame order and exact [`FrameStamp`]
-    /// association.
+    /// Diagnostics may run this on the render thread. A later worker may
+    /// consume the same token, but it must preserve every-frame order and
+    /// exact [`FrameStamp`] association.
     pub fn read(self) -> Fallible<OneXsLumaFrame> {
         self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(self.submission),
@@ -127,18 +123,22 @@ pub(crate) struct LumaShape {
     bytes: u64,
 }
 
-/// Validate the actual imported pair before lazily constructing GPU state.
-pub(crate) fn validate(planes: &[Planes], frames: &Frames) -> Fallible<LumaShape> {
+/// Validate one actual imported pair for the named consumer.
+pub(crate) fn validate_source_pair(
+    planes: &[Planes],
+    frames: &Frames,
+    consumer: &str,
+) -> Fallible<()> {
     if frames.lenses.len() != 2 {
         return Err(format!(
-            "ONE X2 source readback found {} delivered lenses, expected 2",
+            "ONE X2 {consumer} found {} delivered lenses, expected 2",
             frames.lenses.len()
         )
         .into());
     }
     if planes.len() != 2 {
         return Err(format!(
-            "ONE X2 source readback found {} lens planes, expected 2",
+            "ONE X2 {consumer} found {} lens planes, expected 2",
             planes.len()
         )
         .into());
@@ -147,7 +147,7 @@ pub(crate) fn validate(planes: &[Planes], frames: &Frames) -> Fallible<LumaShape
         let texture = &planes[lens.index()].luma;
         if texture.format() != wgpu::TextureFormat::R8Unorm {
             return Err(format!(
-                "ONE X2 source readback needs R8 luma, but lens {lens} is {:?}",
+                "ONE X2 {consumer} needs R8 luma, but lens {lens} is {:?}",
                 texture.format()
             )
             .into());
@@ -158,7 +158,7 @@ pub(crate) fn validate(planes: &[Planes], frames: &Frames) -> Fallible<LumaShape
             || actual.depth_or_array_layers != 1
         {
             return Err(format!(
-                "ONE X2 source readback lens {lens} is {} by {} by {}, expected {} by {} by 1",
+                "ONE X2 {consumer} lens {lens} is {} by {} by {}, expected {} by {} by 1",
                 actual.width,
                 actual.height,
                 actual.depth_or_array_layers,
@@ -168,6 +168,12 @@ pub(crate) fn validate(planes: &[Planes], frames: &Frames) -> Fallible<LumaShape
             .into());
         }
     }
+    Ok(())
+}
+
+/// Validate the actual imported pair before lazily constructing full readback.
+pub(crate) fn validate(planes: &[Planes], frames: &Frames) -> Fallible<LumaShape> {
+    validate_source_pair(planes, frames, "source readback")?;
 
     let words_per_row = frames.size.width.div_ceil(PIXELS_PER_WORD);
     let bytes = u64::from(words_per_row)

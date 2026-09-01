@@ -11,9 +11,9 @@ crates/app      kjerag         libcosmic shell + window. The view is an
                                `iced::widget::shader` around a Scene, and
                                the mouse reaches it through that widget.
 crates/render   kjerag-render  wgpu: dmabuf import, final WGSL pass (NV12 ->
-                               RGB + projection); selected ONE X2 CPU luma
-                               analysis and native-map construction; camera
-                               state and offscreen screenshot rendering
+                               RGB + projection); selected ONE X2 compact GPU
+                               luma sampling and CPU native-map estimation;
+                               camera state and offscreen screenshot rendering
 crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
                                frames by index or timestamp. One demuxer per
@@ -172,12 +172,13 @@ one lens. Zero-copy import is a requirement, not an optimization. (An
 earlier research note put `vaDeriveImage` at 0.53 ms/frame; that was the
 map call alone, with nothing reading the pixels through it.)
 
-The selected ONE X2 path keeps those imported textures as its render inputs,
-but its stitch analysis is not zero-copy. A compute pass copies each frame's
-R8 luma into CPU memory for the capture-owned estimator described below. The
-final native map is then uploaded and the original decoded textures are drawn
-once. "Zero-copy" therefore describes decoded picture delivery, not the ONE
-X2 analysis step.
+The selected ONE X2 path also samples those imported R8 textures directly for
+stitch analysis. Its exact compute pass applies the retained float2 maps and
+3-by-3 reduction on the GPU, then reads back only two 1080-by-60 U8 solver
+belts, 129,600 bytes rather than both 2880-by-2880 luma planes. The retained
+estimator is still on CPU, and its final native map is uploaded before the
+original decoded textures are drawn once. Decoded picture delivery and source
+sampling are zero-copy; the compact GPU-to-CPU solver boundary is not.
 
 ## Playback (issue #4)
 
@@ -241,12 +242,19 @@ this route.
 
 The player changes to `PresentationPolicy::EveryFrame`, and one capture-owned
 `FrameOwner` starts cold at frame zero. For each adjacent decoded pair, the
-renderer reads both luma planes, constructs the camera masks and source belts,
-advances the recovered cold or warm estimator, and materializes the native
-200 by 100 packed type-2 map with its copied-pole alpha. The decoded pair and
-the completed map carry the same opaque `FrameStamp`. Only that exact match
+renderer constructs the retained maps and camera masks, samples both imported
+luma planes into compact solver belts on the GPU, advances the recovered cold
+or warm CPU estimator, and materializes the native 200 by 100 packed type-2
+map with its copied-pole alpha. The decoded pair, GPU token, prepared geometry
+and completed map carry the same opaque `FrameStamp`. Only that exact match
 can become `FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek
 or another open cannot impersonate it.
+
+WGSL does not guarantee the fused arithmetic this producer requires. Its lazy
+constructor therefore runs the complete 129,600-byte adversarial CPU/native
+oracle and the retained-map FMA bit probe on the actual graphics device before
+the first selected frame can advance. One differing byte refuses the route
+with its own error. There is no approximate or full-luma CPU fallback.
 
 A discontinuous seek builds a new owner and causally replays from frame zero
 to the requested target. The displayed frame is retained until its exact map

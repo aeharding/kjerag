@@ -3,11 +3,48 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
-**Standalone GPU ONE X2 solver-belt producer, 2026-09-01, implementation
-branch only [BYTE-EXACT TARGET-GPU TWIN; NOT WIRED INTO PLAYBACK; NO SPEED OR
-STUDIO PARITY CLAIM]:** a render-internal compute pipeline now consumes the
-two R8 source textures and the two retained 1080-by-60 float2 base maps
-directly. Each invocation evaluates four final solver bytes with the selected
+**Production GPU ONE X2 solver-belt bridge, 2026-09-01, implementation branch
+only [WIRED INTO PLAYBACK; BYTE-EXACT TARGET-GPU TWIN; ONE REAL FRAME
+BYTE-IDENTICAL TO THE FROZEN CPU BUILD; NO THROUGHPUT, STUDIO PARITY OR OWNER
+VERDICT CLAIM]:** selected playback now sends the imported R8 lens textures
+and each frame's retained float2 maps directly to the exact GPU sampler and
+3-by-3 reducer. It reads back only the final two 1080-by-60 U8 solver belts,
+129,600 bytes instead of both 2880-by-2880 luma planes' 16,588,800 bytes. The
+same scalar cold/warm estimator then consumes those belts and builds the same
+typed map. Full-luma GPU readback remains available only to diagnostics; it is
+not a production fallback.
+
+WGSL does not itself promise the required FMA and exceptional-float behavior.
+The lazy production constructor therefore runs the same complete 129,600-byte
+adversarial CPU/native oracle plus the retained-map FMA bit probe on the actual
+graphics device before consuming frame zero. Any difference refuses selected
+playback with the arithmetic error; it neither approximates nor falls back to
+the CPU luma path. This is runtime qualification, not a device allowlist.
+
+Preparation and commit remain separate capture-owned operations. The GPU wait
+happens with no capture mutex held, a pending token retains the exact imported
+decoder surfaces and their opaque `FrameStamp`, and the scalar owner consumes
+history only after successful readback and a second exact-frame check. A GPU,
+shape or association failure therefore surfaces its own error and leaves the
+previous complete display and estimator transaction available for the existing
+rollback path. Existing-result lookup and successor preparation occur under
+one lock, so recreating the render pipeline cannot open a ready/prepare race.
+
+On the target Radeon 760M/RADV adapter, the complete render crate passed 598
+tests with 23 data-dependent tests ignored. The required adversarial GPU twin
+matched all 129,600 bytes. A separately built frozen CPU branch and this GPU
+branch then causally rendered frames 0 through 2 of the owner ONE X2 clip at
+the reported 71.13 yaw, -13.99 pitch, 57.95-degree locked view with Sharp
+sampling and the factory seam. Both runs presented three frames with none
+dropped, and their frame-2 2560-by-1440 PNGs were byte-identical at SHA-256
+`72b76cc0c887e30c51abd43e8132fafa83f598bd8a5482508e74a5a399cbd2ea`.
+This is an integration and bounded correctness result, not a speed result or a
+replacement for the authenticated causal review interval.
+
+**Initial GPU ONE X2 solver-belt producer, 2026-09-01, implementation branch
+history [BYTE-EXACT TARGET-GPU TWIN]:** a render-internal compute pipeline
+consumes the two R8 source textures and the two retained 1080-by-60 float2 base
+maps directly. Each invocation evaluates four final solver bytes with the selected
 scalar/native base-map and source bilinear schedules, the strict ordered UV
 gate and the exact integer 3-by-3 reduction, then packs those four bytes into
 one storage word. It therefore produces the final two compact 1080-by-60 U8
@@ -22,13 +59,13 @@ With `KJERAG_REQUIRE_GPU=1`, the target Radeon/Vulkan adapter produced all
 source textures uploaded through 512-byte padded rows, different lens
 patterns, fractional and over-one coordinates, ordered zero/negative/NaN
 sentinels, infinity clamps, both lenses, the retained-map FMA bit pattern and
-a source-FMA discriminator whose selected answer is 190 rather than 189. The output packs
-four logical bytes per u32 and compile-time guards pin both total and per-lens
-divisibility. WGSL permits a backend to expand `fma`, and exceptional-float
-handling may vary with finite-math/flush-to-zero policy, so byte identity on a
-different adapter remains a required gate rather than a source-level promise.
-This branch does not change playback, measure performance or claim any wider
-Studio result.
+a source-FMA discriminator whose selected answer is 190 rather than 189. The
+output packs four logical bytes per u32 and compile-time guards pin both total
+and per-lens divisibility. WGSL permits a backend to expand `fma`, and
+exceptional-float handling may vary with finite-math policy, so byte identity
+on a different adapter remains a required gate rather than a source-level promise.
+That standalone stage made no playback, performance or wider Studio claim;
+the production bridge above is the later integration boundary.
 
 **ONE X2 GPU migration transaction boundary, 2026-08-31, working branch only
 [STRUCTURAL PREREQUISITE; NO GPU OR PERFORMANCE CLAIM]:** the capture-owned

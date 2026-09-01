@@ -44,7 +44,9 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
-use super::flow::one_xs::player::{FrameOwner, FrameResult};
+use super::flow::one_xs::player::{FrameOwner, FrameResult, PreparedFrame};
+use super::flow::one_xs_belt::SolverBelts;
+use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingSolverBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
@@ -366,6 +368,36 @@ struct OneXsCaptureState {
     ready: Option<OneXsMapFrame>,
 }
 
+enum OneXsPreparation {
+    Ready(OneXsMapFrame),
+    Prepared(Box<PreparedFrame>),
+}
+
+/// One submitted compact solver input and the exact delivery it sampled.
+///
+/// [`PendingSolverBelts`] retains the decoder surfaces themselves. This outer
+/// token retains their opaque numeric identity as well, so the readback cannot
+/// be committed to geometry prepared for another delivery.
+struct PendingOneXsSolverBelts {
+    frame: FrameStamp,
+    pending: PendingSolverBelts<Arc<Frames>>,
+}
+
+impl PendingOneXsSolverBelts {
+    fn read(self, prepared: &PreparedFrame) -> Fallible<SolverBelts> {
+        if &self.frame != prepared.frame() {
+            return Err(crate::studio_type2::FrameMapMismatch::new(
+                "GPU solver belts",
+                &self.frame,
+                "prepared geometry",
+                prepared.frame(),
+            )
+            .into());
+        }
+        self.pending.read()
+    }
+}
+
 impl std::fmt::Debug for OneXsCapture {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         output.write_str("OneXsCapture")
@@ -421,14 +453,38 @@ impl OneXsCapture {
             .cloned())
     }
 
-    fn process(&self, frame: &super::OneXsLumaFrame) -> Fallible<OneXsMapFrame> {
+    /// Return an existing exact result or prepare its successor atomically.
+    ///
+    /// This closes the ready/prepare gap for a recreated pipeline. The mutex
+    /// is released before GPU submission or waiting. The current GPU bridge is
+    /// deliberately synchronous, so no prepared transaction survives its
+    /// `prepare_one_xs_playback` call; a future asynchronous bridge must add a
+    /// shared in-flight state before allowing transactions to overlap.
+    fn prepare_or_ready(&self, frame: &FrameStamp, size: Size) -> Fallible<OneXsPreparation> {
+        let state = self.state.lock().map_err(
+            |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
+        )?;
+        if let Some(ready) = state.ready.as_ref().filter(|ready| ready.frame() == frame) {
+            return Ok(OneXsPreparation::Ready(ready.clone()));
+        }
+        Ok(OneXsPreparation::Prepared(Box::new(
+            state.owner.prepare(frame, size)?,
+        )))
+    }
+
+    /// Commit compact solver inputs after their GPU transaction has completed.
+    fn commit(
+        &self,
+        prepared: PreparedFrame,
+        solver_belts: SolverBelts,
+    ) -> Fallible<OneXsMapFrame> {
         let mut state = self.state.lock().map_err(
             |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
         )?;
         if let Some(ready) = state
             .ready
             .as_ref()
-            .filter(|ready| ready.frame() == frame.frame())
+            .filter(|ready| ready.frame() == prepared.frame())
         {
             return Ok(ready.clone());
         }
@@ -441,7 +497,7 @@ impl OneXsCapture {
             weighted_rows,
             lens_a_census,
             lens_b_census,
-        } = owner.process(frame)?;
+        } = owner.commit(prepared, solver_belts)?;
         // Preserve access to the complete transaction diagnostics without
         // making a pooled number a picture verdict. They remain available for
         // the exact-frame regression and do not gate drawing.
@@ -1747,8 +1803,12 @@ pub struct ScenePipeline {
     /// the same frame. Other ordinary routes leave this empty.
     prepared_picture: Option<PreparedPicture>,
     /// Lazy access to the exact bound R8 source pair, used by selected
-    /// playback and diagnostics.
+    /// diagnostics. Production selected playback does not construct it.
     one_xs_luma: Option<Box<LumaReadbackPipeline>>,
+    /// Exact GPU sampler/reducer for production selected playback. It reads
+    /// the imported R8 pair and returns only the two compact 1080-by-60 U8
+    /// solver inputs; retained estimator state remains capture-owned on CPU.
+    one_xs_belts: Option<Box<GpuSolverBeltPipeline>>,
     /// Lazily built production/direct type-2 consumer. Its pipeline and
     /// exact-size buffers are reused; only the two map payloads and their
     /// CPU-side frame association change between frames and diagnostics.
@@ -2085,6 +2145,7 @@ impl ScenePipeline {
             map_oracle: None,
             prepared_picture: None,
             one_xs_luma: None,
+            one_xs_belts: None,
             direct_one_xs_map: None,
             layout,
             sampler,
@@ -2249,11 +2310,11 @@ impl ScenePipeline {
 
     /// Correctness-first live selected ONE X2 transaction.
     ///
-    /// The initial implementation intentionally waits for exact luma and the
-    /// scalar owner on this redraw. It is slower than the eventual worker/GPU
-    /// implementation, but keeps one simple invariant: the source bindings,
-    /// sequential CPU state, uploaded native map and draw all name the same
-    /// full [`FrameStamp`].
+    /// The first GPU slice samples retained maps and performs exact 3-by-3
+    /// reduction on the imported R8 pair, then waits for only the compact
+    /// solver belts. The scalar estimator remains synchronous on this redraw.
+    /// Source bindings, prepared geometry, sequential CPU state, uploaded map
+    /// and draw all name the same full [`FrameStamp`].
     fn prepare_one_xs_playback(
         &mut self,
         primitive: &ScenePrimitive,
@@ -2283,16 +2344,16 @@ impl ScenePipeline {
             .as_ref()
             .ok_or("ONE X2 playback lost its capture-owned stitch state")?;
 
-        let map = match capture.ready(&frames.stamp())? {
-            Some(map) => map,
-            None => {
-                let pending = self.submit_one_xs_luma(device, queue, frames.clone())?;
-                // This is the disclosed synchronous first implementation. The
-                // presentation policy admits only one frame at a time, so no
-                // later delivery can pass the causal estimator while this
-                // exact GPU readback is consumed.
-                let luma = pending.read()?;
-                capture.process(&luma)?
+        let map = match capture.prepare_or_ready(&frames.stamp(), frames.size)? {
+            OneXsPreparation::Ready(map) => map,
+            OneXsPreparation::Prepared(prepared) => {
+                let pending =
+                    self.submit_one_xs_solver_belts(device, queue, frames.clone(), &prepared)?;
+                // The presentation policy admits only one frame at a time.
+                // Waiting occurs outside the capture mutex, and retained CPU
+                // history is consumed only after this exact readback succeeds.
+                let solver_belts = pending.read(&prepared)?;
+                capture.commit(*prepared, solver_belts)?
             }
         };
         MapBindError::require_frame(map.frame(), self.prepared_picture.as_ref())?;
@@ -2408,13 +2469,13 @@ impl ScenePipeline {
         }
     }
 
-    /// Diagnostic wrapper around the same exact R8 readback selected playback
-    /// uses for the lens pair it actually bound.
+    /// Diagnostic wrapper around exact full R8 readback for the lens pair the
+    /// picture actually bound.
     ///
     /// Selection and submission are one transaction. If a newer offered frame
     /// cannot be imported, this captures the held frame the draw still samples,
-    /// not the newer offer. Selected playback calls [`Self::submit_one_xs_luma`]
-    /// directly.
+    /// not the newer offer. Production selected playback instead submits the
+    /// compact GPU solver-belt producer directly.
     pub fn prepare_one_xs_luma(
         &mut self,
         primitive: &ScenePrimitive,
@@ -2454,6 +2515,55 @@ impl ScenePipeline {
             .one_xs_luma
             .get_or_insert_with(|| Box::new(LumaReadbackPipeline::new(device, &self.layout)));
         Ok(readback.submit(device, queue, &self.bind_group, frames, shape))
+    }
+
+    /// Submit exact retained-map sampling and area reduction for the bound
+    /// source pair. The returned token owns both the imported decoder surfaces
+    /// and their opaque delivery stamp until its compact readback is consumed.
+    fn submit_one_xs_solver_belts(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frames: Arc<Frames>,
+        prepared: &PreparedFrame,
+    ) -> Fallible<PendingOneXsSolverBelts> {
+        let frame = frames.stamp();
+        if prepared.frame() != &frame {
+            return Err(crate::studio_type2::FrameMapMismatch::new(
+                "prepared geometry",
+                prepared.frame(),
+                "bound source",
+                &frame,
+            )
+            .into());
+        }
+        let live = self
+            .live
+            .front()
+            .ok_or("ONE X2 GPU solver belts have no bound lens pair")?;
+        if !Arc::ptr_eq(&live.frames, &frames) {
+            return Err("ONE X2 GPU solver-belt source differs from the picture bindings".into());
+        }
+        one_xs_luma::validate_source_pair(&live.planes, &frames, "GPU solver belts")?;
+        let sources = SourceTextures {
+            a: &live.planes[0].luma,
+            b: &live.planes[1].luma,
+        };
+        if self.one_xs_belts.is_none() {
+            self.one_xs_belts = Some(Box::new(GpuSolverBeltPipeline::new(device, queue)?));
+        }
+        let producer = self
+            .one_xs_belts
+            .as_ref()
+            .expect("the exact GPU solver-belt producer was just qualified");
+        let pending = producer.submit_retained(
+            device,
+            queue,
+            sources,
+            prepared.retained_base_maps(),
+            frames,
+        )?;
+        Ok(PendingOneXsSolverBelts { frame, pending })
     }
 
     /// How many imported frame pairs the inactive source oracle can currently
@@ -5336,10 +5446,12 @@ mod tests {
         };
         let mut pipeline = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
         assert!(pipeline.one_xs_luma.is_none());
+        assert!(pipeline.one_xs_belts.is_none());
 
         let scene = Scene::blank();
         pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
         assert!(pipeline.one_xs_luma.is_none());
+        assert!(pipeline.one_xs_belts.is_none());
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

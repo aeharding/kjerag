@@ -67,10 +67,9 @@ pub mod one_xs;
 /// frame through its capture-owned producer.
 pub mod one_xs_belt;
 
-/// Standalone GPU producer for the selected ONE X2 solver belts. It is kept
-/// outside playback until its exact output and resource lifetime contract can
-/// be integrated without weakening the current causal CPU reference.
-#[allow(dead_code)]
+/// GPU producer for the selected ONE X2 solver belts. Production playback
+/// reads its compact exact output into the retained CPU estimator; its packed
+/// buffer is also the boundary for migrating that estimator stage by stage.
 pub(crate) mod one_xs_belt_gpu;
 
 /// Chunk 4, the composition the draw applies: the TWO separately-estimated DIS

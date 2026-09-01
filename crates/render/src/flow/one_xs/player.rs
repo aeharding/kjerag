@@ -14,10 +14,15 @@ use kjerag_meta::{CalibrationSet, Filter, OrientationTrack, Readout};
 
 use crate::flow::one_xs_belt::{
     BaseMapShapeError, CameraMaskError, CameraMaskReport, CameraMaskSupport, RetainedBaseMaps,
-    SolverBelts, sample_source_belts,
+    SolverBelts,
 };
 use crate::studio_type2::{OneXsMapFrame, PackedMap};
-use crate::{Camera, Held, OneXsLumaFrame, Reframe, Sampling};
+use crate::{Camera, Held, Reframe, Sampling};
+
+#[cfg(test)]
+use crate::OneXsLumaFrame;
+#[cfg(test)]
+use crate::flow::one_xs_belt::sample_source_belts;
 
 use super::base_map::{FilterError, MergeError, filter_fisheye_line_pair, map_merge};
 use super::map_patch::{self, BaseMap, BilateralInputs, Census, FlowMap, PreimageMap, SideInputs};
@@ -61,6 +66,7 @@ impl PreparedFrame {
         &self.retained
     }
 
+    #[cfg(test)]
     fn sample_solver_belts(&self, frame: &OneXsLumaFrame) -> Result<SolverBelts, FrameOwnerError> {
         if frame.frame() != self.frame() {
             return Err(FrameOwnerError::PreparedSourceMismatch);
@@ -270,6 +276,7 @@ impl FrameOwner {
     }
 
     /// Process one exact decoded luma pair through the synchronous CPU route.
+    #[cfg(test)]
     pub fn process(&mut self, frame: &OneXsLumaFrame) -> Result<FrameResult, FrameOwnerError> {
         let prepared = self.prepare(frame.frame(), frame.size())?;
         let solver_belts = prepared.sample_solver_belts(frame)?;
@@ -370,14 +377,21 @@ impl Error for SequenceError {}
 pub(crate) enum FrameOwnerError {
     Resource(ResourceError),
     Parent(ParentMapError),
-    Merge { lens: char, error: MergeError },
+    Merge {
+        lens: char,
+        error: MergeError,
+    },
     Filter(FilterError),
     BaseMap(BaseMapShapeError),
     CameraMask(CameraMaskError),
     Sequence(SequenceError),
     EstimatorContinuity(super::owner::ContinuityError),
+    #[cfg(test)]
     PreparedSourceMismatch,
-    SourceSize { expected: Size, actual: Size },
+    SourceSize {
+        expected: Size,
+        actual: Size,
+    },
 }
 
 impl fmt::Display for FrameOwnerError {
@@ -391,6 +405,7 @@ impl fmt::Display for FrameOwnerError {
             Self::CameraMask(error) => error.fmt(out),
             Self::Sequence(error) => error.fmt(out),
             Self::EstimatorContinuity(error) => error.fmt(out),
+            #[cfg(test)]
             Self::PreparedSourceMismatch => {
                 out.write_str("ONE X2 prepared geometry and source belts name different frames")
             }

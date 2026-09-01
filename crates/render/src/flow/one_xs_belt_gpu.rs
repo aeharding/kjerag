@@ -2,15 +2,16 @@
 //!
 //! This is the GPU-shaped equivalent of [`super::one_xs_belt::sample_source_belts`]
 //! followed by [`SourceBelts::reduce_area_3x3`](super::one_xs_belt::SourceBelts::reduce_area_3x3).
-//! It deliberately is not wired into playback yet. One invocation owns four
-//! final U8 codes and packs them into one storage word, so no 3240-by-180
-//! staging allocation or CPU luma readback lies between the imported R8
-//! textures and the 1080-by-60 solver inputs.
+//! Production playback consumes its compact readback at the CPU estimator
+//! boundary. One invocation owns four final U8 codes and packs them into one
+//! storage word, so no 3240-by-180 staging allocation or full CPU luma
+//! readback lies between the imported R8 textures and the 1080-by-60 inputs.
 
 use std::sync::mpsc;
+use std::{error::Error, fmt};
 
 use super::one_xs::{Lens, LensPair};
-use super::one_xs_belt::{RetainedBaseMaps, SolverBelts};
+use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
 use crate::Fallible;
 
 const CODES_PER_WORD: usize = 4;
@@ -19,6 +20,191 @@ const OUTPUT_WORDS: u32 = (SolverBelts::BYTES / CODES_PER_WORD) as u32;
 const WORKGROUP_SIZE: u32 = 64;
 const _: () = assert!(SolverBelts::BYTES.is_multiple_of(CODES_PER_WORD));
 const _: () = assert!(RetainedBaseMaps::NODES_PER_LENS.is_multiple_of(CODES_PER_WORD));
+
+const QUALIFICATION_A_ROWS: usize = 127;
+const QUALIFICATION_A_COLS: usize = 259;
+const QUALIFICATION_B_ROWS: usize = 131;
+const QUALIFICATION_B_COLS: usize = 263;
+const QUALIFICATION_STRIDE: usize = 512;
+const RETAINED_FMA_BITS: [u32; 2] = [1_064_967_376, 1_051_445_982];
+
+/// A deterministic CPU/native oracle that qualifies the actual adapter before
+/// selected playback can consume this shader. WGSL does not promise the FMA
+/// and exceptional-float behavior the estimator needs, so construction fails
+/// closed if this exact workload disagrees even once.
+struct QualificationFixture {
+    sources: LensPair<SourceImage>,
+    maps: RetainedBaseMaps,
+    expected: SolverBelts,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GpuQualificationError {
+    SolverByte {
+        lens: Lens,
+        row: usize,
+        col: usize,
+        actual: u8,
+        expected: u8,
+    },
+    RetainedMap {
+        actual: [u32; 2],
+        expected: [u32; 2],
+    },
+}
+
+impl fmt::Display for GpuQualificationError {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SolverByte {
+                lens,
+                row,
+                col,
+                actual,
+                expected,
+            } => write!(
+                output,
+                "ONE X2 GPU arithmetic is not exact on this graphics device: lens {lens} solver row {row} column {col} is {actual}, expected {expected}"
+            ),
+            Self::RetainedMap { actual, expected } => write!(
+                output,
+                "ONE X2 GPU arithmetic is not exact on this graphics device: retained-map FMA wrote {actual:?}, expected {expected:?}"
+            ),
+        }
+    }
+}
+
+impl Error for GpuQualificationError {}
+
+fn qualification_fixture() -> QualificationFixture {
+    let source = |lens: Lens, rows: usize, cols: usize| {
+        let mut pixels = (0..rows * cols)
+            .map(|index| {
+                let row = index / cols;
+                let col = index % cols;
+                match lens {
+                    Lens::A => ((17 * row + 29 * col + 3) % 256) as u8,
+                    Lens::B => ((43 * row + 11 * col + 197) % 256) as u8,
+                }
+            })
+            .collect::<Vec<_>>();
+        if lens == Lens::A {
+            // Native-order source-FMA discriminator: at row .251, column
+            // .871 the selected answer is 190; top-left-first writes 189.
+            pixels[0] = 17;
+            pixels[1] = 201;
+            pixels[cols] = 93;
+            pixels[cols + 1] = 248;
+        }
+        SourceImage::from_compact(rows, cols, pixels)
+            .expect("the static GPU qualification source has its declared shape")
+    };
+    let sources = LensPair {
+        a: source(Lens::A, QUALIFICATION_A_ROWS, QUALIFICATION_A_COLS),
+        b: source(Lens::B, QUALIFICATION_B_ROWS, QUALIFICATION_B_COLS),
+    };
+    let map = |lens: Lens| {
+        (0..RetainedBaseMaps::NODES_PER_LENS)
+            .map(|index| {
+                let row = index / super::one_xs::COLS;
+                let col = index % super::one_xs::COLS;
+                let selector = (31 * row + 47 * col + lens.index()) % 997;
+                match selector {
+                    0 => [0.0, 0.5],
+                    1 => [-0.25, 0.75],
+                    2 => [f32::NAN, 0.5],
+                    3 => [0.5, f32::NAN],
+                    4 => [1.25, 1.5],
+                    5 => [f32::INFINITY, f32::INFINITY],
+                    _ => {
+                        let (rows, cols) = match lens {
+                            Lens::A => (QUALIFICATION_A_ROWS, QUALIFICATION_A_COLS),
+                            Lens::B => (QUALIFICATION_B_ROWS, QUALIFICATION_B_COLS),
+                        };
+                        let x = 1 + (13 * row + 7 * col + 19 * lens.index()) % (cols - 2);
+                        let y = 1 + (5 * row + 23 * col + 29 * lens.index()) % (rows - 2);
+                        [
+                            (x as f32 + (col % 3) as f32 * 0.21) / cols as f32,
+                            (y as f32 + (row % 3) as f32 * 0.37) / rows as f32,
+                        ]
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut a = map(Lens::A);
+    let b = map(Lens::B);
+    let fma_uv = [
+        0.871 / QUALIFICATION_A_COLS as f32,
+        0.251 / QUALIFICATION_A_ROWS as f32,
+    ];
+    for row in 10..=11 {
+        for col in 10..=11 {
+            a[row * super::one_xs::COLS + col] = fma_uv;
+        }
+    }
+    let maps = RetainedBaseMaps::from_lenses(LensPair { a, b })
+        .expect("the static GPU qualification maps have the retained shape");
+    let expected = sample_source_belts(&sources, &maps).reduce_area_3x3();
+    assert_eq!(
+        expected.pixel(Lens::A, 10, 10),
+        190,
+        "the static GPU qualification source-FMA discriminator changed"
+    );
+    QualificationFixture {
+        sources,
+        maps,
+        expected,
+    }
+}
+
+fn qualification_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &'static str,
+    source: &SourceImage,
+) -> wgpu::Texture {
+    let mut padded = vec![0xee; QUALIFICATION_STRIDE * source.rows()];
+    for row in 0..source.rows() {
+        padded[row * QUALIFICATION_STRIDE..row * QUALIFICATION_STRIDE + source.cols()]
+            .copy_from_slice(&source.pixels()[row * source.cols()..(row + 1) * source.cols()]);
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: source.cols() as u32,
+            height: source.rows() as u32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        &padded,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(QUALIFICATION_STRIDE as u32),
+            rows_per_image: Some(source.rows() as u32),
+        },
+        texture.size(),
+    );
+    texture
+}
+
+const RETAINED_FMA_PROBE: &str = r#"
+@compute @workgroup_size(1)
+fn probe_retained_fma() {
+    let third = bitcast<f32>(THIRD_BITS);
+    let uv = sample_base(0u, 4.0 * third, 142.0 * third);
+    output_words[0] = bitcast<u32>(uv.x);
+    output_words[1] = bitcast<u32>(uv.y);
+}
+"#;
 
 /// The two exact R8 source textures in physical A/B order.
 #[derive(Clone, Copy)]
@@ -59,7 +245,16 @@ pub(crate) struct GpuSolverBeltPipeline {
 }
 
 impl GpuSolverBeltPipeline {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    /// Build and qualify the exact arithmetic on the actual device.
+    ///
+    /// WGSL permits transformations that change native solver bytes. The
+    /// qualification is therefore part of construction, not merely a test;
+    /// an adapter that disagrees is refused with no CPU or approximate path.
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Self> {
+        Self::from_shader(device, queue, SHADER)
+    }
+
+    fn from_shader(device: &wgpu::Device, queue: &wgpu::Queue, shader: &str) -> Fallible<Self> {
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -91,7 +286,7 @@ impl GpuSolverBeltPipeline {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ONE X2 GPU solver belts"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("ONE X2 GPU solver belts"),
@@ -101,7 +296,193 @@ impl GpuSolverBeltPipeline {
             compilation_options: Default::default(),
             cache: None,
         });
-        Self { pipeline, layout }
+        let built = Self { pipeline, layout };
+        built.qualify(device, queue, shader)?;
+        Ok(built)
+    }
+
+    fn qualify(&self, device: &wgpu::Device, queue: &wgpu::Queue, shader: &str) -> Fallible<()> {
+        let fixture = qualification_fixture();
+        let texture_a = qualification_texture(
+            device,
+            queue,
+            "ONE X2 GPU qualification source A",
+            &fixture.sources.a,
+        );
+        let texture_b = qualification_texture(
+            device,
+            queue,
+            "ONE X2 GPU qualification source B",
+            &fixture.sources.b,
+        );
+        let pending = self.submit(
+            device,
+            queue,
+            SourceTextures {
+                a: &texture_a,
+                b: &texture_b,
+            },
+            &fixture.maps,
+        )?;
+        let actual = pending.read()?;
+        if let Some(index) = actual
+            .bytes()
+            .iter()
+            .zip(fixture.expected.bytes())
+            .position(|(actual, expected)| actual != expected)
+        {
+            let lens = if index < RetainedBaseMaps::NODES_PER_LENS {
+                Lens::A
+            } else {
+                Lens::B
+            };
+            let local = index % RetainedBaseMaps::NODES_PER_LENS;
+            let row = local / super::one_xs::COLS;
+            let col = local % super::one_xs::COLS;
+            return Err(GpuQualificationError::SolverByte {
+                lens,
+                row,
+                col,
+                actual: actual.bytes()[index],
+                expected: fixture.expected.bytes()[index],
+            }
+            .into());
+        }
+
+        let retained_bits =
+            self.probe_retained_fma(device, queue, &texture_a, &texture_b, shader)?;
+        if retained_bits != RETAINED_FMA_BITS {
+            return Err(GpuQualificationError::RetainedMap {
+                actual: retained_bits,
+                expected: RETAINED_FMA_BITS,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn probe_retained_fma(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture_a: &wgpu::Texture,
+        texture_b: &wgpu::Texture,
+        shader: &str,
+    ) -> Fallible<[u32; 2]> {
+        let quad = [
+            [
+                [f32::from_bits(1_064_954_653), f32::from_bits(1_051_416_063)],
+                [f32::from_bits(1_064_974_894), f32::from_bits(1_051_403_380)],
+            ],
+            [
+                [f32::from_bits(1_064_972_601), f32::from_bits(1_051_518_451)],
+                [f32::from_bits(1_064_992_780), f32::from_bits(1_051_505_921)],
+            ],
+        ];
+        let mut probe_a = vec![[0.0; 2]; RetainedBaseMaps::NODES_PER_LENS];
+        for dr in 0..2 {
+            for dc in 0..2 {
+                probe_a[(1 + dr) * super::one_xs::COLS + 47 + dc] = quad[dr][dc];
+            }
+        }
+        let probe_maps = RetainedBaseMaps::from_lenses(LensPair {
+            b: probe_a.clone(),
+            a: probe_a,
+        })
+        .expect("the static retained-map FMA probe has the retained shape");
+        let probe_map = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 retained FMA probe map"),
+            size: probe_maps.bytes().len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&probe_map, 0, probe_maps.bytes());
+        let probe_output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 retained FMA probe output"),
+            size: 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let probe_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 retained FMA probe readback"),
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let probe_view_a = texture_a.create_view(&Default::default());
+        let probe_view_b = texture_b.create_view(&Default::default());
+        let probe_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 retained FMA probe"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&probe_view_a),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&probe_view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: probe_map.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: probe_output.as_entire_binding(),
+                },
+            ],
+        });
+        let probe_source = format!("{shader}\n{RETAINED_FMA_PROBE}");
+        let probe_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ONE X2 retained FMA probe"),
+            source: wgpu::ShaderSource::Wgsl(probe_source.into()),
+        });
+        let probe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ONE X2 retained FMA probe"),
+            bind_group_layouts: &[&self.layout],
+            immediate_size: 0,
+        });
+        let probe_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ONE X2 retained FMA probe"),
+            layout: Some(&probe_layout),
+            module: &probe_module,
+            entry_point: Some("probe_retained_fma"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 retained FMA probe"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ONE X2 retained FMA probe"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&probe_pipeline);
+            pass.set_bind_group(0, &probe_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&probe_output, 0, &probe_readback, 0, 8);
+        let submission = queue.submit([encoder.finish()]);
+        let slice = probe_readback.slice(..);
+        let (mapped, answer) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = mapped.send(result);
+        });
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })?;
+        answer.recv()??;
+        let mapped = slice.get_mapped_range();
+        let bits = [
+            u32::from_ne_bytes(mapped[0..4].try_into().unwrap()),
+            u32::from_ne_bytes(mapped[4..8].try_into().unwrap()),
+        ];
+        drop(mapped);
+        probe_readback.unmap();
+        Ok(bits)
     }
 
     /// Submit one independent source/map transaction.
@@ -195,7 +576,7 @@ impl GpuSolverBeltPipeline {
             device: device.clone(),
             _source_owner: source_owner,
             _map: map,
-            packed,
+            _packed: packed,
             readback,
             _resources: resources,
             submission,
@@ -209,7 +590,8 @@ pub(crate) struct PendingSolverBelts<K> {
     device: wgpu::Device,
     _source_owner: K,
     _map: wgpu::Buffer,
-    packed: wgpu::Buffer,
+    /// Retained until the copy into `readback` has completed.
+    _packed: wgpu::Buffer,
     readback: wgpu::Buffer,
     _resources: wgpu::BindGroup,
     submission: wgpu::SubmissionIndex,
@@ -217,8 +599,9 @@ pub(crate) struct PendingSolverBelts<K> {
 
 impl<K> PendingSolverBelts<K> {
     /// The compact GPU-resident A-then-B payload, four U8 codes per word.
+    #[cfg(test)]
     pub(crate) fn packed(&self) -> &wgpu::Buffer {
-        &self.packed
+        &self._packed
     }
 
     /// Wait for and consume the exact compact payload.
@@ -252,9 +635,9 @@ impl<K> PendingSolverBelts<K> {
 // The explicit `fma` chain and native `(1-coordinate)+floor(coordinate)`
 // weights mirror the CPU oracle. WGSL permits a backend to expand `fma`, so
 // byte identity remains an adapter-tested contract rather than a promise made
-// from source spelling alone. NaN, infinity and subnormal handling can also
-// vary with backend finite-math and flush-to-zero policy. The required GPU
-// twin below is the gate for the target RADV adapter.
+// from source spelling alone. NaN and infinity handling can also vary with
+// backend finite-math policy. Runtime qualification and the required GPU twin
+// below gate the actual adapter.
 const SHADER: &str = r#"
 const ROWS = 1080u;
 const COLS = 60u;
@@ -373,7 +756,6 @@ mod tests {
     use std::future::Future;
 
     use super::*;
-    use crate::flow::one_xs_belt::{SourceImage, sample_source_belts};
 
     #[test]
     fn gpu_solver_belts_are_byte_exact_on_adversarial_odd_padded_sources() {
@@ -389,118 +771,13 @@ mod tests {
             }
         };
 
-        const A_ROWS: usize = 127;
-        const A_COLS: usize = 259;
-        const B_ROWS: usize = 131;
-        const B_COLS: usize = 263;
-        const STRIDE: usize = 512;
-        let source = |lens: Lens, rows: usize, cols: usize| {
-            let mut pixels = (0..rows * cols)
-                .map(|index| {
-                    let row = index / cols;
-                    let col = index % cols;
-                    match lens {
-                        Lens::A => ((17 * row + 29 * col + 3) % 256) as u8,
-                        Lens::B => ((43 * row + 11 * col + 197) % 256) as u8,
-                    }
-                })
-                .collect::<Vec<_>>();
-            if lens == Lens::A {
-                // This is the native-order source-FMA discriminator from the
-                // scalar oracle. At row .251, column .871 it is 190; a
-                // top-left-first accumulation is 189.
-                pixels[0] = 17;
-                pixels[1] = 201;
-                pixels[cols] = 93;
-                pixels[cols + 1] = 248;
-            }
-            SourceImage::from_compact(rows, cols, pixels).unwrap()
-        };
-        let sources = LensPair {
-            a: source(Lens::A, A_ROWS, A_COLS),
-            b: source(Lens::B, B_ROWS, B_COLS),
-        };
-        let texture = |label: &str, source: &SourceImage| {
-            let mut padded = vec![0xee; STRIDE * source.rows()];
-            for row in 0..source.rows() {
-                padded[row * STRIDE..row * STRIDE + source.cols()].copy_from_slice(
-                    &source.pixels()[row * source.cols()..(row + 1) * source.cols()],
-                );
-            }
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d {
-                    width: source.cols() as u32,
-                    height: source.rows() as u32,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            queue.write_texture(
-                texture.as_image_copy(),
-                &padded,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(STRIDE as u32),
-                    rows_per_image: Some(source.rows() as u32),
-                },
-                texture.size(),
-            );
-            texture
-        };
-        let texture_a = texture("ONE X2 odd padded A", &sources.a);
-        let texture_b = texture("ONE X2 odd padded B", &sources.b);
-
-        let map = |lens: Lens| {
-            (0..RetainedBaseMaps::NODES_PER_LENS)
-                .map(|index| {
-                    let row = index / 60;
-                    let col = index % 60;
-                    let selector = (31 * row + 47 * col + lens.index()) % 997;
-                    match selector {
-                        0 => [0.0, 0.5],
-                        1 => [-0.25, 0.75],
-                        2 => [f32::NAN, 0.5],
-                        3 => [0.5, f32::NAN],
-                        4 => [1.25, 1.5],
-                        5 => [f32::INFINITY, f32::INFINITY],
-                        _ => {
-                            let (rows, cols) = match lens {
-                                Lens::A => (A_ROWS, A_COLS),
-                                Lens::B => (B_ROWS, B_COLS),
-                            };
-                            let x = 1 + (13 * row + 7 * col + 19 * lens.index()) % (cols - 2);
-                            let y = 1 + (5 * row + 23 * col + 29 * lens.index()) % (rows - 2);
-                            [
-                                (x as f32 + (col % 3) as f32 * 0.21) / cols as f32,
-                                (y as f32 + (row % 3) as f32 * 0.37) / rows as f32,
-                            ]
-                        }
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut a = map(Lens::A);
-        let b = map(Lens::B);
-        let fma_uv = [0.871 / A_COLS as f32, 0.251 / A_ROWS as f32];
-        for row in 10..=11 {
-            for col in 10..=11 {
-                a[row * 60 + col] = fma_uv;
-            }
-        }
-        let maps = RetainedBaseMaps::from_lenses(LensPair { a, b }).unwrap();
-        let expected = sample_source_belts(&sources, &maps).reduce_area_3x3();
-        assert_eq!(
-            expected.pixel(Lens::A, 10, 10),
-            190,
-            "scalar fixture no longer pins the source-FMA discriminator"
-        );
-        let pipeline = GpuSolverBeltPipeline::new(&device);
+        let fixture = qualification_fixture();
+        let texture_a =
+            qualification_texture(&device, &queue, "ONE X2 odd padded A", &fixture.sources.a);
+        let texture_b =
+            qualification_texture(&device, &queue, "ONE X2 odd padded B", &fixture.sources.b);
+        let pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+            .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
         let pending = pipeline
             .submit(
                 &device,
@@ -509,7 +786,7 @@ mod tests {
                     a: &texture_a,
                     b: &texture_b,
                 },
-                &maps,
+                &fixture.maps,
             )
             .unwrap();
         assert_eq!(pending.packed().size(), OUTPUT_BYTES);
@@ -521,131 +798,47 @@ mod tests {
         );
         assert_eq!(
             actual.bytes(),
-            expected.bytes(),
+            fixture.expected.bytes(),
             "GPU solver belts differ from the scalar/native schedule on {adapter}"
         );
 
-        // Pin the retained-map FMA schedule before source sampling can wash a
-        // one-ULP UV difference out. This is the scalar oracle's discriminator
-        // from `retained_map_preserves_studio_top_right_first_fma_order`.
-        let quad = [
-            [
-                [f32::from_bits(1_064_954_653), f32::from_bits(1_051_416_063)],
-                [f32::from_bits(1_064_974_894), f32::from_bits(1_051_403_380)],
-            ],
-            [
-                [f32::from_bits(1_064_972_601), f32::from_bits(1_051_518_451)],
-                [f32::from_bits(1_064_992_780), f32::from_bits(1_051_505_921)],
-            ],
-        ];
-        let mut probe_a = vec![[0.0; 2]; RetainedBaseMaps::NODES_PER_LENS];
-        for dr in 0..2 {
-            for dc in 0..2 {
-                probe_a[(1 + dr) * 60 + 47 + dc] = quad[dr][dc];
-            }
-        }
-        let probe_maps = RetainedBaseMaps::from_lenses(LensPair {
-            b: probe_a.clone(),
-            a: probe_a,
-        })
-        .unwrap();
-        let probe_map = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained FMA probe map"),
-            size: probe_maps.bytes().len() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&probe_map, 0, probe_maps.bytes());
-        let probe_output = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained FMA probe output"),
-            size: 8,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let probe_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained FMA probe readback"),
-            size: 8,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let probe_view_a = texture_a.create_view(&Default::default());
-        let probe_view_b = texture_b.create_view(&Default::default());
-        let probe_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            layout: &pipeline.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&probe_view_a),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&probe_view_b),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: probe_map.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: probe_output.as_entire_binding(),
-                },
-            ],
-        });
-        let probe_source = format!("{SHADER}\n{RETAINED_FMA_PROBE}");
-        let probe_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            source: wgpu::ShaderSource::Wgsl(probe_source.into()),
-        });
-        let probe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            bind_group_layouts: &[&pipeline.layout],
-            immediate_size: 0,
-        });
-        let probe_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            layout: Some(&probe_layout),
-            module: &probe_module,
-            entry_point: Some("probe_retained_fma"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&probe_pipeline);
-            pass.set_bind_group(0, &probe_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&probe_output, 0, &probe_readback, 0, 8);
-        let submission = queue.submit([encoder.finish()]);
-        let slice = probe_readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
+        // Pin retained-map FMA before source quantization can hide one ULP.
+        let retained_bits = pipeline
+            .probe_retained_fma(&device, &queue, &texture_a, &texture_b, SHADER)
             .unwrap();
-        let mapped = slice.get_mapped_range();
-        let bits = [
-            u32::from_ne_bytes(mapped[0..4].try_into().unwrap()),
-            u32::from_ne_bytes(mapped[4..8].try_into().unwrap()),
-        ];
-        assert_eq!(bits, [1_064_967_376, 1_051_445_982]);
-        drop(mapped);
-        probe_readback.unmap();
+        assert_eq!(retained_bits, RETAINED_FMA_BITS);
     }
 
-    const RETAINED_FMA_PROBE: &str = r#"
-@compute @workgroup_size(1)
-fn probe_retained_fma() {
-    let third = bitcast<f32>(THIRD_BITS);
-    let uv = sample_base(0u, 4.0 * third, 142.0 * third);
-    output_words[0] = bitcast<u32>(uv.x);
-    output_words[1] = bitcast<u32>(uv.y);
-}
-"#;
+    #[test]
+    fn runtime_qualification_refuses_changed_solver_arithmetic() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 GPU qualification refusal test: {why}");
+                return;
+            }
+        };
+        let broken = SHADER.replacen("return (sum + 4u) / 9u;", "return 0u;", 1);
+        assert_ne!(
+            broken, SHADER,
+            "the solver mutation did not find its target"
+        );
+        let error = match GpuSolverBeltPipeline::from_shader(&device, &queue, &broken) {
+            Ok(_) => panic!("changed ONE X2 GPU arithmetic was accepted on {adapter}"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error.downcast_ref::<GpuQualificationError>(),
+                Some(GpuQualificationError::SolverByte { .. })
+            ),
+            "changed arithmetic returned the wrong failure on {adapter}: {error}"
+        );
+    }
 
     fn block_on<F: Future>(future: F) -> F::Output {
         let mut future = std::pin::pin!(future);
