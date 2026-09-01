@@ -14,7 +14,6 @@ use kjerag_meta::{CalibrationSet, Filter, OrientationTrack, Readout};
 
 use crate::flow::one_xs_belt::{
     BaseMapShapeError, CameraMaskError, CameraMaskReport, CameraMaskSupport, RetainedBaseMaps,
-    SolverBelts,
 };
 use crate::studio_type2::{OneXsMapFrame, PackedMap};
 use crate::{Camera, Held, Reframe, Sampling};
@@ -22,13 +21,16 @@ use crate::{Camera, Held, Reframe, Sampling};
 #[cfg(test)]
 use crate::OneXsLumaFrame;
 #[cfg(test)]
-use crate::flow::one_xs_belt::sample_source_belts;
+use crate::flow::one_xs_belt::{SolverBelts, sample_source_belts};
 
 use super::base_map::{FilterError, MergeError, filter_fisheye_line_pair, map_merge};
 use super::map_patch::{self, BaseMap, BilateralInputs, Census, FlowMap, PreimageMap, SideInputs};
 use super::owner::{Continuity, PairOwner, PairPosition, Phase};
 use super::resources::{OneXsResources, ResourceError};
 use super::scalar::{ColdInputs, WorkRowCounts};
+use super::temporal::BlurredBelts;
+#[cfg(test)]
+use super::temporal::gaussian_blur;
 use super::{COLS, InvalidNodeCounts, LensPair, ParentMapBuilder, ParentMapError, ROWS};
 
 /// The complete result for one exact delivered source pair.
@@ -72,6 +74,14 @@ impl PreparedFrame {
             return Err(FrameOwnerError::PreparedSourceMismatch);
         }
         Ok(sample_source_belts(frame.sources(), self.retained_base_maps()).reduce_area_3x3())
+    }
+
+    #[cfg(test)]
+    fn sample_blurred_belts(
+        &self,
+        frame: &OneXsLumaFrame,
+    ) -> Result<BlurredBelts, FrameOwnerError> {
+        Ok(gaussian_blur(&self.sample_solver_belts(frame)?))
     }
 }
 
@@ -186,7 +196,7 @@ impl FrameOwner {
         })
     }
 
-    /// Consume one prepared delivery and its exact pre-blur solver belts.
+    /// Consume one prepared delivery and its exact post-blur solver belts.
     ///
     /// The second delivery check rejects a stale prepared transaction before
     /// retained history is touched. Once history is taken, the existing
@@ -195,7 +205,7 @@ impl FrameOwner {
     pub(crate) fn commit(
         &mut self,
         prepared: PreparedFrame,
-        solver_belts: SolverBelts,
+        blurred_belts: BlurredBelts,
     ) -> Result<FrameResult, FrameOwnerError> {
         self.validate_delivery(&prepared.frame)?;
         let PreparedFrame {
@@ -207,7 +217,7 @@ impl FrameOwner {
             ..
         } = prepared;
 
-        let input = ColdInputs::from_solver_belts_and_masks(solver_belts, masks);
+        let input = ColdInputs::from_blurred_belts_and_masks(blurred_belts, masks);
 
         // All fallible source, geometry and mask work is complete. Consume the
         // retained estimator only now, then finish through fixed-size values.
@@ -279,8 +289,8 @@ impl FrameOwner {
     #[cfg(test)]
     pub fn process(&mut self, frame: &OneXsLumaFrame) -> Result<FrameResult, FrameOwnerError> {
         let prepared = self.prepare(frame.frame(), frame.size())?;
-        let solver_belts = prepared.sample_solver_belts(frame)?;
-        self.commit(prepared, solver_belts)
+        let blurred_belts = prepared.sample_blurred_belts(frame)?;
+        self.commit(prepared, blurred_belts)
     }
 
     fn validate_delivery(&self, offered: &FrameStamp) -> Result<(), FrameOwnerError> {
@@ -430,6 +440,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::flow::one_xs::Lens;
     use crate::flow::one_xs_belt::SourceImage;
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
 
@@ -469,7 +480,16 @@ mod tests {
 
     fn frame(index: u64, previous: Option<&FrameStamp>, code: u8) -> OneXsLumaFrame {
         let stamp = FrameStamp::for_test(index, Duration::from_secs(2), previous);
-        let source = || SourceImage::from_compact(1, 1, vec![code]).unwrap();
+        let source = |lens_code: u8| {
+            let pixels = (0..32 * 32)
+                .map(|index| {
+                    lens_code
+                        .wrapping_add(((index / 32) as u8).wrapping_mul(31))
+                        .wrapping_add(((index % 32) as u8).wrapping_mul(17))
+                })
+                .collect();
+            SourceImage::from_compact(32, 32, pixels).unwrap()
+        };
         OneXsLumaFrame::for_test(
             stamp,
             Size {
@@ -477,10 +497,21 @@ mod tests {
                 height: ONE_XS_FRAME.height,
             },
             LensPair {
-                a: source(),
-                b: source(),
+                a: source(code),
+                b: source(code.wrapping_add(83)),
             },
         )
+    }
+
+    fn assert_distinct_blur_stages(raw: &SolverBelts, once: &BlurredBelts) {
+        assert_ne!(raw.lens(Lens::A), once.lens(Lens::A));
+        let once_as_solver = SolverBelts::from_lenses(LensPair {
+            a: once.lens(Lens::A).to_vec(),
+            b: once.lens(Lens::B).to_vec(),
+        })
+        .unwrap();
+        let twice = gaussian_blur(&once_as_solver);
+        assert_ne!(once.lens(Lens::A), twice.lens(Lens::A));
     }
 
     fn assert_same_result(left: &FrameResult, right: &FrameResult) {
@@ -505,14 +536,17 @@ mod tests {
 
         let synchronous_first = synchronous.process(&first).unwrap();
         let prepared = split.prepare(first.frame(), first.size()).unwrap();
-        assert_eq!(prepared.frame(), first.frame());
-        let belts = prepared.sample_solver_belts(&first).unwrap();
+        let raw = prepared.sample_solver_belts(&first).unwrap();
+        let belts = gaussian_blur(&raw);
+        assert_distinct_blur_stages(&raw, &belts);
         let split_first = split.commit(prepared, belts).unwrap();
         assert_same_result(&synchronous_first, &split_first);
 
         let synchronous_second = synchronous.process(&second).unwrap();
         let prepared = split.prepare(second.frame(), second.size()).unwrap();
-        let belts = prepared.sample_solver_belts(&second).unwrap();
+        let raw = prepared.sample_solver_belts(&second).unwrap();
+        let belts = gaussian_blur(&raw);
+        assert_distinct_blur_stages(&raw, &belts);
         let split_second = split.commit(prepared, belts).unwrap();
         assert_same_result(&synchronous_second, &split_second);
     }
@@ -525,11 +559,11 @@ mod tests {
         let mut owner = FrameOwner::new(&calibration).unwrap();
         let accepted = owner.prepare(first.frame(), first.size()).unwrap();
         let stale = owner.prepare(first.frame(), first.size()).unwrap();
-        let belts = SolverBelts::from_fn(|lens, row, col| {
+        let belts = gaussian_blur(&SolverBelts::from_fn(|lens, row, col| {
             (lens.index() as u8)
                 .wrapping_add(row as u8)
                 .wrapping_add(col as u8)
-        });
+        }));
 
         owner.commit(accepted, belts.clone()).unwrap();
         let error = match owner.commit(stale, belts.clone()) {

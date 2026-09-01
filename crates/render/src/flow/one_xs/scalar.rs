@@ -139,12 +139,22 @@ impl ColdInputs {
     ) -> Self {
         debug_assert_eq!(mask.a.len(), ROWS * COLS);
         debug_assert_eq!(mask.b.len(), ROWS * COLS);
-        let blurred = temporal::gaussian_blur(&retained);
+        Self::from_blurred_belts_and_masks(temporal::gaussian_blur(&retained), mask)
+    }
+
+    /// Admit an exact solver pair that has already crossed the selected input
+    /// Gaussian.
+    ///
+    /// The [`temporal::BlurredBelts`] typestate has no conversion back to
+    /// [`SolverBelts`], so this production handoff cannot apply the blur twice.
+    pub(crate) fn from_blurred_belts_and_masks(
+        blurred: temporal::BlurredBelts,
+        mask: LensPair<Vec<u8>>,
+    ) -> Self {
+        debug_assert_eq!(mask.a.len(), ROWS * COLS);
+        debug_assert_eq!(mask.b.len(), ROWS * COLS);
         Self {
-            image: LensPair {
-                a: blurred.lens(Lens::A).to_vec(),
-                b: blurred.lens(Lens::B).to_vec(),
-            },
+            image: blurred.into_lenses(),
             mask,
         }
     }
@@ -4644,6 +4654,34 @@ mod tests {
             error.to_string(),
             "ONE X2 scalar lens B image has 64799 samples, expected 64800",
         );
+    }
+
+    #[test]
+    fn preblurred_handoff_matches_existing_path_and_does_not_blur_again() {
+        let centre = (ROWS / 2, COLS / 2);
+        let retained = SolverBelts::from_fn(|lens, row, col| {
+            u8::from(lens == Lens::A && (row, col) == centre) * u8::MAX
+        });
+        let masks = LensPair {
+            a: vec![u8::MAX; ROWS * COLS],
+            b: vec![u8::MAX; ROWS * COLS],
+        };
+        let expected = ColdInputs::from_solver_belts_and_masks(retained.clone(), masks.clone());
+        let once = temporal::gaussian_blur(&retained);
+        let actual = ColdInputs::from_blurred_belts_and_masks(once.clone(), masks);
+
+        assert_eq!(actual.image(Lens::A), expected.image(Lens::A));
+        assert_eq!(actual.image(Lens::B), expected.image(Lens::B));
+        assert_eq!(actual.mask(Lens::A), expected.mask(Lens::A));
+        assert_eq!(actual.mask(Lens::B), expected.mask(Lens::B));
+
+        let twice_input = SolverBelts::from_lenses(LensPair {
+            a: once.lens(Lens::A).to_vec(),
+            b: once.lens(Lens::B).to_vec(),
+        })
+        .unwrap();
+        let twice = temporal::gaussian_blur(&twice_input);
+        assert_ne!(actual.image(Lens::A), twice.lens(Lens::A));
     }
 
     #[test]

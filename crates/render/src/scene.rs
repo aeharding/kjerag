@@ -45,7 +45,7 @@ use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
 use super::flow::one_xs::player::{FrameOwner, FrameResult, PreparedFrame};
-use super::flow::one_xs_belt::SolverBelts;
+use super::flow::one_xs::temporal::{BlurredBelts, gaussian_blur};
 use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingSolverBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
@@ -378,13 +378,13 @@ enum OneXsPreparation {
 /// [`PendingSolverBelts`] retains the decoder surfaces themselves. This outer
 /// token retains their opaque numeric identity as well, so the readback cannot
 /// be committed to geometry prepared for another delivery.
-struct PendingOneXsSolverBelts {
+struct PendingOneXsBlurredBelts {
     frame: FrameStamp,
     pending: PendingSolverBelts<Arc<Frames>>,
 }
 
-impl PendingOneXsSolverBelts {
-    fn read(self, prepared: &PreparedFrame) -> Fallible<SolverBelts> {
+impl PendingOneXsBlurredBelts {
+    fn read(self, prepared: &PreparedFrame) -> Fallible<BlurredBelts> {
         if &self.frame != prepared.frame() {
             return Err(crate::studio_type2::FrameMapMismatch::new(
                 "GPU solver belts",
@@ -394,7 +394,11 @@ impl PendingOneXsSolverBelts {
             )
             .into());
         }
-        self.pending.read()
+        // Temporary adapter for the first GPU producer. The next producer
+        // returns `BlurredBelts` directly, at which point this is only
+        // `self.pending.read()`. There is no runtime fallback: either the exact
+        // submitted payload is read and blurred once, or the transaction fails.
+        Ok(gaussian_blur(&self.pending.read()?))
     }
 }
 
@@ -476,7 +480,7 @@ impl OneXsCapture {
     fn commit(
         &self,
         prepared: PreparedFrame,
-        solver_belts: SolverBelts,
+        blurred_belts: BlurredBelts,
     ) -> Fallible<OneXsMapFrame> {
         let mut state = self.state.lock().map_err(
             |_| "ONE X2 stitch state is unavailable after its owner stopped unexpectedly",
@@ -497,7 +501,7 @@ impl OneXsCapture {
             weighted_rows,
             lens_a_census,
             lens_b_census,
-        } = owner.commit(prepared, solver_belts)?;
+        } = owner.commit(prepared, blurred_belts)?;
         // Preserve access to the complete transaction diagnostics without
         // making a pooled number a picture verdict. They remain available for
         // the exact-frame regression and do not gate drawing.
@@ -2378,8 +2382,8 @@ impl ScenePipeline {
                 // The presentation policy admits only one frame at a time.
                 // Waiting occurs outside the capture mutex, and retained CPU
                 // history is consumed only after this exact readback succeeds.
-                let solver_belts = pending.read(&prepared)?;
-                capture.commit(*prepared, solver_belts)?
+                let blurred_belts = pending.read(&prepared)?;
+                capture.commit(*prepared, blurred_belts)?
             }
         };
         MapBindError::require_frame(map.frame(), self.prepared_picture.as_ref())?;
@@ -2552,7 +2556,7 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         frames: Arc<Frames>,
         prepared: &PreparedFrame,
-    ) -> Fallible<PendingOneXsSolverBelts> {
+    ) -> Fallible<PendingOneXsBlurredBelts> {
         let frame = frames.stamp();
         if prepared.frame() != &frame {
             return Err(crate::studio_type2::FrameMapMismatch::new(
@@ -2589,7 +2593,7 @@ impl ScenePipeline {
             prepared.retained_base_maps(),
             frames,
         )?;
-        Ok(PendingOneXsSolverBelts { frame, pending })
+        Ok(PendingOneXsBlurredBelts { frame, pending })
     }
 
     /// How many imported frame pairs the inactive source oracle can currently

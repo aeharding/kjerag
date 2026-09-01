@@ -66,6 +66,18 @@ impl BlurredBelts {
     pub fn bytes(&self) -> &[u8] {
         self.inner.bytes()
     }
+
+    /// Consume the post-Gaussian pair into the estimator's physical lens slots.
+    ///
+    /// This is deliberately visible only inside the selected ONE X2 module.
+    /// Keeping the raw [`SolverBelts`] member private means a caller cannot feed
+    /// these bytes back through [`gaussian_blur`] for a second pass.
+    pub(super) fn into_lenses(self) -> super::LensPair<Vec<u8>> {
+        super::LensPair {
+            a: self.inner.lens(Lens::A).to_vec(),
+            b: self.inner.lens(Lens::B).to_vec(),
+        }
+    }
 }
 
 /// Apply Studio's in-place OpenCV 5-by-5, sigma-0.8 input blur to both
