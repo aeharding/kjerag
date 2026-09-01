@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use std::sync::mpsc;
 
 use super::{
-    AtoB, BtoA, CostMode, DescentAdmission, Flow, HintGrid, InitialGrid, Input, Level,
+    AtoB, BtoA, CostMode, DescentAdmission, Direction, Flow, HintGrid, InitialGrid, Input, Level,
     PisDirection, solve_with_descent_admission,
 };
 use crate::Fallible;
@@ -49,27 +49,105 @@ impl<D: PisDirection> TerminalBits<D> {
     /// Re-enter the typed CPU boundary without changing any terminal bits.
     /// Pass reports are intentionally empty because this production handoff
     /// retains only the native terminal grid.
-    pub(crate) fn into_patch_grid(self) -> super::PatchGrid<D> {
+    pub(crate) fn into_patch_grid(self) -> Result<super::PatchGrid<D>, TerminalGridError> {
+        let expected = self.level.patches();
+        for (component, actual) in [("dcol", self.dcol.len()), ("drow", self.drow.len())] {
+            if actual != expected {
+                return Err(TerminalGridError::Shape {
+                    direction: D::DIRECTION,
+                    level: self.level,
+                    component,
+                    expected,
+                    actual,
+                });
+            }
+        }
         let patches = self
             .dcol
             .iter()
             .copied()
             .zip(self.drow.iter().copied())
-            .map(|(dcol, drow)| {
-                super::Patch::seeded(Flow {
-                    dcol: f32::from_bits(dcol),
-                    drow: f32::from_bits(drow),
-                })
+            .enumerate()
+            .map(|(patch, (dcol, drow))| {
+                for (component, bits) in [("dcol", dcol), ("drow", drow)] {
+                    if !f32::from_bits(bits).is_finite() {
+                        return Err(TerminalGridError::NonFinite {
+                            direction: D::DIRECTION,
+                            level: self.level,
+                            patch,
+                            component,
+                            bits,
+                        });
+                    }
+                }
+                let flow = Flow::new(f32::from_bits(dcol), f32::from_bits(drow)).ok_or(
+                    TerminalGridError::NonFinite {
+                        direction: D::DIRECTION,
+                        level: self.level,
+                        patch,
+                        component: "flow",
+                        bits: dcol,
+                    },
+                )?;
+                Ok(super::Patch::seeded(flow))
             })
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>, _>>()?
             .into_boxed_slice();
-        super::PatchGrid {
+        Ok(super::PatchGrid {
             level: self.level,
             patches,
             direction: PhantomData,
+        })
+    }
+}
+
+/// A terminal GPU bit grid could not safely re-enter the typed CPU boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalGridError {
+    Shape {
+        direction: Direction,
+        level: Level,
+        component: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    NonFinite {
+        direction: Direction,
+        level: Level,
+        patch: usize,
+        component: &'static str,
+        bits: u32,
+    },
+}
+
+impl fmt::Display for TerminalGridError {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Shape {
+                direction,
+                level,
+                component,
+                expected,
+                actual,
+            } => write!(
+                out,
+                "ONE X2 GPU PIS {direction:?} {level} terminal {component} has {actual} patches, expected {expected}"
+            ),
+            Self::NonFinite {
+                direction,
+                level,
+                patch,
+                component,
+                bits,
+            } => write!(
+                out,
+                "ONE X2 GPU PIS {direction:?} {level} patch {patch} terminal {component} bits {bits:#010x} are not finite"
+            ),
         }
     }
 }
+
+impl Error for TerminalGridError {}
 
 /// The two direction-typed terminal grids from one paired level solve.
 #[derive(Debug, PartialEq, Eq)]
@@ -282,11 +360,11 @@ impl GpuPisPipeline {
             a_to_b: decode_terminal(
                 packed.level,
                 &words[packed.a_output_base..packed.a_output_base + packed.output_span],
-            ),
+            )?,
             b_to_a: decode_terminal(
                 packed.level,
                 &words[packed.b_output_base..packed.b_output_base + packed.output_span],
-            ),
+            )?,
         })
     }
 
@@ -353,15 +431,17 @@ impl GpuPisPipeline {
             a_admission,
             b_admission,
         )?;
-        compare("A-to-B", &actual.a_to_b, &expected_a)?;
-        compare("B-to-A", &actual.b_to_a, &expected_b)?;
+        let actual_a = actual.a_to_b.into_patch_grid()?;
+        let actual_b = actual.b_to_a.into_patch_grid()?;
+        compare("A-to-B", &actual_a, &expected_a)?;
+        compare("B-to-A", &actual_b, &expected_b)?;
         Ok(())
     }
 }
 
 fn compare<D: PisDirection>(
     direction: &'static str,
-    actual: &TerminalBits<D>,
+    actual: &super::PatchGrid<D>,
     expected: &super::PatchGrid<D>,
 ) -> Fallible<()> {
     let expected_candidates = expected
@@ -378,9 +458,9 @@ fn compare<D: PisDirection>(
         })
         .unwrap_or_default();
     for (patch, (actual_bits, expected_bits)) in actual
-        .dcol
+        .patches()
         .iter()
-        .copied()
+        .map(|patch| patch.flow().dcol().to_bits())
         .zip(
             expected
                 .patches()
@@ -392,21 +472,21 @@ fn compare<D: PisDirection>(
         if actual_bits != expected_bits {
             return Err(QualificationError::Direction {
                 direction,
-                level: actual.level,
+                level: actual.level(),
                 patch,
                 component: "dcol",
                 actual: actual_bits,
                 expected: expected_bits,
-                actual_diagnostics: actual.diagnostics.clone(),
+                actual_diagnostics: Box::default(),
                 expected_candidates: expected_candidates.clone(),
             }
             .into());
         }
     }
     for (patch, (actual_bits, expected_bits)) in actual
-        .drow
+        .patches()
         .iter()
-        .copied()
+        .map(|patch| patch.flow().drow().to_bits())
         .zip(
             expected
                 .patches()
@@ -418,12 +498,12 @@ fn compare<D: PisDirection>(
         if actual_bits != expected_bits {
             return Err(QualificationError::Direction {
                 direction,
-                level: actual.level,
+                level: actual.level(),
                 patch,
                 component: "drow",
                 actual: actual_bits,
                 expected: expected_bits,
-                actual_diagnostics: actual.diagnostics.clone(),
+                actual_diagnostics: Box::default(),
                 expected_candidates: expected_candidates.clone(),
             }
             .into());
@@ -502,20 +582,33 @@ impl PackedPair {
     }
 }
 
-fn decode_terminal<D: PisDirection>(level: Level, words: &[u32]) -> TerminalBits<D> {
+fn decode_terminal<D: PisDirection>(
+    level: Level,
+    words: &[u32],
+) -> Result<TerminalBits<D>, TerminalGridError> {
+    let expected_words = level.patches() * OUTPUT_WORDS_PER_PATCH + DIAGNOSTIC_WORDS;
+    if words.len() != expected_words {
+        return Err(TerminalGridError::Shape {
+            direction: D::DIRECTION,
+            level,
+            component: "word span",
+            expected: expected_words,
+            actual: words.len(),
+        });
+    }
     let mut dcol = Vec::with_capacity(level.patches());
     let mut drow = Vec::with_capacity(level.patches());
     for pair in words[..level.patches() * 2].chunks_exact(2) {
         dcol.push(pair[0]);
         drow.push(pair[1]);
     }
-    TerminalBits {
+    Ok(TerminalBits {
         level,
         dcol: dcol.into_boxed_slice(),
         drow: drow.into_boxed_slice(),
         diagnostics: words[level.patches() * 2..].into(),
         direction: PhantomData,
-    }
+    })
 }
 
 impl<D: PisDirection> PackedInput<D> {
