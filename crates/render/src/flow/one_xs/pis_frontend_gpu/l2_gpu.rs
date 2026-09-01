@@ -27,6 +27,61 @@ use crate::flow::one_xs::pis::{AtoB, BtoA, DisparityInterval, Level, PisDirectio
 use crate::flow::one_xs::post_update::RetainedPublicPyramids;
 use crate::flow::one_xs::scalar::PairSolveStage;
 
+/// Opaque warm successor minted only by this module's `post_l1` child after
+/// its joined encoder has been submitted. Siblings can consume the complete
+/// value but cannot assemble one from unrelated buffers.
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuWarmPostL1Successor {
+    public: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
+    histogram: wgpu::Buffer,
+    fifo: wgpu::Buffer,
+    hints: wgpu::Buffer,
+    small_rows: wgpu::Buffer,
+    small_present: bool,
+}
+
+impl GpuWarmPostL1Successor {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        public: wgpu::Buffer,
+        retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
+        histogram: wgpu::Buffer,
+        fifo: wgpu::Buffer,
+        hints: wgpu::Buffer,
+        small_rows: wgpu::Buffer,
+        small_present: bool,
+    ) -> Self {
+        Self {
+            public,
+            retained_l2_direction_pixel_vec2,
+            histogram,
+            fifo,
+            hints,
+            small_rows,
+            small_present,
+        }
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn into_resident_storage(
+        self,
+        lack_rows: wgpu::Buffer,
+        cadence: crate::flow::one_xs_belt_gpu::geometry_gpu::temporal_gpu::GpuPairedCadence,
+    ) -> crate::flow::one_xs_belt_gpu::resident_frame_gpu::ResidentPostL1Storage {
+        crate::flow::one_xs_belt_gpu::resident_frame_gpu::ResidentPostL1Storage::new(
+            self.public,
+            self.retained_l2_direction_pixel_vec2,
+            self.histogram,
+            self.fifo,
+            self.hints,
+            lack_rows,
+            self.small_rows,
+            self.small_present,
+            cadence,
+            3,
+        )
+    }
+}
+
 #[path = "post_l1.rs"]
 mod post_l1;
 #[cfg(test)]
@@ -1472,6 +1527,8 @@ pub(crate) struct GpuL2PostPisBridge {
     hint_layout: wgpu::BindGroupLayout,
     hint_pipeline: wgpu::ComputePipeline,
     post_l1: post_l1::GpuColdPostL1Pipeline,
+    warm_post_l1: post_l1::GpuWarmPostL1Pipeline,
+    small_rows: post_l1::small_rows::GpuSmallRowPipeline,
 }
 
 impl GpuL2PostPisBridge {
@@ -1614,6 +1671,10 @@ impl GpuL2PostPisBridge {
             })?;
         let post_l1 = post_l1::GpuColdPostL1Pipeline::new(context.clone())
             .map_err(|error| BridgeGpuError::Scoped(error.to_string()))?;
+        let warm_post_l1 = post_l1::GpuWarmPostL1Pipeline::new(context.clone())
+            .map_err(|error| BridgeGpuError::Scoped(error.to_string()))?;
+        let small_rows = post_l1::small_rows::GpuSmallRowPipeline::new(context.clone())
+            .map_err(|error| BridgeGpuError::Scoped(error.to_string()))?;
         let work_modes = GpuWorkModePipeline::new(context.clone())?;
         Ok(Self {
             context,
@@ -1626,6 +1687,8 @@ impl GpuL2PostPisBridge {
             hint_layout,
             hint_pipeline,
             post_l1,
+            warm_post_l1,
+            small_rows,
         })
     }
 
@@ -1660,7 +1723,13 @@ impl GpuL2PostPisBridge {
         let validity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("L2 bridge resident finite-center status"),
             contents: &u32::MAX.to_ne_bytes(),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | if cfg!(test) {
+                    wgpu::BufferUsages::COPY_DST
+                } else {
+                    wgpu::BufferUsages::empty()
+                },
         });
         (output, validity)
     }

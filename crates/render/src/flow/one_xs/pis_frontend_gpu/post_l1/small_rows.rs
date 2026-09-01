@@ -33,11 +33,23 @@ pub(super) trait GpuSmallRowArithmeticInput: input_owner::Sealed {
     fn pre_increment_counts(&self) -> [i32; 2];
 }
 
-/// Production frame input projection. Only the future exact paused post-L1
-/// owner may implement this sealed extension and reach ordinary encoding.
-pub(super) trait GpuSmallRowInputOwner: GpuSmallRowArithmeticInput {
+/// Production frame input projection. The exact paused post-L1 owner creates
+/// the complete bind group, so its installed-prior row allocation never
+/// crosses this boundary as a reusable buffer handle.
+pub(super) trait GpuSmallRowInputOwner: input_owner::Sealed {
+    fn context(&self) -> &OneXsGpuContext;
+    fn prior_present(&self) -> bool;
+    fn pre_increment_counts(&self) -> [i32; 2];
     fn producer_flight(&self) -> &GpuPisFlight;
     fn capture_root(&self) -> &GpuResidentIdentity;
+    fn bind_classifier(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        candidates: &wgpu::Buffer,
+        rows: &wgpu::Buffer,
+    ) -> Fallible<wgpu::BindGroup>;
 }
 
 pub(super) mod input_owner {
@@ -120,12 +132,46 @@ impl GpuSmallRowArithmeticInput for TestSmallRowOwner<'_> {
 
 #[cfg(test)]
 impl GpuSmallRowInputOwner for TestSmallRowOwner<'_> {
+    fn context(&self) -> &OneXsGpuContext {
+        self.arithmetic.context()
+    }
+
+    fn prior_present(&self) -> bool {
+        self.arithmetic.prior_present()
+    }
+
+    fn pre_increment_counts(&self) -> [i32; 2] {
+        self.arithmetic.pre_increment_counts()
+    }
+
     fn producer_flight(&self) -> &GpuPisFlight {
         &self.flight
     }
 
     fn capture_root(&self) -> &GpuResidentIdentity {
         &self.root
+    }
+
+    fn bind_classifier(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        candidates: &wgpu::Buffer,
+        rows: &wgpu::Buffer,
+    ) -> Fallible<wgpu::BindGroup> {
+        Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 test resident mature small rows"),
+            layout,
+            entries: &[
+                binding(0, self.arithmetic.filtered()),
+                binding(1, self.arithmetic.common_a_block_mask()),
+                binding(2, self.arithmetic.prior_rows()),
+                binding(3, config),
+                binding(4, candidates),
+                binding(5, rows),
+            ],
+        }))
     }
 }
 
@@ -173,10 +219,17 @@ impl GpuResidentSmallRows {
         }
         Ok(())
     }
+
+    pub(super) fn into_successor_parts(self) -> (wgpu::Buffer, bool) {
+        (self.rows, self.present)
+    }
 }
 
+impl super::classified_rows::Sealed for GpuResidentSmallRows {}
+impl super::GpuWarmClassifiedRows for GpuResidentSmallRows {}
+
 #[allow(dead_code)]
-pub(super) struct GpuSmallRowPipeline {
+pub(in super::super) struct GpuSmallRowPipeline {
     context: OneXsGpuContext,
     layout: wgpu::BindGroupLayout,
     classify: wgpu::ComputePipeline,
@@ -185,7 +238,7 @@ pub(super) struct GpuSmallRowPipeline {
 
 #[allow(dead_code)]
 impl GpuSmallRowPipeline {
-    pub(super) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+    pub(in super::super) fn new(context: OneXsGpuContext) -> Fallible<Self> {
         Self::qualified_from_shader(context, SHADER)
     }
 
@@ -250,16 +303,44 @@ impl GpuSmallRowPipeline {
         input: &O,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Fallible<GpuResidentSmallRows> {
-        let allocations = self.encode_arithmetic(input, encoder, false)?;
+        self.context.ensure_same(input.context())?;
+        let device = self.context.device();
+        let pre_increment_counts = input.pre_increment_counts();
+        let prior_present = input.prior_present();
+        let config = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ONE X2 resident mature small-row state"),
+            contents: &pre_increment_counts
+                .map(|count| count.to_ne_bytes())
+                .into_iter()
+                .flatten()
+                .chain(u32::from(prior_present).to_ne_bytes())
+                .collect::<Vec<_>>(),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let candidates = storage_buffer(
+            device,
+            "ONE X2 small-row direction candidates",
+            ROW_WORDS,
+            false,
+        );
+        let rows = storage_buffer(
+            device,
+            "ONE X2 bilateral resident small rows",
+            ROW_WORDS,
+            cfg!(test),
+        );
+        let resources = input.bind_classifier(device, &self.layout, &config, &candidates, &rows)?;
+        encode_passes(self, encoder, &resources);
+        let present = prior_present || pre_increment_counts.into_iter().any(|count| count >= 3);
         Ok(GpuResidentSmallRows {
             context: self.context.clone(),
             producer_flight: input.producer_flight().clone(),
             root: input.capture_root().clone(),
-            rows: allocations.rows,
-            present: allocations.present,
-            _candidates: allocations.candidates,
-            _config: allocations.config,
-            _resources: allocations.resources,
+            rows,
+            present,
+            _candidates: candidates,
+            _config: config,
+            _resources: resources,
         })
     }
 
@@ -307,24 +388,7 @@ impl GpuSmallRowPipeline {
                 binding(5, &rows),
             ],
         });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 classify mature small rows"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.classify);
-            pass.set_bind_group(0, &resources, &[]);
-            pass.dispatch_workgroups(PATCH_ROWS as u32, 2, 1);
-        }
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 merge bilateral small rows"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.merge);
-            pass.set_bind_group(0, &resources, &[]);
-            pass.dispatch_workgroups(PATCH_ROWS as u32, 1, 1);
-        }
+        encode_passes(self, encoder, &resources);
         let present = prior_present || pre_increment_counts.into_iter().any(|count| count >= 3);
         Ok(GpuSmallRowAllocations {
             rows,
@@ -409,6 +473,31 @@ impl GpuSmallRowPipeline {
             return Err(format!("ONE X2 small-row topology disagreed for {}", case.label).into());
         }
         Ok(words)
+    }
+}
+
+fn encode_passes(
+    pipeline: &GpuSmallRowPipeline,
+    encoder: &mut wgpu::CommandEncoder,
+    resources: &wgpu::BindGroup,
+) {
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ONE X2 classify mature small rows"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline.classify);
+        pass.set_bind_group(0, resources, &[]);
+        pass.dispatch_workgroups(PATCH_ROWS as u32, 2, 1);
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ONE X2 merge bilateral small rows"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline.merge);
+        pass.set_bind_group(0, resources, &[]);
+        pass.dispatch_workgroups(PATCH_ROWS as u32, 1, 1);
     }
 }
 

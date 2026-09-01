@@ -1237,10 +1237,12 @@ mod tests {
         ));
         let retirements = crate::draw_retirement::IcedDrawRetirements::new(context.device(), 2);
         let witness = Arc::new(AtomicU8::new(0));
-        let mut install =
-            crate::flow::one_xs_belt_gpu::prepare_resident_install(ready, direct, &retirements)
-                .unwrap();
-        install.observe_draw_drop(Arc::clone(&witness));
+        let install = crate::flow::one_xs_belt_gpu::prepare_resident_install(
+            ready,
+            Arc::clone(&direct),
+            &retirements,
+        )
+        .unwrap();
         let installed = install.install().unwrap();
         let reframe = crate::Reframe::blank(1.0, false);
         installed.write_reframe(&reframe);
@@ -1380,50 +1382,320 @@ mod tests {
             .collect::<Vec<_>>()
         });
         assert_eq!(actual_l2, expected_l2, "warm L2 chose the wrong lack owner");
-        drop(warm_terminal);
-        let warm_rollback = capture.snapshot();
-        assert!(!warm_rollback.pending);
-        assert!(Arc::ptr_eq(
-            warm_rollback.committed.as_ref().unwrap(),
-            &installed_cold2
-        ));
-        assert!(installed_snapshot.same_ready(&warm_rollback));
+        let warm_operands = warm_terminal
+            .complete_warm_final(&bridge)
+            .unwrap_or_else(|error| panic!("first warm post-L1 failed on {adapter}: {error}"));
+        let mut warm_pending = materializer.materialize_final(warm_operands).unwrap();
+        let warm_ready = loop {
+            warm_pending = match warm_pending.poll().unwrap() {
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Pending(
+                    pending,
+                ) => pending,
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Ready(ready) => {
+                    break ready;
+                }
+            };
+        };
+        warm_ready.assert_cpu_twin_for_test().unwrap();
+        warm_ready
+            .assert_alpha_for_test(resources.alpha().bytes())
+            .unwrap();
+        let warm_install = crate::flow::one_xs_belt_gpu::prepare_resident_install(
+            warm_ready,
+            Arc::clone(&direct),
+            &retirements,
+        )
+        .unwrap();
+        let warm_installed = warm_install.install().unwrap();
+        let warm1_snapshot = capture.snapshot();
+        assert!(!warm1_snapshot.pending);
+        let installed_warm1 = Arc::clone(warm1_snapshot.committed.as_ref().unwrap());
+        assert!(!Arc::ptr_eq(&installed_warm1, &installed_cold2));
+        assert_eq!(installed_warm1.calculation_for_test(), 3);
+        assert_eq!(installed_warm1.cadence_for_test(), [1, 8]);
+        let warm1_fingerprint = installed_warm1
+            .successor_fingerprint_for_test(&context)
+            .unwrap();
 
-        let next = capture
+        // A later warm frame must consume the exact first-warm allocation,
+        // including its newly classified rows, and install another complete
+        // map through the same generic final path.
+        drop(installed);
+        let later_reservation = capture
             .reserve(FrameStamp::for_test(73, Duration::from_millis(73), None))
             .unwrap();
-        let pending_snapshot = capture.snapshot();
-        assert!(pending_snapshot.pending);
-        assert!(installed_snapshot.same_ready(&pending_snapshot));
-        let held_permit = retirements.reserve().unwrap();
-        let next_references = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("resident retirement-full successor"),
-            size: 4,
-            usage: wgpu::BufferUsages::STORAGE,
+        assert!(
+            later_reservation
+                .installed_prior()
+                .unwrap()
+                .same_successor(&installed_warm1)
+        );
+        let later_flight = later_reservation.flight().clone();
+        let later_parent = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 installed warm to later warm resident parent"),
+            size: PARENT_BYTES,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let successor =
-            crate::flow::one_xs_belt_gpu::resident_frame_gpu::ResidentSuccessor::from_motion(
-                next.flight().clone(),
-                next_references,
-            );
-        let bound = crate::flow::one_xs_belt_gpu::ResidentBoundInstall {
-            draw: Some(Arc::clone(&installed.draw)),
-            root: Some(next.seal(successor).unwrap()),
+        context
+            .queue()
+            .write_buffer(&later_parent, 0, &parent_bytes);
+        let later_encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("ONE X2 installed warm to later warm resident parent"),
+                });
+        let later_geometry = geometry
+            .encode_buffer(
+                later_parent.clone(),
+                ParentRetention::Resident(ResidentGpuParentMaps::for_geometry_test(
+                    &context,
+                    later_parent,
+                )),
+                Some(later_flight.clone()),
+                Some(later_reservation),
+                later_encoder,
+            )
+            .unwrap();
+        let later_source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+            &context,
+            session.clone(),
+            later_flight.frame.clone(),
+            &picture_layout,
+            &uniforms,
+            &sampler,
+        );
+        let later_terminal = later_geometry
+            .submit_belts(
+                &GpuSolverBeltPipeline::new(context.clone()).unwrap(),
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                later_source,
+            )
+            .unwrap()
+            .prepare_motion(&motion)
+            .unwrap()
+            .submit_resident_warm(
+                &front,
+                &solver,
+                &bridge,
+                GpuL2Controls::resident(disparity, disparity),
+                GpuL1Controls::resident(disparity, disparity),
+            )
+            .unwrap_or_else(|error| panic!("later warm L2/L1 failed on {adapter}: {error}"));
+        assert!(
+            later_terminal
+                .post_for_test()
+                .installed_prior_matches_for_test(&installed_warm1)
+        );
+        let later_operands = later_terminal
+            .complete_warm_final(&bridge)
+            .unwrap_or_else(|error| panic!("later warm post-L1 failed on {adapter}: {error}"));
+        let mut later_pending = materializer.materialize_final(later_operands).unwrap();
+        let later_ready = loop {
+            later_pending = match later_pending.poll().unwrap() {
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Pending(
+                    pending,
+                ) => pending,
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Ready(ready) => {
+                    break ready;
+                }
+            };
         };
-        let error = match bound.reserve(&retirements) {
-            Ok(_) => panic!("full retirement admitted a successor install"),
+        later_ready.assert_cpu_twin_for_test().unwrap();
+        later_ready
+            .assert_alpha_for_test(resources.alpha().bytes())
+            .unwrap();
+        let mut later_install = crate::flow::one_xs_belt_gpu::prepare_resident_install(
+            later_ready,
+            Arc::clone(&direct),
+            &retirements,
+        )
+        .unwrap();
+        later_install.observe_draw_drop(Arc::clone(&witness));
+        let later_installed = later_install.install().unwrap();
+        let later_snapshot = capture.snapshot();
+        let installed_warm2 = Arc::clone(later_snapshot.committed.as_ref().unwrap());
+        assert!(!Arc::ptr_eq(&installed_warm2, &installed_warm1));
+        assert_eq!(installed_warm2.calculation_for_test(), 3);
+        assert_eq!(installed_warm2.cadence_for_test(), [2, 9]);
+        assert_eq!(
+            installed_warm1
+                .successor_fingerprint_for_test(&context)
+                .unwrap(),
+            warm1_fingerprint,
+            "later warm mutated its installed predecessor"
+        );
+
+        let prepare_additional_warm = |frame_index: u64| {
+            let prior_snapshot = capture.snapshot();
+            let prior = Arc::clone(prior_snapshot.committed.as_ref().unwrap());
+            let reservation = capture
+                .reserve(FrameStamp::for_test(
+                    frame_index,
+                    Duration::from_millis(frame_index),
+                    None,
+                ))
+                .unwrap();
+            assert!(
+                reservation
+                    .installed_prior()
+                    .unwrap()
+                    .same_successor(&prior)
+            );
+            let flight = reservation.flight().clone();
+            let parent = context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 additional warm resident parent"),
+                size: PARENT_BYTES,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            context.queue().write_buffer(&parent, 0, &parent_bytes);
+            let encoder =
+                context
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("ONE X2 additional warm resident parent"),
+                    });
+            let geometry = geometry
+                .encode_buffer(
+                    parent.clone(),
+                    ParentRetention::Resident(ResidentGpuParentMaps::for_geometry_test(
+                        &context, parent,
+                    )),
+                    Some(flight.clone()),
+                    Some(reservation),
+                    encoder,
+                )
+                .unwrap();
+            let source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+                &context,
+                session.clone(),
+                flight.frame.clone(),
+                &picture_layout,
+                &uniforms,
+                &sampler,
+            );
+            let terminal = geometry
+                .submit_belts(
+                    &GpuSolverBeltPipeline::new(context.clone()).unwrap(),
+                    SourceTextures {
+                        a: &texture_a,
+                        b: &texture_b,
+                    },
+                    source,
+                )
+                .unwrap()
+                .prepare_motion(&motion)
+                .unwrap()
+                .submit_resident_warm(
+                    &front,
+                    &solver,
+                    &bridge,
+                    GpuL2Controls::resident(disparity, disparity),
+                    GpuL1Controls::resident(disparity, disparity),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("additional warm L2/L1 failed on {adapter}: {error}")
+                });
+            assert!(
+                terminal
+                    .post_for_test()
+                    .installed_prior_matches_for_test(&prior)
+            );
+            terminal
+        };
+
+        // A failing status planted on the exact warm L1 terminal must remain
+        // the same four-byte validity owner through post-L1 and final map. Its
+        // refusal rolls the pending root back without touching warm2.
+        let warm2_fingerprint = installed_warm2
+            .successor_fingerprint_for_test(&context)
+            .unwrap();
+        let invalid_terminal = prepare_additional_warm(74);
+        invalid_terminal
+            .inject_inherited_validity_for_test(0)
+            .unwrap();
+        let invalid_operands = invalid_terminal.complete_warm_final(&bridge).unwrap();
+        let mut invalid_pending = materializer.materialize_final(invalid_operands).unwrap();
+        let invalid_error = loop {
+            match invalid_pending.poll() {
+                Ok(crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Pending(
+                    pending,
+                )) => invalid_pending = pending,
+                Ok(crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Ready(_)) => {
+                    panic!("inherited invalid warm validity became installable")
+                }
+                Err(error) => break error,
+            }
+        };
+        assert!(invalid_error.to_string().contains("is not finite"));
+        let invalid_snapshot = capture.snapshot();
+        assert!(!invalid_snapshot.pending);
+        assert!(later_snapshot.same_ready(&invalid_snapshot));
+        assert!(Arc::ptr_eq(
+            later_snapshot.committed.as_ref().unwrap(),
+            invalid_snapshot.committed.as_ref().unwrap()
+        ));
+        assert_eq!(
+            installed_warm2
+                .successor_fingerprint_for_test(&context)
+                .unwrap(),
+            warm2_fingerprint,
+            "invalid inherited validity mutated its installed predecessor"
+        );
+
+        // Both successful installed draws still hold the two retirement
+        // permits. Drive another real warm frame all the way through post-L1,
+        // classification and final mapping, then prove atomic install refuses
+        // that fully materialized candidate and preserves warm2.
+        let full_terminal = prepare_additional_warm(75);
+        let full_operands = full_terminal.complete_warm_final(&bridge).unwrap();
+        let mut full_pending = materializer.materialize_final(full_operands).unwrap();
+        let full_ready = loop {
+            full_pending = match full_pending.poll().unwrap() {
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Pending(
+                    pending,
+                ) => pending,
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Ready(ready) => {
+                    break ready;
+                }
+            };
+        };
+        full_ready.assert_cpu_twin_for_test().unwrap();
+        full_ready
+            .assert_alpha_for_test(resources.alpha().bytes())
+            .unwrap();
+        let error = match crate::flow::one_xs_belt_gpu::prepare_resident_install(
+            full_ready,
+            Arc::clone(&direct),
+            &retirements,
+        ) {
+            Ok(_) => panic!("full retirement admitted a materialized warm install"),
             Err(error) => error,
         };
-        assert_eq!(error, crate::draw_retirement::DrawRetirementError::Full);
+        assert_eq!(error.to_string(), "ONE X2 draw retirement is full");
         let full_snapshot = capture.snapshot();
         assert!(!full_snapshot.pending);
-        assert!(pending_snapshot.same_ready(&full_snapshot));
+        assert!(later_snapshot.same_ready(&full_snapshot));
         assert!(Arc::ptr_eq(
-            pending_snapshot.committed.as_ref().unwrap(),
+            later_snapshot.committed.as_ref().unwrap(),
             full_snapshot.committed.as_ref().unwrap()
         ));
-        drop(held_permit);
+        assert_eq!(
+            installed_warm2
+                .successor_fingerprint_for_test(&context)
+                .unwrap(),
+            warm2_fingerprint,
+            "retirement-full warm candidate mutated its installed predecessor"
+        );
 
         let target = context.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("resident installed draw target"),
@@ -1475,12 +1747,13 @@ mod tests {
                 .unwrap();
             assert_eq!(retirements.poll().unwrap(), 1);
         };
-        draw_once(installed);
+        draw_once(warm_installed);
+        draw_once(later_installed);
         draw_once(capture.ready_for_draw(&retirements).unwrap().unwrap());
         let redraw_snapshot = capture.snapshot();
-        assert!(installed_snapshot.same_ready(&redraw_snapshot));
+        assert!(later_snapshot.same_ready(&redraw_snapshot));
         assert!(Arc::ptr_eq(
-            installed_snapshot.committed.as_ref().unwrap(),
+            later_snapshot.committed.as_ref().unwrap(),
             redraw_snapshot.committed.as_ref().unwrap()
         ));
 
@@ -1489,7 +1762,7 @@ mod tests {
         // before the candidate begins reservation rollback.
         let ready = capture.take_ready_for_drop_order_test(&retirements);
         let refusal = capture
-            .reserve(FrameStamp::for_test(73, Duration::from_millis(73), None))
+            .reserve(FrameStamp::for_test(76, Duration::from_millis(76), None))
             .unwrap();
         let next_references = context.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("resident drop-order successor"),

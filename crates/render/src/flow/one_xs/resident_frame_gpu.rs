@@ -46,7 +46,7 @@ pub(super) struct ResidentPostL1Storage {
 
 impl ResidentPostL1Storage {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn after_cold(
+    pub(super) fn new(
         public: wgpu::Buffer,
         retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
         histogram: wgpu::Buffer,
@@ -137,6 +137,86 @@ impl InstalledResidentPrior {
 
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn small_present(&self) -> bool {
         self.post_l1().small_present
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_warm_post_l1(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        terminal: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        motion_l1: &wgpu::Buffer,
+        histogram: &wgpu::Buffer,
+        fifo: &wgpu::Buffer,
+        hints: &wgpu::Buffer,
+        filtered: &wgpu::Buffer,
+        retained_l1: &wgpu::Buffer,
+        dense_l1: &wgpu::Buffer,
+        horizontal: &wgpu::Buffer,
+        public: &wgpu::Buffer,
+        quantized_values: &wgpu::Buffer,
+        retained_l2: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        let post = self.post_l1();
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 installed warm post-L1 owner"),
+            layout,
+            entries: &[
+                buffer_entry(0, terminal),
+                buffer_entry(1, images),
+                buffer_entry(3, histogram),
+                buffer_entry(4, fifo),
+                buffer_entry(5, &post.public),
+                buffer_entry(6, motion_l1),
+                buffer_entry(7, hints),
+                buffer_entry(9, filtered),
+                buffer_entry(10, retained_l1),
+                buffer_entry(11, dense_l1),
+                buffer_entry(12, horizontal),
+                buffer_entry(13, public),
+                buffer_entry(14, quantized_values),
+                buffer_entry(16, retained_l2),
+                buffer_entry(17, validity),
+            ],
+        })
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn encode_warm_history_copies(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        histogram: &wgpu::Buffer,
+        fifo: &wgpu::Buffer,
+    ) {
+        let post = self.post_l1();
+        encoder.copy_buffer_to_buffer(&post.histogram, 0, histogram, 0, post.histogram.size());
+        encoder.copy_buffer_to_buffer(&post.fifo, 0, fifo, 0, post.fifo.size());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_small_row_classifier(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        filtered: &wgpu::Buffer,
+        common_a_block_mask: &wgpu::Buffer,
+        config: &wgpu::Buffer,
+        candidates: &wgpu::Buffer,
+        rows: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 installed warm small-row owner"),
+            layout,
+            entries: &[
+                buffer_entry(0, filtered),
+                buffer_entry(1, common_a_block_mask),
+                buffer_entry(2, &self.post_l1().small_rows),
+                buffer_entry(3, config),
+                buffer_entry(4, candidates),
+                buffer_entry(5, rows),
+            ],
+        })
     }
 
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn encode_same_flight_lack_rows(
@@ -268,6 +348,47 @@ impl ResidentSuccessor {
     }
 
     #[cfg(test)]
+    pub(super) fn cadence_for_test(&self) -> [i32; 2] {
+        self.post_l1
+            .as_ref()
+            .expect("installed successor retains post-L1 state")
+            .cadence
+            .counts()
+    }
+
+    #[cfg(test)]
+    pub(super) fn calculation_for_test(&self) -> u8 {
+        self.post_l1
+            .as_ref()
+            .expect("installed successor retains post-L1 state")
+            .calculation
+    }
+
+    #[cfg(test)]
+    pub(super) fn successor_fingerprint_for_test(
+        &self,
+        context: &OneXsGpuContext,
+    ) -> Fallible<TestSuccessorFingerprint> {
+        let post = self
+            .post_l1
+            .as_ref()
+            .ok_or("installed successor has no post-L1 state")?;
+        Ok(TestSuccessorFingerprint {
+            motion_references: read_words(context, &self.motion_references)?,
+            public: read_words(context, &post.public)?,
+            retained_l2: read_words(context, post.retained_l2_direction_pixel_vec2.buffer())?,
+            histogram: read_words(context, &post.histogram)?,
+            fifo: read_words(context, &post.fifo)?,
+            hints: read_words(context, &post.hints)?,
+            lack_rows: read_words(context, &post.lack_rows)?,
+            small_rows: read_words(context, &post.small_rows)?,
+            small_present: post.small_present,
+            cadence: post.cadence.counts(),
+            calculation: post.calculation,
+        })
+    }
+
+    #[cfg(test)]
     pub(super) fn replace_installed_cadence_for_test(
         &mut self,
         cadence: GpuPairedCadence,
@@ -278,6 +399,58 @@ impl ResidentSuccessor {
             .cadence = cadence;
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct TestSuccessorFingerprint {
+    motion_references: Vec<u32>,
+    public: Vec<u32>,
+    retained_l2: Vec<u32>,
+    histogram: Vec<u32>,
+    fifo: Vec<u32>,
+    hints: Vec<u32>,
+    lack_rows: Vec<u32>,
+    small_rows: Vec<u32>,
+    small_present: bool,
+    cadence: [i32; 2],
+    calculation: u8,
+}
+
+#[cfg(test)]
+fn read_words(context: &OneXsGpuContext, source: &wgpu::Buffer) -> Fallible<Vec<u32>> {
+    use std::sync::mpsc;
+    let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ONE X2 installed post-L1 fingerprint"),
+        size: source.size(),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = context
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 installed post-L1 fingerprint"),
+        });
+    encoder.copy_buffer_to_buffer(source, 0, &readback, 0, source.size());
+    context.queue().submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    let (sender, receiver) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    context.device().poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    })?;
+    receiver.recv()??;
+    let bytes = slice.get_mapped_range();
+    let words = bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+        .collect();
+    drop(bytes);
+    readback.unmap();
+    Ok(words)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

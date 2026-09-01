@@ -584,6 +584,39 @@ impl<O: Operands> GpuPackedMapFrame<O> {
         })
     }
 
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn assert_cpu_twin_for_test(
+        &self,
+    ) -> Fallible<()> {
+        let diagnostic = self.diagnostic_readback()?;
+        let expected = materialize_words(&diagnostic.input)?;
+        compare_bits(diagnostic.packed.nodes(), &expected)
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn assert_alpha_for_test(
+        &self,
+        expected: &[u8],
+    ) -> Fallible<()> {
+        if expected.len() != ALPHA_BYTES {
+            return Err("ONE X2 final-map alpha oracle has the wrong byte count".into());
+        }
+        let actual = readback_u32(
+            self.context.device(),
+            self.context.queue(),
+            &self.statics.alpha,
+            ALPHA_BYTES as u64,
+        )?;
+        let expected = expected
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err("ONE X2 final-map alpha differs from its frozen CPU resource".into());
+        }
+        Ok(())
+    }
+
     /// Validate exact context and delivery identity, then build the two-buffer
     /// binding consumed by the existing direct type-2 Scene shader. No raw
     /// buffer leaves this module.
@@ -1167,6 +1200,65 @@ fn append_dynamic_side(words: &mut Vec<u32>, side: SideInputs<'_>) {
     append_f32x2_words(words, side.preimage.values());
     append_f32x2_words(words, side.base.values());
     append_f32x2_words(words, side.flow.values());
+}
+
+#[cfg(test)]
+fn materialize_words(words: &[u32]) -> Fallible<Vec<[f32; 4]>> {
+    if words.len() != INPUT_WORDS {
+        return Err("ONE X2 final-map CPU twin input has the wrong word count".into());
+    }
+    struct OwnedSide {
+        preimage: PreimageMap,
+        base: BaseMap,
+        flow: FlowMap,
+        gate: GateMap,
+        coordinate: CoordinateMap,
+    }
+    let vec2 = |start: usize, nodes: usize| {
+        words[start..start + 2 * nodes]
+            .chunks_exact(2)
+            .map(|pair| [f32::from_bits(pair[0]), f32::from_bits(pair[1])])
+            .collect::<Vec<_>>()
+    };
+    let scalar = |start: usize, nodes: usize| {
+        words[start..start + nodes]
+            .iter()
+            .map(|word| f32::from_bits(*word))
+            .collect::<Vec<_>>()
+    };
+    let side = |start: usize| -> Fallible<OwnedSide> {
+        let preimage = start;
+        let base = preimage + PREIMAGE_WORDS;
+        let flow = base + BASE_WORDS;
+        let gate = flow + FLOW_WORDS;
+        let coordinate = gate + GATE_WORDS;
+        Ok(OwnedSide {
+            preimage: PreimageMap::new(vec2(preimage, MAP_NODES))?,
+            base: BaseMap::new(vec2(base, RETAINED_NODES))?,
+            flow: FlowMap::new(vec2(flow, RETAINED_NODES))?,
+            gate: GateMap::new(scalar(gate, MAP_NODES))?,
+            coordinate: CoordinateMap::new(vec2(coordinate, MAP_NODES))?,
+        })
+    };
+    let left = side(0)?;
+    let right = side(SIDE_WORDS)?;
+    Ok(map_patch::materialize(BilateralInputs {
+        b_to_a: SideInputs {
+            preimage: &left.preimage,
+            base: &left.base,
+            flow: &left.flow,
+            gate: &left.gate,
+            coordinate: &left.coordinate,
+        },
+        a_to_b: SideInputs {
+            preimage: &right.preimage,
+            base: &right.base,
+            flow: &right.flow,
+            gate: &right.gate,
+            coordinate: &right.coordinate,
+        },
+    })
+    .packed)
 }
 
 #[cfg(test)]

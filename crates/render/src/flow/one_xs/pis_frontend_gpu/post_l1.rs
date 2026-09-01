@@ -2,25 +2,28 @@
 //!
 //! Each tail keeps the imported-frame lease, source owner, root reservation,
 //! validity allocation and temporal successor together. Cold2 constructs the
-//! typed completed-cold checkpoint; ordinary warm execution remains excluded.
+//! typed completed-cold checkpoint; the typed warm L1 terminal constructs the
+//! next complete resident successor and final-map operands.
 
 use std::num::NonZeroU64;
 
 use super::super::super::geometry_gpu::GpuGeometryFrameOwner;
 use super::super::{GpuPreparedTerminal, GpuResidentValidity, words_bytes};
-use super::{GpuL1PreparedTerminal, GpuResidentLevelTwoPost};
+use super::{GpuL1PreparedTerminal, GpuResidentLevelTwoPost, GpuWarmPostL1Successor};
 use crate::Fallible;
 use crate::direct_type2::ImportedOneXsPicture;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::one_xs_belt_gpu::geometry_gpu::temporal_gpu::{
     GpuColdPriorPublicLevelTwo, GpuMotionResidentL2Post, GpuPriorPublicLevelTwo,
+    GpuWarmPriorPublicLevelTwo,
 };
 use crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::resident;
 use crate::flow::one_xs::pis::Level;
 use crate::flow::one_xs::scalar::PairSolveStage;
 
 #[path = "post_l1/small_rows.rs"]
-mod small_rows;
+pub(super) mod small_rows;
+use small_rows::{GpuResidentSmallRows, GpuSmallRowInputOwner, GpuSmallRowPipeline};
 
 const L1_ROWS: usize = 540;
 const L1_COLS: usize = 30;
@@ -485,6 +488,378 @@ impl GpuWarmPostL1Paused<'_> {
             validity: self.validity,
             classified_rows,
         }
+    }
+}
+
+/// One exact imported warm terminal paused between temporal median and the
+/// mature-row classifier. The source carrier is declared before the pending
+/// root owner so drop and unwind always retire submitted source work first.
+#[must_use = "resident warm post-L1 must classify and submit its successor"]
+struct GpuWarmResidentPaused<'pipeline> {
+    terminal: Option<GpuPreparedTerminal<GpuGeometryFrameOwner<ImportedOneXsPicture>>>,
+    post: Option<GpuMotionResidentL2Post<GpuWarmPriorPublicLevelTwo>>,
+    pipeline: &'pipeline GpuWarmPostL1Pipeline,
+    root: crate::flow::one_xs_belt_gpu::resident_frame_gpu::GpuResidentIdentity,
+    encoder: Option<wgpu::CommandEncoder>,
+    bind: wgpu::BindGroup,
+    filtered: wgpu::Buffer,
+    histogram: wgpu::Buffer,
+    fifo: wgpu::Buffer,
+    hints: wgpu::Buffer,
+    retained_l1: wgpu::Buffer,
+    dense_l1: wgpu::Buffer,
+    horizontal: wgpu::Buffer,
+    public: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: super::RetainedL2DirectionPixelVec2Buffer,
+}
+
+impl small_rows::input_owner::Sealed for GpuWarmResidentPaused<'_> {}
+
+impl GpuSmallRowInputOwner for GpuWarmResidentPaused<'_> {
+    fn context(&self) -> &OneXsGpuContext {
+        &self
+            .terminal
+            .as_ref()
+            .expect("warm paused owner retains terminal")
+            .context
+    }
+
+    fn prior_present(&self) -> bool {
+        self.post
+            .as_ref()
+            .expect("warm paused owner retains post")
+            .prior_small_present()
+    }
+
+    fn pre_increment_counts(&self) -> [i32; 2] {
+        self.post
+            .as_ref()
+            .expect("warm paused owner retains post")
+            .prior_cadence_counts()
+    }
+
+    fn producer_flight(&self) -> &crate::flow::one_xs::pis::gpu::GpuPisFlight {
+        &self
+            .terminal
+            .as_ref()
+            .expect("warm paused owner retains terminal")
+            .receipt
+            .flight
+    }
+
+    fn capture_root(
+        &self,
+    ) -> &crate::flow::one_xs_belt_gpu::resident_frame_gpu::GpuResidentIdentity {
+        &self.root
+    }
+
+    fn bind_classifier(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        candidates: &wgpu::Buffer,
+        rows: &wgpu::Buffer,
+    ) -> Fallible<wgpu::BindGroup> {
+        let terminal = self
+            .terminal
+            .as_ref()
+            .ok_or("warm small-row owner lost its terminal")?;
+        let post = self
+            .post
+            .as_ref()
+            .ok_or("warm small-row owner lost its post state")?;
+        Ok(post.bind_small_row_classifier(
+            device,
+            layout,
+            &self.filtered,
+            &terminal.prepared.l1_block_mask,
+            config,
+            candidates,
+            rows,
+        ))
+    }
+}
+
+struct GpuWarmResidentEncoded<'pipeline> {
+    paused: GpuWarmResidentPaused<'pipeline>,
+    classified_rows: GpuResidentSmallRows,
+}
+
+impl GpuWarmPostL1Pipeline {
+    fn encode_resident(
+        &self,
+        input: GpuL1PreparedTerminal<
+            GpuGeometryFrameOwner<ImportedOneXsPicture>,
+            GpuMotionResidentL2Post<GpuWarmPriorPublicLevelTwo>,
+        >,
+    ) -> Fallible<GpuWarmResidentPaused<'_>> {
+        if input.ordinal.l1_stage() != (PairSolveStage::Warm { level: Level::One }) {
+            return Err("ONE X2 resident warm post-L1 ordinal is not its sealed successor".into());
+        }
+        self.context.ensure_same(&input.terminal.context)?;
+        self.context.ensure_same(input.post.context())?;
+        let root = input
+            .post
+            .resident_identity()?
+            .ok_or("resident warm post-L1 lost its capture root identity")?;
+        input
+            .terminal
+            .resident_validity
+            .as_ref()
+            .ok_or("resident warm post-L1 lost inherited validity")?
+            .ensure_identity(
+                &input.terminal.context,
+                &input.terminal.receipt.flight,
+                Some(&root),
+            )?;
+        let GpuL1PreparedTerminal {
+            terminal,
+            post,
+            ordinal: _,
+            #[cfg(test)]
+                l2_work_modes: _,
+        } = input;
+        for (part, resource, words) in [
+            ("paired L1 terminal", &terminal._output, PATCH_WORDS),
+            (
+                "prepared images",
+                &terminal.prepared.shared_images,
+                2 * (L1_ROWS * L1_COLS + L2_ROWS * L2_COLS),
+            ),
+            (
+                "common A-side block mask",
+                &terminal.prepared.l1_block_mask,
+                PATCHES,
+            ),
+            (
+                "resident validity",
+                &terminal
+                    .resident_validity
+                    .as_ref()
+                    .expect("checked resident warm validity")
+                    .buffer,
+                1,
+            ),
+        ] {
+            if resource.size() != words_bytes(words) {
+                return Err(format!(
+                    "ONE X2 warm post-L1 {part} buffer is {} bytes, expected {}",
+                    resource.size(),
+                    words_bytes(words)
+                )
+                .into());
+            }
+        }
+        let device = self.context.device();
+        let hints = buffer(device, "ONE X2 warm next planar hints", HINT_WORDS);
+        let filtered = buffer(device, "ONE X2 warm filtered patches", PATCH_WORDS);
+        let histogram = buffer(device, "ONE X2 warm successor histogram", HIST_WORDS);
+        let fifo = buffer(device, "ONE X2 warm successor FIFO", FIFO_WORDS);
+        let retained_l1 = buffer(device, "ONE X2 warm retained L1", L1_WORDS);
+        let dense_l1 = buffer(device, "ONE X2 warm dense L1", L1_WORDS);
+        let horizontal = buffer(
+            device,
+            "ONE X2 warm resize horizontal products",
+            HORIZONTAL_PRODUCT_WORDS,
+        );
+        let public = buffer(device, "ONE X2 warm public flow", PUBLIC_WORDS);
+        let retained_l2_direction_pixel_vec2 =
+            super::RetainedL2DirectionPixelVec2Buffer::new(buffer(
+                device,
+                "ONE X2 warm successor retained L2 direction-pixel-vec2",
+                RETAINED_L2_WORDS,
+            ));
+        let validity = &terminal
+            .resident_validity
+            .as_ref()
+            .expect("checked resident warm validity")
+            .buffer;
+        let bind = post.bind_warm_post_l1(
+            device,
+            &self.layout,
+            &terminal._output,
+            &terminal.prepared.shared_images,
+            &histogram,
+            &fifo,
+            &hints,
+            &filtered,
+            &retained_l1,
+            &dense_l1,
+            &horizontal,
+            &public,
+            &self.quantized_values,
+            retained_l2_direction_pixel_vec2.buffer(),
+            validity,
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 resident warm post-L1"),
+        });
+        post.encode_warm_history_copies(&mut encoder, &histogram, &fifo);
+        encoder.clear_buffer(&hints, 0, None);
+        dispatch(&mut encoder, &self.passes[0], &bind, 2 * L1_ROWS * L1_COLS);
+        dispatch(&mut encoder, &self.passes[1], &bind, 2 * L2_ROWS * L2_COLS);
+        dispatch(&mut encoder, &self.passes[2], &bind, 2 * PATCHES);
+        Ok(GpuWarmResidentPaused {
+            terminal: Some(terminal),
+            post: Some(post),
+            pipeline: self,
+            root,
+            encoder: Some(encoder),
+            bind,
+            filtered,
+            histogram,
+            fifo,
+            hints,
+            retained_l1,
+            dense_l1,
+            horizontal,
+            public,
+            retained_l2_direction_pixel_vec2,
+        })
+    }
+}
+
+impl<'pipeline> GpuWarmResidentPaused<'pipeline> {
+    fn classify(
+        mut self,
+        classifier: &GpuSmallRowPipeline,
+    ) -> Fallible<GpuWarmResidentEncoded<'pipeline>> {
+        let mut encoder = self
+            .encoder
+            .take()
+            .ok_or("resident warm post-L1 lost its command encoder")?;
+        let classified_rows = classifier.encode(&self, &mut encoder)?;
+        for (index, count) in [
+            (3, 2 * L1_ROWS * L1_COLS),
+            (4, 2 * L1_ROWS * L1_COLS),
+            (5, 2 * L1_ROWS * PUB_COLS * 2),
+            (6, 2 * PUB_ROWS * PUB_COLS * 2),
+            (7, 2 * 5 * PUB_COLS * 2),
+            (8, 2 * L2_ROWS * L2_COLS),
+        ] {
+            dispatch(
+                &mut encoder,
+                &self.pipeline.passes[index],
+                &self.bind,
+                count,
+            );
+        }
+        self.encoder = Some(encoder);
+        Ok(GpuWarmResidentEncoded {
+            paused: self,
+            classified_rows,
+        })
+    }
+}
+
+impl GpuWarmResidentEncoded<'_> {
+    fn finish(mut self) -> Fallible<GpuFinalOperands<GpuWarmPriorPublicLevelTwo>> {
+        let context = self.paused.pipeline.context.clone();
+        let flight = self
+            .paused
+            .terminal
+            .as_ref()
+            .ok_or("resident warm completion lost its terminal")?
+            .receipt
+            .flight
+            .clone();
+        self.classified_rows
+            .ensure_producer_identity(&context, &flight, &self.paused.root)?;
+        let command = self
+            .paused
+            .encoder
+            .take()
+            .ok_or("resident warm completion lost its command encoder")?
+            .finish();
+        self.paused
+            .terminal
+            .as_mut()
+            .ok_or("resident warm completion lost its terminal")?
+            .prepared
+            .belts
+            .lease
+            .submit_after(&context, |_| command)?;
+        let (small_rows, small_present) = self.classified_rows.into_successor_parts();
+        let public = self.paused.public.clone();
+        let state = GpuWarmPostL1Successor::new(
+            self.paused.public,
+            self.paused.retained_l2_direction_pixel_vec2,
+            self.paused.histogram,
+            self.paused.fifo,
+            self.paused.hints,
+            small_rows,
+            small_present,
+        );
+        self.paused
+            .post
+            .as_mut()
+            .ok_or("resident warm completion lost its post state")?
+            .attach_warm_successor(&context, &flight, state)?;
+        let mut terminal = self
+            .paused
+            .terminal
+            .take()
+            .ok_or("resident warm completion lost its terminal")?;
+        let validity = terminal
+            .resident_validity
+            .take()
+            .ok_or("resident warm completion lost inherited validity")?;
+        Ok(GpuFinalOperands {
+            prepared: terminal.prepared,
+            validity,
+            post: self
+                .paused
+                .post
+                .take()
+                .ok_or("resident warm completion lost its post state")?,
+            public,
+            context,
+            flight,
+        })
+    }
+}
+
+impl
+    GpuL1PreparedTerminal<
+        GpuGeometryFrameOwner<ImportedOneXsPicture>,
+        GpuMotionResidentL2Post<GpuWarmPriorPublicLevelTwo>,
+    >
+{
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn inject_inherited_validity_for_test(
+        &self,
+        word: u32,
+    ) -> Fallible<()> {
+        if word == u32::MAX {
+            return Err("test validity injection requires a failing status word".into());
+        }
+        let validity = self
+            .terminal
+            .resident_validity
+            .as_ref()
+            .ok_or("resident warm L1 terminal lost inherited validity")?;
+        validity.ensure_identity(
+            &self.terminal.context,
+            &self.terminal.receipt.flight,
+            self.post.resident_identity()?.as_ref(),
+        )?;
+        self.terminal
+            .context
+            .queue()
+            .write_buffer(&validity.buffer, 0, &word.to_ne_bytes());
+        Ok(())
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn complete_warm_final(
+        self,
+        bridge: &super::GpuL2PostPisBridge,
+    ) -> Fallible<GpuFinalOperands<GpuWarmPriorPublicLevelTwo>> {
+        bridge
+            .warm_post_l1
+            .encode_resident(self)?
+            .classify(&bridge.small_rows)?
+            .finish()
     }
 }
 

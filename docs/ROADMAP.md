@@ -3,6 +3,42 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Typed GPU-resident warm post-L1 join and atomic continuation, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
+NO SCENE, PERFORMANCE OR STUDIO-RE CLAIM]:** the exact warm L1 terminal now
+continues through all nine existing warm post-L1 arithmetic passes, bilateral
+small-row classification, generic final mapping and atomic resident install.
+One sealed consuming owner retains the original typed resident validity,
+imported source, capture root and source `SubmissionLease`; it appends post-L1
+and classification to one command encoder and submits once through that lease.
+No raw GPU buffer, second submission owner or queue submission crosses the
+join. The classifier binds the predecessor rows only through its complete
+purpose-specific operation, and only the joined tail can mint the opaque
+successor state consumed by attachment.
+
+The successor retains this call's lack rows, classified bilateral rows and
+their exact present/absent topology, public flow, retained L2, histogram,
+FIFO, hints, paired cadence after one call and the completed cold ordinal
+fixed at 3. Classification consumes predecessor pre-increment counts: the
+first warm after installed Cold2 materializes rows, and the later warm consumes
+that exact installed first-warm state. The installed predecessor is never
+written, and carrier fields continue to drop before root rollback.
+
+The focused forced-RADV production-chain regression runs real Cold0 through
+Cold2 install, first warm full post-L1/classifier/final-map/install and a later
+warm full chain/install. Both warm maps match the frozen CPU packed-map oracle
+bit for bit and the capture-static alpha byte for byte; those frame-sized
+copies remain test-only, while ordinary publication maps only the inherited
+four-byte validity word. Exact prior `Arc`, capture identity and source-lease
+continuity are asserted at each warm call. Opaque byte fingerprints covering
+motion references and every retained post-L1 allocation prove predecessor
+immutability. A failing word injected on the typed warm L1 terminal survives
+the join and refuses publication without changing ready state, and a fully
+materialized warm candidate refused by a full retirement queue likewise
+preserves the old committed successor and ready draw. Studio remains the
+frozen correctness oracle; no reverse engineering or optimization was
+performed.
+
 **Allocation-identical installed warm prior and temporal continuation,
 2026-09-01, implementation branch only [PRIVATE AND UNSELECTED; THROUGH WARM
 L1 TERMINAL ONLY; NO WARM POST-L1 JOIN, FINAL MAP, SCENE, PERFORMANCE OR

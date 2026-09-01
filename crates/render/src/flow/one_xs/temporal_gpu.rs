@@ -9,8 +9,8 @@
 use super::super::GpuBlurredBelts;
 use super::super::pis_frontend_gpu::{
     GpuCold0Terminal, GpuColdLoopControls, GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls,
-    GpuL2PostPisBridge, GpuPisFrontEnd, GpuResidentLevelTwoPost, GpuWorkModeBinding,
-    GpuWorkModePipeline, RetainedL2DirectionPixelVec2Buffer,
+    GpuL2PostPisBridge, GpuPisFrontEnd, GpuResidentLevelTwoPost, GpuWarmPostL1Successor,
+    GpuWorkModeBinding, GpuWorkModePipeline, RetainedL2DirectionPixelVec2Buffer,
 };
 use super::super::resident_frame_gpu::{
     GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, InstalledResidentPrior,
@@ -540,7 +540,7 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn attach_cold_successor(
         &mut self,
     ) -> Fallible<()> {
-        let storage = ResidentPostL1Storage::after_cold(
+        let storage = ResidentPostL1Storage::new(
             self.prior.public.clone(),
             self.prior.retained_l2_direction_pixel_vec2.clone(),
             self.prior.histogram.clone(),
@@ -835,6 +835,119 @@ impl<P: GpuPriorPublicLevelTwo> GpuResidentLevelTwoPost for GpuMotionResidentL2P
     ) -> Fallible<GpuWorkModeBinding> {
         self.prior
             .bind_work_mode_fill(pipeline, dynamic, current_l1_lack, level, flight)
+    }
+}
+
+impl GpuMotionResidentL2Post<GpuWarmPriorPublicLevelTwo> {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_warm_post_l1(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        terminal: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        histogram: &wgpu::Buffer,
+        fifo: &wgpu::Buffer,
+        hints: &wgpu::Buffer,
+        filtered: &wgpu::Buffer,
+        retained_l1: &wgpu::Buffer,
+        dense_l1: &wgpu::Buffer,
+        horizontal: &wgpu::Buffer,
+        public: &wgpu::Buffer,
+        quantized_values: &wgpu::Buffer,
+        retained_l2: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.prior.prior.bind_warm_post_l1(
+            device,
+            layout,
+            terminal,
+            images,
+            &self.motion.level_one,
+            histogram,
+            fifo,
+            hints,
+            filtered,
+            retained_l1,
+            dense_l1,
+            horizontal,
+            public,
+            quantized_values,
+            retained_l2,
+            validity,
+        )
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn encode_warm_history_copies(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        histogram: &wgpu::Buffer,
+        fifo: &wgpu::Buffer,
+    ) {
+        self.prior
+            .prior
+            .encode_warm_history_copies(encoder, histogram, fifo);
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prior_small_present(&self) -> bool {
+        self.prior.prior.small_present()
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prior_cadence_counts(&self) -> [i32; 2] {
+        self.prior.prior.cadence().counts()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_small_row_classifier(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        filtered: &wgpu::Buffer,
+        common_a_block_mask: &wgpu::Buffer,
+        config: &wgpu::Buffer,
+        candidates: &wgpu::Buffer,
+        rows: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.prior.prior.bind_small_row_classifier(
+            device,
+            layout,
+            filtered,
+            common_a_block_mask,
+            config,
+            candidates,
+            rows,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn attach_warm_successor(
+        &mut self,
+        context: &OneXsGpuContext,
+        flight: &GpuPisFlight,
+        state: GpuWarmPostL1Successor,
+    ) -> Fallible<()> {
+        context.ensure_same(self.context())?;
+        let reservation = self
+            .motion
+            .reservation
+            .as_ref()
+            .ok_or("resident warm post-L1 lost its root reservation")?;
+        if reservation.flight() != flight {
+            return Err("resident warm post-L1 successor names another flight".into());
+        }
+        if self.prior.prior.calculation() != 3 {
+            return Err("resident warm post-L1 predecessor did not complete Cold2".into());
+        }
+        let storage = state.into_resident_storage(
+            self.prior.work_lack_rows.clone(),
+            self.prior.prior.cadence().after_call(),
+        );
+        self.motion
+            .successor
+            .as_mut()
+            .ok_or("resident warm post-L1 lost its motion successor")?
+            .attach_post_l1(storage)
+            .map_err(|error| error.to_string().into())
     }
 }
 
@@ -1623,7 +1736,7 @@ mod tests {
             public_words * size_of::<u32>(),
         );
         successor
-            .attach_post_l1(ResidentPostL1Storage::after_cold(
+            .attach_post_l1(ResidentPostL1Storage::new(
                 public.clone(),
                 RetainedL2DirectionPixelVec2Buffer::new(buffer(
                     context.device(),
