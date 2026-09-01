@@ -17,9 +17,12 @@ mappable buffer and performs no readback or device poll; the CPU oracle and
 diagnostic copies are test-only. The forced-RADV focused gate matches every
 packed component bit, preserves the accepted arithmetic/order, rejects foreign
 structural contexts and frame identities, and refuses all 20 accepted live
-shader mutations. The remaining seam is the post-L1 resident producer's
-implementation of the sealed operand copier and single-lease submit method;
-there is deliberately no second context, lease or CPU reconstruction route.
+shader mutations. The materializer is now a private child of the resident belt
+owner, so no flow sibling can name its operand copier, raw command or buffer
+details, materializer, binding or output token. The remaining seam is the
+post-L1 resident producer's implementation of the owner-private sealed operand
+copier and single-lease submit method; there is deliberately no second context,
+lease or CPU reconstruction route.
 
 The authenticated receipt in
 `docs/research/gpu-final-map-context-qualification.md` binds clean code commit
@@ -45,6 +48,17 @@ submission index is exposed or caller-assembled. The returned opaque terminal
 retains the exact flight, `PairSolveStage`, shared GPU-context identity, output buffer and
 same non-cloneable frame owner; chaining consumes it back into that same frame,
 while explicit terminal acknowledgement waits for the latest lease once.
+The producer boundary is sealed as the same aggregate: `GpuBlurredBelts` has
+no crate-visible packed-buffer, flight, generic submission or early-completion
+hook. Its only front-end transition consumes the whole token, refuses a
+foreign context before allocation, binding, encoding or submission, advances
+the inherited lease to the exact front-end command, and moves the whole opaque
+producer token inside `GpuPreparedFrame`. The frontend is a private child of
+the belt owner, so no sibling module can name a bridge object or receive a raw
+buffer, command, context, flight, lease, or completion operation. Foreign front-end and PIS regressions
+leave both device validation scopes clean and prove the source owner waits the
+latest valid fence; independently recreated front-end and PIS pipelines on the
+same structural device/queue pair remain accepted.
 
 Only cost modes, initial grids, optional hints, descent admission and the
 selected disparity interval are uploaded per stage. Images, physical masks,

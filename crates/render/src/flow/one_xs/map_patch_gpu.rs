@@ -16,9 +16,9 @@ use std::sync::mpsc;
 
 use kjerag_media::FrameStamp;
 
-use super::gpu_context::OneXsGpuContext;
+use super::super::gpu_context::OneXsGpuContext;
 #[cfg(test)]
-use super::map_patch::{
+use super::super::map_patch::{
     self, BaseMap, BilateralInputs, CoordinateMap, FlowMap, GateMap, PreimageMap, SideInputs,
 };
 use crate::Fallible;
@@ -28,7 +28,7 @@ use crate::studio_type2::{MAP_NODES, PACKED_BYTES};
 
 const SHADER: &str = include_str!("map_patch_gpu.wgsl");
 const WORKGROUP_SIZE: u32 = 64;
-const RETAINED_NODES: usize = super::ROWS * super::COLS;
+const RETAINED_NODES: usize = super::super::ROWS * super::super::COLS;
 const INPUT_WORDS: usize =
     2 * (MAP_NODES * 2 + RETAINED_NODES * 2 + RETAINED_NODES * 2 + MAP_NODES + MAP_NODES * 2);
 const INPUT_BYTES: u64 = (INPUT_WORDS * size_of::<u32>()) as u64;
@@ -42,9 +42,11 @@ const ACTION_BYTES: u64 = (MAP_NODES * 2 * size_of::<u32>()) as u64;
 pub(super) mod resident {
     use super::*;
 
-    pub(in crate::flow::one_xs) trait Sealed {}
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) trait Sealed {}
 
-    pub(in crate::flow::one_xs) trait Operands: Sealed + Sized {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) trait Operands:
+        Sealed + Sized
+    {
         fn context(&self) -> &OneXsGpuContext;
         fn frame(&self) -> &FrameStamp;
         fn alpha_binding(&self) -> wgpu::BufferBinding<'_>;
@@ -260,14 +262,14 @@ impl std::fmt::Display for QualificationError {
 impl std::error::Error for QualificationError {}
 
 /// Render-private, unselected final-map compute pipeline.
-pub(crate) struct GpuMapMaterializer {
+pub(super) struct GpuMapMaterializer {
     context: OneXsGpuContext,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
 impl GpuMapMaterializer {
-    pub(crate) fn new(context: OneXsGpuContext) -> Self {
+    pub(super) fn new(context: OneXsGpuContext) -> Self {
         Self::from_shader(context, SHADER)
     }
 
@@ -576,11 +578,11 @@ impl resident::Operands for TestResidentOperands {
 
 #[cfg(test)]
 struct QualificationFixture {
-    preimage: super::LensPair<PreimageMap>,
-    base: super::LensPair<BaseMap>,
-    flow: super::LensPair<FlowMap>,
-    gate: super::LensPair<GateMap>,
-    coordinate: super::LensPair<CoordinateMap>,
+    preimage: super::super::LensPair<PreimageMap>,
+    base: super::super::LensPair<BaseMap>,
+    flow: super::super::LensPair<FlowMap>,
+    gate: super::super::LensPair<GateMap>,
+    coordinate: super::super::LensPair<CoordinateMap>,
     coverage: Vec<CoverageExpectation>,
 }
 
@@ -600,23 +602,23 @@ impl QualificationFixture {
         right.preimage[0][0] = f32::from_bits(0xbf7f_ffff);
 
         Self {
-            preimage: super::LensPair {
+            preimage: super::super::LensPair {
                 a: PreimageMap::new(left.preimage).unwrap(),
                 b: PreimageMap::new(right.preimage).unwrap(),
             },
-            base: super::LensPair {
+            base: super::super::LensPair {
                 a: BaseMap::new(left.base).unwrap(),
                 b: BaseMap::new(right.base).unwrap(),
             },
-            flow: super::LensPair {
+            flow: super::super::LensPair {
                 a: FlowMap::new(left.flow).unwrap(),
                 b: FlowMap::new(right.flow).unwrap(),
             },
-            gate: super::LensPair {
+            gate: super::super::LensPair {
                 a: GateMap::new(left.gate).unwrap(),
                 b: GateMap::new(right.gate).unwrap(),
             },
-            coordinate: super::LensPair {
+            coordinate: super::super::LensPair {
                 a: CoordinateMap::new(left.coordinate).unwrap(),
                 b: CoordinateMap::new(right.coordinate).unwrap(),
             },
@@ -747,8 +749,8 @@ fn qualification_values(seed: u32) -> RawSide {
         .collect::<Vec<_>>();
     let base = (0..map_patch::RETAINED_NODES)
         .map(|node| {
-            let row = node / super::COLS;
-            let col = node % super::COLS;
+            let row = node / super::super::COLS;
+            let col = node % super::super::COLS;
             [
                 0.125 + col as f32 * 0.0078125 + seed as f32 * 0.000_976_562_5,
                 0.25 + (row % 97) as f32 * 0.00390625 + seed as f32 * 0.001_953_125,
@@ -775,8 +777,8 @@ fn qualification_values(seed: u32) -> RawSide {
         .collect::<Vec<_>>();
     let coordinate = (0..map_patch::OUTPUT_NODES)
         .map(|node| {
-            let col = ((node * 37 + seed as usize * 11) % (super::COLS - 2)) as f32;
-            let row = ((node * 53 + seed as usize * 101) % (super::ROWS - 2)) as f32;
+            let col = ((node * 37 + seed as usize * 11) % (super::super::COLS - 2)) as f32;
+            let row = ((node * 53 + seed as usize * 101) % (super::super::ROWS - 2)) as f32;
             [col + 0.371_093_75, row + 0.613_281_25]
         })
         .collect::<Vec<_>>();
@@ -1005,10 +1007,10 @@ fn plant_quad(
     taps: [[f32; 2]; 4],
 ) {
     let indices = [
-        row * super::COLS + col,
-        row * super::COLS + col + 1,
-        (row + 1) * super::COLS + col,
-        (row + 1) * super::COLS + col + 1,
+        row * super::super::COLS + col,
+        row * super::super::COLS + col + 1,
+        (row + 1) * super::super::COLS + col,
+        (row + 1) * super::super::COLS + col + 1,
     ];
     side.gate[node] = 0.5;
     side.coordinate[node] = [col as f32 + fraction[0], row as f32 + fraction[1]];

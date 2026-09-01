@@ -1,7 +1,7 @@
 //! GPU sampling and reduction for selected ONE X2 solver inputs.
 //!
-//! This is the GPU-shaped equivalent of [`super::one_xs_belt::sample_source_belts`]
-//! followed by [`SourceBelts::reduce_area_3x3`](super::one_xs_belt::SourceBelts::reduce_area_3x3)
+//! This is the GPU-shaped equivalent of [`crate::flow::one_xs_belt::sample_source_belts`]
+//! followed by [`SourceBelts::reduce_area_3x3`](crate::flow::one_xs_belt::SourceBelts::reduce_area_3x3)
 //! and Studio's selected 5-by-5 input Gaussian. Production playback consumes
 //! its compact post-blur readback at the CPU estimator boundary. Horizontal
 //! Q7 sums retain one u32 per logical byte; the vertical pass rounds, packs
@@ -12,12 +12,25 @@
 use std::sync::mpsc;
 use std::{error::Error, fmt};
 
-use super::one_xs::gpu_context::OneXsGpuContext;
-use super::one_xs::pis::gpu::GpuPisFlight;
-use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
-use super::one_xs::{Lens, LensPair};
-use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
+use super::gpu_context::OneXsGpuContext;
+use super::pis::gpu::GpuPisFlight;
+use super::temporal::{BlurredBelts, gaussian_blur};
+use super::{Lens, LensPair};
 use crate::Fallible;
+use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
+
+/// Resident PIS preparation is nested under the belt owner so its only
+/// boundary can consume the whole private producer token atomically.
+#[path = "one_xs/pis_frontend_gpu.rs"]
+#[allow(dead_code)]
+pub(crate) mod pis_frontend_gpu;
+
+/// Device-resident final bilateral-map materializer.
+///
+/// Its input boundary stays inside this private resident owner. Scene does not
+/// consume the resulting opaque map token yet.
+#[path = "one_xs/map_patch_gpu.rs"]
+mod map_patch_gpu;
 
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
@@ -26,7 +39,7 @@ const HORIZONTAL_BYTES: u64 = SolverBelts::BYTES as u64 * size_of::<u32>() as u6
 const WITNESS_BYTES: u64 = 2 * size_of::<u32>() as u64;
 const WORKGROUP_SIZE: u32 = 64;
 const _: () = assert!(SolverBelts::BYTES.is_multiple_of(CODES_PER_WORD));
-const _: () = assert!(super::one_xs::COLS.is_multiple_of(CODES_PER_WORD));
+const _: () = assert!(super::COLS.is_multiple_of(CODES_PER_WORD));
 const _: () = assert!(RetainedBaseMaps::NODES_PER_LENS.is_multiple_of(CODES_PER_WORD));
 
 const QUALIFICATION_A_ROWS: usize = 127;
@@ -132,8 +145,8 @@ fn qualification_fixture() -> QualificationFixture {
     let map = |lens: Lens| {
         (0..RetainedBaseMaps::NODES_PER_LENS)
             .map(|index| {
-                let row = index / super::one_xs::COLS;
-                let col = index % super::one_xs::COLS;
+                let row = index / super::COLS;
+                let col = index % super::COLS;
                 let selector = (31 * row + 47 * col + lens.index()) % 997;
                 match selector {
                     0 => [0.0, 0.5],
@@ -172,7 +185,7 @@ fn qualification_fixture() -> QualificationFixture {
     ];
     for dr in 0..2 {
         for dc in 0..2 {
-            a[(1 + dr) * super::one_xs::COLS + 47 + dc] = retained_fma_quad[dr][dc];
+            a[(1 + dr) * super::COLS + 47 + dc] = retained_fma_quad[dr][dc];
         }
     }
     let fma_uv = [
@@ -181,7 +194,7 @@ fn qualification_fixture() -> QualificationFixture {
     ];
     for row in 10..=11 {
         for col in 10..=11 {
-            a[row * super::one_xs::COLS + col] = fma_uv;
+            a[row * super::COLS + col] = fma_uv;
         }
     }
     let maps = RetainedBaseMaps::from_lenses(LensPair { a, b })
@@ -209,27 +222,27 @@ fn qualification_fixture() -> QualificationFixture {
 /// wide set of final Q14 rounding residues rather than relying on the sampled
 /// source fixture to happen to cover them.
 fn blur_qualification_fixture() -> SolverBelts {
-    let centre = (super::one_xs::ROWS / 2, super::one_xs::COLS / 2);
+    let centre = (super::ROWS / 2, super::COLS / 2);
     SolverBelts::from_fn(|lens, row, col| {
         let in_box = |at: (usize, usize), radius: usize| {
             row.abs_diff(at.0) <= radius && col.abs_diff(at.1) <= radius
         };
         match lens {
             Lens::A if in_box((0, 0), 3) => u8::from(row == 0 && col == 0) * 255,
-            Lens::A if in_box((0, super::one_xs::COLS / 2), 3) => {
-                u8::from(row == 0 && col == super::one_xs::COLS / 2) * 173
+            Lens::A if in_box((0, super::COLS / 2), 3) => {
+                u8::from(row == 0 && col == super::COLS / 2) * 173
             }
             Lens::A if in_box(centre, 3) => u8::from((row, col) == centre) * 255,
-            Lens::A if row >= super::one_xs::ROWS - 5 && col >= super::one_xs::COLS - 5 => 11,
+            Lens::A if row >= super::ROWS - 5 && col >= super::COLS - 5 => 11,
             Lens::B if row < 5 && col < 5 => 241,
-            Lens::B if row >= super::one_xs::ROWS - 4 && col >= super::one_xs::COLS - 4 => {
-                u8::from(row == super::one_xs::ROWS - 1 && col == super::one_xs::COLS - 1) * 199
+            Lens::B if row >= super::ROWS - 4 && col >= super::COLS - 4 => {
+                u8::from(row == super::ROWS - 1 && col == super::COLS - 1) * 199
             }
             _ if row < 32 => u8::from((row + col + lens.index()).is_multiple_of(2)) * 255,
             _ if row < 96 => ((5 * row + 17 * col + 31 * lens.index()) % 256) as u8,
             _ if row < 128 => 137 + lens.index() as u8 * 41,
             _ => {
-                let mut value = (row * super::one_xs::COLS + col) as u32
+                let mut value = (row * super::COLS + col) as u32
                     ^ (0x9e37_79b9u32.wrapping_mul(lens.index() as u32 + 1));
                 value ^= value >> 16;
                 value = value.wrapping_mul(0x7feb_352d);
@@ -464,8 +477,8 @@ impl GpuSolverBeltPipeline {
                 Lens::B
             };
             let local = index % RetainedBaseMaps::NODES_PER_LENS;
-            let row = local / super::one_xs::COLS;
-            let col = local % super::one_xs::COLS;
+            let row = local / super::COLS;
+            let col = local % super::COLS;
             return Err(GpuQualificationError::SolverByte {
                 lens,
                 row,
@@ -495,8 +508,8 @@ impl GpuSolverBeltPipeline {
                 Lens::B
             };
             let local = index % RetainedBaseMaps::NODES_PER_LENS;
-            let row = local / super::one_xs::COLS;
-            let col = local % super::one_xs::COLS;
+            let row = local / super::COLS;
+            let col = local % super::COLS;
             return Err(GpuQualificationError::BlurredByte {
                 lens,
                 row,
@@ -532,8 +545,8 @@ impl GpuSolverBeltPipeline {
                 Lens::B
             };
             let local = index % RetainedBaseMaps::NODES_PER_LENS;
-            let row = local / super::one_xs::COLS;
-            let col = local % super::one_xs::COLS;
+            let row = local / super::COLS;
+            let col = local % super::COLS;
             return Err(GpuQualificationError::BlurredByte {
                 lens,
                 row,
@@ -1111,38 +1124,6 @@ pub(crate) struct GpuBlurredBelts<K> {
 }
 
 impl<K> GpuBlurredBelts<K> {
-    pub(crate) fn take_flight(&mut self) -> GpuPisFlight {
-        self.flight
-            .take()
-            .expect("GPU-resident belts transfer their flight exactly once")
-    }
-
-    pub(crate) fn packed(&self) -> &wgpu::Buffer {
-        &self.packed
-    }
-
-    pub(crate) fn validate_provenance(&self, context: &OneXsGpuContext) -> Fallible<()> {
-        self.lease.validate_provenance(context)
-    }
-
-    /// Submit the concrete prepared-source transition on the lease's exact
-    /// queue and replace its completion fence with that later submission.
-    /// No caller can provide, omit or regress a detached submission index.
-    pub(crate) fn submit_front_end<F>(
-        &mut self,
-        context: &OneXsGpuContext,
-        encode: F,
-    ) -> Fallible<()>
-    where
-        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
-    {
-        self.lease.submit_after(context, encode)
-    }
-
-    pub(crate) fn complete(&mut self) -> Fallible<()> {
-        self.lease.complete()
-    }
-
     #[cfg(test)]
     pub(crate) fn observe_completion(
         &mut self,
@@ -1654,6 +1635,55 @@ mod tests {
     }
 
     #[test]
+    fn submission_lease_accepts_cloned_pair_and_refuses_foreign_pair_before_encoding() {
+        let ((device, queue), (foreign_device, foreign_queue)) = match two_gpu_pairs() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping ONE X2 GPU context identity: {why}");
+                return;
+            }
+            Err(why) => panic!("Vulkan GPU required for ONE X2 context identity: {why}"),
+        };
+        assert_ne!(
+            device, foreign_device,
+            "same-instance requests reused one device handle"
+        );
+        let context = OneXsGpuContext::new(&device, &queue);
+        let cloned = OneXsGpuContext::new(&device, &queue);
+        context.ensure_same(&cloned).unwrap();
+        let first = queue.submit(std::iter::empty());
+        let mut lease = SubmissionLease::new(context.clone(), first, ());
+        let encoded = Arc::new(AtomicU8::new(0));
+        let foreign = OneXsGpuContext::new(&foreign_device, &foreign_queue);
+        let encoded_by_foreign = Arc::clone(&encoded);
+        let error = lease
+            .submit_after(&foreign, move |_| {
+                encoded_by_foreign.fetch_add(1, Ordering::SeqCst);
+                panic!("foreign ONE X2 context reached command encoding")
+            })
+            .expect_err("foreign ONE X2 context was accepted");
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 GPU submission crossed a different device or queue"
+        );
+        assert_eq!(
+            encoded.load(Ordering::SeqCst),
+            0,
+            "foreign context encoded work"
+        );
+        lease
+            .submit_after(&cloned, |device| {
+                device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("ONE X2 cloned-context acceptance"),
+                    })
+                    .finish()
+            })
+            .unwrap();
+        lease.complete().unwrap();
+    }
+
+    #[test]
     fn gpu_solver_belts_are_byte_exact_on_adversarial_odd_padded_sources() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -1731,25 +1761,17 @@ mod tests {
         let input = blur_qualification_fixture();
         assert_eq!(input.pixel(Lens::A, 0, 0), 255, "corner impulse");
         assert_eq!(
-            input.pixel(Lens::A, 0, super::super::one_xs::COLS / 2),
+            input.pixel(Lens::A, 0, super::super::COLS / 2),
             173,
             "edge impulse"
         );
         assert_eq!(
-            input.pixel(
-                Lens::A,
-                super::super::one_xs::ROWS / 2,
-                super::super::one_xs::COLS / 2,
-            ),
+            input.pixel(Lens::A, super::super::ROWS / 2, super::super::COLS / 2,),
             255,
             "centre impulse"
         );
         assert_eq!(
-            input.pixel(
-                Lens::A,
-                super::super::one_xs::ROWS - 1,
-                super::super::one_xs::COLS - 1,
-            ),
+            input.pixel(Lens::A, super::super::ROWS - 1, super::super::COLS - 1,),
             11,
             "lens A storage boundary"
         );
@@ -1927,5 +1949,31 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         Ok((device, queue, name))
+    }
+
+    type GpuPair = (wgpu::Device, wgpu::Queue);
+
+    fn two_gpu_pairs() -> Result<(GpuPair, GpuPair), String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .next()
+            .ok_or("no Vulkan adapter")?;
+        let request = |label| {
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some(label),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+            .map_err(|error| error.to_string())
+        };
+        Ok((
+            request("exact ONE X2 primary GPU context")?,
+            request("exact ONE X2 foreign GPU context")?,
+        ))
     }
 }

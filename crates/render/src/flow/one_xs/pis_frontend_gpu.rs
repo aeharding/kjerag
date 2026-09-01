@@ -9,13 +9,15 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
-use super::gpu_context::OneXsGpuContext;
-use super::pis::gpu::{GpuPisDynamicStage, GpuPisFlight, GpuPisPipeline, GpuPisStageReceipt};
-use super::pis::{AtoB, BtoA, Level, PisDirection};
-use super::scalar::{ColdInputs, LevelInputs, MaskPyramid};
-use super::temporal::BlurredBelts;
-use super::{COLS, Direction, LensPair, ROWS};
 use crate::Fallible;
+use crate::flow::one_xs::gpu_context::OneXsGpuContext;
+use crate::flow::one_xs::pis::gpu::{
+    GpuPisDynamicStage, GpuPisFlight, GpuPisPipeline, GpuPisStageReceipt,
+};
+use crate::flow::one_xs::pis::{AtoB, BtoA, Level, PisDirection};
+use crate::flow::one_xs::scalar::{ColdInputs, LevelInputs, MaskPyramid, PairSolveStage};
+use crate::flow::one_xs::temporal::BlurredBelts;
+use crate::flow::one_xs::{COLS, Direction, LensPair, ROWS};
 use crate::flow::one_xs_belt::SolverBelts;
 use crate::flow::one_xs_belt_gpu::GpuBlurredBelts;
 
@@ -207,7 +209,7 @@ pub(crate) struct GpuPreparedFrame<K> {
 ///
 /// It contains no prepared buffer, base, flight, queue or submission handle.
 pub(crate) struct PreparedPisDispatch<'a> {
-    pub(crate) stage: super::scalar::PairSolveStage,
+    pub(crate) stage: PairSolveStage,
     pub(crate) pipeline: &'a wgpu::ComputePipeline,
     pub(crate) layout: &'a wgpu::BindGroupLayout,
     pub(crate) u32s: Vec<u32>,
@@ -263,7 +265,8 @@ impl<K> GpuPreparedTerminal<K> {
         encoder.copy_buffer_to_buffer(&self._output, 0, &readback, 0, words_bytes(words));
         self.prepared
             .belts
-            .submit_front_end(&self.prepared.context, |_| encoder.finish())?;
+            .lease
+            .submit_after(&self.prepared.context, |_| encoder.finish())?;
         let slice = readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -394,7 +397,8 @@ impl<K> GpuPreparedFrame<K> {
             pass.dispatch_workgroups(2, 1, 1);
         }
         self.belts
-            .submit_front_end(&self.context, |_| encoder.finish())?;
+            .lease
+            .submit_after(&self.context, |_| encoder.finish())?;
         Ok(GpuPreparedTerminal {
             receipt: GpuPisStageReceipt {
                 flight,
@@ -412,13 +416,8 @@ impl<K> GpuPreparedFrame<K> {
     /// Success proves the latest same-queue consumer and every earlier stage,
     /// releases the imported source owner once and disarms cancellation Drop.
     pub(crate) fn acknowledge_terminal(mut self) -> Fallible<()> {
-        self.belts.validate_provenance(&self.context)?;
-        self.belts.complete()
-    }
-
-    #[cfg(test)]
-    fn observe_completion(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
-        self.belts.observe_completion(state);
+        self.belts.lease.validate_provenance(&self.context)?;
+        self.belts.lease.complete()
     }
 
     #[cfg(test)]
@@ -580,17 +579,19 @@ impl GpuPisFrontEnd {
         mut belts: GpuBlurredBelts<K>,
         physical_masks: &LensPair<Vec<u8>>,
     ) -> Fallible<GpuPreparedFrame<K>> {
-        belts.validate_provenance(&self.context)?;
+        belts.lease.validate_provenance(&self.context)?;
         validate_masks(physical_masks)?;
         let device = self.context.device();
         let queue = self.context.queue();
         let mask = upload_masks(device, queue, physical_masks);
         let outputs = OutputBuffers::new(device);
-        let resources = self.resources(device, belts.packed(), &mask, &outputs);
-        belts.submit_front_end(&self.context, |device| {
-            self.encode_command(device, &resources)
-        })?;
-        let flight = belts.take_flight();
+        let resources = self.resources(device, &belts.packed, &mask, &outputs);
+        let command = self.encode_command(device, &resources);
+        belts.lease.submit_after(&self.context, |_| command)?;
+        let flight = belts
+            .flight
+            .take()
+            .expect("GPU-resident belts transfer their flight exactly once");
         Ok(GpuPreparedFrame {
             context: self.context.clone(),
             flight,
@@ -607,7 +608,9 @@ impl GpuPisFrontEnd {
             belts,
         })
     }
+}
 
+impl GpuPisFrontEnd {
     fn resources(
         &self,
         device: &wgpu::Device,
@@ -1708,6 +1711,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sealed_front_end_refuses_foreign_context_before_gpu_work_and_waits_owner() {
+        let ((device, queue), (foreign_device, foreign_queue), adapter) = match gpu_pairs() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping foreign prepared-source context: {why}");
+                return;
+            }
+            Err(why) => panic!("Vulkan GPU required for foreign prepared-source context: {why}"),
+        };
+        let foreign_front =
+            GpuPisFrontEnd::new(OneXsGpuContext::new(&foreign_device, &foreign_queue))
+                .unwrap_or_else(|error| panic!("foreign front end failed on {adapter}: {error}"));
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let (mut belts, _) = resident_qualification_fixture(
+            &device,
+            &queue,
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            GpuPisFlight {
+                generation: 37,
+                frame: FrameStamp::for_test(43, Duration::ZERO, None),
+            },
+        )
+        .unwrap();
+        belts.observe_completion(Arc::clone(&state));
+        let source_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let foreign_scope = foreign_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error = match foreign_front.prepare(belts, &qualification_fixture().1) {
+            Ok(_) => panic!("foreign front end accepted a producer token"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("different device or queue"),
+            "wrong foreign-context refusal: {error}"
+        );
+        assert!(block_on(source_scope.pop()).is_none());
+        assert!(block_on(foreign_scope.pop()).is_none());
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        assert_eq!(answer.recv().unwrap(), 2, "owner preceded producer fence");
+    }
+
+    #[test]
+    fn sealed_prepared_frame_refuses_foreign_pis_before_gpu_work() {
+        let ((device, queue), (foreign_device, foreign_queue), adapter) = match gpu_pairs() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping foreign prepared-frame context: {why}");
+                return;
+            }
+            Err(why) => panic!("Vulkan GPU required for foreign prepared-frame context: {why}"),
+        };
+        let front = GpuPisFrontEnd::new(OneXsGpuContext::new(&device, &queue)).unwrap();
+        let foreign_pis = GpuPisPipeline::from_shader_for_direct_test(
+            OneXsGpuContext::new(&foreign_device, &foreign_queue),
+            DIRECT_TEST_SHADER,
+        )
+        .unwrap_or_else(|error| panic!("foreign PIS failed on {adapter}: {error}"));
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let (mut belts, blurred) = resident_qualification_fixture(
+            &device,
+            &queue,
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            GpuPisFlight {
+                generation: 39,
+                frame: FrameStamp::for_test(47, Duration::ZERO, None),
+            },
+        )
+        .unwrap();
+        belts.observe_completion(Arc::clone(&state));
+        let masks = qualification_fixture().1;
+        let frame = front.prepare(belts, &masks).unwrap();
+        let dynamic = no_patch_dynamic(&blurred, &masks, 91);
+        let source_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let foreign_scope = foreign_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error = match frame.submit_pis_stage(&foreign_pis, dynamic) {
+            Ok(_) => panic!("foreign PIS accepted a prepared frame"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("different device or queue"),
+            "wrong foreign-PIS refusal: {error}"
+        );
+        assert!(block_on(source_scope.pop()).is_none());
+        assert!(block_on(foreign_scope.pop()).is_none());
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        assert_eq!(answer.recv().unwrap(), 2, "owner preceded front-end fence");
+    }
+
+    fn no_patch_dynamic(
+        blurred: &BlurredBelts,
+        masks: &LensPair<Vec<u8>>,
+        calculation: usize,
+    ) -> GpuPisDynamicStage {
+        let retained = ColdInputs::from_blurred_belts_and_masks(blurred.clone(), masks.clone());
+        let pyramid = MaskPyramid::build(&retained);
+        let level = Level::Two;
+        let modes = vec![CostMode::Weighted; level.patch_rows()];
+        let a_input = LevelInputs::build::<AtoB>(&retained, &pyramid, level)
+            .input::<AtoB>(level, modes.clone())
+            .0;
+        let b_input = LevelInputs::build::<BtoA>(&retained, &pyramid, level)
+            .input::<BtoA>(level, modes)
+            .0;
+        GpuPisDynamicStage {
+            stage: PairSolveStage::Cold { calculation, level },
+            a_to_b: GpuPisDynamicDirection::from_oracle(
+                &a_input,
+                InitialGrid::from_test_row_major(level, vec![Flow::ZERO; level.patches()]).unwrap(),
+                None,
+                DescentAdmission::NoPatches,
+            ),
+            b_to_a: GpuPisDynamicDirection::from_oracle(
+                &b_input,
+                InitialGrid::from_test_row_major(level, vec![Flow::ZERO; level.patches()]).unwrap(),
+                None,
+                DescentAdmission::NoPatches,
+            ),
+        }
+    }
+
     fn binding_identity<D, L>(
         binding: PisPreparedBinding<'_, D, L>,
     ) -> (Direction, Level, GpuPisFlight)
@@ -1940,7 +2071,7 @@ mod tests {
         let texture_a = texture("direct-bound PIS A", &sources.a);
         let texture_b = texture("direct-bound PIS B", &sources.b);
         let (_, masks) = qualification_fixture();
-        let blurred = super::super::temporal::gaussian_blur(
+        let blurred = crate::flow::one_xs::temporal::gaussian_blur(
             &sample_source_belts(&sources, &maps).reduce_area_3x3(),
         );
         let retained = ColdInputs::from_blurred_belts_and_masks(blurred, masks.clone());
@@ -2036,7 +2167,7 @@ mod tests {
             } else {
                 DescentAdmission::EveryPatch
             };
-            let expected_a = super::super::pis::solve_with_descent_admission(
+            let expected_a = crate::flow::one_xs::pis::solve_with_descent_admission(
                 &a_input,
                 InitialGrid::from_test_row_major(level, a_seed.clone()).unwrap(),
                 a_uses_hint
@@ -2045,7 +2176,7 @@ mod tests {
                 a_admission,
             )
             .unwrap();
-            let expected_b = super::super::pis::solve_with_descent_admission(
+            let expected_b = crate::flow::one_xs::pis::solve_with_descent_admission(
                 &b_input,
                 InitialGrid::from_test_row_major(level, b_seed.clone()).unwrap(),
                 b_uses_hint
@@ -2157,8 +2288,8 @@ mod tests {
             fn assert_terminal<D: PisDirection>(
                 direction: &str,
                 level: Level,
-                actual: &super::super::pis::PatchGrid<D>,
-                expected: &super::super::pis::PatchGrid<D>,
+                actual: &crate::flow::one_xs::pis::PatchGrid<D>,
+                expected: &crate::flow::one_xs::pis::PatchGrid<D>,
             ) {
                 for (patch, (actual, expected)) in
                     actual.patches().iter().zip(expected.patches()).enumerate()
@@ -2350,5 +2481,33 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         Ok((device, queue, name))
+    }
+
+    type GpuPair = (wgpu::Device, wgpu::Queue);
+
+    fn gpu_pairs() -> Result<(GpuPair, GpuPair, String), String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .next()
+            .ok_or("no Vulkan adapter")?;
+        let name = adapter.get_info().name;
+        let request = |label| {
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some(label),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+            .map_err(|error| error.to_string())
+        };
+        Ok((
+            request("exact ONE X2 source context")?,
+            request("foreign ONE X2 front-end context")?,
+            name,
+        ))
     }
 }
