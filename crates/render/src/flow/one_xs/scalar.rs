@@ -946,6 +946,24 @@ pub(super) struct LevelInputs {
     raw_weight: Arc<Vec<f32>>,
 }
 
+/// Bit-exact CPU oracle for the immutable image-owned GPU PIS front end.
+///
+/// This exposes qualification words only. It cannot be converted into an
+/// [`Input`] and therefore does not create a second production adapter.
+pub(super) struct PreparedFrontEndOracle {
+    pub(super) image_a: Vec<u32>,
+    pub(super) image_b: Vec<u32>,
+    pub(super) mask_a: Vec<u32>,
+    pub(super) mask_b: Vec<u32>,
+    pub(super) gradients: Vec<u32>,
+    pub(super) weight_horizontal: Vec<u32>,
+    pub(super) raw_weight: Vec<u32>,
+    pub(super) patch_weight_sums: Vec<u32>,
+    pub(super) models: Vec<u32>,
+    pub(super) lack_rows: Vec<u32>,
+    pub(super) block_mask: Vec<u32>,
+}
+
 /// Direction-labelled weighted-SSD rows derived from the finest classifier.
 ///
 /// Native classifies level one once, then propagates each contiguous pixel
@@ -1070,6 +1088,68 @@ impl LevelInputs {
     ) -> Vec<[u32; 5]> {
         let (input, _) = self.input::<D>(level, vec![CostMode::Unweighted; level.patch_rows()]);
         input.prepared_source_model_bits()
+    }
+
+    /// Complete qualification image for the immutable GPU front end.
+    pub(super) fn front_end_oracle<D: PisDirection>(&self, level: Level) -> PreparedFrontEndOracle {
+        let models = self
+            .prepared_source_model_bits::<D>(level)
+            .into_iter()
+            .flatten()
+            .collect();
+        let gradients = self
+            .gradient_col
+            .iter()
+            .zip(self.gradient_row.iter())
+            .flat_map(|(col, row)| [col.to_bits(), row.to_bits()])
+            .collect();
+        let magnitude = self
+            .gradient_col
+            .iter()
+            .zip(self.gradient_row.iter())
+            .map(|(col, row)| col.abs() + row.abs())
+            .collect::<Vec<_>>();
+        let weight_horizontal =
+            studio_weight_gaussian_horizontal(&magnitude, level.cols(), level.rows())
+                .into_iter()
+                .map(f32::to_bits)
+                .collect();
+        let patch_weight_sums = pis::rolling_patch_weight_sums(level, &self.raw_weight)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect();
+        let (lack_rows, block_mask) = if level == Level::One {
+            (
+                self.lack_rows::<D>(level)
+                    .rows()
+                    .iter()
+                    .map(|value| u32::from(*value))
+                    .collect(),
+                self.small_disparity_block_mask(level)
+                    .iter()
+                    .map(|value| u32::from(*value))
+                    .collect(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        PreparedFrontEndOracle {
+            image_a: self.image.a.iter().map(|value| u32::from(*value)).collect(),
+            image_b: self.image.b.iter().map(|value| u32::from(*value)).collect(),
+            mask_a: self.mask.a.iter().map(|value| u32::from(*value)).collect(),
+            mask_b: self.mask.b.iter().map(|value| u32::from(*value)).collect(),
+            gradients,
+            weight_horizontal,
+            raw_weight: self
+                .raw_weight
+                .iter()
+                .map(|value| value.to_bits())
+                .collect(),
+            patch_weight_sums,
+            models,
+            lack_rows,
+            block_mask,
+        }
     }
 
     /// Reproduce the direction-owned finest lack-of-texture rows that native
@@ -1289,6 +1369,23 @@ fn studio_weight_gaussian_3x3(src: &[f32], cols: usize, rows: usize) -> Vec<f32>
     const SIDE: f32 = f32::from_bits(0x3e8c_52b9);
     const CENTRE: f32 = f32::from_bits(0x3ee7_5a8e);
 
+    let horizontal = studio_weight_gaussian_horizontal(src, cols, rows);
+
+    let mut output = vec![0.0f32; src.len()];
+    for row in 0..rows {
+        for col in 0..cols {
+            let top = horizontal[reflect_101(row as isize - 1, rows) * cols + col];
+            let middle = horizontal[row * cols + col];
+            let bottom = horizontal[reflect_101(row as isize + 1, rows) * cols + col];
+            output[row * cols + col] = (top + bottom).mul_add(SIDE, middle * CENTRE);
+        }
+    }
+    output
+}
+
+fn studio_weight_gaussian_horizontal(src: &[f32], cols: usize, rows: usize) -> Vec<f32> {
+    const SIDE: f32 = f32::from_bits(0x3e8c_52b9);
+    const CENTRE: f32 = f32::from_bits(0x3ee7_5a8e);
     let mut horizontal = vec![0.0f32; src.len()];
     for row in 0..rows {
         for col in 0..cols {
@@ -1302,17 +1399,7 @@ fn studio_weight_gaussian_3x3(src: &[f32], cols: usize, rows: usize) -> Vec<f32>
             };
         }
     }
-
-    let mut output = vec![0.0f32; src.len()];
-    for row in 0..rows {
-        for col in 0..cols {
-            let top = horizontal[reflect_101(row as isize - 1, rows) * cols + col];
-            let middle = horizontal[row * cols + col];
-            let bottom = horizontal[reflect_101(row as isize + 1, rows) * cols + col];
-            output[row * cols + col] = (top + bottom).mul_add(SIDE, middle * CENTRE);
-        }
-    }
-    output
+    horizontal
 }
 
 fn inter_area(src: &[u8], cols: usize, rows: usize, factor: usize) -> (Vec<u8>, usize, usize) {

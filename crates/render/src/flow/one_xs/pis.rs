@@ -744,7 +744,7 @@ impl CandidateReduction {
 /// origins are retained. No live cached denominator bits were captured, so
 /// these values are an instruction reconstruction rather than an authenticated
 /// native payload.
-fn rolling_patch_weight_sums(level: Level, raw_weight: &[f32]) -> Vec<f32> {
+pub(super) fn rolling_patch_weight_sums(level: Level, raw_weight: &[f32]) -> Vec<f32> {
     let rows = level.rows();
     let cols = level.cols();
     let patch_rows = level.patch_rows();
