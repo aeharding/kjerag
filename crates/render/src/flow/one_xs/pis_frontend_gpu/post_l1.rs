@@ -19,6 +19,9 @@ use crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::resident;
 use crate::flow::one_xs::pis::Level;
 use crate::flow::one_xs::scalar::PairSolveStage;
 
+#[path = "post_l1/small_rows.rs"]
+mod small_rows;
+
 const L1_ROWS: usize = 540;
 const L1_COLS: usize = 30;
 const L2_ROWS: usize = 270;

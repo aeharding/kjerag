@@ -71,6 +71,48 @@ predecessor immutability, periodic pairs and exact retained-L2 ABI. It rejects
 retained-association, raw-hint, special-value fast-path and motion-unpack
 semantic mutations. Cold scheduling and arithmetic remain unchanged.
 
+**GPU-resident mature small-disparity row prerequisite, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
+NO WARM POST-L1 JOIN, INSTALL, SCENE, PERFORMANCE OR PARITY CLAIM]:** an
+isolated sealed two-pass GPU stage accepts the exact post-median paired sparse
+field, common A-side L1 block mask, prior bilateral small-row allocation and
+its distinct optional topology, paired pre-increment counts, GPU context,
+producer frame flight and allocation-identical capture root. Its ordinary
+output has no CPU-readback usage. Constructor qualification alone allocates a
+diagnostic readback copy. The returned typed owner retains its private
+candidate, config, binding and identical bilateral output allocation.
+
+One serial invocation per row and direction visits all eight patch columns in
+CPU order. Masked sites are excluded; an empty count takes positive zero;
+comparison is strictly `mean < 5.0`; an active NaN therefore classifies false
+while a masked NaN is ignored. Pre-increment counts below three preserve the
+prior optional topology and rows. Counts at least three materialize present
+topology even for all-zero results. A second dispatch bilaterally ORs both
+direction candidates and writes the identical canonical result to both halves;
+absence survives only when both candidates are absent.
+
+Forced RADV qualification on AMD Radeon 760M Graphics, RADV PHOENIX, Mesa
+26.1.6 covers counts two and three, negative and maximum signed counts, absent
+versus present-all-zero, exact-five threshold, positive and negative zero,
+negative disparities, order-sensitive accumulation, masked and active NaN,
+all-masked rows, asymmetric maturity, direction asymmetry and one-sided
+retained rows. Live mutations reject a non-strict threshold, wrong mask
+polarity, one-sided merge, late or unsigned maturity, drow consumption,
+missing absolute value and reverse column order. A foreign GPU context is
+refused before encoding, and the opaque result preserves its producer flight
+and capture root for validation by the future attachment boundary.
+
+This checkpoint intentionally has no production frame-input implementation or
+warm work-mode binding. Only a private constructor-qualification fixture
+currently implements the sealed input-owner projection. The later warm
+post-L1 owner must implement that projection inside the sealed module and
+append this work to its existing producer submission. Atomic installation must
+move the whole typed result into that producer's successor.
+Only the next reservation's exact installed-prior owner may then expose those
+rows to warm work modes; its consumer flight is intentionally not compared to
+the stored producer flight. Studio remains a frozen correctness oracle only;
+no optimization reverse engineering was done.
+
 **Capture-scoped resident calibration ownership, 2026-09-01, implementation
 branch only [PRIVATE AND UNSELECTED; NO POST-L1 JOIN, INSTALL, SCENE,
 PERFORMANCE OR PARITY CLAIM]:** the sealed imported ONE X2 front transition now
