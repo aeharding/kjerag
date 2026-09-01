@@ -77,7 +77,7 @@ fn main() -> Fallible<()> {
         options.h
     );
 
-    let mut pipeline = ScenePipeline::new(&gpu.device, kjerag_spike::FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, kjerag_spike::FORMAT);
     let mut scene = Scene::still(&options.input, Cue::Time(secs(options.from)))?;
     scene.set_horizon(match options.lock {
         true => Horizon::Locked,

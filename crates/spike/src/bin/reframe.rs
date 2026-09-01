@@ -86,7 +86,7 @@ fn main() -> Fallible<()> {
     options.seam.hold(&scene);
     scene.set_horizon(options.horizon);
     let primitive = scene.primitive(options.camera);
-    let mut pipeline = ScenePipeline::new(&gpu.device, options.format);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, options.format);
     pipeline.prepare(&primitive, &gpu.device, &gpu.queue, 1.0);
 
     let target = Offscreen::new(

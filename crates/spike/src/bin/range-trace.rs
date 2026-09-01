@@ -112,16 +112,11 @@ fn main() -> Fallible<()> {
         scene.set_sampling(Sampling::Sharp);
         scene.set_flow(false);
         let camera = receipt.record.view.camera()?;
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         pipeline.hold_band(false);
         pipeline.hold_tone(false);
         let prepared = pipeline
-            .prepare_one_xs_picture(
-                &scene.primitive(camera),
-                &gpu.device,
-                &gpu.queue,
-                WIDTH as f32 / HEIGHT as f32,
-            )
+            .prepare_one_xs_picture(&scene.primitive(camera), WIDTH as f32 / HEIGHT as f32)
             .ok_or_else(|| format!("frame {} did not prepare its decoded picture", frame.index))?;
         if !prepared.uses_one_xs_type2_projection() {
             return Err(format!(

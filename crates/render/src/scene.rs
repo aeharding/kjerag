@@ -44,13 +44,17 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
+use super::flow::one_xs::gpu_context::OneXsGpuContext;
 use super::flow::one_xs::pis::gpu::{
     GpuPisFlight, GpuPisPipeline, GpuPisStageOutput, GpuPisStageReceipt,
 };
 #[cfg(test)]
 use super::flow::one_xs::player::FrameOwnerError;
 use super::flow::one_xs::player::{FrameCommitError, FrameOwner, FrameResult, PreparedFrame};
-use super::flow::one_xs::scalar::{PairedPatchGrids, PairedPisSolver, PairedSolveRequest};
+use super::flow::one_xs::scalar::{
+    ColdInputs, ColdPreparedSchedule, CpuPisOracleInputs, PairedControlInputs, PairedPatchGrids,
+    PairedPisSolver, PairedSolveRequest,
+};
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
@@ -395,8 +399,9 @@ enum OneXsPreparation {
 /// The exact old owner and prepared geometry leased out of one capture.
 ///
 /// Future staged GPU PIS work may retain this value across all of its waits.
-/// Until [`Self::commit_with_solver`] succeeds, aborting it restores the exact box
-/// that was installed before the reservation; no estimator clone is involved.
+/// Until [`Self::commit_prepared_with_solver`] succeeds, aborting it restores
+/// the exact box that was installed before the reservation; no estimator clone
+/// is involved.
 struct OneXsReservation {
     capture: Arc<OneXsCapture>,
     flight: GpuPisFlight,
@@ -551,6 +556,7 @@ struct ReservationGpuPisSolver<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     completed_stages: &'a mut u64,
+    prepared: CpuPisOracleInputs,
 }
 
 impl PairedPisSolver for ReservationGpuPisSolver<'_> {
@@ -564,7 +570,13 @@ impl PairedPisSolver for ReservationGpuPisSolver<'_> {
         };
         let output = self
             .pipeline
-            .solve_request(self.device, self.queue, expected.clone(), request)
+            .solve_request(
+                self.device,
+                self.queue,
+                expected.clone(),
+                &self.prepared,
+                request,
+            )
             .map_err(GpuPisSolverError::Pipeline)?;
         *self.completed_stages = self
             .completed_stages
@@ -690,12 +702,13 @@ impl OneXsReservation {
 
     /// Run a fallible paired solver while retaining the outer reservation.
     ///
-    /// `FrameOwner::commit_with_solver` restores the exact old estimator on
-    /// every solver and stamp error. Returning this reservation lets the
-    /// capture restore that owner and its allocation-identical ready map.
-    fn commit_with_solver<S: PairedPisSolver>(
+    /// `FrameOwner::commit_prepared_with_solver` restores the exact old
+    /// estimator on every solver and stamp error. Returning this reservation
+    /// lets the capture restore that owner and its allocation-identical ready
+    /// map.
+    fn commit_prepared_with_solver<S: PairedPisSolver>(
         mut self,
-        blurred_belts: BlurredBelts,
+        controls: PairedControlInputs,
         solver: &mut S,
     ) -> Result<CompletedOneXsReservation, Box<RejectedOneXsSolverReservation<S::Error>>> {
         let prepared = self
@@ -706,7 +719,7 @@ impl OneXsReservation {
             .owner
             .as_deref_mut()
             .expect("a live ONE X2 reservation owns the old estimator");
-        match owner.commit_with_solver(*prepared, blurred_belts, solver) {
+        match owner.commit_prepared_with_solver(*prepared, controls, solver) {
             Ok(result) => Ok(CompletedOneXsReservation {
                 capture: self.capture.clone(),
                 flight: self.flight.clone(),
@@ -2277,6 +2290,9 @@ impl Shown {
 /// The GPU state behind the widget. iced builds one of these per primitive
 /// type and keeps it for the life of the renderer.
 pub struct ScenePipeline {
+    /// The authoritative iced device and queue pair for every selected ONE X2
+    /// resident stage owned by this renderer pipeline.
+    one_xs_gpu: OneXsGpuContext,
     pipeline: wgpu::RenderPipeline,
     /// The same draw with the Studio optical-flow apply compiled in, chosen per
     /// draw when the runtime flow toggle is on ([`ScenePipeline::draw`]). Built
@@ -2557,7 +2573,8 @@ struct Band {
 type BandState = (band::Tone, band::Along, Vec<band::Cell>, band::Field);
 
 impl ScenePipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let one_xs_gpu = OneXsGpuContext::new(device, queue);
         let layout = bind_group_layout(device);
         // Two groups: the pictures and the map, then the band's state. iced's
         // device is asked for a limit of exactly two (`iced_wgpu`), so this is
@@ -2650,6 +2667,7 @@ impl ScenePipeline {
         let bind_group = bind(device, &layout, &uniforms, [&blank; MAX_LENSES], &sampler);
 
         Self {
+            one_xs_gpu,
             pipeline,
             flow_pipeline,
             one_xs_flow_pipeline,
@@ -2787,11 +2805,23 @@ impl ScenePipeline {
                     .is_some_and(|view| view.one_xs.is_some()),
         );
         if selected_one_xs {
+            let gpu = self.one_xs_gpu.clone();
+            if let Err(error) = gpu.ensure_same(&OneXsGpuContext::new(device, queue)) {
+                // A foreign pair cannot touch retained imports, bind groups,
+                // uniforms or recovery state. Preserve the failure site's raw
+                // identity error and leave the last complete display owned by
+                // the authoritative context.
+                self.flow_draw = FlowDraw::Nothing;
+                primitive.stalled.fail_now(error);
+                return;
+            }
+            let device = gpu.device();
+            let queue = gpu.queue();
             if primitive.stalled.stopped() {
                 self.restore_one_xs_display(primitive, device, queue, aspect);
                 return;
             }
-            if let Err(error) = self.prepare_one_xs_playback(primitive, device, queue, aspect) {
+            if let Err(error) = self.prepare_one_xs_playback(primitive, aspect) {
                 primitive.stalled.fail_now(error);
                 self.restore_one_xs_display(primitive, device, queue, aspect);
             } else if self.flow_draw != FlowDraw::DirectOneXs {
@@ -2830,10 +2860,11 @@ impl ScenePipeline {
     pub fn prepare_one_xs_picture(
         &mut self,
         primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         aspect: f32,
     ) -> Option<PreparedPicture> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let _ = self.prepare_inner(primitive, device, queue, aspect, true);
         self.prepared_picture.clone()
     }
@@ -2845,13 +2876,10 @@ impl ScenePipeline {
     /// construction and upload of each prepared source model remain explicit.
     /// Source bindings, prepared geometry, sequential retained state, solver
     /// receipts, uploaded map and draw all name the same full [`FrameStamp`].
-    fn prepare_one_xs_playback(
-        &mut self,
-        primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        aspect: f32,
-    ) -> Fallible<()> {
+    fn prepare_one_xs_playback(&mut self, primitive: &ScenePrimitive, aspect: f32) -> Fallible<()> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, true) else {
             self.flow_draw = FlowDraw::Nothing;
             return Ok(());
@@ -2891,7 +2919,7 @@ impl ScenePipeline {
                 // submitting any per-frame GPU work. `InFlight` returned
                 // above without constructing it.
                 if self.one_xs_pis.is_none() {
-                    let pipeline = match GpuPisPipeline::new(device, queue) {
+                    let pipeline = match GpuPisPipeline::new(self.one_xs_gpu.clone()) {
                         Ok(pipeline) => pipeline,
                         Err(error) => {
                             return Err(abort_one_xs_after_error(reservation, error));
@@ -2899,17 +2927,13 @@ impl ScenePipeline {
                     };
                     self.one_xs_pis = Some(Box::new(pipeline));
                 }
-                let pending = match self.submit_one_xs_solver_belts(
-                    device,
-                    queue,
-                    frames.clone(),
-                    reservation.prepared(),
-                ) {
-                    Ok(pending) => pending,
-                    Err(error) => {
-                        return Err(abort_one_xs_after_error(reservation, error));
-                    }
-                };
+                let pending =
+                    match self.submit_one_xs_solver_belts(frames.clone(), reservation.prepared()) {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            return Err(abort_one_xs_after_error(reservation, error));
+                        }
+                    };
                 // The presentation policy admits only one frame at a time.
                 // Waiting occurs outside the capture mutex, and retained CPU
                 // history is leased only after this exact readback succeeds.
@@ -2919,6 +2943,11 @@ impl ScenePipeline {
                         return Err(abort_one_xs_after_error(reservation, error));
                     }
                 };
+                let input = ColdInputs::from_blurred_belts_and_masks(
+                    blurred_belts,
+                    reservation.prepared().masks().clone(),
+                );
+                let (controls, prepared) = ColdPreparedSchedule::from_cpu(&input).into_parts();
                 let mut solver = ReservationGpuPisSolver {
                     flight: reservation.flight.clone(),
                     pipeline: self
@@ -2928,8 +2957,9 @@ impl ScenePipeline {
                     device,
                     queue,
                     completed_stages: &mut self.one_xs_gpu_pis_completed_stages,
+                    prepared,
                 };
-                match reservation.commit_with_solver(blurred_belts, &mut solver) {
+                match reservation.commit_prepared_with_solver(controls, &mut solver) {
                     Ok(completed) => completed
                         .install()
                         .map_err(|rejected| rejected as Box<dyn std::error::Error + Send + Sync>)?,
@@ -3098,26 +3128,25 @@ impl ScenePipeline {
     pub fn prepare_one_xs_luma(
         &mut self,
         primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         aspect: f32,
     ) -> Fallible<Option<PendingOneXsLuma>> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, false) else {
             return Ok(None);
         };
-        Ok(Some(self.submit_one_xs_luma(device, queue, frames)?))
+        Ok(Some(self.submit_one_xs_luma(frames)?))
     }
 
     /// Submit source extraction for the exact pair already bound by this
     /// preparation. Keeping this separate lets live playback prepare once,
     /// then wait for and consume that same binding without another import or
     /// uniform write between source and map ownership.
-    fn submit_one_xs_luma(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        frames: Arc<Frames>,
-    ) -> Fallible<PendingOneXsLuma> {
+    fn submit_one_xs_luma(&mut self, frames: Arc<Frames>) -> Fallible<PendingOneXsLuma> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
         let shape = {
             let live = self
                 .live
@@ -3141,8 +3170,6 @@ impl ScenePipeline {
     /// and their opaque delivery stamp until its compact readback is consumed.
     fn submit_one_xs_solver_belts(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         frames: Arc<Frames>,
         prepared: &PreparedFrame,
     ) -> Fallible<PendingOneXsBlurredBelts> {
@@ -3169,7 +3196,9 @@ impl ScenePipeline {
             b: &live.planes[1].luma,
         };
         if self.one_xs_belts.is_none() {
-            self.one_xs_belts = Some(Box::new(GpuSolverBeltPipeline::new(device, queue)?));
+            self.one_xs_belts = Some(Box::new(GpuSolverBeltPipeline::new(
+                self.one_xs_gpu.clone(),
+            )?));
         }
         let producer = self
             .one_xs_belts
@@ -5776,6 +5805,14 @@ mod tests {
         .unwrap()
     }
 
+    fn reservation_cpu_schedule(reservation: &OneXsReservation, code: u8) -> ColdPreparedSchedule {
+        let input = ColdInputs::from_blurred_belts_and_masks(
+            reservation_blurred(code),
+            reservation.prepared().masks().clone(),
+        );
+        ColdPreparedSchedule::from_cpu(&input)
+    }
+
     fn reserve_frame(capture: &Arc<OneXsCapture>, frame: &FrameStamp) -> OneXsReservation {
         match capture
             .reserve(
@@ -5821,13 +5858,16 @@ mod tests {
         };
         let reservation = reserve_frame(&capture, &offered);
         let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+        let ColdPreparedSchedule {
+            controls,
+            solver: cpu,
+        } = reservation_cpu_schedule(&reservation, code);
         let mut solver = InjectingSolver {
             at: stage,
             injection,
-            cpu: CpuPairedPisSolver,
+            cpu,
         };
-        let rejected = match reservation.commit_with_solver(reservation_blurred(code), &mut solver)
-        {
+        let rejected = match reservation.commit_prepared_with_solver(controls, &mut solver) {
             Ok(_) => panic!("injected {stage} transaction unexpectedly succeeded"),
             Err(rejected) => rejected,
         };
@@ -5902,11 +5942,15 @@ mod tests {
         let reservation = reserve_frame(&capture, &second);
         let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let ColdPreparedSchedule {
+                controls,
+                solver: cpu,
+            } = reservation_cpu_schedule(&reservation, 103);
             let mut solver = PanickingSolver {
                 at: PairSolveStage::Warm { level },
-                cpu: CpuPairedPisSolver,
+                cpu,
             };
-            let _ = reservation.commit_with_solver(reservation_blurred(103), &mut solver);
+            let _ = reservation.commit_prepared_with_solver(controls, &mut solver);
         }));
         assert!(unwound.is_err());
 
@@ -5985,11 +6029,15 @@ mod tests {
         assert_eq!(ready.pis_backend(), PisBackend::Cpu);
         let reservation = reserve_frame(&capture, &second);
         let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+        let ColdPreparedSchedule {
+            controls,
+            solver: cpu,
+        } = reservation_cpu_schedule(&reservation, 127);
         let mut solver = WrongReceiptSolver {
             flight: reservation.flight.clone(),
-            cpu: CpuPairedPisSolver,
+            cpu,
         };
-        let rejected = match reservation.commit_with_solver(reservation_blurred(127), &mut solver) {
+        let rejected = match reservation.commit_prepared_with_solver(controls, &mut solver) {
             Ok(_) => panic!("wrong GPU receipt committed a map"),
             Err(rejected) => rejected,
         };
@@ -6018,15 +6066,19 @@ mod tests {
         let capture = reservation_capture();
         let first = reservation_stamp(0, None);
         let reservation = reserve_frame(&capture, &first);
+        let ColdPreparedSchedule {
+            controls,
+            solver: cpu,
+        } = reservation_cpu_schedule(&reservation, 131);
         let mut solver = InjectingSolver {
             at: PairSolveStage::Cold {
                 calculation: 1,
                 level: Level::Two,
             },
             injection: SolverInjection::Failure,
-            cpu: CpuPairedPisSolver,
+            cpu,
         };
-        let rejected = match reservation.commit_with_solver(reservation_blurred(131), &mut solver) {
+        let rejected = match reservation.commit_prepared_with_solver(controls, &mut solver) {
             Ok(_) => panic!("injected solver failure unexpectedly committed"),
             Err(rejected) => rejected,
         };
@@ -6555,7 +6607,7 @@ mod tests {
             eprintln!("no GPU available for the source readback laziness test");
             return;
         };
-        let mut pipeline = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         assert!(pipeline.one_xs_luma.is_none());
         assert!(pipeline.one_xs_belts.is_none());
 
@@ -6891,16 +6943,17 @@ mod tests {
             eprintln!("skipping selected ONE X2 scene transaction: set KJERAG_ONE_X2_TEST_MEDIA");
             return;
         };
-        let (device, queue) = test_import_gpu().unwrap_or_else(|error| {
-            panic!("could not open the target dmabuf Vulkan device: {error}")
-        });
+        let ((device, queue), (foreign_device, foreign_queue)) = test_import_gpu_and_foreign()
+            .unwrap_or_else(|error| {
+                panic!("could not open the target dmabuf Vulkan device: {error}")
+            });
         let mut scene = Scene::open(&path)
             .unwrap_or_else(|error| panic!("could not open ONE X2 test capture: {error}"));
         // This is also required by the opt-in test's invocation contract: run
         // it through `scripts/quiet.sh`. Muting here closes the interval
         // between open and the first pause as well.
         scene.set_muted(true);
-        let mut pipeline = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
 
         let first = wait_for_new_scene_frame(&scene, None);
         let first_primitive = scene.primitive(Camera::default());
@@ -6968,7 +7021,11 @@ mod tests {
         // is waiting. The new pipeline has neither the prior import nor its
         // direct-map resource, but it must reconstruct and retain that exact
         // completed display without making a second solver submission.
-        let mut recreated = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut recreated = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        pipeline
+            .one_xs_gpu
+            .ensure_same(&recreated.one_xs_gpu)
+            .expect("pipeline recreation changed the authoritative GPU context");
         recreated.prepare(&second_primitive, &device, &queue, 1.0);
         assert_eq!(recreated.flow_draw, FlowDraw::DirectOneXs);
         assert_eq!(recreated.diagnostic_one_xs_direct_frame(), Some(&first));
@@ -6988,7 +7045,7 @@ mod tests {
 
         let observed_frames = frames.clone();
         let mut pending = pipeline
-            .submit_one_xs_solver_belts(&device, &queue, frames, reservation.prepared())
+            .submit_one_xs_solver_belts(frames, reservation.prepared())
             .expect("could not submit frame one's exact retained maps and bound source");
         let retained_with_pending = Arc::strong_count(&observed_frames);
         let completion = Arc::new(AtomicU8::new(0));
@@ -7083,6 +7140,45 @@ mod tests {
                 .pis_backend(),
             PisBackend::Gpu
         );
+
+        // Even a terminal selected redraw may recover the retained display.
+        // Authenticate before that branch: a different valid pair must touch
+        // no old resource, and the failure's raw context error must survive.
+        assert_ne!(device, foreign_device);
+        let retained_live = Arc::as_ptr(&pipeline.live.front().unwrap().frames);
+        let retained_prepared = pipeline.prepared_picture.as_ref().unwrap().frame().clone();
+        let foreign_scope = foreign_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        pipeline.prepare(&second_primitive, &foreign_device, &foreign_queue, 1.0);
+        let foreign_gpu_error = block_on(foreign_scope.pop());
+        assert!(
+            foreign_gpu_error.is_none(),
+            "foreign Scene recovery reached GPU validation: {foreign_gpu_error:?}"
+        );
+        assert_eq!(pipeline.flow_draw, FlowDraw::Nothing);
+        assert_eq!(
+            pipeline
+                .direct_one_xs_map
+                .as_ref()
+                .and_then(DirectMapDraw::bound_frame),
+            Some(&second)
+        );
+        assert_eq!(pipeline.one_xs_display.complete.as_ref(), Some(&second));
+        assert_eq!(
+            Arc::as_ptr(&pipeline.live.front().unwrap().frames),
+            retained_live
+        );
+        assert_eq!(
+            pipeline.prepared_picture.as_ref().unwrap().frame(),
+            &retained_prepared
+        );
+        assert_eq!(
+            second_primitive.stalled.take().unwrap().to_string(),
+            "ONE X2 GPU submission crossed a different device or queue"
+        );
+        assert_eq!(
+            second_primitive.stalled.terminal().unwrap().to_string(),
+            "ONE X2 GPU submission crossed a different device or queue"
+        );
         scene.pause(Instant::now());
     }
 
@@ -7115,7 +7211,9 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
-    fn test_import_gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
+    type GpuPair = (wgpu::Device, wgpu::Queue);
+
+    fn test_import_gpu_and_foreign() -> Result<(GpuPair, GpuPair), String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
@@ -7125,7 +7223,15 @@ mod tests {
             ..Default::default()
         }))
         .map_err(|error| error.to_string())?;
-        dmabuf::open_device(&adapter).map_err(|error| error.to_string())
+        let primary = dmabuf::open_device(&adapter).map_err(|error| error.to_string())?;
+        let foreign = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("foreign selected ONE X2 Scene context"),
+            required_features: wgpu::Features::empty(),
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .map_err(|error| error.to_string())?;
+        Ok((primary, foreign))
     }
 
     fn wait_for_new_scene_frame(scene: &Scene, previous: Option<&FrameStamp>) -> FrameStamp {

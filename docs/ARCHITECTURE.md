@@ -12,8 +12,8 @@ crates/app      kjerag         libcosmic shell + window. The view is an
                                the mouse reaches it through that widget.
 crates/render   kjerag-render  wgpu: dmabuf import, final WGSL pass (NV12 ->
                                RGB + projection); selected ONE X2 compact GPU
-                               luma sampling and input blur, then CPU native-map
-                               estimation;
+                               luma sampling, input blur and paired sparse PIS,
+                               with retained/dense map stages still on CPU;
                                camera state and offscreen screenshot rendering
 crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
@@ -177,10 +177,38 @@ The selected ONE X2 path also samples those imported R8 textures directly for
 stitch analysis. Its exact compute passes apply the retained float2 maps,
 3-by-3 reduction and separable 5-by-5 integer Gaussian on the GPU, then read
 back only two 1080-by-60 U8 post-blur solver belts, 129,600 bytes rather than
-both 2880-by-2880 luma planes. The retained estimator is still on CPU, and its
-final native map is uploaded before the original decoded textures are drawn
-once. Decoded picture delivery and source sampling are zero-copy; the compact
-GPU-to-CPU solver boundary is not.
+both 2880-by-2880 luma planes. The CPU constructs each level's typed image,
+mask, gradient, weight and prepared-source inputs, and the exact paired PIS
+kernel advances both directions on the GPU. Each stage reads back only its
+terminal sparse grids: 4,224 bytes at level two and 22,784 bytes at level one.
+CPU densification, retained temporal state and final map materialization then
+produce the native map that is uploaded before the original decoded textures
+are drawn once. There is no CPU PIS fallback. Decoded picture delivery and
+source sampling are zero-copy; the post-blur, per-stage terminal and final-map
+CPU/GPU boundaries remain targets of the continuing migration.
+
+Every selected ONE X2 GPU stage is rooted in one render-private
+`OneXsGpuContext`, constructed from the exact device and queue iced gives the
+`ScenePipeline`. The context compares those wgpu handles structurally, so a
+renderer-pipeline recreation on clones of the same pair remains compatible;
+a replacement device or queue is a different context. The solver-belt
+pipeline and its `SubmissionLease` retain that context. The lease submits
+later resident consumers on its own queue and replaces its own completion
+index; no consumer may hand it a detached `SubmissionIndex`. This is the
+ownership foundation for the continuing resident migration, not a claim that
+the current post-belt CPU boundaries have moved.
+
+wgpu supplies one queue together with each requested device and has no public
+constructor for an independent second queue on that same device. Tests
+therefore prove cloned-pair acceptance and independently requested-pair
+refusal. The context nevertheless compares both structural handles because
+the device-and-queue pair, not either handle alone, is the ownership boundary.
+Selected Scene preparation authenticates that pair before terminal-display or
+in-flight recovery can bind, write or encode anything. After authentication,
+all selected work uses the retained context handles. A mismatch selects no
+draw, preserves the last complete display untouched and surfaces the raw
+identity error. Diagnostic picture preparation and full-luma readback are
+context-owned too; their per-frame APIs accept no replacement device or queue.
 
 ## Playback (issue #4)
 
@@ -246,12 +274,13 @@ The player changes to `PresentationPolicy::EveryFrame`, and one capture-owned
 `FrameOwner` starts cold at frame zero. For each adjacent decoded pair, the
 renderer constructs the retained maps and camera masks, samples both imported
 luma planes into compact solver belts and applies the exact input Gaussian on
-the GPU, advances the recovered cold or warm CPU estimator from the typed
-post-blur result, and materializes the native 200 by 100 packed type-2 map with
-its copied-pole alpha. The decoded pair, GPU token, prepared geometry and
-completed map carry the same opaque `FrameStamp`. Only that exact match can
-become `FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek or
-another open cannot impersonate it.
+the GPU, constructs the remaining level inputs on the CPU, advances every cold
+or warm paired sparse PIS stage on the GPU, and completes retained-state,
+dense-field and native 200 by 100 packed type-2 materialization on the CPU.
+The decoded pair, GPU tokens, prepared geometry and completed map carry the
+same opaque `FrameStamp`. Only that exact match can become
+`FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek or another
+open cannot impersonate it.
 
 The capture mutex covers only reservation and atomic installation. Reserving
 a frame moves the exact sequential owner and prepared geometry into a linear
@@ -269,8 +298,8 @@ clearing a different current flight, and terminal state is explicit so the old
 display cannot become the base of another successor. Successful work validates
 generation, opaque frame identity and the previous ready allocation before
 installing the next owner and map together. This boundary is deliberately able
-to retain later staged GPU PIS work across multiple waits without widening the
-lock.
+to retain the current staged GPU PIS work across multiple waits without
+widening the lock.
 
 WGSL does not guarantee the fused arithmetic this producer requires. Its lazy
 constructor therefore compares all 129,600 adversarial sampled pre-blur bytes,
@@ -288,6 +317,17 @@ Qualification therefore uses the exact production shader module, pipelines,
 entries and sampling call rather than compiling a lookalike probe. One
 differing byte or bit pattern refuses the route with its own error. There is
 no approximate or full-luma CPU fallback.
+
+The paired PIS pipeline is qualified separately through the same production
+entry, pipeline and arithmetic implementation used by ordinary frames. Its
+L1/L2 fixtures cover both directions, asymmetric hints and descent admission,
+candidate ties, survivor boundaries, zero-survivor descent, six-step terminal
+behavior, strict disparity endpoints, exact division and the distance guard.
+The public production boundary admits only finite, direction-typed terminal
+`PatchGrid` values carrying the exact reservation flight and stage. A failed
+qualification, readback, receipt or typed-grid admission surfaces its own error
+and restores or terminally retains the exact owner according to whether the
+numeric commit began; it never retries through the CPU solver.
 
 A discontinuous seek builds a new owner and causally replays from frame zero
 to the requested target. The displayed frame is retained until its exact map

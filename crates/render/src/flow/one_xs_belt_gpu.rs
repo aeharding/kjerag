@@ -12,6 +12,7 @@
 use std::sync::mpsc;
 use std::{error::Error, fmt};
 
+use super::one_xs::gpu_context::OneXsGpuContext;
 use super::one_xs::pis::gpu::GpuPisFlight;
 use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
 use super::one_xs::{Lens, LensPair};
@@ -316,8 +317,7 @@ impl SourceTextures<'_> {
 /// bind-group and readback resources so overlapping frames cannot overwrite
 /// one another.
 pub(crate) struct GpuSolverBeltPipeline {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    context: OneXsGpuContext,
     pipeline: wgpu::ComputePipeline,
     horizontal_pipeline: wgpu::ComputePipeline,
     vertical_pipeline: wgpu::ComputePipeline,
@@ -331,11 +331,12 @@ impl GpuSolverBeltPipeline {
     /// WGSL permits transformations that change native solver bytes. The
     /// qualification is therefore part of construction, not merely a test;
     /// an adapter that disagrees is refused with no CPU or approximate path.
-    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Self> {
-        Self::from_shader(device, queue, SHADER)
+    pub(crate) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+        Self::from_shader(context, SHADER)
     }
 
-    fn from_shader(device: &wgpu::Device, queue: &wgpu::Queue, shader: &str) -> Fallible<Self> {
+    fn from_shader(context: OneXsGpuContext, shader: &str) -> Fallible<Self> {
+        let device = context.device();
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -411,8 +412,7 @@ impl GpuSolverBeltPipeline {
             mapped_at_creation: false,
         });
         let built = Self {
-            device: device.clone(),
-            queue: queue.clone(),
+            context,
             pipeline,
             horizontal_pipeline,
             vertical_pipeline,
@@ -424,8 +424,8 @@ impl GpuSolverBeltPipeline {
     }
 
     fn qualify(&self) -> Fallible<()> {
-        let device = &self.device;
-        let queue = &self.queue;
+        let device = self.context.device();
+        let queue = self.context.queue();
         let fixture = qualification_fixture();
         let texture_a = qualification_texture(
             device,
@@ -604,8 +604,8 @@ impl GpuSolverBeltPipeline {
         input: SubmissionInput<'_>,
         copy_to_cpu: bool,
     ) -> Fallible<PendingBlurredBelts<K>> {
-        let device = &self.device;
-        let queue = &self.queue;
+        let device = self.context.device();
+        let queue = self.context.queue();
         let qualify_intermediates = matches!(
             input,
             SubmissionInput::Sampled {
@@ -740,7 +740,7 @@ impl GpuSolverBeltPipeline {
         }
         let submission = queue.submit([encoder.finish()]);
         Ok(PendingBlurredBelts {
-            lease: SubmissionLease::new(device.clone(), queue.clone(), submission, source_owner),
+            lease: SubmissionLease::new(self.context.clone(), submission, source_owner),
             _map: map,
             _packed: packed,
             _horizontal: horizontal,
@@ -756,8 +756,7 @@ impl GpuSolverBeltPipeline {
 /// until completion has been proved.
 enum ExactSubmission {
     Device {
-        device: wgpu::Device,
-        queue: wgpu::Queue,
+        context: OneXsGpuContext,
         index: wgpu::SubmissionIndex,
         #[cfg(test)]
         observer: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
@@ -781,8 +780,7 @@ impl ExactSubmission {
     fn wait(self) -> Fallible<()> {
         match self {
             Self::Device {
-                device,
-                queue: _,
+                context,
                 index,
                 #[cfg(test)]
                 observer,
@@ -791,7 +789,8 @@ impl ExactSubmission {
                 if let Some(observer) = &observer {
                     observer.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-                let result = device
+                let result = context
+                    .device()
                     .poll(wgpu::PollType::Wait {
                         submission_index: Some(index),
                         timeout: None,
@@ -818,10 +817,15 @@ impl ExactSubmission {
         }
     }
 
-    fn submit_after(&mut self, command: wgpu::CommandBuffer) -> Fallible<()> {
+    fn submit_after<F>(&mut self, producer: &OneXsGpuContext, encode: F) -> Fallible<()>
+    where
+        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
+    {
         match self {
-            Self::Device { queue, index, .. } => {
-                *index = queue.submit([command]);
+            Self::Device { context, index, .. } => {
+                context.ensure_same(producer)?;
+                let command = encode(context.device());
+                *index = context.queue().submit([command]);
                 Ok(())
             }
             #[cfg(test)]
@@ -853,16 +857,10 @@ struct SubmissionLease<K> {
 }
 
 impl<K> SubmissionLease<K> {
-    fn new(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        index: wgpu::SubmissionIndex,
-        source_owner: K,
-    ) -> Self {
+    fn new(context: OneXsGpuContext, index: wgpu::SubmissionIndex, source_owner: K) -> Self {
         Self {
             completion: Some(ExactSubmission::Device {
-                device,
-                queue,
+                context,
                 index,
                 #[cfg(test)]
                 observer: None,
@@ -891,16 +889,9 @@ impl<K> SubmissionLease<K> {
         }
     }
 
-    fn validate_provenance(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<()> {
+    fn validate_provenance(&self, producer: &OneXsGpuContext) -> Fallible<()> {
         match &self.completion {
-            Some(ExactSubmission::Device {
-                device: exact_device,
-                queue: exact_queue,
-                ..
-            }) if exact_device == device && exact_queue == queue => Ok(()),
-            Some(ExactSubmission::Device { .. }) => {
-                Err("ONE X2 GPU submission crossed a different device or queue".into())
-            }
+            Some(ExactSubmission::Device { context, .. }) => context.ensure_same(producer),
             #[cfg(test)]
             Some(ExactSubmission::Injected { .. }) => {
                 Err("injected ONE X2 GPU submission has no device or queue provenance".into())
@@ -909,12 +900,15 @@ impl<K> SubmissionLease<K> {
         }
     }
 
-    fn submit_after(&mut self, command: wgpu::CommandBuffer) -> Fallible<()> {
+    fn submit_after<F>(&mut self, producer: &OneXsGpuContext, encode: F) -> Fallible<()>
+    where
+        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
+    {
         let completion = self
             .completion
             .as_mut()
             .ok_or("ONE X2 GPU submission lease was already completed")?;
-        completion.submit_after(command)
+        completion.submit_after(producer, encode)
     }
 
     #[cfg(test)]
@@ -1127,19 +1121,22 @@ impl<K> GpuBlurredBelts<K> {
         &self.packed
     }
 
-    pub(crate) fn validate_provenance(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Fallible<()> {
-        self.lease.validate_provenance(device, queue)
+    pub(crate) fn validate_provenance(&self, context: &OneXsGpuContext) -> Fallible<()> {
+        self.lease.validate_provenance(context)
     }
 
     /// Submit the concrete prepared-source transition on the lease's exact
     /// queue and replace its completion fence with that later submission.
     /// No caller can provide, omit or regress a detached submission index.
-    pub(crate) fn submit_front_end(&mut self, command: wgpu::CommandBuffer) -> Fallible<()> {
-        self.lease.submit_after(command)
+    pub(crate) fn submit_front_end<F>(
+        &mut self,
+        context: &OneXsGpuContext,
+        encode: F,
+    ) -> Fallible<()>
+    where
+        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
+    {
+        self.lease.submit_after(context, encode)
     }
 
     pub(crate) fn complete(&mut self) -> Fallible<()> {
@@ -1176,7 +1173,7 @@ pub(crate) fn resident_qualification_fixture<K>(
         "ONE X2 composed resident source B",
         &fixture.sources.b,
     );
-    let pipeline = GpuSolverBeltPipeline::new(device, queue)?;
+    let pipeline = GpuSolverBeltPipeline::new(OneXsGpuContext::new(device, queue))?;
     let belts = pipeline.submit_resident_retained(
         SourceTextures {
             a: &texture_a,
@@ -1445,7 +1442,7 @@ mod tests {
             qualification_texture(&device, &queue, "ONE X2 resident A", &fixture.sources.a);
         let texture_b =
             qualification_texture(&device, &queue, "ONE X2 resident B", &fixture.sources.b);
-        let pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+        let pipeline = GpuSolverBeltPipeline::new(OneXsGpuContext::new(&device, &queue))
             .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
         let wait_state = Arc::new(AtomicU8::new(0));
         let (dropped, answer) = mpsc::channel();
@@ -1675,7 +1672,7 @@ mod tests {
             qualification_texture(&device, &queue, "ONE X2 odd padded A", &fixture.sources.a);
         let texture_b =
             qualification_texture(&device, &queue, "ONE X2 odd padded B", &fixture.sources.b);
-        let pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+        let pipeline = GpuSolverBeltPipeline::new(OneXsGpuContext::new(&device, &queue))
             .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
         let pending = pipeline
             .submit_inner(
@@ -1729,7 +1726,7 @@ mod tests {
             qualification_texture(&device, &queue, "ONE X2 blur fixture A", &fixture.sources.a);
         let texture_b =
             qualification_texture(&device, &queue, "ONE X2 blur fixture B", &fixture.sources.b);
-        let pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+        let pipeline = GpuSolverBeltPipeline::new(OneXsGpuContext::new(&device, &queue))
             .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
         let input = blur_qualification_fixture();
         assert_eq!(input.pixel(Lens::A, 0, 0), 255, "corner impulse");
@@ -1796,7 +1793,10 @@ mod tests {
             broken, SHADER,
             "the solver mutation did not find its target"
         );
-        let error = match GpuSolverBeltPipeline::from_shader(&device, &queue, &broken) {
+        let error = match GpuSolverBeltPipeline::from_shader(
+            OneXsGpuContext::new(&device, &queue),
+            &broken,
+        ) {
             Ok(_) => panic!("changed ONE X2 GPU arithmetic was accepted on {adapter}"),
             Err(error) => error,
         };
@@ -1822,7 +1822,7 @@ mod tests {
                 return;
             }
         };
-        if let Err(error) = GpuSolverBeltPipeline::new(&device, &queue) {
+        if let Err(error) = GpuSolverBeltPipeline::new(OneXsGpuContext::new(&device, &queue)) {
             assert!(
                 std::env::var("KJERAG_REQUIRE_GPU").is_err(),
                 "KJERAG_REQUIRE_GPU is set and {adapter} fails the baseline ONE X2 GPU qualification: {error}"
@@ -1841,7 +1841,10 @@ mod tests {
             broken, SHADER,
             "the production discriminator mutation did not find its target"
         );
-        let error = match GpuSolverBeltPipeline::from_shader(&device, &queue, &broken) {
+        let error = match GpuSolverBeltPipeline::from_shader(
+            OneXsGpuContext::new(&device, &queue),
+            &broken,
+        ) {
             Ok(_) => panic!("changed ONE X2 production discriminator was accepted on {adapter}"),
             Err(error) => error,
         };
@@ -1867,7 +1870,7 @@ mod tests {
                 return;
             }
         };
-        if let Err(error) = GpuSolverBeltPipeline::new(&device, &queue) {
+        if let Err(error) = GpuSolverBeltPipeline::new(OneXsGpuContext::new(&device, &queue)) {
             assert!(
                 std::env::var("KJERAG_REQUIRE_GPU").is_err(),
                 "KJERAG_REQUIRE_GPU is set and {adapter} fails the baseline ONE X2 GPU qualification: {error}"
@@ -1879,7 +1882,10 @@ mod tests {
         }
         let broken = SHADER.replacen("return (sum + 8192u) >> 14u;", "return sum >> 14u;", 1);
         assert_ne!(broken, SHADER, "the Gaussian mutation found no target");
-        let error = match GpuSolverBeltPipeline::from_shader(&device, &queue, &broken) {
+        let error = match GpuSolverBeltPipeline::from_shader(
+            OneXsGpuContext::new(&device, &queue),
+            &broken,
+        ) {
             Ok(_) => panic!("changed ONE X2 Gaussian was accepted on {adapter}"),
             Err(error) => error,
         };

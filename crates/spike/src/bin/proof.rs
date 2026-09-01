@@ -208,7 +208,7 @@ impl Both {
             let scene = Scene::still(&options.input, options.at)?;
             seam.hold_as(what, &scene);
             scene.set_horizon(options.horizon);
-            Ok((scene, ScenePipeline::new(&gpu.device, FORMAT)))
+            Ok((scene, ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT)))
         };
         Ok(Self {
             before: opened("before", &options.before)?,

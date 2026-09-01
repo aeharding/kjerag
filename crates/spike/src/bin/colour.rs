@@ -1328,7 +1328,7 @@ fn profile(options: &Options) -> Fallible<()> {
     let size = Size::new(options.size, options.size);
 
     let draw = |held: bool| -> Fallible<(Picture, Reframe, kjerag_render::Tone)> {
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         pipeline.hold_tone(held);
         let mut scene = Scene::still(
             &options.input,
@@ -2280,7 +2280,7 @@ fn strip(plane: &[f64], distance: &[Option<f64>], band: (f64, f64)) -> (Option<f
 fn trace(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let mut scene = Scene::still(
         &options.input,
         Cue::Time(std::time::Duration::from_secs_f64(options.from)),

@@ -28,6 +28,9 @@ pub mod pis;
 #[allow(dead_code)]
 pub(crate) mod pis_frontend_gpu;
 
+/// Exact render-private device and queue identity shared by resident stages.
+pub(crate) mod gpu_context;
+
 /// The selected finest-level, component-zero temporal median.
 /// The capture-owned ONE X2 producer places it between patch solving and
 /// densification.

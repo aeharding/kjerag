@@ -268,12 +268,8 @@ pub struct ColdNextCandidate {
 }
 
 impl ColdNextCandidate {
-    pub(super) fn checkpoint_from_borrowed(
-        &self,
-        current_post_blur: ColdInputs,
-    ) -> WarmCheckpointInputs {
-        WarmCheckpointInputs::from_borrowed_state(
-            current_post_blur,
+    pub(super) fn retained_checkpoint_from_borrowed(&self) -> super::warm::WarmRetainedInputs {
+        super::warm::WarmRetainedInputs::from_borrowed_state(
             &self.references,
             &self.a_to_b_public,
             &self.b_to_a_public,
@@ -370,7 +366,7 @@ impl fmt::Display for PairSolveStage {
 
 /// One direction's complete scalar PIS call, owned by a paired request.
 pub(crate) struct DirectionSolveRequest<D: PisDirection> {
-    pub(super) input: Input<D>,
+    pub(super) cost_modes: Vec<CostMode>,
     pub(super) initial: InitialGrid<D>,
     pub(super) hint: super::pis::HintGrid<D>,
     pub(super) admission: DescentAdmission,
@@ -381,6 +377,76 @@ pub(crate) struct PairedSolveRequest {
     pub(crate) stage: PairSolveStage,
     pub(crate) a_to_b: DirectionSolveRequest<AtoB>,
     pub(crate) b_to_a: DirectionSolveRequest<BtoA>,
+}
+
+/// The four frame-static PIS preparations owned by one paired solver session.
+///
+/// The scalar scheduler retains shared [`LevelInputs`] views for dense seeds,
+/// The CPU oracle builds immutable image, mask, gradient and raw-weight planes
+/// once and shares them through `Arc`. Per-stage [`Input`] construction still
+/// validates them and rebuilds rolling patch sums and source models. That
+/// CPU-only cost remains outside [`PairedControlInputs`] and is not part of a
+/// future resident GPU session.
+#[derive(Clone)]
+pub(crate) struct CpuPisOracleInputs {
+    a_to_b_l1: LevelInputs,
+    a_to_b_l2: LevelInputs,
+    b_to_a_l1: LevelInputs,
+    b_to_a_l2: LevelInputs,
+}
+
+/// Backend-neutral frame data consumed by the scalar schedule after PIS.
+///
+/// This deliberately excludes gradients, raw weights and PIS source models.
+/// A GPU-resident estimator can therefore pair these downstream CPU controls
+/// with its own device frame without constructing [`CpuPisOracleInputs`].
+pub(crate) struct PairedControlInputs {
+    pub(super) current_post_blur: temporal::BlurredBelts,
+    pub(super) l1: PreparedLevelImages,
+    pub(super) l2: PreparedLevelImages,
+    pub(super) a_to_b_lack: dense::LackRows<AtoB>,
+    pub(super) b_to_a_lack: dense::LackRows<BtoA>,
+    pub(super) l1_block_mask_a: Arc<[u8]>,
+}
+
+/// The CPU-oracle compatibility package for one complete cold schedule.
+pub(crate) struct ColdPreparedSchedule {
+    pub(crate) controls: PairedControlInputs,
+    pub(crate) solver: CpuPairedPisSolver,
+}
+
+impl CpuPisOracleInputs {
+    pub(super) fn new(
+        a_to_b_l1: &LevelInputs,
+        a_to_b_l2: &LevelInputs,
+        b_to_a_l1: &LevelInputs,
+        b_to_a_l2: &LevelInputs,
+    ) -> Self {
+        Self {
+            a_to_b_l1: a_to_b_l1.clone(),
+            a_to_b_l2: a_to_b_l2.clone(),
+            b_to_a_l1: b_to_a_l1.clone(),
+            b_to_a_l2: b_to_a_l2.clone(),
+        }
+    }
+
+    pub(crate) fn a_to_b(&self, level: Level, cost_modes: Vec<CostMode>) -> Input<AtoB> {
+        match level {
+            Level::One => &self.a_to_b_l1,
+            Level::Two => &self.a_to_b_l2,
+        }
+        .input::<AtoB>(level, cost_modes)
+        .0
+    }
+
+    pub(crate) fn b_to_a(&self, level: Level, cost_modes: Vec<CostMode>) -> Input<BtoA> {
+        match level {
+            Level::One => &self.b_to_a_l1,
+            Level::Two => &self.b_to_a_l2,
+        }
+        .input::<BtoA>(level, cost_modes)
+        .0
+    }
 }
 
 /// Runtime identity returned beside one compile-time direction-labelled grid.
@@ -493,22 +559,60 @@ impl<E: Error + 'static> Error for PairSolveError<E> {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct CpuPairedPisSolver;
+pub(crate) struct CpuPairedPisSolver {
+    prepared: CpuPisOracleInputs,
+}
+
+impl CpuPairedPisSolver {
+    pub(crate) fn new(prepared: CpuPisOracleInputs) -> Self {
+        Self { prepared }
+    }
+
+    pub(super) fn into_preparation(self) -> CpuPisOracleInputs {
+        self.prepared
+    }
+}
 
 impl PairedPisSolver for CpuPairedPisSolver {
     type Error = Infallible;
     const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
 
     fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
+        self.solve_prepared(request)
+    }
+}
+
+impl CpuPairedPisSolver {
+    fn solve_prepared(
+        &mut self,
+        request: PairedSolveRequest,
+    ) -> Result<PairedPatchGrids, Infallible> {
         let PairedSolveRequest {
             stage,
             a_to_b,
             b_to_a,
         } = request;
+        let prepared = &self.prepared;
+        let level = stage.level();
+        let DirectionSolveRequest {
+            cost_modes,
+            initial: a_initial,
+            hint: a_hint,
+            admission: a_admission,
+        } = a_to_b;
+        let a_to_b_input = prepared.a_to_b(level, cost_modes);
+        let DirectionSolveRequest {
+            cost_modes,
+            initial: b_initial,
+            hint: b_hint,
+            admission: b_admission,
+        } = b_to_a;
+        let b_to_a_input = prepared.b_to_a(level, cost_modes);
         let (a_to_b, b_to_a) = thread::scope(|scope| {
-            let b_to_a = scope.spawn(|| solve_one(b_to_a));
-            let a_to_b = catch_unwind(AssertUnwindSafe(|| solve_one(a_to_b)));
+            let b_to_a = scope.spawn(|| solve_one(b_to_a_input, b_initial, b_hint, b_admission));
+            let a_to_b = catch_unwind(AssertUnwindSafe(|| {
+                solve_one(a_to_b_input, a_initial, a_hint, a_admission)
+            }));
             let b_to_a = b_to_a.join();
             match (a_to_b, b_to_a) {
                 (Ok(a_to_b), Ok(b_to_a)) => (a_to_b, b_to_a),
@@ -534,14 +638,21 @@ impl PairedPisSolver for CpuPairedPisSolver {
     }
 }
 
-fn solve_one<D: PisDirection>(request: DirectionSolveRequest<D>) -> PatchGrid<D> {
-    pis::solve_with_descent_admission(
-        &request.input,
-        request.initial,
-        Some(&request.hint),
-        request.admission,
-    )
-    .expect("paired scalar PIS request has one typed level")
+fn solve_one<D: PisDirection>(
+    input: Input<D>,
+    initial: InitialGrid<D>,
+    hint: super::pis::HintGrid<D>,
+    admission: DescentAdmission,
+) -> PatchGrid<D> {
+    pis::solve_with_descent_admission(&input, initial, Some(&hint), admission)
+        .expect("paired scalar PIS request has one typed level")
+}
+
+pub(super) fn weighted_rows(cost_modes: &[CostMode]) -> usize {
+    cost_modes
+        .iter()
+        .filter(|mode| matches!(mode, CostMode::Weighted))
+        .count()
 }
 
 type PairedGridResult<E> = Result<(PatchGrid<AtoB>, PatchGrid<BtoA>), PairSolveError<E>>;
@@ -627,7 +738,11 @@ impl ColdPair {
     /// numeric owner validates adjacency and converts it for the first warm
     /// calculation.
     pub fn transition(self, retained: &ColdInputs) -> ColdTransition {
-        match self.try_transition_with_solver(retained, &mut CpuPairedPisSolver) {
+        let ColdPreparedSchedule {
+            controls,
+            mut solver,
+        } = ColdPreparedSchedule::from_cpu(retained);
+        match self.try_transition_prepared_with_solver(&controls, &mut solver) {
             Ok(transition) => transition,
             Err(PairSolveError::Solver { source, .. }) => match source {},
             Err(PairSolveError::Stamp { source, .. }) => {
@@ -636,23 +751,18 @@ impl ColdPair {
         }
     }
 
-    /// Run the six cold sparse stages through one injected paired boundary.
-    ///
-    /// Every persistent candidate component is built only after all six
-    /// solver calls succeed. A failure therefore leaves `retained` and the
-    /// caller's prior owner untouched for an exact retry.
-    pub(crate) fn try_transition_with_solver<S: PairedPisSolver>(
+    /// Run a backend-neutral cold schedule through an already-prepared solver.
+    pub(crate) fn try_transition_prepared_with_solver<S: PairedPisSolver>(
         self,
-        retained: &ColdInputs,
+        controls: &PairedControlInputs,
         solver: &mut S,
     ) -> Result<ColdTransition, PairSolveError<S::Error>> {
-        let masks = MaskPyramid::build(retained);
-        let a_to_b_finest_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::One);
-        let b_to_a_finest_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::One);
-        let a_to_b_coarse_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::Two);
-        let b_to_a_coarse_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::Two);
-        let a_to_b_work_rows = RetainedWorkRows::after_cold_calc(&a_to_b_finest_inputs);
-        let b_to_a_work_rows = RetainedWorkRows::after_cold_calc(&b_to_a_finest_inputs);
+        let a_to_b_finest_inputs = &controls.l1;
+        let b_to_a_finest_inputs = &controls.l1;
+        let a_to_b_coarse_inputs = &controls.l2;
+        let b_to_a_coarse_inputs = &controls.l2;
+        let a_to_b_work_rows = RetainedWorkRows::after_cold_lack(&controls.a_to_b_lack);
+        let b_to_a_work_rows = RetainedWorkRows::after_cold_lack(&controls.b_to_a_lack);
         let a_to_b_effective = a_to_b_work_rows.effective();
         let b_to_a_effective = b_to_a_work_rows.effective();
         let mut a_to_b_hints = HintPyramid::cold_zeros();
@@ -669,10 +779,10 @@ impl ColdPair {
         let mut b_to_a_l1 = 0;
 
         for calculation in 0..COLD_INNER_CALCULATIONS {
-            let (a_l2_input, a_weighted) = a_to_b_coarse_inputs
-                .input::<AtoB>(Level::Two, a_to_b_effective.modes(Level::Two).to_vec());
-            let (b_l2_input, b_weighted) = b_to_a_coarse_inputs
-                .input::<BtoA>(Level::Two, b_to_a_effective.modes(Level::Two).to_vec());
+            let a_l2_modes = a_to_b_effective.modes(Level::Two).to_vec();
+            let b_l2_modes = b_to_a_effective.modes(Level::Two).to_vec();
+            let a_weighted = weighted_rows(&a_l2_modes);
+            let b_weighted = weighted_rows(&b_l2_modes);
             let (a_l2, b_l2) = solve_pair(
                 solver,
                 PairedSolveRequest {
@@ -681,26 +791,26 @@ impl ColdPair {
                         level: Level::Two,
                     },
                     a_to_b: DirectionSolveRequest {
-                        input: a_l2_input,
+                        cost_modes: a_l2_modes,
                         initial: InitialGrid::coarse_zeros(),
                         hint: a_to_b_hints.grid(Level::Two),
                         admission: a_to_b_cadence.admission(),
                     },
                     b_to_a: DirectionSolveRequest {
-                        input: b_l2_input,
+                        cost_modes: b_l2_modes,
                         initial: InitialGrid::coarse_zeros(),
                         hint: b_to_a_hints.grid(Level::Two),
                         admission: b_to_a_cadence.admission(),
                     },
                 },
             )?;
-            let a_seed = cold_seed(&a_to_b_coarse_inputs, a_l2);
-            let b_seed = cold_seed(&b_to_a_coarse_inputs, b_l2);
+            let a_seed = cold_seed(a_to_b_coarse_inputs, a_l2);
+            let b_seed = cold_seed(b_to_a_coarse_inputs, b_l2);
 
-            let (a_l1_input, a_finest_weighted) = a_to_b_finest_inputs
-                .input::<AtoB>(Level::One, a_to_b_effective.modes(Level::One).to_vec());
-            let (b_l1_input, b_finest_weighted) = b_to_a_finest_inputs
-                .input::<BtoA>(Level::One, b_to_a_effective.modes(Level::One).to_vec());
+            let a_l1_modes = a_to_b_effective.modes(Level::One).to_vec();
+            let b_l1_modes = b_to_a_effective.modes(Level::One).to_vec();
+            let a_finest_weighted = weighted_rows(&a_l1_modes);
+            let b_finest_weighted = weighted_rows(&b_l1_modes);
             let (a_grid, b_grid) = solve_pair(
                 solver,
                 PairedSolveRequest {
@@ -709,13 +819,13 @@ impl ColdPair {
                         level: Level::One,
                     },
                     a_to_b: DirectionSolveRequest {
-                        input: a_l1_input,
+                        cost_modes: a_l1_modes,
                         initial: a_seed,
                         hint: a_to_b_hints.grid(Level::One),
                         admission: a_to_b_cadence.admission(),
                     },
                     b_to_a: DirectionSolveRequest {
-                        input: b_l1_input,
+                        cost_modes: b_l1_modes,
                         initial: b_seed,
                         hint: b_to_a_hints.grid(Level::One),
                         admission: b_to_a_cadence.admission(),
@@ -723,8 +833,8 @@ impl ColdPair {
                 },
             )?;
 
-            let a_hint_images = a_to_b_finest_inputs.directed_images::<AtoB>(Level::One);
-            let b_hint_images = b_to_a_finest_inputs.directed_images::<BtoA>(Level::One);
+            let a_hint_images = a_to_b_finest_inputs.directed::<AtoB>();
+            let b_hint_images = b_to_a_finest_inputs.directed::<BtoA>();
             a_to_b_hints = HintPyramid::from_current_finest(&a_hint_images, &a_grid);
             b_to_a_hints = HintPyramid::from_current_finest(&b_hint_images, &b_grid);
             let a_filtered = a_to_b_median
@@ -733,8 +843,8 @@ impl ColdPair {
             let b_filtered = b_to_a_median
                 .run(b_grid)
                 .expect("selected finest grid has the temporal median's level");
-            a_to_b_raw = Some(finish_direction(&a_to_b_finest_inputs, a_filtered));
-            b_to_a_raw = Some(finish_direction(&b_to_a_finest_inputs, b_filtered));
+            a_to_b_raw = Some(finish_direction(a_to_b_finest_inputs, a_filtered));
+            b_to_a_raw = Some(finish_direction(b_to_a_finest_inputs, b_filtered));
             a_to_b_l2 = a_weighted;
             b_to_a_l2 = b_weighted;
             a_to_b_l1 = a_finest_weighted;
@@ -776,7 +886,7 @@ impl ColdPair {
                 },
             },
             candidate_next: ColdNextCandidate {
-                references: retained.blurred_belts(),
+                references: controls.current_post_blur.clone(),
                 a_to_b_public: a_to_b.public,
                 b_to_a_public: b_to_a.public,
                 a_to_b_median: a_to_b.median,
@@ -792,8 +902,11 @@ impl ColdPair {
     }
 }
 
-fn cold_seed<D: PisDirection>(prepared: &LevelInputs, patches: PatchGrid<D>) -> InitialGrid<D> {
-    let images = prepared.directed_images::<D>(Level::Two);
+fn cold_seed<D: PisDirection>(
+    prepared: &PreparedLevelImages,
+    patches: PatchGrid<D>,
+) -> InitialGrid<D> {
+    let images = prepared.directed::<D>();
     let dense = dense::densify_coarse(&images, patches).expect("densify scalar level two");
     let post = preserve_without_variational_or_retained(dense);
     into_l1_initial_grid(post).expect("scalar level-two field forms a finest seed")
@@ -884,7 +997,10 @@ where
         // Native recognizes and repackages the previous public destination
         // before calls two and three. Cold motion is `noArray`, though, so its
         // empty-pyramid guard returns before reading those retained numerics.
-        raw = Some(finish_direction(finest_inputs, filtered));
+        raw = Some(finish_direction(
+            &PreparedLevelImages::from_pis(finest_inputs, Level::One),
+            filtered,
+        ));
         weighted_l2 = current_weighted_l2;
         weighted_l1 = current_weighted_l1;
         cadence = cadence.after_calc();
@@ -938,6 +1054,7 @@ impl MaskPyramid {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct LevelInputs {
     image: LensPair<Arc<Vec<u8>>>,
     mask: LensPair<Arc<Vec<u8>>>,
@@ -962,6 +1079,35 @@ pub(super) struct PreparedFrontEndOracle {
     pub(super) models: Vec<u32>,
     pub(super) lack_rows: Vec<u32>,
     pub(super) block_mask: Vec<u32>,
+}
+
+/// Downstream image views for densification and hint construction.
+///
+/// PIS-only gradients, weights, masks and source models never enter this
+/// type. The images remain in physical lens order and are shared by `Arc`.
+pub(crate) struct PreparedLevelImages {
+    level: Level,
+    image: LensPair<Arc<Vec<u8>>>,
+}
+
+impl PreparedLevelImages {
+    pub(super) fn from_pis(inputs: &LevelInputs, level: Level) -> Self {
+        Self {
+            level,
+            image: inputs.image.clone(),
+        }
+    }
+
+    pub(super) fn directed<D: PisDirection>(&self) -> DirectedImages<'_, D> {
+        DirectedImages::<D>::from_native_order(
+            self.level,
+            LensPair {
+                a: &self.image.a,
+                b: &self.image.b,
+            },
+        )
+        .expect("scalar control images have the selected directed shape")
+    }
 }
 
 /// Direction-labelled weighted-SSD rows derived from the finest classifier.
@@ -1069,6 +1215,7 @@ impl LevelInputs {
         (input, weighted)
     }
 
+    #[cfg(test)]
     pub(super) fn directed_images<D: PisDirection>(&self, level: Level) -> DirectedImages<'_, D> {
         DirectedImages::<D>::from_native_order(
             level,
@@ -1220,6 +1367,32 @@ impl LevelInputs {
     }
 }
 
+impl ColdPreparedSchedule {
+    pub(crate) fn from_cpu(retained: &ColdInputs) -> Self {
+        let masks = MaskPyramid::build(retained);
+        let a_to_b_l1 = LevelInputs::build::<AtoB>(retained, &masks, Level::One);
+        let b_to_a_l1 = LevelInputs::build::<BtoA>(retained, &masks, Level::One);
+        let a_to_b_l2 = LevelInputs::build::<AtoB>(retained, &masks, Level::Two);
+        let b_to_a_l2 = LevelInputs::build::<BtoA>(retained, &masks, Level::Two);
+        let controls = PairedControlInputs {
+            current_post_blur: retained.blurred_belts(),
+            l1: PreparedLevelImages::from_pis(&a_to_b_l1, Level::One),
+            l2: PreparedLevelImages::from_pis(&a_to_b_l2, Level::Two),
+            a_to_b_lack: a_to_b_l1.lack_rows::<AtoB>(Level::One),
+            b_to_a_lack: b_to_a_l1.lack_rows::<BtoA>(Level::One),
+            l1_block_mask_a: Arc::from(a_to_b_l1.small_disparity_block_mask(Level::One)),
+        };
+        let solver = CpuPairedPisSolver::new(CpuPisOracleInputs::new(
+            &a_to_b_l1, &a_to_b_l2, &b_to_a_l1, &b_to_a_l2,
+        ));
+        Self { controls, solver }
+    }
+
+    pub(crate) fn into_parts(self) -> (PairedControlInputs, CpuPisOracleInputs) {
+        (self.controls, self.solver.into_preparation())
+    }
+}
+
 pub(super) fn propagate_work_modes(finest: &[CostMode]) -> Vec<CostMode> {
     assert_eq!(finest.len(), Level::One.patch_rows());
     let mut coarse = vec![CostMode::Unweighted; Level::Two.patch_rows()];
@@ -1305,17 +1478,10 @@ fn finest_solve<D: PisDirection>(
 }
 
 fn finish_direction<D: PisDirection>(
-    prepared: &LevelInputs,
+    prepared: &PreparedLevelImages,
     filtered: FilteredPatchGrid<D>,
 ) -> PublicDenseField<D> {
-    let images = DirectedImages::<D>::from_native_order(
-        Level::One,
-        LensPair {
-            a: &prepared.image.a,
-            b: &prepared.image.b,
-        },
-    )
-    .expect("level-one scalar images have the selected shape");
+    let images = prepared.directed::<D>();
     let dense = dense::densify_finest(&images, filtered).expect("densify scalar level one");
     dense::finish_linear_x2(preserve_without_variational_or_retained(dense))
         .expect("scalar finest field resizes to the public grid")

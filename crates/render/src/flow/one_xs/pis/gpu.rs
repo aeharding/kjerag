@@ -20,12 +20,13 @@ use super::{
     InitialGrid, Input, Level, PisDirection, solve_with_descent_admission,
 };
 use crate::Fallible;
+use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::pis_frontend_gpu::{
     GpuPreparedFrame, GpuPreparedTerminal, PreparedPisDispatch,
 };
 use crate::flow::one_xs::scalar::{
-    PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids, PairedSolveRequest, SolveStamp,
-    StampedPatchGrid,
+    CpuPisOracleInputs, PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids,
+    PairedSolveRequest, SolveStamp, StampedPatchGrid,
 };
 
 const HEADER_WORDS: usize = 32;
@@ -354,6 +355,7 @@ impl Error for QualificationError {}
 
 /// Render-internal paired PIS compute state.
 pub(crate) struct GpuPisPipeline {
+    context: OneXsGpuContext,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     /// Legacy CPU-oracle submissions do not read the prepared bindings.
@@ -380,17 +382,16 @@ pub(crate) fn validate_direct_stage_for_test(
 
 impl GpuPisPipeline {
     /// Build and qualify the actual production shader entry on this device.
-    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Self> {
-        Self::from_shader(device, queue, SHADER, true)
+    pub(crate) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+        Self::from_shader(context, SHADER, true)
     }
 
     #[cfg(test)]
     pub(crate) fn from_shader_for_direct_test(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        context: OneXsGpuContext,
         shader: &str,
     ) -> Fallible<Self> {
-        Self::from_shader(device, queue, shader, false)
+        Self::from_shader(context, shader, false)
     }
 
     /// Solve one scalar transaction stage while preserving its outer receipt.
@@ -404,6 +405,7 @@ impl GpuPisPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         receipt: GpuPisStageReceipt,
+        prepared: &CpuPisOracleInputs,
         request: PairedSolveRequest,
     ) -> Fallible<GpuPisStageOutput> {
         if receipt.stage != request.stage {
@@ -418,13 +420,16 @@ impl GpuPisPipeline {
             a_to_b,
             b_to_a,
         } = request;
+        let level = stage.level();
+        let a_to_b_input = prepared.a_to_b(level, a_to_b.cost_modes);
+        let b_to_a_input = prepared.b_to_a(level, b_to_a.cost_modes);
         let terminal = self.solve_pair(
             device,
             queue,
-            &a_to_b.input,
+            &a_to_b_input,
             a_to_b.initial,
             Some(&a_to_b.hint),
-            &b_to_a.input,
+            &b_to_a_input,
             b_to_a.initial,
             Some(&b_to_a.hint),
             a_to_b.admission,
@@ -540,22 +545,13 @@ impl GpuPisPipeline {
         })
     }
 
-    pub(crate) fn validate_terminal_context(
-        &self,
-        pipeline: &wgpu::ComputePipeline,
-    ) -> Fallible<()> {
-        if pipeline != &self.pipeline {
-            return Err("ONE X2 GPU PIS terminal belongs to a different qualified pipeline".into());
-        }
-        Ok(())
+    pub(crate) fn validate_terminal_context(&self, context: &OneXsGpuContext) -> Fallible<()> {
+        self.context.ensure_same(context)
     }
 
-    fn from_shader(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        shader: &str,
-        qualify: bool,
-    ) -> Fallible<Self> {
+    fn from_shader(context: OneXsGpuContext, shader: &str, qualify: bool) -> Fallible<Self> {
+        let device = context.device().clone();
+        let queue = context.queue().clone();
         let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -604,12 +600,13 @@ impl GpuPisPipeline {
             mapped_at_creation: false,
         });
         let built = Self {
+            context,
             pipeline,
             layout,
             oracle_placeholder,
         };
         if qualify {
-            built.qualify(device, queue)?;
+            built.qualify(&device, &queue)?;
         }
         Ok(built)
     }
@@ -1838,7 +1835,7 @@ mod tests {
                 return;
             }
         };
-        GpuPisPipeline::new(&device, &queue).unwrap_or_else(|error| {
+        GpuPisPipeline::new(OneXsGpuContext::new(&device, &queue)).unwrap_or_else(|error| {
             panic!("paired GPU PIS qualification failed on {adapter}: {error}")
         });
     }

@@ -12,7 +12,7 @@ every immutable allocation as a whole storage buffer, encodes and submits on
 its stored exact queue, and advances the one inherited submission lease to the
 actual returned submission. No prepared buffer, base, flight, device, queue or
 submission index is exposed or caller-assembled. The returned opaque terminal
-retains the exact flight, `PairSolveStage`, pipeline identity, output buffer and
+retains the exact flight, `PairSolveStage`, shared GPU-context identity, output buffer and
 same non-cloneable frame owner; chaining consumes it back into that same frame,
 while explicit terminal acknowledgement waits for the latest lease once.
 
@@ -27,62 +27,145 @@ direct-path CPU fallback.
 The integrated target-device test creates one resident producer and complete
 front end, compares exact terminal bits at both levels and directions under
 asymmetric modes, hints, admissions and intervals, observes a planted shader
-buffer swap, then chains two ordinary no-readback resident stages and refuses
-a terminal from a different qualified pipeline. Both-direction prepared
+buffer swap, then chains two ordinary no-readback resident stages and accepts
+a recreated qualified pipeline only when it carries the same structural GPU
+context. Both-direction prepared
 buffers and bases are one private frame aggregate, so cross-frame, level and
 direction assembly is not expressible through the crate API. The remaining
-integration blocker is replacement of the interim structural pipeline-handle
-identity with the shared `OneXsGpuContext` foundation used by every resident
-stage. Until that lands this is not Scene-ready, ownership-ready or a
-performance/range claim.
+integration blocker is qualification of the later resident estimator stages
+against this same `OneXsGpuContext`; this direct path remains unselected in
+Scene. This is not yet an ownership-readiness, performance or range claim.
 
-**GPU-resident estimator front-end checkpoint, 2026-09-01, implementation
-branch only [A-TO-B LEVEL TWO ONLY; TARGET-GPU GATE PASSED; NO SCENE WIRING OR
-PERFORMANCE CLAIM]:** the GPU solver-belt producer now has
-an explicit no-readback submission that returns a non-cloneable token carrying
-the full opaque frame stamp, capture generation, imported-frame owner and all
-producer resources. A same-queue consumer can therefore use its packed
-post-Gaussian A/B belts without a CPU poll, staging allocation or 129,600-byte
-readback. The existing selected Scene path is unchanged and continues using
-the qualified CPU-readback handoff; there is no incomplete production route
-or fallback. Normal resident chaining never polls the CPU. If cancellation
-drops the token before a downstream terminal boundary, its non-panicking drop
-guard waits for the exact producer submission before returning the imported
-decoder surface to its owner; a focused regression instruments that order.
+**Backend-neutral paired scheduler boundary, 2026-09-01, implementation
+branch only [CPU ORACLE IDENTITY; NO NEW GPU FRONTEND; NO PERFORMANCE CLAIM]:**
+cold and warm scheduling now consume a `PairedControlInputs` frame containing
+only data used after or around sparse solving: the current blurred belts,
+shared physical L1/L2 image views, typed lack-row classifications and one
+physical-mask block map. PIS gradients, raw weights, masks, rolling patch sums
+and source models are absent. `PairedSolveRequest` remains dynamic-only, and
+the plain `PairedPisSolver` boundary is used through `ColdPair`, `WarmPair`,
+`PairOwner`, `FrameOwner` and the capture reservation. CPU oracle sessions are
+constructed with their CPU-only PIS preparation; there is no default, optional
+or rebinding state. A future resident GPU session can instead own its device
+frame and enter the same prepared schedule without receiving or constructing
+CPU PIS preparation, and without a backend enum in `pis::Input`.
 
-A render-private preprocessing pipeline consumes that resident token and the
-physical masks to produce one complete A-to-B level-two prepared-source model
-on the GPU. This correctness-first shader recursively applies the two exact
-2-to-1 image reductions and mask sampling, reflect-101 Sobel, physical-mask-A
-zeroing, row-major 8-by-8 source-term accumulation, the native positive
-determinant clamp and correctly-rounded restoring division. Its result stays
-resident and carries exact frame, generation, direction and level provenance;
-it deliberately has no PIS-stage identity because image-owned preparation is
-immutable across all cold or warm calculations for that frame. Construction
-compares all 264 five-word models bit for bit with the readable CPU `Input`
-oracle on the actual adapter. Planted mutations cover recursive area rounding,
-source-lens selection, mask use, Sobel border association, determinant clamp
-and division. On the forced-RADV target, AMD Phoenix1 `1002:15bf` with the
-`amdgpu` driver, the baseline plus all six mutations passed 3/3 and the
-no-poll/early-drop ownership regression passed 1/1. Their durable log SHA-256
-values are `250426a2735ab4106d03c81d1586d15a7f8384d6e901dd8c2c90da99c776f884`
-and `24538f0995cc85c446725429bd181bb6239f11ddca163251876e03edfde5c62e`.
-B-to-A, level one, both directions' shared GPU frame owner, direct GPU-PIS
-binding, the compact downstream CPU tail and Scene integration are explicitly
-later checkpoints.
+The selected Scene GPU PIS frontend is intentionally unchanged in this
+checkpoint: it still constructs CPU planes for its existing upload-backed
+kernel before constructing that adapter. This is retained behavior, not the
+new resident frontend and not a second production solve. Complete six-stage
+cold plus two-stage warm output and retained-owner bytes match the CPU oracle;
+all injected stage failures, stamps, panics and receipt mismatches retain the
+exact retryable owner and ready-map allocations. No target-GPU workload or
+performance measurement was run for this scheduler-only refactor.
 
-**Production ONE X2 paired PIS GPU wiring, 2026-09-01, implementation branch
-only [TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; NOT YET A
-RANGE OR PERFORMANCE CLAIM]:** the selected Scene route now lazily qualifies a
+**Shared ONE X2 GPU context foundation, 2026-09-01, implementation branch
+only [STRUCTURAL OWNERSHIP; NO NEW RESIDENT STAGE; NO PERFORMANCE OR PARITY
+CLAIM]:** the renderer now retains the exact iced device and queue as one
+private cloneable `OneXsGpuContext`. Equality is the structural identity of
+both wgpu handles: a recreated `ScenePipeline` on clones of the same pair is
+compatible, while an independently requested pair refuses. wgpu exposes the
+one queue returned with a requested device rather than a second-queue
+constructor, so the regression uses two devices requested from one instance
+and adapter; the production check still compares both handles.
+The production solver-belt pipeline and its exact-submission lease now carry
+that context rather than separate raw handles. Future lease advancement takes
+an encoding closure only after context validation, submits on the lease's own
+queue and replaces its internal completion index; callers cannot provide a
+detached `SubmissionIndex`. Existing explicit completion, early-drop,
+poll-error, poll-panic and double-unwind quarantine behavior is unchanged.
+Selected Scene preparation validates the supplied renderer pair before even a
+stopped or in-flight display can enter recovery, then uses only the context's
+retained handles. A mismatch touches no retained GPU resource, selects no draw
+and surfaces its raw identity error. Diagnostic picture and full-luma paths
+are also context-owned and no longer accept per-call device or queue handles.
+This foundation deliberately does not transplant the resident PIS front end,
+direct PIS, L2 bridge or final-map materializer, and it does not remove any of
+the selected path's current CPU readbacks or uploads.
+
+**Authenticated paired PIS GPU checkpoint, 2026-09-01 [6,400 GPU
+TRANSACTIONS; ZERO CPU FALLBACK; BYTE-IDENTICAL TO THE FROZEN KJERAG CPU
+BOUNDARY; 10.6% MEDIAN THROUGHPUT GAIN; NOT REALTIME; OWNERSHIP FIXED;
+FINAL-HEAD RANGE PENDING]:** exact clean commit
+`a1594c6fc458dbee248ba2a9d0a4f9f419a22304` causally processed frames zero
+through 6399 of the owner clip at the reported 71.13 yaw, -13.99 pitch and
+57.95-degree locked view, Sharp sampling, band and tone enabled, and the
+factory seam. It presented all 6,400 frames with zero dropped and zero
+starved. Its typed receipt recorded 6,400 GPU PIS transactions and zero CPU
+PIS transactions, and every one of the 61 captured map frames named the GPU
+backend. The range receipt SHA-256 is
+`62262de5e5ddd97c773cdf0861fb7671524b98ea53336ba904ddc2958801a107`.
+
+All 183 production artifacts for frames 6339 through 6399, comprising the
+rendered PNG, packed map and alpha map for every frame, are literal byte
+matches to the separately built frozen accepted CPU boundary. Their aggregate
+SHA-256 remains
+`bd0eb80a82d042d641b0543ad28beb4e7b186e77e4e11048e98f424bc63dacf0`.
+All 61 candidate-authenticated computed traces are also byte-identical to the
+frozen traces and report zero uncovered pixels; the trace aggregate remains
+`515a0fd1a9238a721942ac8eca031d048d1dc2c33c9966c48595138521b854c8`
+and the strict trace receipt is
+`450cff21c22c1747d22cc62e8e70d6feabc997dd9d1893bc8363e1c900b8ac60`.
+This authenticates the GPU implementation against Kjerag's frozen accepted
+CPU boundary over the tested interval. It does not expand the prior Studio
+parity claim to other footage or settings.
+
+The same exact GPU executable was measured against the frozen `9054e547` CPU
+implementation plus the common benchmark-only harness at `4c5b91f` in four
+order-balanced pairs, `AB | BA | BA | AB`. Every arm consumed 200
+causal warm-up frames followed by 300 unpaced waited transactions, bound the
+same source hashes, view, direct type-2 route and Radeon 760M/RADV adapter, and
+presented all 300 measured frames with zero drops. The eight arms did not
+overlap one another or the separately retained invalid contended experiment;
+the receipts do not carry general host-load, clock or temperature telemetry.
+CPU throughput was
+18.787368, 18.907114, 18.687162 and 18.914921 fps; GPU throughput was
+20.652659, 20.975677, 21.080096 and 20.714241 fps. The ratio of medians is
++10.60% (18.847241 to 20.844959 fps), while the primary order-balanced paired
+median is +10.43%. This is an unpaced one-clip, one-view, one-machine result
+from four pairs, not statistical significance, realtime playback, audio or a
+visual-quality claim. It remains only 69.55% of the 29.97-fps source rate. The
+complete receipt hash list has SHA-256
+`1b047196e2a32523b6d53621f8ff8155a5cfa0867ea6d3744ed31082cccb80bd`.
+
+An independent ownership audit then found that the submitted belt token could
+be dropped on the selected Scene's exact-frame rejection path before waiting
+for its GPU submission, returning an aliased decoder surface to the pool too
+early. Integration commit
+`fb177d6011a1ea66229aca3fb716ed253eca696b` fixes that production path with
+one qualified device/queue owner and a non-cloneable exact-submission lease.
+Successful completion releases the decoder owner once and disarms the lease;
+early return waits for the exact submission, while a returned poll error or
+native-backend poll panic retains the owner rather than permitting unproved
+reuse. Explicit completion preserves the raw error or original panic, and
+destructor-time panic is swallowed only after fail-closed retention.
+
+Five focused lease regressions, the forced-RADV byte-exact belt twin and the
+exact real owner-clip Scene ABA path passed. The two GPU logs have SHA-256
+`2169499a509da9d24fe09c8fb9aa681c30ace9825ac9d8247d8251582e0e74af`
+and `10fd8dbb3747c6168ce7f1b6d64265c3d6454d95ed821614a12de582f4de7163`.
+An independent re-audit accepted the fix at the exact integration tree. The
+full causal range above still authenticates `a1594c6`, so the eventual
+shipping head needs a fresh range after the wider GPU migration. The separate
+unselected resident-token checkpoint still requires this lease to be carried
+through an explicit terminal acknowledgement before it can be selected. The
+next performance slice keeps the post-Gaussian belts resident, constructs
+estimator levels and prepared models on the GPU, and binds them directly to
+paired PIS rather than reconstructing CPU `Input` behind an adapter.
+
+**Production ONE X2 paired PIS GPU wiring, 2026-09-01, authenticated checkpoint
+[TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; RANGE AND
+PERFORMANCE EVIDENCE ABOVE]:** the selected Scene route now lazily qualifies a
 persistent paired PIS compute pipeline before any frame-specific GPU work.
 Cold and warm scalar transactions retain CPU construction and upload of the
 typed prepared source models as the temporary producer boundary, then consume
 only fallibly admitted directional `PatchGrid` results from the GPU kernel.
 Each reservation mints an exact generation plus opaque `FrameStamp`; each
 stage completion must return that complete flight and `PairSolveStage` before
-the typed grids can enter `commit_with_solver`. Pipeline, readback, receipt and
-solver-stamp failures occur before commit, surface their original error and
-restore the allocation-identical old owner and ready map without a CPU retry.
+the typed grids can enter `commit_prepared_with_solver`. Pipeline, readback,
+receipt and solver-stamp failures occur before commit, surface their original
+error and restore the allocation-identical old owner and ready map without a
+CPU retry.
 An install failure occurs after the scalar owner has advanced, so it instead
 keeps the prior ready display and makes the lineage terminal while retaining
 the advanced owner only in its exact slot or quarantine. It does not falsely
@@ -98,9 +181,8 @@ The strict computed-trace consumer emits its corresponding v2 contract and
 refuses historical v1 or missing, mixed and inconsistent provenance. The
 three-panel owner-review builder now requires those two v2 inputs and emits
 `kjerag.owner-three-panel-review.v2`; the frozen v1 review contract is not
-silently redefined. This branch does not reinterpret any frozen v1 evidence
-as proof of GPU-only PIS; a new target-GPU consecutive-range run is required
-before making that claim.
+silently redefined. The authenticated range above is the new target-GPU v2
+evidence; no frozen v1 evidence is reinterpreted as proof of GPU-only PIS.
 
 **Second GPU ONE X2 slice, 2026-09-01, implementation branch only [GPU
 GAUSSIAN; TYPED POST-BLUR HANDOFF; 244 BYTE-IDENTICAL ARTIFACTS; SMALL NOISY

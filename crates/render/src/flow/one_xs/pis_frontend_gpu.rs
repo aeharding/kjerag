@@ -9,6 +9,7 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
+use super::gpu_context::OneXsGpuContext;
 use super::pis::gpu::{GpuPisDynamicStage, GpuPisFlight, GpuPisPipeline, GpuPisStageReceipt};
 use super::pis::{AtoB, BtoA, Level, PisDirection};
 use super::scalar::{ColdInputs, LevelInputs, MaskPyramid};
@@ -187,8 +188,7 @@ impl<'a, D: PisDirection, L: GpuPreparedLevelMarker> PisPreparedBinding<'a, D, L
 ///
 #[must_use = "the GPU-resident PIS frame front end has not been consumed"]
 pub(crate) struct GpuPreparedFrame<K> {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    context: OneXsGpuContext,
     flight: GpuPisFlight,
     shared_images: wgpu::Buffer,
     shared_masks: wgpu::Buffer,
@@ -222,7 +222,7 @@ pub(crate) struct PreparedPisDispatch<'a> {
 #[must_use = "the resident GPU PIS terminal has not been consumed"]
 pub(crate) struct GpuPreparedTerminal<K> {
     receipt: GpuPisStageReceipt,
-    pipeline: wgpu::ComputePipeline,
+    context: OneXsGpuContext,
     _output: wgpu::Buffer,
     _output_span_words: usize,
     _b_output_base_words: usize,
@@ -231,12 +231,12 @@ pub(crate) struct GpuPreparedTerminal<K> {
 
 impl<K> GpuPreparedTerminal<K> {
     pub(crate) fn into_prepared(self, solver: &GpuPisPipeline) -> Fallible<GpuPreparedFrame<K>> {
-        solver.validate_terminal_context(&self.pipeline)?;
+        solver.validate_terminal_context(&self.context)?;
         Ok(self.prepared)
     }
 
     pub(crate) fn acknowledge_terminal(self, solver: &GpuPisPipeline) -> Fallible<()> {
-        solver.validate_terminal_context(&self.pipeline)?;
+        solver.validate_terminal_context(&self.context)?;
         self.prepared.acknowledge_terminal()
     }
 
@@ -250,26 +250,26 @@ impl<K> GpuPreparedTerminal<K> {
         mut self,
     ) -> Fallible<(GpuPisStageReceipt, Vec<u32>, GpuPreparedFrame<K>)> {
         let words = 2 * self._output_span_words;
-        let readback = self.prepared.device.create_buffer(&wgpu::BufferDescriptor {
+        let device = self.prepared.context.device();
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 diagnostic GPU PIS terminal readback"),
             size: words_bytes(words),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder =
-            self.prepared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("ONE X2 diagnostic GPU PIS terminal readback"),
-                });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 diagnostic GPU PIS terminal readback"),
+        });
         encoder.copy_buffer_to_buffer(&self._output, 0, &readback, 0, words_bytes(words));
-        self.prepared.belts.submit_front_end(encoder.finish())?;
+        self.prepared
+            .belts
+            .submit_front_end(&self.prepared.context, |_| encoder.finish())?;
         let slice = readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = mapped.send(result);
         });
-        self.prepared.device.poll(wgpu::PollType::Wait {
+        device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         })?;
@@ -314,6 +314,7 @@ impl<K> GpuPreparedFrame<K> {
         solver: &GpuPisPipeline,
         dynamic: GpuPisDynamicStage,
     ) -> Fallible<GpuPreparedTerminal<K>> {
+        solver.validate_terminal_context(&self.context)?;
         let mut dispatch = solver.prepare_resident_dispatch(dynamic)?;
         let level = dispatch.stage.level();
         let pair = match level {
@@ -339,14 +340,14 @@ impl<K> GpuPreparedFrame<K> {
         )?;
 
         let dynamic_u32 = upload_words(
-            &self.device,
-            &self.queue,
+            self.context.device(),
+            self.context.queue(),
             "ONE X2 resident GPU PIS dynamic u32 input",
             &dispatch.u32s,
         );
         let dynamic_f32 = upload_words(
-            &self.device,
-            &self.queue,
+            self.context.device(),
+            self.context.queue(),
             "ONE X2 resident GPU PIS dynamic f32 input",
             &dispatch
                 .f32s
@@ -355,30 +356,34 @@ impl<K> GpuPreparedFrame<K> {
                 .collect::<Vec<_>>(),
         );
         let output = storage_buffer(
-            &self.device,
+            self.context.device(),
             "ONE X2 resident GPU PIS terminal bits",
             dispatch.output_words,
         );
-        let resources = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ONE X2 resident GPU PIS sealed resources"),
-            layout: dispatch.layout,
-            entries: &[
-                binding(0, &dynamic_u32),
-                binding(1, &dynamic_f32),
-                binding(2, &output),
-                binding(3, pair.shared_images),
-                binding(4, pair.shared_masks),
-                binding(5, pair.gradients),
-                binding(6, pair.raw_weights),
-                binding(7, pair.patch_weight_sums),
-                binding(8, pair.models),
-            ],
-        });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ONE X2 resident paired GPU PIS"),
+        let resources = self
+            .context
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ONE X2 resident GPU PIS sealed resources"),
+                layout: dispatch.layout,
+                entries: &[
+                    binding(0, &dynamic_u32),
+                    binding(1, &dynamic_f32),
+                    binding(2, &output),
+                    binding(3, pair.shared_images),
+                    binding(4, pair.shared_masks),
+                    binding(5, pair.gradients),
+                    binding(6, pair.raw_weights),
+                    binding(7, pair.patch_weight_sums),
+                    binding(8, pair.models),
+                ],
             });
+        let mut encoder =
+            self.context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("ONE X2 resident paired GPU PIS"),
+                });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ONE X2 resident paired GPU PIS directions"),
@@ -388,13 +393,14 @@ impl<K> GpuPreparedFrame<K> {
             pass.set_bind_group(0, &resources, &[]);
             pass.dispatch_workgroups(2, 1, 1);
         }
-        self.belts.submit_front_end(encoder.finish())?;
+        self.belts
+            .submit_front_end(&self.context, |_| encoder.finish())?;
         Ok(GpuPreparedTerminal {
             receipt: GpuPisStageReceipt {
                 flight,
                 stage: dispatch.stage,
             },
-            pipeline: dispatch.pipeline.clone(),
+            context: self.context.clone(),
             _output: output,
             _output_span_words: dispatch.output_span_words,
             _b_output_base_words: dispatch.b_output_base_words,
@@ -406,7 +412,7 @@ impl<K> GpuPreparedFrame<K> {
     /// Success proves the latest same-queue consumer and every earlier stage,
     /// releases the imported source owner once and disarms cancellation Drop.
     pub(crate) fn acknowledge_terminal(mut self) -> Fallible<()> {
-        self.belts.validate_provenance(&self.device, &self.queue)?;
+        self.belts.validate_provenance(&self.context)?;
         self.belts.complete()
     }
 
@@ -488,8 +494,7 @@ fn binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
 
 /// Render-private production shader plus mandatory target-device CPU twin.
 pub(crate) struct GpuPisFrontEnd {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    context: OneXsGpuContext,
     reduce: wgpu::ComputePipeline,
     gradient: wgpu::ComputePipeline,
     weight_horizontal: wgpu::ComputePipeline,
@@ -500,16 +505,12 @@ pub(crate) struct GpuPisFrontEnd {
 }
 
 impl GpuPisFrontEnd {
-    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Self> {
-        Self::from_shader(device, queue, SHADER, true)
+    pub(crate) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+        Self::from_shader(context, SHADER, true)
     }
 
-    fn from_shader(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        shader: &str,
-        qualify: bool,
-    ) -> Fallible<Self> {
+    fn from_shader(context: OneXsGpuContext, shader: &str, qualify: bool) -> Fallible<Self> {
+        let device = context.device().clone();
         let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -556,8 +557,7 @@ impl GpuPisFrontEnd {
             })
         };
         let built = Self {
-            device: device.clone(),
-            queue: queue.clone(),
+            context,
             reduce: pipeline("reduce_shared"),
             gradient: pipeline("prepare_gradients"),
             weight_horizontal: pipeline("prepare_weight_horizontal"),
@@ -580,19 +580,19 @@ impl GpuPisFrontEnd {
         mut belts: GpuBlurredBelts<K>,
         physical_masks: &LensPair<Vec<u8>>,
     ) -> Fallible<GpuPreparedFrame<K>> {
-        belts.validate_provenance(&self.device, &self.queue)?;
+        belts.validate_provenance(&self.context)?;
         validate_masks(physical_masks)?;
-        let device = &self.device;
-        let queue = &self.queue;
+        let device = self.context.device();
+        let queue = self.context.queue();
         let mask = upload_masks(device, queue, physical_masks);
         let outputs = OutputBuffers::new(device);
         let resources = self.resources(device, belts.packed(), &mask, &outputs);
-        let command = self.encode_command(device, &resources);
-        belts.submit_front_end(command)?;
+        belts.submit_front_end(&self.context, |device| {
+            self.encode_command(device, &resources)
+        })?;
         let flight = belts.take_flight();
         Ok(GpuPreparedFrame {
-            device: device.clone(),
-            queue: queue.clone(),
+            context: self.context.clone(),
             flight,
             shared_images: outputs.shared_images,
             shared_masks: outputs.shared_masks,
@@ -653,8 +653,8 @@ impl GpuPisFrontEnd {
     }
 
     fn qualify(&self) -> Fallible<()> {
-        let device = &self.device;
-        let queue = &self.queue;
+        let device = self.context.device();
+        let queue = self.context.queue();
         let (blurred, masks) = qualification_fixture();
         let expected = cpu_outputs(&blurred, &masks);
         let packed = upload_belts(device, queue, &blurred);
@@ -1602,7 +1602,7 @@ mod tests {
                 return;
             }
         };
-        let front = GpuPisFrontEnd::new(&device, &queue)
+        let front = GpuPisFrontEnd::new(OneXsGpuContext::new(&device, &queue))
             .unwrap_or_else(|error| panic!("GPU front end failed on {adapter}: {error}"));
         let state = Arc::new(AtomicU8::new(0));
         let (dropped, answer) = mpsc::channel();
@@ -1679,7 +1679,7 @@ mod tests {
                 return;
             }
         };
-        let front = GpuPisFrontEnd::new(&device, &queue).unwrap();
+        let front = GpuPisFrontEnd::new(OneXsGpuContext::new(&device, &queue)).unwrap();
         let state = Arc::new(AtomicU8::new(0));
         let (dropped, answer) = mpsc::channel();
         let (mut belts, _) = resident_qualification_fixture(
@@ -1853,7 +1853,7 @@ mod tests {
                 return;
             }
         };
-        GpuPisFrontEnd::new(&device, &queue).unwrap_or_else(|error| {
+        GpuPisFrontEnd::new(OneXsGpuContext::new(&device, &queue)).unwrap_or_else(|error| {
             panic!("ONE X2 GPU prepared-source front end failed on {adapter}: {error}")
         });
     }
@@ -1949,7 +1949,7 @@ mod tests {
             generation: 41,
             frame: FrameStamp::for_test(17, Duration::from_millis(567), None),
         };
-        let belt_pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+        let belt_pipeline = GpuSolverBeltPipeline::new(OneXsGpuContext::new(&device, &queue))
             .unwrap_or_else(|error| panic!("GPU belt qualification failed on {adapter}: {error}"));
         let resident = belt_pipeline
             .submit_resident_retained(
@@ -1962,9 +1962,10 @@ mod tests {
                 flight.clone(),
             )
             .unwrap();
-        let front_end = GpuPisFrontEnd::new(&device, &queue).unwrap_or_else(|error| {
-            panic!("GPU prepared-source qualification failed on {adapter}: {error}")
-        });
+        let front_end =
+            GpuPisFrontEnd::new(OneXsGpuContext::new(&device, &queue)).unwrap_or_else(|error| {
+                panic!("GPU prepared-source qualification failed on {adapter}: {error}")
+            });
         let mut prepared = front_end.prepare(resident, &masks).unwrap();
         assert!(
             validate_direct_stage_for_test(
@@ -1980,7 +1981,7 @@ mod tests {
             .is_err(),
             "stage mutation entered the direct kernel"
         );
-        let pis = GpuPisPipeline::new(&device, &queue)
+        let pis = GpuPisPipeline::new(OneXsGpuContext::new(&device, &queue))
             .unwrap_or_else(|error| panic!("GPU PIS qualification failed on {adapter}: {error}"));
 
         for (ordinal, level) in [Level::Two, Level::One].into_iter().enumerate() {
@@ -2064,9 +2065,11 @@ mod tests {
                     1,
                 );
                 assert_ne!(swapped_shader, DIRECT_TEST_SHADER);
-                let swapped =
-                    GpuPisPipeline::from_shader_for_direct_test(&device, &queue, &swapped_shader)
-                        .unwrap();
+                let swapped = GpuPisPipeline::from_shader_for_direct_test(
+                    OneXsGpuContext::new(&device, &queue),
+                    &swapped_shader,
+                )
+                .unwrap();
                 let output = swapped
                     .solve_prepared_diagnostic(
                         &device,
@@ -2216,13 +2219,14 @@ mod tests {
         );
         let prepared = terminal.into_prepared(&pis).unwrap();
         let terminal = pis.submit_prepared(prepared, resident_request(8)).unwrap();
-        let other =
-            GpuPisPipeline::from_shader_for_direct_test(&device, &queue, DIRECT_TEST_SHADER)
-                .unwrap();
-        assert!(
-            terminal.acknowledge_terminal(&other).is_err(),
-            "a resident terminal crossed a different qualified pipeline"
-        );
+        let other = GpuPisPipeline::from_shader_for_direct_test(
+            OneXsGpuContext::new(&device, &queue),
+            DIRECT_TEST_SHADER,
+        )
+        .unwrap();
+        terminal
+            .acknowledge_terminal(&other)
+            .expect("a recreated pipeline on the same GPU context was rejected");
     }
 
     #[test]

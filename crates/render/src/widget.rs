@@ -115,8 +115,8 @@ impl shader::Primitive for ScenePrimitive {
 }
 
 impl shader::Pipeline for ScenePipeline {
-    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        ScenePipeline::new(device, format)
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        ScenePipeline::new(device, queue, format)
     }
 }
 

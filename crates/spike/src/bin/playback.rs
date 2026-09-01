@@ -630,7 +630,7 @@ fn play(
     println!("shutter: readout {readout}");
     scene.set_sampling(sampling);
     println!("sample: {sampling:?}");
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     pipeline.hold_band(!band);
     pipeline.hold_tone(!tone);
     println!("seam:   band {band}, exposure {tone}");
