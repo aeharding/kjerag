@@ -2,8 +2,8 @@
 //!
 //! The production entry consumes a sealed upstream resident token, advances
 //! that token's existing submission lease and leaves the packed 200-by-100
-//! type-2 map resident. It never maps, polls or reconstructs an operand on the
-//! CPU. Scene wiring remains a later boundary.
+//! type-2 map resident. A four-byte asynchronous validity gate is the only
+//! ordinary CPU observation. Scene wiring remains a later boundary.
 
 #![allow(
     dead_code,
@@ -11,12 +11,12 @@
 )]
 
 use std::num::NonZeroU64;
-#[cfg(test)]
 use std::sync::mpsc;
 
 use kjerag_media::FrameStamp;
 
 use super::super::gpu_context::OneXsGpuContext;
+use super::super::l2_seed::SeedError;
 #[cfg(test)]
 use super::super::map_patch::{
     self, BaseMap, BilateralInputs, CoordinateMap, FlowMap, GateMap, PreimageMap, SideInputs,
@@ -33,6 +33,9 @@ const INPUT_WORDS: usize =
     2 * (MAP_NODES * 2 + RETAINED_NODES * 2 + RETAINED_NODES * 2 + MAP_NODES + MAP_NODES * 2);
 const INPUT_BYTES: u64 = (INPUT_WORDS * size_of::<u32>()) as u64;
 const ACTION_BYTES: u64 = (MAP_NODES * 2 * size_of::<u32>()) as u64;
+const VALIDITY_BYTES: u64 = size_of::<u32>() as u64;
+const L1_PATCH_COLS: usize = 8;
+const L1_PATCHES: usize = 1424;
 
 /// Sealed handoff implemented by the upstream resident ONE X2 chain.
 ///
@@ -51,6 +54,7 @@ pub(super) mod resident {
         fn frame(&self) -> &FrameStamp;
         fn alpha_binding(&self) -> wgpu::BufferBinding<'_>;
         fn encode_input_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer);
+        fn encode_validity_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer);
         fn submit_after(
             &mut self,
             producer: &OneXsGpuContext,
@@ -71,6 +75,93 @@ pub(super) struct GpuPackedMapFrame<O: Operands> {
     _actions: wgpu::Buffer,
     context: OneXsGpuContext,
     upstream: O,
+}
+
+/// A resident final map whose four-byte fail-closed status has not completed.
+///
+/// This type has no Scene-binding operation. It retains the complete upstream
+/// owner until a successful poll converts it into [`GpuPackedMapFrame`].
+#[must_use = "the pending resident final-map validity has not been polled"]
+pub(super) struct PendingGpuPackedMapFrame<O: Operands> {
+    frame: FrameStamp,
+    packed: wgpu::Buffer,
+    actions: wgpu::Buffer,
+    context: OneXsGpuContext,
+    upstream: O,
+    validity: wgpu::Buffer,
+    mapped: mpsc::Receiver<Result<(), String>>,
+}
+
+pub(super) enum ValidityPoll<O: Operands> {
+    Pending(PendingGpuPackedMapFrame<O>),
+    Ready(GpuPackedMapFrame<O>),
+}
+
+impl<O: Operands> PendingGpuPackedMapFrame<O> {
+    /// Drive callbacks once without waiting and consume the result if ready.
+    pub(super) fn poll(self) -> Fallible<ValidityPoll<O>> {
+        self.context
+            .device()
+            .poll(wgpu::PollType::Poll)
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+        match self.mapped.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => Ok(ValidityPoll::Pending(self)),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("ONE X2 GPU validity mapping callback disconnected".into())
+            }
+            Ok(Err(error)) => Err(error.into()),
+            Ok(Ok(())) => self.finish().map(ValidityPoll::Ready),
+        }
+    }
+
+    fn finish(self) -> Fallible<GpuPackedMapFrame<O>> {
+        let bytes = self.validity.slice(..).get_mapped_range();
+        let status = u32::from_ne_bytes(bytes[..size_of::<u32>()].try_into().unwrap());
+        drop(bytes);
+        self.validity.unmap();
+        if status != u32::MAX {
+            return Err(validity_error(status).into());
+        }
+        Ok(GpuPackedMapFrame {
+            frame: self.frame,
+            packed: self.packed,
+            _actions: self.actions,
+            context: self.context,
+            upstream: self.upstream,
+        })
+    }
+
+    #[cfg(test)]
+    fn inject_mapping_failure(&mut self, message: &str) {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Err(message.to_owned())).unwrap();
+        self.mapped = receiver;
+    }
+}
+
+fn validity_error(status: u32) -> SeedError {
+    let plane = status as usize / L1_PATCHES;
+    let patch = status as usize % L1_PATCHES;
+    let direction = if plane < 2 {
+        super::super::Direction::AtoB
+    } else {
+        super::super::Direction::BtoA
+    };
+    let component = if plane.is_multiple_of(2) {
+        "dcol"
+    } else {
+        "drow"
+    };
+    let patch_row = patch / L1_PATCH_COLS;
+    let patch_col = patch % L1_PATCH_COLS;
+    SeedError::NonFiniteCenter {
+        direction,
+        component,
+        patch_row,
+        patch_col,
+        dense_row: patch_row * 3 + 4,
+        dense_col: patch_col * 3 + 4,
+    }
 }
 
 impl<O: Operands> GpuPackedMapFrame<O> {
@@ -320,12 +411,12 @@ impl GpuMapMaterializer {
     /// Consume one sealed upstream token and emit an opaque resident map.
     ///
     /// Submission goes through the upstream token so its existing source-owner
-    /// lease advances to this dispatch. There is no second lease, map, poll or
-    /// readback on this path.
+    /// lease advances to this dispatch. Only the resident validity word is
+    /// copied for asynchronous CPU observation.
     pub(super) fn materialize<O: Operands>(
         &self,
         mut operands: O,
-    ) -> Fallible<GpuPackedMapFrame<O>> {
+    ) -> Fallible<PendingGpuPackedMapFrame<O>> {
         self.context.ensure_same(operands.context())?;
         let frame = operands.frame().clone();
         let input = self
@@ -337,14 +428,30 @@ impl GpuMapMaterializer {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-        let (packed, actions, command) = self.encode(&operands, &input);
+        let validity = self
+            .context
+            .device()
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 resident GPU final-map validity readback"),
+                size: VALIDITY_BYTES,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        let (packed, actions, command) = self.encode(&operands, &input, &validity);
         operands.submit_after(&self.context, command)?;
-        Ok(GpuPackedMapFrame {
+        let slice = validity.slice(..);
+        let (sender, mapped) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result.map_err(|error| error.to_string()));
+        });
+        Ok(PendingGpuPackedMapFrame {
             frame,
             packed,
-            _actions: actions,
+            actions,
             context: self.context.clone(),
             upstream: operands,
+            validity,
+            mapped,
         })
     }
 
@@ -352,6 +459,7 @@ impl GpuMapMaterializer {
         &self,
         operands: &O,
         input: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
     ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::CommandBuffer) {
         let device = self.context.device();
         let packed = device.create_buffer(&wgpu::BufferDescriptor {
@@ -397,6 +505,7 @@ impl GpuMapMaterializer {
             pass.set_bind_group(0, &resources, &[]);
             pass.dispatch_workgroups((MAP_NODES as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
         }
+        operands.encode_validity_copy(&mut encoder, validity);
         (packed, actions, encoder.finish())
     }
 
@@ -413,7 +522,7 @@ impl GpuMapMaterializer {
             AlphaMap::new(vec![0.5; MAP_NODES]).unwrap(),
             &words,
         );
-        let result = self.materialize(operands)?;
+        let result = expect_ready(self.materialize(operands)?)?;
         let actual = result.diagnostic_readback()?.packed;
         compare_bits(actual.nodes(), &expected)?;
         let actions = readback_u32(
@@ -493,6 +602,41 @@ fn compare_bits(actual: &[[f32; 4]; MAP_NODES], expected: &[[f32; 4]]) -> Fallib
 }
 
 #[cfg(test)]
+fn expect_ready<O: Operands>(
+    mut pending: PendingGpuPackedMapFrame<O>,
+) -> Fallible<GpuPackedMapFrame<O>> {
+    for _ in 0..100 {
+        match pending.poll()? {
+            ValidityPoll::Ready(frame) => return Ok(frame),
+            ValidityPoll::Pending(next) => {
+                pending = next;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+    Err("ONE X2 GPU validity remained pending after bounded safe polling".into())
+}
+
+#[cfg(test)]
+fn expect_refusal<O: Operands>(
+    mut pending: PendingGpuPackedMapFrame<O>,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    for _ in 0..100 {
+        match pending.poll() {
+            Err(error) => return error,
+            Ok(ValidityPoll::Ready(_)) => {
+                panic!("invalid resident validity became Scene-bindable")
+            }
+            Ok(ValidityPoll::Pending(next)) => {
+                pending = next;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+    panic!("invalid validity remained pending after bounded safe polling")
+}
+
+#[cfg(test)]
 fn upload(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, bytes: &[u8]) -> wgpu::Buffer {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
@@ -517,11 +661,44 @@ struct TestResidentOperands {
     frame: FrameStamp,
     alpha: wgpu::Buffer,
     input: wgpu::Buffer,
+    validity: wgpu::Buffer,
+    drop_witness: Option<TestDropWitness>,
+}
+
+#[cfg(test)]
+struct TestDropWitness(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(test)]
+impl Drop for TestDropWitness {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
 impl TestResidentOperands {
     fn new(context: OneXsGpuContext, frame: FrameStamp, alpha: AlphaMap, words: &[u32]) -> Self {
+        Self::with_validity(context, frame, alpha, words, u32::MAX)
+    }
+
+    fn with_validity(
+        context: OneXsGpuContext,
+        frame: FrameStamp,
+        alpha: AlphaMap,
+        words: &[u32],
+        validity_word: u32,
+    ) -> Self {
+        Self::with_validity_and_witness(context, frame, alpha, words, validity_word, None)
+    }
+
+    fn with_validity_and_witness(
+        context: OneXsGpuContext,
+        frame: FrameStamp,
+        alpha: AlphaMap,
+        words: &[u32],
+        validity_word: u32,
+        drop_witness: Option<TestDropWitness>,
+    ) -> Self {
         assert_eq!(words.len(), INPUT_WORDS);
         let input = upload(
             context.device(),
@@ -535,11 +712,19 @@ impl TestResidentOperands {
             "ONE X2 diagnostic resident alpha",
             alpha.bytes(),
         );
+        let validity = upload(
+            context.device(),
+            context.queue(),
+            "ONE X2 diagnostic resident validity",
+            &validity_word.to_ne_bytes(),
+        );
         Self {
             context,
             frame,
             alpha,
             input,
+            validity,
+            drop_witness,
         }
     }
 }
@@ -563,6 +748,10 @@ impl resident::Operands for TestResidentOperands {
 
     fn encode_input_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer) {
         encoder.copy_buffer_to_buffer(&self.input, 0, target, 0, INPUT_BYTES);
+    }
+
+    fn encode_validity_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer) {
+        encoder.copy_buffer_to_buffer(&self.validity, 0, target, 0, VALIDITY_BYTES);
     }
 
     fn submit_after(
@@ -1067,9 +1256,12 @@ mod tests {
         });
         let fixture = QualificationFixture::new();
         let frame = FrameStamp::for_test(0, std::time::Duration::ZERO, None);
-        let gpu = pipeline
-            .materialize(fixture.resident_operands(context.clone(), frame.clone()))
-            .unwrap();
+        let gpu = expect_ready(
+            pipeline
+                .materialize(fixture.resident_operands(context.clone(), frame.clone()))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(gpu.frame, frame);
         assert_eq!(gpu.packed.size(), PACKED_BYTES as u64);
         let read = gpu.diagnostic_readback().unwrap();
@@ -1079,6 +1271,65 @@ mod tests {
         assert_eq!(binding.frame(), &frame);
         assert_eq!(binding._resident.upstream.alpha.size(), ALPHA_BYTES as u64);
         let _ = binding.read();
+    }
+
+    #[test]
+    fn invalid_resident_word_refuses_with_exact_identity_and_drops_upstream() {
+        let (device, queue, _) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var("KJERAG_REQUIRE_GPU").is_err(), "{why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let pipeline = GpuMapMaterializer::new(context.clone());
+        let fixture = QualificationFixture::new();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let status = 3 * L1_PATCHES as u32 + 10;
+        let operands = TestResidentOperands::with_validity_and_witness(
+            context,
+            FrameStamp::for_test(9, std::time::Duration::ZERO, None),
+            AlphaMap::new(vec![0.5; MAP_NODES]).unwrap(),
+            &pack_inputs(fixture.cpu_inputs()),
+            status,
+            Some(TestDropWitness(dropped.clone())),
+        );
+        let pending = pipeline.materialize(operands).unwrap();
+        assert_eq!(pending.validity.size(), VALIDITY_BYTES);
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let error = expect_refusal(pending);
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 B-to-A level-one initial drow at patch row 1 column 2, dense row 7 column 10, is not finite"
+        );
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mapping_failure_keeps_raw_underlying_text() {
+        let (device, queue, _) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var("KJERAG_REQUIRE_GPU").is_err(), "{why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let pipeline = GpuMapMaterializer::new(context.clone());
+        let fixture = QualificationFixture::new();
+        let mut pending = pipeline
+            .materialize(fixture.resident_operands(
+                context,
+                FrameStamp::for_test(10, std::time::Duration::ZERO, None),
+            ))
+            .unwrap();
+        pending.inject_mapping_failure("injected raw GPU map failure");
+        let error = match pending.poll() {
+            Err(error) => error,
+            Ok(_) => panic!("injected mapping failure was accepted"),
+        };
+        assert_eq!(error.to_string(), "injected raw GPU map failure");
     }
 
     #[test]
@@ -1100,16 +1351,22 @@ mod tests {
 
         let foreign_context = OneXsGpuContext::new(&foreign_device, &foreign_queue);
 
-        let gpu = pipeline
-            .materialize(fixture.resident_operands(context.clone(), frame.clone()))
-            .unwrap();
+        let gpu = expect_ready(
+            pipeline
+                .materialize(fixture.resident_operands(context.clone(), frame.clone()))
+                .unwrap(),
+        )
+        .unwrap();
         match gpu.bind_for_scene(&foreign_context, &frame, &layout) {
             Err(error) => assert_eq!(error, BindingError::Context),
             Ok(_) => panic!("foreign GPU context was accepted"),
         }
-        let gpu = pipeline
-            .materialize(fixture.resident_operands(context.clone(), frame.clone()))
-            .unwrap();
+        let gpu = expect_ready(
+            pipeline
+                .materialize(fixture.resident_operands(context.clone(), frame.clone()))
+                .unwrap(),
+        )
+        .unwrap();
         match gpu.bind_for_scene(&context, &foreign_frame, &layout) {
             Err(error) => assert_eq!(error, BindingError::Frame),
             Ok(_) => panic!("foreign frame was accepted"),

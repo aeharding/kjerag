@@ -3,6 +3,33 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Asynchronous resident final-map validity gate, 2026-09-01, implementation
+branch only [FOUR-BYTE READBACK; FORCED-RADV QUALIFIED; NO SCENE WIRING OR
+PERFORMANCE CLAIM]:** the private final-map materializer now accepts one
+additional purpose-specific operation from its sealed operands: append a copy
+of the exact resident L2-to-L1 finite-center status word. It exposes no source
+buffer, binding or value. The copy follows the unchanged final-map dispatch in
+the same command buffer and inherited submission lease and targets one
+four-byte `MAP_READ | COPY_DST` staging allocation.
+
+Materialization now returns an opaque pending frame with no Scene-binding
+operation. It retains the complete upstream/source owner, packed map, alpha,
+frame and context while `map_async` is outstanding. One nonblocking poll calls
+`Device::poll(Poll)` once and checks the callback channel once. Pending stays
+pending without changing prior capture state. Only `u32::MAX` converts into the
+existing bindable resident frame. Every encoded failure word is decoded by the
+existing `(direction * 2 + component) * 1424 + patch` contract and surfaces
+the exact `SeedError::NonFiniteCenter` direction, component, patch and dense
+center. Mapping failures retain the underlying map error text. There is no
+wait, polling loop, bulk readback or Scene selection on the ordinary path.
+
+The focused actual-RADV tests exercise bounded safe polling, valid conversion
+and binding, precise invalid refusal with upstream-drop ownership, mapping
+failure text, foreign frame/context refusal, the packed-map CPU twin and all
+20 accepted live shader mutations. Final-map arithmetic, dispatch dimensions
+and mutation gates remain unchanged. A fresh post-commit receipt follows in a
+documentation-only successor.
+
 **Pre-submission resident ONE X2 parent maps, 2026-09-01, implementation
 branch only [BIT-EXACT ON FORCED RADV; PRIVATE OWNER; NO SCENE WIRING]:** the
 frozen parent arithmetic is a private child of the same owner as retained
