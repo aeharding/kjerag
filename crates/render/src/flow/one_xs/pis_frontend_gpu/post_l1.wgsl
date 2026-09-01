@@ -19,8 +19,11 @@ const HINT_FAILURE_TAG = 0x80000000u;
 @group(0) @binding(1) var<storage, read> images: array<u32>;
 @group(0) @binding(3) var<storage, read_write> histogram: array<u32>;
 @group(0) @binding(4) var<storage, read_write> fifo: array<u32>;
+@group(0) @binding(5) var<storage, read> prior_public: array<u32>;
+@group(0) @binding(6) var<storage, read> motion_l1: array<u32>;
 @group(0) @binding(7) var<storage, read_write> next_hints: array<u32>;
 @group(0) @binding(9) var<storage, read_write> filtered: array<u32>;
+@group(0) @binding(10) var<storage, read_write> retained_l1: array<u32>;
 @group(0) @binding(11) var<storage, read_write> dense_l1: array<u32>;
 @group(0) @binding(12) var<storage, read_write> horizontal: array<u32>;
 @group(0) @binding(13) var<storage, read_write> public_out: array<u32>;
@@ -189,6 +192,47 @@ fn densify_cold(@builtin(global_invocation_id) id:vec3<u32>){
     let fresh=vote(dir,row,col,false);
     dense_l1[vec_index(dir,pixel,0u,L1_PIXELS)]=bitcast<u32>(fresh.x);
     dense_l1[vec_index(dir,pixel,1u,L1_PIXELS)]=bitcast<u32>(fresh.y);
+}
+
+fn prior(dir:u32,row:u32,col:u32,component:u32)->f32 {
+    return bitcast<f32>(prior_public[vec_index(dir,row*PUB_COLS+col,component,PUB_PIXELS)]);
+}
+
+// OpenCV's exact-two L1 resize uses its pairwise SIMD association for vector
+// columns 0 through 27, then its scalar remainder association for 28 and 29.
+@compute @workgroup_size(64)
+fn make_retained_l1(@builtin(global_invocation_id) id:vec3<u32>){
+    if(id.x>=2u*L1_PIXELS){return;}
+    let dir=id.x/L1_PIXELS;let pixel=id.x%L1_PIXELS;
+    let row=pixel/L1_COLS;let col=pixel%L1_COLS;
+    for(var component=0u;component<2u;component+=1u){
+        let r=2u*row;let c=2u*col;
+        let tl=prior(dir,r,c,component);let tr=prior(dir,r,c+1u,component);
+        let bl=prior(dir,r+1u,c,component);let br=prior(dir,r+1u,c+1u,component);
+        var resized=0.0;
+        if(col<28u){
+            resized=((tl+tr)*0.5+(bl+br)*0.5)*0.5;
+        }else{
+            resized=(((tl+tr)+bl)+br)*0.25;
+        }
+        retained_l1[vec_index(dir,pixel,component,L1_PIXELS)]=bitcast<u32>(resized*0.5);
+    }
+}
+
+@compute @workgroup_size(64)
+fn densify_warm(@builtin(global_invocation_id) id:vec3<u32>){
+    if(id.x>=2u*L1_PIXELS){return;}
+    let dir=id.x/L1_PIXELS;let pixel=id.x%L1_PIXELS;
+    let row=pixel/L1_COLS;let col=pixel%L1_COLS;
+    let fresh=vote(dir,row,col,false);
+    let motion=(motion_l1[pixel/4u]>>(8u*(pixel%4u)))&0xffu;
+    let fresh_weight=select(0.02,1.0,motion!=0u);
+    for(var component=0u;component<2u;component+=1u){
+        let at=vec_index(dir,pixel,component,L1_PIXELS);
+        let retained_term=bitcast<f32>(retained_l1[at])*(1.0-fresh_weight);
+        let current=select(fresh.x,fresh.y,component==1u);
+        dense_l1[at]=bitcast<u32>(fma(current,fresh_weight,retained_term));
+    }
 }
 
 fn dense(dir:u32,row:u32,col:u32,component:u32)->f32{return bitcast<f32>(dense_l1[vec_index(dir,row*L1_COLS+col,component,L1_PIXELS)]);}

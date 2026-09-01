@@ -35,6 +35,7 @@ const PUBLIC_WORDS: usize = 2 * PUB_ROWS * PUB_COLS * 2;
 const HINT_WORDS: usize = 275_400;
 const PATCH_WORDS: usize = 2 * PATCHES * 2;
 const L1_WORDS: usize = 2 * L1_ROWS * L1_COLS * 2;
+const PACKED_L1_MOTION_WORDS: usize = (L1_ROWS * L1_COLS).div_ceil(4);
 const RETAINED_L2_WORDS: usize = 2 * L2_ROWS * L2_COLS * 2;
 const HORIZONTAL_WORDS: usize = 2 * L1_ROWS * PUB_COLS * 2;
 const HORIZONTAL_PRODUCT_WORDS: usize = 2 * HORIZONTAL_WORDS;
@@ -66,7 +67,7 @@ impl GpuColdPostL1Pipeline {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ONE X2 resident cold post-L1"),
             entries: &[
-                storage(0, true, 2 * PATCHES),
+                storage(0, true, PATCH_WORDS),
                 storage(1, true, 2 * (L1_ROWS * L1_COLS + L2_ROWS * L2_COLS)),
                 storage(3, false, HIST_WORDS),
                 storage(4, false, FIFO_WORDS),
@@ -131,6 +132,372 @@ impl GpuColdPostL1Pipeline {
             quantized_values,
         })
     }
+}
+
+/// Arithmetic-only warm continuation. The resident frame owner does not yet
+/// construct its input; keeping this beside the cold tail makes the shared
+/// shader and ABI one private contract.
+#[allow(
+    dead_code,
+    reason = "qualified prerequisite for the later warm owner join"
+)]
+pub(super) struct GpuWarmPostL1Pipeline {
+    context: OneXsGpuContext,
+    layout: wgpu::BindGroupLayout,
+    passes: [wgpu::ComputePipeline; 9],
+    quantized_values: wgpu::Buffer,
+}
+
+pub(super) mod classified_rows {
+    pub(in super::super) trait Sealed {}
+}
+
+/// Sealed handoff implemented only by the later classifier's exact owned
+/// successor-state output. Post-L1 never receives or returns its raw buffer.
+#[allow(
+    dead_code,
+    reason = "the small-row classifier is a parallel prerequisite"
+)]
+pub(super) trait GpuWarmClassifiedRows: classified_rows::Sealed {}
+
+/// Allocation-identical prior public field carried from the resident
+/// predecessor. It has no ordinary from-buffer constructor or accessor.
+#[allow(
+    dead_code,
+    reason = "qualified prerequisite for the later warm owner join"
+)]
+pub(super) struct GpuWarmPriorPublic {
+    buffer: wgpu::Buffer,
+}
+
+#[cfg(test)]
+impl GpuWarmPriorPublic {
+    fn for_qualification(buffer: wgpu::Buffer) -> Self {
+        assert_eq!(buffer.size(), words_bytes(PUBLIC_WORDS));
+        Self { buffer }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "qualified prerequisite for the later warm owner join"
+)]
+struct GpuWarmPostL1Inputs {
+    context: OneXsGpuContext,
+    terminal: wgpu::Buffer,
+    images: wgpu::Buffer,
+    prior_histogram: wgpu::Buffer,
+    prior_fifo: wgpu::Buffer,
+    prior_public: GpuWarmPriorPublic,
+    motion_l1: wgpu::Buffer,
+    validity: wgpu::Buffer,
+}
+
+/// Hints and median are already encoded, but the command encoder has not been
+/// submitted. Only a sealed classifier result can resume the same encoder.
+#[allow(
+    dead_code,
+    reason = "qualified prerequisite for the later warm owner join"
+)]
+#[must_use = "warm post-L1 must receive classified rows before submission"]
+pub(super) struct GpuWarmPostL1Paused<'pipeline> {
+    pipeline: &'pipeline GpuWarmPostL1Pipeline,
+    encoder: wgpu::CommandEncoder,
+    bind: wgpu::BindGroup,
+    filtered: wgpu::Buffer,
+    histogram: wgpu::Buffer,
+    fifo: wgpu::Buffer,
+    hints: wgpu::Buffer,
+    retained_l1: wgpu::Buffer,
+    dense_l1: wgpu::Buffer,
+    horizontal: wgpu::Buffer,
+    public: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: super::RetainedL2DirectionPixelVec2Buffer,
+    validity: wgpu::Buffer,
+}
+
+#[allow(
+    dead_code,
+    reason = "qualified prerequisite for the later warm owner join"
+)]
+#[must_use = "encoded warm post-L1 must remain inside its resident submission owner"]
+pub(super) struct GpuWarmPostL1Encoded<C: GpuWarmClassifiedRows> {
+    encoder: wgpu::CommandEncoder,
+    _bind: wgpu::BindGroup,
+    _filtered: wgpu::Buffer,
+    _histogram: wgpu::Buffer,
+    _fifo: wgpu::Buffer,
+    _hints: wgpu::Buffer,
+    _retained_l1: wgpu::Buffer,
+    _dense_l1: wgpu::Buffer,
+    _horizontal: wgpu::Buffer,
+    public: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: super::RetainedL2DirectionPixelVec2Buffer,
+    validity: wgpu::Buffer,
+    classified_rows: C,
+}
+
+#[allow(
+    dead_code,
+    reason = "qualified prerequisite for the later warm owner join"
+)]
+impl GpuWarmPostL1Pipeline {
+    pub(super) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+        Self::from_shader(context, SHADER)
+    }
+
+    fn from_shader(context: OneXsGpuContext, shader: &str) -> Fallible<Self> {
+        let device = context.device().clone();
+        let storage = |binding, read_only, words| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(words_bytes(words)),
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ONE X2 resident warm post-L1"),
+            entries: &[
+                storage(0, true, PATCH_WORDS),
+                storage(1, true, 2 * (L1_ROWS * L1_COLS + L2_ROWS * L2_COLS)),
+                storage(3, false, HIST_WORDS),
+                storage(4, false, FIFO_WORDS),
+                storage(5, true, PUBLIC_WORDS),
+                storage(6, true, PACKED_L1_MOTION_WORDS),
+                storage(7, false, HINT_WORDS),
+                storage(9, false, PATCH_WORDS),
+                storage(10, false, L1_WORDS),
+                storage(11, false, L1_WORDS),
+                storage(12, false, HORIZONTAL_PRODUCT_WORDS),
+                storage(13, false, PUBLIC_WORDS),
+                storage(14, true, 2 * HIST_BINS),
+                storage(16, false, RETAINED_L2_WORDS),
+                storage(17, false, 1),
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ONE X2 resident warm post-L1"),
+            bind_group_layouts: &[&layout],
+            immediate_size: 0,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ONE X2 resident warm post-L1"),
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
+        });
+        let make = |entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("ONE X2 resident warm post-L1"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let mut quantized_values = Vec::with_capacity(2 * HIST_BINS);
+        for (base, scale) in [
+            (f32::from_bits(0x3f7f_fc66), -10.0f32),
+            (f32::from_bits(0xbf7f_fc66), 10.0f32),
+        ] {
+            quantized_values.extend((0..HIST_BINS).map(|bin| {
+                let offset = bin as f32 / scale;
+                (base + offset).to_bits()
+            }));
+        }
+        let quantized_values = upload_words(
+            context.device(),
+            context.queue(),
+            "ONE X2 exact warm temporal quantized values",
+            &quantized_values,
+        );
+        Ok(Self {
+            context,
+            layout,
+            passes: [
+                make("make_hint_l1"),
+                make("make_hint_l2"),
+                make("temporal_median"),
+                make("make_retained_l1"),
+                make("densify_warm"),
+                make("resize_horizontal"),
+                make("resize_vertical"),
+                make("repair_periodic"),
+                make("make_retained_l2"),
+            ],
+            quantized_values,
+        })
+    }
+
+    fn encode_until_classification(
+        &self,
+        inputs: GpuWarmPostL1Inputs,
+    ) -> Fallible<GpuWarmPostL1Paused<'_>> {
+        self.context.ensure_same(&inputs.context)?;
+        for (part, resource, words) in [
+            ("paired L1 terminal", &inputs.terminal, PATCH_WORDS),
+            (
+                "prepared images",
+                &inputs.images,
+                2 * (L1_ROWS * L1_COLS + L2_ROWS * L2_COLS),
+            ),
+            (
+                "prior temporal histogram",
+                &inputs.prior_histogram,
+                HIST_WORDS,
+            ),
+            ("prior temporal FIFO", &inputs.prior_fifo, FIFO_WORDS),
+            (
+                "prior public flow",
+                &inputs.prior_public.buffer,
+                PUBLIC_WORDS,
+            ),
+            (
+                "packed L1 motion",
+                &inputs.motion_l1,
+                PACKED_L1_MOTION_WORDS,
+            ),
+            ("resident validity", &inputs.validity, 1),
+        ] {
+            if resource.size() != words_bytes(words) {
+                return Err(format!(
+                    "ONE X2 warm post-L1 {part} buffer is {} bytes, expected {}",
+                    resource.size(),
+                    words_bytes(words)
+                )
+                .into());
+            }
+        }
+        let device = self.context.device();
+        let hints = buffer(device, "ONE X2 warm next planar hints", HINT_WORDS);
+        let filtered = buffer(device, "ONE X2 warm filtered patches", PATCH_WORDS);
+        let histogram = buffer(device, "ONE X2 warm successor histogram", HIST_WORDS);
+        let fifo = buffer(device, "ONE X2 warm successor FIFO", FIFO_WORDS);
+        let retained_l1 = buffer(device, "ONE X2 warm retained L1", L1_WORDS);
+        let dense_l1 = buffer(device, "ONE X2 warm dense L1", L1_WORDS);
+        let horizontal = buffer(
+            device,
+            "ONE X2 warm resize horizontal products",
+            HORIZONTAL_PRODUCT_WORDS,
+        );
+        let public = buffer(device, "ONE X2 warm public flow", PUBLIC_WORDS);
+        let retained_l2_direction_pixel_vec2 =
+            super::RetainedL2DirectionPixelVec2Buffer::new(buffer(
+                device,
+                "ONE X2 warm successor retained L2 direction-pixel-vec2",
+                RETAINED_L2_WORDS,
+            ));
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 resident warm post-L1"),
+            layout: &self.layout,
+            entries: &[
+                entry(0, &inputs.terminal),
+                entry(1, &inputs.images),
+                entry(3, &histogram),
+                entry(4, &fifo),
+                entry(5, &inputs.prior_public.buffer),
+                entry(6, &inputs.motion_l1),
+                entry(7, &hints),
+                entry(9, &filtered),
+                entry(10, &retained_l1),
+                entry(11, &dense_l1),
+                entry(12, &horizontal),
+                entry(13, &public),
+                entry(14, &self.quantized_values),
+                entry(16, retained_l2_direction_pixel_vec2.buffer()),
+                entry(17, &inputs.validity),
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 resident warm post-L1"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &inputs.prior_histogram,
+            0,
+            &histogram,
+            0,
+            words_bytes(HIST_WORDS),
+        );
+        encoder.copy_buffer_to_buffer(&inputs.prior_fifo, 0, &fifo, 0, words_bytes(FIFO_WORDS));
+        encoder.clear_buffer(&hints, 0, None);
+        dispatch(&mut encoder, &self.passes[0], &bind, 2 * L1_ROWS * L1_COLS);
+        dispatch(&mut encoder, &self.passes[1], &bind, 2 * L2_ROWS * L2_COLS);
+        dispatch(&mut encoder, &self.passes[2], &bind, 2 * PATCHES);
+        Ok(GpuWarmPostL1Paused {
+            pipeline: self,
+            encoder,
+            bind,
+            filtered,
+            histogram,
+            fifo,
+            hints,
+            retained_l1,
+            dense_l1,
+            horizontal,
+            public,
+            retained_l2_direction_pixel_vec2,
+            validity: inputs.validity,
+        })
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "qualified prerequisite for the later warm owner join"
+)]
+impl GpuWarmPostL1Paused<'_> {
+    pub(super) fn continue_with<C: GpuWarmClassifiedRows>(
+        mut self,
+        classified_rows: C,
+    ) -> GpuWarmPostL1Encoded<C> {
+        for (index, count) in [
+            (3, 2 * L1_ROWS * L1_COLS),
+            (4, 2 * L1_ROWS * L1_COLS),
+            (5, 2 * L1_ROWS * PUB_COLS * 2),
+            (6, 2 * PUB_ROWS * PUB_COLS * 2),
+            (7, 2 * 5 * PUB_COLS * 2),
+            (8, 2 * L2_ROWS * L2_COLS),
+        ] {
+            dispatch(
+                &mut self.encoder,
+                &self.pipeline.passes[index],
+                &self.bind,
+                count,
+            );
+        }
+        GpuWarmPostL1Encoded {
+            encoder: self.encoder,
+            _bind: self.bind,
+            _filtered: self.filtered,
+            _histogram: self.histogram,
+            _fifo: self.fifo,
+            _hints: self.hints,
+            _retained_l1: self.retained_l1,
+            _dense_l1: self.dense_l1,
+            _horizontal: self.horizontal,
+            public: self.public,
+            retained_l2_direction_pixel_vec2: self.retained_l2_direction_pixel_vec2,
+            validity: self.validity,
+            classified_rows,
+        }
+    }
+}
+
+fn dispatch(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind: &wgpu::BindGroup,
+    count: usize,
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("ONE X2 resident warm post-L1"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
 }
 
 pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuCold0Terminal<K> {
@@ -889,6 +1256,29 @@ mod tests {
         ] {
             assert!(std::panic::catch_unwind(|| assert_cold_shader_contract(&mutated)).is_err());
         }
+    }
+
+    #[test]
+    fn warm_shader_contract_pins_order_association_and_exclusions() {
+        assert!(SHADER.contains("resized=((tl+tr)*0.5+(bl+br)*0.5)*0.5;"));
+        assert!(SHADER.contains("resized=(((tl+tr)+bl)+br)*0.25;"));
+        assert!(SHADER.contains("let v=vote(dir,row,col,true);"));
+        assert!(SHADER.contains("filtered[2u * id.x + 1u] = bitcast<u32>(raw_at"));
+        assert!(SHADER.contains("fn densify_warm"));
+        assert!(SHADER.contains("fn repair_periodic"));
+        assert!(SHADER.contains("fn make_retained_l2"));
+        assert!(!SHADER.contains("fn update_small_rows"));
+    }
+
+    #[test]
+    fn warm_successor_state_pins_classifier_rows_and_retained_l2_abi() {
+        assert_eq!(2 * PATCH_ROWS, 356);
+        assert_eq!(2 * (PATCHES + PATCHES - 1) + 1, PATCH_WORDS - 1);
+        assert_eq!(RETAINED_L2_WORDS, 16_200);
+        assert_eq!(
+            super::super::retained_l2_direction_pixel_vec2_index(1, 17, 1),
+            2 * (L2_ROWS * L2_COLS + 17) + 1
+        );
     }
 
     #[test]

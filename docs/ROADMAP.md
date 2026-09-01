@@ -41,6 +41,36 @@ it, and it makes no playback, screenshot integration, performance, rendered
 parity or Studio-parity claim. Studio remains the frozen correctness oracle;
 no optimization reverse engineering was performed.
 
+**GPU-resident warm post-L1 arithmetic prerequisite, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; NO SMALL-ROW CLASSIFIER,
+INSTALL, SCENE, PERFORMANCE OR PARITY CLAIM]:** the private resident post-L1
+shader now has a type-sequenced warm continuation on the same unfinished
+command encoder. It emits successor L1/L2 hints from the raw paired L1 PIS
+terminal before temporal median, filters only dcol while preserving raw drow,
+derives retained L1 directly from the allocation-identical prior public field
+with the selected pairwise columns 0 through 27 and scalar-tail columns 28 and
+29 associations, densifies the filtered sparse result, applies the exact
+motion-selected 1/0 and 0.02/0.98 retained blend, resizes to public, repairs
+the periodic boundary and emits successor retained L2 in direction-major,
+pixel-interleaved `(dcol,drow)` order. It consumes the established packed-U8
+L1 motion allocation in place and decodes all four byte lanes. Histogram and
+FIFO are copied into new successor allocations before median, so a refused or
+pending candidate cannot mutate the installed predecessor.
+
+The continuation pauses after hints and median as an opaque
+`GpuWarmPostL1Paused`. Only the classifier's sealed, exact owned
+successor-state output can resume that same encoder, and that output remains
+attached for the later installed-prior warm reservation; there is no loose
+buffer or provenance constructor. This checkpoint does not implement the
+classifier, construct a production warm prior-public owner, join the capture
+root, publish or install a ready result, or touch Scene. Ordinary work adds no
+CPU readback; only forced-RADV oracle qualification reads diagnostic outputs.
+The oracle uses asymmetric directions, retained NaN/Inf including full-motion
+multiply-by-zero contamination, mixed packed-motion lanes, refused-candidate
+predecessor immutability, periodic pairs and exact retained-L2 ABI. It rejects
+retained-association, raw-hint, special-value fast-path and motion-unpack
+semantic mutations. Cold scheduling and arithmetic remain unchanged.
+
 **Capture-scoped resident calibration ownership, 2026-09-01, implementation
 branch only [PRIVATE AND UNSELECTED; NO POST-L1 JOIN, INSTALL, SCENE,
 PERFORMANCE OR PARITY CLAIM]:** the sealed imported ONE X2 front transition now

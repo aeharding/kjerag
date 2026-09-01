@@ -10,7 +10,10 @@ use std::sync::mpsc;
 use super::*;
 use crate::flow::one_xs::dense::{self, DirectedImages, PublicDenseField};
 use crate::flow::one_xs::pis::{AtoB, BtoA, Flow, PatchGrid, PisDirection};
-use crate::flow::one_xs::post_update::preserve_without_variational_or_retained;
+use crate::flow::one_xs::post_update::{
+    MotionLevel, RetainedPublicPyramids, preserve_without_variational_or_retained,
+    update_without_variational_with_retained,
+};
 use crate::flow::one_xs::public_blend::blend_periodic_boundary;
 use crate::flow::one_xs::temporal_median::{
     AtoBMedian, BtoAMedian, FilteredPatchGrid, MedianState,
@@ -22,6 +25,396 @@ const PLANAR_BASES: [[usize; 4]; 2] = [
     [0, 64_800, 129_600, 133_650],
     [137_700, 202_500, 267_300, 271_350],
 ];
+
+#[test]
+fn warm_post_l1_matches_cpu_and_rejects_semantic_mutations_on_forced_radv() {
+    let (device, queue, adapter) = match radv() {
+        Ok(gpu) => gpu,
+        Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+            eprintln!("skipping resident warm post-L1 RADV oracle: {why}");
+            return;
+        }
+        Err(why) => panic!("RADV Vulkan GPU required for resident warm post-L1: {why}"),
+    };
+    let context = OneXsGpuContext::new(&device, &queue);
+    let pipeline = GpuWarmPostL1Pipeline::new(context.clone())
+        .unwrap_or_else(|error| panic!("resident warm post-L1 refused {adapter}: {error}"));
+    let fixture = Fixture::new(&device, &queue);
+
+    let mut ab_median = AtoBMedian::new();
+    let mut ba_median = BtoAMedian::new();
+    for calculation in 0..2 {
+        ab_median.run(raw_grid::<AtoB>(calculation)).unwrap();
+        ba_median.run(raw_grid::<BtoA>(calculation)).unwrap();
+    }
+    let initial_history = pack_history(&ab_median.state(), &ba_median.state());
+    let ab_raw = raw_grid::<AtoB>(2);
+    let ba_raw = raw_grid::<BtoA>(2);
+    let expected_hints = pack_hints(
+        &HintPyramid::from_current_finest(&fixture.ab_images, &ab_raw),
+        &HintPyramid::from_current_finest(&fixture.ba_images, &ba_raw),
+    );
+    let terminal_words = pack_terminal(&ab_raw, &ba_raw);
+    let ab_filtered = ab_median.run(raw_grid::<AtoB>(2)).unwrap();
+    let ba_filtered = ba_median.run(raw_grid::<BtoA>(2)).unwrap();
+    let expected_filtered = pack_filtered(&ab_filtered, &ba_filtered);
+    let expected_history = pack_history(&ab_median.state(), &ba_median.state());
+
+    // Distinct directions and components, plus retained exceptional values,
+    // make layout swaps and special-value shortcuts observable.
+    let ab_prior = prior_public::<AtoB>(1.0);
+    let ba_prior = prior_public::<BtoA>(-3.0);
+    let prior_words = pack_public(&ab_prior, &ba_prior);
+    let ab_retained = RetainedPublicPyramids::from_public_ref(&ab_prior);
+    let ba_retained = RetainedPublicPyramids::from_public_ref(&ba_prior);
+    let motion = (0..L1_ROWS * L1_COLS)
+        .map(|pixel| u8::from(pixel % 17 == 0 || pixel % 101 == 9 || [31, 62].contains(&pixel)))
+        .collect::<Vec<_>>();
+    for lane in 0..4 {
+        assert!(
+            motion.iter().skip(lane).step_by(4).any(|value| *value == 0)
+                && motion.iter().skip(lane).step_by(4).any(|value| *value != 0),
+            "packed motion byte lane {lane} lacks zero/nonzero coverage"
+        );
+    }
+    let ab_post = update_without_variational_with_retained(
+        dense::densify_finest(&fixture.ab_images, ab_filtered).unwrap(),
+        &ab_retained,
+        MotionLevel::<AtoB>::from_bytes(Level::One, motion.clone()).unwrap(),
+    )
+    .unwrap();
+    let ba_post = update_without_variational_with_retained(
+        dense::densify_finest(&fixture.ba_images, ba_filtered).unwrap(),
+        &ba_retained,
+        MotionLevel::<BtoA>::from_bytes(Level::One, motion.clone()).unwrap(),
+    )
+    .unwrap();
+    let expected_public = pack_public(
+        &blend_periodic_boundary(dense::finish_linear_x2(ab_post).unwrap()),
+        &blend_periodic_boundary(dense::finish_linear_x2(ba_post).unwrap()),
+    );
+    let expected_retained = retained_l2_words(&expected_public);
+    let classifier_words = (0..2 * PATCH_ROWS)
+        .map(|row| u32::from(row % 11 == 3))
+        .collect::<Vec<_>>();
+
+    assert_failed_candidate_preserves_prior(
+        &pipeline,
+        &device,
+        &queue,
+        &fixture.images_gpu,
+        &initial_history,
+        &prior_words,
+        &motion,
+    );
+
+    let actual = run_warm_call(
+        &pipeline,
+        &device,
+        &queue,
+        &fixture.images_gpu,
+        &terminal_words,
+        &initial_history,
+        &prior_words,
+        &motion,
+        &classifier_words,
+    );
+    exact_words(
+        "warm raw successor hints",
+        &actual.hints,
+        &expected_hints,
+        &adapter,
+    );
+    exact_words(
+        "warm dcol-only median",
+        &actual.filtered,
+        &expected_filtered,
+        &adapter,
+    );
+    exact_words(
+        "warm histogram",
+        &actual.histogram,
+        &expected_history.0,
+        &adapter,
+    );
+    exact_words("warm FIFO", &actual.fifo, &expected_history.1, &adapter);
+    exact_words(
+        "successful warm predecessor histogram",
+        &actual.prior_histogram,
+        &initial_history.0,
+        &adapter,
+    );
+    exact_words(
+        "successful warm predecessor FIFO",
+        &actual.prior_fifo,
+        &initial_history.1,
+        &adapter,
+    );
+    exact_words("warm public", &actual.public, &expected_public, &adapter);
+    exact_words(
+        "warm retained L2 direction-pixel-vec2 ABI",
+        &actual.retained_l2,
+        &expected_retained,
+        &adapter,
+    );
+    exact_words(
+        "sealed classifier rows",
+        &actual.classified_rows,
+        &classifier_words,
+        &adapter,
+    );
+    assert_eq!(actual.validity, u32::MAX);
+    assert_periodic_pairs(&actual.public);
+    for direction in 0..2 {
+        for patch in 0..PATCHES {
+            assert_eq!(
+                actual.filtered[2 * (direction * PATCHES + patch) + 1],
+                terminal_words[2 * (direction * PATCHES + patch) + 1],
+                "temporal median changed drow direction={direction} patch={patch} on {adapter}",
+            );
+        }
+    }
+
+    for (name, from, to) in [
+        (
+            "retained L1 association",
+            "resized=((tl+tr)*0.5+(bl+br)*0.5)*0.5;",
+            "resized=(((tl+tr)+bl)+br)*0.25;",
+        ),
+        (
+            "hint before median",
+            "let v=vote(dir,row,col,true);",
+            "let v=vote(dir,row,col,false);",
+        ),
+        (
+            "retained nonfinite times zero",
+            "let retained_term=bitcast<f32>(retained_l1[at])*(1.0-fresh_weight);",
+            "let retained_term=select(bitcast<f32>(retained_l1[at]),0.0,fresh_weight==1.0);",
+        ),
+        (
+            "packed motion byte lanes",
+            "let motion=(motion_l1[pixel/4u]>>(8u*(pixel%4u)))&0xffu;",
+            "let motion=motion_l1[pixel/4u]&0xffu;",
+        ),
+    ] {
+        assert!(SHADER.contains(from), "mutation source disappeared: {name}");
+        let changed = SHADER.replacen(from, to, 1);
+        let changed_pipeline = GpuWarmPostL1Pipeline::from_shader(context.clone(), &changed)
+            .unwrap_or_else(|error| {
+                panic!("{name} mutation did not compile on {adapter}: {error}")
+            });
+        let changed = run_warm_call(
+            &changed_pipeline,
+            &device,
+            &queue,
+            &fixture.images_gpu,
+            &terminal_words,
+            &initial_history,
+            &prior_words,
+            &motion,
+            &classifier_words,
+        );
+        let observed = if name == "hint before median" {
+            changed.hints != expected_hints
+        } else {
+            changed.public != expected_public
+        };
+        assert!(
+            observed,
+            "live {name} mutation was not observed on {adapter}"
+        );
+    }
+}
+
+fn prior_public<D: PisDirection>(bias: f32) -> PublicDenseField<D> {
+    let mut dcol = Vec::with_capacity(PUB_ROWS * PUB_COLS);
+    let mut drow = Vec::with_capacity(PUB_ROWS * PUB_COLS);
+    for pixel in 0..PUB_ROWS * PUB_COLS {
+        let row = pixel / PUB_COLS;
+        let col = pixel % PUB_COLS;
+        dcol.push(bias + row as f32 * 0.00390625 + col as f32 * 0.0625);
+        drow.push(-bias + row as f32 * 0.001953125 - col as f32 * 0.03125);
+    }
+    let association_operands =
+        [0x3eff_4786, 0x3eff_6895, 0x3f00_3890, 0x3f00_48ff].map(f32::from_bits);
+    for col in [0, 28] {
+        let top = 2 * 10 * PUB_COLS;
+        let left = 2 * col;
+        dcol[top + left] = association_operands[0];
+        dcol[top + left + 1] = association_operands[1];
+        dcol[top + PUB_COLS + left] = association_operands[2];
+        dcol[top + PUB_COLS + left + 1] = association_operands[3];
+    }
+    // Motion is one at these L1 destinations. Exact arithmetic still
+    // evaluates retained * 0, so NaN and Inf contaminate the blend rather
+    // than being erased by a motion fast path.
+    dcol[2 * PUB_COLS + 2] = f32::NAN;
+    drow[4 * PUB_COLS + 4] = f32::INFINITY;
+    PublicDenseField::from_row_major_components(dcol, drow).unwrap()
+}
+
+struct WarmActual {
+    filtered: Vec<u32>,
+    histogram: Vec<u32>,
+    fifo: Vec<u32>,
+    hints: Vec<u32>,
+    public: Vec<u32>,
+    retained_l2: Vec<u32>,
+    classified_rows: Vec<u32>,
+    prior_histogram: Vec<u32>,
+    prior_fifo: Vec<u32>,
+    validity: u32,
+}
+
+struct QualifiedClassifiedRows {
+    rows: wgpu::Buffer,
+    present: bool,
+}
+
+impl classified_rows::Sealed for QualifiedClassifiedRows {}
+impl GpuWarmClassifiedRows for QualifiedClassifiedRows {}
+
+fn pack_motion(motion: &[u8]) -> Vec<u32> {
+    motion
+        .chunks(4)
+        .map(|bytes| {
+            bytes.iter().enumerate().fold(0u32, |word, (lane, byte)| {
+                word | (u32::from(*byte) << (8 * lane))
+            })
+        })
+        .collect()
+}
+
+fn assert_failed_candidate_preserves_prior(
+    pipeline: &GpuWarmPostL1Pipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    images: &wgpu::Buffer,
+    history: &(Vec<u32>, Vec<u32>),
+    prior_public: &[u32],
+    motion: &[u8],
+) {
+    let prior_histogram = upload_words(device, queue, "failed warm prior histogram", &history.0);
+    let prior_fifo = upload_words(device, queue, "failed warm prior FIFO", &history.1);
+    let histogram_copy = prior_histogram.clone();
+    let fifo_copy = prior_fifo.clone();
+    let refused = pipeline.encode_until_classification(GpuWarmPostL1Inputs {
+        context: pipeline.context.clone(),
+        terminal: upload_words(device, queue, "undersized warm terminal", &[0]),
+        images: images.clone(),
+        prior_histogram,
+        prior_fifo,
+        prior_public: GpuWarmPriorPublic::for_qualification(upload_words(
+            device,
+            queue,
+            "failed warm prior public",
+            prior_public,
+        )),
+        motion_l1: upload_words(
+            device,
+            queue,
+            "failed warm packed motion",
+            &pack_motion(motion),
+        ),
+        validity: upload_words(device, queue, "failed warm validity", &[u32::MAX]),
+    });
+    assert!(refused.is_err(), "undersized warm terminal was accepted");
+    exact_words(
+        "failed warm predecessor histogram",
+        &super::super::read_buffer_words(&pipeline.context, &histogram_copy, HIST_WORDS).unwrap(),
+        &history.0,
+        "forced RADV",
+    );
+    exact_words(
+        "failed warm predecessor FIFO",
+        &super::super::read_buffer_words(&pipeline.context, &fifo_copy, FIFO_WORDS).unwrap(),
+        &history.1,
+        "forced RADV",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_warm_call(
+    pipeline: &GpuWarmPostL1Pipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    images: &wgpu::Buffer,
+    terminal: &[u32],
+    history: &(Vec<u32>, Vec<u32>),
+    prior_public: &[u32],
+    motion: &[u8],
+    classified_rows: &[u32],
+) -> WarmActual {
+    let prior_histogram = upload_words(device, queue, "warm oracle histogram", &history.0);
+    let prior_fifo = upload_words(device, queue, "warm oracle FIFO", &history.1);
+    let prior_histogram_copy = prior_histogram.clone();
+    let prior_fifo_copy = prior_fifo.clone();
+    let pending = pipeline
+        .encode_until_classification(GpuWarmPostL1Inputs {
+            context: pipeline.context.clone(),
+            terminal: upload_words(device, queue, "warm oracle terminal", terminal),
+            images: images.clone(),
+            prior_histogram,
+            prior_fifo,
+            prior_public: GpuWarmPriorPublic::for_qualification(upload_words(
+                device,
+                queue,
+                "warm oracle prior public",
+                prior_public,
+            )),
+            motion_l1: upload_words(device, queue, "warm oracle motion L1", &pack_motion(motion)),
+            validity: upload_words(device, queue, "warm oracle validity", &[u32::MAX]),
+        })
+        .unwrap();
+    let encoded = pending.continue_with(QualifiedClassifiedRows {
+        rows: upload_words(
+            device,
+            queue,
+            "warm oracle classified rows",
+            classified_rows,
+        ),
+        present: true,
+    });
+    assert!(encoded.classified_rows.present);
+    let words = read_sections(
+        device,
+        queue,
+        encoded.encoder,
+        &[
+            (&encoded._filtered, PATCH_WORDS),
+            (&encoded._histogram, HIST_WORDS),
+            (&encoded._fifo, FIFO_WORDS),
+            (&encoded._hints, HINT_WORDS),
+            (&encoded.public, PUBLIC_WORDS),
+            (
+                encoded.retained_l2_direction_pixel_vec2.buffer(),
+                RETAINED_L2_WORDS,
+            ),
+            (&encoded.classified_rows.rows, 2 * PATCH_ROWS),
+            (&encoded.validity, 1),
+            (&prior_histogram_copy, HIST_WORDS),
+            (&prior_fifo_copy, FIFO_WORDS),
+        ],
+    );
+    let mut at = 0;
+    let mut take = |count| {
+        let result = words[at..at + count].to_vec();
+        at += count;
+        result
+    };
+    WarmActual {
+        filtered: take(PATCH_WORDS),
+        histogram: take(HIST_WORDS),
+        fifo: take(FIFO_WORDS),
+        hints: take(HINT_WORDS),
+        public: take(PUBLIC_WORDS),
+        retained_l2: take(RETAINED_L2_WORDS),
+        classified_rows: take(2 * PATCH_ROWS),
+        validity: take(1)[0],
+        prior_histogram: take(HIST_WORDS),
+        prior_fifo: take(FIFO_WORDS),
+    }
+}
 
 #[test]
 fn active_cold012_state_matches_cpu_on_forced_radv() {
