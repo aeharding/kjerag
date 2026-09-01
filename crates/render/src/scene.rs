@@ -4965,6 +4965,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::path::PathBuf;
     use std::sync::mpsc;
 
     use super::*;
@@ -5454,6 +5455,139 @@ mod tests {
         assert!(pipeline.one_xs_belts.is_none());
     }
 
+    /// Opt-in because this is the production dmabuf path: it needs a target
+    /// Vulkan adapter, VA-API decode and an actual paired ONE X2 capture.
+    /// `KJERAG_ONE_X2_TEST_MEDIA` names either half; media owns sibling
+    /// discovery and exact lens ordering just as it does for ordinary opens.
+    #[test]
+    fn selected_one_x2_scene_keeps_exact_gpu_transaction_ownership() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            eprintln!("skipping selected ONE X2 scene transaction: set KJERAG_ONE_X2_TEST_MEDIA");
+            return;
+        };
+        let (device, queue) = test_import_gpu().unwrap_or_else(|error| {
+            panic!("could not open the target dmabuf Vulkan device: {error}")
+        });
+        let mut scene = Scene::open(&path)
+            .unwrap_or_else(|error| panic!("could not open ONE X2 test capture: {error}"));
+        // This is also required by the opt-in test's invocation contract: run
+        // it through `scripts/quiet.sh`. Muting here closes the interval
+        // between open and the first pause as well.
+        scene.set_muted(true);
+        let mut pipeline = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+
+        let first = wait_for_new_scene_frame(&scene, None);
+        let first_primitive = scene.primitive(Camera::default());
+        assert!(
+            first_primitive
+                .view
+                .as_ref()
+                .is_some_and(|view| view.one_xs.is_some()),
+            "KJERAG_ONE_X2_TEST_MEDIA is not a selected paired ONE X2 capture"
+        );
+        pipeline.prepare(&first_primitive, &device, &queue, 1.0);
+        assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
+        assert_eq!(
+            pipeline
+                .direct_one_xs_map
+                .as_ref()
+                .and_then(DirectMapDraw::bound_frame),
+            Some(&first)
+        );
+        assert_eq!(
+            scene
+                .diagnostic_one_xs_map()
+                .expect("first selected map lookup failed")
+                .expect("the first selected transaction did not commit")
+                .frame(),
+            &first
+        );
+        assert!(pipeline.one_xs_belts.is_some());
+        assert!(pipeline.one_xs_luma.is_none());
+
+        let second = wait_for_new_scene_frame(&scene, Some(&first));
+        let second_primitive = scene.primitive(Camera::default());
+        let frames = pipeline
+            .prepare_inner(&second_primitive, &device, &queue, 1.0, true)
+            .expect("frame one did not become the exact bound source");
+        assert_eq!(frames.stamp(), second);
+        assert_eq!(pipeline.flow_draw, FlowDraw::Nothing);
+
+        let capture = second_primitive
+            .view
+            .as_ref()
+            .and_then(|view| view.one_xs.as_ref())
+            .expect("selected frame lost its capture owner");
+        let prepared = match capture
+            .prepare_or_ready(&second, frames.size)
+            .expect("could not prepare frame one")
+        {
+            OneXsPreparation::Prepared(prepared) => prepared,
+            OneXsPreparation::Ready(_) => panic!("frame one was committed before its GPU belts"),
+        };
+        let mut pending = pipeline
+            .submit_one_xs_solver_belts(&device, &queue, frames, &prepared)
+            .expect("could not submit frame one's exact retained maps and bound source");
+
+        // Same report fields and decode epoch, different opaque delivered
+        // pair. This is the ABA case an index/timestamp-only association
+        // would accept. Mutating the private outer receipt adds no production
+        // constructor or alternate route.
+        let imposter = FrameStamp::for_test(second.index(), second.timestamp(), Some(&first));
+        assert_ne!(imposter, second);
+        let mismatch = crate::studio_type2::FrameMapMismatch::new(
+            "GPU solver belts",
+            &imposter,
+            "prepared geometry",
+            &second,
+        );
+        pending.frame = imposter;
+        let error = pending
+            .read(&prepared)
+            .expect_err("a different delivered pair impersonated prepared geometry");
+        assert_eq!(
+            error.downcast_ref::<crate::studio_type2::FrameMapMismatch>(),
+            Some(&mismatch)
+        );
+
+        assert!(capture.ready(&first).unwrap().is_some());
+        assert!(capture.ready(&second).unwrap().is_none());
+        assert_eq!(
+            pipeline
+                .direct_one_xs_map
+                .as_ref()
+                .and_then(DirectMapDraw::bound_frame),
+            Some(&first)
+        );
+        assert_eq!(
+            pipeline.flow_draw,
+            FlowDraw::Nothing,
+            "the failed successor selected a legacy or unstitched fallback"
+        );
+
+        // The rejected receipt consumed no estimator history. The ordinary
+        // production entry point can prepare, sample, commit, upload and
+        // acknowledge the same real successor exactly once.
+        pipeline.prepare(&second_primitive, &device, &queue, 1.0);
+        assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
+        assert_eq!(
+            pipeline
+                .direct_one_xs_map
+                .as_ref()
+                .and_then(DirectMapDraw::bound_frame),
+            Some(&second)
+        );
+        assert_eq!(
+            scene
+                .diagnostic_one_xs_map()
+                .expect("second selected map lookup failed")
+                .expect("the recovered transaction did not commit")
+                .frame(),
+            &second
+        );
+        scene.pause(Instant::now());
+    }
+
     fn block_on<F: Future>(future: F) -> F::Output {
         let mut future = std::pin::pin!(future);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -5481,6 +5615,39 @@ mod tests {
             ..Default::default()
         }))
         .map_err(|error| error.to_string())
+    }
+
+    fn test_import_gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .map_err(|error| error.to_string())?;
+        dmabuf::open_device(&adapter).map_err(|error| error.to_string())
+    }
+
+    fn wait_for_new_scene_frame(scene: &Scene, previous: Option<&FrameStamp>) -> FrameStamp {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match scene.pump(Instant::now()) {
+                Next::Stopped(error) => panic!("ONE X2 test playback stopped: {error}"),
+                Next::Refresh | Next::At(_) | Next::Never => {}
+            }
+            if let Some(frame) = scene.frame_stamp()
+                && previous.is_none_or(|previous| &frame != previous)
+            {
+                return frame;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ONE X2 test playback did not deliver its next frame"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]

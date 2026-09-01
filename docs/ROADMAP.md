@@ -3,6 +3,20 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Selected ONE X2 production transaction regression, 2026-09-01, working
+branch only [OPT-IN REAL MEDIA; TARGET GPU]:** an opt-in render test drives a
+real paired ONE X2 delivery through dmabuf import, the exact prepared retained
+maps, compact GPU solver belts, capture-owned scalar commit, direct-map upload
+and scene acknowledgement. Its adjacent-frame arm substitutes an opaque
+delivery identity with the same reported index and timestamp after GPU submit,
+proves the receipt is rejected while the completed owner and direct draw remain
+unchanged with no legacy fallback, then proves the ordinary production entry
+point can commit that exact successor. It runs only when
+`KJERAG_ONE_X2_TEST_MEDIA` names either half of a paired capture and a dmabuf
+Vulkan device is available, and its explicit invocation goes through
+`scripts/quiet.sh`; the normal GPU arithmetic twin remains the
+media-independent synthetic source fixture gate.
+
 **Production GPU ONE X2 solver-belt bridge, 2026-09-01, implementation branch
 only [WIRED INTO PLAYBACK; BYTE-EXACT TARGET-GPU TWIN; ONE REAL FRAME
 BYTE-IDENTICAL TO THE FROZEN CPU BUILD; NO THROUGHPUT, STUDIO PARITY OR OWNER
