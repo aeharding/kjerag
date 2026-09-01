@@ -17,7 +17,7 @@ use super::temporal::BlurredBelts;
 use super::{COLS, Direction, LensPair, ROWS};
 use crate::Fallible;
 use crate::flow::one_xs_belt::SolverBelts;
-use crate::flow::one_xs_belt_gpu::GpuBlurredBelts;
+use crate::flow::one_xs_belt_gpu::{GpuBlurredBelts, GpuPreparedRetention};
 
 const MODEL_WORDS_PER_PATCH: usize = 5;
 const L1_PIXELS: usize = Level::One.pixels();
@@ -200,7 +200,23 @@ pub(crate) struct GpuPreparedFrame<K> {
     l1_block_mask: wgpu::Buffer,
     _weight_horizontal: wgpu::Buffer,
     _resources: wgpu::BindGroup,
-    belts: GpuBlurredBelts<K>,
+    retention: GpuPreparedRetention<K>,
+}
+
+/// Purpose-specific product of front-end allocation, binding and encoding.
+/// Only the belt owner can join it to the exact producer token.
+pub(in crate::flow) struct EncodedPisFrontEnd {
+    command: Option<wgpu::CommandBuffer>,
+    outputs: OutputBuffers,
+    resources: wgpu::BindGroup,
+}
+
+impl EncodedPisFrontEnd {
+    pub(in crate::flow) fn take_command(&mut self) -> wgpu::CommandBuffer {
+        self.command
+            .take()
+            .expect("encoded PIS front end submits exactly once")
+    }
 }
 
 /// Kernel-owned dynamic state handed atomically to the frame owner.
@@ -262,8 +278,8 @@ impl<K> GpuPreparedTerminal<K> {
         });
         encoder.copy_buffer_to_buffer(&self._output, 0, &readback, 0, words_bytes(words));
         self.prepared
-            .belts
-            .submit_front_end(&self.prepared.context, |_| encoder.finish())?;
+            .retention
+            .submit_diagnostic_readback(&self.prepared.context, encoder.finish())?;
         let slice = readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -393,8 +409,8 @@ impl<K> GpuPreparedFrame<K> {
             pass.set_bind_group(0, &resources, &[]);
             pass.dispatch_workgroups(2, 1, 1);
         }
-        self.belts
-            .submit_front_end(&self.context, |_| encoder.finish())?;
+        self.retention
+            .submit_pis_stage(&self.context, encoder.finish())?;
         Ok(GpuPreparedTerminal {
             receipt: GpuPisStageReceipt {
                 flight,
@@ -412,13 +428,12 @@ impl<K> GpuPreparedFrame<K> {
     /// Success proves the latest same-queue consumer and every earlier stage,
     /// releases the imported source owner once and disarms cancellation Drop.
     pub(crate) fn acknowledge_terminal(mut self) -> Fallible<()> {
-        self.belts.validate_provenance(&self.context)?;
-        self.belts.complete()
+        self.retention.acknowledge_terminal(&self.context)
     }
 
     #[cfg(test)]
     fn observe_completion(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
-        self.belts.observe_completion(state);
+        self.retention.observe_completion(state);
     }
 
     #[cfg(test)]
@@ -577,22 +592,58 @@ impl GpuPisFrontEnd {
     /// the producer visible without a CPU poll.
     pub(crate) fn prepare<K>(
         &self,
-        mut belts: GpuBlurredBelts<K>,
+        belts: GpuBlurredBelts<K>,
         physical_masks: &LensPair<Vec<u8>>,
     ) -> Fallible<GpuPreparedFrame<K>> {
-        belts.validate_provenance(&self.context)?;
+        belts.prepare_front_end(self, physical_masks)
+    }
+
+    /// Build the one concrete front-end command after the belt owner has
+    /// proved this context. This is an implementation seam for the consuming
+    /// transition, not a resident-token API.
+    pub(in crate::flow) fn encode_resident_transition(
+        &self,
+        packed: &wgpu::Buffer,
+        physical_masks: &LensPair<Vec<u8>>,
+    ) -> Fallible<EncodedPisFrontEnd> {
         validate_masks(physical_masks)?;
         let device = self.context.device();
         let queue = self.context.queue();
         let mask = upload_masks(device, queue, physical_masks);
         let outputs = OutputBuffers::new(device);
-        let resources = self.resources(device, belts.packed(), &mask, &outputs);
-        belts.submit_front_end(&self.context, |device| {
-            self.encode_command(device, &resources)
-        })?;
-        let flight = belts.take_flight();
-        Ok(GpuPreparedFrame {
-            context: self.context.clone(),
+        let resources = self.resources(device, packed, &mask, &outputs);
+        let command = self.encode_command(device, &resources);
+        Ok(EncodedPisFrontEnd {
+            command: Some(command),
+            outputs,
+            resources,
+        })
+    }
+
+    pub(in crate::flow) fn context_for_resident_transition(&self) -> &OneXsGpuContext {
+        &self.context
+    }
+}
+
+impl<K> GpuPreparedFrame<K> {
+    /// Finish the belt module's single consuming transition. The opaque
+    /// retention is already advanced to this exact front-end command.
+    pub(in crate::flow) fn from_resident_transition(
+        context: OneXsGpuContext,
+        flight: GpuPisFlight,
+        encoded: EncodedPisFrontEnd,
+        retention: GpuPreparedRetention<K>,
+    ) -> Self {
+        let EncodedPisFrontEnd {
+            command: None,
+            outputs,
+            resources,
+        } = encoded
+        else {
+            unreachable!("resident front-end command must be submitted before assembly")
+        };
+        Self {
+            context,
             flight,
             shared_images: outputs.shared_images,
             shared_masks: outputs.shared_masks,
@@ -604,10 +655,12 @@ impl GpuPisFrontEnd {
             l1_block_mask: outputs.l1_block_mask,
             _weight_horizontal: outputs.weight_horizontal,
             _resources: resources,
-            belts,
-        })
+            retention,
+        }
     }
+}
 
+impl GpuPisFrontEnd {
     fn resources(
         &self,
         device: &wgpu::Device,
@@ -1708,6 +1761,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sealed_front_end_refuses_foreign_context_before_gpu_work_and_waits_owner() {
+        let ((device, queue), (foreign_device, foreign_queue), adapter) = match gpu_pairs() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping foreign prepared-source context: {why}");
+                return;
+            }
+            Err(why) => panic!("Vulkan GPU required for foreign prepared-source context: {why}"),
+        };
+        let foreign_front =
+            GpuPisFrontEnd::new(OneXsGpuContext::new(&foreign_device, &foreign_queue))
+                .unwrap_or_else(|error| panic!("foreign front end failed on {adapter}: {error}"));
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let (mut belts, _) = resident_qualification_fixture(
+            &device,
+            &queue,
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            GpuPisFlight {
+                generation: 37,
+                frame: FrameStamp::for_test(43, Duration::ZERO, None),
+            },
+        )
+        .unwrap();
+        belts.observe_completion(Arc::clone(&state));
+        let source_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let foreign_scope = foreign_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error = match foreign_front.prepare(belts, &qualification_fixture().1) {
+            Ok(_) => panic!("foreign front end accepted a producer token"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("different device or queue"),
+            "wrong foreign-context refusal: {error}"
+        );
+        assert!(block_on(source_scope.pop()).is_none());
+        assert!(block_on(foreign_scope.pop()).is_none());
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        assert_eq!(answer.recv().unwrap(), 2, "owner preceded producer fence");
+    }
+
+    #[test]
+    fn sealed_prepared_frame_refuses_foreign_pis_before_gpu_work() {
+        let ((device, queue), (foreign_device, foreign_queue), adapter) = match gpu_pairs() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping foreign prepared-frame context: {why}");
+                return;
+            }
+            Err(why) => panic!("Vulkan GPU required for foreign prepared-frame context: {why}"),
+        };
+        let front = GpuPisFrontEnd::new(OneXsGpuContext::new(&device, &queue)).unwrap();
+        let foreign_pis = GpuPisPipeline::from_shader_for_direct_test(
+            OneXsGpuContext::new(&foreign_device, &foreign_queue),
+            DIRECT_TEST_SHADER,
+        )
+        .unwrap_or_else(|error| panic!("foreign PIS failed on {adapter}: {error}"));
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let (mut belts, blurred) = resident_qualification_fixture(
+            &device,
+            &queue,
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            GpuPisFlight {
+                generation: 39,
+                frame: FrameStamp::for_test(47, Duration::ZERO, None),
+            },
+        )
+        .unwrap();
+        belts.observe_completion(Arc::clone(&state));
+        let masks = qualification_fixture().1;
+        let frame = front.prepare(belts, &masks).unwrap();
+        let dynamic = no_patch_dynamic(&blurred, &masks, 91);
+        let source_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let foreign_scope = foreign_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error = match frame.submit_pis_stage(&foreign_pis, dynamic) {
+            Ok(_) => panic!("foreign PIS accepted a prepared frame"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("different device or queue"),
+            "wrong foreign-PIS refusal: {error}"
+        );
+        assert!(block_on(source_scope.pop()).is_none());
+        assert!(block_on(foreign_scope.pop()).is_none());
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        assert_eq!(answer.recv().unwrap(), 2, "owner preceded front-end fence");
+    }
+
+    fn no_patch_dynamic(
+        blurred: &BlurredBelts,
+        masks: &LensPair<Vec<u8>>,
+        calculation: usize,
+    ) -> GpuPisDynamicStage {
+        let retained = ColdInputs::from_blurred_belts_and_masks(blurred.clone(), masks.clone());
+        let pyramid = MaskPyramid::build(&retained);
+        let level = Level::Two;
+        let modes = vec![CostMode::Weighted; level.patch_rows()];
+        let a_input = LevelInputs::build::<AtoB>(&retained, &pyramid, level)
+            .input::<AtoB>(level, modes.clone())
+            .0;
+        let b_input = LevelInputs::build::<BtoA>(&retained, &pyramid, level)
+            .input::<BtoA>(level, modes)
+            .0;
+        GpuPisDynamicStage {
+            stage: PairSolveStage::Cold { calculation, level },
+            a_to_b: GpuPisDynamicDirection::from_oracle(
+                &a_input,
+                InitialGrid::from_test_row_major(level, vec![Flow::ZERO; level.patches()]).unwrap(),
+                None,
+                DescentAdmission::NoPatches,
+            ),
+            b_to_a: GpuPisDynamicDirection::from_oracle(
+                &b_input,
+                InitialGrid::from_test_row_major(level, vec![Flow::ZERO; level.patches()]).unwrap(),
+                None,
+                DescentAdmission::NoPatches,
+            ),
+        }
+    }
+
     fn binding_identity<D, L>(
         binding: PisPreparedBinding<'_, D, L>,
     ) -> (Direction, Level, GpuPisFlight)
@@ -2350,5 +2531,33 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         Ok((device, queue, name))
+    }
+
+    type GpuPair = (wgpu::Device, wgpu::Queue);
+
+    fn gpu_pairs() -> Result<(GpuPair, GpuPair, String), String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .next()
+            .ok_or("no Vulkan adapter")?;
+        let name = adapter.get_info().name;
+        let request = |label| {
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some(label),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+            .map_err(|error| error.to_string())
+        };
+        Ok((
+            request("exact ONE X2 source context")?,
+            request("foreign ONE X2 front-end context")?,
+            name,
+        ))
     }
 }

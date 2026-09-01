@@ -14,6 +14,7 @@ use std::{error::Error, fmt};
 
 use super::one_xs::gpu_context::OneXsGpuContext;
 use super::one_xs::pis::gpu::GpuPisFlight;
+use super::one_xs::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
 use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
 use super::one_xs::{Lens, LensPair};
 use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
@@ -1111,40 +1112,85 @@ pub(crate) struct GpuBlurredBelts<K> {
 }
 
 impl<K> GpuBlurredBelts<K> {
-    pub(crate) fn take_flight(&mut self) -> GpuPisFlight {
-        self.flight
+    /// The only resident producer-to-front-end transition. Context refusal
+    /// happens before allocation, binding, encoding or submission; success
+    /// moves the exact flight and the sole linear lease into one opaque frame.
+    pub(in crate::flow) fn prepare_front_end(
+        mut self,
+        front_end: &GpuPisFrontEnd,
+        physical_masks: &LensPair<Vec<u8>>,
+    ) -> Fallible<GpuPreparedFrame<K>> {
+        let context = front_end.context_for_resident_transition();
+        self.lease.validate_provenance(context)?;
+        let mut encoded = front_end.encode_resident_transition(&self.packed, physical_masks)?;
+        self.lease
+            .submit_after(context, |_| encoded.take_command())?;
+        let flight = self
+            .flight
             .take()
-            .expect("GPU-resident belts transfer their flight exactly once")
-    }
-
-    pub(crate) fn packed(&self) -> &wgpu::Buffer {
-        &self.packed
-    }
-
-    pub(crate) fn validate_provenance(&self, context: &OneXsGpuContext) -> Fallible<()> {
-        self.lease.validate_provenance(context)
-    }
-
-    /// Submit the concrete prepared-source transition on the lease's exact
-    /// queue and replace its completion fence with that later submission.
-    /// No caller can provide, omit or regress a detached submission index.
-    pub(crate) fn submit_front_end<F>(
-        &mut self,
-        context: &OneXsGpuContext,
-        encode: F,
-    ) -> Fallible<()>
-    where
-        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
-    {
-        self.lease.submit_after(context, encode)
-    }
-
-    pub(crate) fn complete(&mut self) -> Fallible<()> {
-        self.lease.complete()
+            .expect("GPU-resident belts transfer their flight exactly once");
+        let retention = GpuPreparedRetention {
+            lease: self.lease,
+            _packed: self.packed,
+            _producer_map: self._producer_map,
+            _horizontal: self._horizontal,
+            _resources: self._resources,
+        };
+        Ok(GpuPreparedFrame::from_resident_transition(
+            context.clone(),
+            flight,
+            encoded,
+            retention,
+        ))
     }
 
     #[cfg(test)]
     pub(crate) fn observe_completion(
+        &mut self,
+        state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) {
+        self.lease.observe(state);
+    }
+}
+
+/// Producer resources plus the sole submission lease after the exact
+/// front-end transition. It is only obtainable inside `GpuPreparedFrame`.
+pub(in crate::flow) struct GpuPreparedRetention<K> {
+    lease: SubmissionLease<K>,
+    _packed: wgpu::Buffer,
+    _producer_map: wgpu::Buffer,
+    _horizontal: wgpu::Buffer,
+    _resources: wgpu::BindGroup,
+}
+
+impl<K> GpuPreparedRetention<K> {
+    pub(in crate::flow) fn submit_pis_stage(
+        &mut self,
+        context: &OneXsGpuContext,
+        command: wgpu::CommandBuffer,
+    ) -> Fallible<()> {
+        self.lease.submit_after(context, |_| command)
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow) fn submit_diagnostic_readback(
+        &mut self,
+        context: &OneXsGpuContext,
+        command: wgpu::CommandBuffer,
+    ) -> Fallible<()> {
+        self.lease.submit_after(context, |_| command)
+    }
+
+    pub(in crate::flow) fn acknowledge_terminal(
+        &mut self,
+        context: &OneXsGpuContext,
+    ) -> Fallible<()> {
+        self.lease.validate_provenance(context)?;
+        self.lease.complete()
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow) fn observe_completion(
         &mut self,
         state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     ) {
