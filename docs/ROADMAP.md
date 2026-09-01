@@ -45,6 +45,15 @@ submission index is exposed or caller-assembled. The returned opaque terminal
 retains the exact flight, `PairSolveStage`, shared GPU-context identity, output buffer and
 same non-cloneable frame owner; chaining consumes it back into that same frame,
 while explicit terminal acknowledgement waits for the latest lease once.
+The producer boundary is sealed as the same aggregate: `GpuBlurredBelts` has
+no crate-visible packed-buffer, flight, generic submission or early-completion
+hook. Its only front-end transition consumes the whole token, refuses a
+foreign context before allocation, binding, encoding or submission, advances
+the inherited lease to the exact front-end command, and installs one opaque
+retention inside `GpuPreparedFrame`. Foreign front-end and PIS regressions
+leave both device validation scopes clean and prove the source owner waits the
+latest valid fence; independently recreated front-end and PIS pipelines on the
+same structural device/queue pair remain accepted.
 
 Only cost modes, initial grids, optional hints, descent admission and the
 selected disparity interval are uploaded per stage. Images, physical masks,

@@ -14,6 +14,7 @@ use std::{error::Error, fmt};
 
 use super::one_xs::gpu_context::OneXsGpuContext;
 use super::one_xs::pis::gpu::GpuPisFlight;
+use super::one_xs::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
 use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
 use super::one_xs::{Lens, LensPair};
 use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
@@ -1111,40 +1112,85 @@ pub(crate) struct GpuBlurredBelts<K> {
 }
 
 impl<K> GpuBlurredBelts<K> {
-    pub(crate) fn take_flight(&mut self) -> GpuPisFlight {
-        self.flight
+    /// The only resident producer-to-front-end transition. Context refusal
+    /// happens before allocation, binding, encoding or submission; success
+    /// moves the exact flight and the sole linear lease into one opaque frame.
+    pub(in crate::flow) fn prepare_front_end(
+        mut self,
+        front_end: &GpuPisFrontEnd,
+        physical_masks: &LensPair<Vec<u8>>,
+    ) -> Fallible<GpuPreparedFrame<K>> {
+        let context = front_end.context_for_resident_transition();
+        self.lease.validate_provenance(context)?;
+        let mut encoded = front_end.encode_resident_transition(&self.packed, physical_masks)?;
+        self.lease
+            .submit_after(context, |_| encoded.take_command())?;
+        let flight = self
+            .flight
             .take()
-            .expect("GPU-resident belts transfer their flight exactly once")
-    }
-
-    pub(crate) fn packed(&self) -> &wgpu::Buffer {
-        &self.packed
-    }
-
-    pub(crate) fn validate_provenance(&self, context: &OneXsGpuContext) -> Fallible<()> {
-        self.lease.validate_provenance(context)
-    }
-
-    /// Submit the concrete prepared-source transition on the lease's exact
-    /// queue and replace its completion fence with that later submission.
-    /// No caller can provide, omit or regress a detached submission index.
-    pub(crate) fn submit_front_end<F>(
-        &mut self,
-        context: &OneXsGpuContext,
-        encode: F,
-    ) -> Fallible<()>
-    where
-        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
-    {
-        self.lease.submit_after(context, encode)
-    }
-
-    pub(crate) fn complete(&mut self) -> Fallible<()> {
-        self.lease.complete()
+            .expect("GPU-resident belts transfer their flight exactly once");
+        let retention = GpuPreparedRetention {
+            lease: self.lease,
+            _packed: self.packed,
+            _producer_map: self._producer_map,
+            _horizontal: self._horizontal,
+            _resources: self._resources,
+        };
+        Ok(GpuPreparedFrame::from_resident_transition(
+            context.clone(),
+            flight,
+            encoded,
+            retention,
+        ))
     }
 
     #[cfg(test)]
     pub(crate) fn observe_completion(
+        &mut self,
+        state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) {
+        self.lease.observe(state);
+    }
+}
+
+/// Producer resources plus the sole submission lease after the exact
+/// front-end transition. It is only obtainable inside `GpuPreparedFrame`.
+pub(in crate::flow) struct GpuPreparedRetention<K> {
+    lease: SubmissionLease<K>,
+    _packed: wgpu::Buffer,
+    _producer_map: wgpu::Buffer,
+    _horizontal: wgpu::Buffer,
+    _resources: wgpu::BindGroup,
+}
+
+impl<K> GpuPreparedRetention<K> {
+    pub(in crate::flow) fn submit_pis_stage(
+        &mut self,
+        context: &OneXsGpuContext,
+        command: wgpu::CommandBuffer,
+    ) -> Fallible<()> {
+        self.lease.submit_after(context, |_| command)
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow) fn submit_diagnostic_readback(
+        &mut self,
+        context: &OneXsGpuContext,
+        command: wgpu::CommandBuffer,
+    ) -> Fallible<()> {
+        self.lease.submit_after(context, |_| command)
+    }
+
+    pub(in crate::flow) fn acknowledge_terminal(
+        &mut self,
+        context: &OneXsGpuContext,
+    ) -> Fallible<()> {
+        self.lease.validate_provenance(context)?;
+        self.lease.complete()
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow) fn observe_completion(
         &mut self,
         state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     ) {
@@ -1654,6 +1700,55 @@ mod tests {
     }
 
     #[test]
+    fn submission_lease_accepts_cloned_pair_and_refuses_foreign_pair_before_encoding() {
+        let ((device, queue), (foreign_device, foreign_queue)) = match two_gpu_pairs() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping ONE X2 GPU context identity: {why}");
+                return;
+            }
+            Err(why) => panic!("Vulkan GPU required for ONE X2 context identity: {why}"),
+        };
+        assert_ne!(
+            device, foreign_device,
+            "same-instance requests reused one device handle"
+        );
+        let context = OneXsGpuContext::new(&device, &queue);
+        let cloned = OneXsGpuContext::new(&device, &queue);
+        context.ensure_same(&cloned).unwrap();
+        let first = queue.submit(std::iter::empty());
+        let mut lease = SubmissionLease::new(context.clone(), first, ());
+        let encoded = Arc::new(AtomicU8::new(0));
+        let foreign = OneXsGpuContext::new(&foreign_device, &foreign_queue);
+        let encoded_by_foreign = Arc::clone(&encoded);
+        let error = lease
+            .submit_after(&foreign, move |_| {
+                encoded_by_foreign.fetch_add(1, Ordering::SeqCst);
+                panic!("foreign ONE X2 context reached command encoding")
+            })
+            .expect_err("foreign ONE X2 context was accepted");
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 GPU submission crossed a different device or queue"
+        );
+        assert_eq!(
+            encoded.load(Ordering::SeqCst),
+            0,
+            "foreign context encoded work"
+        );
+        lease
+            .submit_after(&cloned, |device| {
+                device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("ONE X2 cloned-context acceptance"),
+                    })
+                    .finish()
+            })
+            .unwrap();
+        lease.complete().unwrap();
+    }
+
+    #[test]
     fn gpu_solver_belts_are_byte_exact_on_adversarial_odd_padded_sources() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -1927,5 +2022,31 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         Ok((device, queue, name))
+    }
+
+    type GpuPair = (wgpu::Device, wgpu::Queue);
+
+    fn two_gpu_pairs() -> Result<(GpuPair, GpuPair), String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .next()
+            .ok_or("no Vulkan adapter")?;
+        let request = |label| {
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some(label),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+            .map_err(|error| error.to_string())
+        };
+        Ok((
+            request("exact ONE X2 primary GPU context")?,
+            request("exact ONE X2 foreign GPU context")?,
+        ))
     }
 }
