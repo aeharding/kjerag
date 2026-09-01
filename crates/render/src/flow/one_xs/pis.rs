@@ -208,6 +208,10 @@ impl DisparityInterval {
         Self { first, second }
     }
 
+    pub(crate) const fn endpoints(self) -> ([f32; 2], [f32; 2]) {
+        (self.first, self.second)
+    }
+
     /// Whether both components lie strictly between their endpoints.
     const fn admits(self, flow: Flow) -> bool {
         const fn between(value: f32, a: f32, b: f32) -> bool {

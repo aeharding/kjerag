@@ -138,6 +138,45 @@ the receipt to
 and the exact test executable before and after the run to
 `b30c547fc9119a0061f121312f63d7562101f64788321b7f9a8f5a5fd952281d`.
 
+**Resident L2-to-L1 ownership continuation, 2026-09-01, implementation branch
+only [UNSELECTED; FINAL RADV RECEIPT PENDING; NOT SCENE-WIRED]:** the ordinary
+boundary consumes the root-carried motion transaction directly rather than
+sealing a separately publishable frame first. Its opaque noncloneable root
+reservation and successor remain inside the post-L2 owner while the same
+prepared images, masks, context and submission lease advance through L2 PIS,
+resident post-L2 and L1 PIS. Carrier-first field ordering waits or quarantines
+the inherited submission before any downstream refusal can roll back the root
+or release successor allocations.
+
+Temporal history alone derives Warm L2 or Cold0 L2. A sealed paired cadence
+owner supplies distinct A-to-B and B-to-A pre-increment admissions unchanged
+to both levels; Cold0 starts at count zero and therefore admits every patch.
+Only the future post-L1 successor may advance that owner. The bridge decodes
+the production temporal layout as four U8 motion codes per word. Cold retained
+state plus mandatory present positive-zero L2/L1 hints come from GPU clears;
+the typed warm contract binds retained state and planar dense successor hints
+but has no production warm owner until post-L1 lands. L2 initial grids are
+always GPU-cleared, dense hint centres fill L2, and L2 seed planes plus dense
+hint centres fill L1. No ordinary CPU bulk grid, terminal upload, readback,
+map, poll, raw buffer/command escape or competing lease exists.
+
+Constructor qualification fails closed for the L2, seed and hint shaders.
+The focused tests compare cold and warm bridge bits, exact seed injection and
+the actual paired L2 and L1 terminals to the CPU chain; nonzero resident hint
+centres and the exact temporal producer buffer are included. A production-shape
+Cold0 test consumes geometry, root reservation, motion, prior state, L2 and L1
+on one lease. The packed-motion fixture
+records histogram `{0: 4021, 1: 5, 16: 1, 64: 5, 65: 1, 176: 2, 192: 1,
+223: 1, 255: 13}` and covers zero/nonzero in every byte lane and both physical
+edges. The earlier rejected bridge evidence expanded motion bytes and omitted
+mandatory L1 hints; it is not an acceptance claim.
+
+The complete three-call cold transaction remains blocked on the post-L1
+owner. Cold0/1 must return a purpose-specific linear loop whose only resume
+derives Cold1/Cold2, preserves this same reservation, prepared frame, lease,
+post state, validity, flight and context, and binds loop-owned resident hints.
+This checkpoint deliberately exposes no generic or caller-forgeable resume.
+
 **Exact render-pass retirement checkpoint, 2026-09-01, implementation branch
 only [PRIVATE OWNERSHIP PRIMITIVE; NOT WIRED TO SCENE; NO DMABUF SAFETY,
 PERFORMANCE OR PARITY CLAIM]:** a bounded private owner now reserves a linear

@@ -545,6 +545,92 @@ impl GpuPisPipeline {
         })
     }
 
+    /// Prepare only the compact headers for a resident grid fill. Initial and
+    /// hint grids are always present but are filled into GPU storage by the
+    /// sealed owner; this method never constructs either bulk CPU grid.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_resident_grid_dispatch(
+        &self,
+        stage: PairSolveStage,
+        a_cost_modes: Box<[CostMode]>,
+        a_admission: DescentAdmission,
+        a_disparity: Option<DisparityInterval>,
+        b_cost_modes: Box<[CostMode]>,
+        b_admission: DescentAdmission,
+        b_disparity: Option<DisparityInterval>,
+    ) -> Fallible<ResidentPisDispatch<'_>> {
+        let level = stage.level();
+        let pack = |cost_modes: Box<[CostMode]>,
+                    admission: DescentAdmission,
+                    disparity: Option<DisparityInterval>|
+         -> Fallible<(Vec<u32>, usize, Option<DisparityInterval>)> {
+            if cost_modes.len() != level.patch_rows() {
+                return Err(format!(
+                    "ONE X2 resident GPU PIS {level} has {} cost modes, expected {}",
+                    cost_modes.len(),
+                    level.patch_rows()
+                )
+                .into());
+            }
+            let mut header = vec![0; HEADER_WORDS];
+            header[0] = level.rows() as u32;
+            header[1] = level.cols() as u32;
+            header[2] = level.patch_rows() as u32;
+            header[3] = level.patch_cols() as u32;
+            header[4] = level.pixels() as u32;
+            header[5] = level.patches() as u32;
+            header[6] = 1;
+            header[7] = u32::from(disparity.is_some());
+            header[8] = u32::from(admission.admits());
+            header[13] = header.len() as u32;
+            header.extend(cost_modes.iter().map(|mode| match mode {
+                CostMode::Unweighted => 0,
+                CostMode::Weighted => 1,
+            }));
+            header[22] = header.len() as u32;
+            header.push(0);
+            let patch_words = 2 * level.patches();
+            header[18] = 0;
+            header[19] = patch_words as u32;
+            header[20] = (2 * patch_words) as u32;
+            header[23] = header.len() as u32;
+            let float_words = 2 * patch_words + 4;
+            header[25] = float_words as u32;
+            header[27] = float_words as u32;
+            header[30] = 1;
+            Ok((header, float_words, disparity))
+        };
+        let (a, direction_float_words, a_disparity) = pack(a_cost_modes, a_admission, a_disparity)?;
+        let (b, b_float_words, b_disparity) = pack(b_cost_modes, b_admission, b_disparity)?;
+        debug_assert_eq!(direction_float_words, b_float_words);
+        let a_word_base = PAIR_HEADER_WORDS;
+        let b_word_base = a_word_base + a.len();
+        let output_span_words = level.patches() * OUTPUT_WORDS_PER_PATCH;
+        let b_output_base_words = output_span_words;
+        let mut u32s = vec![0; PAIR_HEADER_WORDS];
+        u32s[0] = PAIR_SCHEMA;
+        u32s[1] = 2;
+        u32s[2] = u32::try_from(a_word_base)?;
+        u32s[5] = u32::try_from(b_word_base)?;
+        u32s[6] = u32::try_from(direction_float_words)?;
+        u32s[7] = u32::try_from(b_output_base_words)?;
+        u32s.extend(a);
+        u32s.extend(b);
+        Ok(ResidentPisDispatch {
+            stage,
+            pipeline: &self.pipeline,
+            layout: &self.layout,
+            u32s,
+            direction_float_words,
+            float_words: 2 * direction_float_words,
+            a_disparity,
+            b_disparity,
+            output_words: 2 * output_span_words,
+            output_span_words,
+            b_output_base_words,
+        })
+    }
+
     pub(crate) fn validate_terminal_context(&self, context: &OneXsGpuContext) -> Fallible<()> {
         self.context.ensure_same(context)
     }
@@ -1050,6 +1136,20 @@ impl GpuPisPipeline {
         )?;
         compare_qualified(actual, &expected_a, &expected_b, false)
     }
+}
+
+pub(crate) struct ResidentPisDispatch<'a> {
+    pub(crate) stage: PairSolveStage,
+    pub(crate) pipeline: &'a wgpu::ComputePipeline,
+    pub(crate) layout: &'a wgpu::BindGroupLayout,
+    pub(crate) u32s: Vec<u32>,
+    pub(crate) direction_float_words: usize,
+    pub(crate) float_words: usize,
+    pub(crate) a_disparity: Option<DisparityInterval>,
+    pub(crate) b_disparity: Option<DisparityInterval>,
+    pub(crate) output_words: usize,
+    pub(crate) output_span_words: usize,
+    pub(crate) b_output_base_words: usize,
 }
 
 fn assert_descent_fixture_coverage() -> Fallible<()> {

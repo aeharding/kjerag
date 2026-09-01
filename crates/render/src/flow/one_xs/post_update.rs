@@ -97,6 +97,10 @@ impl<D: PisDirection> RetainedPublicPyramids<D> {
             Level::Two => &self.level_two,
         }
     }
+
+    pub(super) fn l2_bridge_qualification_components(&self) -> (&[f32], &[f32]) {
+        (&self.level_two.dcol, &self.level_two.drow)
+    }
 }
 
 /// Owned selected-level reductions of one 1080-by-60 motion mask.

@@ -25,7 +25,7 @@ use crate::flow::one_xs_belt::{RetainedBaseMaps, base_support_masks};
 /// entry can consume only the complete geometry/belt aggregate.
 #[path = "temporal_gpu.rs"]
 #[allow(dead_code)]
-mod temporal_gpu;
+pub(in crate::flow::one_xs::one_xs_belt_gpu) mod temporal_gpu;
 
 const PARENT_NODES_PER_LENS: usize = SELECTED_FLOWSTATE_ROWS * SELECTED_FLOWSTATE_COLS;
 const RETAINED_NODES_PER_LENS: usize = SELECTED_LINE_ROWS * SELECTED_LINE_COLS;
@@ -723,7 +723,13 @@ mod tests {
 
     use super::*;
     use crate::flow::one_xs::base_map::one_xs_static_coordinates;
+    use crate::flow::one_xs::one_xs_belt_gpu::pis_frontend_gpu::{
+        GpuL1Controls, GpuL2Controls, GpuL2PostPisBridge,
+    };
+    use crate::flow::one_xs::pis::gpu::GpuPisPipeline;
+    use crate::flow::one_xs::pis::{CostMode, DisparityInterval, Level};
     use kjerag_media::FrameStamp;
+    use temporal_gpu::{GpuColdPriorPublicLevelTwo, GpuMotionStage};
 
     #[test]
     fn retained_geometry_matches_cpu_and_rejects_semantic_mutations() {
@@ -837,6 +843,81 @@ mod tests {
             .unwrap();
         assert_eq!(Arc::strong_count(&source_owner), 1);
         eprintln!("ONE X2 GPU geometry completed its sealed resident chain on {adapter}");
+    }
+
+    #[test]
+    fn production_cold0_consumes_geometry_motion_prior_l2_and_l1_on_one_lease() {
+        let (context, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(reason) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {reason}"
+                );
+                eprintln!("skipping ONE X2 resident Cold0 chain: {reason}");
+                return;
+            }
+        };
+        let motion = GpuMotionStage::new(context.clone()).unwrap();
+        let capture = motion.new_capture();
+        let reservation = capture
+            .reserve(FrameStamp::for_test(71, Duration::from_millis(71), None))
+            .unwrap();
+        let flight = reservation.flight().clone();
+        let coordinates = one_xs_static_coordinates();
+        let geometry = GpuGeometryPipeline::new(context.clone(), &coordinates).unwrap();
+        let encoded = geometry
+            .encode_uploaded_parents(&qualification_parents(&coordinates), flight)
+            .unwrap();
+        let texture = |label| {
+            context.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let texture_a = texture("resident Cold0 source A");
+        let texture_b = texture("resident Cold0 source B");
+        let mut belts = encoded
+            .submit_belts(
+                &GpuSolverBeltPipeline::new(context.clone()).unwrap(),
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                Arc::new(()),
+            )
+            .unwrap();
+        belts.reservation = Some(reservation);
+        let front = GpuPisFrontEnd::new(context.clone()).unwrap();
+        let solver = GpuPisPipeline::new(context.clone()).unwrap();
+        let bridge = GpuL2PostPisBridge::new(context.clone()).unwrap();
+        let costs =
+            |level: Level| vec![CostMode::Unweighted; level.patch_rows()].into_boxed_slice();
+        let disparity = DisparityInterval::new([-8.0, -8.0], [8.0, 8.0]);
+        let terminal = belts
+            .prepare_motion(&motion)
+            .unwrap()
+            .submit_resident_l2_l1(
+                &front,
+                &solver,
+                GpuL2Controls::resident(costs(Level::Two), disparity, costs(Level::Two), disparity),
+                &bridge,
+                GpuColdPriorPublicLevelTwo::new(context),
+                GpuL1Controls::resident(costs(Level::One), disparity, costs(Level::One), disparity),
+            )
+            .unwrap_or_else(|error| panic!("resident Cold0 chain failed on {adapter}: {error}"));
+        drop(terminal);
+        assert!(!capture.snapshot().pending);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

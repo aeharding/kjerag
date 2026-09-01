@@ -7,16 +7,24 @@
 
 #[cfg(test)]
 use super::super::GpuBlurredBelts;
+use super::super::pis_frontend_gpu::{
+    GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls, GpuL2PostPisBridge, GpuPisFrontEnd,
+    GpuResidentLevelTwoPost,
+};
 use super::super::resident_frame_gpu::{
     GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, ResidentSuccessor,
 };
 use super::GpuGeometryBelts;
+use super::GpuGeometryFrameOwner;
 use crate::Fallible;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
-use crate::flow::one_xs::pis::Level;
 use crate::flow::one_xs::pis::gpu::GpuPisFlight;
+use crate::flow::one_xs::pis::gpu::GpuPisPipeline;
+use crate::flow::one_xs::pis::{DescentAdmission, Level};
 use crate::flow::one_xs::post_update::MotionPyramid;
+use crate::flow::one_xs::scalar::PairSolveStage;
 use crate::flow::one_xs::temporal::{BlurredBelts, MotionMask, next_warm_references};
+use crate::flow::one_xs::warm::EmptyOverrideCadence;
 use crate::flow::one_xs::{COLS, LensPair, ROWS};
 use crate::flow::one_xs_belt::SolverBelts;
 
@@ -37,6 +45,32 @@ pub(crate) struct GpuMotionReceipt {
     pub(crate) flight: GpuPisFlight,
     pub(crate) temporal_generation: u64,
     pub(crate) history: GpuMotionHistory,
+}
+
+/// One immutable, pre-increment A/B admission snapshot. Its fields are
+/// constructible only inside this temporal owner; downstream siblings may
+/// carry and inspect it but cannot mint or alter an ordinary admitted call.
+#[derive(Clone, Copy)]
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuAdmittedSnapshot {
+    a_to_b: DescentAdmission,
+    b_to_a: DescentAdmission,
+}
+
+impl GpuAdmittedSnapshot {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn a_to_b(self) -> DescentAdmission {
+        self.a_to_b
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn b_to_a(self) -> DescentAdmission {
+        self.b_to_a
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn qualification_every_patch() -> Self {
+        Self {
+            a_to_b: DescentAdmission::EveryPatch,
+            b_to_a: DescentAdmission::EveryPatch,
+        }
+    }
 }
 
 /// One private, qualified GPU context matched to a solver-belt producer.
@@ -105,6 +139,229 @@ pub(crate) struct GpuMotionFrame<C> {
     carrier: Option<C>,
     motion: GpuMotionCandidate,
     root_candidate: Option<GpuResidentCandidate>,
+}
+
+mod prior_public_l2 {
+    pub trait Sealed {}
+}
+
+/// Exact private input from the capture-owned resident public L2 slot. It
+/// creates complete bind groups, so neither retained state nor successor hint
+/// storage can detach from the capture owner.
+pub(super) trait GpuPriorPublicLevelTwo: prior_public_l2::Sealed + Sized {
+    fn context(&self) -> &OneXsGpuContext;
+    fn is_warm(&self) -> bool;
+    fn cadence(&self) -> GpuPairedCadence;
+    fn initialize(&self, encoder: &mut wgpu::CommandEncoder);
+    #[allow(clippy::too_many_arguments)]
+    fn bind_l2_bridge(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        terminal: &wgpu::Buffer,
+        motion_l2: &wgpu::Buffer,
+        output: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup;
+    fn bind_l1_hint_fill(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        dynamic: &wgpu::Buffer,
+    ) -> wgpu::BindGroup;
+}
+
+/// Allocation-owned A/B cadence snapshot for one admitted pair call. Both
+/// levels consume these pre-increment values; only post-L1 may replace the
+/// owner with `after_call`. Keeping the directions distinct is load-bearing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GpuPairedCadence {
+    a_to_b: EmptyOverrideCadence,
+    b_to_a: EmptyOverrideCadence,
+}
+
+impl GpuPairedCadence {
+    fn new(a_to_b: EmptyOverrideCadence, b_to_a: EmptyOverrideCadence) -> Self {
+        Self { a_to_b, b_to_a }
+    }
+
+    fn cold_root() -> Self {
+        Self::new(
+            EmptyOverrideCadence::new(0, 10).expect("fixed cold cadence is nonzero"),
+            EmptyOverrideCadence::new(0, 10).expect("fixed cold cadence is nonzero"),
+        )
+    }
+
+    fn admissions(self) -> GpuAdmittedSnapshot {
+        GpuAdmittedSnapshot {
+            a_to_b: self.a_to_b.admission(),
+            b_to_a: self.b_to_a.admission(),
+        }
+    }
+
+    #[allow(dead_code)] // consumed by the private post-L1 successor checkpoint
+    fn after_call(self) -> Self {
+        Self::new(self.a_to_b.after_calc(), self.b_to_a.after_calc())
+    }
+}
+
+/// Real cold prior-public owner for the first selected calculation. Its zero
+/// resident allocations are initialized by GPU clears in the inherited
+/// submission; no CPU grid or raw handle crosses the transition.
+pub(super) struct GpuColdPriorPublicLevelTwo {
+    context: OneXsGpuContext,
+    cadence: GpuPairedCadence,
+    retained: wgpu::Buffer,
+    hints: wgpu::Buffer,
+}
+
+impl GpuColdPriorPublicLevelTwo {
+    pub(super) fn new(context: OneXsGpuContext) -> Self {
+        Self {
+            cadence: GpuPairedCadence::cold_root(),
+            retained: buffer(
+                context.device(),
+                "ONE X2 cold prior-public L2 state",
+                4 * L2_BYTES * size_of::<f32>(),
+            ),
+            hints: buffer(
+                context.device(),
+                "ONE X2 cold resident successor hints",
+                275_400 * size_of::<u32>(),
+            ),
+            context,
+        }
+    }
+}
+
+impl prior_public_l2::Sealed for GpuColdPriorPublicLevelTwo {}
+
+impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
+    fn context(&self) -> &OneXsGpuContext {
+        &self.context
+    }
+
+    fn is_warm(&self) -> bool {
+        false
+    }
+
+    fn cadence(&self) -> GpuPairedCadence {
+        self.cadence
+    }
+
+    fn initialize(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.clear_buffer(&self.retained, 0, None);
+        encoder.clear_buffer(&self.hints, 0, None);
+    }
+
+    fn bind_l2_bridge(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        terminal: &wgpu::Buffer,
+        motion_l2: &wgpu::Buffer,
+        output: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 cold prior-public L2 owner"),
+            layout,
+            entries: &[
+                entry(0, config),
+                entry(1, images),
+                entry(2, terminal),
+                entry(3, &self.retained),
+                entry(4, motion_l2),
+                entry(5, output),
+                entry(6, validity),
+            ],
+        })
+    }
+
+    fn bind_l1_hint_fill(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        dynamic: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 cold prior-public hint owner"),
+            layout,
+            entries: &[entry(0, config), entry(1, &self.hints), entry(2, dynamic)],
+        })
+    }
+}
+
+/// Pending temporal successor fused to the prior-public L2 owner. The root
+/// reservation remains opaque and unsealed inside `motion` until a later
+/// whole-frame candidate owns every downstream result.
+pub(super) struct GpuMotionResidentL2Post<P: GpuPriorPublicLevelTwo> {
+    motion: GpuMotionCandidate,
+    prior: P,
+}
+
+impl<P: GpuPriorPublicLevelTwo> super::super::pis_frontend_gpu::resident_l2_post_seal::Sealed
+    for GpuMotionResidentL2Post<P>
+{
+}
+
+impl<P: GpuPriorPublicLevelTwo> GpuResidentLevelTwoPost for GpuMotionResidentL2Post<P> {
+    fn context(&self) -> &OneXsGpuContext {
+        self.prior.context()
+    }
+
+    fn is_warm(&self) -> bool {
+        self.prior.is_warm()
+    }
+
+    fn admissions(&self) -> GpuAdmittedSnapshot {
+        self.prior.cadence().admissions()
+    }
+
+    fn initialize(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.prior.initialize(encoder);
+    }
+
+    fn bind(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        terminal: &wgpu::Buffer,
+        output: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.prior.bind_l2_bridge(
+            device,
+            layout,
+            config,
+            images,
+            terminal,
+            &self.motion.level_two,
+            output,
+            validity,
+        )
+    }
+
+    fn bind_l1_hint_fill(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        dynamic: &wgpu::Buffer,
+    ) -> Option<wgpu::BindGroup> {
+        self.prior.is_warm().then(|| {
+            self.prior
+                .bind_l1_hint_fill(device, layout, config, dynamic)
+        })
+    }
 }
 
 impl GpuMotionStage {
@@ -408,6 +665,55 @@ impl<C> GpuMotionTransaction<C> {
     }
 }
 
+impl<K> GpuMotionTransaction<GpuGeometryBelts<K>> {
+    /// Consume the root-carried motion transaction directly through front end,
+    /// L2 PIS, resident post-L2 and L1 PIS. The root reservation is neither
+    /// cloned nor sealed into a separately publishable candidate here.
+    pub(super) fn submit_resident_l2_l1<P: GpuPriorPublicLevelTwo>(
+        mut self,
+        front_end: &GpuPisFrontEnd,
+        solver: &GpuPisPipeline,
+        l2: GpuL2Controls,
+        bridge: &GpuL2PostPisBridge,
+        prior: P,
+        l1: GpuL1Controls,
+    ) -> Fallible<GpuL1PreparedTerminal<GpuGeometryFrameOwner<K>, GpuMotionResidentL2Post<P>>> {
+        let motion_is_warm = self.candidate().receipt.history == GpuMotionHistory::Warm;
+        if prior.is_warm() != motion_is_warm {
+            return Err("ONE X2 prior-public L2 state does not match temporal history".into());
+        }
+        let admissions = prior.cadence().admissions();
+        let l2_stage = if motion_is_warm {
+            PairSolveStage::Warm { level: Level::Two }
+        } else {
+            if admissions.a_to_b() != DescentAdmission::EveryPatch
+                || admissions.b_to_a() != DescentAdmission::EveryPatch
+            {
+                return Err("ONE X2 Cold0 admission is not EveryPatch".into());
+            }
+            PairSolveStage::Cold {
+                calculation: 0,
+                level: Level::Two,
+            }
+        };
+        let post = GpuMotionResidentL2Post {
+            motion: self
+                .candidate
+                .take()
+                .expect("resident L2 transition lost its root-carried motion"),
+            prior,
+        };
+        let carrier = self
+            .carrier
+            .take()
+            .expect("resident L2 transition lost its source submission lease");
+        carrier
+            .prepare_front_end(front_end)?
+            .submit_resident_l2_bridge(solver, bridge, l2, l2_stage, post)?
+            .submit_l1_pis(bridge, solver, l1)
+    }
+}
+
 impl<K> GpuGeometryBelts<K> {
     /// Consume the entire resident producer token into the temporal stage.
     /// No buffer, flight, context, command or lease component crosses this
@@ -444,10 +750,9 @@ impl<K> GpuGeometryBelts<K> {
             drop(encoded);
             return Err(error);
         }
-        self.belts
-            .flight
-            .take()
-            .expect("GPU-resident belts transfer their flight exactly once");
+        // The exact flight remains inside the carrier. Motion adds resident
+        // state to that aggregate; only the later PIS front end may take the
+        // original token, so no clone can be reassociated with another frame.
         Ok(GpuMotionTransaction::from_resident_transition(
             encoded, self,
         ))
@@ -477,9 +782,8 @@ impl<K> GpuBlurredBelts<K> {
             drop(encoded);
             return Err(error);
         }
-        self.flight
-            .take()
-            .expect("GPU-resident belts transfer their flight exactly once");
+        // Qualification follows the production ownership shape: retain the
+        // original flight in the carrier for the eventual consuming stage.
         Ok(GpuMotionTransaction::from_resident_transition(
             encoded, self,
         ))
@@ -633,6 +937,16 @@ fn qualification_pair() -> (BlurredBelts, BlurredBelts) {
             current.a[index] = reference_lenses.a[index] + 12;
         }
     }
+    // Keep a fully populated changed block at the far physical edge. It
+    // survives promotion and both area-half reductions, so the packed L2
+    // producer/consumer qualification exercises a nonzero trailing lane
+    // alongside robust storage bounds.
+    for row in ROWS - 12..ROWS {
+        for col in COLS - 12..COLS {
+            let index = row * COLS + col;
+            current.b[index] = reference_lenses.b[index] + 12;
+        }
+    }
     (
         reference,
         BlurredBelts::from_lenses(current).expect("qualification pair has retained shape"),
@@ -741,6 +1055,49 @@ mod tests {
     }
 
     #[test]
+    fn paired_resident_cadence_authenticates_each_direction_pre_increment() {
+        let admission = |count, cadence| {
+            EmptyOverrideCadence::new(count, cadence)
+                .unwrap()
+                .admission()
+        };
+        for count in [3, 9, 10, 11, 19, 20] {
+            let paired = GpuPairedCadence::new(
+                EmptyOverrideCadence::new(count, 10).unwrap(),
+                EmptyOverrideCadence::new(count, 10).unwrap(),
+            );
+            let actual = paired.admissions();
+            assert_eq!(actual.a_to_b, admission(count, 10));
+            assert_eq!(actual.b_to_a, admission(count, 10));
+            assert_eq!(
+                paired.after_call().a_to_b.calc_count(),
+                count.wrapping_add(1)
+            );
+        }
+
+        let asymmetric = GpuPairedCadence::new(
+            EmptyOverrideCadence::new(10, 10).unwrap(),
+            EmptyOverrideCadence::new(12, 10).unwrap(),
+        );
+        assert_eq!(asymmetric.admissions().a_to_b, DescentAdmission::EveryPatch);
+        assert_eq!(asymmetric.admissions().b_to_a, DescentAdmission::NoPatches);
+
+        let selected = GpuPairedCadence::new(
+            EmptyOverrideCadence::new(6_370, 10).unwrap(),
+            EmptyOverrideCadence::new(6_372, 10).unwrap(),
+        );
+        assert_ne!(selected.admissions().a_to_b, selected.admissions().b_to_a);
+
+        let wrapped = GpuPairedCadence::new(
+            EmptyOverrideCadence::new(i32::MAX, 10).unwrap(),
+            EmptyOverrideCadence::new(i32::MIN, 10).unwrap(),
+        )
+        .after_call();
+        assert_eq!(wrapped.a_to_b.calc_count(), i32::MIN);
+        assert_eq!(wrapped.b_to_a.calc_count(), i32::MIN.wrapping_add(1));
+    }
+
+    #[test]
     fn production_motion_kernel_is_bit_exact_on_the_actual_adapter() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -815,6 +1172,42 @@ mod tests {
     }
 
     #[test]
+    fn qualification_pair_l2_motion_covers_packed_zero_and_nonzero_lanes() {
+        let (reference, current) = qualification_pair();
+        let expected = MotionPyramid::from_base(&MotionMask::between(&current, &reference));
+        let l2 = expected.bytes(Level::Two);
+        let mut histogram = std::collections::BTreeMap::new();
+        for &code in l2 {
+            *histogram.entry(code).or_insert(0usize) += 1;
+        }
+        eprintln!("ONE X2 qualification L2 motion histogram: {histogram:?}");
+        assert_eq!(l2.len(), L2_BYTES);
+        assert!(l2.contains(&0), "qualification motion has no still branch");
+        assert!(
+            l2.iter().any(|&code| code != 0),
+            "qualification motion has no changed branch"
+        );
+        for lane in 0..CODES_PER_WORD {
+            let lane_values = l2.iter().skip(lane).step_by(CODES_PER_WORD);
+            assert!(
+                lane_values.clone().any(|&code| code == 0)
+                    && lane_values.clone().any(|&code| code != 0),
+                "packed lane {lane} does not cover both motion branches"
+            );
+        }
+        let edge_words = 2 * Level::Two.cols();
+        for (name, edge) in [
+            ("leading", &l2[..edge_words]),
+            ("trailing", &l2[l2.len() - edge_words..]),
+        ] {
+            assert!(
+                edge.contains(&0) && edge.iter().any(|&code| code != 0),
+                "{name} L2 edge does not cover both motion branches"
+            );
+        }
+    }
+
+    #[test]
     fn test_only_successor_install_leaves_ready_unpublished_and_drop_retries_exactly() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -830,7 +1223,7 @@ mod tests {
         let stage = GpuMotionStage::new(OneXsGpuContext::new(&device, &queue))
             .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
         let capture = stage.new_capture();
-        let first_input = fixture(3);
+        let (first_input, second_input) = qualification_pair();
         let first_flight = flight(1, 1);
         let first_reservation = capture.reserve(first_flight.frame.clone()).unwrap();
         let first_flight = first_reservation.flight().clone();
@@ -873,7 +1266,6 @@ mod tests {
         drop(cold_frame);
         assert_eq!(Arc::strong_count(&first_owner), 1);
 
-        let second_input = fixture(211);
         let second_flight = flight(2, 2);
         let second_reservation = capture.reserve(second_flight.frame.clone()).unwrap();
         let second_flight = second_reservation.flight().clone();
@@ -925,6 +1317,21 @@ mod tests {
         let expected_mask = MotionMask::between(&second, &first);
         let expected_pyramid = MotionPyramid::from_base(&expected_mask);
         let expected_reference = next_warm_references(&first, &second);
+        let expected_l2_motion = expected_pyramid.bytes(Level::Two);
+        assert_eq!(expected_l2_motion.len(), L2_BYTES);
+        assert!(
+            expected_l2_motion.contains(&0) && expected_l2_motion.iter().any(|&code| code != 0),
+            "production-motion qualification needs both packed branch values"
+        );
+        GpuL2PostPisBridge::new(OneXsGpuContext::new(&device, &queue))
+            .unwrap_or_else(|error| panic!("L2 bridge qualification failed on {adapter}: {error}"))
+            .qualify_production_motion_buffer_for_test(
+                frame.level(Level::Two).unwrap(),
+                expected_l2_motion,
+            )
+            .unwrap_or_else(|error| {
+                panic!("production temporal motion was decoded incorrectly on {adapter}: {error}")
+            });
         assert_eq!(
             read(&device, &queue, frame.current(), BELT_BYTES).unwrap(),
             second.bytes()

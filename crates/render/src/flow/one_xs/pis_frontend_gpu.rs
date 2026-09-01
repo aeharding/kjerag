@@ -22,6 +22,21 @@ use crate::flow::one_xs::{COLS, Direction, LensPair, ROWS};
 use crate::flow::one_xs_belt::SolverBelts;
 use crate::flow::one_xs_belt_gpu::GpuBlurredBelts;
 
+/// Resident level-two PIS continuation. Keeping this as a child module lets
+/// it consume the sealed terminal and prepared-frame buffers without exposing
+/// either raw buffer through the ordinary boundary.
+#[path = "pis_frontend_gpu/l2_gpu.rs"]
+mod l2_gpu;
+
+pub(in crate::flow::one_xs::one_xs_belt_gpu) mod resident_l2_post_seal {
+    pub trait Sealed {}
+}
+
+pub(in crate::flow::one_xs::one_xs_belt_gpu) use l2_gpu::{
+    GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls, GpuL2PostPisBridge,
+    GpuResidentLevelTwoPost,
+};
+
 const MODEL_WORDS_PER_PATCH: usize = 5;
 const L1_PIXELS: usize = Level::One.pixels();
 const L2_PIXELS: usize = Level::Two.pixels();
@@ -229,17 +244,30 @@ pub(crate) struct GpuPreparedTerminal<K> {
     _output: wgpu::Buffer,
     _output_span_words: usize,
     _b_output_base_words: usize,
+    resident_validity: Option<GpuResidentValidity>,
     prepared: GpuPreparedFrame<K>,
+}
+
+/// Resident fail-closed state carried through every downstream consumer.
+/// Only the eventual publication policy may consume and validate its word.
+struct GpuResidentValidity {
+    buffer: wgpu::Buffer,
 }
 
 impl<K> GpuPreparedTerminal<K> {
     pub(crate) fn into_prepared(self, solver: &GpuPisPipeline) -> Fallible<GpuPreparedFrame<K>> {
         solver.validate_terminal_context(&self.context)?;
+        if self.resident_validity.is_some() {
+            return Err("ONE X2 resident validity has not reached its terminal policy".into());
+        }
         Ok(self.prepared)
     }
 
     pub(crate) fn acknowledge_terminal(self, solver: &GpuPisPipeline) -> Fallible<()> {
         solver.validate_terminal_context(&self.context)?;
+        if self.resident_validity.is_some() {
+            return Err("ONE X2 resident validity has not reached its terminal policy".into());
+        }
         self.prepared.acknowledge_terminal()
     }
 
@@ -409,6 +437,7 @@ impl<K> GpuPreparedFrame<K> {
             _output: output,
             _output_span_words: dispatch.output_span_words,
             _b_output_base_words: dispatch.b_output_base_words,
+            resident_validity: None,
             prepared: self,
         })
     }

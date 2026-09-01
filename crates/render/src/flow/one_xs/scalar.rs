@@ -1216,6 +1216,15 @@ impl LevelInputs {
     }
 
     #[cfg(test)]
+    pub(crate) fn resident_l2_oracle_input<D: PisDirection>(
+        &self,
+        level: Level,
+        cost_modes: Vec<CostMode>,
+    ) -> Input<D> {
+        self.input(level, cost_modes).0
+    }
+
+    #[cfg(test)]
     pub(super) fn directed_images<D: PisDirection>(&self, level: Level) -> DirectedImages<'_, D> {
         DirectedImages::<D>::from_native_order(
             level,
