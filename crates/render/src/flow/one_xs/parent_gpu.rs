@@ -32,6 +32,36 @@ pub(super) struct ResidentGpuParentMaps {
     _resources: wgpu::BindGroup,
 }
 
+#[cfg(test)]
+impl ResidentGpuParentMaps {
+    pub(super) fn for_geometry_test(context: &OneXsGpuContext, storage: wgpu::Buffer) -> Self {
+        let input = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 resident parent test input"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let layout = context
+            .device()
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ONE X2 resident parent test retention"),
+                entries: &[],
+            });
+        let resources = context
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ONE X2 resident parent test retention"),
+                layout: &layout,
+                entries: &[],
+            });
+        Self {
+            _input: input,
+            storage,
+            _resources: resources,
+        }
+    }
+}
+
 /// An unfinished parent command stream bound to one exact capture flight.
 /// Only the geometry child may consume it; none of its components has an
 /// accessor or independent submission path.

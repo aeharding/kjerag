@@ -206,6 +206,12 @@ pub(super) mod resident {
     }
 }
 
+#[cfg(test)]
+use super::pis_frontend_gpu::validate_completed_cold_final;
+use super::pis_frontend_gpu::{
+    CompletedColdFinalOperands, GpuCompletedColdCheckpoint, admit_completed_cold_final,
+};
+use crate::direct_type2::ImportedOneXsPicture;
 use resident::Operands;
 
 /// Capture-static final-map resources derived from one validated ONE X2
@@ -334,6 +340,8 @@ pub(super) struct GpuPackedMapFrame<O: Operands> {
     _actions: wgpu::Buffer,
     context: OneXsGpuContext,
     statics: Arc<GpuFinalMapStatics>,
+    #[cfg(test)]
+    input_readback: wgpu::Buffer,
 }
 
 /// A resident final map whose four-byte fail-closed status has not completed.
@@ -352,6 +360,8 @@ pub(super) struct PendingGpuPackedMapFrame<O: Operands> {
     statics: Arc<GpuFinalMapStatics>,
     validity: wgpu::Buffer,
     mapped: mpsc::Receiver<Result<(), String>>,
+    #[cfg(test)]
+    input_readback: wgpu::Buffer,
 }
 
 /// Carrier-first owner spanning the only fallible submit. It becomes the
@@ -364,6 +374,16 @@ struct UnsubmittedGpuPackedMapFrame<O: Operands> {
     context: OneXsGpuContext,
     statics: Arc<GpuFinalMapStatics>,
     validity: wgpu::Buffer,
+    #[cfg(test)]
+    input_readback: wgpu::Buffer,
+}
+
+struct EncodedFinalMap {
+    packed: wgpu::Buffer,
+    actions: wgpu::Buffer,
+    command: wgpu::CommandBuffer,
+    #[cfg(test)]
+    input_readback: wgpu::Buffer,
 }
 
 pub(super) enum ValidityPoll<O: Operands> {
@@ -404,6 +424,8 @@ impl<O: Operands> PendingGpuPackedMapFrame<O> {
             _actions: self.actions,
             context: self.context,
             statics: self.statics,
+            #[cfg(test)]
+            input_readback: self.input_readback,
         })
     }
 
@@ -547,11 +569,19 @@ impl Error for ResidentValidity {
 
 impl<O: Operands> GpuPackedMapFrame<O> {
     #[cfg(test)]
-    fn diagnostic_readback(&self) -> Fallible<DiagnosticPackedMap> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn diagnostic_readback(
+        &self,
+    ) -> Fallible<DiagnosticPackedMap> {
         let packed = readback_packed(self.context.device(), self.context.queue(), &self.packed)?;
         Ok(DiagnosticPackedMap {
             frame: self.frame.clone(),
             packed,
+            input: readback_u32(
+                self.context.device(),
+                self.context.queue(),
+                &self.input_readback,
+                INPUT_BYTES,
+            )?,
         })
     }
 
@@ -698,9 +728,10 @@ fn readback_u32(
 
 /// Explicit CPU diagnostic copy of one frame-bound GPU result.
 #[cfg(test)]
-struct DiagnosticPackedMap {
-    frame: FrameStamp,
-    packed: PackedMap,
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct DiagnosticPackedMap {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) frame: FrameStamp,
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) packed: PackedMap,
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) input: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -802,19 +833,40 @@ impl GpuMapMaterializer {
     /// Submission goes through the upstream token so its existing source-owner
     /// lease advances to this dispatch. Only the resident validity word is
     /// copied for asynchronous CPU observation.
-    pub(super) fn materialize<O: Operands>(
+    pub(super) fn materialize_completed_cold(
         &self,
-        operands: O,
-    ) -> Fallible<PendingGpuPackedMapFrame<O>> {
+        checkpoint: GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
+    ) -> Fallible<PendingGpuPackedMapFrame<CompletedColdFinalOperands>> {
+        let operands = admit_completed_cold_final(checkpoint, &self.context)?;
+        self.materialize_inner(operands)
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn validate_completed_cold_for_test(
+        &self,
+        checkpoint: &GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
+    ) -> Fallible<()> {
+        validate_completed_cold_final(checkpoint, &self.context)
+    }
+
+    #[cfg(test)]
+    fn materialize<O: Operands>(&self, operands: O) -> Fallible<PendingGpuPackedMapFrame<O>> {
+        self.materialize_inner(operands)
+    }
+
+    fn materialize_inner<O: Operands>(&self, operands: O) -> Fallible<PendingGpuPackedMapFrame<O>> {
         self.context.ensure_same(operands.context())?;
         let frame = operands.frame().clone();
+        let input_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        #[cfg(test)]
+        let input_usage = input_usage | wgpu::BufferUsages::COPY_SRC;
         let input = self
             .context
             .device()
             .create_buffer(&wgpu::BufferDescriptor {
                 label: Some("ONE X2 resident GPU final-map inputs"),
                 size: INPUT_BYTES,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                usage: input_usage,
                 mapped_at_creation: false,
             });
         let validity = self
@@ -826,17 +878,21 @@ impl GpuMapMaterializer {
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-        let (packed, actions, command) = self.encode(&operands, &input, &validity);
+        let encoded = self.encode(&operands, &input, &validity);
         let mut unsubmitted = UnsubmittedGpuPackedMapFrame {
             upstream: operands,
             frame,
-            packed,
-            actions,
+            packed: encoded.packed,
+            actions: encoded.actions,
             context: self.context.clone(),
             statics: Arc::clone(&self.statics),
             validity,
+            #[cfg(test)]
+            input_readback: encoded.input_readback,
         };
-        unsubmitted.upstream.submit_after(&self.context, command)?;
+        unsubmitted
+            .upstream
+            .submit_after(&self.context, encoded.command)?;
         let slice = unsubmitted.validity.slice(..);
         let (sender, mapped) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -851,6 +907,8 @@ impl GpuMapMaterializer {
             statics: unsubmitted.statics,
             validity: unsubmitted.validity,
             mapped,
+            #[cfg(test)]
+            input_readback: unsubmitted.input_readback,
         })
     }
 
@@ -859,7 +917,7 @@ impl GpuMapMaterializer {
         operands: &O,
         input: &wgpu::Buffer,
         validity: &wgpu::Buffer,
-    ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::CommandBuffer) {
+    ) -> EncodedFinalMap {
         let device = self.context.device();
         let packed = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 GPU-resident packed type-2 map"),
@@ -906,7 +964,24 @@ impl GpuMapMaterializer {
             pass.dispatch_workgroups((MAP_NODES as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
         }
         operands.encode_validity_copy(&mut encoder, validity);
-        (packed, actions, encoder.finish())
+        #[cfg(test)]
+        let input_readback = {
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 diagnostic final-map input readback"),
+                size: INPUT_BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(input, 0, &readback, 0, INPUT_BYTES);
+            readback
+        };
+        EncodedFinalMap {
+            packed,
+            actions,
+            command: encoder.finish(),
+            #[cfg(test)]
+            input_readback,
+        }
     }
 
     #[cfg(test)]

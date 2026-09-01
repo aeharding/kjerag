@@ -28,6 +28,11 @@ use crate::flow::one_xs_belt_gpu::GpuBlurredBelts;
 /// either raw buffer through the ordinary boundary.
 #[path = "pis_frontend_gpu/l2_gpu.rs"]
 mod l2_gpu;
+#[cfg(test)]
+pub(in crate::flow::one_xs::one_xs_belt_gpu) use l2_gpu::validate_completed_cold_final;
+pub(in crate::flow::one_xs::one_xs_belt_gpu) use l2_gpu::{
+    CompletedColdFinalOperands, GpuCompletedColdCheckpoint, admit_completed_cold_final,
+};
 
 pub(in crate::flow::one_xs::one_xs_belt_gpu) mod resident_l2_post_seal {
     pub trait Sealed {}

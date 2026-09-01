@@ -309,6 +309,30 @@ impl GpuColdPriorPublicLevelTwo {
 impl prior_public_l2::Sealed for GpuColdPriorPublicLevelTwo {}
 
 impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn ensure_final_reservation(
+        &self,
+        context: &OneXsGpuContext,
+        flight: &GpuPisFlight,
+        root: &super::super::resident_frame_gpu::GpuResidentIdentity,
+    ) -> Fallible<()> {
+        context.ensure_same(self.prior.context())?;
+        let reservation = self
+            .motion
+            .reservation
+            .as_ref()
+            .ok_or("ONE X2 final map lost its root reservation")?;
+        if reservation.flight() != flight {
+            return Err("ONE X2 final-map post state names a different root flight".into());
+        }
+        if !reservation.identity().matches(root) {
+            return Err("ONE X2 final-map post state belongs to a different capture root".into());
+        }
+        if self.motion.successor.is_none() {
+            return Err("ONE X2 final map lost its resident successor allocation".into());
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cold_lifecycle_for_test(
         &self,

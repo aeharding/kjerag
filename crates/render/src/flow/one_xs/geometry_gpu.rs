@@ -45,6 +45,7 @@ pub(crate) struct GpuRetainedGeometry {
     context: OneXsGpuContext,
     flight: Option<GpuPisFlight>,
     _parents: ParentRetention,
+    parent: wgpu::Buffer,
     retained: wgpu::Buffer,
     masks: wgpu::Buffer,
     _resources: wgpu::BindGroup,
@@ -59,6 +60,57 @@ enum ParentRetention {
 impl GpuRetainedGeometry {
     // Intentionally no ordinary accessors. Only the two concrete consuming
     // transitions below can bind its retained map and packed masks.
+}
+
+impl GpuGeometryFrameOwner<crate::direct_type2::ImportedOneXsPicture> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn ensure_final_map_sources(
+        &self,
+        frame: &kjerag_media::FrameStamp,
+    ) -> Fallible<()> {
+        self._source_owner.ensure_resident_frame(frame)?;
+        if !matches!(self._geometry._parents, ParentRetention::Resident(_)) {
+            return Err("ONE X2 final map requires the exact resident parent allocation".into());
+        }
+        for (name, actual, expected) in [
+            ("parent", self._geometry.parent.size(), PARENT_BYTES),
+            ("base", self._geometry.retained.size(), RETAINED_BYTES),
+        ] {
+            if actual != expected {
+                return Err(format!(
+                    "ONE X2 final-map {name} buffer is {actual} bytes, expected {expected}"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn copy_final_map_dynamic_inputs(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: super::map_patch_gpu::resident::DynamicInputTarget<'_>,
+        public: &wgpu::Buffer,
+    ) {
+        use super::map_patch_gpu::resident::{DynamicBufferCopy, DynamicSide};
+
+        const PREIMAGE_WORDS: u64 = 40_000;
+        const SIDE_FLOW_WORDS: u64 = 129_600;
+        const WORD_BYTES: u64 = size_of::<u32>() as u64;
+        target.copy_side(
+            encoder,
+            DynamicSide::LensA,
+            DynamicBufferCopy::new(&self._geometry.parent, 0),
+            DynamicBufferCopy::new(&self._geometry.retained, 0),
+            DynamicBufferCopy::new(public, SIDE_FLOW_WORDS * WORD_BYTES),
+        );
+        target.copy_side(
+            encoder,
+            DynamicSide::LensB,
+            DynamicBufferCopy::new(&self._geometry.parent, PREIMAGE_WORDS * WORD_BYTES),
+            DynamicBufferCopy::new(&self._geometry.retained, SIDE_FLOW_WORDS * WORD_BYTES),
+            DynamicBufferCopy::new(public, 0),
+        );
+    }
 }
 
 /// Source owner carried by the sole submission lease after geometry enters
@@ -378,6 +430,7 @@ impl GpuGeometryPipeline {
                 context: self.context.clone(),
                 flight,
                 _parents: parent_retention,
+                parent: parent_buffer,
                 retained,
                 masks,
                 _resources: resources,
@@ -719,6 +772,7 @@ fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
 mod tests {
     use std::future::Future;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -733,7 +787,7 @@ mod tests {
 
     #[test]
     fn retained_geometry_matches_cpu_and_rejects_semantic_mutations() {
-        let (context, adapter) = match gpu() {
+        let (context, _, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(reason) => {
                 assert!(
@@ -847,7 +901,7 @@ mod tests {
 
     #[test]
     fn production_cold0_consumes_geometry_motion_prior_l2_and_l1_on_one_lease() {
-        let (context, adapter) = match gpu() {
+        let (context, foreign_context, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(reason) => {
                 assert!(
@@ -864,10 +918,43 @@ mod tests {
             .reserve(FrameStamp::for_test(71, Duration::from_millis(71), None))
             .unwrap();
         let flight = reservation.flight().clone();
-        let coordinates = one_xs_static_coordinates();
+        let resources = crate::flow::one_xs::resources::OneXsResources::new(
+            &crate::projection::tests::one_xs_lenses(),
+        )
+        .unwrap();
+        let coordinates = resources.static_coordinates().clone();
         let geometry = GpuGeometryPipeline::new(context.clone(), &coordinates).unwrap();
+        let parents = qualification_parents(&coordinates);
+        let expected_base = cpu_oracle(&coordinates, &parents).unwrap().0;
+        let parent_bytes = pair_bytes(&parents);
+        let parent_words = parent_bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let parent = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 final bridge resident parent"),
+            size: PARENT_BYTES,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue().write_buffer(&parent, 0, &parent_bytes);
+        let encoder = context
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ONE X2 final bridge resident parent"),
+            });
         let encoded = geometry
-            .encode_uploaded_parents(&qualification_parents(&coordinates), flight)
+            .encode_buffer(
+                parent.clone(),
+                ParentRetention::Resident(ResidentGpuParentMaps::for_geometry_test(
+                    &context, parent,
+                )),
+                Some(flight.clone()),
+                Some(reservation),
+                encoder,
+            )
             .unwrap();
         let texture = |label| {
             context.device().create_texture(&wgpu::TextureDescriptor {
@@ -887,17 +974,21 @@ mod tests {
         };
         let texture_a = texture("resident Cold0 source A");
         let texture_b = texture("resident Cold0 source B");
-        let mut belts = encoded
+        let imported = crate::direct_type2::ImportedOneXsPicture::resident_test_owner(
+            &context,
+            crate::flow::one_xs_belt_gpu::ResidentSourceIdentity::for_test(),
+            flight.frame.clone(),
+        );
+        let belts = encoded
             .submit_belts(
                 &GpuSolverBeltPipeline::new(context.clone()).unwrap(),
                 SourceTextures {
                     a: &texture_a,
                     b: &texture_b,
                 },
-                Arc::new(()),
+                imported,
             )
             .unwrap();
-        belts.reservation = Some(reservation);
         let front = GpuPisFrontEnd::new(context.clone()).unwrap();
         let solver = GpuPisPipeline::new(context.clone()).unwrap();
         let bridge = GpuL2PostPisBridge::new(context.clone()).unwrap();
@@ -913,7 +1004,7 @@ mod tests {
                 &front,
                 &solver,
                 &bridge,
-                GpuColdPriorPublicLevelTwo::new(context),
+                GpuColdPriorPublicLevelTwo::new(context.clone()),
                 controls,
             )
             .unwrap_or_else(|error| panic!("resident Cold0 chain failed on {adapter}: {error}"))
@@ -928,7 +1019,7 @@ mod tests {
         let cold1_state = cold1
             .snapshot_for_test()
             .unwrap_or_else(|error| panic!("resident Cold1 snapshot failed on {adapter}: {error}"));
-        let successor = cold1
+        let mut successor = cold1
             .resume(&bridge, &solver)
             .unwrap_or_else(|error| panic!("resident Cold2 chain failed on {adapter}: {error}"));
         let cold2_state = successor
@@ -951,7 +1042,117 @@ mod tests {
         assert!(cold0_state.same_root(&cold1_state));
         assert!(cold1_state.same_root(&cold2_state));
         assert!(capture.snapshot().pending);
-        drop(successor);
+        let completion = Arc::new(AtomicU8::new(0));
+        let submissions = Arc::new(AtomicU8::new(0));
+        let expected_public = successor.public_words_for_test().unwrap();
+        successor.observe_final_lease(Arc::clone(&completion), Arc::clone(&submissions));
+        let foreign_materializer =
+            crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::GpuMapMaterializer::new(
+                foreign_context,
+                &resources,
+            )
+            .unwrap();
+        let error = foreign_materializer
+            .validate_completed_cold_for_test(&successor)
+            .unwrap_err();
+        assert!(error.to_string().contains("different device or queue"));
+        assert_eq!(submissions.load(Ordering::SeqCst), 0);
+        assert_eq!(completion.load(Ordering::SeqCst), 0);
+        assert!(capture.snapshot().pending);
+        let materializer =
+            crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::GpuMapMaterializer::new(
+                context.clone(),
+                &resources,
+            )
+            .unwrap();
+
+        // Equal readable frame values do not authorize a different frame
+        // allocation. Refuse the ABA before allocating or submitting final
+        // work, then restore the exact flight for the joined success path.
+        let forged_frame =
+            FrameStamp::for_test(flight.frame.index(), flight.frame.timestamp(), None);
+        let original_frame = successor.replace_frame_for_test(forged_frame);
+        let error = materializer
+            .validate_completed_cold_for_test(&successor)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("different root flight"),
+            "unexpected frame ABA refusal: {error}"
+        );
+        successor.replace_frame_for_test(original_frame);
+        assert_eq!(submissions.load(Ordering::SeqCst), 0);
+        assert_eq!(completion.load(Ordering::SeqCst), 0);
+        assert!(capture.snapshot().pending);
+
+        // The same flight value in a different capture root is likewise not
+        // the resident root. Identity is allocation based, not generation or
+        // frame-value based.
+        let foreign_capture = motion.new_capture();
+        let foreign_reservation = foreign_capture.reserve(flight.frame.clone()).unwrap();
+        let original_root = successor
+            .replace_validity_root_for_test(foreign_reservation.identity())
+            .expect("completed Cold2 validity retains its resident root");
+        let error = materializer
+            .validate_completed_cold_for_test(&successor)
+            .unwrap_err();
+        assert!(error.to_string().contains("different capture root"));
+        successor.replace_validity_root_for_test(original_root);
+        drop(foreign_reservation);
+        assert_eq!(submissions.load(Ordering::SeqCst), 0);
+        assert_eq!(completion.load(Ordering::SeqCst), 0);
+        assert!(capture.snapshot().pending);
+
+        let mut pending = materializer.materialize_completed_cold(successor).unwrap();
+        assert_eq!(submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(completion.load(Ordering::SeqCst), 0);
+        let ready = loop {
+            pending = match pending.poll().unwrap() {
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Pending(
+                    pending,
+                ) => pending,
+                crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::ValidityPoll::Ready(ready) => {
+                    break ready;
+                }
+            };
+        };
+        let diagnostic = ready.diagnostic_readback().unwrap();
+        assert_eq!(diagnostic.frame, flight.frame);
+        assert_eq!(
+            diagnostic.packed.nodes().len(),
+            crate::studio_type2::MAP_NODES
+        );
+        const PREIMAGE_WORDS: usize = 40_000;
+        const FLOW_WORDS: usize = 129_600;
+        const SIDE_WORDS: usize = 359_200;
+        assert_eq!(
+            &diagnostic.input[..PREIMAGE_WORDS],
+            &parent_words[..PREIMAGE_WORDS]
+        );
+        assert_eq!(
+            &diagnostic.input[PREIMAGE_WORDS..PREIMAGE_WORDS + FLOW_WORDS],
+            &expected_base[..FLOW_WORDS]
+        );
+        assert_eq!(
+            &diagnostic.input[PREIMAGE_WORDS + FLOW_WORDS..PREIMAGE_WORDS + 2 * FLOW_WORDS],
+            &expected_public[FLOW_WORDS..2 * FLOW_WORDS]
+        );
+        assert_eq!(
+            &diagnostic.input[SIDE_WORDS..SIDE_WORDS + PREIMAGE_WORDS],
+            &parent_words[PREIMAGE_WORDS..2 * PREIMAGE_WORDS]
+        );
+        assert_eq!(
+            &diagnostic.input
+                [SIDE_WORDS + PREIMAGE_WORDS..SIDE_WORDS + PREIMAGE_WORDS + FLOW_WORDS],
+            &expected_base[FLOW_WORDS..2 * FLOW_WORDS]
+        );
+        assert_eq!(
+            &diagnostic.input[SIDE_WORDS + PREIMAGE_WORDS + FLOW_WORDS
+                ..SIDE_WORDS + PREIMAGE_WORDS + 2 * FLOW_WORDS],
+            &expected_public[..FLOW_WORDS]
+        );
+        drop(diagnostic);
+        drop(ready);
+        assert_eq!(completion.load(Ordering::SeqCst), 2);
         assert!(!capture.snapshot().pending);
     }
 
@@ -966,7 +1167,7 @@ mod tests {
         }
     }
 
-    fn gpu() -> Result<(OneXsGpuContext, String), String> {
+    fn gpu() -> Result<(OneXsGpuContext, OneXsGpuContext, String), String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
@@ -984,6 +1185,18 @@ mod tests {
             ..Default::default()
         }))
         .map_err(|error| error.to_string())?;
-        Ok((OneXsGpuContext::new(&device, &queue), name))
+        let (foreign_device, foreign_queue) =
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("foreign exact ONE X2 GPU geometry"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+            .map_err(|error| error.to_string())?;
+        Ok((
+            OneXsGpuContext::new(&device, &queue),
+            OneXsGpuContext::new(&foreign_device, &foreign_queue),
+            name,
+        ))
     }
 }

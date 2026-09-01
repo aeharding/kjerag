@@ -10,10 +10,12 @@ use super::super::super::geometry_gpu::GpuGeometryFrameOwner;
 use super::super::{GpuPreparedTerminal, GpuResidentValidity, words_bytes};
 use super::{GpuL1PreparedTerminal, GpuResidentLevelTwoPost};
 use crate::Fallible;
+use crate::direct_type2::ImportedOneXsPicture;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::one_xs_belt_gpu::geometry_gpu::temporal_gpu::{
     GpuColdPriorPublicLevelTwo, GpuMotionResidentL2Post,
 };
+use crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::resident;
 use crate::flow::one_xs::pis::Level;
 use crate::flow::one_xs::scalar::PairSolveStage;
 
@@ -180,7 +182,134 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuCompletedColdCheckpoint<K
     prepared: Option<super::super::GpuPreparedFrame<GpuGeometryFrameOwner<K>>>,
     validity: Option<GpuResidentValidity>,
     post: Option<GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo>>,
-    _public: wgpu::Buffer,
+    public: wgpu::Buffer,
+}
+
+/// Concrete, nonconstructible final-map operand for the only production
+/// Cold2/source-owner combination. It deliberately has no generic parameter.
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdFinalOperands {
+    // Carrier first: every error, panic and unwind retires the imported source
+    // lease before releasing the root reservation or capture-static owners.
+    prepared: super::super::GpuPreparedFrame<GpuGeometryFrameOwner<ImportedOneXsPicture>>,
+    validity: GpuResidentValidity,
+    post: GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo>,
+    public: wgpu::Buffer,
+    context: OneXsGpuContext,
+    flight: crate::flow::one_xs::pis::gpu::GpuPisFlight,
+}
+
+pub(in crate::flow::one_xs::one_xs_belt_gpu) fn admit_completed_cold_final(
+    mut checkpoint: GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
+    producer: &OneXsGpuContext,
+) -> Fallible<CompletedColdFinalOperands> {
+    validate_completed_cold_final(&checkpoint, producer)?;
+    let flight = checkpoint
+        .prepared
+        .as_ref()
+        .expect("validated Cold2 prepared owner")
+        .flight
+        .clone();
+    Ok(CompletedColdFinalOperands {
+        prepared: checkpoint
+            .prepared
+            .take()
+            .expect("checked Cold2 prepared owner"),
+        validity: checkpoint
+            .validity
+            .take()
+            .expect("checked Cold2 validity owner"),
+        post: checkpoint.post.take().expect("checked Cold2 post owner"),
+        public: checkpoint.public,
+        context: producer.clone(),
+        flight,
+    })
+}
+
+pub(in crate::flow::one_xs::one_xs_belt_gpu) fn validate_completed_cold_final(
+    checkpoint: &GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
+    producer: &OneXsGpuContext,
+) -> Fallible<()> {
+    let prepared = checkpoint
+        .prepared
+        .as_ref()
+        .ok_or("resident Cold2 final map lost its prepared frame")?;
+    producer.ensure_same(&prepared.context)?;
+    let flight = prepared.flight.clone();
+    let validity = checkpoint
+        .validity
+        .as_ref()
+        .ok_or("resident Cold2 final map lost its validity owner")?;
+    let post = checkpoint
+        .post
+        .as_ref()
+        .ok_or("resident Cold2 final map lost its post-L1 owner")?;
+    producer.ensure_same(post.context())?;
+    let root = post
+        .resident_identity()?
+        .ok_or("resident Cold2 final map lost its capture root identity")?;
+    validity.ensure_identity(producer, &flight, Some(&root))?;
+    post.ensure_final_reservation(producer, &flight, &root)?;
+    prepared.belts.lease.validate_provenance(producer)?;
+    prepared
+        .belts
+        .lease
+        .ensure_final_map_sources(&flight.frame)?;
+    if checkpoint.public.size() != words_bytes(PUBLIC_WORDS) {
+        return Err(format!(
+            "ONE X2 Cold2 public-flow buffer is {} bytes, expected {}",
+            checkpoint.public.size(),
+            words_bytes(PUBLIC_WORDS)
+        )
+        .into());
+    }
+    if validity.buffer.size() != words_bytes(1) {
+        return Err(format!(
+            "ONE X2 resident validity buffer is {} bytes, expected {}",
+            validity.buffer.size(),
+            words_bytes(1)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+impl resident::Sealed for CompletedColdFinalOperands {}
+
+impl resident::Operands for CompletedColdFinalOperands {
+    fn context(&self) -> &OneXsGpuContext {
+        &self.context
+    }
+
+    fn frame(&self) -> &kjerag_media::FrameStamp {
+        &self.flight.frame
+    }
+
+    fn encode_dynamic_input_copy(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: resident::DynamicInputTarget<'_>,
+    ) {
+        self.prepared
+            .belts
+            .lease
+            .copy_final_map_dynamic_inputs(encoder, target, &self.public)
+            .expect("Cold2 final-map sources were checked before encoding");
+    }
+
+    fn encode_validity_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer) {
+        encoder.copy_buffer_to_buffer(&self.validity.buffer, 0, target, 0, words_bytes(1));
+    }
+
+    fn submit_after(
+        &mut self,
+        producer: &OneXsGpuContext,
+        command: wgpu::CommandBuffer,
+    ) -> Fallible<()> {
+        self.prepared
+            .belts
+            .lease
+            .submit_after(producer, |_| command)
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +382,62 @@ impl<K> GpuCompletedColdCheckpoint<K> {
                 .as_ref()
                 .ok_or("cold snapshot lost validity")?,
         )
+    }
+}
+
+#[cfg(test)]
+impl GpuCompletedColdCheckpoint<ImportedOneXsPicture> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn observe_final_lease(
+        &mut self,
+        completion: std::sync::Arc<std::sync::atomic::AtomicU8>,
+        submissions: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) {
+        let lease = &mut self
+            .prepared
+            .as_mut()
+            .expect("completed Cold2 test checkpoint retains prepared owner")
+            .belts
+            .lease;
+        lease.observe(completion);
+        lease.observe_submit(submissions);
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn public_words_for_test(
+        &self,
+    ) -> Fallible<Vec<u32>> {
+        let context = &self
+            .prepared
+            .as_ref()
+            .ok_or("completed Cold2 test checkpoint lost prepared owner")?
+            .context;
+        super::read_buffer_words(context, &self.public, PUBLIC_WORDS)
+            .map_err(|error| error.to_string().into())
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn replace_frame_for_test(
+        &mut self,
+        frame: kjerag_media::FrameStamp,
+    ) -> kjerag_media::FrameStamp {
+        std::mem::replace(
+            &mut self
+                .prepared
+                .as_mut()
+                .expect("completed Cold2 test checkpoint retains prepared owner")
+                .flight
+                .frame,
+            frame,
+        )
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn replace_validity_root_for_test(
+        &mut self,
+        root: super::super::super::resident_frame_gpu::GpuResidentIdentity,
+    ) -> Option<super::super::super::resident_frame_gpu::GpuResidentIdentity> {
+        self.validity
+            .as_mut()
+            .expect("completed Cold2 test checkpoint retains validity owner")
+            .resident
+            .replace(root)
     }
 }
 
@@ -360,7 +545,7 @@ impl<K> GpuColdLoop<K, ColdAfter1> {
             prepared: Some(completed.prepared),
             validity: Some(completed.validity),
             post: Some(completed.post),
-            _public: completed.public,
+            public: completed.public,
         };
         boundary
             .post

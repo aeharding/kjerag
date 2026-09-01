@@ -105,6 +105,64 @@ impl ImportedOneXsPicture {
     ) {
         pipeline.draw(pass, &self.picture, map);
     }
+
+    pub(crate) fn ensure_resident_frame(&self, frame: &FrameStamp) -> Fallible<()> {
+        if &self.frames.stamp() != frame {
+            return Err("ONE X2 final map names a different imported picture allocation".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resident_test_owner(
+        context: &OneXsGpuContext,
+        session: ResidentSourceIdentity,
+        frame: FrameStamp,
+    ) -> Self {
+        let device = context.device();
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ONE X2 resident test source owner"),
+            entries: &[],
+        });
+        let picture = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 resident test source owner"),
+            layout: &layout,
+            entries: &[],
+        });
+        let texture = |label| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let planes = [
+            Planes {
+                luma: texture("ONE X2 resident test source A luma"),
+                chroma: texture("ONE X2 resident test source A chroma"),
+            },
+            Planes {
+                luma: texture("ONE X2 resident test source B luma"),
+                chroma: texture("ONE X2 resident test source B chroma"),
+            },
+        ];
+        Self {
+            picture,
+            planes,
+            frames: Arc::new(Frames::empty_for_test(frame, crate::Size::new(1, 1))),
+            context: context.clone(),
+            session,
+        }
+    }
 }
 
 impl ImportedOneXsSource for ImportedOneXsPicture {

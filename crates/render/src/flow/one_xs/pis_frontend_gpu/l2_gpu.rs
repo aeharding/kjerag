@@ -29,7 +29,12 @@ use crate::flow::one_xs::scalar::PairSolveStage;
 
 #[path = "post_l1.rs"]
 mod post_l1;
-pub(in crate::flow::one_xs::one_xs_belt_gpu) use post_l1::GpuCold0Terminal;
+#[cfg(test)]
+pub(in crate::flow::one_xs::one_xs_belt_gpu) use post_l1::validate_completed_cold_final;
+pub(in crate::flow::one_xs::one_xs_belt_gpu) use post_l1::{
+    CompletedColdFinalOperands, GpuCold0Terminal, GpuCompletedColdCheckpoint,
+    admit_completed_cold_final,
+};
 #[path = "l2_gpu/work_modes.rs"]
 mod work_modes;
 pub(in crate::flow::one_xs::one_xs_belt_gpu) use work_modes::{

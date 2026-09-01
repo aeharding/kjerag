@@ -29,6 +29,33 @@ This checkpoint changes no selected behavior and does not implement the Cold2
 final-map operand join, atomic ready/successor publication, draw retirement
 wiring, warm state or performance work.
 
+**Concrete Cold2-to-final-map resident bridge, 2026-09-01, implementation
+branch only [PRIVATE AND UNSELECTED; NO SCENE, INSTALL, WARM, PERFORMANCE OR
+PARITY CLAIM]:** the exact
+`GpuCompletedColdCheckpoint<ImportedOneXsPicture>` now has one private,
+nonconstructible concrete admission into the existing final-map materializer.
+Admission consumes and validates the prepared owner, structural GPU context,
+flight-derived frame, imported-picture identity, allocation-identical capture
+root, post reservation, four-byte validity owner, exact resident-parent
+variant and every source buffer size before the materializer allocates or
+encodes anything.
+
+The geometry owner supplies only purpose-specific fixed copies. Parent and
+base storage remain A then B. Final lens A receives parent words 0 through
+39,999, base words 0 through 129,599 and the Cold2 public B-to-A half at word
+129,600. Final lens B receives parent words 40,000 through 79,999, base words
+129,600 through 259,199 and the Cold2 public A-to-B half at word zero. The
+four-byte validity copy follows the unchanged final dispatch. The one inherited
+imported-source submission lease is advanced exactly once and remains the
+first owner on submit, validity, mapping, drop and unwind paths. No raw buffer,
+queue, command, offset, caller-chosen direction or frame accessor was added.
+
+This checkpoint joins no Scene or installation path, implements no warm tail,
+does no frame-sized CPU readback, upload or reconstruction, and makes no
+playback, rendered-parity, Studio-parity or throughput claim. Studio remains a
+frozen correctness oracle only; this change performs no optimization reverse
+engineering.
+
 **Capture-static resident ONE X2 final-map resources, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
 NO POST-L1 JOIN, SCENE, PLAYBACK, PERFORMANCE OR PARITY CLAIM]:** the resident

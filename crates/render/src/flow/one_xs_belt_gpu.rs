@@ -106,6 +106,11 @@ impl ResidentSourceIdentity {
         Self(Arc::new(()))
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new()
+    }
+
     fn matches(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -185,6 +190,15 @@ impl ResidentSourceFrontPipeline {
             geometry,
             belts: &self.belts,
         })
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn materialize_completed_cold(
+        &self,
+        checkpoint: pis_frontend_gpu::GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
+    ) -> Fallible<
+        map_patch_gpu::PendingGpuPackedMapFrame<pis_frontend_gpu::CompletedColdFinalOperands>,
+    > {
+        self.final_map.materialize_completed_cold(checkpoint)
     }
 }
 
@@ -1049,6 +1063,8 @@ enum ExactSubmission {
         index: wgpu::SubmissionIndex,
         #[cfg(test)]
         observer: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+        #[cfg(test)]
+        submit_observer: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
     },
     #[cfg(test)]
     Injected {
@@ -1073,6 +1089,8 @@ impl ExactSubmission {
                 index,
                 #[cfg(test)]
                 observer,
+                #[cfg(test)]
+                    submit_observer: _,
             } => {
                 #[cfg(test)]
                 if let Some(observer) = &observer {
@@ -1115,6 +1133,14 @@ impl ExactSubmission {
                 context.ensure_same(producer)?;
                 let command = encode(context.device());
                 *index = context.queue().submit([command]);
+                #[cfg(test)]
+                if let Self::Device {
+                    submit_observer: Some(observer),
+                    ..
+                } = self
+                {
+                    observer.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 Ok(())
             }
             #[cfg(test)]
@@ -1129,6 +1155,16 @@ impl ExactSubmission {
         match self {
             Self::Device { observer, .. } => *observer = Some(state),
             Self::Injected { observer, .. } => *observer = state,
+        }
+    }
+
+    #[cfg(test)]
+    fn observe_submit(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
+        if let Self::Device {
+            submit_observer, ..
+        } = self
+        {
+            *submit_observer = Some(state);
         }
     }
 }
@@ -1153,6 +1189,8 @@ impl<K> SubmissionLease<K> {
                 index,
                 #[cfg(test)]
                 observer: None,
+                #[cfg(test)]
+                submit_observer: None,
             }),
             source_owner: Some(source_owner),
         }
@@ -1236,6 +1274,35 @@ impl<K> SubmissionLease<K> {
         if let Some(completion) = &mut self.completion {
             completion.observe(state);
         }
+    }
+
+    #[cfg(test)]
+    fn observe_submit(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
+        if let Some(completion) = &mut self.completion {
+            completion.observe_submit(state);
+        }
+    }
+}
+
+impl SubmissionLease<geometry_gpu::GpuGeometryFrameOwner<ImportedOneXsPicture>> {
+    fn ensure_final_map_sources(&self, frame: &FrameStamp) -> Fallible<()> {
+        self.source_owner
+            .as_ref()
+            .ok_or("ONE X2 final map lost its imported source owner")?
+            .ensure_final_map_sources(frame)
+    }
+
+    fn copy_final_map_dynamic_inputs(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: map_patch_gpu::resident::DynamicInputTarget<'_>,
+        public: &wgpu::Buffer,
+    ) -> Fallible<()> {
+        self.source_owner
+            .as_ref()
+            .ok_or("ONE X2 final map lost its imported source owner")?
+            .copy_final_map_dynamic_inputs(encoder, target, public);
+        Ok(())
     }
 }
 
@@ -1954,6 +2021,42 @@ mod tests {
         assert!(!result.contains("fn source_owner"));
         assert!(!result.contains("fn device"));
         assert!(!result.contains("fn queue"));
+    }
+
+    #[test]
+    fn cold2_final_bridge_is_concrete_sealed_and_pins_the_directional_copy_law() {
+        let bridge = include_str!("one_xs/pis_frontend_gpu/post_l1.rs");
+        let geometry = include_str!("one_xs/geometry_gpu.rs");
+        let materializer = include_str!("one_xs/map_patch_gpu.rs");
+
+        assert!(bridge.contains("struct CompletedColdFinalOperands"));
+        assert!(!bridge.contains("struct CompletedColdFinalOperands<"));
+        assert!(bridge.contains("GpuCompletedColdCheckpoint<ImportedOneXsPicture>"));
+        assert!(bridge.contains("impl resident::Sealed for CompletedColdFinalOperands"));
+        assert!(bridge.contains("&self.flight.frame"));
+        assert!(bridge.contains("copy_buffer_to_buffer(&self.validity.buffer"));
+
+        assert!(geometry.contains("const PREIMAGE_WORDS: u64 = 40_000;"));
+        assert!(geometry.contains("const SIDE_FLOW_WORDS: u64 = 129_600;"));
+        assert!(geometry.contains("DynamicSide::LensA"));
+        assert!(geometry.contains("DynamicSide::LensB"));
+        assert!(geometry.contains("PREIMAGE_WORDS * WORD_BYTES"));
+        assert!(geometry.contains("SIDE_FLOW_WORDS * WORD_BYTES"));
+        assert!(geometry.contains("DynamicBufferCopy::new(public, 0)"));
+
+        let production = materializer
+            .split_once("pub(super) fn materialize_completed_cold(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert!(production.contains("admit_completed_cold_final"));
+        assert!(!production.contains("<O:"));
+        for forbidden in ["pub fn buffer", "pub fn packed", "pub fn input"] {
+            assert!(!bridge.contains(forbidden));
+            assert!(!geometry.contains(forbidden));
+        }
     }
 
     #[test]

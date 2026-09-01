@@ -266,6 +266,19 @@ impl Frames {
     pub fn stamp(&self) -> FrameStamp {
         self.stamp.clone()
     }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn empty_for_test(stamp: FrameStamp, size: Size) -> Self {
+        Self {
+            index: stamp.index(),
+            timestamp: stamp.timestamp(),
+            lenses: Vec::new(),
+            size,
+            samples: Samples::default(),
+            stamp,
+        }
+    }
 }
 
 impl std::fmt::Debug for Frames {
