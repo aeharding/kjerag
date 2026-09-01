@@ -51,8 +51,8 @@ use super::flow::one_xs::pis::gpu::{
 use super::flow::one_xs::player::FrameOwnerError;
 use super::flow::one_xs::player::{FrameCommitError, FrameOwner, FrameResult, PreparedFrame};
 use super::flow::one_xs::scalar::{
-    CpuPreparedPisSolverBridge, PairedPatchGrids, PairedPisSolver, PairedPreparedInputs,
-    PairedSolveRequest,
+    ColdInputs, ColdPreparedSchedule, CpuPisOracleInputs, PairedControlInputs, PairedPatchGrids,
+    PairedPisSolver, PairedSolveRequest,
 };
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
@@ -554,7 +554,7 @@ struct ReservationGpuPisSolver<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     completed_stages: &'a mut u64,
-    prepared: Option<PairedPreparedInputs>,
+    prepared: CpuPisOracleInputs,
 }
 
 impl PairedPisSolver for ReservationGpuPisSolver<'_> {
@@ -572,9 +572,7 @@ impl PairedPisSolver for ReservationGpuPisSolver<'_> {
                 self.device,
                 self.queue,
                 expected.clone(),
-                self.prepared
-                    .as_ref()
-                    .expect("GPU PIS solver was not given frame preparation"),
+                &self.prepared,
                 request,
             )
             .map_err(GpuPisSolverError::Pipeline)?;
@@ -583,12 +581,6 @@ impl PairedPisSolver for ReservationGpuPisSolver<'_> {
             .checked_add(1)
             .expect("ONE X2 GPU PIS completed-stage counter is exhausted");
         finish_gpu_pis_stage(&expected, output)
-    }
-}
-
-impl CpuPreparedPisSolverBridge for ReservationGpuPisSolver<'_> {
-    fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-        self.prepared = Some(inputs);
     }
 }
 
@@ -711,9 +703,9 @@ impl OneXsReservation {
     /// `FrameOwner::commit_with_solver` restores the exact old estimator on
     /// every solver and stamp error. Returning this reservation lets the
     /// capture restore that owner and its allocation-identical ready map.
-    fn commit_with_solver<S: CpuPreparedPisSolverBridge>(
+    fn commit_prepared_with_solver<S: PairedPisSolver>(
         mut self,
-        blurred_belts: BlurredBelts,
+        controls: PairedControlInputs,
         solver: &mut S,
     ) -> Result<CompletedOneXsReservation, Box<RejectedOneXsSolverReservation<S::Error>>> {
         let prepared = self
@@ -724,7 +716,7 @@ impl OneXsReservation {
             .owner
             .as_deref_mut()
             .expect("a live ONE X2 reservation owns the old estimator");
-        match owner.commit_with_solver(*prepared, blurred_belts, solver) {
+        match owner.commit_prepared_with_solver(*prepared, controls, solver) {
             Ok(result) => Ok(CompletedOneXsReservation {
                 capture: self.capture.clone(),
                 flight: self.flight.clone(),
@@ -2937,6 +2929,11 @@ impl ScenePipeline {
                         return Err(abort_one_xs_after_error(reservation, error));
                     }
                 };
+                let input = ColdInputs::from_blurred_belts_and_masks(
+                    blurred_belts,
+                    reservation.prepared().masks().clone(),
+                );
+                let (controls, prepared) = ColdPreparedSchedule::from_cpu(&input).into_parts();
                 let mut solver = ReservationGpuPisSolver {
                     flight: reservation.flight.clone(),
                     pipeline: self
@@ -2946,9 +2943,9 @@ impl ScenePipeline {
                     device,
                     queue,
                     completed_stages: &mut self.one_xs_gpu_pis_completed_stages,
-                    prepared: None,
+                    prepared,
                 };
-                match reservation.commit_with_solver(blurred_belts, &mut solver) {
+                match reservation.commit_prepared_with_solver(controls, &mut solver) {
                     Ok(completed) => completed
                         .install()
                         .map_err(|rejected| rejected as Box<dyn std::error::Error + Send + Sync>)?,
@@ -5609,8 +5606,7 @@ mod tests {
 
     use crate::flow::one_xs::pis::Level;
     use crate::flow::one_xs::scalar::{
-        CpuPairedPisSolver, CpuPreparedPisSolverBridge, PairSolveError, PairSolveStage,
-        PairedPatchGrids, PairedPreparedInputs, PairedSolveRequest,
+        CpuPairedPisSolver, PairSolveError, PairSolveStage, PairedPatchGrids, PairedSolveRequest,
     };
     use crate::flow::one_xs::{COLS, LensPair, ROWS};
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
@@ -5668,12 +5664,6 @@ mod tests {
         }
     }
 
-    impl CpuPreparedPisSolverBridge for InjectingSolver {
-        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-            self.cpu.bind_cpu_preparation(inputs);
-        }
-    }
-
     impl PairedPisSolver for PanickingSolver {
         type Error = InjectedSolverFailure;
         const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
@@ -5683,12 +5673,6 @@ mod tests {
                 panic!("injected paired PIS panic at {}", request.stage);
             }
             Ok(self.cpu.solve(request).unwrap())
-        }
-    }
-
-    impl CpuPreparedPisSolverBridge for PanickingSolver {
-        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -5711,12 +5695,6 @@ mod tests {
                     grids,
                 },
             )
-        }
-    }
-
-    impl CpuPreparedPisSolverBridge for WrongReceiptSolver {
-        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -5814,6 +5792,14 @@ mod tests {
         .unwrap()
     }
 
+    fn reservation_cpu_schedule(reservation: &OneXsReservation, code: u8) -> ColdPreparedSchedule {
+        let input = ColdInputs::from_blurred_belts_and_masks(
+            reservation_blurred(code),
+            reservation.prepared().masks().clone(),
+        );
+        ColdPreparedSchedule::from_cpu(&input)
+    }
+
     fn reserve_frame(capture: &Arc<OneXsCapture>, frame: &FrameStamp) -> OneXsReservation {
         match capture
             .reserve(
@@ -5859,13 +5845,16 @@ mod tests {
         };
         let reservation = reserve_frame(&capture, &offered);
         let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+        let ColdPreparedSchedule {
+            controls,
+            solver: cpu,
+        } = reservation_cpu_schedule(&reservation, code);
         let mut solver = InjectingSolver {
             at: stage,
             injection,
-            cpu: CpuPairedPisSolver::default(),
+            cpu,
         };
-        let rejected = match reservation.commit_with_solver(reservation_blurred(code), &mut solver)
-        {
+        let rejected = match reservation.commit_prepared_with_solver(controls, &mut solver) {
             Ok(_) => panic!("injected {stage} transaction unexpectedly succeeded"),
             Err(rejected) => rejected,
         };
@@ -5940,11 +5929,15 @@ mod tests {
         let reservation = reserve_frame(&capture, &second);
         let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let ColdPreparedSchedule {
+                controls,
+                solver: cpu,
+            } = reservation_cpu_schedule(&reservation, 103);
             let mut solver = PanickingSolver {
                 at: PairSolveStage::Warm { level },
-                cpu: CpuPairedPisSolver::default(),
+                cpu,
             };
-            let _ = reservation.commit_with_solver(reservation_blurred(103), &mut solver);
+            let _ = reservation.commit_prepared_with_solver(controls, &mut solver);
         }));
         assert!(unwound.is_err());
 
@@ -6023,11 +6016,15 @@ mod tests {
         assert_eq!(ready.pis_backend(), PisBackend::Cpu);
         let reservation = reserve_frame(&capture, &second);
         let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
+        let ColdPreparedSchedule {
+            controls,
+            solver: cpu,
+        } = reservation_cpu_schedule(&reservation, 127);
         let mut solver = WrongReceiptSolver {
             flight: reservation.flight.clone(),
-            cpu: CpuPairedPisSolver::default(),
+            cpu,
         };
-        let rejected = match reservation.commit_with_solver(reservation_blurred(127), &mut solver) {
+        let rejected = match reservation.commit_prepared_with_solver(controls, &mut solver) {
             Ok(_) => panic!("wrong GPU receipt committed a map"),
             Err(rejected) => rejected,
         };
@@ -6056,15 +6053,19 @@ mod tests {
         let capture = reservation_capture();
         let first = reservation_stamp(0, None);
         let reservation = reserve_frame(&capture, &first);
+        let ColdPreparedSchedule {
+            controls,
+            solver: cpu,
+        } = reservation_cpu_schedule(&reservation, 131);
         let mut solver = InjectingSolver {
             at: PairSolveStage::Cold {
                 calculation: 1,
                 level: Level::Two,
             },
             injection: SolverInjection::Failure,
-            cpu: CpuPairedPisSolver::default(),
+            cpu,
         };
-        let rejected = match reservation.commit_with_solver(reservation_blurred(131), &mut solver) {
+        let rejected = match reservation.commit_prepared_with_solver(controls, &mut solver) {
             Ok(_) => panic!("injected solver failure unexpectedly committed"),
             Err(rejected) => rejected,
         };

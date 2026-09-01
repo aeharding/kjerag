@@ -268,12 +268,8 @@ pub struct ColdNextCandidate {
 }
 
 impl ColdNextCandidate {
-    pub(super) fn checkpoint_from_borrowed(
-        &self,
-        current_post_blur: ColdInputs,
-    ) -> WarmCheckpointInputs {
-        WarmCheckpointInputs::from_borrowed_state(
-            current_post_blur,
+    pub(super) fn retained_checkpoint_from_borrowed(&self) -> super::warm::WarmRetainedInputs {
+        super::warm::WarmRetainedInputs::from_borrowed_state(
             &self.references,
             &self.a_to_b_public,
             &self.b_to_a_public,
@@ -386,19 +382,40 @@ pub(crate) struct PairedSolveRequest {
 /// The four frame-static PIS preparations owned by one paired solver session.
 ///
 /// The scalar scheduler retains shared [`LevelInputs`] views for dense seeds,
-/// hints and post-processing. These solver-owned values share those immutable
-/// planes through `Arc`; no image, mask, gradient or weight preparation is
-/// repeated. A later GPU session can replace this CPU representation without
-/// putting a backend discriminator inside [`pis::Input`].
+/// The CPU oracle builds immutable image, mask, gradient and raw-weight planes
+/// once and shares them through `Arc`. Per-stage [`Input`] construction still
+/// validates them and rebuilds rolling patch sums and source models. That
+/// CPU-only cost remains outside [`PairedControlInputs`] and is not part of a
+/// future resident GPU session.
 #[derive(Clone)]
-pub(crate) struct PairedPreparedInputs {
+pub(crate) struct CpuPisOracleInputs {
     a_to_b_l1: LevelInputs,
     a_to_b_l2: LevelInputs,
     b_to_a_l1: LevelInputs,
     b_to_a_l2: LevelInputs,
 }
 
-impl PairedPreparedInputs {
+/// Backend-neutral frame data consumed by the scalar schedule after PIS.
+///
+/// This deliberately excludes gradients, raw weights and PIS source models.
+/// A GPU-resident estimator can therefore pair these downstream CPU controls
+/// with its own device frame without constructing [`CpuPisOracleInputs`].
+pub(crate) struct PairedControlInputs {
+    pub(super) current_post_blur: temporal::BlurredBelts,
+    pub(super) l1: PreparedLevelImages,
+    pub(super) l2: PreparedLevelImages,
+    pub(super) a_to_b_lack: dense::LackRows<AtoB>,
+    pub(super) b_to_a_lack: dense::LackRows<BtoA>,
+    pub(super) l1_block_mask_a: Arc<[u8]>,
+}
+
+/// The CPU-oracle compatibility package for one complete cold schedule.
+pub(crate) struct ColdPreparedSchedule {
+    pub(crate) controls: PairedControlInputs,
+    pub(crate) solver: CpuPairedPisSolver,
+}
+
+impl CpuPisOracleInputs {
     pub(super) fn new(
         a_to_b_l1: &LevelInputs,
         a_to_b_l2: &LevelInputs,
@@ -475,10 +492,6 @@ pub(crate) trait PairedPisSolver {
 /// estimator frame implements the dynamic solver contract directly and owns
 /// its device preparation from construction; it must not accept, ignore or
 /// redundantly rebuild these CPU `LevelInputs`.
-pub(crate) trait CpuPreparedPisSolverBridge: PairedPisSolver {
-    fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs);
-}
-
 /// A returned sparse grid did not belong to its submitted direction/level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SolveStampError {
@@ -552,9 +565,18 @@ impl<E: Error + 'static> Error for PairSolveError<E> {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct CpuPairedPisSolver {
-    prepared: Option<PairedPreparedInputs>,
+    prepared: CpuPisOracleInputs,
+}
+
+impl CpuPairedPisSolver {
+    pub(crate) fn new(prepared: CpuPisOracleInputs) -> Self {
+        Self { prepared }
+    }
+
+    pub(super) fn into_preparation(self) -> CpuPisOracleInputs {
+        self.prepared
+    }
 }
 
 impl PairedPisSolver for CpuPairedPisSolver {
@@ -563,12 +585,6 @@ impl PairedPisSolver for CpuPairedPisSolver {
 
     fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
         self.solve_prepared(request)
-    }
-}
-
-impl CpuPreparedPisSolverBridge for CpuPairedPisSolver {
-    fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-        self.prepared = Some(inputs);
     }
 }
 
@@ -582,10 +598,7 @@ impl CpuPairedPisSolver {
             a_to_b,
             b_to_a,
         } = request;
-        let prepared = self
-            .prepared
-            .as_ref()
-            .expect("paired CPU PIS solver was not given frame preparation");
+        let prepared = &self.prepared;
         let level = stage.level();
         let DirectionSolveRequest {
             cost_modes,
@@ -731,7 +744,11 @@ impl ColdPair {
     /// numeric owner validates adjacency and converts it for the first warm
     /// calculation.
     pub fn transition(self, retained: &ColdInputs) -> ColdTransition {
-        match self.try_transition_with_solver(retained, &mut CpuPairedPisSolver::default()) {
+        let ColdPreparedSchedule {
+            controls,
+            mut solver,
+        } = ColdPreparedSchedule::from_cpu(retained);
+        match self.try_transition_prepared_with_solver(&controls, &mut solver) {
             Ok(transition) => transition,
             Err(PairSolveError::Solver { source, .. }) => match source {},
             Err(PairSolveError::Stamp { source, .. }) => {
@@ -740,29 +757,18 @@ impl ColdPair {
         }
     }
 
-    /// Run the six cold sparse stages through one injected paired boundary.
-    ///
-    /// Every persistent candidate component is built only after all six
-    /// solver calls succeed. A failure therefore leaves `retained` and the
-    /// caller's prior owner untouched for an exact retry.
-    pub(crate) fn try_transition_with_solver<S: CpuPreparedPisSolverBridge>(
+    /// Run a backend-neutral cold schedule through an already-prepared solver.
+    pub(crate) fn try_transition_prepared_with_solver<S: PairedPisSolver>(
         self,
-        retained: &ColdInputs,
+        controls: &PairedControlInputs,
         solver: &mut S,
     ) -> Result<ColdTransition, PairSolveError<S::Error>> {
-        let masks = MaskPyramid::build(retained);
-        let a_to_b_finest_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::One);
-        let b_to_a_finest_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::One);
-        let a_to_b_coarse_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::Two);
-        let b_to_a_coarse_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::Two);
-        solver.bind_cpu_preparation(PairedPreparedInputs::new(
-            &a_to_b_finest_inputs,
-            &a_to_b_coarse_inputs,
-            &b_to_a_finest_inputs,
-            &b_to_a_coarse_inputs,
-        ));
-        let a_to_b_work_rows = RetainedWorkRows::after_cold_calc(&a_to_b_finest_inputs);
-        let b_to_a_work_rows = RetainedWorkRows::after_cold_calc(&b_to_a_finest_inputs);
+        let a_to_b_finest_inputs = &controls.l1;
+        let b_to_a_finest_inputs = &controls.l1;
+        let a_to_b_coarse_inputs = &controls.l2;
+        let b_to_a_coarse_inputs = &controls.l2;
+        let a_to_b_work_rows = RetainedWorkRows::after_cold_lack(&controls.a_to_b_lack);
+        let b_to_a_work_rows = RetainedWorkRows::after_cold_lack(&controls.b_to_a_lack);
         let a_to_b_effective = a_to_b_work_rows.effective();
         let b_to_a_effective = b_to_a_work_rows.effective();
         let mut a_to_b_hints = HintPyramid::cold_zeros();
@@ -804,8 +810,8 @@ impl ColdPair {
                     },
                 },
             )?;
-            let a_seed = cold_seed(&a_to_b_coarse_inputs, a_l2);
-            let b_seed = cold_seed(&b_to_a_coarse_inputs, b_l2);
+            let a_seed = cold_seed(a_to_b_coarse_inputs, a_l2);
+            let b_seed = cold_seed(b_to_a_coarse_inputs, b_l2);
 
             let a_l1_modes = a_to_b_effective.modes(Level::One).to_vec();
             let b_l1_modes = b_to_a_effective.modes(Level::One).to_vec();
@@ -833,8 +839,8 @@ impl ColdPair {
                 },
             )?;
 
-            let a_hint_images = a_to_b_finest_inputs.directed_images::<AtoB>(Level::One);
-            let b_hint_images = b_to_a_finest_inputs.directed_images::<BtoA>(Level::One);
+            let a_hint_images = a_to_b_finest_inputs.directed::<AtoB>();
+            let b_hint_images = b_to_a_finest_inputs.directed::<BtoA>();
             a_to_b_hints = HintPyramid::from_current_finest(&a_hint_images, &a_grid);
             b_to_a_hints = HintPyramid::from_current_finest(&b_hint_images, &b_grid);
             let a_filtered = a_to_b_median
@@ -843,8 +849,8 @@ impl ColdPair {
             let b_filtered = b_to_a_median
                 .run(b_grid)
                 .expect("selected finest grid has the temporal median's level");
-            a_to_b_raw = Some(finish_direction(&a_to_b_finest_inputs, a_filtered));
-            b_to_a_raw = Some(finish_direction(&b_to_a_finest_inputs, b_filtered));
+            a_to_b_raw = Some(finish_direction(a_to_b_finest_inputs, a_filtered));
+            b_to_a_raw = Some(finish_direction(b_to_a_finest_inputs, b_filtered));
             a_to_b_l2 = a_weighted;
             b_to_a_l2 = b_weighted;
             a_to_b_l1 = a_finest_weighted;
@@ -886,7 +892,7 @@ impl ColdPair {
                 },
             },
             candidate_next: ColdNextCandidate {
-                references: retained.blurred_belts(),
+                references: controls.current_post_blur.clone(),
                 a_to_b_public: a_to_b.public,
                 b_to_a_public: b_to_a.public,
                 a_to_b_median: a_to_b.median,
@@ -902,8 +908,11 @@ impl ColdPair {
     }
 }
 
-fn cold_seed<D: PisDirection>(prepared: &LevelInputs, patches: PatchGrid<D>) -> InitialGrid<D> {
-    let images = prepared.directed_images::<D>(Level::Two);
+fn cold_seed<D: PisDirection>(
+    prepared: &PreparedLevelImages,
+    patches: PatchGrid<D>,
+) -> InitialGrid<D> {
+    let images = prepared.directed::<D>();
     let dense = dense::densify_coarse(&images, patches).expect("densify scalar level two");
     let post = preserve_without_variational_or_retained(dense);
     into_l1_initial_grid(post).expect("scalar level-two field forms a finest seed")
@@ -994,7 +1003,10 @@ where
         // Native recognizes and repackages the previous public destination
         // before calls two and three. Cold motion is `noArray`, though, so its
         // empty-pyramid guard returns before reading those retained numerics.
-        raw = Some(finish_direction(finest_inputs, filtered));
+        raw = Some(finish_direction(
+            &PreparedLevelImages::from_pis(finest_inputs, Level::One),
+            filtered,
+        ));
         weighted_l2 = current_weighted_l2;
         weighted_l1 = current_weighted_l1;
         cadence = cadence.after_calc();
@@ -1055,6 +1067,35 @@ pub(super) struct LevelInputs {
     gradient_col: Arc<Vec<f32>>,
     gradient_row: Arc<Vec<f32>>,
     raw_weight: Arc<Vec<f32>>,
+}
+
+/// Downstream image views for densification and hint construction.
+///
+/// PIS-only gradients, weights, masks and source models never enter this
+/// type. The images remain in physical lens order and are shared by `Arc`.
+pub(crate) struct PreparedLevelImages {
+    level: Level,
+    image: LensPair<Arc<Vec<u8>>>,
+}
+
+impl PreparedLevelImages {
+    pub(super) fn from_pis(inputs: &LevelInputs, level: Level) -> Self {
+        Self {
+            level,
+            image: inputs.image.clone(),
+        }
+    }
+
+    pub(super) fn directed<D: PisDirection>(&self) -> DirectedImages<'_, D> {
+        DirectedImages::<D>::from_native_order(
+            self.level,
+            LensPair {
+                a: &self.image.a,
+                b: &self.image.b,
+            },
+        )
+        .expect("scalar control images have the selected directed shape")
+    }
 }
 
 /// Direction-labelled weighted-SSD rows derived from the finest classifier.
@@ -1162,6 +1203,7 @@ impl LevelInputs {
         (input, weighted)
     }
 
+    #[cfg(test)]
     pub(super) fn directed_images<D: PisDirection>(&self, level: Level) -> DirectedImages<'_, D> {
         DirectedImages::<D>::from_native_order(
             level,
@@ -1238,6 +1280,32 @@ impl LevelInputs {
                 }
             })
             .collect()
+    }
+}
+
+impl ColdPreparedSchedule {
+    pub(crate) fn from_cpu(retained: &ColdInputs) -> Self {
+        let masks = MaskPyramid::build(retained);
+        let a_to_b_l1 = LevelInputs::build::<AtoB>(retained, &masks, Level::One);
+        let b_to_a_l1 = LevelInputs::build::<BtoA>(retained, &masks, Level::One);
+        let a_to_b_l2 = LevelInputs::build::<AtoB>(retained, &masks, Level::Two);
+        let b_to_a_l2 = LevelInputs::build::<BtoA>(retained, &masks, Level::Two);
+        let controls = PairedControlInputs {
+            current_post_blur: retained.blurred_belts(),
+            l1: PreparedLevelImages::from_pis(&a_to_b_l1, Level::One),
+            l2: PreparedLevelImages::from_pis(&a_to_b_l2, Level::Two),
+            a_to_b_lack: a_to_b_l1.lack_rows::<AtoB>(Level::One),
+            b_to_a_lack: b_to_a_l1.lack_rows::<BtoA>(Level::One),
+            l1_block_mask_a: Arc::from(a_to_b_l1.small_disparity_block_mask(Level::One)),
+        };
+        let solver = CpuPairedPisSolver::new(CpuPisOracleInputs::new(
+            &a_to_b_l1, &a_to_b_l2, &b_to_a_l1, &b_to_a_l2,
+        ));
+        Self { controls, solver }
+    }
+
+    pub(crate) fn into_parts(self) -> (PairedControlInputs, CpuPisOracleInputs) {
+        (self.controls, self.solver.into_preparation())
     }
 }
 
@@ -1326,17 +1394,10 @@ fn finest_solve<D: PisDirection>(
 }
 
 fn finish_direction<D: PisDirection>(
-    prepared: &LevelInputs,
+    prepared: &PreparedLevelImages,
     filtered: FilteredPatchGrid<D>,
 ) -> PublicDenseField<D> {
-    let images = DirectedImages::<D>::from_native_order(
-        Level::One,
-        LensPair {
-            a: &prepared.image.a,
-            b: &prepared.image.b,
-        },
-    )
-    .expect("level-one scalar images have the selected shape");
+    let images = prepared.directed::<D>();
     let dense = dense::densify_finest(&images, filtered).expect("densify scalar level one");
     dense::finish_linear_x2(preserve_without_variational_or_retained(dense))
         .expect("scalar finest field resizes to the public grid")

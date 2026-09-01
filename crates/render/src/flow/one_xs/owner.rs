@@ -15,10 +15,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::scalar::{
-    ColdInputs, ColdNextCandidate, ColdPair, CpuPairedPisSolver, CpuPreparedPisSolverBridge,
-    PairSolveError, WorkRowCounts,
+    ColdInputs, ColdNextCandidate, ColdPair, ColdPreparedSchedule, PairSolveError,
+    PairedControlInputs, PairedPisSolver, WorkRowCounts,
 };
-use super::warm::{KnownWarmNext, WarmPair, WarmTransitionError};
+use super::warm::{KnownWarmNext, WarmPair};
 use super::{Displacement, InvalidNodeCounts};
 
 /// Caller-supplied identity for one numeric lineage.
@@ -131,30 +131,25 @@ impl PairOwner {
     /// entry only for frame zero. Lower-level callers retain responsibility for
     /// providing an equivalent source-authority boundary.
     pub fn start(at: PairPosition, input: ColdInputs) -> PairStep {
-        match Self::try_start_with_solver(at, input, &mut CpuPairedPisSolver::default()) {
+        let ColdPreparedSchedule {
+            controls,
+            mut solver,
+        } = ColdPreparedSchedule::from_cpu(&input);
+        match Self::try_start_prepared(at.clone(), &controls, &mut solver) {
             Ok(step) => step,
-            Err(error) => match *error {
-                FailedStart {
-                    source: PairSolveError::Solver { source, .. },
-                    ..
-                } => match source {},
-                FailedStart {
-                    source: PairSolveError::Stamp { source, .. },
-                    ..
-                } => panic!("CPU paired solver returned its own invalid stamp: {source}"),
-            },
+            Err(PairSolveError::Solver { source, .. }) => match source {},
+            Err(PairSolveError::Stamp { source, .. }) => {
+                panic!("CPU paired solver returned its own invalid stamp: {source}")
+            }
         }
     }
 
-    pub(crate) fn try_start_with_solver<S: CpuPreparedPisSolverBridge>(
+    pub(crate) fn try_start_prepared<S: PairedPisSolver>(
         at: PairPosition,
-        input: ColdInputs,
+        controls: &PairedControlInputs,
         solver: &mut S,
-    ) -> Result<PairStep, Box<FailedStart<S::Error>>> {
-        let transition = match ColdPair::new().try_transition_with_solver(&input, solver) {
-            Ok(transition) => transition,
-            Err(source) => return Err(Box::new(FailedStart { at, input, source })),
-        };
+    ) -> Result<PairStep, PairSolveError<S::Error>> {
+        let transition = ColdPair::new().try_transition_prepared_with_solver(controls, solver)?;
         Ok(PairStep {
             output: PairOutput {
                 phase: Phase::Cold,
@@ -182,46 +177,22 @@ impl PairOwner {
         offered: PairPosition,
         input: ColdInputs,
     ) -> Result<PairStep, Box<RejectedAdvance>> {
-        match self.try_advance_with_solver(offered, input, &mut CpuPairedPisSolver::default()) {
+        let ColdPreparedSchedule {
+            controls,
+            mut solver,
+        } = ColdPreparedSchedule::from_cpu(&input);
+        match self.try_advance_prepared_borrowed(&offered, &controls, &mut solver) {
             Ok(step) => Ok(step),
-            Err(error) => match *error {
-                FailedAdvance {
-                    owner,
-                    offered,
-                    input,
-                    reason: AdvanceFailure::Continuity(reason),
-                } => Err(Box::new(RejectedAdvance {
-                    owner,
-                    offered,
-                    input,
-                    reason,
-                })),
-                FailedAdvance {
-                    reason: AdvanceFailure::Solver(PairSolveError::Solver { source, .. }),
-                    ..
-                } => match source {},
-                FailedAdvance {
-                    reason: AdvanceFailure::Solver(PairSolveError::Stamp { source, .. }),
-                    ..
-                } => panic!("CPU paired solver returned its own invalid stamp: {source}"),
-            },
-        }
-    }
-
-    pub(crate) fn try_advance_with_solver<S: CpuPreparedPisSolverBridge>(
-        self,
-        offered: PairPosition,
-        input: ColdInputs,
-        solver: &mut S,
-    ) -> Result<PairStep, Box<FailedAdvance<S::Error>>> {
-        match self.try_advance_borrowed_with_solver(&offered, &input, solver) {
-            Ok(step) => Ok(step),
-            Err(reason) => Err(Box::new(FailedAdvance {
+            Err(AdvanceFailure::Continuity(reason)) => Err(Box::new(RejectedAdvance {
                 owner: self,
                 offered,
                 input,
                 reason,
             })),
+            Err(AdvanceFailure::Solver(PairSolveError::Solver { source, .. })) => match source {},
+            Err(AdvanceFailure::Solver(PairSolveError::Stamp { source, .. })) => {
+                panic!("CPU paired solver returned its own invalid stamp: {source}")
+            }
         }
     }
 
@@ -231,29 +202,21 @@ impl PairOwner {
     /// borrowed across the injected call makes a solver panic unwind without
     /// dropping the only retained estimator. Success returns a distinct next
     /// owner that the caller can install atomically.
-    pub(crate) fn try_advance_borrowed_with_solver<S: CpuPreparedPisSolverBridge>(
+    pub(crate) fn try_advance_prepared_borrowed<S: PairedPisSolver>(
         &self,
         offered: &PairPosition,
-        input: &ColdInputs,
+        controls: &PairedControlInputs,
         solver: &mut S,
     ) -> Result<PairStep, AdvanceFailure<S::Error>> {
         self.require_adjacent(offered)
             .map_err(AdvanceFailure::Continuity)?;
-        let checkpoint = match &self.next {
-            NextState::AfterCold(next) => next.checkpoint_from_borrowed(input.clone()),
-            NextState::AfterWarm(next) => next.checkpoint_from_borrowed(input.clone()),
+        let retained = match &self.next {
+            NextState::AfterCold(next) => next.retained_checkpoint_from_borrowed(),
+            NextState::AfterWarm(next) => next.retained_checkpoint_from_borrowed(),
         };
-        let transition = match WarmPair::new().try_transition_with_solver(checkpoint, solver) {
-            Ok(transition) => transition,
-            Err(error) => {
-                let WarmTransitionError {
-                    inputs: failed_checkpoint,
-                    source,
-                } = *error;
-                drop(failed_checkpoint);
-                return Err(AdvanceFailure::Solver(source));
-            }
-        };
+        let transition = WarmPair::new()
+            .try_transition_prepared_with_solver(&retained, controls, solver)
+            .map_err(AdvanceFailure::Solver)?;
         Ok(PairStep {
             output: PairOutput {
                 phase: Phase::Warm,
@@ -303,24 +266,9 @@ impl PairOwner {
 }
 
 /// A failed cold start with both consumed arguments returned intact.
-#[allow(dead_code)]
-pub(crate) struct FailedStart<E> {
-    pub(crate) at: PairPosition,
-    pub(crate) input: ColdInputs,
-    pub(crate) source: PairSolveError<E>,
-}
-
 pub(crate) enum AdvanceFailure<E> {
     Continuity(ContinuityError),
     Solver(PairSolveError<E>),
-}
-
-/// A refused or failed warm advance with the exact prior owner returned.
-pub(crate) struct FailedAdvance<E> {
-    pub(crate) owner: PairOwner,
-    pub(crate) offered: PairPosition,
-    pub(crate) input: ColdInputs,
-    pub(crate) reason: AdvanceFailure<E>,
 }
 
 impl fmt::Debug for PairOwner {
@@ -409,8 +357,8 @@ mod tests {
     use crate::flow::one_xs::dense::PublicDenseField;
     use crate::flow::one_xs::pis::{AtoB, BtoA, DescentAdmission, Level, PisDirection};
     use crate::flow::one_xs::scalar::{
-        PairSolveStage, PairedPatchGrids, PairedPisSolver, PairedPreparedInputs,
-        PairedSolveRequest, SolveStampError,
+        CpuPairedPisSolver, PairSolveStage, PairedPatchGrids, PairedPisSolver, PairedSolveRequest,
+        SolveStampError,
     };
     use crate::flow::one_xs::temporal::BlurredBelts;
     use crate::flow::one_xs::temporal_median::MedianState;
@@ -433,6 +381,17 @@ mod tests {
         cpu: CpuPairedPisSolver,
     }
 
+    struct DynamicOnlyFailure;
+
+    impl PairedPisSolver for DynamicOnlyFailure {
+        type Error = InjectedFailure;
+        const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Gpu;
+
+        fn solve(&mut self, _request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
+            Err(InjectedFailure)
+        }
+    }
+
     impl PairedPisSolver for FailingSolver {
         type Error = InjectedFailure;
         const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
@@ -442,12 +401,6 @@ mod tests {
                 return Err(InjectedFailure);
             }
             Ok(self.cpu.solve(request).unwrap())
-        }
-    }
-
-    impl CpuPreparedPisSolverBridge for FailingSolver {
-        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -465,7 +418,6 @@ mod tests {
     }
 
     struct RecordingSolver {
-        preparations: usize,
         calls: Vec<(PairSolveStage, DescentAdmission, DescentAdmission)>,
         cpu: CpuPairedPisSolver,
     }
@@ -481,13 +433,6 @@ mod tests {
                 request.b_to_a.admission,
             ));
             Ok(self.cpu.solve(request).unwrap())
-        }
-    }
-
-    impl CpuPreparedPisSolverBridge for RecordingSolver {
-        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-            self.preparations += 1;
-            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -526,12 +471,6 @@ mod tests {
                 }
             }
             Ok(solved)
-        }
-    }
-
-    impl CpuPreparedPisSolverBridge for CorruptingSolver {
-        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
-            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -1008,31 +947,31 @@ mod tests {
             let continuity = Continuity::new();
             let at = PairPosition::new(&continuity, 20);
             let control = PairOwner::start(at.clone(), input(64, 96));
-            let mut failing = FailingSolver {
-                fail_at,
-                cpu: CpuPairedPisSolver::default(),
+            let failed_input = input(64, 96);
+            let ColdPreparedSchedule {
+                controls,
+                solver: cpu,
+            } = ColdPreparedSchedule::from_cpu(&failed_input);
+            let mut failing = FailingSolver { fail_at, cpu };
+            let failure = match PairOwner::try_start_prepared(at.clone(), &controls, &mut failing) {
+                Err(failure) => failure,
+                Ok(_) => panic!("injected {fail_at} unexpectedly succeeded"),
             };
-            let failed =
-                match PairOwner::try_start_with_solver(at.clone(), input(64, 96), &mut failing) {
-                    Err(failed) => failed,
-                    Ok(_) => panic!("injected {fail_at} unexpectedly succeeded"),
-                };
-            assert_eq!(failed.at, at);
-            assert_input(&failed.input, 64, 96);
+            assert_input(&failed_input, 64, 96);
             assert!(matches!(
-                failed.source,
+                failure,
                 PairSolveError::Solver {
                     stage,
                     source: InjectedFailure,
                 } if stage == fail_at
             ));
 
-            let retried = PairOwner::try_start_with_solver(
-                failed.at,
-                failed.input,
-                &mut CpuPairedPisSolver::default(),
-            )
-            .unwrap_or_else(|_| panic!("CPU retry after {fail_at} failed"));
+            let ColdPreparedSchedule {
+                controls,
+                mut solver,
+            } = ColdPreparedSchedule::from_cpu(&failed_input);
+            let retried = PairOwner::try_start_prepared(at, &controls, &mut solver)
+                .unwrap_or_else(|_| panic!("CPU retry after {fail_at} failed"));
             assert_eq!(retried.output, control.output);
             assert_eq!(owner_bits(&retried.owner), owner_bits(&control.owner));
 
@@ -1050,6 +989,33 @@ mod tests {
     }
 
     #[test]
+    fn prepared_owner_accepts_a_solver_with_no_cpu_preparation_type() {
+        let input = input(64, 96);
+        let ColdPreparedSchedule {
+            controls,
+            solver: cpu_oracle,
+        } = ColdPreparedSchedule::from_cpu(&input);
+        drop(cpu_oracle);
+        let continuity = Continuity::new();
+        let at = PairPosition::new(&continuity, 20);
+        let failure = match PairOwner::try_start_prepared(at, &controls, &mut DynamicOnlyFailure) {
+            Err(failure) => failure,
+            Ok(_) => panic!("dynamic-only solver unexpectedly succeeded"),
+        };
+        assert!(matches!(
+            failure,
+            PairSolveError::Solver {
+                stage: PairSolveStage::Cold {
+                    calculation: 0,
+                    level: Level::Two,
+                },
+                source: InjectedFailure,
+            }
+        ));
+        assert_input(&input, 64, 96);
+    }
+
+    #[test]
     fn every_warm_stage_failure_returns_exact_owner_for_retry_and_successor() {
         for fail_at in [
             PairSolveStage::Warm { level: Level::Two },
@@ -1059,22 +1025,24 @@ mod tests {
             let control = PairOwner::start(PairPosition::new(&continuity, 20), input(64, 96));
             let trial = PairOwner::start(PairPosition::new(&continuity, 20), input(64, 96));
             let before = owner_bits(&trial.owner);
-            let mut failing = FailingSolver {
-                fail_at,
-                cpu: CpuPairedPisSolver::default(),
-            };
-            let failed = match trial.owner.try_advance_with_solver(
-                PairPosition::new(&continuity, 21),
-                input(72, 104),
+            let failed_input = input(72, 104);
+            let ColdPreparedSchedule {
+                controls,
+                solver: cpu,
+            } = ColdPreparedSchedule::from_cpu(&failed_input);
+            let mut failing = FailingSolver { fail_at, cpu };
+            let failure = match trial.owner.try_advance_prepared_borrowed(
+                &PairPosition::new(&continuity, 21),
+                &controls,
                 &mut failing,
             ) {
-                Err(failed) => failed,
+                Err(failure) => failure,
                 Ok(_) => panic!("injected {fail_at} unexpectedly succeeded"),
             };
-            assert_eq!(owner_bits(&failed.owner), before);
-            assert_input(&failed.input, 72, 104);
+            assert_eq!(owner_bits(&trial.owner), before);
+            assert_input(&failed_input, 72, 104);
             assert!(matches!(
-                failed.reason,
+                failure,
                 AdvanceFailure::Solver(PairSolveError::Solver {
                     stage,
                     source: InjectedFailure,
@@ -1085,9 +1053,9 @@ mod tests {
                 .owner
                 .advance(PairPosition::new(&continuity, 21), input(72, 104))
                 .unwrap();
-            let actual = failed
+            let actual = trial
                 .owner
-                .advance(PairPosition::new(&continuity, 21), failed.input)
+                .advance(PairPosition::new(&continuity, 21), failed_input)
                 .unwrap();
             assert_eq!(actual.output, expected.output);
             assert_eq!(owner_bits(&actual.owner), owner_bits(&expected.owner));
@@ -1139,22 +1107,26 @@ mod tests {
         ] {
             let continuity = Continuity::new();
             let at = PairPosition::new(&continuity, 20);
+            let failed_input = input(64, 96);
+            let ColdPreparedSchedule {
+                controls,
+                solver: cpu,
+            } = ColdPreparedSchedule::from_cpu(&failed_input);
             let mut solver = CorruptingSolver {
                 corrupt_at: expected,
                 corruption,
-                cpu: CpuPairedPisSolver::default(),
+                cpu,
             };
-            let failed =
-                match PairOwner::try_start_with_solver(at.clone(), input(64, 96), &mut solver) {
-                    Err(failed) => failed,
-                    Ok(_) => panic!("corrupt receipt unexpectedly succeeded"),
-                };
+            let failure = match PairOwner::try_start_prepared(at.clone(), &controls, &mut solver) {
+                Err(failure) => failure,
+                Ok(_) => panic!("corrupt receipt unexpectedly succeeded"),
+            };
             assert!(matches!(
-                failed.source,
+                failure,
                 PairSolveError::Stamp { stage, source }
                     if stage == expected && source == expected_source
             ));
-            let recovered = PairOwner::start(failed.at, failed.input);
+            let recovered = PairOwner::start(at.clone(), failed_input);
             assert_eq!(recovered.owner.position(), &at);
         }
     }
@@ -1164,14 +1136,17 @@ mod tests {
         let continuity = Continuity::new();
         let cold_at = PairPosition::new(&continuity, 20);
         let control_cold = PairOwner::start(cold_at.clone(), input(64, 96));
+        let cold_input = input(64, 96);
+        let ColdPreparedSchedule {
+            controls: cold_controls,
+            solver: cold_cpu,
+        } = ColdPreparedSchedule::from_cpu(&cold_input);
         let mut cold_solver = RecordingSolver {
-            preparations: 0,
             calls: Vec::new(),
-            cpu: CpuPairedPisSolver::default(),
+            cpu: cold_cpu,
         };
-        let cold = PairOwner::try_start_with_solver(cold_at, input(64, 96), &mut cold_solver)
+        let cold = PairOwner::try_start_prepared(cold_at, &cold_controls, &mut cold_solver)
             .unwrap_or_else(|_| panic!("recorded cold transaction failed"));
-        assert_eq!(cold_solver.preparations, 1);
         assert_eq!(
             output_bytes(&cold.output),
             output_bytes(&control_cold.output)
@@ -1231,10 +1206,14 @@ mod tests {
             ]
         );
 
+        let warm_input = input(72, 104);
+        let ColdPreparedSchedule {
+            controls: warm_controls,
+            solver: warm_cpu,
+        } = ColdPreparedSchedule::from_cpu(&warm_input);
         let mut warm_solver = RecordingSolver {
-            preparations: 0,
             calls: Vec::new(),
-            cpu: CpuPairedPisSolver::default(),
+            cpu: warm_cpu,
         };
         let control_warm = control_cold
             .owner
@@ -1242,13 +1221,12 @@ mod tests {
             .unwrap();
         let warm = cold
             .owner
-            .try_advance_with_solver(
-                PairPosition::new(&continuity, 21),
-                input(72, 104),
+            .try_advance_prepared_borrowed(
+                &PairPosition::new(&continuity, 21),
+                &warm_controls,
                 &mut warm_solver,
             )
             .unwrap_or_else(|_| panic!("recorded warm transaction failed"));
-        assert_eq!(warm_solver.preparations, 1);
         assert_eq!(
             output_bytes(&warm.output),
             output_bytes(&control_warm.output)

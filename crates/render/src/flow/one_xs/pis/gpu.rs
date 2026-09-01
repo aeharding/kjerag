@@ -21,7 +21,7 @@ use super::{
 };
 use crate::Fallible;
 use crate::flow::one_xs::scalar::{
-    PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids, PairedPreparedInputs,
+    CpuPisOracleInputs, PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids,
     PairedSolveRequest, SolveStamp, StampedPatchGrid,
 };
 
@@ -306,7 +306,7 @@ impl GpuPisPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         receipt: GpuPisStageReceipt,
-        prepared: &PairedPreparedInputs,
+        prepared: &CpuPisOracleInputs,
         request: PairedSolveRequest,
     ) -> Fallible<GpuPisStageOutput> {
         if receipt.stage != request.stage {

@@ -33,10 +33,12 @@ use super::post_update::{
 };
 use super::public_blend::blend_periodic_boundary;
 use super::scalar::{
-    ColdInputs, CpuPairedPisSolver, CpuPreparedPisSolverBridge, DirectionSolveRequest, LevelInputs,
-    MaskPyramid, PairSolveError, PairSolveStage, PairedPreparedInputs, PairedSolveRequest,
-    WorkRowCounts, propagate_work_modes, solve_pair, weighted_rows,
+    ColdInputs, ColdPreparedSchedule, DirectionSolveRequest, PairSolveError, PairSolveStage,
+    PairedControlInputs, PairedPisSolver, PairedSolveRequest, PreparedLevelImages, WorkRowCounts,
+    propagate_work_modes, solve_pair, weighted_rows,
 };
+#[cfg(test)]
+use super::scalar::{LevelInputs, MaskPyramid};
 use super::temporal::{BlurredBelts, MotionMask, next_warm_references};
 use super::temporal_median::{DirectedPatchGrids, FilteredPatchGrid, MedianState, TemporalMedians};
 use super::{
@@ -230,8 +232,13 @@ impl<D: PisDirection> RetainedWorkRows<D> {
     /// The first calculation derives `FDS+0x120` from its finest prepared
     /// texture before PIS. The optional `FDS+0x108` owner is still absent: its
     /// writer does not become eligible until pre-increment count three.
+    #[cfg(test)]
     pub(super) fn after_cold_calc(inputs: &LevelInputs) -> Self {
         let lack = inputs.lack_rows::<D>(Level::One);
+        Self::after_cold_lack(&lack)
+    }
+
+    pub(super) fn after_cold_lack(lack: &super::dense::LackRows<D>) -> Self {
         Self {
             small_disparity: None,
             lack_of_texture: lack.rows().to_vec().into_boxed_slice(),
@@ -247,11 +254,20 @@ impl<D: PisDirection> RetainedWorkRows<D> {
         }
     }
 
+    #[cfg(test)]
     fn prepare_lack_on_first_calc(&self, inputs: &LevelInputs, calc_count: i32) -> Self {
+        let lack = inputs.lack_rows::<D>(Level::One);
+        self.prepare_lack_rows_on_first_calc(&lack, calc_count)
+    }
+
+    fn prepare_lack_rows_on_first_calc(
+        &self,
+        lack: &super::dense::LackRows<D>,
+        calc_count: i32,
+    ) -> Self {
         if calc_count != 0 {
             return self.clone();
         }
-        let lack = inputs.lack_rows::<D>(Level::One);
         Self {
             small_disparity: self.small_disparity.clone(),
             lack_of_texture: lack.rows().to_vec().into_boxed_slice(),
@@ -679,6 +695,10 @@ impl<D: PisDirection> WarmDirection<D> {
 /// temporal medians are consumed together.
 pub struct WarmCheckpointInputs {
     current_post_blur: ColdInputs,
+    retained: WarmRetainedInputs,
+}
+
+pub struct WarmRetainedInputs {
     prior_references: BlurredBelts,
     a_to_b: WarmDirection<AtoB>,
     b_to_a: WarmDirection<BtoA>,
@@ -697,17 +717,20 @@ impl WarmCheckpointInputs {
         let (a_to_b_median, b_to_a_median) = temporal_medians.into_states();
         Self {
             current_post_blur,
-            prior_references,
-            a_to_b,
-            b_to_a,
-            a_to_b_median,
-            b_to_a_median,
+            retained: WarmRetainedInputs {
+                prior_references,
+                a_to_b,
+                b_to_a,
+                a_to_b_median,
+                b_to_a_median,
+            },
         }
     }
+}
 
+impl WarmRetainedInputs {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn from_borrowed_state(
-        current_post_blur: ColdInputs,
         prior_references: &BlurredBelts,
         a_to_b_public: &PublicDenseField<AtoB>,
         b_to_a_public: &PublicDenseField<BtoA>,
@@ -721,7 +744,6 @@ impl WarmCheckpointInputs {
         b_to_a_median: &MedianState<BtoA>,
     ) -> Self {
         Self {
-            current_post_blur,
             prior_references: prior_references.clone(),
             a_to_b: WarmDirection::new(
                 copy_public(a_to_b_public),
@@ -738,6 +760,14 @@ impl WarmCheckpointInputs {
             a_to_b_median: a_to_b_median.clone(),
             b_to_a_median: b_to_a_median.clone(),
         }
+    }
+}
+
+impl std::ops::Deref for WarmCheckpointInputs {
+    type Target = WarmRetainedInputs;
+
+    fn deref(&self) -> &Self::Target {
+        &self.retained
     }
 }
 
@@ -772,12 +802,8 @@ pub struct KnownWarmNext {
 }
 
 impl KnownWarmNext {
-    pub(super) fn checkpoint_from_borrowed(
-        &self,
-        current_post_blur: ColdInputs,
-    ) -> WarmCheckpointInputs {
-        WarmCheckpointInputs::from_borrowed_state(
-            current_post_blur,
+    pub(super) fn retained_checkpoint_from_borrowed(&self) -> WarmRetainedInputs {
+        WarmRetainedInputs::from_borrowed_state(
             &self.references,
             &self.a_to_b_public,
             &self.b_to_a_public,
@@ -853,32 +879,6 @@ pub struct WarmTransition {
     pub known_next: KnownWarmNext,
 }
 
-/// A failed warm sparse stage with the exact incoming checkpoint returned.
-pub(crate) struct WarmTransitionError<E> {
-    pub(crate) inputs: WarmCheckpointInputs,
-    pub(crate) source: PairSolveError<E>,
-}
-
-impl<E: fmt::Debug> fmt::Debug for WarmTransitionError<E> {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        out.debug_struct("WarmTransitionError")
-            .field("source", &self.source)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<E: fmt::Display> fmt::Display for WarmTransitionError<E> {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.source.fmt(out)
-    }
-}
-
-impl<E: Error + 'static> Error for WarmTransitionError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
-    }
-}
-
 /// Stateless owner for one warm checkpoint composition.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WarmPair;
@@ -898,32 +898,26 @@ impl WarmPair {
 
     /// Compose one checkpoint and export the exact known next-state subset.
     pub fn transition(self, inputs: WarmCheckpointInputs) -> WarmTransition {
-        match self.try_transition_with_solver(inputs, &mut CpuPairedPisSolver::default()) {
+        let ColdPreparedSchedule {
+            controls,
+            mut solver,
+        } = ColdPreparedSchedule::from_cpu(&inputs.current_post_blur);
+        match staged_warm_prepared_transition(&inputs.retained, &controls, &mut solver) {
             Ok(transition) => transition,
-            Err(error) => match *error {
-                WarmTransitionError {
-                    source: PairSolveError::Solver { source, .. },
-                    ..
-                } => match source {},
-                WarmTransitionError {
-                    source: PairSolveError::Stamp { source, .. },
-                    ..
-                } => panic!("CPU paired solver returned its own invalid stamp: {source}"),
-            },
+            Err(PairSolveError::Solver { source, .. }) => match source {},
+            Err(PairSolveError::Stamp { source, .. }) => {
+                panic!("CPU paired solver returned its own invalid stamp: {source}")
+            }
         }
     }
 
-    /// Run L2 and L1 through an injected paired solver, returning the exact
-    /// incoming checkpoint if either stage fails.
-    pub(crate) fn try_transition_with_solver<S: CpuPreparedPisSolverBridge>(
+    pub(crate) fn try_transition_prepared_with_solver<S: PairedPisSolver>(
         self,
-        inputs: WarmCheckpointInputs,
+        retained: &WarmRetainedInputs,
+        controls: &PairedControlInputs,
         solver: &mut S,
-    ) -> Result<WarmTransition, Box<WarmTransitionError<S::Error>>> {
-        match staged_warm_transition(&inputs, solver) {
-            Ok(transition) => Ok(transition),
-            Err(source) => Err(Box::new(WarmTransitionError { inputs, source })),
-        }
+    ) -> Result<WarmTransition, PairSolveError<S::Error>> {
+        staged_warm_prepared_transition(retained, controls, solver)
     }
 
     #[cfg(test)]
@@ -939,11 +933,14 @@ impl WarmPair {
     ) -> WarmTransition {
         let WarmCheckpointInputs {
             current_post_blur,
-            prior_references,
-            a_to_b,
-            b_to_a,
-            a_to_b_median,
-            b_to_a_median,
+            retained:
+                WarmRetainedInputs {
+                    prior_references,
+                    a_to_b,
+                    b_to_a,
+                    a_to_b_median,
+                    b_to_a_median,
+                },
         } = inputs;
         let mut temporal_medians = TemporalMedians::from_states(a_to_b_median, b_to_a_median)
             .expect("validated warm median checkpoint must restore");
@@ -1081,13 +1078,13 @@ impl WarmPair {
         let b_to_a_next_rows = b_to_a_rows.after_warm_calc(&shared_small);
 
         let a_to_b = finish_direction::<AtoB>(
-            &a_to_b_finest_inputs,
+            &PreparedLevelImages::from_pis(&a_to_b_finest_inputs, Level::One),
             a_to_b_filtered,
             &a_to_b_retained,
             &motion,
         );
         let b_to_a = finish_direction::<BtoA>(
-            &b_to_a_finest_inputs,
+            &PreparedLevelImages::from_pis(&b_to_a_finest_inputs, Level::One),
             b_to_a_filtered,
             &b_to_a_retained,
             &motion,
@@ -1133,37 +1130,29 @@ impl WarmPair {
     }
 }
 
-fn staged_warm_transition<S: CpuPreparedPisSolverBridge>(
-    inputs: &WarmCheckpointInputs,
+pub(crate) fn staged_warm_prepared_transition<S: PairedPisSolver>(
+    inputs: &WarmRetainedInputs,
+    controls: &PairedControlInputs,
     solver: &mut S,
 ) -> Result<WarmTransition, PairSolveError<S::Error>> {
-    let current = &inputs.current_post_blur;
-    let current_belts = current.blurred_belts();
+    let current_belts = &controls.current_post_blur;
     let motion = MotionPyramid::from_base(&MotionMask::between(
-        &current_belts,
+        current_belts,
         &inputs.prior_references,
     ));
-    let masks = MaskPyramid::build(current);
     let a_retained = RetainedPublicPyramids::from_public_ref(&inputs.a_to_b.prior_public);
     let b_retained = RetainedPublicPyramids::from_public_ref(&inputs.b_to_a.prior_public);
-    let a_finest = LevelInputs::build::<AtoB>(current, &masks, Level::One);
-    let b_finest = LevelInputs::build::<BtoA>(current, &masks, Level::One);
     let a_rows = inputs
         .a_to_b
         .work_rows
-        .prepare_lack_on_first_calc(&a_finest, inputs.a_to_b.cadence.calc_count());
+        .prepare_lack_rows_on_first_calc(&controls.a_to_b_lack, inputs.a_to_b.cadence.calc_count());
     let b_rows = inputs
         .b_to_a
         .work_rows
-        .prepare_lack_on_first_calc(&b_finest, inputs.b_to_a.cadence.calc_count());
+        .prepare_lack_rows_on_first_calc(&controls.b_to_a_lack, inputs.b_to_a.cadence.calc_count());
     let a_effective = a_rows.effective();
     let b_effective = b_rows.effective();
 
-    let a_coarse = LevelInputs::build::<AtoB>(current, &masks, Level::Two);
-    let b_coarse = LevelInputs::build::<BtoA>(current, &masks, Level::Two);
-    solver.bind_cpu_preparation(PairedPreparedInputs::new(
-        &a_finest, &a_coarse, &b_finest, &b_coarse,
-    ));
     let a_l2_modes = a_effective.modes(Level::Two).to_vec();
     let b_l2_modes = b_effective.modes(Level::Two).to_vec();
     let a_l2_weighted = weighted_rows(&a_l2_modes);
@@ -1186,8 +1175,8 @@ fn staged_warm_transition<S: CpuPreparedPisSolverBridge>(
             },
         },
     )?;
-    let a_seed = warm_seed(&a_coarse, a_l2, &a_retained, &motion);
-    let b_seed = warm_seed(&b_coarse, b_l2, &b_retained, &motion);
+    let a_seed = warm_seed(&controls.l2, a_l2, &a_retained, &motion);
+    let b_seed = warm_seed(&controls.l2, b_l2, &b_retained, &motion);
 
     let a_l1_modes = a_effective.modes(Level::One).to_vec();
     let b_l1_modes = b_effective.modes(Level::One).to_vec();
@@ -1212,10 +1201,8 @@ fn staged_warm_transition<S: CpuPreparedPisSolverBridge>(
         },
     )?;
 
-    let a_block_mask = a_finest.small_disparity_block_mask(Level::One);
-    let b_block_mask = b_finest.small_disparity_block_mask(Level::One);
-    let a_hint_images = a_finest.directed_images::<AtoB>(Level::One);
-    let b_hint_images = b_finest.directed_images::<BtoA>(Level::One);
+    let a_hint_images = controls.l1.directed::<AtoB>();
+    let b_hint_images = controls.l1.directed::<BtoA>();
     let a_next_hints = inputs
         .a_to_b
         .hints
@@ -1234,31 +1221,31 @@ fn staged_warm_transition<S: CpuPreparedPisSolverBridge>(
     let a_small = SmallDisparityRows::refresh(
         &a_rows,
         &a_filtered,
-        &a_block_mask,
+        &controls.l1_block_mask_a,
         inputs.a_to_b.cadence.calc_count(),
     );
     let b_small = SmallDisparityRows::refresh(
         &b_rows,
         &b_filtered,
-        &b_block_mask,
+        &controls.l1_block_mask_a,
         inputs.b_to_a.cadence.calc_count(),
     );
     let shared_small = SharedSmallDisparityRows::merge(&a_small, &b_small);
     let a_next_rows = a_rows.after_warm_calc(&shared_small);
     let b_next_rows = b_rows.after_warm_calc(&shared_small);
     let a_public = blend_periodic_boundary(finish_direction::<AtoB>(
-        &a_finest,
+        &controls.l1,
         a_filtered,
         &a_retained,
         &motion,
     ));
     let b_public = blend_periodic_boundary(finish_direction::<BtoA>(
-        &b_finest,
+        &controls.l1,
         b_filtered,
         &b_retained,
         &motion,
     ));
-    let next_references = next_warm_references(&inputs.prior_references, &current_belts);
+    let next_references = next_warm_references(&inputs.prior_references, current_belts);
     let (a_median, b_median) = medians.into_states();
     let (fields, invalid_nodes) = DirectedFields::from_public_dense_ref(&a_public, &b_public);
 
@@ -1290,12 +1277,12 @@ fn staged_warm_transition<S: CpuPreparedPisSolverBridge>(
 }
 
 fn warm_seed<D: PisDirection>(
-    prepared: &LevelInputs,
+    prepared: &PreparedLevelImages,
     patches: PatchGrid<D>,
     retained: &RetainedPublicPyramids<D>,
     motion: &MotionPyramid,
 ) -> InitialGrid<D> {
-    let images = prepared.directed_images::<D>(Level::Two);
+    let images = prepared.directed::<D>();
     let dense = dense::densify_coarse(&images, patches)
         .expect("typed warm level-two images and patches share one level");
     let post =
@@ -1412,13 +1399,13 @@ fn solve_finest<D: PisDirection>(
 }
 
 fn finish_direction<D: PisDirection>(
-    prepared: &LevelInputs,
+    prepared: &PreparedLevelImages,
     filtered: FilteredPatchGrid<D>,
     retained: &RetainedPublicPyramids<D>,
     motion: &MotionPyramid,
 ) -> PublicDenseField<D> {
     let level = Level::One;
-    let images = prepared.directed_images::<D>(level);
+    let images = prepared.directed::<D>();
     let dense = dense::densify_finest(&images, filtered)
         .expect("typed warm finest images and filtered patches share one level");
     let post = update_without_variational_with_retained(dense, retained, motion.level::<D>(level))
