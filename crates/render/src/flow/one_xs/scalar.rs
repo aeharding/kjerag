@@ -1062,6 +1062,16 @@ impl LevelInputs {
         .expect("scalar level images have the selected directed shape")
     }
 
+    /// Complete CPU/native prepared-source model oracle for one direction.
+    /// Cost modes do not participate in these image-owned terms.
+    pub(super) fn prepared_source_model_bits<D: PisDirection>(
+        &self,
+        level: Level,
+    ) -> Vec<[u32; 5]> {
+        let (input, _) = self.input::<D>(level, vec![CostMode::Unweighted; level.patch_rows()]);
+        input.prepared_source_model_bits()
+    }
+
     /// Reproduce the direction-owned finest lack-of-texture rows that native
     /// stores at `FDS+0x120` before deriving first-calculation work rows, then
     /// retains across nonzero warm calculations.

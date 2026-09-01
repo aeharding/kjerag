@@ -396,6 +396,28 @@ impl<D: PisDirection> Input<D> {
         D::DIRECTION
     }
 
+    /// Row-major prepared-source model bits after determinant inversion.
+    ///
+    /// This is the narrow CPU oracle for the staged GPU front end. It exposes
+    /// neither the image planes nor a constructible solver model, so ordinary
+    /// callers still enter PIS only through this typed `Input`.
+    pub(super) fn prepared_source_model_bits(&self) -> Vec<[u32; 5]> {
+        (0..self.level.patches())
+            .map(|patch| {
+                let row = patch / self.level.patch_cols();
+                let col = patch % self.level.patch_cols();
+                let model = self.prepared_source_terms(row, col).inverted();
+                [
+                    model.gradient_col_sum.to_bits(),
+                    model.gradient_row_sum.to_bits(),
+                    model.inverse_col_col.to_bits(),
+                    model.inverse_col_row.to_bits(),
+                    model.inverse_row_row.to_bits(),
+                ]
+            })
+            .collect()
+    }
+
     /// Evaluate one candidate with its selected row's dual-mask cost mode.
     pub fn score(&self, patch_row: usize, patch_col: usize, flow: Flow) -> Score {
         assert!(

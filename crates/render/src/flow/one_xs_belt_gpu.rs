@@ -12,6 +12,7 @@
 use std::sync::mpsc;
 use std::{error::Error, fmt};
 
+use super::one_xs::pis::gpu::GpuPisFlight;
 use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
 use super::one_xs::{Lens, LensPair};
 use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
@@ -26,6 +27,9 @@ const WORKGROUP_SIZE: u32 = 64;
 const _: () = assert!(SolverBelts::BYTES.is_multiple_of(CODES_PER_WORD));
 const _: () = assert!(super::one_xs::COLS.is_multiple_of(CODES_PER_WORD));
 const _: () = assert!(RetainedBaseMaps::NODES_PER_LENS.is_multiple_of(CODES_PER_WORD));
+
+#[cfg(test)]
+static RESIDENT_DROP_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 const QUALIFICATION_A_ROWS: usize = 127;
 const QUALIFICATION_A_COLS: usize = 259;
@@ -444,6 +448,7 @@ impl GpuSolverBeltPipeline {
             SubmissionInput::Sampled {
                 qualify_intermediates: true,
             },
+            true,
         )?;
         let (actual_blurred, actual_preblur, retained_bits) = pending.read_qualification()?;
         if let Some(index) = actual_preblur
@@ -513,6 +518,7 @@ impl GpuSolverBeltPipeline {
                 &fixture.maps,
                 (),
                 SubmissionInput::Preblurred(&blur_input),
+                true,
             )?
             .read()?;
         if let Some(index) = actual_blur
@@ -563,9 +569,42 @@ impl GpuSolverBeltPipeline {
             SubmissionInput::Sampled {
                 qualify_intermediates: false,
             },
+            true,
         )
     }
 
+    /// Submit the exact production producer without allocating or copying a
+    /// CPU readback. The returned token retains the decoded source owner and
+    /// exact capture flight until the device has completed the post-Gaussian
+    /// payload.
+    ///
+    /// This is a staged GPU-estimator boundary. Selected playback does not use
+    /// it until a qualified downstream consumer exists.
+    #[allow(dead_code)]
+    pub(crate) fn submit_resident_retained<K>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sources: SourceTextures<'_>,
+        maps: &RetainedBaseMaps,
+        source_owner: K,
+        flight: GpuPisFlight,
+    ) -> Fallible<GpuBlurredBelts<K>> {
+        let pending = self.submit_inner(
+            device,
+            queue,
+            sources,
+            maps,
+            source_owner,
+            SubmissionInput::Sampled {
+                qualify_intermediates: false,
+            },
+            false,
+        )?;
+        Ok(pending.into_resident(flight))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn submit_inner<K>(
         &self,
         device: &wgpu::Device,
@@ -574,6 +613,7 @@ impl GpuSolverBeltPipeline {
         maps: &RetainedBaseMaps,
         source_owner: K,
         input: SubmissionInput<'_>,
+        copy_to_cpu: bool,
     ) -> Fallible<PendingBlurredBelts<K>> {
         let qualify_intermediates = matches!(
             input,
@@ -610,11 +650,13 @@ impl GpuSolverBeltPipeline {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 blurred solver belt readback"),
-            size: OUTPUT_BYTES,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        let readback = copy_to_cpu.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 blurred solver belt readback"),
+                size: OUTPUT_BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
         });
         let preblur_readback = qualify_intermediates.then(|| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -702,7 +744,9 @@ impl GpuSolverBeltPipeline {
             pass.set_bind_group(0, &resources, &[]);
             pass.dispatch_workgroups(OUTPUT_WORDS.div_ceil(WORKGROUP_SIZE), 1, 1);
         }
-        encoder.copy_buffer_to_buffer(&packed, 0, &readback, 0, OUTPUT_BYTES);
+        if let Some(readback) = &readback {
+            encoder.copy_buffer_to_buffer(&packed, 0, readback, 0, OUTPUT_BYTES);
+        }
         let submission = queue.submit([encoder.finish()]);
         Ok(PendingBlurredBelts {
             device: device.clone(),
@@ -725,10 +769,10 @@ pub(crate) struct PendingBlurredBelts<K> {
     device: wgpu::Device,
     _source_owner: K,
     _map: wgpu::Buffer,
-    /// Retained until the copy into `readback` has completed.
+    /// Retained through either the CPU copy or the resident consumer.
     _packed: wgpu::Buffer,
     _horizontal: wgpu::Buffer,
-    readback: wgpu::Buffer,
+    readback: Option<wgpu::Buffer>,
     preblur_readback: Option<wgpu::Buffer>,
     witness_readback: Option<wgpu::Buffer>,
     _resources: wgpu::BindGroup,
@@ -750,6 +794,28 @@ impl<K> PendingBlurredBelts<K> {
         Ok(self.read_inner()?.0)
     }
 
+    /// Make a no-readback submission a GPU-resident, frame-bound post-Gaussian
+    /// resource without waiting on the CPU.
+    ///
+    /// A later same-queue submission orders its reads after this producer.
+    /// The token retains every producer resource and the imported source owner
+    /// until that consumer reaches an explicit CPU re-entry boundary.
+    fn into_resident(self, flight: GpuPisFlight) -> GpuBlurredBelts<K> {
+        debug_assert!(self.readback.is_none());
+        GpuBlurredBelts {
+            flight,
+            device: self.device,
+            #[cfg(test)]
+            drop_wait_state: None,
+            _source_owner: self._source_owner,
+            packed: self._packed,
+            _producer_map: self._map,
+            _horizontal: self._horizontal,
+            _resources: self._resources,
+            _submission: self.submission,
+        }
+    }
+
     fn read_qualification(self) -> Fallible<(BlurredBelts, SolverBelts, [u32; 2])> {
         let (blurred, preblur, witness) = self.read_inner()?;
         Ok((
@@ -760,7 +826,11 @@ impl<K> PendingBlurredBelts<K> {
     }
 
     fn read_inner(self) -> Fallible<(BlurredBelts, Option<SolverBelts>, Option<[u32; 2]>)> {
-        let slice = self.readback.slice(..);
+        let readback = self
+            .readback
+            .as_ref()
+            .ok_or("ONE X2 GPU-resident blurred solver belts have no CPU readback")?;
+        let slice = readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = mapped.send(result);
@@ -795,7 +865,7 @@ impl<K> PendingBlurredBelts<K> {
         let mapped = slice.get_mapped_range();
         let belts = unpack_blurred_belts(&mapped)?;
         drop(mapped);
-        self.readback.unmap();
+        readback.unmap();
         let preblur = preblur
             .map(|(slice, _)| {
                 let mapped = slice.get_mapped_range();
@@ -822,6 +892,69 @@ impl<K> PendingBlurredBelts<K> {
             bits
         });
         Ok((belts, preblur, witness))
+    }
+}
+
+/// Exact post-Gaussian solver belts that have never crossed into CPU memory.
+///
+/// The token is deliberately neither cloneable nor publicly constructible.
+/// Its capture generation and opaque frame identity travel with the storage
+/// allocation, so a later preprocessing result cannot be admitted by numeric
+/// frame index alone.
+#[must_use = "the GPU-resident post-Gaussian belts have not been consumed"]
+pub(crate) struct GpuBlurredBelts<K> {
+    flight: GpuPisFlight,
+    device: wgpu::Device,
+    #[cfg(test)]
+    drop_wait_state: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    _source_owner: K,
+    packed: wgpu::Buffer,
+    _producer_map: wgpu::Buffer,
+    _horizontal: wgpu::Buffer,
+    _resources: wgpu::BindGroup,
+    _submission: wgpu::SubmissionIndex,
+}
+
+impl<K> GpuBlurredBelts<K> {
+    pub(crate) fn flight(&self) -> &GpuPisFlight {
+        &self.flight
+    }
+
+    pub(crate) fn packed(&self) -> &wgpu::Buffer {
+        &self.packed
+    }
+
+    #[cfg(test)]
+    fn observe_drop_wait(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
+        self.drop_wait_state = Some(state);
+    }
+}
+
+impl<K> Drop for GpuBlurredBelts<K> {
+    fn drop(&mut self) {
+        // Normal chaining retains this token through the downstream terminal
+        // CPU re-entry, where the producer has already completed. Cancellation
+        // may instead drop it early; wait for the exact producer before the
+        // imported decoder owner can return its aliased surface to the pool.
+        #[cfg(test)]
+        {
+            RESIDENT_DROP_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(state) = &self.drop_wait_state {
+                state.store(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        // There is no timeout. WrongSubmissionIndex would be an internal wgpu
+        // contract failure because this exact index came from this Device's
+        // Queue. Drop must remain non-panicking; on such a device failure the
+        // GPU can no longer continue reading the external surface.
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(self._submission.clone()),
+            timeout: None,
+        });
+        #[cfg(test)]
+        if let Some(state) = &self.drop_wait_state {
+            state.store(2, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -1044,8 +1177,85 @@ fn blur_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::time::Duration;
+
+    use kjerag_media::FrameStamp;
 
     use super::*;
+
+    struct ObservedSourceOwner {
+        wait_state: Arc<AtomicU8>,
+        dropped: mpsc::Sender<u8>,
+    }
+
+    impl Drop for ObservedSourceOwner {
+        fn drop(&mut self) {
+            let _ = self.dropped.send(self.wait_state.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn resident_submission_returns_without_poll_and_early_drop_waits_before_owner_release() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 resident ownership test: {why}");
+                return;
+            }
+        };
+        let fixture = qualification_fixture();
+        let texture_a =
+            qualification_texture(&device, &queue, "ONE X2 resident A", &fixture.sources.a);
+        let texture_b =
+            qualification_texture(&device, &queue, "ONE X2 resident B", &fixture.sources.b);
+        let pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+            .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
+        let wait_state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        RESIDENT_DROP_POLLS.store(0, Ordering::SeqCst);
+        let mut resident = pipeline
+            .submit_resident_retained(
+                &device,
+                &queue,
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                &fixture.maps,
+                ObservedSourceOwner {
+                    wait_state: Arc::clone(&wait_state),
+                    dropped,
+                },
+                GpuPisFlight {
+                    generation: 7,
+                    frame: FrameStamp::for_test(11, Duration::from_secs(2), None),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            RESIDENT_DROP_POLLS.load(Ordering::SeqCst),
+            0,
+            "resident submission polled before returning"
+        );
+        assert!(
+            matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "resident submission released its source owner before token drop"
+        );
+        resident.observe_drop_wait(Arc::clone(&wait_state));
+        drop(resident);
+        assert_eq!(RESIDENT_DROP_POLLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            answer.recv().unwrap(),
+            2,
+            "source owner preceded exact wait"
+        );
+    }
 
     #[test]
     fn gpu_solver_belts_are_byte_exact_on_adversarial_odd_padded_sources() {
@@ -1081,6 +1291,7 @@ mod tests {
                 SubmissionInput::Sampled {
                     qualify_intermediates: true,
                 },
+                true,
             )
             .unwrap();
         assert_eq!(pending.packed().size(), OUTPUT_BYTES);
@@ -1160,6 +1371,7 @@ mod tests {
                 &fixture.maps,
                 (),
                 SubmissionInput::Preblurred(&input),
+                true,
             )
             .unwrap()
             .read()

@@ -3,6 +3,41 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**GPU-resident estimator front-end checkpoint, 2026-09-01, implementation
+branch only [A-TO-B LEVEL TWO ONLY; TARGET-GPU GATE PASSED; NO SCENE WIRING OR
+PERFORMANCE CLAIM]:** the GPU solver-belt producer now has
+an explicit no-readback submission that returns a non-cloneable token carrying
+the full opaque frame stamp, capture generation, imported-frame owner and all
+producer resources. A same-queue consumer can therefore use its packed
+post-Gaussian A/B belts without a CPU poll, staging allocation or 129,600-byte
+readback. The existing selected Scene path is unchanged and continues using
+the qualified CPU-readback handoff; there is no incomplete production route
+or fallback. Normal resident chaining never polls the CPU. If cancellation
+drops the token before a downstream terminal boundary, its non-panicking drop
+guard waits for the exact producer submission before returning the imported
+decoder surface to its owner; a focused regression instruments that order.
+
+A render-private preprocessing pipeline consumes that resident token and the
+physical masks to produce one complete A-to-B level-two prepared-source model
+on the GPU. This correctness-first shader recursively applies the two exact
+2-to-1 image reductions and mask sampling, reflect-101 Sobel, physical-mask-A
+zeroing, row-major 8-by-8 source-term accumulation, the native positive
+determinant clamp and correctly-rounded restoring division. Its result stays
+resident and carries exact frame, generation, direction and level provenance;
+it deliberately has no PIS-stage identity because image-owned preparation is
+immutable across all cold or warm calculations for that frame. Construction
+compares all 264 five-word models bit for bit with the readable CPU `Input`
+oracle on the actual adapter. Planted mutations cover recursive area rounding,
+source-lens selection, mask use, Sobel border association, determinant clamp
+and division. On the forced-RADV target, AMD Phoenix1 `1002:15bf` with the
+`amdgpu` driver, the baseline plus all six mutations passed 3/3 and the
+no-poll/early-drop ownership regression passed 1/1. Their durable log SHA-256
+values are `250426a2735ab4106d03c81d1586d15a7f8384d6e901dd8c2c90da99c776f884`
+and `24538f0995cc85c446725429bd181bb6239f11ddca163251876e03edfde5c62e`.
+B-to-A, level one, both directions' shared GPU frame owner, direct GPU-PIS
+binding, the compact downstream CPU tail and Scene integration are explicitly
+later checkpoints.
+
 **Production ONE X2 paired PIS GPU wiring, 2026-09-01, implementation branch
 only [TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; NOT YET A
 RANGE OR PERFORMANCE CLAIM]:** the selected Scene route now lazily qualifies a

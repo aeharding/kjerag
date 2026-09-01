@@ -23,6 +23,11 @@ pub mod temporal;
 /// The capture-owned ONE X2 producer uses it in both cold and warm solves.
 pub mod pis;
 
+/// Staged GPU-resident producer for image-owned PIS inputs. It is not wired
+/// into Scene until its complete downstream transaction is qualified.
+#[allow(dead_code)]
+pub(crate) mod pis_frontend_gpu;
+
 /// The selected finest-level, component-zero temporal median.
 /// The capture-owned ONE X2 producer places it between patch solving and
 /// densification.
