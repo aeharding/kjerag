@@ -565,6 +565,75 @@ impl Run {
     }
 }
 
+/// Select an exact capture only from the display transaction already installed
+/// by Scene. The offered source may be one frame newer while its resident map
+/// is pending, so it is never capture authority.
+fn exact_capture_due(
+    run: &Run,
+    range_output: Option<&RangeOutput>,
+    shown: Option<FrameStamp>,
+) -> Fallible<Option<FrameStamp>> {
+    let Some(shown) = shown else {
+        return Ok(None);
+    };
+    let required = match (run, range_output) {
+        (Run::Target(target), _) => Some(("target", target.index)),
+        (Run::Range(range), Some(output)) if output.next_index() <= range.spec.end => {
+            Some(("range", output.next_index()))
+        }
+        (Run::Range(_), None) => return Err("range output was not initialized".into()),
+        (Run::Timed(_) | Run::Measure(_), _) | (Run::Range(_), Some(_)) => None,
+    };
+    let Some((label, required)) = required else {
+        return Ok(None);
+    };
+    if shown.index() > required {
+        return Err(format!(
+            "{label} skipped installed frame {required}; exact shown frame is {}",
+            shown.index()
+        )
+        .into());
+    }
+    Ok((shown.index() == required).then_some(shown))
+}
+
+const MAX_EXACT_CAPTURE_REDRAWS: usize = 512;
+const EXACT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Drive an armed exact screenshot without advancing the presentation clock.
+///
+/// Resident screenshot admission may be temporarily full. Scene rearms the
+/// same request in that case, and each no-pump redraw contributes the one
+/// nonblocking device poll that can retire the owner blocking admission.
+fn drive_exact_capture<T>(
+    label: &str,
+    reports: &mpsc::Receiver<Fallible<T>>,
+    mut redraw: impl FnMut() -> Fallible<()>,
+) -> Fallible<T> {
+    let began = Instant::now();
+    for _ in 0..MAX_EXACT_CAPTURE_REDRAWS {
+        redraw()?;
+        match reports.try_recv() {
+            Ok(result) => return result,
+            Err(mpsc::TryRecvError::Empty) if began.elapsed() < EXACT_CAPTURE_TIMEOUT => {}
+            Err(mpsc::TryRecvError::Empty) => {
+                return Err(format!(
+                    "{label} capture did not finish within {} s",
+                    EXACT_CAPTURE_TIMEOUT.as_secs()
+                )
+                .into());
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(format!("{label} capture result channel disconnected").into());
+            }
+        }
+    }
+    Err(
+        format!("{label} capture did not finish after {MAX_EXACT_CAPTURE_REDRAWS} no-pump redraws")
+            .into(),
+    )
+}
+
 fn play(
     input: &Path,
     run: Run,
@@ -742,24 +811,6 @@ fn play(
             }
         };
         let offered = scene.frame();
-        let target_hit = match (&run, offered) {
-            (Run::Target(target), Some((index, _))) => index == target.index,
-            _ => false,
-        };
-        let range_hit = match (&run, offered, range_output.as_ref()) {
-            (Run::Range(range), Some((index, _)), Some(output)) => {
-                if output.next_index() <= range.spec.end && index > output.next_index() {
-                    return Err(format!(
-                        "range skipped displayed frame {}; next required frame is {}",
-                        index,
-                        output.next_index()
-                    )
-                    .into());
-                }
-                index == output.next_index() && index <= range.spec.end
-            }
-            _ => false,
-        };
         if let (Run::Target(target), Some((index, timestamp))) = (&run, offered)
             && last_progress != Some(index)
             && (index == 0 || index % 100 == 0 || index == target.index)
@@ -793,18 +844,9 @@ fn play(
             last_progress = Some(index);
         }
 
-        let armed = !target_hit && !range_hit && burst.due(start.elapsed());
+        let armed = burst.due(start.elapsed());
         if armed {
             scene.capture(burst.request());
-        }
-        if target_hit || range_hit {
-            let written = exact_written.clone();
-            scene.capture(Request {
-                width: SHOT_WIDTH,
-                then: Box::new(move |shot| {
-                    let _ = written.send(shot);
-                }),
-            });
         }
         let primitive = scene.primitive(camera);
 
@@ -823,20 +865,50 @@ fn play(
         redraws += 1;
 
         if let Some(output) = range_output.as_mut()
-            && let Some(map) = scene.diagnostic_one_xs_map()?
+            && let Some(map) = scene.diagnostic_one_xs_displayed_map()?
         {
             output.observe_transaction(&map)?;
         }
 
+        let exact_capture =
+            exact_capture_due(&run, range_output.as_ref(), scene.displayed_frame_stamp())?;
+        let target_hit = exact_capture.is_some() && matches!(run, Run::Target(_));
+        let range_hit = exact_capture.is_some() && matches!(run, Run::Range(_));
         if target_hit || range_hit {
             let capture_label = if range_hit { "range" } else { "target" };
-            let (expected_index, expected_timestamp) =
-                offered.expect("exact capture hit has a source frame");
-            let shot = exact_report
-                .recv_timeout(Duration::from_secs(30))
-                .map_err(|error| {
-                    format!("{capture_label} capture did not finish within 30 s: {error}")
-                })??;
+            // The ordinary redraw above first commits the requested resident
+            // display. Arm and render once more without pumping the source, so
+            // screenshot, shown stamp and installed map all name that exact
+            // transaction. Keep redrawing without pump if screenshot retirement
+            // admission is temporarily full; Scene preserves the exact request.
+            let written = exact_written.clone();
+            scene.capture(Request {
+                width: SHOT_WIDTH,
+                then: Box::new(move |shot| {
+                    let _ = written.send(shot);
+                }),
+            });
+            let expected_stamp = exact_capture
+                .as_ref()
+                .expect("exact capture hit has an installed frame");
+            let expected_index = expected_stamp.index();
+            let expected_timestamp = expected_stamp.timestamp();
+            let shot = drive_exact_capture(capture_label, &exact_report, || {
+                let primitive = scene.primitive(camera);
+                let began = Instant::now();
+                pipeline.prepare(
+                    &primitive,
+                    &gpu.device,
+                    &gpu.queue,
+                    OUTPUT.width as f32 / OUTPUT.height as f32,
+                );
+                burst.prepared(false, began.elapsed());
+                let drawn = Instant::now();
+                gpu.render(&pipeline)?;
+                render += drawn.elapsed();
+                redraws += 1;
+                Ok(())
+            })?;
             if shot.index != expected_index {
                 return Err(format!(
                     "{capture_label} capture holds frame {} but frame {expected_index} was prepared",
@@ -854,27 +926,17 @@ fn play(
             }
 
             if range_hit {
-                if scene.displayed_frame() != Some((expected_index, expected_timestamp)) {
+                if scene.displayed_frame_stamp().as_ref() != Some(expected_stamp) {
                     return Err(format!(
                         "range frame {expected_index} was captured without that exact frame being displayed"
                     )
                     .into());
                 }
-                let current_stamp = scene
-                    .frame_stamp()
-                    .ok_or("range scene lost its exact delivered frame stamp")?;
-                if current_stamp.index() != expected_index
-                    || current_stamp.timestamp() != expected_timestamp
-                {
-                    return Err("range scene stamp changed after the picture was displayed".into());
-                }
-                let map = scene.diagnostic_one_xs_map()?.ok_or(
-                    "range scene has no shown selected ONE X2 map for its current delivery",
-                )?;
-                if map.frame() != &current_stamp {
-                    return Err(
-                        "range ONE X2 map differs from the scene's exact shown delivery".into(),
-                    );
+                let map = scene
+                    .diagnostic_one_xs_displayed_map()?
+                    .ok_or("range scene has no selected ONE X2 map for its exact shown delivery")?;
+                if map.frame() != expected_stamp {
+                    return Err("range ONE X2 map differs from the exact captured display".into());
                 }
                 let output = range_output
                     .as_mut()
@@ -971,22 +1033,18 @@ fn play(
                 let evidence = evidence
                     .as_ref()
                     .ok_or("target evidence was not authenticated before playback")?;
-                let current_stamp = scene
-                    .frame_stamp()
-                    .ok_or("target scene lost its exact delivered frame stamp")?;
-                let map = scene.diagnostic_one_xs_map()?.ok_or(
-                    "target scene has no shown selected ONE X2 map for its current delivery",
-                )?;
-                if map.frame() != &current_stamp {
+                if scene.displayed_frame_stamp().as_ref() != Some(expected_stamp) {
                     return Err(
-                        "diagnostic ONE X2 map differs from the scene's exact current delivery"
-                            .into(),
+                        "target scene changed its exact shown delivery after capture".into(),
                     );
                 }
-                if current_stamp.index() != expected_index
-                    || current_stamp.timestamp() != expected_timestamp
-                {
-                    return Err("target scene stamp changed after the picture was prepared".into());
+                let map = scene.diagnostic_one_xs_displayed_map()?.ok_or(
+                    "target scene has no selected ONE X2 map for its exact shown delivery",
+                )?;
+                if map.frame() != expected_stamp {
+                    return Err(
+                        "diagnostic ONE X2 map differs from the exact captured display".into(),
+                    );
                 }
                 let sources = scene
                     .source_paths()
@@ -2865,6 +2923,77 @@ mod tests {
         let mut words = vec!["playback".to_owned()];
         words.extend(arguments.iter().map(|word| (*word).to_owned()));
         Options::parse(&words)
+    }
+
+    #[test]
+    fn exact_range_capture_waits_for_the_installed_stamp_not_the_newer_offer() {
+        let before = FrameStamp::for_test(6_338, Duration::from_secs(211), None);
+        let requested = FrameStamp::for_test(6_339, Duration::from_secs(212), Some(&before));
+        let run = Run::Range(RangeRun {
+            spec: RangeSpec {
+                start: 6_339,
+                count: 61,
+                end: 6_399,
+            },
+            out_dir: PathBuf::from("unused"),
+        });
+        let output = RangeOutput {
+            out: PathBuf::new(),
+            stage: None,
+            spec: RangeSpec {
+                start: 6_339,
+                count: 61,
+                end: 6_399,
+            },
+            next: 6_339,
+            frames: Vec::new(),
+            capture_height: None,
+            next_transaction: 0,
+            last_transaction: None,
+            gpu_pis_transactions: 0,
+            cpu_pis_transactions: 0,
+        };
+
+        // The source has offered 6339, but the resident transaction still
+        // shows 6338. This is the real asynchronous boundary that previously
+        // armed a screenshot one redraw too early.
+        let offered = requested.clone();
+        let mut captures = Vec::new();
+        if let Some(stamp) = exact_capture_due(&run, Some(&output), Some(before)).unwrap() {
+            captures.push(stamp);
+        }
+        assert_eq!(offered.index(), 6_339);
+        assert!(captures.is_empty(), "offered identity armed a screenshot");
+
+        // Once Scene installs the exact full stamp, the production trigger
+        // returns that identity for the immediate no-pump capture redraw.
+        if let Some(stamp) =
+            exact_capture_due(&run, Some(&output), Some(requested.clone())).unwrap()
+        {
+            captures.push(stamp);
+        }
+        assert_eq!(captures, vec![requested]);
+    }
+
+    #[test]
+    fn exact_capture_redraws_without_pump_after_retirement_full() {
+        let (sent, reports) = mpsc::channel();
+        let mut redraws = 0;
+        let result = drive_exact_capture("range", &reports, || {
+            redraws += 1;
+            // The first prepare models ResidentScreenshotPrepare::RetryFull:
+            // Scene has rearmed the request, so no callback exists yet. The
+            // next no-pump redraw admits that same screenshot.
+            if redraws == 2 {
+                sent.send(Ok::<_, Box<dyn std::error::Error + Send + Sync>>(17))
+                    .unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(result, 17);
+        assert_eq!(redraws, 2);
     }
 
     #[test]

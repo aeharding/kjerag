@@ -1360,6 +1360,17 @@ impl Scene {
         self.shown.frame()
     }
 
+    /// Opaque identity of the exact aligned lens pair most recently committed
+    /// to display.
+    ///
+    /// Unlike [`Self::frame_stamp`], this stays on the installed display while
+    /// a newer offered delivery is still waiting for its resident map. Exact
+    /// capture instruments use it to arm for what the screenshot pass will
+    /// actually draw, without reducing identity to index and timestamp.
+    pub fn displayed_frame_stamp(&self) -> Option<FrameStamp> {
+        Some(self.shown.get()?.frames.stamp())
+    }
+
     /// Opaque identity of the exact aligned lens pair currently held by this
     /// scene. Unlike [`Self::frame`], this does not alias after a seek or
     /// across captures.
@@ -1412,6 +1423,24 @@ impl Scene {
             return Ok(None);
         }
         capture.diagnostic_installed_map(&current)
+    }
+
+    /// Read the selected ONE X2 map belonging to the exact installed display.
+    ///
+    /// This explicit diagnostic differs from [`Self::diagnostic_one_xs_map`]
+    /// only while a newer source pair is offered but not installed. It follows
+    /// the retained shown view and its capture facade, so a range screenshot
+    /// can authenticate the map for the pixels it actually captured. Like the
+    /// other map diagnostic, this performs a frame-sized readback and wait and
+    /// must not be used by ordinary playback.
+    pub fn diagnostic_one_xs_displayed_map(&self) -> Fallible<Option<OneXsMapFrame>> {
+        let Some(shown) = self.shown.get() else {
+            return Ok(None);
+        };
+        let Some(capture) = shown.resident_one_xs.clone() else {
+            return Ok(None);
+        };
+        capture.diagnostic_installed_map(&shown.frames.stamp())
     }
 
     /// Takes whichever frame belongs on screen at `now`, and says when to

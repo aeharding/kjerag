@@ -44,6 +44,19 @@ playback, and owner-eye review remain merge gates. The structural source test
 is a tripwire rather than a transitive proof, and the five-frame test submits
 real render passes but does not read back their pixels.
 
+The first authenticated resident range attempt exposed an instrument boundary
+error before publishing output: source frame 6339 had been offered while exact
+frame 6338 was still installed, so the runner armed a frame-6339 screenshot and
+correctly received the shown frame 6338. The runner now treats the complete
+installed `FrameStamp` as capture authority. After an ordinary redraw installs
+the requested transaction, it arms the screenshot and drives bounded no-pump
+redraws until the exact-once callback resolves; temporary screenshot-retirement
+backpressure therefore cannot advance the source or substitute a successor.
+Its diagnostic map readback follows the same shown capture facade and full
+stamp. Focused regressions cover the offered-N/shown-N-1 boundary and a first
+capture redraw refused by full retirement admission. A fresh authenticated
+real range remains pending.
+
 **Capture-shared resident transaction facade, 2026-09-01, implementation
 branch only [SUPERSEDED BY THE SELECTED SCENE CUTOVER ABOVE; FORCED-RADV
 QUALIFIED; NO PLAYBACK, PERFORMANCE OR STUDIO-RE CLAIM]:** one open ONE X2 capture now has a
