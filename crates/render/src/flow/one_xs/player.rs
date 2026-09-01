@@ -28,7 +28,9 @@ use super::map_patch::{self, BaseMap, BilateralInputs, Census, FlowMap, Preimage
 use super::owner::{AdvanceFailure, Continuity, PairOwner, PairPosition, Phase};
 use super::resources::{OneXsResources, ResourceError};
 #[cfg(test)]
-use super::scalar::{ColdInputs, ColdPreparedSchedule};
+use super::scalar::{
+    ColdInputs, ColdPreparedSchedule, CpuPairedPisSolver, PairedPatchGrids, PairedSolveRequest,
+};
 use super::scalar::{PairSolveError, PairedControlInputs, PairedPisSolver, WorkRowCounts};
 #[cfg(test)]
 use super::temporal::BlurredBelts;
@@ -123,6 +125,90 @@ pub(crate) struct FrameOwner {
     source_size: Size,
     continuity: Continuity,
     state: State,
+}
+
+#[cfg(test)]
+pub(crate) struct ColdFinalInputsForTest {
+    pub frame: FrameStamp,
+    pub lens_a_preimage: Vec<u32>,
+    pub lens_b_preimage: Vec<u32>,
+    pub lens_a_base: Vec<u32>,
+    pub lens_b_base: Vec<u32>,
+    pub lens_a_public: Vec<u32>,
+    pub lens_b_public: Vec<u32>,
+    pub cold0_l2_terminal: Vec<u32>,
+    pub cold0_l1_initial: Vec<u32>,
+    pub l1_terminals: Vec<Vec<u32>>,
+}
+
+#[cfg(test)]
+struct RecordingColdSolver {
+    cpu: CpuPairedPisSolver,
+    cold0_l2_terminal: Option<Vec<u32>>,
+    cold0_l1_initial: Option<Vec<u32>>,
+    l1_terminals: Vec<Vec<u32>>,
+}
+
+#[cfg(test)]
+impl PairedPisSolver for RecordingColdSolver {
+    type Error = std::convert::Infallible;
+    const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
+
+    fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
+        let stage = request.stage;
+        if stage
+            == (super::scalar::PairSolveStage::Cold {
+                calculation: 0,
+                level: super::pis::Level::One,
+            })
+        {
+            let planar = |flows: &[super::pis::Flow]| {
+                flows
+                    .iter()
+                    .map(|flow| flow.dcol().to_bits())
+                    .chain(flows.iter().map(|flow| flow.drow().to_bits()))
+                    .collect::<Vec<_>>()
+            };
+            let mut initial = planar(request.a_to_b.initial.flows());
+            initial.extend(planar(request.b_to_a.initial.flows()));
+            self.cold0_l1_initial = Some(initial);
+        }
+        let solved = self.cpu.solve(request)?;
+        if stage
+            == (super::scalar::PairSolveStage::Cold {
+                calculation: 0,
+                level: super::pis::Level::Two,
+            })
+        {
+            self.cold0_l2_terminal = Some(
+                solved
+                    .a_to_b
+                    .grid
+                    .patches()
+                    .iter()
+                    .chain(solved.b_to_a.grid.patches())
+                    .flat_map(|patch| {
+                        [patch.flow().dcol().to_bits(), patch.flow().drow().to_bits()]
+                    })
+                    .collect(),
+            );
+        }
+        if stage.level() == super::pis::Level::One {
+            self.l1_terminals.push(
+                solved
+                    .a_to_b
+                    .grid
+                    .patches()
+                    .iter()
+                    .chain(solved.b_to_a.grid.patches())
+                    .flat_map(|patch| {
+                        [patch.flow().dcol().to_bits(), patch.flow().drow().to_bits()]
+                    })
+                    .collect(),
+            );
+        }
+        Ok(solved)
+    }
 }
 
 #[allow(dead_code, reason = "frozen CPU transaction oracle")]
@@ -348,6 +434,86 @@ impl FrameOwner {
         let prepared = self.prepare(frame.frame(), frame.size())?;
         let blurred_belts = prepared.sample_blurred_belts(frame)?;
         self.commit(prepared, blurred_belts)
+    }
+
+    /// Test-only earliest-stage oracle for an exact decoded delivery. This
+    /// prepares the frozen CPU geometry and source sampler without advancing
+    /// the retained owner.
+    #[cfg(test)]
+    pub(crate) fn blurred_for_test(
+        &self,
+        frame: &OneXsLumaFrame,
+    ) -> Result<BlurredBelts, FrameOwnerError> {
+        self.prepare(frame.frame(), frame.size())?
+            .sample_blurred_belts(frame)
+    }
+
+    /// Frozen CPU view of the three frame-varying sections copied into the
+    /// production final-map materializer. Values retain native f32 bits and
+    /// the renderer's physical lens ownership.
+    #[cfg(test)]
+    pub(crate) fn cold_final_inputs_for_test(
+        &self,
+        frame: &OneXsLumaFrame,
+    ) -> Result<ColdFinalInputsForTest, FrameOwnerError> {
+        let prepared = self.prepare(frame.frame(), frame.size())?;
+        let blurred = prepared.sample_blurred_belts(frame)?;
+        let inputs = ColdInputs::from_blurred_belts_and_masks(blurred, prepared.masks.clone());
+        let ColdPreparedSchedule { controls, solver } = ColdPreparedSchedule::from_cpu(&inputs);
+        let mut solver = RecordingColdSolver {
+            cpu: solver,
+            cold0_l2_terminal: None,
+            cold0_l1_initial: None,
+            l1_terminals: Vec::with_capacity(3),
+        };
+        let transition = match super::scalar::ColdPair::new()
+            .try_transition_prepared_with_solver(&controls, &mut solver)
+        {
+            Ok(transition) => transition,
+            Err(PairSolveError::Solver { source, .. }) => match source {},
+            Err(PairSolveError::Stamp { source, .. }) => {
+                panic!("CPU paired solver returned its own invalid stamp: {source}")
+            }
+        };
+        assert_eq!(
+            solver.l1_terminals.len(),
+            3,
+            "cold CPU oracle did not execute three L1 calls"
+        );
+        let words = |values: &[[f32; 2]]| {
+            values
+                .iter()
+                .flat_map(|value| value.iter().map(|component| component.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        let public_words = |dcol: &[f32], drow: &[f32]| {
+            dcol.iter()
+                .zip(drow)
+                .flat_map(|(dcol, drow)| [dcol.to_bits(), drow.to_bits()])
+                .collect::<Vec<_>>()
+        };
+        Ok(ColdFinalInputsForTest {
+            frame: frame.frame().clone(),
+            lens_a_preimage: words(prepared.preimage.a.values()),
+            lens_b_preimage: words(prepared.preimage.b.values()),
+            lens_a_base: words(prepared.patch_base.a.values()),
+            lens_b_base: words(prepared.patch_base.b.values()),
+            lens_a_public: public_words(
+                transition.candidate_next.b_to_a_public.dcol(),
+                transition.candidate_next.b_to_a_public.drow(),
+            ),
+            lens_b_public: public_words(
+                transition.candidate_next.a_to_b_public.dcol(),
+                transition.candidate_next.a_to_b_public.drow(),
+            ),
+            cold0_l2_terminal: solver
+                .cold0_l2_terminal
+                .expect("cold CPU oracle did not retain its Cold0 L2 terminal"),
+            cold0_l1_initial: solver
+                .cold0_l1_initial
+                .expect("cold CPU oracle did not retain its Cold0 L1 initial"),
+            l1_terminals: solver.l1_terminals,
+        })
     }
 
     fn validate_delivery(&self, offered: &FrameStamp) -> Result<(), FrameOwnerError> {

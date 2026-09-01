@@ -7280,6 +7280,236 @@ mod tests {
         scene.pause(Instant::now());
     }
 
+    /// Opt-in real-media comparison of the earliest resident numeric stage.
+    /// The CPU side reads the same imported frame-zero delivery and the GPU
+    /// side snapshots the production resident post-Gaussian allocation.
+    #[test]
+    fn selected_one_x2_cold_frame_zero_blurred_belts_match_cpu_oracle() {
+        if std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_none() {
+            eprintln!("skipping cold resident stage probe: set KJERAG_ONE_X2_COLD_STAGE_PROBE");
+            return;
+        }
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            panic!("KJERAG_ONE_X2_COLD_STAGE_PROBE requires KJERAG_ONE_X2_TEST_MEDIA");
+        };
+        let ((device, queue), _) = test_import_gpu_and_foreign()
+            .unwrap_or_else(|error| panic!("could not open target dmabuf Vulkan device: {error}"));
+        let mut scene = Scene::open(&path)
+            .unwrap_or_else(|error| panic!("could not open ONE X2 test capture: {error}"));
+        scene.set_muted(true);
+        let exact = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(
+            exact.index(),
+            0,
+            "cold stage probe did not receive frame zero"
+        );
+        let primitive = scene.primitive(Camera::default());
+
+        // Submit the full-R8 oracle read before production consumes the same
+        // delivery. It remains pending while the ordinary resident chain runs.
+        let mut oracle_pipeline =
+            ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let pending_luma = oracle_pipeline
+            .prepare_one_xs_luma(&primitive, 1.0)
+            .expect("exact source readback submission failed")
+            .expect("frame zero was not importable for exact source readback");
+        assert_eq!(pending_luma.frame(), &exact);
+
+        let mut resident_pipeline =
+            ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let capture = prepare_and_draw_exact_resident_frame(
+            &scene,
+            &mut resident_pipeline,
+            &device,
+            &queue,
+            &exact,
+        );
+        let luma = pending_luma.read().expect("exact source readback failed");
+        assert_eq!(luma.frame(), &exact);
+        let calibration = scene
+            .show
+            .as_ref()
+            .and_then(|show| show.one_xs_calibration.clone())
+            .expect("selected capture lost its factory calibration");
+        let owner = crate::flow::one_xs::player::FrameOwner::new(&calibration)
+            .expect("CPU frame owner construction failed");
+        let expected = owner
+            .blurred_for_test(&luma)
+            .expect("CPU frame-zero blurred belts failed");
+        let actual = capture
+            .diagnostic_cold_blurred_probe(&exact)
+            .expect("resident cold blurred probe readback failed")
+            .expect("resident cold blurred probe was not recorded");
+
+        if let Some(index) = actual
+            .bytes()
+            .iter()
+            .zip(expected.bytes())
+            .position(|(actual, expected)| actual != expected)
+        {
+            let nodes = ROWS * COLS;
+            let lens = if index < nodes { 'A' } else { 'B' };
+            let local = index % nodes;
+            panic!(
+                "resident cold blurred belts first differ at lens {lens} row {} column {} (byte {index}): GPU {}, CPU {}",
+                local / COLS,
+                local % COLS,
+                actual.bytes()[index],
+                expected.bytes()[index],
+            );
+        }
+        assert_eq!(actual.bytes(), expected.bytes());
+
+        let expected_final = owner
+            .cold_final_inputs_for_test(&luma)
+            .expect("CPU frame-zero final inputs failed");
+        let (actual_cold0_l2, actual_cold0_initial) = capture
+            .diagnostic_cold0_pis_inputs(&exact)
+            .expect("resident Cold0 PIS input probe readback failed")
+            .expect("resident Cold0 PIS input probe was not retained");
+        let actual_l1_terminals = capture
+            .diagnostic_cold_l1_terminals(&exact)
+            .expect("resident cold L1 terminal probe readback failed")
+            .expect("resident cold L1 terminal probe was not retained");
+        let actual_final = capture
+            .diagnostic_cold_final_inputs(&exact)
+            .expect("resident final-input probe readback failed")
+            .expect("resident final-input probe was not retained");
+        assert_eq!(expected_final.frame, exact);
+        assert_eq!(actual_final.frame, exact);
+        let compare = |stage: &str, lens: char, actual: &[u32], expected: &[u32]| {
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "resident {stage} lens {lens} word count differs"
+            );
+            if let Some(word) = actual
+                .iter()
+                .zip(expected)
+                .position(|(actual, expected)| actual != expected)
+            {
+                panic!(
+                    "resident {stage} first differs at lens {lens} node {} component {} (word {word} of {}): GPU 0x{:08x}, CPU 0x{:08x}",
+                    word / 2,
+                    word % 2,
+                    actual.len(),
+                    actual[word],
+                    expected[word],
+                );
+            }
+            println!(
+                "cold-stage-probe: {stage} lens {lens} exact, {} words",
+                actual.len()
+            );
+        };
+        compare(
+            "Cold0 L2 terminal",
+            'A',
+            &actual_cold0_l2[..actual_cold0_l2.len() / 2],
+            &expected_final.cold0_l2_terminal[..expected_final.cold0_l2_terminal.len() / 2],
+        );
+        compare(
+            "Cold0 L2 terminal",
+            'B',
+            &actual_cold0_l2[actual_cold0_l2.len() / 2..],
+            &expected_final.cold0_l2_terminal[expected_final.cold0_l2_terminal.len() / 2..],
+        );
+        let compare_planar_initial = |direction: &str, actual: &[u32], expected: &[u32]| {
+            assert_eq!(actual.len(), expected.len());
+            if let Some(word) = actual
+                .iter()
+                .zip(expected)
+                .position(|(actual, expected)| actual != expected)
+            {
+                let patches = actual.len() / 2;
+                panic!(
+                    "resident Cold0 L1 initial first differs at {direction} patch {} component {} (word {word} of {}): GPU 0x{:08x}, CPU 0x{:08x}",
+                    word % patches,
+                    if word < patches { "dcol" } else { "drow" },
+                    actual.len(),
+                    actual[word],
+                    expected[word],
+                );
+            }
+            println!(
+                "cold-stage-probe: Cold0 L1 initial {direction} exact, {} words",
+                actual.len()
+            );
+        };
+        compare_planar_initial(
+            "A-to-B",
+            &actual_cold0_initial[..actual_cold0_initial.len() / 2],
+            &expected_final.cold0_l1_initial[..expected_final.cold0_l1_initial.len() / 2],
+        );
+        compare_planar_initial(
+            "B-to-A",
+            &actual_cold0_initial[actual_cold0_initial.len() / 2..],
+            &expected_final.cold0_l1_initial[expected_final.cold0_l1_initial.len() / 2..],
+        );
+        assert_eq!(
+            actual_l1_terminals.len(),
+            expected_final.l1_terminals.len(),
+            "resident cold L1 terminal call count differs"
+        );
+        for (calculation, (actual, expected)) in actual_l1_terminals
+            .iter()
+            .zip(&expected_final.l1_terminals)
+            .enumerate()
+        {
+            compare(
+                &format!("Cold{calculation} L1 terminal"),
+                'A',
+                &actual[..actual.len() / 2],
+                &expected[..expected.len() / 2],
+            );
+            compare(
+                &format!("Cold{calculation} L1 terminal"),
+                'B',
+                &actual[actual.len() / 2..],
+                &expected[expected.len() / 2..],
+            );
+        }
+        // Stop at the earliest unequal semantic producer. Parent/preimage and
+        // retained base are geometry outputs; public flow is post-L1.
+        compare(
+            "parent/preimage",
+            'A',
+            &actual_final.lens_a_preimage,
+            &expected_final.lens_a_preimage,
+        );
+        compare(
+            "parent/preimage",
+            'B',
+            &actual_final.lens_b_preimage,
+            &expected_final.lens_b_preimage,
+        );
+        compare(
+            "retained base",
+            'A',
+            &actual_final.lens_a_base,
+            &expected_final.lens_a_base,
+        );
+        compare(
+            "retained base",
+            'B',
+            &actual_final.lens_b_base,
+            &expected_final.lens_b_base,
+        );
+        compare(
+            "public flow",
+            'A',
+            &actual_final.lens_a_public,
+            &expected_final.lens_a_public,
+        );
+        compare(
+            "public flow",
+            'B',
+            &actual_final.lens_b_public,
+            &expected_final.lens_b_public,
+        );
+        scene.pause(Instant::now());
+    }
+
     fn block_on<F: Future>(future: F) -> F::Output {
         let mut future = std::pin::pin!(future);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());

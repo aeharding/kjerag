@@ -3,6 +3,24 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Resident cold frame-zero causal locator, 2026-09-01, diagnostic branch
+only [CFG(TEST), ENV-GATED, REAL MEDIA; NO PRODUCTION OR PARITY CLAIM]:** an
+opt-in probe now compares one exact decoded frame-zero delivery through the
+ordinary resident orchestration against a fresh frozen CPU `FrameOwner`.
+On the owner's reported clip, the post-Gaussian belts are byte-exact across
+129,600 bytes, and both parent/preimage sections (40,000 words each) and both
+retained-base sections (129,600 words each) are bit-exact. The first public
+flow mismatch is downstream of those boundaries.
+
+The narrower same-run snapshots locate the first proven arithmetic divergence
+at the Cold0 paired L2 PIS terminal itself, before the L2-to-L1 seed bridge,
+Cold0 L1 terminal, temporal median, dense finish or public-flow packing. The
+first unequal word is A-to-B patch 0 dcol: resident `0xbf35468e`, CPU
+`0xbd412190`. The next causal boundary is therefore Cold0's prepared L2 PIS
+input (model, masks, work mode, admission and disparity), not post-L1 history
+or final-map assembly. The probe stops at the first unequal semantic producer;
+ordinary builds and playback APIs are unchanged.
+
 **Selected ONE X2 Scene resident cutover, 2026-09-01, implementation branch
 only [NORMAL LIVE PATH; POST-QUALIFICATION NONBLOCKING; NO PERFORMANCE OR
 STUDIO-RE CLAIM]:** an ordinary supported ONE X2 open now branches before

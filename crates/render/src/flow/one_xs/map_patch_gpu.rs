@@ -722,7 +722,20 @@ pub(super) struct InstalledGpuMapBinding {
     _actions: wgpu::Buffer,
     context: OneXsGpuContext,
     statics: Arc<GpuFinalMapStatics>,
+    #[cfg(test)]
+    input_readback: wgpu::Buffer,
     carrier: Box<dyn InstalledFinalCarrier>,
+}
+
+#[cfg(test)]
+pub(crate) struct DiagnosticFinalInputs {
+    pub frame: FrameStamp,
+    pub lens_a_preimage: Vec<u32>,
+    pub lens_b_preimage: Vec<u32>,
+    pub lens_a_base: Vec<u32>,
+    pub lens_b_base: Vec<u32>,
+    pub lens_a_public: Vec<u32>,
+    pub lens_b_public: Vec<u32>,
 }
 
 /// Type-erased only after the complete typed post owner has crossed the
@@ -775,6 +788,36 @@ impl InstalledGpuMapBinding {
             crate::studio_type2::PisBackend::Gpu,
         ))
     }
+
+    #[cfg(test)]
+    pub(super) fn diagnostic_final_inputs(&self) -> Fallible<DiagnosticFinalInputs> {
+        let words = readback_u32(
+            self.context.device(),
+            self.context.queue(),
+            &self.input_readback,
+            INPUT_BYTES,
+        )?;
+        let side = |side: usize| {
+            let start = side * SIDE_WORDS;
+            let preimage = words[start..start + PREIMAGE_WORDS].to_vec();
+            let base_start = start + PREIMAGE_WORDS;
+            let base = words[base_start..base_start + BASE_WORDS].to_vec();
+            let public_start = base_start + BASE_WORDS;
+            let public = words[public_start..public_start + FLOW_WORDS].to_vec();
+            (preimage, base, public)
+        };
+        let (lens_a_preimage, lens_a_base, lens_a_public) = side(0);
+        let (lens_b_preimage, lens_b_base, lens_b_public) = side(1);
+        Ok(DiagnosticFinalInputs {
+            frame: self.frame.clone(),
+            lens_a_preimage,
+            lens_b_preimage,
+            lens_a_base,
+            lens_b_base,
+            lens_a_public,
+            lens_b_public,
+        })
+    }
 }
 
 impl<P> GpuPackedMapFrame<GpuFinalOperands<P>>
@@ -822,6 +865,8 @@ where
             _actions: self._actions,
             context: self.context,
             statics: self.statics,
+            #[cfg(test)]
+            input_readback: self.input_readback,
             carrier: Box::new(parts.carrier),
         };
         Ok(GpuBoundFinalMap {

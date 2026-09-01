@@ -423,6 +423,17 @@ struct ResidentCaptureSession {
     sampler: wgpu::Sampler,
     direct: Arc<DirectType2Pipeline>,
     retirements: Arc<IcedDrawRetirements<InstalledOneXsPass>>,
+    #[cfg(test)]
+    cold_blurred_probe: Mutex<Option<TestColdBlurredProbe>>,
+}
+
+#[cfg(test)]
+struct TestColdBlurredProbe {
+    frame: FrameStamp,
+    packed: wgpu::Buffer,
+    cold0_l2_terminal: Option<wgpu::Buffer>,
+    cold0_l1_initial: Option<wgpu::Buffer>,
+    l1_terminals: Vec<wgpu::Buffer>,
 }
 
 impl ResidentCaptureSession {
@@ -461,6 +472,8 @@ impl ResidentCaptureSession {
                 context.device(),
                 IcedInstalledDrawAdapter::RETIREMENT_CAPACITY,
             )),
+            #[cfg(test)]
+            cold_blurred_probe: Mutex::new(None),
             context,
             format,
             source_size: calibration.dimension,
@@ -504,12 +517,30 @@ impl ResidentCaptureSession {
         reframe: &crate::Reframe,
     ) -> Fallible<ResidentPendingMap> {
         let warm = self.capture.pipeline.root.has_installed_successor()?;
+        #[cfg(test)]
+        let frame = frames.stamp();
         let source =
             self.capture
                 .import_picture(&self.picture_layout, &self.sampler, reframe, frames)?;
-        let motion = source
-            .submit_resident_front(&self.capture)?
-            .prepare_motion(&self.motion)?;
+        let source = source.submit_resident_front(&self.capture)?;
+        #[cfg(test)]
+        if !warm && std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some() {
+            let mut probe = self
+                .cold_blurred_probe
+                .lock()
+                .map_err(|_| "ONE X2 cold blurred stage probe is poisoned")?;
+            if probe.is_some() {
+                return Err("ONE X2 cold blurred stage probe was recorded more than once".into());
+            }
+            *probe = Some(TestColdBlurredProbe {
+                frame,
+                packed: source.blurred_buffer_for_test(),
+                cold0_l2_terminal: None,
+                cold0_l1_initial: None,
+                l1_terminals: Vec::with_capacity(3),
+            });
+        }
+        let motion = source.prepare_motion(&self.motion)?;
         let controls = self.controls();
         if warm {
             let terminal = motion.submit_resident_warm(
@@ -527,16 +558,43 @@ impl ResidentCaptureSession {
                     .materialize_final(operands)?,
             )))
         } else {
-            let cold = motion
-                .submit_resident_cold0(
-                    &self.front,
-                    &self.solver,
-                    &self.bridge,
-                    geometry_gpu::temporal_gpu::GpuColdPriorPublicLevelTwo::new(
-                        self.context.clone(),
-                    ),
-                    controls,
-                )?
+            let cold0 = motion.submit_resident_cold0(
+                &self.front,
+                &self.solver,
+                &self.bridge,
+                geometry_gpu::temporal_gpu::GpuColdPriorPublicLevelTwo::new(self.context.clone()),
+                controls,
+            )?;
+            #[cfg(test)]
+            let probing = std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some();
+            #[cfg(test)]
+            let cold = if probing {
+                let (cold0_l2_terminal, cold0_l1_initial) = cold0.cold0_input_buffers_for_test();
+                let cold0_terminal = cold0.l1_terminal_buffer_for_test();
+                let cold_after0 = cold0.complete(&self.bridge)?;
+                let (cold_after1, cold1_terminal) =
+                    cold_after0.resume_with_l1_probe_for_test(&self.bridge, &self.solver)?;
+                let (cold, cold2_terminal) =
+                    cold_after1.resume_with_l1_probe_for_test(&self.bridge, &self.solver)?;
+                let mut probe = self
+                    .cold_blurred_probe
+                    .lock()
+                    .map_err(|_| "ONE X2 cold stage probe is poisoned")?;
+                let probe = probe
+                    .as_mut()
+                    .ok_or("ONE X2 cold stage probe lost its blurred owner")?;
+                probe.cold0_l2_terminal = Some(cold0_l2_terminal);
+                probe.cold0_l1_initial = Some(cold0_l1_initial);
+                probe.l1_terminals = vec![cold0_terminal, cold1_terminal, cold2_terminal];
+                cold
+            } else {
+                cold0
+                    .complete(&self.bridge)?
+                    .resume(&self.bridge, &self.solver)?
+                    .resume(&self.bridge, &self.solver)?
+            };
+            #[cfg(not(test))]
+            let cold = cold0
                 .complete(&self.bridge)?
                 .resume(&self.bridge, &self.solver)?
                 .resume(&self.bridge, &self.solver)?;
@@ -659,6 +717,115 @@ impl ResidentCaptureFacade {
             return Err("ONE X2 diagnostic ready differs from the installed frame".into());
         }
         Ok(Some(draw.map.diagnostic_readback()?))
+    }
+
+    /// Test-only snapshot of the exact production post-Gaussian belt buffer
+    /// retained at cold frame zero. The buffer is cloned while the ordinary
+    /// resident ownership chain is intact and copied only after installation.
+    #[cfg(test)]
+    pub(crate) fn diagnostic_cold_blurred_probe(
+        &self,
+        frame: &FrameStamp,
+    ) -> Fallible<Option<BlurredBelts>> {
+        let Some(session) = self.state()?.session.clone() else {
+            return Ok(None);
+        };
+        let probe = session
+            .cold_blurred_probe
+            .lock()
+            .map_err(|_| "ONE X2 cold blurred stage probe is poisoned")?;
+        let Some(probe) = probe.as_ref() else {
+            return Ok(None);
+        };
+        if &probe.frame != frame {
+            return Err("ONE X2 cold blurred stage probe names a different frame".into());
+        }
+        read_blurred_probe(&session.context, &probe.packed).map(Some)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_cold_l1_terminals(
+        &self,
+        frame: &FrameStamp,
+    ) -> Fallible<Option<Vec<Vec<u32>>>> {
+        let Some(session) = self.state()?.session.clone() else {
+            return Ok(None);
+        };
+        let probe = session
+            .cold_blurred_probe
+            .lock()
+            .map_err(|_| "ONE X2 cold stage probe is poisoned")?;
+        let Some(probe) = probe.as_ref() else {
+            return Ok(None);
+        };
+        if &probe.frame != frame {
+            return Err("ONE X2 cold L1 terminal probe names a different frame".into());
+        }
+        if probe.l1_terminals.len() != 3 {
+            return Err("ONE X2 cold L1 terminal probe did not retain three calls".into());
+        }
+        probe
+            .l1_terminals
+            .iter()
+            .map(|buffer| read_word_probe(&session.context, buffer))
+            .collect::<Fallible<Vec<_>>>()
+            .map(Some)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_cold0_pis_inputs(
+        &self,
+        frame: &FrameStamp,
+    ) -> Fallible<Option<(Vec<u32>, Vec<u32>)>> {
+        let Some(session) = self.state()?.session.clone() else {
+            return Ok(None);
+        };
+        let probe = session
+            .cold_blurred_probe
+            .lock()
+            .map_err(|_| "ONE X2 cold stage probe is poisoned")?;
+        let Some(probe) = probe.as_ref() else {
+            return Ok(None);
+        };
+        if &probe.frame != frame {
+            return Err("ONE X2 Cold0 PIS probe names a different frame".into());
+        }
+        let l2 = probe
+            .cold0_l2_terminal
+            .as_ref()
+            .ok_or("ONE X2 Cold0 probe lost its L2 terminal")?;
+        let initial = probe
+            .cold0_l1_initial
+            .as_ref()
+            .ok_or("ONE X2 Cold0 probe lost its L1 initial")?;
+        Ok(Some((
+            read_word_probe(&session.context, l2)?,
+            read_word_probe(&session.context, initial)?,
+        )))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_cold_final_inputs(
+        &self,
+        frame: &FrameStamp,
+    ) -> Fallible<Option<map_patch_gpu::DiagnosticFinalInputs>> {
+        let (installed, session) = {
+            let state = self.state()?;
+            (state.installed.clone(), state.session.clone())
+        };
+        if installed.as_ref() != Some(frame) {
+            return Ok(None);
+        }
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        let Some(draw) = session.capture.pipeline.root.diagnostic_ready()? else {
+            return Ok(None);
+        };
+        if draw.frame() != *frame {
+            return Err("ONE X2 diagnostic final inputs differ from the installed frame".into());
+        }
+        draw.map.diagnostic_final_inputs().map(Some)
     }
 }
 
@@ -1654,6 +1821,11 @@ where
 
 #[allow(dead_code)]
 impl ResidentImportedFront {
+    #[cfg(test)]
+    fn blurred_buffer_for_test(&self) -> wgpu::Buffer {
+        self.inner.belts.packed.clone()
+    }
+
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_motion(
         self,
         stage: &geometry_gpu::temporal_gpu::GpuMotionStage,
@@ -1664,6 +1836,69 @@ impl ResidentImportedFront {
     > {
         self.inner.prepare_motion(stage)
     }
+}
+
+#[cfg(test)]
+fn read_blurred_probe(context: &OneXsGpuContext, packed: &wgpu::Buffer) -> Fallible<BlurredBelts> {
+    let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ONE X2 cold blurred stage probe"),
+        size: OUTPUT_BYTES,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = context.device().create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(packed, 0, &readback, 0, OUTPUT_BYTES);
+    let submission = context.queue().submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    let (mapped, answer) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = mapped.send(result);
+    });
+    context.device().poll(wgpu::PollType::Wait {
+        submission_index: Some(submission),
+        timeout: None,
+    })?;
+    answer.recv()??;
+    let bytes = slice.get_mapped_range();
+    let belts = unpack_blurred_belts(&bytes)?;
+    drop(bytes);
+    readback.unmap();
+    Ok(belts)
+}
+
+#[cfg(test)]
+fn read_word_probe(context: &OneXsGpuContext, source: &wgpu::Buffer) -> Fallible<Vec<u32>> {
+    let bytes = source.size();
+    if !bytes.is_multiple_of(4) {
+        return Err("ONE X2 cold stage word probe has a non-word buffer size".into());
+    }
+    let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ONE X2 cold stage word probe readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = context.device().create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(source, 0, &readback, 0, bytes);
+    let submission = context.queue().submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    let (sent, received) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sent.send(result);
+    });
+    context.device().poll(wgpu::PollType::Wait {
+        submission_index: Some(submission),
+        timeout: None,
+    })?;
+    received.recv()??;
+    let mapped = slice.get_mapped_range();
+    let words = mapped
+        .chunks_exact(4)
+        .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+        .collect();
+    drop(mapped);
+    readback.unmap();
+    Ok(words)
 }
 
 const CODES_PER_WORD: usize = 4;

@@ -619,6 +619,10 @@ impl GpuWarmPostL1Pipeline {
             ordinal: _,
             #[cfg(test)]
                 l2_work_modes: _,
+            #[cfg(test)]
+                l2_terminal: _,
+            #[cfg(test)]
+                l1_initial: _,
         } = input;
         for (part, resource, words) in [
             ("paired L1 terminal", &terminal._output, PATCH_WORDS),
@@ -1307,6 +1311,20 @@ impl<K> GpuCold0Terminal<K> {
             ordinal: std::marker::PhantomData,
         })
     }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn l1_terminal_buffer_for_test(
+        &self,
+    ) -> wgpu::Buffer {
+        self.terminal.terminal._output.clone()
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cold0_input_buffers_for_test(
+        &self,
+    ) -> (wgpu::Buffer, wgpu::Buffer) {
+        self.terminal.cold_input_buffers_for_test()
+    }
 }
 
 impl<K, O: ColdLoopOrdinal> GpuColdLoop<K, O> {
@@ -1372,6 +1390,29 @@ impl<K> GpuColdLoop<K, ColdAfter0> {
             ordinal: std::marker::PhantomData,
         })
     }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn resume_with_l1_probe_for_test(
+        self,
+        bridge: &super::GpuL2PostPisBridge,
+        solver: &crate::flow::one_xs::pis::gpu::GpuPisPipeline,
+    ) -> Fallible<(GpuColdLoop<K, ColdAfter1>, wgpu::Buffer)> {
+        let controls = self.controls.clone();
+        let terminal = self.resume_terminal(bridge, solver)?;
+        let probe = terminal.terminal._output.clone();
+        let completed = complete_cold_tail(terminal, &bridge.post_l1, 1)?;
+        Ok((
+            GpuColdLoop {
+                prepared: Some(completed.prepared),
+                validity: Some(completed.validity),
+                post: Some(completed.post),
+                controls,
+                _public_scratch: completed.public,
+                ordinal: std::marker::PhantomData,
+            },
+            probe,
+        ))
+    }
 }
 
 impl<K> GpuColdLoop<K, ColdAfter1> {
@@ -1394,6 +1435,29 @@ impl<K> GpuColdLoop<K, ColdAfter1> {
             .ok_or("resident cold loop lost its temporal owner")?
             .attach_cold_successor()?;
         Ok(boundary)
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn resume_with_l1_probe_for_test(
+        self,
+        bridge: &super::GpuL2PostPisBridge,
+        solver: &crate::flow::one_xs::pis::gpu::GpuPisPipeline,
+    ) -> Fallible<(GpuCompletedColdCheckpoint<K>, wgpu::Buffer)> {
+        let terminal = self.resume_terminal(bridge, solver)?;
+        let probe = terminal.terminal._output.clone();
+        let completed = complete_cold_tail(terminal, &bridge.post_l1, 2)?;
+        let mut boundary = GpuCompletedColdCheckpoint {
+            prepared: Some(completed.prepared),
+            validity: Some(completed.validity),
+            post: Some(completed.post),
+            public: completed.public,
+        };
+        boundary
+            .post
+            .as_mut()
+            .ok_or("resident cold loop lost its temporal owner")?
+            .attach_cold_successor()?;
+        Ok((boundary, probe))
     }
 }
 
@@ -1444,6 +1508,10 @@ fn complete_cold_tail<K>(
         ordinal: _,
         #[cfg(test)]
             l2_work_modes: _,
+        #[cfg(test)]
+            l2_terminal: _,
+        #[cfg(test)]
+            l1_initial: _,
     } = input;
     let mut guard = ColdTailGuard {
         terminal: Some(terminal),
