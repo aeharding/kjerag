@@ -26,7 +26,7 @@ pub mod pis;
 /// Staged GPU-resident producer for image-owned PIS inputs. It is not wired
 /// into Scene until its complete downstream transaction is qualified.
 #[allow(dead_code)]
-pub(crate) use self::one_xs_belt_gpu::pis_frontend_gpu;
+use self::one_xs_belt_gpu::pis_frontend_gpu;
 
 /// Exact render-private device and queue identity shared by resident stages.
 pub(crate) mod gpu_context;
