@@ -23,7 +23,7 @@ use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sampl
 /// boundary can consume the whole private producer token atomically.
 #[path = "one_xs/pis_frontend_gpu.rs"]
 #[allow(dead_code)]
-pub(crate) mod pis_frontend_gpu;
+pub(super) mod pis_frontend_gpu;
 
 /// Device-resident final bilateral-map materializer.
 ///
