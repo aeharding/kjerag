@@ -3,6 +3,74 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Shared-context resident ONE X2 final-map materializer, 2026-09-01,
+integration branch only [UNSELECTED; EXACT TARGET-GPU TWIN; NO SCENE OR
+PERFORMANCE CLAIM]:** the accepted final bilateral materializer now owns the
+one structural `OneXsGpuContext` used by the resident chain. Its production
+entry consumes a generic sealed upstream token, advances that token's existing
+submission lease, performs only GPU copies plus the exact stored compute pass,
+and returns an opaque frame-bound packed-map token. That token retains the
+upstream alpha and source ownership and can create the existing two-storage
+direct type-2 Scene binding without exposing either raw buffer. Scene does not
+construct, store or draw this token yet. Ordinary materialization creates no
+mappable buffer and performs no readback or device poll; the CPU oracle and
+diagnostic copies are test-only. The forced-RADV focused gate matches every
+packed component bit, preserves the accepted arithmetic/order, rejects foreign
+structural contexts and frame identities, and refuses all 20 accepted live
+shader mutations. The materializer is now a private child of the resident belt
+owner, so no flow sibling can name its operand copier, raw command or buffer
+details, materializer, binding or output token. The remaining seam is the
+post-L1 resident producer's implementation of the owner-private sealed operand
+copier and single-lease submit method; there is deliberately no second context,
+lease or CPU reconstruction route.
+
+The authenticated receipt in
+`docs/research/gpu-final-map-context-qualification.md` binds clean code commit
+`e620a4cae27f1a51b8998328620594765c277dd7`, tree
+`b7ce05854f507824170c1364ac4bddbc54b110c5`, the fresh retained test binary
+before and after execution, exact forced-Vulkan/RADV command and environment,
+ICD, adapter/driver, source hashes, timestamps and exit status. Its sealed
+pre-run receipt hashes to `98be0bc640364941ab06ba3d5a53e07b07e4bea9155ee5f4ab1f717d9b9d9609`,
+the complete 4/4 run log to
+`34fe395b5f996a26a4b1e5bbc6943207294c03e723d04a556c41c98216df3c86`,
+and the post-run receipt to
+`dc1039b41b68df250f0e9bb10a6e05584c64094b2ab8067d9bf6636eb407f777`.
+
+**Context-bound GPU ONE X2 retained geometry, 2026-09-01, implementation
+branch only [UNSELECTED; NO SCENE WIRING; SEALED TRANSITIONS]:** the
+shared `OneXsGpuContext` now owns a correctness-first geometry pipeline for
+both 1,080-by-60 periodic map merges, the selected directional continuity
+filters, physical validity seed, 9-by-9 erosion and A/B mask unification.
+Static line coordinates upload once. The temporary input boundary uploads the
+two CPU-built 100-by-200 parent maps into private token-owned storage; the
+incoming resident-parent producer can replace only that private owner and
+binding without changing any geometry arithmetic or downstream layout.
+
+The output is one non-cloneable opaque encoded token containing its exact GPU
+context, unfinished command encoder, full frame flight, both parent preimages,
+both retained float2 maps, both physical masks and all bind groups. It exposes
+no raw buffer, queue, submission index, detached flight or ordinary completion
+hook. The geometry stage neither submits nor creates a competing lease. Its
+only production handoff appends exact belt sampling and Gaussian commands to
+that unfinished encoder; the belt owner then performs the one submission and
+mints the chain's sole source-surface lease. A second purpose-specific
+transition binds the token's packed masks directly into the sealed frontend.
+The geometry allocation and imported source owner remain inseparable inside
+that lease through PIS and final materialization. None of the rejected
+separable flight, packed-buffer, generic-submit or completion hooks return.
+
+The physical masks use the frontend's exact packed layout: four U8 codes per
+word, lens A then lens B, followed by its explicit runtime-zero word. Belt
+sampling consumes the retained map directly and the frontend consumes the
+packed masks directly, with no map or mask reupload or layout conversion.
+Construction compares every retained float word and packed mask word with the
+selected CPU oracle on the actual adapter, including signed zero, exceptional
+parent payloads, periodic edges and the native ordered FMA schedule. Four live
+shader mutations cover FMA operand association, the strict directional
+threshold, erosion radius and lens unification. This checkpoint makes no
+playback, performance, Studio-parity, owner-eye or final ownership-readiness
+claim.
+
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
 READINESS CLAIM]:** the qualified paired GPU PIS kernel has a concrete
@@ -29,32 +97,42 @@ same structural device/queue pair remain accepted.
 
 **GPU-resident warm image-state arithmetic checkpoint, 2026-09-01,
 implementation branch only [UNSELECTED; NO SCENE WIRING; NO PERFORMANCE
-CLAIM]:** a render-private compute stage now consumes the sealed resident
-physical A/B post-Gaussian belts and a capture-owned retained reference slot.
+CLAIM]:** a render-private compute stage beneath the private geometry owner
+now consumes its complete sealed geometry/belt aggregate and a capture-owned
+retained reference slot.
 Warm work produces the exact threshold/population motion mask, recursive L1
 and L2 U8 area reductions, and the selected fused 0.7/0.3 next-reference
 planes. Cold work copies both current physical planes exactly and exposes no
 invented motion result. All storage bindings cover complete word-aligned
 buffers, ordinary work has no CPU readback, and the full opaque `GpuPisFlight`
 plus a temporal generation seal every candidate. The stage validates the
-shared `OneXsGpuContext`, encodes through the resident belt's inherited linear
-submission lease, and returns that same lease inside its opaque output.
+shared `OneXsGpuContext`, privately binds the physical A/B post-Gaussian belt
+within that aggregate, encodes through its inherited linear submission lease,
+and returns the complete geometry, masks, source owner and same lease inside
+its opaque output. Production cannot enter motion from a separable raw belt
+token; that narrower entry exists only in tests.
 
-The next reference is a private candidate slot until an enclosing whole-frame
-transaction explicitly commits it. Dropping the candidate clears only its
-matching flight and leaves the allocation-identical prior committed slot and
-generation unchanged. The target Radeon 760M/RADV matched the CPU oracle for
+The next reference remains a private pending successor after the motion
+transaction seals its opaque frame candidate. Motion has no production
+publication method at this boundary: later L2, post, final-map, bind and draw
+installation may still fail. Dropping either the transaction or transferred
+frame candidate clears only its matching flight and leaves the
+allocation-identical prior committed slot and generation unchanged. The future
+capture-owner final install must publish the successor atomically with its
+ready resident draw. The target Radeon 760M/RADV matched the CPU oracle for
 both physical lenses, base/L1/L2 motion and next references; six live shader
 mutations covering lens selection, inclusive change threshold, asymmetric
 low-edge bounds, promotion population, recursive rounding and EMA weight were
-all refused. Cold commit, warm drop, exact retry and warm commit passed in one
-state regression.
+all refused. Cold final-install publication, warm post-motion drop, exact retry
+and warm final-install publication passed in one state regression.
 
 Ordinary cold/warm work does not map, poll, reconstruct CPU images or create a
 second submission owner. The remaining connection is one purpose-specific
 private-owner transition that consumes the whole `GpuMotionFrame` into the
-resident front-end and warm scheduler/post-L1 chain. No current image, L1/L2
-physical mask, flight or lease component is exposed separately for that seam,
+resident front-end and warm scheduler/post-L1 chain. That transition must bind
+the already-retained geometry mask internally rather than split the geometry
+carrier back into belts and masks. No current image, L1/L2 physical mask,
+geometry mask, flight or lease component is exposed separately for that seam,
 and Scene cannot select it until the downstream transition is qualified.
 
 Only cost modes, initial grids, optional hints, descent admission and the

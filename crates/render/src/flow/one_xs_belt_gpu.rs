@@ -23,13 +23,20 @@ use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sampl
 /// boundary can consume the whole private producer token atomically.
 #[path = "one_xs/pis_frontend_gpu.rs"]
 #[allow(dead_code)]
-pub(crate) mod pis_frontend_gpu;
+pub(super) mod pis_frontend_gpu;
 
-/// Resident temporal state is another private descendant of the belt owner.
-/// Its only ordinary entry consumes the complete producer token atomically.
-#[path = "one_xs/temporal_gpu.rs"]
+/// Device-resident final bilateral-map materializer.
+///
+/// Its input boundary stays inside this private resident owner. Scene does not
+/// consume the resulting opaque map token yet.
+#[path = "one_xs/map_patch_gpu.rs"]
+mod map_patch_gpu;
+
+/// Geometry is nested under the belt owner so its only production boundary
+/// can append belt work and mint the one lease atomically.
+#[path = "one_xs/geometry_gpu.rs"]
 #[allow(dead_code)]
-pub(crate) mod temporal_gpu;
+mod geometry_gpu;
 
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
@@ -300,6 +307,11 @@ pub(crate) struct SourceTextures<'a> {
 enum SubmissionInput<'a> {
     Sampled { qualify_intermediates: bool },
     Preblurred(&'a SolverBelts),
+}
+
+enum MapInput<'a> {
+    Uploaded(&'a RetainedBaseMaps),
+    Resident(&'a wgpu::Buffer),
 }
 
 impl SourceTextures<'_> {
@@ -616,6 +628,25 @@ impl GpuSolverBeltPipeline {
         input: SubmissionInput<'_>,
         copy_to_cpu: bool,
     ) -> Fallible<PendingBlurredBelts<K>> {
+        self.submit_inner_with_map(
+            sources,
+            MapInput::Uploaded(maps),
+            source_owner,
+            input,
+            copy_to_cpu,
+            None,
+        )
+    }
+
+    fn submit_inner_with_map<K>(
+        &self,
+        sources: SourceTextures<'_>,
+        map_input: MapInput<'_>,
+        source_owner: K,
+        input: SubmissionInput<'_>,
+        copy_to_cpu: bool,
+        encoder: Option<wgpu::CommandEncoder>,
+    ) -> Fallible<PendingBlurredBelts<K>> {
         let device = self.context.device();
         let queue = self.context.queue();
         let qualify_intermediates = matches!(
@@ -629,13 +660,25 @@ impl GpuSolverBeltPipeline {
             SubmissionInput::Preblurred(belts) => Some(belts),
         };
         sources.validate()?;
-        let map = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained base maps"),
-            size: maps.bytes().len() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&map, 0, maps.bytes());
+        let uploaded_map = match map_input {
+            MapInput::Uploaded(maps) => {
+                let map = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ONE X2 retained base maps"),
+                    size: maps.bytes().len() as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&map, 0, maps.bytes());
+                Some(map)
+            }
+            MapInput::Resident(_) => None,
+        };
+        let map = match map_input {
+            MapInput::Uploaded(_) => uploaded_map
+                .as_ref()
+                .expect("uploaded map was allocated before binding"),
+            MapInput::Resident(map) => map,
+        };
         let packed = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 packed blurred solver belts"),
             size: OUTPUT_BYTES,
@@ -709,8 +752,10 @@ impl GpuSolverBeltPipeline {
                 },
             ],
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ONE X2 GPU solver belts"),
+        let mut encoder = encoder.unwrap_or_else(|| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ONE X2 GPU solver belts"),
+            })
         });
         if initial_preblur.is_none() {
             {
@@ -753,7 +798,7 @@ impl GpuSolverBeltPipeline {
         let submission = queue.submit([encoder.finish()]);
         Ok(PendingBlurredBelts {
             lease: SubmissionLease::new(self.context.clone(), submission, source_owner),
-            _map: map,
+            _map: uploaded_map,
             _packed: packed,
             _horizontal: horizontal,
             readback,
@@ -977,7 +1022,7 @@ impl<K> Drop for SubmissionLease<K> {
 #[must_use = "the submitted ONE X2 solver belts have not been consumed"]
 pub(crate) struct PendingBlurredBelts<K> {
     lease: SubmissionLease<K>,
-    _map: wgpu::Buffer,
+    _map: Option<wgpu::Buffer>,
     /// Retained through either the CPU copy or the resident consumer.
     _packed: wgpu::Buffer,
     _horizontal: wgpu::Buffer,
@@ -1117,7 +1162,7 @@ pub(crate) struct GpuBlurredBelts<K> {
     flight: Option<GpuPisFlight>,
     lease: SubmissionLease<K>,
     packed: wgpu::Buffer,
-    _producer_map: wgpu::Buffer,
+    _producer_map: Option<wgpu::Buffer>,
     _horizontal: wgpu::Buffer,
     _resources: wgpu::BindGroup,
 }
@@ -1654,11 +1699,15 @@ mod tests {
 
     #[test]
     fn submission_lease_drop_during_outer_unwind_is_process_safe() {
-        let helper = "flow::one_xs::one_xs_belt_gpu::tests::submission_lease_double_unwind_child";
+        let module = module_path!();
+        let module = module
+            .split_once("::")
+            .map_or(module, |(_, test_path)| test_path);
+        let helper = format!("{module}::submission_lease_double_unwind_child");
         let output = std::process::Command::new(
             std::env::current_exe().expect("the test harness has an executable path"),
         )
-        .args(["--exact", helper, "--nocapture"])
+        .args(["--exact", &helper, "--nocapture"])
         .env(DOUBLE_UNWIND_CHILD, "1")
         .output()
         .expect("could not start the isolated double-unwind helper");

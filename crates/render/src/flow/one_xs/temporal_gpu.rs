@@ -7,7 +7,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::GpuBlurredBelts;
+#[cfg(test)]
+use super::super::GpuBlurredBelts;
+use super::GpuGeometryBelts;
 use crate::Fallible;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::pis::Level;
@@ -80,23 +82,21 @@ struct EncodedGpuMotion {
     candidate: Option<GpuMotionCandidate>,
 }
 
-/// Candidate second slot.  Drop is rollback; commit is the sole publication.
-#[must_use = "the GPU motion transaction must join a whole-frame commit or roll back"]
-pub(crate) struct GpuMotionTransaction<K> {
+/// Candidate second slot. Drop is rollback; transfer only seals the successor.
+#[must_use = "the GPU motion transaction must enter a frame candidate or roll back"]
+pub(crate) struct GpuMotionTransaction<C> {
     candidate: Option<GpuMotionCandidate>,
-    belts: Option<GpuBlurredBelts<K>>,
-    committed: bool,
+    carrier: Option<C>,
+    transferred: bool,
 }
 
-/// Resident temporal outputs after their state slot was atomically published.
-#[must_use = "the committed GPU motion frame still owns the source submission lease"]
-pub(crate) struct GpuMotionFrame<K> {
-    receipt: GpuMotionReceipt,
-    belts: GpuBlurredBelts<K>,
-    current: wgpu::Buffer,
-    base: Option<wgpu::Buffer>,
-    level_one: Option<wgpu::Buffer>,
-    level_two: Option<wgpu::Buffer>,
+/// Opaque pending successor. Publication belongs only to the capture owner's
+/// final atomic ready-draw install, after every downstream stage succeeds.
+#[must_use = "the pending GPU motion frame must reach final install or roll back"]
+pub(crate) struct GpuMotionFrame<C> {
+    candidate: Option<GpuMotionCandidate>,
+    carrier: C,
+    installed: bool,
 }
 
 impl GpuMotionStage {
@@ -341,13 +341,13 @@ impl Drop for EncodedGpuMotion {
     }
 }
 
-impl<K> GpuMotionTransaction<K> {
-    fn from_resident_transition(mut encoded: EncodedGpuMotion, belts: GpuBlurredBelts<K>) -> Self {
+impl<C> GpuMotionTransaction<C> {
+    fn from_resident_transition(mut encoded: EncodedGpuMotion, carrier: C) -> Self {
         debug_assert!(encoded.command.is_none());
         Self {
             candidate: encoded.candidate.take(),
-            belts: Some(belts),
-            committed: false,
+            carrier: Some(carrier),
+            transferred: false,
         }
     }
 
@@ -373,55 +373,27 @@ impl<K> GpuMotionTransaction<K> {
         })
     }
 
-    /// Publish the candidate reference slot.  Enclosing frame ownership must
-    /// call this only at its existing all-or-nothing commit boundary.
-    pub(crate) fn commit(mut self) -> Fallible<GpuMotionFrame<K>> {
+    /// Seal the complete pending successor into the opaque frame candidate.
+    /// This deliberately does not publish temporal state: later resident L2,
+    /// post, final-map, bind and draw installation may still fail.
+    pub(crate) fn into_frame_candidate(mut self) -> GpuMotionFrame<C> {
         let candidate = self
             .candidate
             .take()
             .expect("GPU motion transaction lost its candidate");
-        {
-            let mut state = candidate
-                .state
-                .lock()
-                .expect("GPU motion state mutex poisoned");
-            if state.pending.as_ref()
-                != Some(&(
-                    candidate.receipt.temporal_generation,
-                    candidate.receipt.flight.clone(),
-                ))
-            {
-                return Err(
-                    "ONE X2 GPU motion commit does not match the sealed in-flight frame".into(),
-                );
-            }
-            let next_generation = state
-                .generation
-                .checked_add(1)
-                .ok_or("ONE X2 GPU motion generation space exhausted")?;
-            state.committed_references = Some(Arc::clone(&candidate.next_references));
-            state.committed_flight = Some(candidate.receipt.flight.clone());
-            state.generation = next_generation;
-            state.pending = None;
-        }
-        self.committed = true;
-        Ok(GpuMotionFrame {
-            receipt: candidate.receipt.clone(),
-            belts: self
-                .belts
+        self.transferred = true;
+        GpuMotionFrame {
+            candidate: Some(candidate),
+            carrier: self
+                .carrier
                 .take()
                 .expect("motion transaction lost its submission lease"),
-            current: candidate.current,
-            base: (candidate.receipt.history == GpuMotionHistory::Warm).then_some(candidate.base),
-            level_one: (candidate.receipt.history == GpuMotionHistory::Warm)
-                .then_some(candidate.level_one),
-            level_two: (candidate.receipt.history == GpuMotionHistory::Warm)
-                .then_some(candidate.level_two),
-        })
+            installed: false,
+        }
     }
 }
 
-impl<K> GpuBlurredBelts<K> {
+impl<K> GpuGeometryBelts<K> {
     /// Consume the entire resident producer token into the temporal stage.
     /// No buffer, flight, context, command or lease component crosses this
     /// private ownership boundary separately.
@@ -429,7 +401,36 @@ impl<K> GpuBlurredBelts<K> {
         mut self,
         stage: &GpuMotionStage,
         state: &GpuMotionState,
-    ) -> Fallible<GpuMotionTransaction<K>> {
+    ) -> Fallible<GpuMotionTransaction<Self>> {
+        let context = stage.context_for_resident_transition();
+        self.belts.lease.validate_provenance(context)?;
+        let flight = self
+            .belts
+            .flight
+            .as_ref()
+            .expect("GPU-resident belts retain their flight until consumption")
+            .clone();
+        let mut encoded = stage.encode_resident_transition(state, &self.belts.packed, flight)?;
+        self.belts
+            .lease
+            .submit_after(context, |_| encoded.take_command())?;
+        self.belts
+            .flight
+            .take()
+            .expect("GPU-resident belts transfer their flight exactly once");
+        Ok(GpuMotionTransaction::from_resident_transition(
+            encoded, self,
+        ))
+    }
+}
+
+#[cfg(test)]
+impl<K> GpuBlurredBelts<K> {
+    fn prepare_motion(
+        mut self,
+        stage: &GpuMotionStage,
+        state: &GpuMotionState,
+    ) -> Fallible<GpuMotionTransaction<Self>> {
         let context = stage.context_for_resident_transition();
         self.lease.validate_provenance(context)?;
         let flight = self
@@ -449,9 +450,9 @@ impl<K> GpuBlurredBelts<K> {
     }
 }
 
-impl<K> Drop for GpuMotionTransaction<K> {
+impl<C> Drop for GpuMotionTransaction<C> {
     fn drop(&mut self) {
-        if self.committed {
+        if self.transferred {
             return;
         }
         if let Some(candidate) = &self.candidate {
@@ -464,32 +465,87 @@ impl<K> Drop for GpuMotionTransaction<K> {
     }
 }
 
-impl<K> GpuMotionFrame<K> {
+impl<C> GpuMotionFrame<C> {
+    fn candidate(&self) -> &GpuMotionCandidate {
+        self.candidate
+            .as_ref()
+            .expect("GPU motion frame lost its pending successor")
+    }
+
     pub(crate) fn receipt(&self) -> &GpuMotionReceipt {
-        &self.receipt
+        &self.candidate().receipt
     }
 
     #[cfg(test)]
     fn current(&self) -> &wgpu::Buffer {
-        &self.current
+        &self.candidate().current
     }
 
     #[cfg(test)]
     fn base(&self) -> Option<&wgpu::Buffer> {
-        self.base.as_ref()
+        (self.receipt().history == GpuMotionHistory::Warm).then_some(&self.candidate().base)
     }
 
     #[cfg(test)]
     fn level(&self, level: Level) -> Option<&wgpu::Buffer> {
-        match level {
-            Level::One => self.level_one.as_ref(),
-            Level::Two => self.level_two.as_ref(),
+        (self.receipt().history == GpuMotionHistory::Warm).then_some(match level {
+            Level::One => &self.candidate().level_one,
+            Level::Two => &self.candidate().level_two,
+        })
+    }
+}
+
+impl<C> Drop for GpuMotionFrame<C> {
+    fn drop(&mut self) {
+        if self.installed {
+            return;
+        }
+        if let Some(candidate) = &self.candidate {
+            clear_pending(
+                &candidate.state,
+                candidate.receipt.temporal_generation,
+                &candidate.receipt.flight,
+            );
         }
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl<K> GpuMotionFrame<GpuBlurredBelts<K>> {
+    /// Test-only stand-in for the future capture-owner atomic ready-draw
+    /// install. Production deliberately has no publication method yet.
+    fn publish_at_install_for_test(mut self) -> Fallible<Self> {
+        let candidate = self.candidate();
+        {
+            let mut state = candidate
+                .state
+                .lock()
+                .expect("GPU motion state mutex poisoned");
+            if state.pending.as_ref()
+                != Some(&(
+                    candidate.receipt.temporal_generation,
+                    candidate.receipt.flight.clone(),
+                ))
+            {
+                return Err(
+                    "ONE X2 GPU motion install does not match the sealed in-flight frame".into(),
+                );
+            }
+            let next_generation = state
+                .generation
+                .checked_add(1)
+                .ok_or("ONE X2 GPU motion generation space exhausted")?;
+            state.committed_references = Some(Arc::clone(&candidate.next_references));
+            state.committed_flight = Some(candidate.receipt.flight.clone());
+            state.generation = next_generation;
+            state.pending = None;
+        }
+        self.installed = true;
+        Ok(self)
+    }
+
     fn observe_completion(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
-        self.belts.observe_completion(state);
+        self.carrier.observe_completion(state);
     }
 }
 
@@ -672,7 +728,7 @@ mod tests {
 
     use kjerag_media::FrameStamp;
 
-    use super::super::resident_blurred_fixture;
+    use super::super::super::resident_blurred_fixture;
     use super::*;
 
     #[test]
@@ -750,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_commit_then_warm_drop_is_all_or_nothing() {
+    fn final_install_publishes_and_later_stage_drop_is_all_or_nothing() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(why) => {
@@ -779,9 +835,16 @@ mod tests {
         let cold = first_belts.prepare_motion(&stage, &state).unwrap();
         assert_eq!(cold.receipt().history, GpuMotionHistory::Cold);
         assert!(cold.base().is_none());
-        let cold_frame = cold.commit().unwrap();
+        let cold_frame = cold.into_frame_candidate();
         assert_eq!(cold_frame.receipt().flight, first_flight);
         assert_eq!(Arc::strong_count(&first_owner), 2);
+        {
+            let state = state.inner.lock().unwrap();
+            assert_eq!(state.generation, 0);
+            assert!(state.committed_references.is_none());
+            assert!(state.pending.is_some());
+        }
+        let cold_frame = cold_frame.publish_at_install_for_test().unwrap();
         let (generation, reference) = {
             let state = state.inner.lock().unwrap();
             (
@@ -808,11 +871,12 @@ mod tests {
         )
         .unwrap();
         let warm = second_belts.prepare_motion(&stage, &state).unwrap();
-        assert_eq!(warm.receipt().history, GpuMotionHistory::Warm);
-        assert!(warm.base().is_some());
-        assert!(warm.level(Level::One).is_some());
-        assert!(warm.level(Level::Two).is_some());
-        drop(warm);
+        let warm_frame = warm.into_frame_candidate();
+        assert_eq!(warm_frame.receipt().history, GpuMotionHistory::Warm);
+        assert!(warm_frame.base().is_some());
+        assert!(warm_frame.level(Level::One).is_some());
+        assert!(warm_frame.level(Level::Two).is_some());
+        drop(warm_frame);
         assert_eq!(Arc::strong_count(&dropped_owner), 1);
         {
             let state = state.inner.lock().unwrap();
@@ -835,7 +899,7 @@ mod tests {
         .unwrap();
         assert_eq!(recovered_second, second);
         let recovered = recovered_belts.prepare_motion(&stage, &state).unwrap();
-        let frame = recovered.commit().unwrap();
+        let frame = recovered.into_frame_candidate();
         assert_eq!(frame.receipt().flight, second_flight);
         assert_eq!(Arc::strong_count(&recovered_owner), 2);
         let expected_mask = MotionMask::between(&second, &first);
@@ -858,6 +922,16 @@ mod tests {
                 expected
             );
         }
+        {
+            let state = state.inner.lock().unwrap();
+            assert_eq!(state.generation, generation);
+            assert!(Arc::ptr_eq(
+                state.committed_references.as_ref().unwrap(),
+                &reference
+            ));
+            assert!(state.pending.is_some());
+        }
+        let frame = frame.publish_at_install_for_test().unwrap();
         {
             let state = state.inner.lock().unwrap();
             assert_eq!(state.generation, generation + 1);
