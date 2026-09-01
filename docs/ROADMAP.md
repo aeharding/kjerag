@@ -3,9 +3,65 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
-**Production ONE X2 paired PIS GPU wiring, 2026-09-01, implementation branch
-only [TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; NOT YET A
-RANGE OR PERFORMANCE CLAIM]:** the selected Scene route now lazily qualifies a
+**Authenticated paired PIS GPU checkpoint, 2026-09-01 [6,400 GPU
+TRANSACTIONS; ZERO CPU FALLBACK; BYTE-IDENTICAL TO THE FROZEN KJERAG CPU
+BOUNDARY; 10.6% MEDIAN THROUGHPUT GAIN; NOT REALTIME; OWNERSHIP FIX REQUIRED
+BEFORE INTEGRATION]:** exact clean commit
+`a1594c6fc458dbee248ba2a9d0a4f9f419a22304` causally processed frames zero
+through 6399 of the owner clip at the reported 71.13 yaw, -13.99 pitch and
+57.95-degree locked view, Sharp sampling, band and tone enabled, and the
+factory seam. It presented all 6,400 frames with zero dropped and zero
+starved. Its typed receipt recorded 6,400 GPU PIS transactions and zero CPU
+PIS transactions, and every one of the 61 captured map frames named the GPU
+backend. The range receipt SHA-256 is
+`62262de5e5ddd97c773cdf0861fb7671524b98ea53336ba904ddc2958801a107`.
+
+All 183 production artifacts for frames 6339 through 6399, comprising the
+rendered PNG, packed map and alpha map for every frame, are literal byte
+matches to the separately built frozen accepted CPU boundary. Their aggregate
+SHA-256 remains
+`bd0eb80a82d042d641b0543ad28beb4e7b186e77e4e11048e98f424bc63dacf0`.
+All 61 candidate-authenticated computed traces are also byte-identical to the
+frozen traces and report zero uncovered pixels; the trace aggregate remains
+`515a0fd1a9238a721942ac8eca031d048d1dc2c33c9966c48595138521b854c8`
+and the strict trace receipt is
+`450cff21c22c1747d22cc62e8e70d6feabc997dd9d1893bc8363e1c900b8ac60`.
+This authenticates the GPU implementation against Kjerag's frozen accepted
+CPU boundary over the tested interval. It does not expand the prior Studio
+parity claim to other footage or settings.
+
+The same exact GPU executable was measured against the frozen `9054e547` CPU
+implementation plus the common benchmark-only harness at `4c5b91f` in four
+order-balanced pairs, `AB | BA | BA | AB`. Every arm consumed 200
+causal warm-up frames followed by 300 unpaced waited transactions, bound the
+same source hashes, view, direct type-2 route and Radeon 760M/RADV adapter, and
+presented all 300 measured frames with zero drops. The eight arms did not
+overlap one another or the separately retained invalid contended experiment;
+the receipts do not carry general host-load, clock or temperature telemetry.
+CPU throughput was
+18.787368, 18.907114, 18.687162 and 18.914921 fps; GPU throughput was
+20.652659, 20.975677, 21.080096 and 20.714241 fps. The ratio of medians is
++10.60% (18.847241 to 20.844959 fps), while the primary order-balanced paired
+median is +10.43%. This is an unpaced one-clip, one-view, one-machine result
+from four pairs, not statistical significance, realtime playback, audio or a
+visual-quality claim. It remains only 69.55% of the 29.97-fps source rate. The
+complete receipt hash list has SHA-256
+`1b047196e2a32523b6d53621f8ff8155a5cfa0867ea6d3744ed31082cccb80bd`.
+
+An independent ownership audit then found that the submitted belt token can
+be dropped on the selected Scene's exact-frame rejection path before waiting
+for its GPU submission, returning an aliased decoder surface to the pool too
+early. The unused resident token also ignores a failed completion poll before
+releasing that owner. Numerical authentication above remains valid, but this
+commit is not an integration candidate until a fail-closed submission lease,
+early-drop regression and exact owner-clip rerun land. The next performance
+slice keeps the post-Gaussian belts resident, constructs estimator levels and
+prepared models on the GPU, and binds them directly to paired PIS rather than
+reconstructing CPU `Input` behind an adapter.
+
+**Production ONE X2 paired PIS GPU wiring, 2026-09-01, authenticated checkpoint
+[TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; RANGE AND
+PERFORMANCE EVIDENCE ABOVE]:** the selected Scene route now lazily qualifies a
 persistent paired PIS compute pipeline before any frame-specific GPU work.
 Cold and warm scalar transactions retain CPU construction and upload of the
 typed prepared source models as the temporary producer boundary, then consume
@@ -30,9 +86,8 @@ The strict computed-trace consumer emits its corresponding v2 contract and
 refuses historical v1 or missing, mixed and inconsistent provenance. The
 three-panel owner-review builder now requires those two v2 inputs and emits
 `kjerag.owner-three-panel-review.v2`; the frozen v1 review contract is not
-silently redefined. This branch does not reinterpret any frozen v1 evidence
-as proof of GPU-only PIS; a new target-GPU consecutive-range run is required
-before making that claim.
+silently redefined. The authenticated range above is the new target-GPU v2
+evidence; no frozen v1 evidence is reinterpreted as proof of GPU-only PIS.
 
 **Second GPU ONE X2 slice, 2026-09-01, implementation branch only [GPU
 GAUSSIAN; TYPED POST-BLUR HANDOFF; 244 BYTE-IDENTICAL ARTIFACTS; SMALL NOISY
