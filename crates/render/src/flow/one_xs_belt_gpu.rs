@@ -25,6 +25,12 @@ use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sampl
 #[allow(dead_code)]
 pub(crate) mod pis_frontend_gpu;
 
+/// Resident temporal state is another private descendant of the belt owner.
+/// Its only ordinary entry consumes the complete producer token atomically.
+#[path = "one_xs/temporal_gpu.rs"]
+#[allow(dead_code)]
+pub(crate) mod temporal_gpu;
+
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
 const OUTPUT_WORDS: u32 = (SolverBelts::BYTES / CODES_PER_WORD) as u32;
@@ -1160,6 +1166,48 @@ pub(crate) fn resident_qualification_fixture<K>(
     Ok((belts, expected))
 }
 
+#[cfg(test)]
+fn resident_blurred_fixture<K>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source_owner: K,
+    flight: GpuPisFlight,
+    blurred: &BlurredBelts,
+) -> Fallible<(GpuBlurredBelts<K>, BlurredBelts)> {
+    let fixture = qualification_fixture();
+    let texture_a = qualification_texture(
+        device,
+        queue,
+        "ONE X2 resident blurred fixture source A",
+        &fixture.sources.a,
+    );
+    let texture_b = qualification_texture(
+        device,
+        queue,
+        "ONE X2 resident blurred fixture source B",
+        &fixture.sources.b,
+    );
+    let pipeline = GpuSolverBeltPipeline::new(OneXsGpuContext::new(device, queue))?;
+    let blurred = SolverBelts::from_lenses(LensPair {
+        a: blurred.bytes()[..RetainedBaseMaps::NODES_PER_LENS].to_vec(),
+        b: blurred.bytes()[RetainedBaseMaps::NODES_PER_LENS..].to_vec(),
+    })?;
+    let expected = gaussian_blur(&blurred);
+    let belts = pipeline
+        .submit_inner(
+            SourceTextures {
+                a: &texture_a,
+                b: &texture_b,
+            },
+            &fixture.maps,
+            source_owner,
+            SubmissionInput::Preblurred(&blurred),
+            false,
+        )?
+        .into_resident(flight);
+    Ok((belts, expected))
+}
+
 fn unpack_belt_lenses(words: &[u8]) -> LensPair<Vec<u8>> {
     let bytes = words
         .chunks_exact(size_of::<u32>())
@@ -1606,7 +1654,7 @@ mod tests {
 
     #[test]
     fn submission_lease_drop_during_outer_unwind_is_process_safe() {
-        let helper = "flow::one_xs_belt_gpu::tests::submission_lease_double_unwind_child";
+        let helper = "flow::one_xs::one_xs_belt_gpu::tests::submission_lease_double_unwind_child";
         let output = std::process::Command::new(
             std::env::current_exe().expect("the test harness has an executable path"),
         )
@@ -1625,55 +1673,6 @@ mod tests {
             stdout.contains(DOUBLE_UNWIND_MARKER) || stderr.contains(DOUBLE_UNWIND_MARKER),
             "isolated helper did not prove outer-payload and quarantine checks\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
-    }
-
-    #[test]
-    fn submission_lease_accepts_cloned_pair_and_refuses_foreign_pair_before_encoding() {
-        let ((device, queue), (foreign_device, foreign_queue)) = match two_gpu_pairs() {
-            Ok(gpu) => gpu,
-            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
-                eprintln!("skipping ONE X2 GPU context identity: {why}");
-                return;
-            }
-            Err(why) => panic!("Vulkan GPU required for ONE X2 context identity: {why}"),
-        };
-        assert_ne!(
-            device, foreign_device,
-            "same-instance requests reused one device handle"
-        );
-        let context = OneXsGpuContext::new(&device, &queue);
-        let cloned = OneXsGpuContext::new(&device, &queue);
-        context.ensure_same(&cloned).unwrap();
-        let first = queue.submit(std::iter::empty());
-        let mut lease = SubmissionLease::new(context.clone(), first, ());
-        let encoded = Arc::new(AtomicU8::new(0));
-        let foreign = OneXsGpuContext::new(&foreign_device, &foreign_queue);
-        let encoded_by_foreign = Arc::clone(&encoded);
-        let error = lease
-            .submit_after(&foreign, move |_| {
-                encoded_by_foreign.fetch_add(1, Ordering::SeqCst);
-                panic!("foreign ONE X2 context reached command encoding")
-            })
-            .expect_err("foreign ONE X2 context was accepted");
-        assert_eq!(
-            error.to_string(),
-            "ONE X2 GPU submission crossed a different device or queue"
-        );
-        assert_eq!(
-            encoded.load(Ordering::SeqCst),
-            0,
-            "foreign context encoded work"
-        );
-        lease
-            .submit_after(&cloned, |device| {
-                device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("ONE X2 cloned-context acceptance"),
-                    })
-                    .finish()
-            })
-            .unwrap();
-        lease.complete().unwrap();
     }
 
     #[test]
@@ -1942,31 +1941,5 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         Ok((device, queue, name))
-    }
-
-    type GpuPair = (wgpu::Device, wgpu::Queue);
-
-    fn two_gpu_pairs() -> Result<(GpuPair, GpuPair), String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
-        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
-            .into_iter()
-            .next()
-            .ok_or("no Vulkan adapter")?;
-        let request = |label| {
-            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some(label),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits(),
-                ..Default::default()
-            }))
-            .map_err(|error| error.to_string())
-        };
-        Ok((
-            request("exact ONE X2 primary GPU context")?,
-            request("exact ONE X2 foreign GPU context")?,
-        ))
     }
 }

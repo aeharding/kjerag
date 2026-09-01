@@ -27,6 +27,36 @@ leave both device validation scopes clean and prove the source owner waits the
 latest valid fence; independently recreated front-end and PIS pipelines on the
 same structural device/queue pair remain accepted.
 
+**GPU-resident warm image-state arithmetic checkpoint, 2026-09-01,
+implementation branch only [UNSELECTED; NO SCENE WIRING; NO PERFORMANCE
+CLAIM]:** a render-private compute stage now consumes the sealed resident
+physical A/B post-Gaussian belts and a capture-owned retained reference slot.
+Warm work produces the exact threshold/population motion mask, recursive L1
+and L2 U8 area reductions, and the selected fused 0.7/0.3 next-reference
+planes. Cold work copies both current physical planes exactly and exposes no
+invented motion result. All storage bindings cover complete word-aligned
+buffers, ordinary work has no CPU readback, and the full opaque `GpuPisFlight`
+plus a temporal generation seal every candidate. The stage validates the
+shared `OneXsGpuContext`, encodes through the resident belt's inherited linear
+submission lease, and returns that same lease inside its opaque output.
+
+The next reference is a private candidate slot until an enclosing whole-frame
+transaction explicitly commits it. Dropping the candidate clears only its
+matching flight and leaves the allocation-identical prior committed slot and
+generation unchanged. The target Radeon 760M/RADV matched the CPU oracle for
+both physical lenses, base/L1/L2 motion and next references; six live shader
+mutations covering lens selection, inclusive change threshold, asymmetric
+low-edge bounds, promotion population, recursive rounding and EMA weight were
+all refused. Cold commit, warm drop, exact retry and warm commit passed in one
+state regression.
+
+Ordinary cold/warm work does not map, poll, reconstruct CPU images or create a
+second submission owner. The remaining connection is one purpose-specific
+private-owner transition that consumes the whole `GpuMotionFrame` into the
+resident front-end and warm scheduler/post-L1 chain. No current image, L1/L2
+physical mask, flight or lease component is exposed separately for that seam,
+and Scene cannot select it until the downstream transition is qualified.
+
 Only cost modes, initial grids, optional hints, descent admission and the
 selected disparity interval are uploaded per stage. Images, physical masks,
 gradients, raw weights, rolling patch sums and five-word source models are
