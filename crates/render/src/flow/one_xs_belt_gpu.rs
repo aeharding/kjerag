@@ -818,6 +818,19 @@ impl ExactSubmission {
         }
     }
 
+    fn submit_after(&mut self, command: wgpu::CommandBuffer) -> Fallible<()> {
+        match self {
+            Self::Device { queue, index, .. } => {
+                *index = queue.submit([command]);
+                Ok(())
+            }
+            #[cfg(test)]
+            Self::Injected { .. } => {
+                Err("injected ONE X2 GPU submission cannot accept a consumer".into())
+            }
+        }
+    }
+
     #[cfg(test)]
     fn observe(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
         match self {
@@ -896,27 +909,12 @@ impl<K> SubmissionLease<K> {
         }
     }
 
-    fn advance_submission(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        index: wgpu::SubmissionIndex,
-    ) -> Fallible<()> {
-        self.validate_provenance(device, queue)?;
+    fn submit_after(&mut self, command: wgpu::CommandBuffer) -> Fallible<()> {
         let completion = self
             .completion
             .as_mut()
-            .expect("validated submission lease has its completion");
-        match completion {
-            ExactSubmission::Device {
-                index: exact_index, ..
-            } => *exact_index = index,
-            #[cfg(test)]
-            ExactSubmission::Injected { .. } => {
-                unreachable!("validated production lease is device-backed")
-            }
-        }
-        Ok(())
+            .ok_or("ONE X2 GPU submission lease was already completed")?;
+        completion.submit_after(command)
     }
 
     #[cfg(test)]
@@ -1137,13 +1135,11 @@ impl<K> GpuBlurredBelts<K> {
         self.lease.validate_provenance(device, queue)
     }
 
-    pub(crate) fn record_consumer_submission(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        submission: wgpu::SubmissionIndex,
-    ) -> Fallible<()> {
-        self.lease.advance_submission(device, queue, submission)
+    /// Submit the concrete prepared-source transition on the lease's exact
+    /// queue and replace its completion fence with that later submission.
+    /// No caller can provide, omit or regress a detached submission index.
+    pub(crate) fn submit_front_end(&mut self, command: wgpu::CommandBuffer) -> Fallible<()> {
+        self.lease.submit_after(command)
     }
 
     pub(crate) fn complete(&mut self) -> Fallible<()> {

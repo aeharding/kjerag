@@ -33,12 +33,12 @@ mod level_marker {
 }
 
 /// Compile-time identity of one prepared recursive level.
-pub(crate) trait GpuPreparedLevelMarker: level_marker::Sealed + 'static {
+trait GpuPreparedLevelMarker: level_marker::Sealed + 'static {
     const LEVEL: Level;
 }
 
-pub(crate) struct GpuLevelOne;
-pub(crate) struct GpuLevelTwo;
+struct GpuLevelOne;
+struct GpuLevelTwo;
 
 impl level_marker::Sealed for GpuLevelOne {}
 impl level_marker::Sealed for GpuLevelTwo {}
@@ -68,7 +68,7 @@ struct PisPreparedBaseWords {
 /// Every storage binding covers its complete buffer at byte offset zero. The
 /// shader receives these logical word bases in its private dynamic header, so
 /// no unaligned storage-buffer slice can escape this bundle.
-pub(crate) struct PisPreparedBinding<'a, D: PisDirection, L: GpuPreparedLevelMarker> {
+struct PisPreparedBinding<'a, D: PisDirection, L: GpuPreparedLevelMarker> {
     flight: &'a GpuPisFlight,
     shared_images: &'a wgpu::Buffer,
     shared_masks: &'a wgpu::Buffer,
@@ -83,67 +83,67 @@ pub(crate) struct PisPreparedBinding<'a, D: PisDirection, L: GpuPreparedLevelMar
 }
 
 impl<'a, D: PisDirection, L: GpuPreparedLevelMarker> PisPreparedBinding<'a, D, L> {
-    pub(crate) fn flight(&self) -> &'a GpuPisFlight {
+    fn flight(&self) -> &'a GpuPisFlight {
         self.flight
     }
-    pub(crate) fn level(&self) -> Level {
+    fn level(&self) -> Level {
         L::LEVEL
     }
-    pub(crate) fn direction(&self) -> Direction {
+    fn direction(&self) -> Direction {
         D::DIRECTION
     }
-    pub(crate) fn shared_images(&self) -> &'a wgpu::Buffer {
+    fn shared_images(&self) -> &'a wgpu::Buffer {
         self.shared_images
     }
-    pub(crate) fn shared_masks(&self) -> &'a wgpu::Buffer {
+    fn shared_masks(&self) -> &'a wgpu::Buffer {
         self.shared_masks
     }
-    pub(crate) fn gradients(&self) -> &'a wgpu::Buffer {
+    fn gradients(&self) -> &'a wgpu::Buffer {
         self.gradients
     }
-    pub(crate) fn raw_weights(&self) -> &'a wgpu::Buffer {
+    fn raw_weights(&self) -> &'a wgpu::Buffer {
         self.raw_weights
     }
-    pub(crate) fn patch_weight_sums(&self) -> &'a wgpu::Buffer {
+    fn patch_weight_sums(&self) -> &'a wgpu::Buffer {
         self.patch_weight_sums
     }
-    pub(crate) fn models(&self) -> &'a wgpu::Buffer {
+    fn models(&self) -> &'a wgpu::Buffer {
         self.models
     }
-    pub(crate) fn l1_lack_rows(&self) -> &'a wgpu::Buffer {
+    fn l1_lack_rows(&self) -> &'a wgpu::Buffer {
         self.l1_lack_rows
     }
-    pub(crate) fn l1_block_mask(&self) -> &'a wgpu::Buffer {
+    fn l1_block_mask(&self) -> &'a wgpu::Buffer {
         self.l1_block_mask
     }
-    pub(crate) fn source_image_base_words(&self) -> u32 {
+    fn source_image_base_words(&self) -> u32 {
         self.bases.source_image
     }
-    pub(crate) fn target_image_base_words(&self) -> u32 {
+    fn target_image_base_words(&self) -> u32 {
         self.bases.target_image
     }
-    pub(crate) fn source_mask_base_words(&self) -> u32 {
+    fn source_mask_base_words(&self) -> u32 {
         self.bases.source_mask
     }
-    pub(crate) fn target_mask_base_words(&self) -> u32 {
+    fn target_mask_base_words(&self) -> u32 {
         self.bases.target_mask
     }
-    pub(crate) fn gradient_base_words(&self) -> u32 {
+    fn gradient_base_words(&self) -> u32 {
         self.bases.gradient
     }
-    pub(crate) fn weight_base_words(&self) -> u32 {
+    fn weight_base_words(&self) -> u32 {
         self.bases.weight
     }
-    pub(crate) fn patch_sum_base_words(&self) -> u32 {
+    fn patch_sum_base_words(&self) -> u32 {
         self.bases.patch_sum
     }
-    pub(crate) fn model_base_words(&self) -> u32 {
+    fn model_base_words(&self) -> u32 {
         self.bases.model
     }
-    pub(crate) fn lack_row_base_words(&self) -> Option<u32> {
+    fn lack_row_base_words(&self) -> Option<u32> {
         self.bases.lack_rows
     }
-    pub(crate) fn block_mask_base_words(&self) -> Option<u32> {
+    fn block_mask_base_words(&self) -> Option<u32> {
         self.bases.block_mask
     }
 }
@@ -152,6 +152,8 @@ impl<'a, D: PisDirection, L: GpuPreparedLevelMarker> PisPreparedBinding<'a, D, L
 ///
 #[must_use = "the GPU-resident PIS frame front end has not been consumed"]
 pub(crate) struct GpuPreparedFrame<K> {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     flight: GpuPisFlight,
     shared_images: wgpu::Buffer,
     shared_masks: wgpu::Buffer,
@@ -167,7 +169,7 @@ pub(crate) struct GpuPreparedFrame<K> {
 }
 
 impl<K> GpuPreparedFrame<K> {
-    pub(crate) fn bind_pis_level<D, L>(&self) -> PisPreparedBinding<'_, D, L>
+    fn bind_pis_level<D, L>(&self) -> PisPreparedBinding<'_, D, L>
     where
         D: PisDirection,
         L: GpuPreparedLevelMarker,
@@ -187,20 +189,11 @@ impl<K> GpuPreparedFrame<K> {
         }
     }
 
-    pub(crate) fn record_consumer_submission(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        submission: wgpu::SubmissionIndex,
-    ) -> Fallible<()> {
-        self.belts
-            .record_consumer_submission(device, queue, submission)
-    }
-
     /// Consume the resident frame at its explicit CPU re-entry boundary.
     /// Success proves the latest same-queue consumer and every earlier stage,
     /// releases the imported source owner once and disarms cancellation Drop.
     pub(crate) fn acknowledge_terminal(mut self) -> Fallible<()> {
+        self.belts.validate_provenance(&self.device, &self.queue)?;
         self.belts.complete()
     }
 
@@ -327,10 +320,12 @@ impl GpuPisFrontEnd {
         let mask = upload_masks(device, queue, physical_masks);
         let outputs = OutputBuffers::new(device);
         let resources = self.resources(device, belts.packed(), &mask, &outputs);
-        let submission = self.dispatch(device, queue, &resources);
-        belts.record_consumer_submission(device, queue, submission)?;
+        let command = self.encode_command(device, &resources);
+        belts.submit_front_end(command)?;
         let flight = belts.take_flight();
         Ok(GpuPreparedFrame {
+            device: device.clone(),
+            queue: queue.clone(),
             flight,
             shared_images: outputs.shared_images,
             shared_masks: outputs.shared_masks,
@@ -378,17 +373,16 @@ impl GpuPisFrontEnd {
         })
     }
 
-    fn dispatch(
+    fn encode_command(
         &self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         resources: &wgpu::BindGroup,
-    ) -> wgpu::SubmissionIndex {
+    ) -> wgpu::CommandBuffer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ONE X2 GPU PIS prepared-source front end"),
         });
         encode(&mut encoder, self, resources);
-        queue.submit([encoder.finish()])
+        encoder.finish()
     }
 
     fn qualify(&self) -> Fallible<()> {
@@ -1454,6 +1448,31 @@ mod tests {
         D: PisDirection,
         L: GpuPreparedLevelMarker,
     {
+        let expected = prepared_bases::<D, L>();
+        assert_eq!(binding.shared_images().size(), words_bytes(SHARED_PIXELS));
+        assert_eq!(binding.shared_masks().size(), words_bytes(SHARED_PIXELS));
+        assert_eq!(binding.gradients().size(), words_bytes(2 * STAGE_PIXELS));
+        assert_eq!(binding.raw_weights().size(), words_bytes(STAGE_PIXELS));
+        assert_eq!(
+            binding.patch_weight_sums().size(),
+            words_bytes(STAGE_PATCHES)
+        );
+        assert_eq!(
+            binding.models().size(),
+            words_bytes(MODEL_WORDS_PER_PATCH * STAGE_PATCHES)
+        );
+        assert_eq!(binding.l1_lack_rows().size(), words_bytes(L1_LACK_ROWS));
+        assert_eq!(binding.l1_block_mask().size(), words_bytes(L1_BLOCKS));
+        assert_eq!(binding.source_image_base_words(), expected.source_image);
+        assert_eq!(binding.target_image_base_words(), expected.target_image);
+        assert_eq!(binding.source_mask_base_words(), expected.source_mask);
+        assert_eq!(binding.target_mask_base_words(), expected.target_mask);
+        assert_eq!(binding.gradient_base_words(), expected.gradient);
+        assert_eq!(binding.weight_base_words(), expected.weight);
+        assert_eq!(binding.patch_sum_base_words(), expected.patch_sum);
+        assert_eq!(binding.model_base_words(), expected.model);
+        assert_eq!(binding.lack_row_base_words(), expected.lack_rows);
+        assert_eq!(binding.block_mask_base_words(), expected.block_mask);
         (
             binding.direction(),
             binding.level(),
