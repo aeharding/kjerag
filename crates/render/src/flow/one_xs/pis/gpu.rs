@@ -552,26 +552,15 @@ impl GpuPisPipeline {
     pub(crate) fn prepare_resident_grid_dispatch(
         &self,
         stage: PairSolveStage,
-        a_cost_modes: Box<[CostMode]>,
         a_admission: DescentAdmission,
         a_disparity: Option<DisparityInterval>,
-        b_cost_modes: Box<[CostMode]>,
         b_admission: DescentAdmission,
         b_disparity: Option<DisparityInterval>,
     ) -> Fallible<ResidentPisDispatch<'_>> {
         let level = stage.level();
-        let pack = |cost_modes: Box<[CostMode]>,
-                    admission: DescentAdmission,
+        let pack = |admission: DescentAdmission,
                     disparity: Option<DisparityInterval>|
          -> Fallible<(Vec<u32>, usize, Option<DisparityInterval>)> {
-            if cost_modes.len() != level.patch_rows() {
-                return Err(format!(
-                    "ONE X2 resident GPU PIS {level} has {} cost modes, expected {}",
-                    cost_modes.len(),
-                    level.patch_rows()
-                )
-                .into());
-            }
             let mut header = vec![0; HEADER_WORDS];
             header[0] = level.rows() as u32;
             header[1] = level.cols() as u32;
@@ -583,10 +572,10 @@ impl GpuPisPipeline {
             header[7] = u32::from(disparity.is_some());
             header[8] = u32::from(admission.admits());
             header[13] = header.len() as u32;
-            header.extend(cost_modes.iter().map(|mode| match mode {
-                CostMode::Unweighted => 0,
-                CostMode::Weighted => 1,
-            }));
+            // The exact direction-owned work-row owner overwrites every one
+            // of these private slots on the GPU immediately before PIS. The
+            // host supplies only their shape, never a second classification.
+            header.resize(header.len() + level.patch_rows(), 0);
             header[22] = header.len() as u32;
             header.push(0);
             let patch_words = 2 * level.patches();
@@ -600,8 +589,8 @@ impl GpuPisPipeline {
             header[30] = 1;
             Ok((header, float_words, disparity))
         };
-        let (a, direction_float_words, a_disparity) = pack(a_cost_modes, a_admission, a_disparity)?;
-        let (b, b_float_words, b_disparity) = pack(b_cost_modes, b_admission, b_disparity)?;
+        let (a, direction_float_words, a_disparity) = pack(a_admission, a_disparity)?;
+        let (b, b_float_words, b_disparity) = pack(b_admission, b_disparity)?;
         debug_assert_eq!(direction_float_words, b_float_words);
         let a_word_base = PAIR_HEADER_WORDS;
         let b_word_base = a_word_base + a.len();
@@ -1928,8 +1917,9 @@ mod tests {
             Ok(gpu) => gpu,
             Err(why) => {
                 assert!(
-                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
-                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                    std::env::var_os("KJERAG_REQUIRE_GPU").is_none()
+                        && std::env::var_os("KJERAG_REQUIRE_RADV").is_none(),
+                    "a required GPU is unavailable: {why}"
                 );
                 eprintln!("skipping exact paired GPU PIS twin: {why}");
                 return;
@@ -1946,8 +1936,9 @@ mod tests {
             Ok(gpu) => gpu,
             Err(why) => {
                 assert!(
-                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
-                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                    std::env::var_os("KJERAG_REQUIRE_GPU").is_none()
+                        && std::env::var_os("KJERAG_REQUIRE_RADV").is_none(),
+                    "a required GPU is unavailable: {why}"
                 );
                 eprintln!("skipping paired GPU PIS mutation refusal: {why}");
                 return;
@@ -1963,6 +1954,11 @@ mod tests {
                 "eight/nine survivor boundary",
                 "survivors >= 9u",
                 "survivors >= 8u",
+            ),
+            (
+                "work-mode polarity",
+                "local_word(word(13u) + patch_row) != 0u",
+                "local_word(word(13u) + patch_row) == 0u",
             ),
             (
                 "forward scan propagation",
@@ -2051,8 +2047,9 @@ mod tests {
             Ok(gpu) => gpu,
             Err(why) => {
                 assert!(
-                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
-                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                    std::env::var_os("KJERAG_REQUIRE_GPU").is_none()
+                        && std::env::var_os("KJERAG_REQUIRE_RADV").is_none(),
+                    "a required GPU is unavailable: {why}"
                 );
                 eprintln!("skipping paired GPU PIS ordinary-mode probe gate: {why}");
                 return;
@@ -2123,11 +2120,17 @@ mod tests {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
+        let require_radv = std::env::var_os("KJERAG_REQUIRE_RADV").is_some();
         let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
             .into_iter()
-            .next()
-            .ok_or("no Vulkan adapter")?;
-        let name = adapter.get_info().name;
+            .find(|adapter| !require_radv || adapter.get_info().driver.eq_ignore_ascii_case("radv"))
+            .ok_or(if require_radv {
+                "no RADV Vulkan adapter"
+            } else {
+                "no Vulkan adapter"
+            })?;
+        let info = adapter.get_info();
+        let name = format!("{} / {} / {}", info.name, info.driver, info.driver_info);
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("exact paired ONE X2 GPU PIS"),
             required_features: wgpu::Features::empty(),

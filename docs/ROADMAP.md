@@ -74,6 +74,7 @@ admission, internal stamp/context derivation and the absence of raw resource
 accessors. Existing GPU lease tests remain the proof that a source owner is
 retained until exact submission completion. This checkpoint does not
 fabricate dmabuf success and does not install a resident result.
+
 **Resident ONE X2 Cold0 through Cold2 post-L1 checkpoint, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
 PERFORMANCE OR WARM-TAIL CLAIM]:** the accepted paired L1 terminal now remains
@@ -91,10 +92,43 @@ opaque pending motion successor.
 The ordinary path adds no frame-sized CPU readback or upload. Warm post-L1
 execution, final validity mapping, ready installation and Scene selection stay
 excluded; this checkpoint constructs only their purpose-specific typed owner.
-Cold work-mode preparation is also still excluded: the typed loop currently
-retains fixed controls minted at Cold0, while the autonomous GPU derivation of
-direction-owned lack-row L1 modes and their exact L2 propagation remains the
-next resident input checkpoint. No CPU readback or caller setup is proposed.
+Cold work-mode preparation is now supplied by the bridge-owned GPU derivation
+described immediately below; the typed loop retains only the disparity
+controls minted at Cold0.
+
+**GPU-resident ONE X2 PIS work-row prerequisite, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
+NO SCENE, PLAYBACK OR PERFORMANCE CLAIM]:** the resident cold/warm PIS packer
+no longer accepts caller-supplied CPU `CostMode` arrays. It reserves canonical
+zero placeholders only. A bridge-owned compute pass overwrites every private
+mode slot in the same command encoder immediately before the corresponding
+PIS dispatch. Cold reads the current paired direction-owned L1 lack rows;
+warm reads the retained paired lack and small-disparity rows and uses
+`small || lack`. L2 is not reclassified: each direction serially scans the
+same 178 L1 rows and applies the exact READ contiguous-run geometry to its 88
+L2 rows.
+
+The pass exposes no buffer or bind group. Its sealed binding carries the exact
+GPU context, frame flight, cold/warm meaning and target level. Four
+level-specific entry points make a valid dispatch unconditional. Before the
+private dynamic allocation is uploaded, the host rejects any wrong schema,
+direction base, level shape, mode offset, sentinel or nonzero CPU-supplied
+placeholder. Ordinary dynamic storage has no `COPY_SRC`; the per-frame
+work-mode operation has no copy, map, poll, wait or CPU readback. Constructor
+qualification alone uses a separate readback allocation to authenticate both
+levels and both meanings.
+
+Forced RADV tests cover asymmetric A/B ownership, both edges, singletons,
+contiguous runs, alternating rows, all false, all true, cold ignoring planted
+small rows, warm `small || lack`, exact L1/L2 dynamic offsets and untouched
+sentinels. The CPU transcription matches all 15,931 possible single
+contiguous L1 runs. Live mutations reject direction swaps, OR/polarity,
+offset and propagation changes, and actual paired L2 then L1 PIS terminals
+match the CPU oracle for both cold lack rows and non-vacuous warm retained
+rows. Production warm ownership remains deliberately absent until the
+post-L1 retained-state owner lands; the sealed warm hook refuses owners that
+cannot supply those exact paired rows.
+
 **Sealed ONE X2 source-import ownership prerequisite, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
 PERFORMANCE OR PARITY CLAIM]:** the direct type-2 module now owns one private

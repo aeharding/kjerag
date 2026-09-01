@@ -726,8 +726,8 @@ mod tests {
     use crate::flow::one_xs::one_xs_belt_gpu::pis_frontend_gpu::{
         GpuColdLoopControls, GpuL1Controls, GpuL2Controls, GpuL2PostPisBridge,
     };
+    use crate::flow::one_xs::pis::DisparityInterval;
     use crate::flow::one_xs::pis::gpu::GpuPisPipeline;
-    use crate::flow::one_xs::pis::{CostMode, DisparityInterval, Level};
     use kjerag_media::FrameStamp;
     use temporal_gpu::{GpuColdPriorPublicLevelTwo, GpuMotionStage};
 
@@ -901,12 +901,10 @@ mod tests {
         let front = GpuPisFrontEnd::new(context.clone()).unwrap();
         let solver = GpuPisPipeline::new(context.clone()).unwrap();
         let bridge = GpuL2PostPisBridge::new(context.clone()).unwrap();
-        let costs =
-            |level: Level| vec![CostMode::Unweighted; level.patch_rows()].into_boxed_slice();
         let disparity = DisparityInterval::new([-8.0, -8.0], [8.0, 8.0]);
         let controls = GpuColdLoopControls::new(
-            GpuL2Controls::resident(costs(Level::Two), disparity, costs(Level::Two), disparity),
-            GpuL1Controls::resident(costs(Level::One), disparity, costs(Level::One), disparity),
+            GpuL2Controls::resident(disparity, disparity),
+            GpuL1Controls::resident(disparity, disparity),
         );
         let cold0 = belts
             .prepare_motion(&motion)

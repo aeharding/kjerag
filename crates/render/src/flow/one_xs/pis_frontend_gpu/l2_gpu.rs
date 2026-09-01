@@ -23,13 +23,18 @@ use crate::flow::one_xs::one_xs_belt_gpu::geometry_gpu::temporal_gpu::GpuAdmitte
 #[cfg(test)]
 use crate::flow::one_xs::pis::Flow;
 use crate::flow::one_xs::pis::gpu::{GpuPisPipeline, GpuPisStageReceipt, ResidentPisDispatch};
-use crate::flow::one_xs::pis::{AtoB, BtoA, CostMode, DisparityInterval, Level, PisDirection};
+use crate::flow::one_xs::pis::{AtoB, BtoA, DisparityInterval, Level, PisDirection};
 use crate::flow::one_xs::post_update::RetainedPublicPyramids;
 use crate::flow::one_xs::scalar::PairSolveStage;
 
 #[path = "post_l1.rs"]
 mod post_l1;
 pub(in crate::flow::one_xs::one_xs_belt_gpu) use post_l1::GpuCold0Terminal;
+#[path = "l2_gpu/work_modes.rs"]
+mod work_modes;
+pub(in crate::flow::one_xs::one_xs_belt_gpu) use work_modes::{
+    GpuWorkModeBinding, GpuWorkModePipeline,
+};
 
 const L2_ROWS: usize = 270;
 const L2_COLS: usize = 15;
@@ -157,6 +162,14 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) trait GpuResidentLevelTwoPost:
         config: &wgpu::Buffer,
         dynamic: &wgpu::Buffer,
     ) -> Option<wgpu::BindGroup>;
+    fn bind_work_mode_fill(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        current_l1_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &crate::flow::one_xs::pis::gpu::GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding>;
 
     fn bind_l2_hint_fill(
         &self,
@@ -185,6 +198,8 @@ struct QualificationResidentLevelTwoPost {
     retained: wgpu::Buffer,
     motion: wgpu::Buffer,
     hints: Option<wgpu::Buffer>,
+    work_lack: Option<wgpu::Buffer>,
+    work_small: Option<wgpu::Buffer>,
 }
 
 /// Qualification-only adapter that binds the exact packed allocation emitted
@@ -201,11 +216,11 @@ impl super::resident_l2_post_seal::Sealed for QualificationResidentLevelTwoPost 
 #[cfg(test)]
 impl super::resident_l2_post_seal::Sealed for BorrowedProductionMotionPost<'_> {}
 
-/// L1 controls deliberately omit the initial grid. The only initial accepted
-/// by this transition is the resident seed allocation produced by L2.
+/// L1 controls deliberately omit both initial grid and work-row modes. The
+/// initial comes from the resident L2 seed allocation and the exact modes are
+/// derived from the sealed row owner on the GPU.
 #[derive(Clone)]
 pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuL1DirectionControls<D: PisDirection> {
-    pub(in crate::flow::one_xs::one_xs_belt_gpu) cost_modes: Box<[CostMode]>,
     pub(in crate::flow::one_xs::one_xs_belt_gpu) disparity: DisparityInterval,
     direction: PhantomData<D>,
 }
@@ -248,19 +263,15 @@ impl GpuColdLoopControls {
 
 impl GpuL2Controls {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn resident(
-        a_cost_modes: Box<[CostMode]>,
         a_disparity: DisparityInterval,
-        b_cost_modes: Box<[CostMode]>,
         b_disparity: DisparityInterval,
     ) -> Self {
         Self {
             a_to_b: GpuL1DirectionControls {
-                cost_modes: a_cost_modes,
                 disparity: a_disparity,
                 direction: PhantomData,
             },
             b_to_a: GpuL1DirectionControls {
-                cost_modes: b_cost_modes,
                 disparity: b_disparity,
                 direction: PhantomData,
             },
@@ -275,10 +286,8 @@ impl GpuL2Controls {
     ) -> Fallible<ResidentPisDispatch<'a>> {
         solver.prepare_resident_grid_dispatch(
             stage,
-            self.a_to_b.cost_modes,
             admissions.a_to_b(),
             Some(self.a_to_b.disparity),
-            self.b_to_a.cost_modes,
             admissions.b_to_a(),
             Some(self.b_to_a.disparity),
         )
@@ -287,19 +296,15 @@ impl GpuL2Controls {
 
 impl GpuL1Controls {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn resident(
-        a_cost_modes: Box<[CostMode]>,
         a_disparity: DisparityInterval,
-        b_cost_modes: Box<[CostMode]>,
         b_disparity: DisparityInterval,
     ) -> Self {
         Self {
             a_to_b: GpuL1DirectionControls {
-                cost_modes: a_cost_modes,
                 disparity: a_disparity,
                 direction: PhantomData,
             },
             b_to_a: GpuL1DirectionControls {
-                cost_modes: b_cost_modes,
                 disparity: b_disparity,
                 direction: PhantomData,
             },
@@ -314,10 +319,8 @@ impl GpuL1Controls {
     ) -> Fallible<ResidentPisDispatch<'a>> {
         solver.prepare_resident_grid_dispatch(
             stage,
-            self.a_to_b.cost_modes,
             admissions.a_to_b(),
             Some(self.a_to_b.disparity),
-            self.b_to_a.cost_modes,
             admissions.b_to_a(),
             Some(self.b_to_a.disparity),
         )
@@ -425,6 +428,17 @@ impl GpuResidentLevelTwoPost for ColdResidentLevelTwoPost {
     ) -> Option<wgpu::BindGroup> {
         None
     }
+
+    fn bind_work_mode_fill(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        current_l1_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &crate::flow::one_xs::pis::gpu::GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding> {
+        Ok(pipeline.bind_cold(dynamic, current_l1_lack, level, flight))
+    }
 }
 
 impl GpuResidentLevelTwoPost for QualificationResidentLevelTwoPost {
@@ -482,6 +496,28 @@ impl GpuResidentLevelTwoPost for QualificationResidentLevelTwoPost {
             })
         })
     }
+
+    fn bind_work_mode_fill(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        current_l1_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &crate::flow::one_xs::pis::gpu::GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding> {
+        if !self.warm {
+            return Ok(pipeline.bind_cold(dynamic, current_l1_lack, level, flight));
+        }
+        let lack = self
+            .work_lack
+            .as_ref()
+            .ok_or("ONE X2 warm qualification has no retained lack rows")?;
+        let small = self
+            .work_small
+            .as_ref()
+            .ok_or("ONE X2 warm qualification has no retained small rows")?;
+        Ok(pipeline.bind_warm(dynamic, lack, small, level, flight))
+    }
 }
 
 #[cfg(test)]
@@ -533,6 +569,17 @@ impl GpuResidentLevelTwoPost for BorrowedProductionMotionPost<'_> {
         _dynamic: &wgpu::Buffer,
     ) -> Option<wgpu::BindGroup> {
         None
+    }
+
+    fn bind_work_mode_fill(
+        &self,
+        _pipeline: &GpuWorkModePipeline,
+        _dynamic: &wgpu::Buffer,
+        _current_l1_lack: &wgpu::Buffer,
+        _level: Level,
+        _flight: &crate::flow::one_xs::pis::gpu::GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding> {
+        Err("ONE X2 borrowed motion qualification has no retained warm work rows".into())
     }
 }
 
@@ -709,6 +756,9 @@ impl<K> GpuPreparedFrame<K> {
             crate::flow::one_xs::Direction::BtoA,
             pair.b,
         )?;
+        bridge
+            .work_modes
+            .validate_dynamic(&dispatch.u32s, dispatch.stage.level())?;
 
         let device = bridge.context.device();
         let queue = bridge.context.queue();
@@ -743,6 +793,17 @@ impl<K> GpuPreparedFrame<K> {
                 binding(8, pair.models),
             ],
         });
+        let work_modes = joined
+            .post
+            .as_ref()
+            .expect("L2 PIS join lost its post")
+            .bind_work_mode_fill(
+                &bridge.work_modes,
+                &dynamic_u32,
+                &prepared.l1_lack_rows,
+                dispatch.stage.level(),
+                &flight,
+            )?;
         let hint_config = upload(
             device,
             "ONE X2 resident dense-to-L2 hint config",
@@ -776,6 +837,9 @@ impl<K> GpuPreparedFrame<K> {
             label: Some("ONE X2 resident L2 PIS"),
         });
         encoder.clear_buffer(&dynamic_f32, 0, None);
+        bridge
+            .work_modes
+            .encode(&work_modes, &flight, dispatch.stage.level(), &mut encoder)?;
         encode_disparities(&dispatch, device, queue, &dynamic_f32, &mut encoder)?;
         if let Some(hint_resources) = &hint_resources {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -867,6 +931,9 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             crate::flow::one_xs::Direction::BtoA,
             pair.b,
         )?;
+        bridge
+            .work_modes
+            .validate_dynamic(&dispatch.u32s, dispatch.stage.level())?;
 
         let device = bridge.context.device();
         let queue = bridge.context.queue();
@@ -901,6 +968,13 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
                 binding(8, pair.models),
             ],
         });
+        let work_modes = self._post.bind_work_mode_fill(
+            &bridge.work_modes,
+            &dynamic_u32,
+            &self._prepared.l1_lack_rows,
+            dispatch.stage.level(),
+            &flight,
+        )?;
         let seed_config = upload(
             device,
             "ONE X2 resident L2-to-L1 seed config",
@@ -943,6 +1017,9 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             label: Some("ONE X2 resident L2-to-L1 PIS continuation"),
         });
         encoder.clear_buffer(&dynamic_f32, 0, None);
+        bridge
+            .work_modes
+            .encode(&work_modes, &flight, dispatch.stage.level(), &mut encoder)?;
         encode_disparities(&dispatch, device, queue, &dynamic_f32, &mut encoder)?;
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1295,6 +1372,7 @@ fn block_on_gpu<F: std::future::Future>(device: &wgpu::Device, future: F) -> F::
 /// shader before it may process a caller's buffers.
 pub(crate) struct GpuL2PostPisBridge {
     context: OneXsGpuContext,
+    work_modes: GpuWorkModePipeline,
     plane_stride: u64,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
@@ -1332,6 +1410,7 @@ impl GpuL2PostPisBridge {
     ) -> Result<Self, Box<dyn Error>> {
         let bridge = Self::from_shaders(context, shader, seed_shader, hint_shader)?;
         bridge.qualify()?;
+        bridge.work_modes.qualify()?;
         Ok(bridge)
     }
 
@@ -1444,8 +1523,10 @@ impl GpuL2PostPisBridge {
             })?;
         let post_l1 = post_l1::GpuColdPostL1Pipeline::new(context.clone())
             .map_err(|error| BridgeGpuError::Scoped(error.to_string()))?;
+        let work_modes = GpuWorkModePipeline::new(context.clone())?;
         Ok(Self {
             context,
+            work_modes,
             plane_stride,
             layout,
             pipeline,
@@ -1660,6 +1741,8 @@ impl GpuL2PostPisBridge {
             retained: upload(device, "L2 bridge retained", &f32_bytes(&retained)),
             motion: upload(device, "L2 bridge motion", &u32_bytes(&motion)),
             hints: None,
+            work_lack: None,
+            work_small: None,
         };
         self.submit_qualification_resident(a_terminal, b_terminal, images, resident)
     }
@@ -2747,7 +2830,7 @@ mod tests {
     use super::super::{GpuPisFrontEnd, qualification_fixture};
     use super::*;
     use crate::flow::one_xs::pis::{HintGrid, InitialGrid, solve_with_descent_admission};
-    use crate::flow::one_xs::scalar::{ColdInputs, LevelInputs, MaskPyramid};
+    use crate::flow::one_xs::scalar::{ColdInputs, LevelInputs, MaskPyramid, propagate_work_modes};
 
     #[test]
     fn l1_ordinal_is_derived_only_from_the_exact_l2_receipt() {
@@ -2867,6 +2950,18 @@ mod tests {
             self.inner
                 .bind_l1_hint_fill(device, layout, config, dynamic)
         }
+
+        fn bind_work_mode_fill(
+            &self,
+            pipeline: &GpuWorkModePipeline,
+            dynamic: &wgpu::Buffer,
+            current_l1_lack: &wgpu::Buffer,
+            level: Level,
+            flight: &GpuPisFlight,
+        ) -> Fallible<GpuWorkModeBinding> {
+            self.inner
+                .bind_work_mode_fill(pipeline, dynamic, current_l1_lack, level, flight)
+        }
     }
 
     fn ordering_terminal(
@@ -2944,13 +3039,12 @@ mod tests {
             .unwrap();
         let foreign_solver = GpuPisPipeline::new(foreign).unwrap();
         let disparity = DisparityInterval::new([-8.0, -8.0], [8.0, 8.0]);
-        let costs = || vec![CostMode::Unweighted; Level::One.patch_rows()].into_boxed_slice();
         assert!(
             output
                 .submit_l1_pis(
                     &bridge,
                     &foreign_solver,
-                    GpuL1Controls::resident(costs(), disparity, costs(), disparity),
+                    GpuL1Controls::resident(disparity, disparity),
                 )
                 .is_err()
         );
@@ -3232,20 +3326,25 @@ mod tests {
         let masks = qualification_fixture().1;
         let retained = ColdInputs::from_blurred_belts_and_masks(blurred, masks.clone());
         let pyramid = MaskPyramid::build(&retained);
-        let l2_modes = vec![CostMode::Unweighted; Level::Two.patch_rows()];
+        let a_l1_prepared = LevelInputs::build::<AtoB>(&retained, &pyramid, Level::One);
+        let b_l1_prepared = LevelInputs::build::<BtoA>(&retained, &pyramid, Level::One);
+        let a_l1_modes = cold_l1_modes::<AtoB>(&a_l1_prepared);
+        let b_l1_modes = cold_l1_modes::<BtoA>(&b_l1_prepared);
+        assert_non_vacuous_modes("cold A-to-B", &a_l1_modes);
+        assert_non_vacuous_modes("cold B-to-A", &b_l1_modes);
+        let a_l2_modes = propagate_work_modes(&a_l1_modes);
+        let b_l2_modes = propagate_work_modes(&b_l1_modes);
         let a_l2_input = LevelInputs::build::<AtoB>(&retained, &pyramid, Level::Two)
-            .resident_l2_oracle_input::<AtoB>(Level::Two, l2_modes.clone());
+            .resident_l2_oracle_input::<AtoB>(Level::Two, a_l2_modes);
         let b_l2_input = LevelInputs::build::<BtoA>(&retained, &pyramid, Level::Two)
-            .resident_l2_oracle_input::<BtoA>(Level::Two, l2_modes.clone());
+            .resident_l2_oracle_input::<BtoA>(Level::Two, b_l2_modes);
         let prepared = front.prepare(belts, &masks).unwrap();
         let output = prepared
             .submit_resident_l2_bridge(
                 &pis,
                 &bridge,
                 GpuL2Controls::resident(
-                    l2_modes.clone().into_boxed_slice(),
                     a_l2_input.disparity_interval().unwrap(),
-                    l2_modes.into_boxed_slice(),
                     b_l2_input.disparity_interval().unwrap(),
                 ),
                 PairSolveStage::Cold {
@@ -3285,11 +3384,8 @@ mod tests {
         );
         let seeds = output.seeds.readback_diagnostic().unwrap();
 
-        let modes = vec![CostMode::Unweighted; Level::One.patch_rows()];
-        let a_input = LevelInputs::build::<AtoB>(&retained, &pyramid, Level::One)
-            .resident_l2_oracle_input::<AtoB>(Level::One, modes.clone());
-        let b_input = LevelInputs::build::<BtoA>(&retained, &pyramid, Level::One)
-            .resident_l2_oracle_input::<BtoA>(Level::One, modes);
+        let a_input = a_l1_prepared.resident_l2_oracle_input::<AtoB>(Level::One, a_l1_modes);
+        let b_input = b_l1_prepared.resident_l2_oracle_input::<BtoA>(Level::One, b_l1_modes);
         let zero_hint = vec![Flow::ZERO; L1_PATCHES];
         let a_hint = HintGrid::<AtoB>::from_row_major(Level::One, zero_hint.clone()).unwrap();
         let b_hint = HintGrid::<BtoA>::from_row_major(Level::One, zero_hint).unwrap();
@@ -3353,12 +3449,36 @@ mod tests {
         let masks = qualification_fixture().1;
         let retained = ColdInputs::from_blurred_belts_and_masks(blurred.clone(), masks.clone());
         let pyramid = MaskPyramid::build(&retained);
-        let l2_modes = vec![CostMode::Unweighted; Level::Two.patch_rows()];
+        let mut work_lack = vec![0u32; 2 * Level::One.patch_rows()];
+        let mut work_small = vec![0u32; 2 * Level::One.patch_rows()];
+        for row in [0, 17, 79, 177] {
+            work_lack[row] = 1;
+        }
+        for row in 53..=60 {
+            work_lack[Level::One.patch_rows() + row] = 1;
+        }
+        work_small[18..=27].fill(1);
+        for row in [0, 84, 177] {
+            work_small[Level::One.patch_rows() + row] = 1;
+        }
+        let a_l1_modes = warm_l1_modes(&work_lack, &work_small, 0);
+        let b_l1_modes = warm_l1_modes(&work_lack, &work_small, 1);
+        assert_non_vacuous_modes("warm A-to-B", &a_l1_modes);
+        assert_non_vacuous_modes("warm B-to-A", &b_l1_modes);
+        assert_eq!(a_l1_modes[18], CostMode::Weighted, "small-only A row");
+        assert_eq!(a_l1_modes[17], CostMode::Weighted, "lack-only A row");
+        assert_eq!(b_l1_modes[84], CostMode::Weighted, "small-only B row");
+        assert_eq!(b_l1_modes[53], CostMode::Weighted, "lack-only B row");
+        let a_l2_modes = propagate_work_modes(&a_l1_modes);
+        let b_l2_modes = propagate_work_modes(&b_l1_modes);
         let a_l2_input = LevelInputs::build::<AtoB>(&retained, &pyramid, Level::Two)
-            .resident_l2_oracle_input::<AtoB>(Level::Two, l2_modes.clone());
+            .resident_l2_oracle_input::<AtoB>(Level::Two, a_l2_modes);
         let b_l2_input = LevelInputs::build::<BtoA>(&retained, &pyramid, Level::Two)
-            .resident_l2_oracle_input::<BtoA>(Level::Two, l2_modes.clone());
-        let (a_input, b_input) = l1_oracle_inputs(&blurred, &masks);
+            .resident_l2_oracle_input::<BtoA>(Level::Two, b_l2_modes);
+        let a_input = LevelInputs::build::<AtoB>(&retained, &pyramid, Level::One)
+            .resident_l2_oracle_input::<AtoB>(Level::One, a_l1_modes);
+        let b_input = LevelInputs::build::<BtoA>(&retained, &pyramid, Level::One)
+            .resident_l2_oracle_input::<BtoA>(Level::One, b_l1_modes);
         let prepared = front.prepare(belts, &masks).unwrap();
 
         let mut hint_words = vec![0u32; 275_400];
@@ -3395,15 +3515,23 @@ mod tests {
                 "L2 bridge warm terminal hint qualifier",
                 &u32_bytes(&hint_words),
             )),
+            work_lack: Some(upload(
+                context.device(),
+                "L2 bridge warm retained lack rows",
+                &u32_bytes(&work_lack),
+            )),
+            work_small: Some(upload(
+                context.device(),
+                "L2 bridge warm retained small rows",
+                &u32_bytes(&work_small),
+            )),
         };
         let output = prepared
             .submit_resident_l2_bridge(
                 &pis,
                 &bridge,
                 GpuL2Controls::resident(
-                    l2_modes.clone().into_boxed_slice(),
                     a_l2_input.disparity_interval().unwrap(),
-                    l2_modes.into_boxed_slice(),
                     b_l2_input.disparity_interval().unwrap(),
                 ),
                 PairSolveStage::Warm { level: Level::Two },
@@ -3530,7 +3658,6 @@ mod tests {
     ) -> GpuL1Controls {
         fn direction<D: PisDirection>(disparity: DisparityInterval) -> GpuL1DirectionControls<D> {
             GpuL1DirectionControls {
-                cost_modes: vec![CostMode::Unweighted; Level::One.patch_rows()].into_boxed_slice(),
                 disparity,
                 direction: PhantomData,
             }
@@ -3539,6 +3666,47 @@ mod tests {
             a_to_b: direction::<AtoB>(a_disparity),
             b_to_a: direction::<BtoA>(b_disparity),
         }
+    }
+
+    fn cold_l1_modes<D: PisDirection>(prepared: &LevelInputs) -> Vec<CostMode> {
+        prepared
+            .lack_rows::<D>(Level::One)
+            .rows()
+            .iter()
+            .map(|lack| {
+                if *lack {
+                    CostMode::Weighted
+                } else {
+                    CostMode::Unweighted
+                }
+            })
+            .collect()
+    }
+
+    fn warm_l1_modes(lack: &[u32], small: &[u32], direction: usize) -> Vec<CostMode> {
+        assert_eq!(lack.len(), 2 * Level::One.patch_rows());
+        assert_eq!(small.len(), lack.len());
+        let base = direction * Level::One.patch_rows();
+        (0..Level::One.patch_rows())
+            .map(|row| {
+                if lack[base + row] != 0 || small[base + row] != 0 {
+                    CostMode::Weighted
+                } else {
+                    CostMode::Unweighted
+                }
+            })
+            .collect()
+    }
+
+    fn assert_non_vacuous_modes(label: &str, modes: &[CostMode]) {
+        assert!(
+            modes.contains(&CostMode::Weighted),
+            "{label} has no weighted row"
+        );
+        assert!(
+            modes.contains(&CostMode::Unweighted),
+            "{label} has no unweighted row"
+        );
     }
 
     fn l1_oracle_inputs(
@@ -3799,11 +3967,17 @@ mod tests {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
+        let require_radv = std::env::var_os("KJERAG_REQUIRE_RADV").is_some();
         let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
             .into_iter()
-            .next()
-            .ok_or("no Vulkan adapter")?;
-        let name = format!("{:?}", adapter.get_info());
+            .find(|adapter| !require_radv || adapter.get_info().driver.eq_ignore_ascii_case("radv"))
+            .ok_or(if require_radv {
+                "no RADV Vulkan adapter"
+            } else {
+                "no Vulkan adapter"
+            })?;
+        let info = adapter.get_info();
+        let name = format!("{} / {} / {}", info.name, info.driver, info.driver_info);
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ONE X2 L2 bridge qualifier"),
             required_features: wgpu::Features::empty(),
@@ -3819,10 +3993,15 @@ mod tests {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
+        let require_radv = std::env::var_os("KJERAG_REQUIRE_RADV").is_some();
         let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
             .into_iter()
-            .next()
-            .ok_or("no Vulkan adapter")?;
+            .find(|adapter| !require_radv || adapter.get_info().driver.eq_ignore_ascii_case("radv"))
+            .ok_or(if require_radv {
+                "no RADV Vulkan adapter"
+            } else {
+                "no Vulkan adapter"
+            })?;
         let info = adapter.get_info();
         let name = format!("{} ({})", info.name, info.driver);
         let request = || {

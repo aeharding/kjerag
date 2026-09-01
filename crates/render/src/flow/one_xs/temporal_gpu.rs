@@ -9,7 +9,8 @@
 use super::super::GpuBlurredBelts;
 use super::super::pis_frontend_gpu::{
     GpuCold0Terminal, GpuColdLoopControls, GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls,
-    GpuL2PostPisBridge, GpuPisFrontEnd, GpuResidentLevelTwoPost,
+    GpuL2PostPisBridge, GpuPisFrontEnd, GpuResidentLevelTwoPost, GpuWorkModeBinding,
+    GpuWorkModePipeline,
 };
 use super::super::resident_frame_gpu::{
     GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, ResidentPostL1Storage,
@@ -194,6 +195,14 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) trait GpuPriorPublicLevelTwo:
         config: &wgpu::Buffer,
         dynamic: &wgpu::Buffer,
     ) -> wgpu::BindGroup;
+    fn bind_work_mode_fill(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        current_l1_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding>;
 }
 
 /// Allocation-owned A/B cadence snapshot for one admitted pair call. Both
@@ -513,6 +522,17 @@ impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
             entries: &[entry(0, config), entry(1, &self.hints), entry(2, dynamic)],
         })
     }
+
+    fn bind_work_mode_fill(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        current_l1_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding> {
+        Ok(pipeline.bind_cold(dynamic, current_l1_lack, level, flight))
+    }
 }
 
 /// Pending temporal successor fused to the prior-public L2 owner. The root
@@ -591,6 +611,18 @@ impl<P: GpuPriorPublicLevelTwo> GpuResidentLevelTwoPost for GpuMotionResidentL2P
             self.prior
                 .bind_l1_hint_fill(device, layout, config, dynamic),
         )
+    }
+
+    fn bind_work_mode_fill(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        current_l1_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding> {
+        self.prior
+            .bind_work_mode_fill(pipeline, dynamic, current_l1_lack, level, flight)
     }
 }
 

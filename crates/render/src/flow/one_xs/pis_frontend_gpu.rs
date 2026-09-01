@@ -35,7 +35,7 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) mod resident_l2_post_seal {
 
 pub(in crate::flow::one_xs::one_xs_belt_gpu) use l2_gpu::{
     GpuCold0Terminal, GpuColdLoopControls, GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls,
-    GpuL2PostPisBridge, GpuResidentLevelTwoPost,
+    GpuL2PostPisBridge, GpuResidentLevelTwoPost, GpuWorkModeBinding, GpuWorkModePipeline,
 };
 
 const MODEL_WORDS_PER_PATCH: usize = 5;
