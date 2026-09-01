@@ -25,14 +25,15 @@ def fixtures(root):
     for n,c in enumerate(M.OWNER_SOURCES):
         source.append({"path":f"/source/{c['basename']}",**{k:c[k] for k in ("bytes","sha256","decoder_lane","picked")},"stable_identity":ident(n+1)})
     request={"start":M.START,"count":M.COUNT,"end_inclusive":M.END,"no_seek":True,"cold_start_at_range_boundary":False,"every_source_frame_consumed":True,"captured_map_substitution":False}
-    run={"presented":M.END+1,"dropped":0,"starved":0,"scene_redraws":M.END+1}
+    run={"presented":M.END+1,"dropped":0,"starved":0,"scene_redraws":M.END+1,
+         "gpu_pis_transactions":M.END+1,"cpu_pis_transactions":0}
     kf,sf,tf=[],[],[]
     for i in range(M.START,M.END+1):
         kp,sp,tp=kd/f"frame-{i:010d}.png",sd/f"frame-{i:08d}.png",td/f"frame-{i:010d}-trace.png"
         png(kp);png(sp);png(tp)
         packed,alpha=kd/f"frame-{i:010d}.packed-f32le.bin",kd/f"frame-{i:010d}.alpha-f32le.bin"
         packed.write_bytes(bytes(320_000));alpha.write_bytes(bytes(80_000)); ns=i*M.PTS_STEP*M.NANOS//30_000
-        kf.append({"index":i,"timestamp_seconds":ns//M.NANOS,"timestamp_nanoseconds":ns%M.NANOS,"image":{**leaf(kp),"width":M.WIDTH,"height":M.HEIGHT},"production_map":{"packed":leaf(packed),"alpha":leaf(alpha)}})
+        kf.append({"index":i,"timestamp_seconds":ns//M.NANOS,"timestamp_nanoseconds":ns%M.NANOS,"image":{**leaf(kp),"width":M.WIDTH,"height":M.HEIGHT},"production_map":{"pis_backend":"gpu","packed":leaf(packed),"alpha":leaf(alpha)}})
         sf.append({"index":i,"pts":i*M.PTS_STEP,"time_base":"1/30000",**leaf(sp,"png")})
         tf.append({"index":i,"timestamp_seconds":ns//M.NANOS,"timestamp_nanoseconds":ns%M.NANOS,"base_png_sha256":sha(kp),"packed_sha256":sha(packed),"alpha_sha256":sha(alpha),"trace":leaf(tp)})
     kr={"schema":M.KJERAG_SCHEMA,"claim":M.KJERAG_CLAIM,"request":request,"view":M.OWNER_VIEW,"source":source,"build":build(PLAYBACK_SHA),"frames":kf,"run":run}
@@ -46,6 +47,9 @@ def fixtures(root):
 def pinned(path,label): return M.PinnedReceipt(path,sha(path),label)
 
 class Tests(unittest.TestCase):
+    def test_gpu_provenance_requires_new_owner_review_contract(self):
+        self.assertEqual(M.OUTPUT_SCHEMA,"kjerag.owner-three-panel-review.v2")
+        self.assertNotEqual(M.OUTPUT_SCHEMA,"kjerag.owner-three-panel-review.v1")
     def test_exact_owner_receipts_authenticate(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);kr,sr,tr=fixtures(root)
@@ -59,6 +63,23 @@ class Tests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as d:
                 root=Path(d);kr,_,_=fixtures(root);v=json.loads(kr.read_text());mutate(v);kr.write_text(json.dumps(v));(root/"copy").mkdir()
                 with pinned(kr,"K") as p,self.assertRaisesRegex(M.Refusal,msg): M.validate_kjerag(p,root/"copy",COMMIT,TREE,PLAYBACK_SHA)
+    def test_gpu_pis_provenance_decoys_refuse(self):
+        cases=((lambda v:v["run"].update(gpu_pis_transactions=M.END),"every committed transaction"),
+               (lambda v:v["run"].update(cpu_pis_transactions=1),"every committed transaction"),
+               (lambda v:v["frames"][0]["production_map"].update(pis_backend="cpu"),"GPU PIS committed map"),
+               (lambda v:v.update(schema="kjerag.playback-consecutive-range.v1"),"schema or claim"))
+        for mutate,msg in cases:
+            with tempfile.TemporaryDirectory() as d:
+                root=Path(d);kr,_,_=fixtures(root);v=json.loads(kr.read_text());mutate(v);kr.write_text(json.dumps(v));(root/"copy").mkdir()
+                with pinned(kr,"K") as p,self.assertRaisesRegex(M.Refusal,msg): M.validate_kjerag(p,root/"copy",COMMIT,TREE,PLAYBACK_SHA)
+    def test_historical_v1_trace_refuses_gpu_review_chain(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);kr,_,tr=fixtures(root);(root/"k").mkdir();(root/"t").mkdir()
+            value=json.loads(tr.read_text());value["schema"]="kjerag.playback-output-seam-trace.v1";tr.write_text(json.dumps(value))
+            with pinned(kr,"K") as kp:
+                k=M.validate_kjerag(kp,root/"k",COMMIT,TREE,PLAYBACK_SHA)
+                with pinned(tr,"trace") as tp,self.assertRaisesRegex(M.Refusal,"schema or claim"):
+                    M.validate_trace(tp,root/"t",kp,k,COMMIT,TREE,TRACE_SHA)
     def test_fake_trace_pixels_refuse_private_derivation(self):
         f={"index":M.START,"sha256":"1"*64}; a={"input_receipt":{},"request":{},"view":{},"source":[],"input_run":{},"selected_frames":[],"build":build(TRACE_SHA),"frames":[dict(f) for _ in range(M.COUNT)]};b=json.loads(json.dumps(a));b["frames"][0]["sha256"]="2"*64
         with self.assertRaisesRegex(M.Refusal,"private derivation"): M.compare_trace_derivation(a,b)

@@ -46,7 +46,7 @@ use std::process::Command;
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
-use kjerag_media::{Fallible, Reader};
+use kjerag_media::{Fallible, FrameStamp, Reader};
 use kjerag_render::{
     Camera, Extent, Horizon, Next, OneXsMapFrame, PisBackend, Readout, Request, Sampling, Scene,
     ScenePipeline, Shot, Size, Sweep, dmabuf,
@@ -1679,6 +1679,7 @@ struct RangeOutput {
     frames: Vec<Value>,
     capture_height: Option<u32>,
     next_transaction: u64,
+    last_transaction: Option<(FrameStamp, PisBackend)>,
     gpu_pis_transactions: u64,
     cpu_pis_transactions: u64,
 }
@@ -1721,15 +1722,34 @@ impl RangeOutput {
             frames: Vec::new(),
             capture_height: None,
             next_transaction: 0,
+            last_transaction: None,
             gpu_pis_transactions: 0,
             cpu_pis_transactions: 0,
         })
     }
 
     fn observe_transaction(&mut self, map: &OneXsMapFrame) -> Fallible<()> {
-        let index = map.frame().index();
+        self.observe_transaction_identity(map.frame(), map.pis_backend())
+    }
+
+    fn observe_transaction_identity(
+        &mut self,
+        frame: &FrameStamp,
+        backend: PisBackend,
+    ) -> Fallible<()> {
+        let index = frame.index();
         if index.checked_add(1) == Some(self.next_transaction) {
-            return Ok(());
+            return match self.last_transaction.as_ref() {
+                Some((last_frame, last_backend))
+                    if last_frame == frame && *last_backend == backend =>
+                {
+                    Ok(())
+                }
+                _ => Err(format!(
+                    "range backend provenance redraw changed frame {index} identity or PIS backend"
+                )
+                .into()),
+            };
         }
         if index != self.next_transaction {
             return Err(format!(
@@ -1738,7 +1758,7 @@ impl RangeOutput {
             )
             .into());
         }
-        match map.pis_backend() {
+        match backend {
             PisBackend::Gpu => self.gpu_pis_transactions += 1,
             PisBackend::Cpu => self.cpu_pis_transactions += 1,
         }
@@ -1746,6 +1766,7 @@ impl RangeOutput {
             .next_transaction
             .checked_add(1)
             .ok_or("range backend transaction count overflows")?;
+        self.last_transaction = Some((frame.clone(), backend));
         Ok(())
     }
 
@@ -3453,6 +3474,78 @@ mod tests {
         assert!(!stage.exists());
         assert!(!out.exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn range_backend_provenance_counts_only_exact_causal_transactions() {
+        let mut output = RangeOutput {
+            out: PathBuf::new(),
+            stage: None,
+            spec: RangeSpec {
+                start: 0,
+                count: 1,
+                end: 0,
+            },
+            next: 0,
+            frames: Vec::new(),
+            capture_height: None,
+            next_transaction: 0,
+            last_transaction: None,
+            gpu_pis_transactions: 0,
+            cpu_pis_transactions: 0,
+        };
+
+        let frame_zero = FrameStamp::for_test(0, Duration::ZERO, None);
+        let frame_zero_decoy = FrameStamp::for_test(0, Duration::ZERO, None);
+        let frame_one = FrameStamp::for_test(1, Duration::from_secs(1), Some(&frame_zero));
+        let frame_two = FrameStamp::for_test(2, Duration::from_secs(2), Some(&frame_one));
+        let frame_three = FrameStamp::for_test(3, Duration::from_secs(3), Some(&frame_two));
+        let frame_four = FrameStamp::for_test(4, Duration::from_secs(4), Some(&frame_three));
+
+        output
+            .observe_transaction_identity(&frame_zero, PisBackend::Gpu)
+            .unwrap();
+        output
+            .observe_transaction_identity(&frame_zero, PisBackend::Gpu)
+            .unwrap();
+        assert!(
+            output
+                .observe_transaction_identity(&frame_zero, PisBackend::Cpu)
+                .is_err()
+        );
+        assert!(
+            output
+                .observe_transaction_identity(&frame_zero_decoy, PisBackend::Gpu)
+                .is_err()
+        );
+        output
+            .observe_transaction_identity(&frame_one, PisBackend::Gpu)
+            .unwrap();
+        assert!(
+            output
+                .observe_transaction_identity(&frame_zero, PisBackend::Gpu)
+                .is_err()
+        );
+        assert!(
+            output
+                .observe_transaction_identity(&frame_three, PisBackend::Gpu)
+                .is_err()
+        );
+        assert_eq!(output.next_transaction, 2);
+        assert_eq!(output.gpu_pis_transactions, 2);
+        assert_eq!(output.cpu_pis_transactions, 0);
+
+        output
+            .observe_transaction_identity(&frame_two, PisBackend::Cpu)
+            .unwrap();
+        assert!(
+            output
+                .observe_transaction_identity(&frame_four, PisBackend::Gpu)
+                .is_err()
+        );
+        assert_eq!(output.next_transaction, 3);
+        assert_eq!(output.gpu_pis_transactions, 2);
+        assert_eq!(output.cpu_pis_transactions, 1);
     }
 
     #[test]

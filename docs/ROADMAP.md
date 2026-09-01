@@ -12,11 +12,14 @@ typed prepared source models as the temporary producer boundary, then consume
 only fallibly admitted directional `PatchGrid` results from the GPU kernel.
 Each reservation mints an exact generation plus opaque `FrameStamp`; each
 stage completion must return that complete flight and `PairSolveStage` before
-the typed grids can enter `commit_with_solver`. Pipeline, readback, receipt,
-stamp and install failures surface their original error, restore the exact
-capture owner and ready-map identity, and do not retry through the CPU solver.
-An in-flight lookup returns before constructing either GPU producer and keeps
-the prior completed display.
+the typed grids can enter `commit_with_solver`. Pipeline, readback, receipt and
+solver-stamp failures occur before commit, surface their original error and
+restore the allocation-identical old owner and ready map without a CPU retry.
+An install failure occurs after the scalar owner has advanced, so it instead
+keeps the prior ready display and makes the lineage terminal while retaining
+the advanced owner only in its exact slot or quarantine. It does not falsely
+restore the pre-commit estimator. An in-flight lookup returns before
+constructing either GPU producer and keeps the prior completed display.
 
 Committed `OneXsMapFrame` values now carry typed CPU/GPU PIS provenance
 separately from the diagnostic count of GPU stages that returned grids. The
@@ -24,9 +27,12 @@ consecutive-range receipt contract is therefore
 `kjerag.playback-consecutive-range.v2`: every recorded production map names
 its backend and the run authenticates exact GPU and CPU transaction totals.
 The strict computed-trace consumer emits its corresponding v2 contract and
-refuses historical v1 or missing, mixed and inconsistent provenance. This
-branch does not reinterpret the frozen v1 evidence as proof of GPU-only PIS;
-a new target-GPU consecutive-range run is required before making that claim.
+refuses historical v1 or missing, mixed and inconsistent provenance. The
+three-panel owner-review builder now requires those two v2 inputs and emits
+`kjerag.owner-three-panel-review.v2`; the frozen v1 review contract is not
+silently redefined. This branch does not reinterpret any frozen v1 evidence
+as proof of GPU-only PIS; a new target-GPU consecutive-range run is required
+before making that claim.
 
 **Second GPU ONE X2 slice, 2026-09-01, implementation branch only [GPU
 GAUSSIAN; TYPED POST-BLUR HANDOFF; 244 BYTE-IDENTICAL ARTIFACTS; SMALL NOISY

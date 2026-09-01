@@ -23,12 +23,12 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parent.parent
-KJERAG_SCHEMA = "kjerag.playback-consecutive-range.v1"
+KJERAG_SCHEMA = "kjerag.playback-consecutive-range.v2"
 KJERAG_CLAIM = "exact consecutive displayed production frames from one causal frame-zero run"
 STUDIO_SCHEMA = "kjerag.studio-projected-interval.v1"
-TRACE_SCHEMA = "kjerag.playback-output-seam-trace.v1"
+TRACE_SCHEMA = "kjerag.playback-output-seam-trace.v2"
 TRACE_CLAIM = "actual selected-alpha 0.5 four-neighbour crossings over authenticated Kjerag output PNGs"
-OUTPUT_SCHEMA = "kjerag.owner-three-panel-review.v1"
+OUTPUT_SCHEMA = "kjerag.owner-three-panel-review.v2"
 OUTPUT_RECEIPT = "three-panel-review-receipt.json"
 NATIVE = "riser-three-panel-native.mp4"
 QUARTER = "riser-three-panel-quarter-speed.mp4"
@@ -343,6 +343,9 @@ def validate_kjerag(receipt: PinnedReceipt, stage: Path, expected_commit: str,
     run = obj(value.get("run"), "Kjerag run")
     require(run.get("presented") == END + 1 and run.get("dropped") == 0 and run.get("starved") == 0,
             "Kjerag receipt does not prove uninterrupted frame-zero causal consumption")
+    require(run.get("gpu_pis_transactions") == run.get("presented") and
+            run.get("cpu_pis_transactions") == 0,
+            "Kjerag receipt does not prove every committed transaction used GPU PIS with no CPU fallback")
     source, build = array(value.get("source"), "Kjerag source"), obj(value.get("build"), "Kjerag build")
     require(len(source) == 2, "Kjerag receipt must bind two source files")
     for item, expected in zip(source, OWNER_SOURCES, strict=True):
@@ -372,6 +375,8 @@ def validate_kjerag(receipt: PinnedReceipt, stage: Path, expected_commit: str,
         require_png(destination, f"Kjerag frame {index}")
         require(authenticated["file"] == destination.name, f"Kjerag frame {index} name changed")
         production = obj(frame.get("production_map"), f"Kjerag frame {index} production map")
+        require(production.get("pis_backend") == "gpu",
+                f"Kjerag frame {index} does not authenticate a GPU PIS committed map")
         packed_path = stage / f"frame-{index:010d}.packed-f32le.bin"
         alpha_path = stage / f"frame-{index:010d}.alpha-f32le.bin"
         packed = copy_leaf(receipt.path.parent, obj(production.get("packed"), "packed map"), packed_path,

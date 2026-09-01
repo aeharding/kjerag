@@ -471,6 +471,38 @@ impl std::fmt::Display for RejectedOneXsAbort {
 
 impl std::error::Error for RejectedOneXsAbort {}
 
+#[derive(Debug)]
+struct OneXsRollbackFailure {
+    primary: Box<dyn std::error::Error + Send + Sync>,
+    rollback: Box<RejectedOneXsAbort>,
+}
+
+impl std::fmt::Display for OneXsRollbackFailure {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            output,
+            "{}; restoring the ONE X2 reservation also failed: {}",
+            self.primary, self.rollback
+        )
+    }
+}
+
+impl std::error::Error for OneXsRollbackFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.primary.as_ref())
+    }
+}
+
+fn abort_one_xs_after_error(
+    reservation: OneXsReservation,
+    primary: Box<dyn std::error::Error + Send + Sync>,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    match reservation.abort() {
+        Ok(()) => primary,
+        Err(rollback) => Box::new(OneXsRollbackFailure { primary, rollback }),
+    }
+}
+
 /// One submitted compact solver input and the exact delivery it sampled.
 ///
 /// [`PendingBlurredBelts`] retains the decoder surfaces themselves. This outer
@@ -2862,8 +2894,7 @@ impl ScenePipeline {
                     let pipeline = match GpuPisPipeline::new(device, queue) {
                         Ok(pipeline) => pipeline,
                         Err(error) => {
-                            reservation.abort()?;
-                            return Err(error);
+                            return Err(abort_one_xs_after_error(reservation, error));
                         }
                     };
                     self.one_xs_pis = Some(Box::new(pipeline));
@@ -2876,8 +2907,7 @@ impl ScenePipeline {
                 ) {
                     Ok(pending) => pending,
                     Err(error) => {
-                        reservation.abort()?;
-                        return Err(error);
+                        return Err(abort_one_xs_after_error(reservation, error));
                     }
                 };
                 // The presentation policy admits only one frame at a time.
@@ -2886,8 +2916,7 @@ impl ScenePipeline {
                 let blurred_belts = match pending.read(reservation.prepared()) {
                     Ok(blurred_belts) => blurred_belts,
                     Err(error) => {
-                        reservation.abort()?;
-                        return Err(error);
+                        return Err(abort_one_xs_after_error(reservation, error));
                     }
                 };
                 let mut solver = ReservationGpuPisSolver {
@@ -2906,8 +2935,7 @@ impl ScenePipeline {
                         .map_err(|rejected| rejected as Box<dyn std::error::Error + Send + Sync>)?,
                     Err(rejected) => {
                         let RejectedOneXsSolverReservation { reservation, error } = *rejected;
-                        reservation.abort()?;
-                        return Err(error.into());
+                        return Err(abort_one_xs_after_error(reservation, error.into()));
                     }
                 }
             }
@@ -5988,6 +6016,43 @@ mod tests {
         assert!(Arc::ptr_eq(state.ready.as_ref().unwrap(), &ready));
         assert_eq!(state.ready.as_ref().unwrap().frame(), &first);
         assert_eq!(state.ready.as_ref().unwrap().pis_backend(), PisBackend::Cpu);
+    }
+
+    #[test]
+    fn solver_failure_and_failed_abort_preserve_both_raw_errors() {
+        let capture = reservation_capture();
+        let first = reservation_stamp(0, None);
+        let reservation = reserve_frame(&capture, &first);
+        let mut solver = InjectingSolver {
+            at: PairSolveStage::Cold {
+                calculation: 1,
+                level: Level::Two,
+            },
+            injection: SolverInjection::Failure,
+            cpu: CpuPairedPisSolver,
+        };
+        let rejected = match reservation.commit_with_solver(reservation_blurred(131), &mut solver) {
+            Ok(_) => panic!("injected solver failure unexpectedly committed"),
+            Err(rejected) => rejected,
+        };
+        let RejectedOneXsSolverReservation { reservation, error } = *rejected;
+        let primary = error.to_string();
+        {
+            let mut state = capture.state.lock().unwrap();
+            state.in_flight = Some(GpuPisFlight {
+                generation: reservation.flight.generation + 1,
+                frame: reservation.flight.frame.clone(),
+            });
+        }
+
+        let combined = abort_one_xs_after_error(reservation, error.into());
+        assert_eq!(combined.source().unwrap().to_string(), primary);
+        assert!(combined.to_string().starts_with(&primary));
+        assert!(
+            combined
+                .to_string()
+                .contains("ONE X2 stitch rollback names a stale reservation generation")
+        );
     }
 
     #[test]

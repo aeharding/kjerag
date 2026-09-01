@@ -63,3 +63,6 @@ wayland-protocols-misc = { workspace = true, features = ["client"] }
 # (`wlr_virtual_pointer_manager_v1_create`). It is also all `pointer` binds,
 # beside wayland-client.
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
+
+[dev-dependencies]
+kjerag-media = { workspace = true, features = ["test-support"] }
