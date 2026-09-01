@@ -658,8 +658,16 @@ impl Run {
         if self.presented != expected_presented
             || self.dropped != 0
             || self.starved != 0
-            || self.scene_redraws != self.presented
-            || self.instrument_redraws != self.presented
+            // `presented` counts only a newly claimed source pair. The
+            // player's redraw count also includes a pump which finds no new
+            // pair, including the unanchored startup pump before frame zero.
+            // Selected playback can additionally hold that offered pair for
+            // a render redraw while its exact map transaction completes; that
+            // gate returns before `Player::pump`, so only the instrument count
+            // advances. Preserve the causal ordering instead of requiring the
+            // three distinct counters to be identical.
+            || self.scene_redraws < self.presented
+            || self.instrument_redraws < self.scene_redraws
             || self.elapsed_nanoseconds >= 1_000_000_000
             || (self.elapsed_seconds == 0 && self.elapsed_nanoseconds == 0)
         {
@@ -1643,6 +1651,44 @@ mod tests {
         false_claim["request"]["no_seek"] = json!(false);
         let receipt: Receipt = serde_json::from_value(false_claim).unwrap();
         assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn run_redraws_preserve_the_causal_counter_order() {
+        let (_temp, value) = fixture();
+
+        let mut startup_redraw = value.clone();
+        startup_redraw["run"]["scene_redraws"] = json!(10);
+        startup_redraw["run"]["instrument_redraws"] = json!(10);
+        serde_json::from_value::<Receipt>(startup_redraw)
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        let mut selected_map_redraw = value.clone();
+        selected_map_redraw["run"]["instrument_redraws"] = json!(10);
+        serde_json::from_value::<Receipt>(selected_map_redraw)
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        let mut fewer_scene_redraws_than_presentations = value.clone();
+        fewer_scene_redraws_than_presentations["run"]["scene_redraws"] = json!(8);
+        assert!(
+            serde_json::from_value::<Receipt>(fewer_scene_redraws_than_presentations)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+
+        let mut fewer_instrument_redraws_than_scene_redraws = value;
+        fewer_instrument_redraws_than_scene_redraws["run"]["scene_redraws"] = json!(10);
+        assert!(
+            serde_json::from_value::<Receipt>(fewer_instrument_redraws_than_scene_redraws)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
