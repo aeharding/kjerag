@@ -3,6 +3,26 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**GPU-resident selected ONE X2 parent maps, 2026-09-01, implementation branch
+only [BIT-EXACT ON FORCED RADV; OPAQUE OUTPUT; NO SCENE WIRING]:** the frozen
+per-frame parent preparation now has one paired compute producer on the shared
+`OneXsGpuContext`. Per-frame uploads contain only the two 33-word selected
+model/control packs and 51 sealed pose quaternions. The complete two-lens
+100-by-200 float2 result remains one private A-then-B storage buffer; the
+ordinary producer submits and returns without copy, map, poll or wait.
+
+The WGSL retains the scalar operation order with explicitly materialized
+binary32 operations, correctly rounded software division and integer square
+root. Fixed raster-angle transcendental results are compiled from the same
+frozen scalar expressions into the shader, rather than uploaded per frame.
+On forced RADV PHOENIX, qualification compared all 80,000 output words for a
+cold dispatch, warm pipeline reuse, a one-microsecond clock mutation and a
+live orientation mutation: all four pairs were bit-identical to the CPU
+oracle. Readback exists only in the test module. This stage does not wire
+Scene or select playback. Its remaining seam is transfer of the opaque token
+into the resident geometry/mapMerge chain under that chain's inherited
+submission lease; there is no public raw-buffer or detached submission API.
+
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
 READINESS CLAIM]:** the qualified paired GPU PIS kernel has a concrete

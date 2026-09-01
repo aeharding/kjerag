@@ -48,6 +48,12 @@ pub struct ParentMapBuilder {
     readout: Readout,
 }
 
+/// Exact binary32 inputs shared by the scalar oracle and resident GPU stage.
+pub(super) struct PreparedParentMap {
+    pub(super) parameters: LensPair<MetalCalcMapParams>,
+    pub(super) poses: [[f32; 4]; POSE_COUNT],
+}
+
 impl ParentMapBuilder {
     /// Pack the static selected ONE X2 inputs from one capture calibration.
     pub fn new(calibration: &CalibrationSet) -> Result<Self, ParentMapError> {
@@ -83,6 +89,16 @@ impl ParentMapBuilder {
         center: Duration,
         readout: Readout,
     ) -> Result<LensPair<FlowstateRoi>, ParentMapError> {
+        let prepared = self.prepare(orientation, center, readout)?;
+        Ok(prepared.scalar_maps())
+    }
+
+    pub(super) fn prepare(
+        &self,
+        orientation: &OrientationTrack,
+        center: Duration,
+        readout: Readout,
+    ) -> Result<PreparedParentMap, ParentMapError> {
         if readout.seconds.to_bits() != self.readout.seconds.to_bits()
             || readout.sweep != self.readout.sweep
         {
@@ -90,16 +106,25 @@ impl ParentMapBuilder {
                 "selected ONE X2 parent readout does not match its calibration",
             ));
         }
-        build_at_center(&self.selected, orientation, center, readout)
+        prepare_at_center(&self.selected, orientation, center, readout)
     }
 }
 
-fn build_at_center(
+impl PreparedParentMap {
+    pub(super) fn scalar_maps(&self) -> LensPair<FlowstateRoi> {
+        LensPair {
+            a: diagnostic_metal_calc_map(&self.parameters.a, &self.poses),
+            b: diagnostic_metal_calc_map(&self.parameters.b, &self.poses),
+        }
+    }
+}
+
+fn prepare_at_center(
     selected: &LensPair<SelectedModel3Static>,
     orientation: &OrientationTrack,
     center: Duration,
     readout: Readout,
-) -> Result<LensPair<FlowstateRoi>, ParentMapError> {
+) -> Result<PreparedParentMap, ParentMapError> {
     if orientation.is_empty() {
         return Err(fail("selected ONE X2 parent orientation provider is empty"));
     }
@@ -133,9 +158,12 @@ fn build_at_center(
     });
     let mapping_base = quat_f32_xyzw(mapping_base);
 
-    Ok(LensPair {
-        a: diagnostic_metal_calc_map(&parameters(&selected.a, mapping_base), &poses),
-        b: diagnostic_metal_calc_map(&parameters(&selected.b, mapping_base), &poses),
+    Ok(PreparedParentMap {
+        parameters: LensPair {
+            a: parameters(&selected.a, mapping_base),
+            b: parameters(&selected.b, mapping_base),
+        },
+        poses,
     })
 }
 

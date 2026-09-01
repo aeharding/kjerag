@@ -31,6 +31,10 @@ pub(crate) mod pis_frontend_gpu;
 /// Exact render-private device and queue identity shared by resident stages.
 pub(crate) mod gpu_context;
 
+/// GPU-resident selected parent-map arithmetic.
+#[allow(dead_code)] // Connected by the following resident geometry integration.
+pub(crate) mod parent_gpu;
+
 /// The selected finest-level, component-zero temporal median.
 /// The capture-owned ONE X2 producer places it between patch solving and
 /// densification.
