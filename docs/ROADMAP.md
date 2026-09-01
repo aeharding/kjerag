@@ -3,9 +3,50 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Selected ONE X2 Scene resident cutover, 2026-09-01, implementation branch
+only [NORMAL LIVE PATH; POST-QUALIFICATION NONBLOCKING; NO PERFORMANCE OR
+STUDIO-RE CLAIM]:** an ordinary supported ONE X2 open now branches before
+legacy Scene preparation and attaches its capture-owned
+`ResidentCaptureFacade` to a renderer-local `ResidentSceneFacade`. Normal
+prepare, redraw and window draw never construct a `FrameOwner`,
+`PreparedFrame`, solver-belt readback, `ColdInputs`, CPU PIS adapter, CPU dense
+map or `DirectMapDraw` upload. Only exact resident staging replaces `Shown`
+and acknowledges a frame; pending and full retirement admission keep the old
+exact ready drawable and schedule another redraw.
+
+Scene performs at most one nonblocking device poll, when resident work exists,
+for all active and retired attachments in a redraw, then only classifies callbacks. Seek and reopen move
+the old attachment into normal draining by capture identity, including while
+the new frame-zero lineage has no offered view and after reopening a
+non-ONE-X2 file. Completion-proven candidates and render callbacks release
+normally. Uncertain ownership is retained fail-closed without blocking or
+spinning the new lineage. Pipeline recreation binds the same capture-owned
+session. Screenshot takes a separate resident permit and renders through its
+own offscreen pass; it neither calls the window draw nor steals its permit.
+
+The explicit diagnostic map API authenticates the current and shown full
+`FrameStamp` plus capture identity, then reads the installed packed map and
+alpha for causal tooling. That instrument-only operation intentionally uses
+bulk `MAP_READ` and waits. The first lazy session construction also retains
+the existing synchronous target-device arithmetic qualifications, including
+their bulk diagnostic readbacks and waits. After construction, ordinary
+per-frame submit/redraw maps only the four-byte validity word and performs no
+wait or frame-sized CPU transfer. The CPU implementation remains accessible
+only as an oracle/diagnostic boundary. Studio remains the frozen correctness
+oracle and no optimization reverse engineering was performed. No visual
+tradeoff is proposed; rendered parity and owner-eye verification remain gates.
+On the dirty branch, format, workspace/all-targets warnings-denied clippy,
+workspace tests, repository name/source/diff gates, the focused forced-RADV
+facade test and the five-frame real-media selected Scene test pass. A final
+clean commit receipt remains pending. The 61-frame render/map/alpha/computed-
+trace range and decoy/null review, ordinary app plus installed-Flatpak/UI
+playback, and owner-eye review remain merge gates. The structural source test
+is a tripwire rather than a transitive proof, and the five-frame test submits
+real render passes but does not read back their pixels.
+
 **Capture-shared resident transaction facade, 2026-09-01, implementation
-branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED; NO SCENE,
-PLAYBACK, PERFORMANCE OR STUDIO-RE CLAIM]:** one open ONE X2 capture now has a
+branch only [SUPERSEDED BY THE SELECTED SCENE CUTOVER ABOVE; FORCED-RADV
+QUALIFIED; NO PLAYBACK, PERFORMANCE OR STUDIO-RE CLAIM]:** one open ONE X2 capture now has a
 lazy resident session that owns the exact GPU context, authenticated render
 format, calibration/orientation-derived producers, capture root, direct
 pipeline, picture layout, sampler and bounded draw-retirement queue. Renderer
@@ -13,7 +54,7 @@ attachments share that session and queue but keep their one-redraw staged cell
 local, so destroying and recreating an attachment neither detaches an old
 installed picture from its pipeline nor loses armed decoder-surface retirement
 proof. A changed device/queue or surface format refuses with its failure-site
-error. Scene does not select or construct this facade yet.
+error. At this checkpoint Scene did not yet select or construct the facade.
 
 The facade owns at most one cold-or-warm final-map continuation. It chooses
 cold start or warm continuation internally, uses the selected direction- and
@@ -50,7 +91,7 @@ rollback with zero wait, full backpressure, private screen/screenshot
 Reframes, attachment recreation with shared retirement ownership, carrier-
 before-root unwind ordering and predecessor immutability.
 
-This checkpoint deliberately does not implement normal seek/reopen draining.
+This checkpoint did not yet implement normal seek/reopen draining.
 Dropping a capture with uncertain callbacks is nonblocking and fail-closed, so
 its decoder owners may remain retained until process exit. Scene integration
 must keep old sessions alive and poll them to empty during normal replacement.
@@ -107,9 +148,8 @@ NO PRODUCER, PLAYBACK, PERFORMANCE OR PARITY CLAIM]:** this earlier checkpoint
 established bounded render-pass retirement, one-shot iced staging and typed
 full backpressure. The capture-shared facade above replaces its pipeline-local
 ownership and shared-uniform assumptions with capture-stable retirement and
-draw-private picture resources. No resident producer is connected to Scene,
-so normal selected ONE X2 playback still uses its existing
-CPU-retained/direct-map path.
+draw-private picture resources. At that checkpoint no resident producer was
+connected to Scene; the selected cutover above retires that limitation.
 
 **Allocation-identical installed warm prior and temporal continuation,
 2026-09-01, implementation branch only [PRIVATE AND UNSELECTED; THROUGH WARM
@@ -898,7 +938,7 @@ integration blocker is qualification of the later resident estimator stages
 against this same `OneXsGpuContext`; this direct path remains unselected in
 Scene. This is not yet an ownership-readiness, performance or range claim.
 
-**Backend-neutral paired scheduler boundary, 2026-09-01, implementation
+**Backend-neutral paired scheduler boundary, 2026-09-01, historical superseded implementation
 branch only [CPU ORACLE IDENTITY; NO NEW GPU FRONTEND; NO PERFORMANCE CLAIM]:**
 cold and warm scheduling now consume a `PairedControlInputs` frame containing
 only data used after or around sparse solving: the current blurred belts,
@@ -921,7 +961,7 @@ all injected stage failures, stamps, panics and receipt mismatches retain the
 exact retryable owner and ready-map allocations. No target-GPU workload or
 performance measurement was run for this scheduler-only refactor.
 
-**Shared ONE X2 GPU context foundation, 2026-09-01, implementation branch
+**Shared ONE X2 GPU context foundation, 2026-09-01, historical superseded implementation branch
 only [STRUCTURAL OWNERSHIP; NO NEW RESIDENT STAGE; NO PERFORMANCE OR PARITY
 CLAIM]:** the renderer now retains the exact iced device and queue as one
 private cloneable `OneXsGpuContext`. Equality is the structural identity of
@@ -1015,7 +1055,7 @@ next performance slice keeps the post-Gaussian belts resident, constructs
 estimator levels and prepared models on the GPU, and binds them directly to
 paired PIS rather than reconstructing CPU `Input` behind an adapter.
 
-**Production ONE X2 paired PIS GPU wiring, 2026-09-01, authenticated checkpoint
+**Production ONE X2 paired PIS GPU wiring, 2026-09-01, historical superseded authenticated checkpoint
 [TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; RANGE AND
 PERFORMANCE EVIDENCE ABOVE]:** the selected Scene route now lazily qualifies a
 persistent paired PIS compute pipeline before any frame-specific GPU work.
@@ -1046,7 +1086,7 @@ three-panel owner-review builder now requires those two v2 inputs and emits
 silently redefined. The authenticated range above is the new target-GPU v2
 evidence; no frozen v1 evidence is reinterpreted as proof of GPU-only PIS.
 
-**Second GPU ONE X2 slice, 2026-09-01, implementation branch only [GPU
+**Second GPU ONE X2 slice, 2026-09-01, historical superseded implementation branch only [GPU
 GAUSSIAN; TYPED POST-BLUR HANDOFF; 244 BYTE-IDENTICAL ARTIFACTS; SMALL NOISY
 THROUGHPUT GAIN; NOT REALTIME; NO NEW STUDIO OR OWNER VERDICT CLAIM]:** the
 production GPU producer now follows source sampling and the 3-by-3 reduction
@@ -1111,7 +1151,7 @@ The four second-slice values are
 `d19fd7dc391e1c5d7b53bfbddbb589df212072cda421f21537e66d119d798d66`
 and `d238f734a2ae8bea594d34704700ab2d71ac9fe7b401f34d7d5e482bc7bf67e8`.
 
-**Selected ONE X2 production transaction regression, 2026-09-01, working
+**Selected ONE X2 production transaction regression, 2026-09-01, historical superseded working
 branch only [OPT-IN REAL MEDIA; TARGET GPU]:** an opt-in render test drives a
 real paired ONE X2 delivery through dmabuf import, the exact prepared retained
 maps, compact GPU solver belts, capture-owned scalar commit, direct-map upload
@@ -1125,7 +1165,7 @@ Vulkan device is available, and its explicit invocation goes through
 `scripts/quiet.sh`; the normal GPU arithmetic twin remains the
 media-independent synthetic source fixture gate.
 
-**Production GPU ONE X2 solver-belt bridge, 2026-09-01, implementation branch
+**Production GPU ONE X2 solver-belt bridge, 2026-09-01, historical superseded implementation branch
 only [WIRED INTO PLAYBACK; BYTE-EXACT TARGET-GPU TWIN; AUTHENTICATED 61-FRAME
 CPU IDENTITY; 25.6% MEDIAN THROUGHPUT GAIN; NOT REALTIME; NO STUDIO OR OWNER
 VERDICT CLAIM]:** selected playback now sends the imported R8 lens textures

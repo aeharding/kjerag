@@ -145,6 +145,10 @@ impl<P> IcedDrawRetirements<P> {
         self.lock().collect_completed()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lock().pending.is_empty()
+    }
+
     /// A shared device poll failed while resident draws may still be in
     /// flight. Keep every uncertain payload for process life without replacing
     /// the failure site's original error.

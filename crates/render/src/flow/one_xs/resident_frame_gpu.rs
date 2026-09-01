@@ -1,8 +1,8 @@
-//! Private capture root for the unselected resident ONE X2 frame chain.
+//! Private capture root for the selected resident ONE X2 frame chain.
 //!
 //! A capture is constructed once. Seeking or reopening constructs another
 //! capture; there is deliberately no reset operation. The mutex owns the one
-//! monotonic generation, exact pending seal, committed successor and future
+//! monotonic generation, exact pending seal, committed successor and
 //! ready capability. GPU work happens only after a linear reservation has
 //! taken an immutable snapshot of the committed successor.
 
@@ -601,6 +601,18 @@ impl GpuResidentCapture {
             permit,
             pass: None,
         }))
+    }
+
+    pub(super) fn diagnostic_ready(&self) -> Fallible<Option<Arc<InstalledOneXsDraw>>> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        Ok(state.ready.clone())
     }
 
     #[cfg(test)]

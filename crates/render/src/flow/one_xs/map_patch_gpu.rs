@@ -1,14 +1,9 @@
-//! Unselected resident GPU final-map materializer for the selected ONE X2 route.
+//! Resident GPU final-map materializer for the selected ONE X2 route.
 //!
 //! The production entry consumes a sealed upstream resident token, advances
 //! that token's existing submission lease and leaves the packed 200-by-100
 //! type-2 map resident. A four-byte asynchronous validity gate is the only
-//! ordinary CPU observation. Scene wiring remains a later boundary.
-
-#![allow(
-    dead_code,
-    reason = "standalone qualification checkpoint is deliberately not selected by Scene"
-)]
+//! ordinary CPU observation. Scene reaches it through the capture facade.
 
 use std::num::NonZeroU64;
 use std::sync::{Arc, mpsc};
@@ -25,8 +20,8 @@ use super::super::map_patch::{
 use super::super::resources::OneXsResources;
 use crate::Fallible;
 #[cfg(test)]
-use crate::studio_type2::{ALPHA_BYTES, AlphaMap, PackedMap};
-use crate::studio_type2::{MAP_NODES, PACKED_BYTES};
+use crate::studio_type2::AlphaMap;
+use crate::studio_type2::{ALPHA_BYTES, MAP_NODES, PACKED_BYTES, PackedMap};
 
 const SHADER: &str = include_str!("map_patch_gpu.wgsl");
 const WORKGROUP_SIZE: u32 = 64;
@@ -44,6 +39,7 @@ const INPUT_BYTES: u64 = (INPUT_WORDS * size_of::<u32>()) as u64;
 #[cfg(test)]
 const DYNAMIC_INPUT_WORDS: usize = 2 * DYNAMIC_SIDE_WORDS;
 const STATIC_INPUT_WORDS: usize = 2 * STATIC_SIDE_WORDS;
+#[allow(dead_code, reason = "legacy final-map binding oracle ABI")]
 const STATIC_INPUT_BYTES: u64 = (STATIC_INPUT_WORDS * size_of::<u32>()) as u64;
 const ACTION_BYTES: u64 = (MAP_NODES * 2 * size_of::<u32>()) as u64;
 const VALIDITY_BYTES: u64 = size_of::<u32>() as u64;
@@ -79,6 +75,7 @@ pub(super) enum GeneratedHintComponent {
 
 /// Encode one exact generated-successor-hint failure for the shared resident
 /// validity word. Invalid dense sites have no representation.
+#[allow(dead_code, reason = "final-map qualification oracle")]
 pub(super) const fn generated_hint_validity_word(
     level: GeneratedHintLevel,
     direction: super::super::Direction,
@@ -400,6 +397,7 @@ pub(super) enum ClassifiedValidityPoll<O: Operands> {
 
 impl<O: Operands> PendingGpuPackedMapFrame<O> {
     /// Drive callbacks once without waiting and consume the result if ready.
+    #[allow(dead_code, reason = "legacy final-map oracle polling")]
     pub(super) fn poll(self) -> Fallible<ValidityPoll<O>> {
         if let Err(error) = self
             .context
@@ -421,6 +419,7 @@ impl<O: Operands> PendingGpuPackedMapFrame<O> {
 
     /// Consume the callback state after the capture façade has already driven
     /// this exact device once for the redraw.
+    #[allow(dead_code, reason = "explicit final-map oracle completion boundary")]
     pub(super) fn finish_after_poll(self) -> Fallible<ValidityPoll<O>> {
         match self.finish_after_poll_classified() {
             ClassifiedValidityPoll::Pending(pending) => Ok(ValidityPoll::Pending(pending)),
@@ -673,6 +672,7 @@ impl<O: Operands> GpuPackedMapFrame<O> {
     /// Validate exact context and delivery identity, then build the two-buffer
     /// binding consumed by the existing direct type-2 Scene shader. No raw
     /// buffer leaves this module.
+    #[allow(dead_code, reason = "legacy final-map binding oracle")]
     pub(super) fn bind_for_scene(
         self,
         context: &OneXsGpuContext,
@@ -718,10 +718,10 @@ pub(super) struct GpuBoundFinalMap {
 pub(super) struct InstalledGpuMapBinding {
     frame: FrameStamp,
     read: wgpu::BindGroup,
-    _packed: wgpu::Buffer,
+    packed: wgpu::Buffer,
     _actions: wgpu::Buffer,
-    _context: OneXsGpuContext,
-    _statics: Arc<GpuFinalMapStatics>,
+    context: OneXsGpuContext,
+    statics: Arc<GpuFinalMapStatics>,
     carrier: Box<dyn InstalledFinalCarrier>,
 }
 
@@ -756,12 +756,32 @@ impl InstalledGpuMapBinding {
     ) -> bool {
         self.carrier.matches_root(root)
     }
+
+    pub(super) fn diagnostic_readback(&self) -> Fallible<crate::OneXsMapFrame> {
+        let packed = readback_packed(self.context.device(), self.context.queue(), &self.packed)?;
+        let alpha = readback_u32(
+            self.context.device(),
+            self.context.queue(),
+            &self.statics.alpha,
+            ALPHA_BYTES as u64,
+        )?
+        .into_iter()
+        .map(f32::from_bits)
+        .collect();
+        Ok(crate::OneXsMapFrame::new(
+            self.frame.clone(),
+            packed,
+            crate::studio_type2::AlphaMap::new(alpha)?,
+            crate::studio_type2::PisBackend::Gpu,
+        ))
+    }
 }
 
 impl<P> GpuPackedMapFrame<GpuFinalOperands<P>>
 where
     P: GpuPriorPublicLevelTwo + Send + Sync + 'static,
 {
+    #[allow(dead_code, reason = "explicit final-map oracle identity inspection")]
     pub(super) fn frame_stamp(&self) -> &FrameStamp {
         &self.frame
     }
@@ -798,10 +818,10 @@ where
         let binding = InstalledGpuMapBinding {
             frame: self.frame.clone(),
             read,
-            _packed: self.packed,
+            packed: self.packed,
             _actions: self._actions,
-            _context: self.context,
-            _statics: self.statics,
+            context: self.context,
+            statics: self.statics,
             carrier: Box::new(parts.carrier),
         };
         Ok(GpuBoundFinalMap {
@@ -812,12 +832,14 @@ where
     }
 }
 
+#[allow(dead_code, reason = "legacy final-map binding oracle")]
 pub(super) struct GpuMapBinding<O: Operands> {
     frame: FrameStamp,
     read: wgpu::BindGroup,
     _resident: GpuPackedMapFrame<O>,
 }
 
+#[allow(dead_code, reason = "legacy final-map binding oracle")]
 impl<O: Operands> GpuMapBinding<O> {
     pub(super) fn frame(&self) -> &FrameStamp {
         &self.frame
@@ -829,6 +851,7 @@ impl<O: Operands> GpuMapBinding<O> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "legacy final-map binding oracle error surface")]
 pub(super) enum BindingError {
     Context,
     Frame,
@@ -847,7 +870,6 @@ impl fmt::Display for BindingError {
 
 impl Error for BindingError {}
 
-#[cfg(test)]
 fn readback_packed(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -889,7 +911,6 @@ fn readback_packed(
     Ok(PackedMap::new(nodes).expect("fixed GPU output has the type-2 map shape"))
 }
 
-#[cfg(test)]
 fn readback_u32(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -965,7 +986,7 @@ impl std::fmt::Display for QualificationError {
 #[cfg(test)]
 impl std::error::Error for QualificationError {}
 
-/// Render-private, unselected final-map compute pipeline.
+/// Render-private final-map compute pipeline.
 pub(super) struct GpuMapMaterializer {
     context: OneXsGpuContext,
     statics: Arc<GpuFinalMapStatics>,
@@ -1385,6 +1406,7 @@ struct TestResidentOperands {
     dynamic: wgpu::Buffer,
     validity: wgpu::Buffer,
     submit_error: Option<String>,
+    #[allow(dead_code, reason = "drop-order witness retained by oracle payload")]
     drop_witness: Option<TestDropWitness>,
 }
 

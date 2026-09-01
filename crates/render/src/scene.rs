@@ -30,6 +30,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -52,12 +53,12 @@ use super::flow::one_xs::pis::gpu::{
 use super::flow::one_xs::player::FrameOwnerError;
 use super::flow::one_xs::player::{FrameCommitError, FrameOwner, FrameResult, PreparedFrame};
 use super::flow::one_xs::scalar::{
-    ColdInputs, ColdPreparedSchedule, CpuPisOracleInputs, PairedControlInputs, PairedPatchGrids,
-    PairedPisSolver, PairedSolveRequest,
+    CpuPisOracleInputs, PairedControlInputs, PairedPatchGrids, PairedPisSolver, PairedSolveRequest,
 };
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{
-    GpuSolverBeltPipeline, IcedInstalledDrawAdapter, PendingBlurredBelts, SourceTextures,
+    PendingBlurredBelts, ResidentCaptureFacade, ResidentDrain, ResidentPrepare, ResidentRetry,
+    ResidentSceneFacade, ResidentScreenshotPrepare, ResidentSubmit,
 };
 use super::flow::{Cadence, Estimate};
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
@@ -196,6 +197,7 @@ pub struct Scene {
     stalled: Stalled,
     /// And what it last managed to draw of this file, for the same reason.
     shown: Shown,
+    resident_refresh: Arc<AtomicBool>,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -231,7 +233,7 @@ fn one_xs_frame_waiting(enabled: bool, capture_owned: bool, current_ready: Optio
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReplayStart {
+pub(crate) enum ReplayStart {
     Continue,
     FrameZero,
 }
@@ -240,7 +242,7 @@ enum ReplayStart {
 /// decoder exactly where it stands. `exact_ready` binds the offered surfaces
 /// to the completed map by full opaque identity; the adjacency arm covers the
 /// one offered successor which has not completed its transaction yet.
-fn one_xs_replay_start(
+pub(crate) fn one_xs_replay_start(
     ready: Option<u64>,
     offered: Option<u64>,
     exact_ready: bool,
@@ -333,7 +335,7 @@ struct Show {
     /// horizon lock is a no-op rather than an error.
     held: Arc<Motion>,
     /// Sequential selected ONE X2 state for ordinary live playback only.
-    one_xs: Option<Arc<OneXsCapture>>,
+    one_xs: Option<ResidentCaptureFacade>,
     /// Factory input for a genuinely fresh causal lineage after a restart.
     one_xs_calibration: Option<Arc<CalibrationSet>>,
     /// A requested target remains a seek until its exact map, not merely its
@@ -364,6 +366,7 @@ struct Motion {
 /// sequential owner out, so GPU waits and estimator work hold no capture lock;
 /// its generation keeps a recreated pipeline from restarting or duplicating
 /// the capture's numeric lineage.
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct OneXsCapture {
     state: Mutex<OneXsCaptureState>,
 }
@@ -375,6 +378,7 @@ struct OneXsReplay {
     playing: bool,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct OneXsCaptureState {
     /// Ordinary playback. The last completed resources are retained so a
     /// redraw of the exact same delivered pair does not consume the
@@ -392,6 +396,7 @@ struct OneXsCaptureState {
     quarantined_owners: Vec<FrameOwner>,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 enum OneXsPreparation {
     Ready(Arc<OneXsMapFrame>),
     Reserved(OneXsReservation),
@@ -404,6 +409,7 @@ enum OneXsPreparation {
 /// Until [`Self::commit_prepared_with_solver`] succeeds, aborting it restores
 /// the exact box that was installed before the reservation; no estimator clone
 /// is involved.
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct OneXsReservation {
     capture: Arc<OneXsCapture>,
     flight: GpuPisFlight,
@@ -412,6 +418,7 @@ struct OneXsReservation {
     prepared: Option<Box<PreparedFrame>>,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct CompletedOneXsReservation {
     capture: Arc<OneXsCapture>,
     flight: GpuPisFlight,
@@ -427,16 +434,19 @@ struct RejectedOneXsReservation {
     error: FrameOwnerError,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct RejectedOneXsSolverReservation<E> {
     reservation: OneXsReservation,
     error: FrameCommitError<E>,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct RejectedOneXsAbort {
     reservation: OneXsReservation,
     reason: String,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct RejectedOneXsInstall {
     completion: CompletedOneXsReservation,
     reason: String,
@@ -479,6 +489,7 @@ impl std::fmt::Display for RejectedOneXsAbort {
 impl std::error::Error for RejectedOneXsAbort {}
 
 #[derive(Debug)]
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct OneXsRollbackFailure {
     primary: Box<dyn std::error::Error + Send + Sync>,
     rollback: Box<RejectedOneXsAbort>,
@@ -500,6 +511,7 @@ impl std::error::Error for OneXsRollbackFailure {
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 fn abort_one_xs_after_error(
     reservation: OneXsReservation,
     primary: Box<dyn std::error::Error + Send + Sync>,
@@ -515,6 +527,7 @@ fn abort_one_xs_after_error(
 /// [`PendingBlurredBelts`] retains the decoder surfaces themselves. This outer
 /// token retains their opaque numeric identity as well, so the readback cannot
 /// be committed to geometry prepared for another delivery.
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct PendingOneXsBlurredBelts {
     frame: FrameStamp,
     pending: PendingBlurredBelts<Arc<Frames>>,
@@ -522,6 +535,7 @@ struct PendingOneXsBlurredBelts {
 
 /// Failure before a GPU PIS result can re-enter its capture reservation.
 #[derive(Debug)]
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 enum GpuPisSolverError {
     Pipeline(Box<dyn std::error::Error + Send + Sync>),
     Receipt {
@@ -552,6 +566,7 @@ impl std::error::Error for GpuPisSolverError {
 }
 
 /// The only production adapter from one reservation into the GPU kernel.
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 struct ReservationGpuPisSolver<'a> {
     flight: GpuPisFlight,
     pipeline: &'a GpuPisPipeline,
@@ -588,6 +603,7 @@ impl PairedPisSolver for ReservationGpuPisSolver<'_> {
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 fn finish_gpu_pis_stage(
     expected: &GpuPisStageReceipt,
     output: GpuPisStageOutput,
@@ -596,6 +612,7 @@ fn finish_gpu_pis_stage(
     Ok(output.grids)
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 fn validate_gpu_pis_receipt(
     expected: &GpuPisStageReceipt,
     actual: &GpuPisStageReceipt,
@@ -610,6 +627,7 @@ fn validate_gpu_pis_receipt(
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 impl PendingOneXsBlurredBelts {
     fn read(self, prepared: &PreparedFrame) -> Fallible<BlurredBelts> {
         if &self.frame != prepared.frame() {
@@ -631,6 +649,7 @@ impl std::fmt::Debug for OneXsCapture {
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 fn same_ready_map(left: Option<&Arc<OneXsMapFrame>>, right: Option<&Arc<OneXsMapFrame>>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -639,6 +658,7 @@ fn same_ready_map(left: Option<&Arc<OneXsMapFrame>>, right: Option<&Arc<OneXsMap
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 impl OneXsReservation {
     fn prepared(&self) -> &PreparedFrame {
         self.prepared
@@ -757,6 +777,7 @@ impl Drop for OneXsReservation {
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 impl CompletedOneXsReservation {
     fn install(mut self) -> Result<Arc<OneXsMapFrame>, Box<RejectedOneXsInstall>> {
         let capture = self.capture.clone();
@@ -787,6 +808,7 @@ impl Drop for CompletedOneXsReservation {
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 impl OneXsCapture {
     fn replay_start(&self, offered: Option<&FrameStamp>, target: u64) -> Fallible<ReplayStart> {
         let state = self.state.lock().map_err(
@@ -1098,6 +1120,7 @@ impl Scene {
             flow: Cell::new(false),
             stalled: Stalled::default(),
             shown: Shown::default(),
+            resident_refresh: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1365,26 +1388,30 @@ impl Scene {
         let Some(show) = self.show.as_ref() else {
             return Ok(None);
         };
-        let playing = show.playing.borrow();
-        let Some(capture) = show.one_xs.as_ref() else {
+        let Some(capture) = show.one_xs.clone() else {
             return Ok(None);
         };
-        let Some(frames) = playing.frames.as_ref() else {
+        let Some(current) = show
+            .playing
+            .borrow()
+            .frames
+            .as_ref()
+            .map(|frames| frames.stamp())
+        else {
             return Ok(None);
         };
-        let current = frames.stamp();
         let Some(shown) = self.shown.get() else {
             return Ok(None);
         };
         let shown_stamp = shown.frames.stamp();
         let same_capture = shown
-            .one_xs
+            .resident_one_xs
             .as_ref()
-            .is_some_and(|shown_capture| Arc::ptr_eq(shown_capture, capture));
+            .is_some_and(|shown_capture| shown_capture.same_capture(&capture));
         if !exact_selected_display(&current, Some(&shown_stamp), same_capture) {
             return Ok(None);
         }
-        Ok(capture.ready(&current)?.map(|map| map.as_ref().clone()))
+        capture.diagnostic_installed_map(&current)
     }
 
     /// Takes whichever frame belongs on screen at `now`, and says when to
@@ -1412,6 +1439,9 @@ impl Scene {
             }
             retire_replay(&show.replay);
             return Next::Stopped(self.finish_observed_terminal_stop(stall));
+        }
+        if self.resident_refresh.load(AtomicOrdering::Acquire) {
+            return Next::Refresh;
         }
         let Source::Live(player) = source else {
             return Next::Never;
@@ -1833,6 +1863,7 @@ impl Scene {
         // observes and resolves the shutter. A complete shown display stays
         // armed for the pipeline to restore and capture after failure.
         self.shutter.arm(request);
+        self.resident_refresh.store(true, AtomicOrdering::Release);
         self.fail_terminal_shutter_without_display();
     }
 
@@ -1868,11 +1899,13 @@ impl Scene {
         ScenePrimitive {
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
+            resident_capture: self.show.as_ref().and_then(|show| show.one_xs.clone()),
             sampling: self.sampling.get(),
             flow: self.flow.get(),
             shutter: self.shutter.clone(),
             stalled: self.stalled.clone(),
             shown: self.shown.clone(),
+            resident_refresh: Arc::clone(&self.resident_refresh),
         }
     }
 }
@@ -1935,7 +1968,8 @@ impl Show {
             lenses: self.lenses(),
             table: self.table.get(),
             frames,
-            one_xs: self.one_xs.clone(),
+            one_xs: None,
+            resident_one_xs: self.one_xs.clone(),
         })
     }
 
@@ -1966,7 +2000,20 @@ impl Show {
             .borrow()
             .map_or_else(|| player.is_playing(), |replay| replay.playing);
         let offered = frames.as_ref().map(|frames| frames.stamp());
-        let proposed = capture.replay_start(offered.as_ref(), target)?;
+        let installed = capture.installed_stamp()?;
+        let proposed = one_xs_replay_start(
+            installed.as_ref().map(FrameStamp::index),
+            offered.as_ref().map(FrameStamp::index),
+            installed
+                .as_ref()
+                .zip(offered.as_ref())
+                .is_some_and(|(a, b)| a == b),
+            installed
+                .as_ref()
+                .zip(offered.as_ref())
+                .is_some_and(|(a, b)| a.same_decode_epoch(b)),
+            target,
+        );
         // Arbitrary seeks restart so the independent sound ring can be
         // positioned at the requested target without consuming stale audio.
         // A single forward step retains the already-proven next-audio splice.
@@ -1985,7 +2032,10 @@ impl Show {
             // Replace the Arc. The retained old View continues to name the
             // old completed capture and can never submit its nonzero frame to
             // this fresh frame-zero owner.
-            self.one_xs = Some(Arc::new(OneXsCapture::new(calibration)?));
+            self.one_xs = Some(ResidentCaptureFacade::new(
+                calibration.clone(),
+                self.held.orientation.clone(),
+            ));
             // Do not let the acknowledgement gate wait for a surface from
             // the lineage just retired. The last complete display remains in
             // `Shown` and may be restored until new frame zero completes.
@@ -2163,7 +2213,7 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
         );
     }
     let held = Motion {
-        orientation,
+        orientation: orientation.clone(),
         exposure: calibration.exposure[0].clone(),
         readout: calibration.readout(),
     };
@@ -2172,7 +2222,7 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
         if ONE_XS_PLAYBACK_ENABLED && projection::is_one_xs_lens_pair(&lenses) {
             let calibration = Arc::new(calibration);
             (
-                Some(Arc::new(OneXsCapture::new(&calibration)?)),
+                Some(ResidentCaptureFacade::new(calibration.clone(), orientation)),
                 Some(calibration),
             )
         } else {
@@ -2193,7 +2243,7 @@ struct Calibrated {
     lenses: Arc<[Lens]>,
     camera: u64,
     held: Arc<Motion>,
-    one_xs: Option<Arc<OneXsCapture>>,
+    one_xs: Option<ResidentCaptureFacade>,
     one_xs_calibration: Option<Arc<CalibrationSet>>,
 }
 
@@ -2202,6 +2252,8 @@ struct Calibrated {
 pub struct ScenePrimitive {
     camera: Camera,
     view: Option<View>,
+    /// Current live lineage even while replay has cleared its offered frame.
+    resident_capture: Option<ResidentCaptureFacade>,
     /// How the pass samples a magnified picture, which is a property of the
     /// redraw rather than of the frame in it.
     sampling: Sampling,
@@ -2220,6 +2272,7 @@ pub struct ScenePrimitive {
     /// And on the slot the pass keeps the last frame it drew of this capture
     /// in, which it both writes and reads.
     shown: Shown,
+    resident_refresh: Arc<AtomicBool>,
 }
 
 /// A pair of decoded lenses and the calibration that reprojects them. Both
@@ -2239,12 +2292,10 @@ struct View {
     /// Capture-owned sequential stitch state. `None` for every other camera
     /// and for stepped diagnostic scenes.
     one_xs: Option<Arc<OneXsCapture>>,
+    resident_one_xs: Option<ResidentCaptureFacade>,
 }
 
-/// Resolves the selected route's shutter at its final display boundary.
-/// A complete exact display wins even after a terminal successor failure;
-/// without one, only a terminal error consumes the request. A merely pending
-/// frame therefore leaves it armed for the redraw that completes the map.
+#[cfg(test)]
 fn resolve_selected_shutter(
     shutter: &Shutter,
     stalled: &Stalled,
@@ -2295,9 +2346,11 @@ pub struct ScenePipeline {
     /// The authoritative iced device and queue pair for every selected ONE X2
     /// resident stage owned by this renderer pipeline.
     one_xs_gpu: OneXsGpuContext,
-    /// Bounded render-pass retirement for the unselected installed-resident
-    /// route. No production prepare path stages it yet.
-    installed_one_xs_draw: IcedInstalledDrawAdapter,
+    /// The selected capture attachment and older attachments still proving
+    /// GPU completion after seek/reopen replacement.
+    resident_one_xs: Option<(ResidentCaptureFacade, ResidentSceneFacade)>,
+    retired_one_xs: Vec<(ResidentCaptureFacade, ResidentSceneFacade)>,
+    resident_draw: ResidentDrawSelection,
     pipeline: wgpu::RenderPipeline,
     /// The same draw with the Studio optical-flow apply compiled in, chosen per
     /// draw when the runtime flow toggle is on ([`ScenePipeline::draw`]). Built
@@ -2322,16 +2375,6 @@ pub struct ScenePipeline {
     /// Lazy access to the exact bound R8 source pair, used by selected
     /// diagnostics. Production selected playback does not construct it.
     one_xs_luma: Option<Box<LumaReadbackPipeline>>,
-    /// Exact GPU sampler/reducer for production selected playback. It reads
-    /// the imported R8 pair and returns only the two compact 1080-by-60 U8
-    /// solver inputs; retained estimator state remains capture-owned on CPU.
-    one_xs_belts: Option<Box<GpuSolverBeltPipeline>>,
-    /// Lazily built, device-qualified paired PIS kernel. CPU preparation of
-    /// each source model remains the explicit producer boundary.
-    one_xs_pis: Option<Box<GpuPisPipeline>>,
-    /// Frame-path instrumentation counts paired GPU stages that returned typed
-    /// grids, not queue submissions, reservations or map installs.
-    one_xs_gpu_pis_completed_stages: u64,
     /// Lazily built production/direct type-2 consumer. Its pipeline and
     /// exact-size buffers are reused; only the two map payloads and their
     /// CPU-side frame association change between frames and diagnostics.
@@ -2394,6 +2437,14 @@ enum FlowDraw {
     MapOracle,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ResidentDrawSelection {
+    #[default]
+    None,
+    Active,
+    Retired(usize),
+}
+
 /// Identity of the last complete selected display transaction.
 ///
 /// A successor is recorded only when its source and map carry the same opaque
@@ -2411,6 +2462,7 @@ impl<T> Default for ExactDisplay<T> {
 }
 
 impl<T: Clone + Eq> ExactDisplay<T> {
+    #[cfg(test)]
     fn commit(&mut self, source: &T, map: &T) -> bool {
         if source != map {
             return false;
@@ -2419,6 +2471,7 @@ impl<T: Clone + Eq> ExactDisplay<T> {
         true
     }
 
+    #[cfg(test)]
     fn recovery_index(
         &self,
         shown: &T,
@@ -2461,6 +2514,7 @@ impl FlowDraw {
         if active { Self::Legacy } else { Self::Plain }
     }
 
+    #[cfg(test)]
     fn selected_map(ready: bool) -> Self {
         if ready {
             Self::DirectOneXs
@@ -2673,16 +2727,15 @@ impl ScenePipeline {
 
         Self {
             one_xs_gpu,
-            installed_one_xs_draw: IcedInstalledDrawAdapter::new(device),
+            resident_one_xs: None,
+            retired_one_xs: Vec::new(),
+            resident_draw: ResidentDrawSelection::None,
             pipeline,
             flow_pipeline,
             one_xs_flow_pipeline,
             map_oracle: None,
             prepared_picture: None,
             one_xs_luma: None,
-            one_xs_belts: None,
-            one_xs_pis: None,
-            one_xs_gpu_pis_completed_stages: 0,
             direct_one_xs_map: None,
             layout,
             sampler,
@@ -2799,22 +2852,59 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         aspect: f32,
     ) {
-        if let Err(error) = self.installed_one_xs_draw.poll_prepare() {
-            self.flow_draw = FlowDraw::Nothing;
-            primitive.stalled.fail_now(error);
-            return;
-        }
+        primitive
+            .resident_refresh
+            .store(false, AtomicOrdering::Release);
         let selected_one_xs = one_xs_playback_selected(
             ONE_XS_PLAYBACK_ENABLED,
             primitive
                 .view
                 .as_ref()
-                .is_some_and(|view| view.one_xs.is_some())
+                .is_some_and(|view| view.resident_one_xs.is_some())
+                || primitive.resident_capture.is_some()
                 || primitive
                     .shown
                     .get()
-                    .is_some_and(|view| view.one_xs.is_some()),
+                    .is_some_and(|view| view.resident_one_xs.is_some()),
         );
+        let has_resident_work = self
+            .resident_one_xs
+            .as_ref()
+            .is_some_and(|(_, attachment)| attachment.needs_poll())
+            || self
+                .retired_one_xs
+                .iter()
+                .any(|(_, attachment)| attachment.needs_poll());
+        if has_resident_work {
+            let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.one_xs_gpu.device().poll(wgpu::PollType::Poll)
+            }));
+            let poll_error = match polled {
+                Ok(Ok(_)) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(payload) => Some(
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "ONE X2 GPU device poll panicked".to_owned()),
+                ),
+            };
+            if let Some(error) = poll_error {
+                if let Some((_, attachment)) = &self.resident_one_xs {
+                    attachment.quarantine_after_external_poll_failure();
+                }
+                for (_, attachment) in &self.retired_one_xs {
+                    attachment.quarantine_after_external_poll_failure();
+                }
+                if selected_one_xs {
+                    primitive.shutter.fail(&error);
+                    primitive.stalled.fail_now(&error);
+                    return;
+                }
+                eprintln!("{error}");
+            }
+        }
         if selected_one_xs {
             let gpu = self.one_xs_gpu.clone();
             if let Err(error) = gpu.ensure_same(&OneXsGpuContext::new(device, queue)) {
@@ -2823,27 +2913,219 @@ impl ScenePipeline {
                 // identity error and leave the last complete display owned by
                 // the authoritative context.
                 self.flow_draw = FlowDraw::Nothing;
+                primitive.shutter.fail(&error);
                 primitive.stalled.fail_now(error);
                 return;
             }
-            let device = gpu.device();
-            let queue = gpu.queue();
-            if primitive.stalled.stopped() {
-                self.restore_one_xs_display(primitive, device, queue, aspect);
-                return;
-            }
-            if let Err(error) = self.prepare_one_xs_playback(primitive, aspect) {
+            if let Err(error) = self.prepare_resident_one_xs(primitive, aspect) {
+                self.resident_draw = ResidentDrawSelection::None;
+                primitive.shutter.fail(&error);
                 primitive.stalled.fail_now(error);
-                self.restore_one_xs_display(primitive, device, queue, aspect);
-            } else if self.flow_draw != FlowDraw::DirectOneXs {
-                // Initial decode and any future asynchronous implementation
-                // may have a source without an exact completed map yet.
-                self.restore_one_xs_display(primitive, device, queue, aspect);
             }
         } else {
+            if let Some(old) = self.resident_one_xs.take() {
+                self.retired_one_xs.push(old);
+            }
+            let mut index = 0;
+            while index < self.retired_one_xs.len() {
+                match self.retired_one_xs[index]
+                    .1
+                    .drain_replaced_after_external_poll()
+                {
+                    Ok(ResidentDrain::Drained) => {
+                        self.retired_one_xs.remove(index);
+                    }
+                    Ok(ResidentDrain::Pending) => {
+                        primitive
+                            .resident_refresh
+                            .store(true, AtomicOrdering::Release);
+                        index += 1;
+                    }
+                    Ok(ResidentDrain::FailClosedRetained) | Err(_) => index += 1,
+                }
+            }
+            self.resident_draw = ResidentDrawSelection::None;
             self.one_xs_display.clear();
             let _ = self.prepare_inner(primitive, device, queue, aspect, false);
         }
+    }
+
+    fn resident_reframe(&self, primitive: &ScenePrimitive, view: &View, aspect: f32) -> Reframe {
+        Reframe::new(
+            &view.lenses,
+            view.frames.size,
+            primitive.camera,
+            view.held,
+            aspect,
+            self.linearize(),
+            primitive.sampling,
+        )
+        .with_samples(view.frames.samples)
+        .with_table(view.table)
+    }
+
+    fn prepare_resident_one_xs(&mut self, primitive: &ScenePrimitive, aspect: f32) -> Fallible<()> {
+        self.resident_draw = ResidentDrawSelection::None;
+        self.flow_draw = FlowDraw::Nothing;
+        let offered = primitive
+            .view
+            .as_ref()
+            .filter(|view| view.resident_one_xs.is_some());
+        if let Some(capture) = primitive.resident_capture.as_ref() {
+            let changed = self
+                .resident_one_xs
+                .as_ref()
+                .is_some_and(|(current, _)| !current.same_capture(capture));
+            if changed && let Some(old) = self.resident_one_xs.take() {
+                self.retired_one_xs.push(old);
+            }
+            if self.resident_one_xs.is_none() {
+                let attachment = capture.attach_renderer(self.one_xs_gpu.clone(), self.format)?;
+                self.resident_one_xs = Some((capture.clone(), attachment));
+            }
+        }
+
+        let shown = primitive.shown.get();
+        let shown_capture = shown
+            .as_ref()
+            .and_then(|view| view.resident_one_xs.as_ref());
+        let mut index = 0;
+        while index < self.retired_one_xs.len() {
+            let display_live = shown_capture
+                .is_some_and(|shown| shown.same_capture(&self.retired_one_xs[index].0));
+            let drain = self.retired_one_xs[index]
+                .1
+                .drain_replaced_after_external_poll()?;
+            if drain == ResidentDrain::Drained && !display_live {
+                self.retired_one_xs.remove(index);
+            } else {
+                if drain == ResidentDrain::Pending {
+                    primitive
+                        .resident_refresh
+                        .store(true, AtomicOrdering::Release);
+                }
+                index += 1;
+            }
+        }
+
+        if !primitive.stalled.stopped()
+            && let Some(view) = offered
+            && let Some((capture, attachment)) = self.resident_one_xs.as_ref()
+            && capture.same_capture(
+                primitive
+                    .resident_capture
+                    .as_ref()
+                    .expect("selected Scene has a current capture"),
+            )
+            && capture.same_capture(
+                view.resident_one_xs
+                    .as_ref()
+                    .expect("selected view has capture"),
+            )
+        {
+            let reframe = self.resident_reframe(primitive, view, aspect);
+            match attachment.submit_frame(
+                &self.one_xs_gpu,
+                self.format,
+                view.frames.clone(),
+                &reframe,
+            )? {
+                ResidentSubmit::Submitted
+                | ResidentSubmit::AlreadyInstalled(_)
+                | ResidentSubmit::Retry(ResidentRetry::InFlight)
+                | ResidentSubmit::Retry(ResidentRetry::DrawRetirementFull) => {}
+            }
+        }
+
+        if let Some((capture, attachment)) = self.resident_one_xs.as_ref() {
+            let prepared = attachment.prepare_redraw_after_external_poll(
+                &self.one_xs_gpu,
+                self.format,
+                |stamp| {
+                    let view = offered
+                        .filter(|view| {
+                            view.frames.stamp() == *stamp
+                                && view
+                                    .resident_one_xs
+                                    .as_ref()
+                                    .is_some_and(|owner| owner.same_capture(capture))
+                        })
+                        .or_else(|| {
+                            shown.as_ref().filter(|view| {
+                                view.frames.stamp() == *stamp
+                                    && view
+                                        .resident_one_xs
+                                        .as_ref()
+                                        .is_some_and(|owner| owner.same_capture(capture))
+                            })
+                        })
+                        .ok_or("ONE X2 resident ready has no exact capture view")?;
+                    Ok(self.resident_reframe(primitive, view, aspect))
+                },
+            )?;
+            match prepared {
+                ResidentPrepare::Staged { installed } => {
+                    let view = offered
+                        .filter(|view| {
+                            view.frames.stamp() == installed
+                                && view
+                                    .resident_one_xs
+                                    .as_ref()
+                                    .is_some_and(|owner| owner.same_capture(capture))
+                        })
+                        .or_else(|| {
+                            shown.as_ref().filter(|view| {
+                                view.frames.stamp() == installed
+                                    && view
+                                        .resident_one_xs
+                                        .as_ref()
+                                        .is_some_and(|owner| owner.same_capture(capture))
+                            })
+                        })
+                        .ok_or("ONE X2 staged frame has no exact capture view")?;
+                    primitive.shown.keep(view);
+                    debug_assert!(capture.acknowledged(&installed)?);
+                    self.resident_draw = ResidentDrawSelection::Active;
+                }
+                ResidentPrepare::Pending { .. } | ResidentPrepare::Retry { .. } => primitive
+                    .resident_refresh
+                    .store(true, AtomicOrdering::Release),
+                ResidentPrepare::Empty => {}
+            }
+        }
+
+        if self.resident_draw == ResidentDrawSelection::None
+            && let Some(shown_capture) = shown_capture
+            && let Some((index, (_, attachment))) = self
+                .retired_one_xs
+                .iter()
+                .enumerate()
+                .find(|(_, (capture, _))| capture.same_capture(shown_capture))
+            && let ResidentPrepare::Staged { .. } = attachment.prepare_redraw_after_external_poll(
+                &self.one_xs_gpu,
+                self.format,
+                |stamp| {
+                    let view = shown
+                        .as_ref()
+                        .filter(|view| {
+                            view.frames.stamp() == *stamp
+                                && view
+                                    .resident_one_xs
+                                    .as_ref()
+                                    .is_some_and(|owner| owner.same_capture(shown_capture))
+                        })
+                        .ok_or("ONE X2 retired ready has no exact shown view")?;
+                    Ok(self.resident_reframe(primitive, view, aspect))
+                },
+            )?
+        {
+            self.resident_draw = ResidentDrawSelection::Retired(index);
+        }
+
+        if let Some(request) = primitive.shutter.take() {
+            self.shoot_resident(primitive, request, aspect);
+        }
+        Ok(())
     }
 
     /// Opaque identity of the native map bound for the next production
@@ -2878,255 +3160,6 @@ impl ScenePipeline {
         let queue = gpu.queue();
         let _ = self.prepare_inner(primitive, device, queue, aspect, true);
         self.prepared_picture.clone()
-    }
-
-    /// Correctness-first live selected ONE X2 transaction.
-    ///
-    /// The GPU samples retained maps, performs exact 3-by-3 reduction on the
-    /// imported R8 pair, then executes every selected paired PIS stage. CPU
-    /// construction and upload of each prepared source model remain explicit.
-    /// Source bindings, prepared geometry, sequential retained state, solver
-    /// receipts, uploaded map and draw all name the same full [`FrameStamp`].
-    fn prepare_one_xs_playback(&mut self, primitive: &ScenePrimitive, aspect: f32) -> Fallible<()> {
-        let gpu = self.one_xs_gpu.clone();
-        let device = gpu.device();
-        let queue = gpu.queue();
-        let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, true) else {
-            self.flow_draw = FlowDraw::Nothing;
-            return Ok(());
-        };
-        // `prepare_inner` may deliberately hold the last successfully bound
-        // frame when a newer import fails. Select the View for those exact
-        // bindings, never merely the newest source offered by the player.
-        let view = primitive
-            .view
-            .as_ref()
-            .filter(|view| self.is_bound(view))
-            .cloned()
-            .or_else(|| primitive.shown.get().filter(|view| self.is_bound(view)))
-            .ok_or("ONE X2 playback has bound source textures without their capture view")?;
-        if view.frames.stamp() != frames.stamp() {
-            return Err("ONE X2 playback source view differs from its bound lens pair".into());
-        }
-        let capture = view
-            .one_xs
-            .as_ref()
-            .ok_or("ONE X2 playback lost its capture-owned stitch state")?;
-
-        let map = match capture.reserve(&frames.stamp(), frames.size)? {
-            OneXsPreparation::Ready(map) => map,
-            OneXsPreparation::InFlight(ready) => {
-                self.flow_draw = FlowDraw::Nothing;
-                // `prepare_inner` may already have made the offered successor
-                // frontmost. Seed a recreated pipeline from the capture-owned
-                // completed map, then put the last exact source/map/uniform
-                // tuple back without making a second estimator submission.
-                self.seed_one_xs_display(primitive, device, queue, ready.as_deref());
-                self.restore_one_xs_display(primitive, device, queue, aspect);
-                return Ok(());
-            }
-            OneXsPreparation::Reserved(reservation) => {
-                // Qualify every pipeline required by this transaction before
-                // submitting any per-frame GPU work. `InFlight` returned
-                // above without constructing it.
-                if self.one_xs_pis.is_none() {
-                    let pipeline = match GpuPisPipeline::new(self.one_xs_gpu.clone()) {
-                        Ok(pipeline) => pipeline,
-                        Err(error) => {
-                            return Err(abort_one_xs_after_error(reservation, error));
-                        }
-                    };
-                    self.one_xs_pis = Some(Box::new(pipeline));
-                }
-                let pending =
-                    match self.submit_one_xs_solver_belts(frames.clone(), reservation.prepared()) {
-                        Ok(pending) => pending,
-                        Err(error) => {
-                            return Err(abort_one_xs_after_error(reservation, error));
-                        }
-                    };
-                // The presentation policy admits only one frame at a time.
-                // Waiting occurs outside the capture mutex, and retained CPU
-                // history is leased only after this exact readback succeeds.
-                let blurred_belts = match pending.read(reservation.prepared()) {
-                    Ok(blurred_belts) => blurred_belts,
-                    Err(error) => {
-                        return Err(abort_one_xs_after_error(reservation, error));
-                    }
-                };
-                let input = ColdInputs::from_blurred_belts_and_masks(
-                    blurred_belts,
-                    reservation.prepared().masks().clone(),
-                );
-                let (controls, prepared) = ColdPreparedSchedule::from_cpu(&input).into_parts();
-                let mut solver = ReservationGpuPisSolver {
-                    flight: reservation.flight.clone(),
-                    pipeline: self
-                        .one_xs_pis
-                        .as_deref()
-                        .expect("the selected reservation initialized GPU PIS"),
-                    device,
-                    queue,
-                    completed_stages: &mut self.one_xs_gpu_pis_completed_stages,
-                    prepared,
-                };
-                match reservation.commit_prepared_with_solver(controls, &mut solver) {
-                    Ok(completed) => completed
-                        .install()
-                        .map_err(|rejected| rejected as Box<dyn std::error::Error + Send + Sync>)?,
-                    Err(rejected) => {
-                        let RejectedOneXsSolverReservation { reservation, error } = *rejected;
-                        return Err(abort_one_xs_after_error(reservation, error.into()));
-                    }
-                }
-            }
-        };
-        MapBindError::require_frame(map.frame(), self.prepared_picture.as_ref())?;
-        let source = frames.stamp();
-        if !self.one_xs_display.commit(&source, map.frame()) {
-            return Err(crate::studio_type2::FrameMapMismatch::new(
-                "source",
-                &source,
-                "map",
-                map.frame(),
-            )
-            .into());
-        }
-        let draw = self
-            .direct_one_xs_map
-            .get_or_insert_with(|| DirectMapDraw::new(device, &self.layout, self.format));
-        if draw.bound_frame() != Some(map.frame()) {
-            draw.upload(queue, &map);
-        }
-        debug_assert_eq!(draw.bound_frame(), Some(map.frame()));
-        self.flow_draw = FlowDraw::selected_map(true);
-        primitive.shown.keep(&view);
-
-        // A still request waits behind the same exact map rather than taking
-        // an unstitched or blank picture while the transaction is pending.
-        if let Some(request) = primitive.shutter.take() {
-            self.shoot(device, queue, request, aspect, Some(&view));
-        }
-        Ok(())
-    }
-
-    /// Restore the last complete selected display after preparation of its
-    /// successor waits or fails.
-    ///
-    /// `show` may already have imported the successor and replaced the source
-    /// bind group, and `prepare_inner` may already have written its uniform.
-    /// Merely retaining [`FlowDraw::DirectOneXs`] would therefore pair the old
-    /// map with the new source. Recovery is admitted only when the Scene-owned
-    /// shown view, retained imported planes, completed transaction and native
-    /// map all name the same opaque [`FrameStamp`]. It then makes that retained
-    /// source frontmost again and rebuilds the uniform for the current camera
-    /// and target aspect before selecting the direct draw.
-    fn seed_one_xs_display(
-        &mut self,
-        primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        ready: Option<&OneXsMapFrame>,
-    ) {
-        let Some(ready) = ready else {
-            return;
-        };
-        let Some(view) = primitive
-            .shown
-            .get()
-            .filter(|view| view.frames.stamp() == *ready.frame())
-        else {
-            return;
-        };
-
-        // A genuinely recreated iced pipeline has no retained import or map
-        // resource of its own. Both are reconstructible from capture-owned
-        // state without touching the in-flight estimator reservation.
-        self.show(device, &view, primitive);
-        if !self.is_bound(&view) {
-            return;
-        }
-        let draw = self
-            .direct_one_xs_map
-            .get_or_insert_with(|| DirectMapDraw::new(device, &self.layout, self.format));
-        if draw.bound_frame() != Some(ready.frame()) {
-            draw.upload(queue, ready);
-        }
-        let source = view.frames.stamp();
-        let _ = self.one_xs_display.commit(&source, ready.frame());
-    }
-
-    fn restore_one_xs_display(
-        &mut self,
-        primitive: &ScenePrimitive,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        aspect: f32,
-    ) {
-        self.flow_draw = FlowDraw::Nothing;
-        let Some(view) = primitive.shown.get().filter(|view| view.one_xs.is_some()) else {
-            resolve_selected_shutter(&primitive.shutter, &primitive.stalled, false);
-            return;
-        };
-        let frame = view.frames.stamp();
-        let map = self
-            .direct_one_xs_map
-            .as_ref()
-            .and_then(|draw| draw.bound_frame());
-        let retained = self.one_xs_display.recovery_index(
-            &frame,
-            map,
-            self.live
-                .iter()
-                .enumerate()
-                .map(|(index, live)| (index, Arc::ptr_eq(&live.frames, &view.frames))),
-        );
-        let Some(retained) = retained else {
-            resolve_selected_shutter(&primitive.shutter, &primitive.stalled, false);
-            return;
-        };
-
-        // `is_bound` deliberately means `live.front`, so moving the exact
-        // retained import is part of restoration rather than bookkeeping.
-        let live = self
-            .live
-            .remove(retained)
-            .expect("retained source position came from this queue");
-        self.live.push_front(live);
-        let live = self
-            .live
-            .front()
-            .expect("restored selected source was pushed to the front");
-        self.bind_group = bind(
-            device,
-            &self.layout,
-            &self.uniforms,
-            std::array::from_fn(|lens| live.planes.get(lens).unwrap_or(&self.blank)),
-            &self.sampler,
-        );
-
-        let reframe = Reframe::new(
-            &view.lenses,
-            view.frames.size,
-            primitive.camera,
-            view.held,
-            aspect,
-            self.linearize(),
-            primitive.sampling,
-        )
-        .with_samples(view.frames.samples)
-        .with_table(view.table);
-        self.anchor = None;
-        self.map_oracle = None;
-        self.prepared_picture = Some(PreparedPicture::new(frame, reframe, aspect));
-        queue.write_buffer(&self.uniforms, 0, reframe.bytes());
-        self.flow_draw = FlowDraw::DirectOneXs;
-
-        if let Some(request) =
-            resolve_selected_shutter(&primitive.shutter, &primitive.stalled, true)
-        {
-            self.shoot(device, queue, request, aspect, Some(&view));
-        }
     }
 
     /// Diagnostic wrapper around exact full R8 readback for the lens pair the
@@ -3174,49 +3207,6 @@ impl ScenePipeline {
             .one_xs_luma
             .get_or_insert_with(|| Box::new(LumaReadbackPipeline::new(device, &self.layout)));
         Ok(readback.submit(device, queue, &self.bind_group, frames, shape))
-    }
-
-    /// Submit exact retained-map sampling and area reduction for the bound
-    /// source pair. The returned token owns both the imported decoder surfaces
-    /// and their opaque delivery stamp until its compact readback is consumed.
-    fn submit_one_xs_solver_belts(
-        &mut self,
-        frames: Arc<Frames>,
-        prepared: &PreparedFrame,
-    ) -> Fallible<PendingOneXsBlurredBelts> {
-        let frame = frames.stamp();
-        if prepared.frame() != &frame {
-            return Err(crate::studio_type2::FrameMapMismatch::new(
-                "prepared geometry",
-                prepared.frame(),
-                "bound source",
-                &frame,
-            )
-            .into());
-        }
-        let live = self
-            .live
-            .front()
-            .ok_or("ONE X2 GPU solver belts have no bound lens pair")?;
-        if !Arc::ptr_eq(&live.frames, &frames) {
-            return Err("ONE X2 GPU solver-belt source differs from the picture bindings".into());
-        }
-        one_xs_luma::validate_source_pair(&live.planes, &frames, "GPU solver belts")?;
-        let sources = SourceTextures {
-            a: &live.planes[0].luma,
-            b: &live.planes[1].luma,
-        };
-        if self.one_xs_belts.is_none() {
-            self.one_xs_belts = Some(Box::new(GpuSolverBeltPipeline::new(
-                self.one_xs_gpu.clone(),
-            )?));
-        }
-        let producer = self
-            .one_xs_belts
-            .as_ref()
-            .expect("the exact GPU solver-belt producer was just qualified");
-        let pending = producer.submit_retained(sources, prepared.retained_base_maps(), frames)?;
-        Ok(PendingOneXsBlurredBelts { frame, pending })
     }
 
     /// How many imported frame pairs the inactive source oracle can currently
@@ -3500,6 +3490,131 @@ impl ScenePipeline {
         );
     }
 
+    fn shoot_resident(&self, primitive: &ScenePrimitive, request: Request, aspect: f32) {
+        let Some(view) = primitive.shown.get() else {
+            primitive.shutter.arm(request);
+            primitive
+                .resident_refresh
+                .store(true, AtomicOrdering::Release);
+            return;
+        };
+        let Some(capture) = view.resident_one_xs.as_ref() else {
+            capture::reject(request, "ONE X2 screenshot lost its capture owner");
+            return;
+        };
+        let Some(attachment) = self
+            .resident_one_xs
+            .as_ref()
+            .filter(|(owner, _)| owner.same_capture(capture))
+            .map(|(_, attachment)| attachment)
+            .or_else(|| {
+                self.retired_one_xs
+                    .iter()
+                    .find(|(owner, _)| owner.same_capture(capture))
+                    .map(|(_, attachment)| attachment)
+            })
+        else {
+            capture::reject(request, "ONE X2 screenshot has no renderer attachment");
+            return;
+        };
+        let prepared = attachment.prepare_screenshot(&self.one_xs_gpu, self.format, |stamp| {
+            if view.frames.stamp() != *stamp {
+                return Err("ONE X2 screenshot ready differs from the shown frame".into());
+            }
+            Ok(self.resident_reframe(primitive, &view, aspect))
+        });
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                capture::reject(request, error);
+                return;
+            }
+        };
+        let ResidentScreenshotPrepare::Ready(draw) = prepared else {
+            primitive.shutter.arm(request);
+            primitive
+                .resident_refresh
+                .store(true, AtomicOrdering::Release);
+            return;
+        };
+        let at = Stamp {
+            index: view.frames.index,
+            time: view.frames.timestamp,
+        };
+        let pending = self.expose_resident(request.width, aspect, at, draw);
+        capture::deliver(pending, request.then);
+    }
+
+    fn expose_resident(
+        &self,
+        width: u32,
+        aspect: f32,
+        at: Stamp,
+        draw: super::flow::one_xs_belt_gpu::ResidentScreenshotDraw,
+    ) -> Fallible<Pending> {
+        let device = self.one_xs_gpu.device();
+        let queue = self.one_xs_gpu.queue();
+        let order = Order::of(self.format)?;
+        let size = capture::fitted(width, aspect)?;
+        let stride = capture::stride(size.width);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ONE X2 resident capture"),
+            size: size.extent(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 resident capture"),
+            size: u64::from(stride) * u64::from(size.height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let texture_view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ONE X2 resident capture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            draw.arm_and_draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(size.height),
+                },
+            },
+            size.extent(),
+        );
+        Ok(Pending {
+            device: device.clone(),
+            _texture: texture,
+            readback,
+            submission: queue.submit([encoder.finish()]),
+            size,
+            stride,
+            order,
+            at,
+        })
+    }
+
     /// The render-thread half: a target, one pass into it, and the copy that
     /// will be read back. The frame it samples is the one the bind group
     /// already points at, and `RETAINED` is what keeps that frame's decoder
@@ -3577,8 +3692,20 @@ impl ScenePipeline {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.installed_one_xs_draw.arm_and_draw(pass) {
-            return;
+        match self.resident_draw {
+            ResidentDrawSelection::Active => {
+                if let Some((_, attachment)) = &self.resident_one_xs {
+                    let _ = attachment.arm_and_draw(pass);
+                }
+                return;
+            }
+            ResidentDrawSelection::Retired(index) => {
+                if let Some((_, attachment)) = self.retired_one_xs.get(index) {
+                    let _ = attachment.arm_and_draw(pass);
+                }
+                return;
+            }
+            ResidentDrawSelection::None => {}
         }
         // Plain and both typed flow variants share the picture bindings. Only
         // flow draws bind the displacement buffer; their separate shader
@@ -3995,7 +4122,7 @@ impl ScenePipeline {
                 // imported. The exact map upload below is the presentation
                 // boundary; recording it here would let an unstitched View
                 // replace the last successfully presented one.
-                if !ONE_XS_PLAYBACK_ENABLED || view.one_xs.is_none() {
+                if !ONE_XS_PLAYBACK_ENABLED || view.resident_one_xs.is_none() {
                     primitive.shown.keep(view);
                 }
             }
@@ -5591,7 +5718,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 mod tests {
     use std::future::Future;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::mpsc;
 
     use super::*;
@@ -5601,11 +5727,94 @@ mod tests {
     };
 
     use crate::flow::one_xs::pis::Level;
+    use crate::flow::one_xs::scalar::{ColdInputs, ColdPreparedSchedule};
     use crate::flow::one_xs::scalar::{
         CpuPairedPisSolver, PairSolveError, PairSolveStage, PairedPatchGrids, PairedSolveRequest,
     };
     use crate::flow::one_xs::{COLS, LensPair, ROWS};
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+
+    #[test]
+    fn selected_post_qualification_scene_path_has_no_legacy_cpu_boundary() {
+        let source = include_str!("scene.rs");
+        let selected = source
+            .split_once("fn prepare_resident_one_xs")
+            .unwrap()
+            .1
+            .split_once("/// Opaque identity of the native map")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "prepare_inner",
+            "prepare_one_xs_playback",
+            "restore_one_xs_display",
+            "FrameOwner",
+            "PreparedFrame",
+            "ColdInputs",
+            "ColdPreparedSchedule",
+            "DirectMapDraw",
+            ".upload(",
+            "PollType::Wait",
+            "MAP_READ",
+        ] {
+            assert!(
+                !selected.contains(forbidden),
+                "selected resident Scene path contains {forbidden}"
+            );
+        }
+        for required in ["submit_frame", "prepare_redraw_after_external_poll"] {
+            assert!(
+                selected.contains(required),
+                "selected path lacks {required}"
+            );
+        }
+        let draw = source
+            .split_once("pub fn draw(&self, pass:")
+            .unwrap()
+            .1
+            .split_once("/// Override the player's normal draw")
+            .unwrap()
+            .0;
+        assert!(
+            draw.contains("attachment.arm_and_draw(pass)"),
+            "selected draw does not consume the resident attachment"
+        );
+
+        let facade = include_str!("flow/one_xs_belt_gpu.rs");
+        let submit = facade
+            .split_once("pub(crate) fn submit_frame")
+            .unwrap()
+            .1
+            .split_once("/// Drive the capture exactly once")
+            .unwrap()
+            .0;
+        let prepare = facade
+            .split_once("fn prepare_redraw_inner")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn arm_and_draw")
+            .unwrap()
+            .0;
+        assert!(submit.contains("session.submit(frames, reframe)"));
+        assert!(prepare.contains("finish_after_poll_classified"));
+        assert!(prepare.contains("prepare_installed"));
+        for (method, body) in [("submit_frame", submit), ("prepare_redraw_inner", prepare)] {
+            for forbidden in [
+                "diagnostic_readback",
+                "PollType::Wait",
+                "MAP_READ",
+                "FrameOwner",
+                "PreparedFrame",
+                "ColdInputs",
+                "ColdPreparedSchedule",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "post-qualification {method} contains {forbidden}"
+                );
+            }
+        }
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct InjectedSolverFailure;
@@ -6592,12 +6801,10 @@ mod tests {
         };
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         assert!(pipeline.one_xs_luma.is_none());
-        assert!(pipeline.one_xs_belts.is_none());
 
         let scene = Scene::blank();
         pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
         assert!(pipeline.one_xs_luma.is_none());
-        assert!(pipeline.one_xs_belts.is_none());
     }
 
     #[test]
@@ -6919,249 +7126,128 @@ mod tests {
     /// Opt-in because this is the production dmabuf path: it needs a target
     /// Vulkan adapter, VA-API decode and an actual paired ONE X2 capture.
     /// `KJERAG_ONE_X2_TEST_MEDIA` names either half; media owns sibling
+    fn prepare_and_draw_exact_resident_frame(
+        scene: &Scene,
+        pipeline: &mut ScenePipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expected: &FrameStamp,
+    ) -> ResidentCaptureFacade {
+        let mut primitive = scene.primitive(Camera::default());
+        let capture = primitive
+            .view
+            .as_ref()
+            .and_then(|view| view.resident_one_xs.clone())
+            .expect("KJERAG_ONE_X2_TEST_MEDIA is not a selected paired ONE X2 capture");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                primitive
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.one_xs.is_none())
+            );
+            pipeline.prepare(&primitive, device, queue, 1.0);
+            if pipeline.resident_draw == ResidentDrawSelection::Active
+                && capture.installed_stamp().ok().flatten().as_ref() == Some(expected)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "resident frame {} did not install",
+                expected.index()
+            );
+            std::thread::yield_now();
+            primitive = scene.primitive(Camera::default());
+        }
+        let (attached_capture, _) = pipeline
+            .resident_one_xs
+            .as_ref()
+            .expect("selected Scene has no resident renderer attachment");
+        assert!(capture.same_capture(attached_capture));
+        assert_eq!(pipeline.flow_draw, FlowDraw::Nothing);
+        assert!(pipeline.one_xs_luma.is_none());
+        assert!(pipeline.direct_one_xs_map.is_none());
+        assert!(pipeline.prepared_picture.is_none());
+        assert!(pipeline.live.is_empty());
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("selected resident Scene test target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("selected resident Scene test draw"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pipeline.draw(&mut pass);
+        }
+        queue.submit([encoder.finish()]);
+        capture
+    }
+
     /// discovery and exact lens ordering just as it does for ordinary opens.
+    /// Opt-in proof of the ordinary post-qualification resident Scene route.
+    /// Constructor qualification may synchronously read back device probes;
+    /// every frame after attachment remains resident and nonblocking.
     #[test]
     fn selected_one_x2_scene_keeps_exact_gpu_transaction_ownership() {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             eprintln!("skipping selected ONE X2 scene transaction: set KJERAG_ONE_X2_TEST_MEDIA");
             return;
         };
-        let ((device, queue), (foreign_device, foreign_queue)) = test_import_gpu_and_foreign()
-            .unwrap_or_else(|error| {
-                panic!("could not open the target dmabuf Vulkan device: {error}")
-            });
+        let ((device, queue), _) = test_import_gpu_and_foreign()
+            .unwrap_or_else(|error| panic!("could not open target dmabuf Vulkan device: {error}"));
         let mut scene = Scene::open(&path)
             .unwrap_or_else(|error| panic!("could not open ONE X2 test capture: {error}"));
-        // This is also required by the opt-in test's invocation contract: run
-        // it through `scripts/quiet.sh`. Muting here closes the interval
-        // between open and the first pause as well.
         scene.set_muted(true);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
 
-        let first = wait_for_new_scene_frame(&scene, None);
-        let first_primitive = scene.primitive(Camera::default());
-        assert!(
-            first_primitive
-                .view
-                .as_ref()
-                .is_some_and(|view| view.one_xs.is_some()),
-            "KJERAG_ONE_X2_TEST_MEDIA is not a selected paired ONE X2 capture"
-        );
-        pipeline.prepare(&first_primitive, &device, &queue, 1.0);
-        assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
-        assert_eq!(pipeline.diagnostic_one_xs_direct_frame(), Some(&first));
-        assert_eq!(
-            pipeline
-                .direct_one_xs_map
-                .as_ref()
-                .and_then(DirectMapDraw::bound_frame),
-            Some(&first)
-        );
-        assert_eq!(
-            scene
-                .diagnostic_one_xs_map()
-                .expect("first selected map lookup failed")
-                .expect("the first selected transaction did not commit")
-                .frame(),
-            &first
-        );
-        assert!(pipeline.one_xs_belts.is_some());
-        assert!(pipeline.one_xs_pis.is_some());
-        assert_eq!(pipeline.one_xs_gpu_pis_completed_stages, 6);
-        assert!(pipeline.one_xs_luma.is_none());
-        assert_eq!(
-            scene
-                .diagnostic_one_xs_map()
-                .unwrap()
-                .unwrap()
-                .pis_backend(),
-            PisBackend::Gpu
-        );
+        let mut exact = wait_for_new_scene_frame(&scene, None);
+        let mut capture =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &exact);
+        for _ in 1..5 {
+            let next = wait_for_new_scene_frame(&scene, Some(&exact));
+            let next_capture = prepare_and_draw_exact_resident_frame(
+                &scene,
+                &mut pipeline,
+                &device,
+                &queue,
+                &next,
+            );
+            assert!(capture.same_capture(&next_capture));
+            capture = next_capture;
+            exact = next;
+        }
 
-        let second = wait_for_new_scene_frame(&scene, Some(&first));
-        let second_primitive = scene.primitive(Camera::default());
-        let frames = pipeline
-            .prepare_inner(&second_primitive, &device, &queue, 1.0, true)
-            .expect("frame one did not become the exact bound source");
-        assert_eq!(frames.stamp(), second);
-        assert_eq!(pipeline.flow_draw, FlowDraw::Nothing);
-
-        let capture = second_primitive
-            .view
-            .as_ref()
-            .and_then(|view| view.one_xs.as_ref())
-            .expect("selected frame lost its capture owner");
-        let reservation = match capture
-            .reserve(&second, frames.size)
-            .expect("could not reserve frame one")
-        {
-            OneXsPreparation::Reserved(reservation) => reservation,
-            OneXsPreparation::Ready(_) => panic!("frame one was committed before its GPU belts"),
-            OneXsPreparation::InFlight(_) => panic!("frame one already had a reservation"),
-        };
-
-        // iced may recreate its pipeline while the capture-owned transaction
-        // is waiting. The new pipeline has neither the prior import nor its
-        // direct-map resource, but it must reconstruct and retain that exact
-        // completed display without making a second solver submission.
-        let mut recreated = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-        pipeline
-            .one_xs_gpu
-            .ensure_same(&recreated.one_xs_gpu)
-            .expect("pipeline recreation changed the authoritative GPU context");
-        recreated.prepare(&second_primitive, &device, &queue, 1.0);
-        assert_eq!(recreated.flow_draw, FlowDraw::DirectOneXs);
-        assert_eq!(recreated.diagnostic_one_xs_direct_frame(), Some(&first));
-        assert_eq!(
-            recreated
-                .direct_one_xs_map
-                .as_ref()
-                .and_then(DirectMapDraw::bound_frame),
-            Some(&first)
-        );
-        assert!(
-            recreated.one_xs_belts.is_none(),
-            "recreated pipeline submitted a second solver transaction"
-        );
-        assert!(recreated.one_xs_pis.is_none());
-        assert_eq!(recreated.one_xs_gpu_pis_completed_stages, 0);
-
-        let observed_frames = frames.clone();
-        let mut pending = pipeline
-            .submit_one_xs_solver_belts(frames, reservation.prepared())
-            .expect("could not submit frame one's exact retained maps and bound source");
-        let retained_with_pending = Arc::strong_count(&observed_frames);
-        let completion = Arc::new(AtomicU8::new(0));
-        pending.pending.observe_completion(Arc::clone(&completion));
-
-        // Same report fields and decode epoch, different opaque delivered
-        // pair. This is the ABA case an index/timestamp-only association
-        // would accept. Mutating the private outer receipt adds no production
-        // constructor or alternate route.
-        let imposter = FrameStamp::for_test(second.index(), second.timestamp(), Some(&first));
-        assert_ne!(imposter, second);
-        let mismatch = crate::studio_type2::FrameMapMismatch::new(
-            "GPU solver belts",
-            &imposter,
-            "prepared geometry",
-            &second,
-        );
-        pending.frame = imposter;
-        let error = pending
-            .read(reservation.prepared())
-            .expect_err("a different delivered pair impersonated prepared geometry");
-        assert_eq!(
-            error.downcast_ref::<crate::studio_type2::FrameMapMismatch>(),
-            Some(&mismatch)
-        );
-        assert_eq!(
-            completion.load(Ordering::SeqCst),
-            2,
-            "ABA refusal released its source without exact GPU completion"
-        );
-        assert_eq!(
-            Arc::strong_count(&observed_frames),
-            retained_with_pending - 1,
-            "completed ABA refusal did not release exactly its pending FramePair Arc"
-        );
-        reservation
-            .abort()
-            .expect("rejected receipt did not restore the exact owner");
-
-        assert!(capture.ready(&first).unwrap().is_some());
-        assert!(capture.ready(&second).unwrap().is_none());
-        assert_eq!(
-            pipeline
-                .direct_one_xs_map
-                .as_ref()
-                .and_then(DirectMapDraw::bound_frame),
-            Some(&first)
-        );
-        assert_eq!(
-            pipeline.flow_draw,
-            FlowDraw::Nothing,
-            "the failed successor selected a legacy or unstitched fallback"
-        );
-        assert!(pipeline.diagnostic_one_xs_direct_frame().is_none());
-        assert_eq!(
-            second_primitive
-                .shown
-                .get()
-                .expect("failed successor lost the last complete display")
-                .frames
-                .stamp(),
-            first
-        );
-
-        // The rejected receipt consumed no estimator history. The ordinary
-        // production entry point can prepare, sample, commit, upload and
-        // acknowledge the same real successor exactly once.
-        pipeline.prepare(&second_primitive, &device, &queue, 1.0);
-        assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
-        assert_eq!(pipeline.diagnostic_one_xs_direct_frame(), Some(&second));
-        assert_eq!(pipeline.one_xs_gpu_pis_completed_stages, 8);
-        assert_eq!(
-            pipeline
-                .direct_one_xs_map
-                .as_ref()
-                .and_then(DirectMapDraw::bound_frame),
-            Some(&second)
-        );
-        assert_eq!(
-            scene
-                .diagnostic_one_xs_map()
-                .expect("second selected map lookup failed")
-                .expect("the recovered transaction did not commit")
-                .frame(),
-            &second
-        );
-        assert_eq!(
-            scene
-                .diagnostic_one_xs_map()
-                .unwrap()
-                .unwrap()
-                .pis_backend(),
-            PisBackend::Gpu
-        );
-
-        // Even a terminal selected redraw may recover the retained display.
-        // Authenticate before that branch: a different valid pair must touch
-        // no old resource, and the failure's raw context error must survive.
-        assert_ne!(device, foreign_device);
-        let retained_live = Arc::as_ptr(&pipeline.live.front().unwrap().frames);
-        let retained_prepared = pipeline.prepared_picture.as_ref().unwrap().frame().clone();
-        let foreign_scope = foreign_device.push_error_scope(wgpu::ErrorFilter::Validation);
-        pipeline.prepare(&second_primitive, &foreign_device, &foreign_queue, 1.0);
-        let foreign_gpu_error = block_on(foreign_scope.pop());
-        assert!(
-            foreign_gpu_error.is_none(),
-            "foreign Scene recovery reached GPU validation: {foreign_gpu_error:?}"
-        );
-        assert_eq!(pipeline.flow_draw, FlowDraw::Nothing);
-        assert_eq!(
-            pipeline
-                .direct_one_xs_map
-                .as_ref()
-                .and_then(DirectMapDraw::bound_frame),
-            Some(&second)
-        );
-        assert_eq!(pipeline.one_xs_display.complete.as_ref(), Some(&second));
-        assert_eq!(
-            Arc::as_ptr(&pipeline.live.front().unwrap().frames),
-            retained_live
-        );
-        assert_eq!(
-            pipeline.prepared_picture.as_ref().unwrap().frame(),
-            &retained_prepared
-        );
-        assert_eq!(
-            second_primitive.stalled.take().unwrap().to_string(),
-            "ONE X2 GPU submission crossed a different device or queue"
-        );
-        assert_eq!(
-            second_primitive.stalled.terminal().unwrap().to_string(),
-            "ONE X2 GPU submission crossed a different device or queue"
-        );
+        let map = scene
+            .diagnostic_one_xs_map()
+            .expect("resident diagnostic readback failed")
+            .expect("final resident frame was not available to the diagnostic");
+        assert_eq!(map.frame(), &exact);
+        assert_eq!(map.pis_backend(), PisBackend::Gpu);
         scene.pause(Instant::now());
     }
 

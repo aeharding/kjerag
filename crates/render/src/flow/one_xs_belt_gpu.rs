@@ -2,8 +2,8 @@
 //!
 //! This is the GPU-shaped equivalent of [`crate::flow::one_xs_belt::sample_source_belts`]
 //! followed by [`SourceBelts::reduce_area_3x3`](crate::flow::one_xs_belt::SourceBelts::reduce_area_3x3)
-//! and Studio's selected 5-by-5 input Gaussian. Production playback consumes
-//! its compact post-blur readback at the CPU estimator boundary. Horizontal
+//! and Studio's selected 5-by-5 input Gaussian. Production playback carries
+//! its compact post-blur result into the resident estimator. Horizontal
 //! Q7 sums retain one u32 per logical byte; the vertical pass rounds, packs
 //! four final U8 codes into one word and preserves the 129,600-byte A-then-B
 //! boundary. No staging allocation or full CPU luma readback lies between the
@@ -39,15 +39,15 @@ mod parent_gpu;
 
 /// Device-resident final bilateral-map materializer.
 ///
-/// Its input boundary stays inside this private resident owner. Scene does not
-/// consume the resulting opaque map token yet.
+/// Its input boundary stays inside this private resident owner. Scene consumes
+/// the result only through the capture facade's installed draw.
 #[path = "one_xs/map_patch_gpu.rs"]
 mod map_patch_gpu;
 
-/// Capture-root reservation, successor and future ready-install ownership.
+/// Capture-root reservation, successor and ready-install ownership.
 ///
-/// The types stay private to this resident owner. Scene cannot reserve or
-/// publish this path, and the motion child receives only a linear reservation.
+/// The types stay private to this resident owner. Scene can publish only
+/// through the facade, and the motion child receives only a linear reservation.
 #[path = "one_xs/resident_frame_gpu.rs"]
 #[allow(dead_code)]
 mod resident_frame_gpu;
@@ -281,6 +281,13 @@ pub(crate) enum ResidentPrepare {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResidentDrain {
+    Pending,
+    Drained,
+    FailClosedRetained,
+}
+
 #[allow(dead_code)]
 type ColdPending = map_patch_gpu::PendingGpuPackedMapFrame<
     pis_frontend_gpu::GpuFinalOperands<geometry_gpu::temporal_gpu::GpuColdPriorPublicLevelTwo>,
@@ -393,7 +400,6 @@ fn validate_resident_sequence(
     )
 }
 
-#[allow(dead_code)]
 struct ResidentCaptureState {
     session: Option<Arc<ResidentCaptureSession>>,
     transaction: ResidentTransaction,
@@ -404,7 +410,6 @@ struct ResidentCaptureState {
 /// direct pipeline and retirement queue are intentionally not ScenePipeline
 /// fields. An installed source/map pair therefore keeps the exact association
 /// that created it when iced recreates its renderer pipeline.
-#[allow(dead_code)]
 struct ResidentCaptureSession {
     context: OneXsGpuContext,
     format: wgpu::TextureFormat,
@@ -420,7 +425,6 @@ struct ResidentCaptureSession {
     retirements: Arc<IcedDrawRetirements<InstalledOneXsPass>>,
 }
 
-#[allow(dead_code)]
 impl ResidentCaptureSession {
     /// Lazily construct one capture session. The existing resident stage
     /// constructors synchronously qualify arithmetic on this target device;
@@ -623,6 +627,47 @@ impl ResidentCaptureFacade {
     pub(crate) fn acknowledged(&self, frame: &FrameStamp) -> Fallible<bool> {
         Ok(self.state()?.installed.as_ref() == Some(frame))
     }
+
+    pub(crate) fn same_capture(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn installed_stamp(&self) -> Fallible<Option<FrameStamp>> {
+        Ok(self.state()?.installed.clone())
+    }
+
+    /// Explicit instrument-only bulk readback of the exact installed resident
+    /// result. Ordinary prepare and draw never call this path.
+    pub(crate) fn diagnostic_installed_map(
+        &self,
+        frame: &FrameStamp,
+    ) -> Fallible<Option<crate::OneXsMapFrame>> {
+        let (installed, session) = {
+            let state = self.state()?;
+            (state.installed.clone(), state.session.clone())
+        };
+        if installed.as_ref() != Some(frame) {
+            return Ok(None);
+        }
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        let Some(draw) = session.capture.pipeline.root.diagnostic_ready()? else {
+            return Ok(None);
+        };
+        if draw.frame() != *frame {
+            return Err("ONE X2 diagnostic ready differs from the installed frame".into());
+        }
+        Ok(Some(draw.map.diagnostic_readback()?))
+    }
+}
+
+impl std::fmt::Debug for ResidentCaptureFacade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResidentCaptureFacade")
+            .field("identity", &Arc::as_ptr(&self.inner))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Pipeline-local one-shot staging backed by capture-shared transaction and
@@ -636,6 +681,36 @@ pub(crate) struct ResidentSceneFacade {
 
 #[allow(dead_code)]
 impl ResidentSceneFacade {
+    pub(crate) fn needs_poll(&self) -> bool {
+        let state = match self.capture.state() {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("{error}");
+                return false;
+            }
+        };
+        if matches!(state.transaction, ResidentTransaction::Quarantined) {
+            return false;
+        }
+        matches!(state.transaction, ResidentTransaction::Pending(_))
+            || state
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.retirements.is_empty())
+    }
+
+    pub(crate) fn quarantine_after_external_poll_failure(&self) {
+        self.draw.staged().take();
+        if let Ok(mut state) = self.capture.state() {
+            let transaction =
+                std::mem::replace(&mut state.transaction, ResidentTransaction::Quarantined);
+            transaction.quarantine_uncertain();
+            if let Some(session) = &state.session {
+                session.retirements.quarantine_after_external_poll_failure();
+            }
+        }
+    }
+
     pub(crate) fn submit_frame(
         &self,
         context: &OneXsGpuContext,
@@ -697,6 +772,25 @@ impl ResidentSceneFacade {
         format: wgpu::TextureFormat,
         reframe_for: impl Fn(&FrameStamp) -> Fallible<crate::Reframe>,
     ) -> Fallible<ResidentPrepare> {
+        self.prepare_redraw_inner(context, format, false, reframe_for)
+    }
+
+    pub(crate) fn prepare_redraw_after_external_poll(
+        &self,
+        context: &OneXsGpuContext,
+        format: wgpu::TextureFormat,
+        reframe_for: impl Fn(&FrameStamp) -> Fallible<crate::Reframe>,
+    ) -> Fallible<ResidentPrepare> {
+        self.prepare_redraw_inner(context, format, true, reframe_for)
+    }
+
+    fn prepare_redraw_inner(
+        &self,
+        context: &OneXsGpuContext,
+        format: wgpu::TextureFormat,
+        externally_polled: bool,
+        reframe_for: impl Fn(&FrameStamp) -> Fallible<crate::Reframe>,
+    ) -> Fallible<ResidentPrepare> {
         let session = self.capture.bind_session(context.clone(), format)?;
         self.draw.staged().take();
         let transaction = {
@@ -706,27 +800,29 @@ impl ResidentSceneFacade {
         let mut prepare_start = ResidentStartGuard::rollback(Arc::clone(&self.capture.inner));
         let (transaction, externally_polled) = match transaction {
             ResidentTransaction::Pending(pending) => {
-                let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    session.context.device().poll(wgpu::PollType::Poll)
-                }));
-                let poll_error: Option<Box<dyn Error + Send + Sync>> = match polled {
-                    Ok(Ok(_)) => None,
-                    Ok(Err(error)) => Some(Box::new(error)),
-                    Err(payload) => Some(
-                        payload
-                            .downcast_ref::<&str>()
-                            .map(|message| (*message).to_owned())
-                            .or_else(|| payload.downcast_ref::<String>().cloned())
-                            .unwrap_or_else(|| "ONE X2 GPU device poll panicked".to_owned())
-                            .into(),
-                    ),
-                };
-                if let Some(error) = poll_error {
-                    session.retirements.quarantine_after_external_poll_failure();
-                    self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-                    prepare_start.disarm();
-                    ResidentTransaction::Pending(pending).quarantine_uncertain();
-                    return Err(error);
+                if !externally_polled {
+                    let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        session.context.device().poll(wgpu::PollType::Poll)
+                    }));
+                    let poll_error: Option<Box<dyn Error + Send + Sync>> = match polled {
+                        Ok(Ok(_)) => None,
+                        Ok(Err(error)) => Some(Box::new(error)),
+                        Err(payload) => Some(
+                            payload
+                                .downcast_ref::<&str>()
+                                .map(|message| (*message).to_owned())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "ONE X2 GPU device poll panicked".to_owned())
+                                .into(),
+                        ),
+                    };
+                    if let Some(error) = poll_error {
+                        session.retirements.quarantine_after_external_poll_failure();
+                        self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+                        prepare_start.disarm();
+                        ResidentTransaction::Pending(pending).quarantine_uncertain();
+                        return Err(error);
+                    }
                 }
                 let result = match pending {
                     ResidentPendingMap::Cold(pending) => {
@@ -789,7 +885,7 @@ impl ResidentSceneFacade {
                 prepare_start.disarm();
                 return Err("ONE X2 resident transaction facade is quarantined".into());
             }
-            other => (other, false),
+            other => (other, externally_polled),
         };
         let retirement_result = if externally_polled {
             session.retirements.collect_after_external_poll()
@@ -935,6 +1031,79 @@ impl ResidentSceneFacade {
         Ok(self.capture.state()?.installed.clone())
     }
 
+    /// Nonblocking normal replacement drain. Completion-proven candidates are
+    /// discarded without publication; uncertain submissions remain owned and
+    /// are polled again on a later redraw.
+    pub(crate) fn drain_replaced(&self) -> Fallible<ResidentDrain> {
+        self.drain_replaced_inner(false)
+    }
+
+    pub(crate) fn drain_replaced_after_external_poll(&self) -> Fallible<ResidentDrain> {
+        self.drain_replaced_inner(true)
+    }
+
+    fn drain_replaced_inner(&self, externally_polled: bool) -> Fallible<ResidentDrain> {
+        self.draw.staged().take();
+        let Some(session) = self.capture.state()?.session.clone() else {
+            return Ok(ResidentDrain::Drained);
+        };
+        let transaction = {
+            let mut state = self.capture.state()?;
+            std::mem::replace(&mut state.transaction, ResidentTransaction::Starting)
+        };
+        if matches!(transaction, ResidentTransaction::Quarantined) {
+            self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+            return Ok(ResidentDrain::FailClosedRetained);
+        }
+        let polled = (!externally_polled).then(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.context.device().poll(wgpu::PollType::Poll)
+            }))
+        });
+        if let Some(Err(payload)) = polled.as_ref() {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "ONE X2 GPU device poll panicked".to_owned());
+            session.retirements.quarantine_after_external_poll_failure();
+            transaction.quarantine_uncertain();
+            self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+            eprintln!("{message}");
+            return Ok(ResidentDrain::FailClosedRetained);
+        }
+        if let Some(Ok(Err(error))) = polled {
+            session.retirements.quarantine_after_external_poll_failure();
+            transaction.quarantine_uncertain();
+            self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+            eprintln!("{error}");
+            return Ok(ResidentDrain::FailClosedRetained);
+        }
+        let transaction = match transaction {
+            ResidentTransaction::Pending(pending) => match pending {
+                ResidentPendingMap::Cold(pending) => classify_retired_cold(*pending)?,
+                ResidentPendingMap::Warm(pending) => classify_retired_warm(*pending)?,
+            },
+            ResidentTransaction::Ready(ready) => {
+                drop(ready);
+                ResidentTransaction::Idle
+            }
+            other => other,
+        };
+        session.retirements.collect_after_external_poll()?;
+        let fail_closed = matches!(transaction, ResidentTransaction::Quarantined);
+        let idle =
+            matches!(transaction, ResidentTransaction::Idle) && session.retirements.is_empty();
+        self.capture.state()?.transaction = transaction;
+        Ok(if fail_closed {
+            ResidentDrain::FailClosedRetained
+        } else if idle {
+            ResidentDrain::Drained
+        } else {
+            ResidentDrain::Pending
+        })
+    }
+
     /// Reserve a separate render-pass proof for an offscreen screenshot. It
     /// cannot steal or reuse the one-shot window capability.
     pub(crate) fn prepare_screenshot(
@@ -973,6 +1142,46 @@ impl ResidentSceneFacade {
             retirements: Arc::clone(&session.retirements),
         }))
     }
+}
+
+fn classify_retired_cold(pending: ColdPending) -> Fallible<ResidentTransaction> {
+    Ok(match pending.finish_after_poll_classified() {
+        map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
+            ResidentTransaction::Pending(ResidentPendingMap::Cold(Box::new(value)))
+        }
+        map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
+            drop(value);
+            ResidentTransaction::Idle
+        }
+        map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
+            eprintln!("{error}");
+            ResidentTransaction::Idle
+        }
+        map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
+            eprintln!("{error}");
+            ResidentTransaction::Quarantined
+        }
+    })
+}
+
+fn classify_retired_warm(pending: WarmPending) -> Fallible<ResidentTransaction> {
+    Ok(match pending.finish_after_poll_classified() {
+        map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
+            ResidentTransaction::Pending(ResidentPendingMap::Warm(Box::new(value)))
+        }
+        map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
+            drop(value);
+            ResidentTransaction::Idle
+        }
+        map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
+            eprintln!("{error}");
+            ResidentTransaction::Idle
+        }
+        map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
+            eprintln!("{error}");
+            ResidentTransaction::Quarantined
+        }
+    })
 }
 
 #[allow(dead_code)]
@@ -1202,17 +1411,19 @@ impl InstalledOneXsReady {
 /// attaches its retirement proof to iced's live render pass. A second prepare
 /// before draw drops the undispatched permit before reserving another one.
 /// It changes no capture history.
-#[allow(dead_code)] // private prerequisite; the resident producer remains unselected
 pub(crate) struct IcedInstalledDrawAdapter {
     retirements: Arc<IcedDrawRetirements<InstalledOneXsPass>>,
     staged: Mutex<Option<InstalledOneXsReady>>,
 }
 
-#[allow(dead_code)]
 impl IcedInstalledDrawAdapter {
     /// The qualified adapter bounds in-flight decoder-backed pictures at two.
     const RETIREMENT_CAPACITY: usize = 2;
 
+    #[allow(
+        dead_code,
+        reason = "explicit legacy installed-draw oracle constructor"
+    )]
     pub(crate) fn new(device: &wgpu::Device) -> Self {
         Self::with_shared_retirements(Arc::new(IcedDrawRetirements::new(
             device,
@@ -1227,9 +1438,9 @@ impl IcedInstalledDrawAdapter {
         }
     }
 
-    /// Poll only. Scene calls this from every prepare even while the resident
-    /// route is unselected, so a future selected producer cannot accidentally
-    /// make draw-time polling part of the contract.
+    /// Legacy adapter oracle: poll without making draw-time polling part of
+    /// the selected contract.
+    #[allow(dead_code, reason = "explicit legacy installed-draw oracle polling")]
     pub(crate) fn poll_prepare(&self) -> Fallible<usize> {
         match self.retirements.poll() {
             Ok(retired) => Ok(retired),
@@ -1259,6 +1470,7 @@ impl IcedInstalledDrawAdapter {
     /// Retirement exhaustion remains typed retryable backpressure. The
     /// staged cell is empty before admission, so refusal cannot draw an older
     /// capability or become a terminal playback failure.
+    #[allow(dead_code, reason = "explicit legacy installed-draw oracle staging")]
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_redraw(
         &self,
         root: &resident_frame_gpu::GpuResidentCapture,
@@ -1282,6 +1494,7 @@ impl IcedInstalledDrawAdapter {
         true
     }
 
+    #[allow(dead_code, reason = "explicit legacy installed-draw oracle inspection")]
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn retirements(
         &self,
     ) -> &IcedDrawRetirements<InstalledOneXsPass> {
@@ -1990,6 +2203,7 @@ impl GpuSolverBeltPipeline {
     /// A dmabuf texture aliases a decoder surface. Scene integration must pass
     /// the corresponding frame owner here; retaining only wgpu handles does
     /// not keep that external surface out of the decoder's pool.
+    #[allow(dead_code, reason = "explicit legacy solver-belt oracle boundary")]
     pub(crate) fn submit_retained<K>(
         &self,
         sources: SourceTextures<'_>,
@@ -2523,14 +2737,6 @@ impl<K> PendingBlurredBelts<K> {
     #[cfg(test)]
     pub(crate) fn packed(&self) -> &wgpu::Buffer {
         &self._packed
-    }
-
-    #[cfg(test)]
-    pub(crate) fn observe_completion(
-        &mut self,
-        state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    ) {
-        self.lease.observe(state);
     }
 
     /// Wait for and consume the exact compact post-Gaussian payload.
@@ -3538,8 +3744,8 @@ mod tests {
         assert!(!adapter.contains("PollType::Wait"));
 
         let scene = include_str!("../scene.rs");
-        assert!(scene.contains("installed_one_xs_draw: IcedInstalledDrawAdapter"));
-        assert!(scene.contains("IcedInstalledDrawAdapter::new(device)"));
+        assert!(scene.contains("resident_one_xs: Option<(ResidentCaptureFacade"));
+        assert!(!scene.contains("installed_one_xs_draw"));
         let prepare = scene
             .split_once("pub fn prepare(")
             .unwrap()
@@ -3547,7 +3753,7 @@ mod tests {
             .split_once("pub fn diagnostic_one_xs_direct_frame")
             .unwrap()
             .0;
-        assert!(prepare.contains("self.installed_one_xs_draw.poll_prepare()"));
+        assert!(prepare.contains("prepare_redraw_after_external_poll"));
         let draw = scene
             .split_once("pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>)")
             .unwrap()
@@ -3555,7 +3761,7 @@ mod tests {
             .split_once("fn is_bound")
             .unwrap()
             .0;
-        assert!(draw.contains("self.installed_one_xs_draw.arm_and_draw(pass)"));
+        assert!(draw.contains("attachment.arm_and_draw(pass)"));
 
         let retirement = include_str!("../draw_retirement.rs");
         let poll = retirement

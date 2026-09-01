@@ -2048,7 +2048,7 @@ fn persist_target_evidence(evidence: TargetEvidence<'_>) -> Fallible<()> {
 
     let receipt = json!({
         "schema": "kjerag.playback-production-map.v1",
-        "claim": "one exact production FrameOwner map bound in-process to the selected current Scene delivery",
+        "claim": "one exact installed resident GPU map bound in-process to the selected current Scene delivery",
         "limitations": {
             "opaque_frame_stamp_serialized": false,
             "video_parity_claimed": false,

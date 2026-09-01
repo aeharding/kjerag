@@ -37,6 +37,7 @@ use super::temporal::gaussian_blur;
 use super::{COLS, InvalidNodeCounts, LensPair, ParentMapBuilder, ParentMapError, ROWS};
 
 /// The complete result for one exact delivered source pair.
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 pub(crate) struct FrameResult {
     pub map: OneXsMapFrame,
     pub phase: Phase,
@@ -51,6 +52,7 @@ pub(crate) struct FrameResult {
 ///
 /// This value is deliberately linear: it cannot be cloned, and committing it
 /// consumes it. The retained numeric owner is untouched until [`FrameOwner::commit`].
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 pub(crate) struct PreparedFrame {
     frame: FrameStamp,
     retained: RetainedBaseMaps,
@@ -60,6 +62,7 @@ pub(crate) struct PreparedFrame {
     camera_mask: CameraMaskReport,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 impl PreparedFrame {
     /// The exact delivery this preparation is allowed to commit.
     pub(crate) fn frame(&self) -> &FrameStamp {
@@ -100,6 +103,7 @@ impl PreparedFrame {
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 enum State {
     NeedFrameZero,
     Running {
@@ -109,6 +113,7 @@ enum State {
 }
 
 /// All capture-static and retained per-frame state for one uninterrupted run.
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 pub(crate) struct FrameOwner {
     parent: ParentMapBuilder,
     resources: OneXsResources,
@@ -120,6 +125,7 @@ pub(crate) struct FrameOwner {
     state: State,
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 impl FrameOwner {
     /// Build a fresh cold owner from one capture's factory calibration.
     pub fn new(calibration: &CalibrationSet) -> Result<Self, FrameOwnerError> {
@@ -359,6 +365,7 @@ impl FrameOwner {
 
 /// A frame transaction failed before its retained owner could advance.
 #[derive(Debug)]
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 pub(crate) enum FrameCommitError<E> {
     Owner(FrameOwnerError),
     Solver(PairSolveError<E>),
@@ -382,6 +389,7 @@ impl<E: Error + 'static> Error for FrameCommitError<E> {
     }
 }
 
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 fn planar_flow(planes: &[f32], nodes: usize) -> Vec<[f32; 2]> {
     debug_assert_eq!(planes.len(), 2 * nodes);
     (0..nodes)
@@ -460,6 +468,7 @@ impl fmt::Display for SequenceError {
 impl Error for SequenceError {}
 
 #[derive(Debug)]
+#[allow(dead_code, reason = "frozen CPU transaction oracle")]
 pub(crate) enum FrameOwnerError {
     Resource(ResourceError),
     Parent(ParentMapError),

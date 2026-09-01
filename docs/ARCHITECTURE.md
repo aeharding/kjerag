@@ -12,8 +12,8 @@ crates/app      kjerag         libcosmic shell + window. The view is an
                                the mouse reaches it through that widget.
 crates/render   kjerag-render  wgpu: dmabuf import, final WGSL pass (NV12 ->
                                RGB + projection); selected ONE X2 compact GPU
-                               luma sampling, input blur and paired sparse PIS,
-                               with retained/dense map stages still on CPU;
+                               luma sampling, sparse PIS, retained state, dense
+                               map construction and direct resident draw;
                                camera state and offscreen screenshot rendering
 crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
@@ -63,16 +63,16 @@ depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`
 that cannot live in a crate with no wgpu.
 
-The resident ONE X2 draw prerequisite has a separate, private source-import
+The resident ONE X2 draw path has a separate, private source-import
 owner in `direct_type2`. Its only production constructor consumes the exact
 `Arc<Frames>`, requires two lenses, imports both descriptors directly into
 `[Planes; 2]` and builds their picture bind group. It has no raw-plane or
 stamp-only association boundary, and exposes no bind-group or texture handle:
 its only rendering capability binds and draws the exact picture internally.
-Field order releases the bind group, planes and frame owner in that order. It
-remains unselected: Scene's legacy `VecDeque<Live>` and three-frame retention
-path are unchanged until the resident result and render-pass retirement owners
-can be joined without weakening either lifetime.
+Field order releases the bind group, planes and frame owner in that order.
+Selected Scene playback reaches it only through the capture-owned resident
+session and renderer attachment; the legacy `VecDeque<Live>` path remains an
+explicit diagnostic/oracle boundary and is not a selected fallback.
 
 ## Failures the pilot is told about (issue #124)
 
@@ -184,30 +184,24 @@ one lens. Zero-copy import is a requirement, not an optimization. (An
 earlier research note put `vaDeriveImage` at 0.53 ms/frame; that was the
 map call alone, with nothing reading the pixels through it.)
 
-The selected ONE X2 path also samples those imported R8 textures directly for
-stitch analysis. Its exact compute passes apply the retained float2 maps,
-3-by-3 reduction and separable 5-by-5 integer Gaussian on the GPU, then read
-back only two 1080-by-60 U8 post-blur solver belts, 129,600 bytes rather than
-both 2880-by-2880 luma planes. The CPU constructs each level's typed image,
-mask, gradient, weight and prepared-source inputs, and the exact paired PIS
-kernel advances both directions on the GPU. Each stage reads back only its
-terminal sparse grids: 4,224 bytes at level two and 22,784 bytes at level one.
-CPU densification, retained temporal state and final map materialization then
-produce the native map that is uploaded before the original decoded textures
-are drawn once. There is no CPU PIS fallback. Decoded picture delivery and
-source sampling are zero-copy; the post-blur, per-stage terminal and final-map
-CPU/GPU boundaries remain targets of the continuing migration.
+The selected ONE X2 path samples those imported R8 textures directly and keeps
+the ordinary stitch transaction resident through retained-map sampling,
+reduction, blur, paired sparse PIS, temporal continuation, dense native-map
+materialization and direct draw. Normal post-qualification frame preparation
+maps only the four-byte validity word. It performs no solver-belt or sparse
+terminal readback, CPU PIS, CPU map materialization, frame-sized transfer or
+native-map upload. The decoded picture and every installed map stay in the
+capture-owned resident session until bounded render-pass retirement proves
+their last draw complete.
 
 Every selected ONE X2 GPU stage is rooted in one render-private
 `OneXsGpuContext`, constructed from the exact device and queue iced gives the
 `ScenePipeline`. The context compares those wgpu handles structurally, so a
 renderer-pipeline recreation on clones of the same pair remains compatible;
-a replacement device or queue is a different context. The solver-belt
-pipeline and its `SubmissionLease` retain that context. The lease submits
+a replacement device or queue is a different context. The resident producer
+and its `SubmissionLease` retain that context. The lease submits
 later resident consumers on its own queue and replaces its own completion
-index; no consumer may hand it a detached `SubmissionIndex`. This is the
-ownership foundation for the continuing resident migration, not a claim that
-the current post-belt CPU boundaries have moved.
+index; no consumer may hand it a detached `SubmissionIndex`.
 
 wgpu supplies one queue together with each requested device and has no public
 constructor for an independent second queue on that same device. Tests
@@ -281,69 +275,37 @@ There is no calibration step, setup ritual or quality toggle. The Optical
 Flow setting controls only the legacy solver and does not select or modify
 this route.
 
-The player changes to `PresentationPolicy::EveryFrame`, and one capture-owned
-`FrameOwner` starts cold at frame zero. For each adjacent decoded pair, the
-renderer constructs the retained maps and camera masks, samples both imported
-luma planes into compact solver belts and applies the exact input Gaussian on
-the GPU, constructs the remaining level inputs on the CPU, advances every cold
-or warm paired sparse PIS stage on the GPU, and completes retained-state,
-dense-field and native 200 by 100 packed type-2 materialization on the CPU.
-The decoded pair, GPU tokens, prepared geometry and completed map carry the
-same opaque `FrameStamp`. Only that exact match can become
-`FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek or another
-open cannot impersonate it.
+The player changes to `PresentationPolicy::EveryFrame` and one capture-owned
+resident facade starts at frame zero. Scene branches to this route before legacy
+prepare, import or draw. A renderer attachment binds the same capture-owned GPU
+session across pipeline recreation, submits the exact offered decoded pair and
+stages only an installed result carrying the same opaque `FrameStamp` and capture
+identity. Pending work and full render-retirement admission leave the prior exact
+shown ready drawable; there is no legacy recovery route.
 
-The capture mutex covers only reservation and atomic installation. Reserving
-a frame moves the exact sequential owner and prepared geometry into a linear
-token, records the full opaque stamp and a monotonically increasing capture
-generation, then releases the lock before GPU submission, waiting or scalar
-estimation. A recreated render pipeline sees the shared in-flight reservation,
-submits nothing and restores the last exact source/map display. Submission,
-readback or estimator rejection explicitly returns the same boxed owner and
-leaves the ready map's `Arc` unchanged; dropping an unfinished reservation has
-the same rollback behavior. After successful estimation, dropping the completed
-token installs its usable next owner and map; corrupt completion metadata that
-cannot publish instead leaves that advanced owner retained in the terminal
-capture and keeps the old ready map. A stale token is quarantined without
-clearing a different current flight, and terminal state is explicit so the old
-display cannot become the base of another successor. Successful work validates
-generation, opaque frame identity and the previous ready allocation before
-installing the next owner and map together. This boundary is deliberately able
-to retain the current staged GPU PIS work across multiple waits without
-widening the lock.
-
-WGSL does not guarantee the fused arithmetic this producer requires. Its lazy
-constructor therefore compares all 129,600 adversarial sampled pre-blur bytes,
-the retained-map FMA bit discriminator and all resulting post-blur bytes with
-the CPU/native oracle on the actual graphics device before the first selected
-frame can advance. It separately uploads an adversarial retained-belt fixture
-to qualify the same horizontal and vertical Gaussian pipelines independently
-of source sampling. `solver_code` writes the exact sampled UV it passes to
-`sample_source` at one adversarial tap into a two-word witness sink.
-Qualification reads that sink after the same complete `build_solver_belts`
-dispatch that produced the byte fixture; ordinary submissions bind the same
-pipeline-owned eight-byte sink but do not read it. Overlapping ordinary writes
-are intentionally unobserved. Output and dispatch semantics are unchanged.
-Qualification therefore uses the exact production shader module, pipelines,
-entries and sampling call rather than compiling a lookalike probe. One
-differing byte or bit pattern refuses the route with its own error. There is
-no approximate or full-luma CPU fallback.
-
-The paired PIS pipeline is qualified separately through the same production
-entry, pipeline and arithmetic implementation used by ordinary frames. Its
-L1/L2 fixtures cover both directions, asymmetric hints and descent admission,
-candidate ties, survivor boundaries, zero-survivor descent, six-step terminal
-behavior, strict disparity endpoints, exact division and the distance guard.
-The public production boundary admits only finite, direction-typed terminal
-`PatchGrid` values carrying the exact reservation flight and stage. A failed
-qualification, readback, receipt or typed-grid admission surfaces its own error
-and restores or terminally retains the exact owner according to whether the
-numeric commit began; it never retries through the CPU solver.
-
-A discontinuous seek builds a new owner and causally replays from frame zero
-to the requested target. The displayed frame is retained until its exact map
+At most one nonblocking device poll, when callback or retirement work exists,
+drives the active attachment and every normally draining attachment replaced by seek or reopen. Callback collection and
+retirement never wait. Completion-proven owners release normally; uncertain
+owners remain fail-closed without blocking or repeatedly scheduling the new
+lineage. A discontinuous seek creates a new capture facade and causally replays
+from frame zero to the requested target while the old exact display may remain
+visible. The displayed frame is retained until its exact map
 is acknowledged. The direct type-2 draw consumes the native map and alpha
 without routing through the legacy seam-band displacement.
+
+Screen and screenshot reserve separate immutable resident draw permits. A
+screenshot prepares the exact shown capture and stamp, then draws its permit in
+an independent offscreen pass; it never calls the window draw. Explicit seam
+diagnostics may authenticate that same installed identity and read back packed
+map and alpha bytes, but that bulk transfer and wait are instrument-only.
+
+The first lazy resident-session construction runs the existing target-device
+arithmetic qualifications synchronously. Those constructor-only probes perform
+bulk readbacks and waits. Once the session exists, normal frame submit, redraw,
+draw and retirement perform no bulk readback or wait; only the four-byte
+validity callback crosses to CPU. The bulk legacy CPU stitch implementation is
+retained solely as the frozen oracle and explicit diagnostic surface; small
+control, pose, identity and lifecycle state remains on CPU.
 
 The selected ONE X2 basis, calibration packing, 51-pose schedule and Metal
 parent-map law are READ from Studio. Kjerag uses its existing orientation
@@ -393,14 +355,16 @@ parity.
   surfaces per stream here (`Reader::pool_size`, read from the
   `AVHWFramesContext` after the first frame). Every held frame, mapped or
   not, holds one: the engine holds at most 9 per stream (2 lookahead, 2
-  queued pairs, the one on screen, the one peeked, and 3 retained on the
-  GPU). Nothing checks this at runtime; the count is the budget.
-- An imported texture aliases the decoder's surface, so dropping the
+  queued pairs, the one on screen, the one peeked, and 3 retained on the GPU)
+  on the generic route. Nothing checks that generic-route count at runtime;
+  selected resident playback instead owns pending, installed and bounded
+  retired sources until their callbacks prove completion.
+- On the generic and legacy diagnostic routes, an imported texture aliases the decoder's surface, so dropping the
   `Frames` while the GPU is still reading hands live memory back to the
   decoder. `ScenePipeline` keeps the last 3 pairs alive behind the one it
   binds; iced submits after `prepare` returns and presents later still, so
   "the draw call was recorded" is not "the GPU is done".
-- The unselected resident ONE X2 path enforces the same rule with a sealed
+- The selected resident ONE X2 path enforces the same rule with a sealed
   transition rather than a retention convention. `ImportedOneXsPicture` owns
   the exact two imported plane pairs, their picture binding, GPU context and
   decoder `Frames`. Its consuming resident-front operation derives the exact
@@ -409,9 +373,10 @@ parity.
   one command stream, and moves that same aggregate into the submission
   lease. The crate-visible admission accepts the concrete aggregate rather
   than a `SourceTextures`/owner pair. Its opaque result retains the only
-  module-private consuming motion continuation, which is not yet published as
-  an integration API. No raw wgpu or dmabuf resource crosses that boundary.
-  This is an ownership prerequisite only; Scene and playback do not select it.
+  module-private consuming motion continuation. Scene reaches it only through
+  the capture facade and renderer attachment. No raw wgpu or dmabuf resource
+  crosses that boundary. Bounded callback retirement, rather than the generic
+  three-pair convention, proves when each selected source may be released.
 - Reference import code: `ez-ffmpeg` 0.17 `wgpu_filter/hw_interop.rs`,
   `iroh-live` `rusty-codecs/src/render/dmabuf_import.rs`, `bevy-dmabuf`.
 - GStreamer was evaluated and rejected: no wgpu or dmabuf-to-Vulkan sink.

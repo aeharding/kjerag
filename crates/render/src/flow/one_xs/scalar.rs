@@ -568,6 +568,7 @@ impl CpuPairedPisSolver {
         Self { prepared }
     }
 
+    #[allow(dead_code, reason = "frozen CPU PIS oracle boundary")]
     pub(super) fn into_preparation(self) -> CpuPisOracleInputs {
         self.prepared
     }
@@ -1397,6 +1398,7 @@ impl ColdPreparedSchedule {
         Self { controls, solver }
     }
 
+    #[allow(dead_code, reason = "frozen CPU schedule oracle boundary")]
     pub(crate) fn into_parts(self) -> (PairedControlInputs, CpuPisOracleInputs) {
         (self.controls, self.solver.into_preparation())
     }

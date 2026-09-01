@@ -209,7 +209,7 @@ impl<'a, D: PisDirection, L: GpuPreparedLevelMarker> PisPreparedBinding<'a, D, L
     }
 }
 
-/// Complete per-frame front end, still resident and deliberately unselected.
+/// Complete per-frame front end, resident and selected only through the capture facade.
 ///
 #[must_use = "the GPU-resident PIS frame front end has not been consumed"]
 pub(crate) struct GpuPreparedFrame<K> {
