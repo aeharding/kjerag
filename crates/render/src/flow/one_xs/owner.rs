@@ -15,8 +15,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::scalar::{
-    ColdInputs, ColdNextCandidate, ColdPair, CpuPairedPisSolver, PairSolveError, PairedPisSolver,
-    WorkRowCounts,
+    ColdInputs, ColdNextCandidate, ColdPair, CpuPairedPisSolver, CpuPreparedPisSolverBridge,
+    PairSolveError, WorkRowCounts,
 };
 use super::warm::{KnownWarmNext, WarmPair, WarmTransitionError};
 use super::{Displacement, InvalidNodeCounts};
@@ -131,7 +131,7 @@ impl PairOwner {
     /// entry only for frame zero. Lower-level callers retain responsibility for
     /// providing an equivalent source-authority boundary.
     pub fn start(at: PairPosition, input: ColdInputs) -> PairStep {
-        match Self::try_start_with_solver(at, input, &mut CpuPairedPisSolver) {
+        match Self::try_start_with_solver(at, input, &mut CpuPairedPisSolver::default()) {
             Ok(step) => step,
             Err(error) => match *error {
                 FailedStart {
@@ -146,7 +146,7 @@ impl PairOwner {
         }
     }
 
-    pub(crate) fn try_start_with_solver<S: PairedPisSolver>(
+    pub(crate) fn try_start_with_solver<S: CpuPreparedPisSolverBridge>(
         at: PairPosition,
         input: ColdInputs,
         solver: &mut S,
@@ -182,7 +182,7 @@ impl PairOwner {
         offered: PairPosition,
         input: ColdInputs,
     ) -> Result<PairStep, Box<RejectedAdvance>> {
-        match self.try_advance_with_solver(offered, input, &mut CpuPairedPisSolver) {
+        match self.try_advance_with_solver(offered, input, &mut CpuPairedPisSolver::default()) {
             Ok(step) => Ok(step),
             Err(error) => match *error {
                 FailedAdvance {
@@ -208,7 +208,7 @@ impl PairOwner {
         }
     }
 
-    pub(crate) fn try_advance_with_solver<S: PairedPisSolver>(
+    pub(crate) fn try_advance_with_solver<S: CpuPreparedPisSolverBridge>(
         self,
         offered: PairPosition,
         input: ColdInputs,
@@ -231,7 +231,7 @@ impl PairOwner {
     /// borrowed across the injected call makes a solver panic unwind without
     /// dropping the only retained estimator. Success returns a distinct next
     /// owner that the caller can install atomically.
-    pub(crate) fn try_advance_borrowed_with_solver<S: PairedPisSolver>(
+    pub(crate) fn try_advance_borrowed_with_solver<S: CpuPreparedPisSolverBridge>(
         &self,
         offered: &PairPosition,
         input: &ColdInputs,
@@ -409,7 +409,8 @@ mod tests {
     use crate::flow::one_xs::dense::PublicDenseField;
     use crate::flow::one_xs::pis::{AtoB, BtoA, DescentAdmission, Level, PisDirection};
     use crate::flow::one_xs::scalar::{
-        PairSolveStage, PairedPatchGrids, PairedSolveRequest, SolveStampError,
+        PairSolveStage, PairedPatchGrids, PairedPisSolver, PairedPreparedInputs,
+        PairedSolveRequest, SolveStampError,
     };
     use crate::flow::one_xs::temporal::BlurredBelts;
     use crate::flow::one_xs::temporal_median::MedianState;
@@ -444,6 +445,12 @@ mod tests {
         }
     }
 
+    impl CpuPreparedPisSolverBridge for FailingSolver {
+        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
+            self.cpu.bind_cpu_preparation(inputs);
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum Corruption {
         Direction,
@@ -458,6 +465,7 @@ mod tests {
     }
 
     struct RecordingSolver {
+        preparations: usize,
         calls: Vec<(PairSolveStage, DescentAdmission, DescentAdmission)>,
         cpu: CpuPairedPisSolver,
     }
@@ -473,6 +481,13 @@ mod tests {
                 request.b_to_a.admission,
             ));
             Ok(self.cpu.solve(request).unwrap())
+        }
+    }
+
+    impl CpuPreparedPisSolverBridge for RecordingSolver {
+        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
+            self.preparations += 1;
+            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -511,6 +526,12 @@ mod tests {
                 }
             }
             Ok(solved)
+        }
+    }
+
+    impl CpuPreparedPisSolverBridge for CorruptingSolver {
+        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
+            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -632,6 +653,25 @@ mod tests {
                     next.b_to_a_cadence,
                 );
             }
+        }
+        bytes
+    }
+
+    fn output_bytes(output: &PairOutput) -> Vec<u8> {
+        let mut bytes = vec![match output.phase {
+            Phase::Cold => 0,
+            Phase::Warm => 1,
+        }];
+        bytes.extend_from_slice(output.displacement.bytes());
+        for value in [
+            output.invalid_nodes.a_to_b,
+            output.invalid_nodes.b_to_a,
+            output.weighted_rows.a_to_b_l2,
+            output.weighted_rows.b_to_a_l2,
+            output.weighted_rows.a_to_b_l1,
+            output.weighted_rows.b_to_a_l1,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
         }
         bytes
     }
@@ -970,7 +1010,7 @@ mod tests {
             let control = PairOwner::start(at.clone(), input(64, 96));
             let mut failing = FailingSolver {
                 fail_at,
-                cpu: CpuPairedPisSolver,
+                cpu: CpuPairedPisSolver::default(),
             };
             let failed =
                 match PairOwner::try_start_with_solver(at.clone(), input(64, 96), &mut failing) {
@@ -987,9 +1027,12 @@ mod tests {
                 } if stage == fail_at
             ));
 
-            let retried =
-                PairOwner::try_start_with_solver(failed.at, failed.input, &mut CpuPairedPisSolver)
-                    .unwrap_or_else(|_| panic!("CPU retry after {fail_at} failed"));
+            let retried = PairOwner::try_start_with_solver(
+                failed.at,
+                failed.input,
+                &mut CpuPairedPisSolver::default(),
+            )
+            .unwrap_or_else(|_| panic!("CPU retry after {fail_at} failed"));
             assert_eq!(retried.output, control.output);
             assert_eq!(owner_bits(&retried.owner), owner_bits(&control.owner));
 
@@ -1018,7 +1061,7 @@ mod tests {
             let before = owner_bits(&trial.owner);
             let mut failing = FailingSolver {
                 fail_at,
-                cpu: CpuPairedPisSolver,
+                cpu: CpuPairedPisSolver::default(),
             };
             let failed = match trial.owner.try_advance_with_solver(
                 PairPosition::new(&continuity, 21),
@@ -1099,7 +1142,7 @@ mod tests {
             let mut solver = CorruptingSolver {
                 corrupt_at: expected,
                 corruption,
-                cpu: CpuPairedPisSolver,
+                cpu: CpuPairedPisSolver::default(),
             };
             let failed =
                 match PairOwner::try_start_with_solver(at.clone(), input(64, 96), &mut solver) {
@@ -1119,16 +1162,21 @@ mod tests {
     #[test]
     fn paired_stages_share_one_pre_increment_admission_and_advance_cadence_once() {
         let continuity = Continuity::new();
+        let cold_at = PairPosition::new(&continuity, 20);
+        let control_cold = PairOwner::start(cold_at.clone(), input(64, 96));
         let mut cold_solver = RecordingSolver {
+            preparations: 0,
             calls: Vec::new(),
-            cpu: CpuPairedPisSolver,
+            cpu: CpuPairedPisSolver::default(),
         };
-        let cold = PairOwner::try_start_with_solver(
-            PairPosition::new(&continuity, 20),
-            input(64, 96),
-            &mut cold_solver,
-        )
-        .unwrap_or_else(|_| panic!("recorded cold transaction failed"));
+        let cold = PairOwner::try_start_with_solver(cold_at, input(64, 96), &mut cold_solver)
+            .unwrap_or_else(|_| panic!("recorded cold transaction failed"));
+        assert_eq!(cold_solver.preparations, 1);
+        assert_eq!(
+            output_bytes(&cold.output),
+            output_bytes(&control_cold.output)
+        );
+        assert_eq!(owner_bits(&cold.owner), owner_bits(&control_cold.owner));
         assert_eq!(
             cold_solver.calls,
             vec![
@@ -1184,9 +1232,14 @@ mod tests {
         );
 
         let mut warm_solver = RecordingSolver {
+            preparations: 0,
             calls: Vec::new(),
-            cpu: CpuPairedPisSolver,
+            cpu: CpuPairedPisSolver::default(),
         };
+        let control_warm = control_cold
+            .owner
+            .advance(PairPosition::new(&continuity, 21), input(72, 104))
+            .unwrap();
         let warm = cold
             .owner
             .try_advance_with_solver(
@@ -1195,6 +1248,12 @@ mod tests {
                 &mut warm_solver,
             )
             .unwrap_or_else(|_| panic!("recorded warm transaction failed"));
+        assert_eq!(warm_solver.preparations, 1);
+        assert_eq!(
+            output_bytes(&warm.output),
+            output_bytes(&control_warm.output)
+        );
+        assert_eq!(owner_bits(&warm.owner), owner_bits(&control_warm.owner));
         assert_eq!(
             warm_solver.calls,
             vec![

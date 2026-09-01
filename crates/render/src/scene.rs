@@ -50,7 +50,10 @@ use super::flow::one_xs::pis::gpu::{
 #[cfg(test)]
 use super::flow::one_xs::player::FrameOwnerError;
 use super::flow::one_xs::player::{FrameCommitError, FrameOwner, FrameResult, PreparedFrame};
-use super::flow::one_xs::scalar::{PairedPatchGrids, PairedPisSolver, PairedSolveRequest};
+use super::flow::one_xs::scalar::{
+    CpuPreparedPisSolverBridge, PairedPatchGrids, PairedPisSolver, PairedPreparedInputs,
+    PairedSolveRequest,
+};
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, PendingBlurredBelts, SourceTextures};
 use super::flow::{Cadence, Estimate};
@@ -551,6 +554,7 @@ struct ReservationGpuPisSolver<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     completed_stages: &'a mut u64,
+    prepared: Option<PairedPreparedInputs>,
 }
 
 impl PairedPisSolver for ReservationGpuPisSolver<'_> {
@@ -564,13 +568,27 @@ impl PairedPisSolver for ReservationGpuPisSolver<'_> {
         };
         let output = self
             .pipeline
-            .solve_request(self.device, self.queue, expected.clone(), request)
+            .solve_request(
+                self.device,
+                self.queue,
+                expected.clone(),
+                self.prepared
+                    .as_ref()
+                    .expect("GPU PIS solver was not given frame preparation"),
+                request,
+            )
             .map_err(GpuPisSolverError::Pipeline)?;
         *self.completed_stages = self
             .completed_stages
             .checked_add(1)
             .expect("ONE X2 GPU PIS completed-stage counter is exhausted");
         finish_gpu_pis_stage(&expected, output)
+    }
+}
+
+impl CpuPreparedPisSolverBridge for ReservationGpuPisSolver<'_> {
+    fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
+        self.prepared = Some(inputs);
     }
 }
 
@@ -693,7 +711,7 @@ impl OneXsReservation {
     /// `FrameOwner::commit_with_solver` restores the exact old estimator on
     /// every solver and stamp error. Returning this reservation lets the
     /// capture restore that owner and its allocation-identical ready map.
-    fn commit_with_solver<S: PairedPisSolver>(
+    fn commit_with_solver<S: CpuPreparedPisSolverBridge>(
         mut self,
         blurred_belts: BlurredBelts,
         solver: &mut S,
@@ -2928,6 +2946,7 @@ impl ScenePipeline {
                     device,
                     queue,
                     completed_stages: &mut self.one_xs_gpu_pis_completed_stages,
+                    prepared: None,
                 };
                 match reservation.commit_with_solver(blurred_belts, &mut solver) {
                     Ok(completed) => completed
@@ -5590,7 +5609,8 @@ mod tests {
 
     use crate::flow::one_xs::pis::Level;
     use crate::flow::one_xs::scalar::{
-        CpuPairedPisSolver, PairSolveError, PairSolveStage, PairedPatchGrids, PairedSolveRequest,
+        CpuPairedPisSolver, CpuPreparedPisSolverBridge, PairSolveError, PairSolveStage,
+        PairedPatchGrids, PairedPreparedInputs, PairedSolveRequest,
     };
     use crate::flow::one_xs::{COLS, LensPair, ROWS};
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
@@ -5648,6 +5668,12 @@ mod tests {
         }
     }
 
+    impl CpuPreparedPisSolverBridge for InjectingSolver {
+        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
+            self.cpu.bind_cpu_preparation(inputs);
+        }
+    }
+
     impl PairedPisSolver for PanickingSolver {
         type Error = InjectedSolverFailure;
         const BACKEND: crate::studio_type2::PisBackend = crate::studio_type2::PisBackend::Cpu;
@@ -5657,6 +5683,12 @@ mod tests {
                 panic!("injected paired PIS panic at {}", request.stage);
             }
             Ok(self.cpu.solve(request).unwrap())
+        }
+    }
+
+    impl CpuPreparedPisSolverBridge for PanickingSolver {
+        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
+            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -5679,6 +5711,12 @@ mod tests {
                     grids,
                 },
             )
+        }
+    }
+
+    impl CpuPreparedPisSolverBridge for WrongReceiptSolver {
+        fn bind_cpu_preparation(&mut self, inputs: PairedPreparedInputs) {
+            self.cpu.bind_cpu_preparation(inputs);
         }
     }
 
@@ -5824,7 +5862,7 @@ mod tests {
         let mut solver = InjectingSolver {
             at: stage,
             injection,
-            cpu: CpuPairedPisSolver,
+            cpu: CpuPairedPisSolver::default(),
         };
         let rejected = match reservation.commit_with_solver(reservation_blurred(code), &mut solver)
         {
@@ -5904,7 +5942,7 @@ mod tests {
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let mut solver = PanickingSolver {
                 at: PairSolveStage::Warm { level },
-                cpu: CpuPairedPisSolver,
+                cpu: CpuPairedPisSolver::default(),
             };
             let _ = reservation.commit_with_solver(reservation_blurred(103), &mut solver);
         }));
@@ -5987,7 +6025,7 @@ mod tests {
         let owner_pointer = reservation.owner.as_deref().unwrap() as *const FrameOwner;
         let mut solver = WrongReceiptSolver {
             flight: reservation.flight.clone(),
-            cpu: CpuPairedPisSolver,
+            cpu: CpuPairedPisSolver::default(),
         };
         let rejected = match reservation.commit_with_solver(reservation_blurred(127), &mut solver) {
             Ok(_) => panic!("wrong GPU receipt committed a map"),
@@ -6024,7 +6062,7 @@ mod tests {
                 level: Level::Two,
             },
             injection: SolverInjection::Failure,
-            cpu: CpuPairedPisSolver,
+            cpu: CpuPairedPisSolver::default(),
         };
         let rejected = match reservation.commit_with_solver(reservation_blurred(131), &mut solver) {
             Ok(_) => panic!("injected solver failure unexpectedly committed"),

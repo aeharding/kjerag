@@ -33,9 +33,9 @@ use super::post_update::{
 };
 use super::public_blend::blend_periodic_boundary;
 use super::scalar::{
-    ColdInputs, CpuPairedPisSolver, DirectionSolveRequest, LevelInputs, MaskPyramid,
-    PairSolveError, PairSolveStage, PairedPisSolver, PairedSolveRequest, WorkRowCounts,
-    propagate_work_modes, solve_pair,
+    ColdInputs, CpuPairedPisSolver, CpuPreparedPisSolverBridge, DirectionSolveRequest, LevelInputs,
+    MaskPyramid, PairSolveError, PairSolveStage, PairedPreparedInputs, PairedSolveRequest,
+    WorkRowCounts, propagate_work_modes, solve_pair, weighted_rows,
 };
 use super::temporal::{BlurredBelts, MotionMask, next_warm_references};
 use super::temporal_median::{DirectedPatchGrids, FilteredPatchGrid, MedianState, TemporalMedians};
@@ -898,7 +898,7 @@ impl WarmPair {
 
     /// Compose one checkpoint and export the exact known next-state subset.
     pub fn transition(self, inputs: WarmCheckpointInputs) -> WarmTransition {
-        match self.try_transition_with_solver(inputs, &mut CpuPairedPisSolver) {
+        match self.try_transition_with_solver(inputs, &mut CpuPairedPisSolver::default()) {
             Ok(transition) => transition,
             Err(error) => match *error {
                 WarmTransitionError {
@@ -915,7 +915,7 @@ impl WarmPair {
 
     /// Run L2 and L1 through an injected paired solver, returning the exact
     /// incoming checkpoint if either stage fails.
-    pub(crate) fn try_transition_with_solver<S: PairedPisSolver>(
+    pub(crate) fn try_transition_with_solver<S: CpuPreparedPisSolverBridge>(
         self,
         inputs: WarmCheckpointInputs,
         solver: &mut S,
@@ -1133,7 +1133,7 @@ impl WarmPair {
     }
 }
 
-fn staged_warm_transition<S: PairedPisSolver>(
+fn staged_warm_transition<S: CpuPreparedPisSolverBridge>(
     inputs: &WarmCheckpointInputs,
     solver: &mut S,
 ) -> Result<WarmTransition, PairSolveError<S::Error>> {
@@ -1161,22 +1161,25 @@ fn staged_warm_transition<S: PairedPisSolver>(
 
     let a_coarse = LevelInputs::build::<AtoB>(current, &masks, Level::Two);
     let b_coarse = LevelInputs::build::<BtoA>(current, &masks, Level::Two);
-    let (a_l2_input, a_l2_weighted) =
-        a_coarse.input::<AtoB>(Level::Two, a_effective.modes(Level::Two).to_vec());
-    let (b_l2_input, b_l2_weighted) =
-        b_coarse.input::<BtoA>(Level::Two, b_effective.modes(Level::Two).to_vec());
+    solver.bind_cpu_preparation(PairedPreparedInputs::new(
+        &a_finest, &a_coarse, &b_finest, &b_coarse,
+    ));
+    let a_l2_modes = a_effective.modes(Level::Two).to_vec();
+    let b_l2_modes = b_effective.modes(Level::Two).to_vec();
+    let a_l2_weighted = weighted_rows(&a_l2_modes);
+    let b_l2_weighted = weighted_rows(&b_l2_modes);
     let (a_l2, b_l2) = solve_pair(
         solver,
         PairedSolveRequest {
             stage: PairSolveStage::Warm { level: Level::Two },
             a_to_b: DirectionSolveRequest {
-                input: a_l2_input,
+                cost_modes: a_l2_modes,
                 initial: InitialGrid::coarse_zeros(),
                 hint: inputs.a_to_b.hints.grid(Level::Two),
                 admission: inputs.a_to_b.cadence.admission(),
             },
             b_to_a: DirectionSolveRequest {
-                input: b_l2_input,
+                cost_modes: b_l2_modes,
                 initial: InitialGrid::coarse_zeros(),
                 hint: inputs.b_to_a.hints.grid(Level::Two),
                 admission: inputs.b_to_a.cadence.admission(),
@@ -1186,22 +1189,22 @@ fn staged_warm_transition<S: PairedPisSolver>(
     let a_seed = warm_seed(&a_coarse, a_l2, &a_retained, &motion);
     let b_seed = warm_seed(&b_coarse, b_l2, &b_retained, &motion);
 
-    let (a_l1_input, a_l1_weighted) =
-        a_finest.input::<AtoB>(Level::One, a_effective.modes(Level::One).to_vec());
-    let (b_l1_input, b_l1_weighted) =
-        b_finest.input::<BtoA>(Level::One, b_effective.modes(Level::One).to_vec());
+    let a_l1_modes = a_effective.modes(Level::One).to_vec();
+    let b_l1_modes = b_effective.modes(Level::One).to_vec();
+    let a_l1_weighted = weighted_rows(&a_l1_modes);
+    let b_l1_weighted = weighted_rows(&b_l1_modes);
     let (a_grid, b_grid) = solve_pair(
         solver,
         PairedSolveRequest {
             stage: PairSolveStage::Warm { level: Level::One },
             a_to_b: DirectionSolveRequest {
-                input: a_l1_input,
+                cost_modes: a_l1_modes,
                 initial: a_seed,
                 hint: inputs.a_to_b.hints.grid(Level::One),
                 admission: inputs.a_to_b.cadence.admission(),
             },
             b_to_a: DirectionSolveRequest {
-                input: b_l1_input,
+                cost_modes: b_l1_modes,
                 initial: b_seed,
                 hint: inputs.b_to_a.hints.grid(Level::One),
                 admission: inputs.b_to_a.cadence.admission(),

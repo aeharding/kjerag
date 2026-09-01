@@ -29,7 +29,7 @@ use super::owner::{AdvanceFailure, Continuity, PairOwner, PairPosition, Phase};
 use super::resources::{OneXsResources, ResourceError};
 #[cfg(test)]
 use super::scalar::CpuPairedPisSolver;
-use super::scalar::{ColdInputs, PairSolveError, PairedPisSolver, WorkRowCounts};
+use super::scalar::{ColdInputs, CpuPreparedPisSolverBridge, PairSolveError, WorkRowCounts};
 use super::temporal::BlurredBelts;
 #[cfg(test)]
 use super::temporal::gaussian_blur;
@@ -218,7 +218,7 @@ impl FrameOwner {
         prepared: PreparedFrame,
         blurred_belts: BlurredBelts,
     ) -> Result<FrameResult, FrameOwnerError> {
-        match self.commit_with_solver(prepared, blurred_belts, &mut CpuPairedPisSolver) {
+        match self.commit_with_solver(prepared, blurred_belts, &mut CpuPairedPisSolver::default()) {
             Ok(result) => Ok(result),
             Err(FrameCommitError::Owner(error)) => Err(error),
             Err(FrameCommitError::Solver(PairSolveError::Solver { source, .. })) => match source {},
@@ -234,7 +234,7 @@ impl FrameOwner {
     /// numeric owner is restored exactly when any cold or warm solver call, or
     /// any returned solver stamp, fails. A caller can therefore roll its outer
     /// capture reservation back and retry the same decoded delivery.
-    pub(crate) fn commit_with_solver<S: PairedPisSolver>(
+    pub(crate) fn commit_with_solver<S: CpuPreparedPisSolverBridge>(
         &mut self,
         prepared: PreparedFrame,
         blurred_belts: BlurredBelts,
