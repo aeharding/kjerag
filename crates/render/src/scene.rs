@@ -44,6 +44,7 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
+use super::flow::one_xs::gpu_context::OneXsGpuContext;
 use super::flow::one_xs::pis::gpu::{
     GpuPisFlight, GpuPisPipeline, GpuPisStageOutput, GpuPisStageReceipt,
 };
@@ -2277,6 +2278,9 @@ impl Shown {
 /// The GPU state behind the widget. iced builds one of these per primitive
 /// type and keeps it for the life of the renderer.
 pub struct ScenePipeline {
+    /// The authoritative iced device and queue pair for every selected ONE X2
+    /// resident stage owned by this renderer pipeline.
+    one_xs_gpu: OneXsGpuContext,
     pipeline: wgpu::RenderPipeline,
     /// The same draw with the Studio optical-flow apply compiled in, chosen per
     /// draw when the runtime flow toggle is on ([`ScenePipeline::draw`]). Built
@@ -2557,7 +2561,8 @@ struct Band {
 type BandState = (band::Tone, band::Along, Vec<band::Cell>, band::Field);
 
 impl ScenePipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let one_xs_gpu = OneXsGpuContext::new(device, queue);
         let layout = bind_group_layout(device);
         // Two groups: the pictures and the map, then the band's state. iced's
         // device is asked for a limit of exactly two (`iced_wgpu`), so this is
@@ -2650,6 +2655,7 @@ impl ScenePipeline {
         let bind_group = bind(device, &layout, &uniforms, [&blank; MAX_LENSES], &sampler);
 
         Self {
+            one_xs_gpu,
             pipeline,
             flow_pipeline,
             one_xs_flow_pipeline,
@@ -2852,6 +2858,8 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         aspect: f32,
     ) -> Fallible<()> {
+        self.one_xs_gpu
+            .ensure_same(&OneXsGpuContext::new(device, queue))?;
         let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, true) else {
             self.flow_draw = FlowDraw::Nothing;
             return Ok(());
@@ -2899,17 +2907,13 @@ impl ScenePipeline {
                     };
                     self.one_xs_pis = Some(Box::new(pipeline));
                 }
-                let pending = match self.submit_one_xs_solver_belts(
-                    device,
-                    queue,
-                    frames.clone(),
-                    reservation.prepared(),
-                ) {
-                    Ok(pending) => pending,
-                    Err(error) => {
-                        return Err(abort_one_xs_after_error(reservation, error));
-                    }
-                };
+                let pending =
+                    match self.submit_one_xs_solver_belts(frames.clone(), reservation.prepared()) {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            return Err(abort_one_xs_after_error(reservation, error));
+                        }
+                    };
                 // The presentation policy admits only one frame at a time.
                 // Waiting occurs outside the capture mutex, and retained CPU
                 // history is leased only after this exact readback succeeds.
@@ -3141,8 +3145,6 @@ impl ScenePipeline {
     /// and their opaque delivery stamp until its compact readback is consumed.
     fn submit_one_xs_solver_belts(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         frames: Arc<Frames>,
         prepared: &PreparedFrame,
     ) -> Fallible<PendingOneXsBlurredBelts> {
@@ -3169,7 +3171,9 @@ impl ScenePipeline {
             b: &live.planes[1].luma,
         };
         if self.one_xs_belts.is_none() {
-            self.one_xs_belts = Some(Box::new(GpuSolverBeltPipeline::new(device, queue)?));
+            self.one_xs_belts = Some(Box::new(GpuSolverBeltPipeline::new(
+                self.one_xs_gpu.clone(),
+            )?));
         }
         let producer = self
             .one_xs_belts
@@ -6555,7 +6559,7 @@ mod tests {
             eprintln!("no GPU available for the source readback laziness test");
             return;
         };
-        let mut pipeline = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         assert!(pipeline.one_xs_luma.is_none());
         assert!(pipeline.one_xs_belts.is_none());
 
@@ -6900,7 +6904,7 @@ mod tests {
         // it through `scripts/quiet.sh`. Muting here closes the interval
         // between open and the first pause as well.
         scene.set_muted(true);
-        let mut pipeline = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
 
         let first = wait_for_new_scene_frame(&scene, None);
         let first_primitive = scene.primitive(Camera::default());
@@ -6968,7 +6972,11 @@ mod tests {
         // is waiting. The new pipeline has neither the prior import nor its
         // direct-map resource, but it must reconstruct and retain that exact
         // completed display without making a second solver submission.
-        let mut recreated = ScenePipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut recreated = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        pipeline
+            .one_xs_gpu
+            .ensure_same(&recreated.one_xs_gpu)
+            .expect("pipeline recreation changed the authoritative GPU context");
         recreated.prepare(&second_primitive, &device, &queue, 1.0);
         assert_eq!(recreated.flow_draw, FlowDraw::DirectOneXs);
         assert_eq!(recreated.diagnostic_one_xs_direct_frame(), Some(&first));
@@ -6988,7 +6996,7 @@ mod tests {
 
         let observed_frames = frames.clone();
         let mut pending = pipeline
-            .submit_one_xs_solver_belts(&device, &queue, frames, reservation.prepared())
+            .submit_one_xs_solver_belts(frames, reservation.prepared())
             .expect("could not submit frame one's exact retained maps and bound source");
         let retained_with_pending = Arc::strong_count(&observed_frames);
         let completion = Arc::new(AtomicU8::new(0));

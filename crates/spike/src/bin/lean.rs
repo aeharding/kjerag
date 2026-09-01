@@ -340,7 +340,7 @@ impl Rig {
     fn open(size: Size) -> Fallible<Self> {
         let gpu = Gpu::open()?;
         println!("gpu:    {}", gpu.name);
-        let pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         let target = Offscreen::new(&gpu.device, size, FORMAT);
         Ok(Self {
             gpu,

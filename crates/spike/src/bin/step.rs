@@ -156,7 +156,7 @@ fn main() -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
 
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     pipeline.hold_band(options.off);
     let mut scene = Scene::still(&options.input, options.start())?;
     scene.use_table(options.table);

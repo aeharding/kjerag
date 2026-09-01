@@ -3,6 +3,25 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Shared ONE X2 GPU context foundation, 2026-09-01, implementation branch
+only [STRUCTURAL OWNERSHIP; NO NEW RESIDENT STAGE; NO PERFORMANCE OR PARITY
+CLAIM]:** the renderer now retains the exact iced device and queue as one
+private cloneable `OneXsGpuContext`. Equality is the structural identity of
+both wgpu handles: a recreated `ScenePipeline` on clones of the same pair is
+compatible, while an independently requested pair refuses. wgpu exposes the
+one queue returned with a requested device rather than a second-queue
+constructor, so the regression uses two devices requested from one instance
+and adapter; the production check still compares both handles.
+The production solver-belt pipeline and its exact-submission lease now carry
+that context rather than separate raw handles. Future lease advancement takes
+an encoding closure only after context validation, submits on the lease's own
+queue and replaces its internal completion index; callers cannot provide a
+detached `SubmissionIndex`. Existing explicit completion, early-drop,
+poll-error, poll-panic and double-unwind quarantine behavior is unchanged.
+This foundation deliberately does not transplant the resident PIS front end,
+direct PIS, L2 bridge or final-map materializer, and it does not remove any of
+the selected path's current CPU readbacks or uploads.
+
 **Authenticated paired PIS GPU checkpoint, 2026-09-01 [6,400 GPU
 TRANSACTIONS; ZERO CPU FALLBACK; BYTE-IDENTICAL TO THE FROZEN KJERAG CPU
 BOUNDARY; 10.6% MEDIAN THROUGHPUT GAIN; NOT REALTIME; OWNERSHIP FIXED;

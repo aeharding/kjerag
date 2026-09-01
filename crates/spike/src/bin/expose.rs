@@ -1309,7 +1309,7 @@ fn render(options: &Options) -> Fallible<()> {
     // The same instant, the same view, the same run of frames, twice: the two
     // pictures differ by this stage and by nothing else.
     let draw = |held: bool| -> Fallible<(Picture, Reframe, kjerag_render::Tone, Scene)> {
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         pipeline.hold_tone(held);
         let mut scene = Scene::still(
             &options.input,
@@ -1577,7 +1577,7 @@ fn on_seam(scene: &Scene, yaw: f64) -> Option<f64> {
 fn trace(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let mut scene = Scene::still(
         &options.input,
         Cue::Time(std::time::Duration::from_secs_f64(options.from)),

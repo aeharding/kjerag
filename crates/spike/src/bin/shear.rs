@@ -275,8 +275,8 @@ struct Fit {
 /// `use_seam`), so the second `primitive` of a frame builds the same map as the
 /// first.
 fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
-    let mut live = ScenePipeline::new(&gpu.device, FORMAT);
-    let mut plain = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut live = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
+    let mut plain = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     plain.hold_band(true);
     live.hold_band(options.held());
     let mut scene = Scene::still(&options.input, options.start())?;

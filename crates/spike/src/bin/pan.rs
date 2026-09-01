@@ -71,7 +71,7 @@ fn main() -> Fallible<()> {
     // Everything the window would build, because the picture has to be
     // rendered for the sequence to mean anything to anybody.
     let gpu = Gpu::open()?;
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let target = Offscreen::new(&gpu.device, BOUNDS, FORMAT);
     if options.png {
         std::fs::create_dir_all("scratch")?;

@@ -187,6 +187,23 @@ are drawn once. There is no CPU PIS fallback. Decoded picture delivery and
 source sampling are zero-copy; the post-blur, per-stage terminal and final-map
 CPU/GPU boundaries remain targets of the continuing migration.
 
+Every selected ONE X2 GPU stage is rooted in one render-private
+`OneXsGpuContext`, constructed from the exact device and queue iced gives the
+`ScenePipeline`. The context compares those wgpu handles structurally, so a
+renderer-pipeline recreation on clones of the same pair remains compatible;
+a replacement device or queue is a different context. The solver-belt
+pipeline and its `SubmissionLease` retain that context. The lease submits
+later resident consumers on its own queue and replaces its own completion
+index; no consumer may hand it a detached `SubmissionIndex`. This is the
+ownership foundation for the continuing resident migration, not a claim that
+the current post-belt CPU boundaries have moved.
+
+wgpu supplies one queue together with each requested device and has no public
+constructor for an independent second queue on that same device. Tests
+therefore prove cloned-pair acceptance and independently requested-pair
+refusal. The context nevertheless compares both structural handles because
+the device-and-queue pair, not either handle alone, is the ownership boundary.
+
 ## Playback (issue #4)
 
 One demuxer per file feeds every decoder and hands out `Frames`: every lens

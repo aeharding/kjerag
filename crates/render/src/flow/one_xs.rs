@@ -23,6 +23,9 @@ pub mod temporal;
 /// The capture-owned ONE X2 producer uses it in both cold and warm solves.
 pub mod pis;
 
+/// Exact render-private device and queue identity shared by resident stages.
+pub(crate) mod gpu_context;
+
 /// The selected finest-level, component-zero temporal median.
 /// The capture-owned ONE X2 producer places it between patch solving and
 /// densification.

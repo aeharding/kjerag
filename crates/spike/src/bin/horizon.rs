@@ -68,7 +68,7 @@ fn main() -> Fallible<()> {
     // app. It draws the factory calibration, the parity base: the per-capture
     // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
     let mut scene = Scene::still(&options.input, options.at())?;
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);
     let aspect = options.size.width as f32 / options.size.height as f32;
     let mut runs: Vec<Vec<Option<Skyline>>> = vec![Vec::new(); variants.len()];
@@ -668,7 +668,7 @@ fn conventions_against_the_picture(
     // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
     let mut scene = Scene::still(&options.input, options.at())?;
     scene.set_horizon(Horizon::Free);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);
     let aspect = options.size.width as f32 / options.size.height as f32;
 

@@ -94,7 +94,7 @@ fn main() -> Fallible<()> {
     // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
     let scene = Scene::still(&options.input, options.at)?;
     scene.set_horizon(options.horizon);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let mut render = Render {
         gpu: &gpu,
         scene: &scene,

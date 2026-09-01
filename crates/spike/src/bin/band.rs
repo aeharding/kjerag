@@ -179,7 +179,7 @@ fn play(
 fn field(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
 
     let last = reads.last().expect("play returns at least one frame");
@@ -669,7 +669,7 @@ fn stepped_by(reads: &[Read], at: impl Fn(&Read, usize, usize) -> f64) -> (f64, 
 fn trace(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
     let last = reads.last().expect("play returns at least one frame");
 
@@ -1064,7 +1064,7 @@ struct Step {
 fn snap(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let mut reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
     // Kept before the plant goes in, so the run can be attributed twice and
     // the plant's own contribution read as the difference rather than as a
@@ -2244,7 +2244,7 @@ const FIRM: f32 = 0.80;
 fn over_time(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let mut scene = Scene::still(&options.input, options.at())?;
     scene.set_horizon(match options.lock {
         true => Horizon::Locked,
@@ -2406,7 +2406,7 @@ fn cost(options: &Options) -> Fallible<()> {
     println!("gpu:    {}", gpu.name);
     let mut taken: Vec<(u32, Vec<f64>)> = Vec::new();
     for repeats in [1u32, 1 + REPEATS] {
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         let mut scene = Scene::still(&options.input, options.at())?;
         scene.set_horizon(match options.lock {
             true => Horizon::Locked,
@@ -2497,7 +2497,7 @@ const REPEATS: u32 = 16;
 fn sequence(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let out = options.out();
     std::fs::create_dir_all(&out)?;
     let stem = options.stem();
@@ -2525,7 +2525,7 @@ fn render(options: &Options) -> Fallible<()> {
     // The same frame both ways, so the two differ by the band and by nothing
     // else: same file, same instant, same run length, same pass, two opens.
     let draw = |off: bool| -> Fallible<Read> {
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         let mut options = options.clone();
         options.off = off;
         let mut reads = play(&gpu, &options, &mut pipeline, |_, _| Ok(()))?;

@@ -112,7 +112,7 @@ fn main() -> Fallible<()> {
         scene.set_sampling(Sampling::Sharp);
         scene.set_flow(false);
         let camera = receipt.record.view.camera()?;
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         pipeline.hold_band(false);
         pipeline.hold_tone(false);
         let prepared = pipeline
