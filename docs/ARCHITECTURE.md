@@ -12,7 +12,8 @@ crates/app      kjerag         libcosmic shell + window. The view is an
                                the mouse reaches it through that widget.
 crates/render   kjerag-render  wgpu: dmabuf import, final WGSL pass (NV12 ->
                                RGB + projection); selected ONE X2 compact GPU
-                               luma sampling and CPU native-map estimation;
+                               luma sampling and input blur, then CPU native-map
+                               estimation;
                                camera state and offscreen screenshot rendering
 crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
@@ -173,12 +174,13 @@ earlier research note put `vaDeriveImage` at 0.53 ms/frame; that was the
 map call alone, with nothing reading the pixels through it.)
 
 The selected ONE X2 path also samples those imported R8 textures directly for
-stitch analysis. Its exact compute pass applies the retained float2 maps and
-3-by-3 reduction on the GPU, then reads back only two 1080-by-60 U8 solver
-belts, 129,600 bytes rather than both 2880-by-2880 luma planes. The retained
-estimator is still on CPU, and its final native map is uploaded before the
-original decoded textures are drawn once. Decoded picture delivery and source
-sampling are zero-copy; the compact GPU-to-CPU solver boundary is not.
+stitch analysis. Its exact compute passes apply the retained float2 maps,
+3-by-3 reduction and separable 5-by-5 integer Gaussian on the GPU, then read
+back only two 1080-by-60 U8 post-blur solver belts, 129,600 bytes rather than
+both 2880-by-2880 luma planes. The retained estimator is still on CPU, and its
+final native map is uploaded before the original decoded textures are drawn
+once. Decoded picture delivery and source sampling are zero-copy; the compact
+GPU-to-CPU solver boundary is not.
 
 ## Playback (issue #4)
 
@@ -243,26 +245,30 @@ this route.
 The player changes to `PresentationPolicy::EveryFrame`, and one capture-owned
 `FrameOwner` starts cold at frame zero. For each adjacent decoded pair, the
 renderer constructs the retained maps and camera masks, samples both imported
-luma planes into compact solver belts on the GPU, advances the recovered cold
-or warm CPU estimator, and materializes the native 200 by 100 packed type-2
-map with its copied-pole alpha. The decoded pair, GPU token, prepared geometry
-and completed map carry the same opaque `FrameStamp`. Only that exact match
-can become `FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek
-or another open cannot impersonate it.
+luma planes into compact solver belts and applies the exact input Gaussian on
+the GPU, advances the recovered cold or warm CPU estimator from the typed
+post-blur result, and materializes the native 200 by 100 packed type-2 map with
+its copied-pole alpha. The decoded pair, GPU token, prepared geometry and
+completed map carry the same opaque `FrameStamp`. Only that exact match can
+become `FlowDraw::DirectOneXs`; a repeated index and timestamp from a seek or
+another open cannot impersonate it.
 
 WGSL does not guarantee the fused arithmetic this producer requires. Its lazy
-constructor therefore runs the complete 129,600-byte adversarial CPU/native
-oracle and the retained-map FMA bit discriminator on the actual graphics
-device before the first selected frame can advance. `solver_code` writes the
-exact sampled UV it passes to `sample_source` at one adversarial tap into a
-two-word witness sink. Qualification reads that sink after the same complete
-`build_solver_belts` dispatch that produced the byte fixture; ordinary
-submissions bind the same pipeline-owned eight-byte sink but do not read it.
-Overlapping ordinary writes are intentionally unobserved. Output and
-dispatch semantics are unchanged. Qualification therefore uses the exact
-production shader module, pipeline, entry and sampling call rather than
-compiling a lookalike probe. One differing byte or bit pattern refuses the
-route with its own error. There is no approximate or full-luma CPU fallback.
+constructor therefore compares all 129,600 adversarial sampled pre-blur bytes,
+the retained-map FMA bit discriminator and all resulting post-blur bytes with
+the CPU/native oracle on the actual graphics device before the first selected
+frame can advance. It separately uploads an adversarial retained-belt fixture
+to qualify the same horizontal and vertical Gaussian pipelines independently
+of source sampling. `solver_code` writes the exact sampled UV it passes to
+`sample_source` at one adversarial tap into a two-word witness sink.
+Qualification reads that sink after the same complete `build_solver_belts`
+dispatch that produced the byte fixture; ordinary submissions bind the same
+pipeline-owned eight-byte sink but do not read it. Overlapping ordinary writes
+are intentionally unobserved. Output and dispatch semantics are unchanged.
+Qualification therefore uses the exact production shader module, pipelines,
+entries and sampling call rather than compiling a lookalike probe. One
+differing byte or bit pattern refuses the route with its own error. There is
+no approximate or full-luma CPU fallback.
 
 A discontinuous seek builds a new owner and causally replays from frame zero
 to the requested target. The displayed frame is retained until its exact map

@@ -3,6 +3,71 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Second GPU ONE X2 slice, 2026-09-01, implementation branch only [GPU
+GAUSSIAN; TYPED POST-BLUR HANDOFF; 244 BYTE-IDENTICAL ARTIFACTS; SMALL NOISY
+THROUGHPUT GAIN; NOT REALTIME; NO NEW STUDIO OR OWNER VERDICT CLAIM]:** the
+production GPU producer now follows source sampling and the 3-by-3 reduction
+with the exact separable 5-by-5 input Gaussian. A horizontal integer-Q7 pass
+uses coefficients `[3, 29, 64, 29, 3]` and reflect-101 borders while retaining
+one `u32` sum per logical byte. A distinct vertical pass applies the same
+coefficients, rounds once with `(sum + 8192) >> 14`, and packs four final U8
+codes per word. The arithmetic bounds are 32,640 for the horizontal pass and
+4,177,920 for the vertical pass, both within `u32`. Ordinary playback still
+reads back exactly two 1080-by-60 belts, 129,600 bytes, but they now have the
+`BlurredBelts` type. The CPU estimator accepts that type directly, so a second
+CPU blur is structurally unavailable on the production handoff.
+
+Construction now authenticates three different production properties on the
+actual graphics device: every sampled pre-blur byte and the retained-map FMA
+witness, every resulting sampled post-blur byte, and an independently uploaded
+adversarial retained-belt blur fixture covering impulses, edges, lens
+boundaries, checker/ramp/constant patterns and deterministic noise. A changed
+Gaussian rounding instruction refuses construction as a typed `BlurredByte`
+error. There is no CPU playback fallback. On the target Radeon 760M/RADV, all
+604 render tests passed with 23 corpus-dependent tests ignored, including the
+real owner-clip Scene transaction through dmabuf import, exact `FrameStamp` and
+`Arc` ownership, rejected ABA successor, retained last-complete display and
+ordinary exact-successor recovery. The software llvmpipe adapter instead
+produced 189 at the existing source-FMA discriminator where the required
+answer is 190 and was refused before playback, as designed.
+
+Clean candidate `080a03972ff3f9272cf5cc860bb11aa460711b50` (tree
+`e997c818b361b5a3bc0e5a049794359a96bd71c4`, playback executable SHA-256
+`06aa24e203a0b9ba773677d8cc5a50e30994207d0f3809c8286529f83d0e530b`)
+causally processed frames 0 through 6399 of the owner clip at the reported
+71.13 yaw, -13.99 pitch and 57.95-degree locked view, Sharp sampling and the
+factory seam. It presented all 6,400 frames with zero dropped and zero
+starved. All 61 PNGs, 61 packed maps, 61 alpha maps and 61
+candidate-authenticated computed traces were literal byte matches to the
+separately built frozen accepted CPU boundary; every trace also reported zero
+uncovered pixels. The new range receipt is SHA-256
+`088369b0064222a40d3d235b2dfbc81f8113d5bd339b2e87176582ff97d41fc4` and
+the trace receipt is
+`bbf9d166047f31e0e138b7f7a998b7cd10eda10d0b4503522a91a591d70bb0dd`.
+
+The same authenticated transaction benchmark compared the first-slice commit
+`f0db9851753415b8f69e1d6a7c97472094f4c841` against this candidate in four
+order-balanced pairs, `AB | BA | BA | AB`, each with 200 causal warm-up frames
+and 300 unpaced waited transactions. Every receipt binds the same two source
+hashes, exact view, Radeon adapter and `one-x2-direct-type-2` route; every run
+presented all 300 measured frames and dropped none. Pairwise throughput changes
+were -3.31%, +16.01%, +1.84% and +1.42%, whose median is +1.63%. Aggregate
+median throughput moved from 22.885 to 23.787 fps (+3.94%), while the median of
+run-median preparation time moved from 29.108 to 28.172 ms (-3.22%). One slow
+first-slice run makes the aggregate figure optimistic, so this records only a
+small positive result under substantial run-to-run variance, not a large speed
+claim. Playback remains below the 29.97-fps source clock. The four first-slice
+receipt SHA-256 values are
+`9f041d6c1c67650607fd95c735f7d8951093d8d80529c3c42ad0579e010801e0`,
+`40934d13fd0ebcb94c88cf828b13a6e27f0934f0f71510b2d30fc08b886546c0`,
+`2bc6ecd39d76a1b1546f054bebb2bd5f0356cbe0d4f8a70809a82db6df7c9450`
+and `bc97443806d967f9140a21fa2d2b1db68420fb88d9db06c63ffbbf621d69ad04`.
+The four second-slice values are
+`b89fde6b5722c85cd893b0046845dd4e1089d74921a99e7e91acc4c078b7dfa1`,
+`9ca9412960c03525341f25f66d2d6924532fda6f6cdfc91e069c7037ce20a97f`,
+`d19fd7dc391e1c5d7b53bfbddbb589df212072cda421f21537e66d119d798d66`
+and `d238f734a2ae8bea594d34704700ab2d71ac9fe7b401f34d7d5e482bc7bf67e8`.
+
 **Selected ONE X2 production transaction regression, 2026-09-01, working
 branch only [OPT-IN REAL MEDIA; TARGET GPU]:** an opt-in render test drives a
 real paired ONE X2 delivery through dmabuf import, the exact prepared retained
@@ -24,9 +89,10 @@ VERDICT CLAIM]:** selected playback now sends the imported R8 lens textures
 and each frame's retained float2 maps directly to the exact GPU sampler and
 3-by-3 reducer. It reads back only the final two 1080-by-60 U8 solver belts,
 129,600 bytes instead of both 2880-by-2880 luma planes' 16,588,800 bytes. The
-same scalar cold/warm estimator then consumes those belts and builds the same
-typed map. Full-luma GPU readback remains available only to diagnostics; it is
-not a production fallback.
+later Gaussian slice above extends that pipeline through the exact 5-by-5
+input blur and hands typed post-blur belts to the same scalar cold/warm
+estimator, which builds the same typed map. Full-luma GPU readback remains
+available only to diagnostics; it is not a production fallback.
 
 WGSL does not itself promise the required FMA and exceptional-float behavior.
 The lazy production constructor therefore runs the same complete 129,600-byte
