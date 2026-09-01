@@ -25,6 +25,12 @@ use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sampl
 #[allow(dead_code)]
 pub(crate) mod pis_frontend_gpu;
 
+/// Parent arithmetic is another private child of the resident source owner.
+/// Its only producer consumes the whole owner without exposing its pieces.
+#[path = "one_xs/parent_gpu.rs"]
+#[allow(dead_code)]
+mod parent_gpu;
+
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
 const OUTPUT_WORDS: u32 = (SolverBelts::BYTES / CODES_PER_WORD) as u32;

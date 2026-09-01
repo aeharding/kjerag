@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::time::Duration;
 
 use kjerag_media::FrameStamp;
 use kjerag_meta::{
@@ -6,10 +7,10 @@ use kjerag_meta::{
     OrientationTrack, Quat, Size,
 };
 
+use super::super::resident_qualification_fixture;
 use super::*;
 use crate::flow::one_xs::LensPair;
 use crate::flow::one_xs::pis::gpu::GpuPisFlight;
-use crate::flow::one_xs_belt_gpu::resident_qualification_fixture;
 use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
 
 const CENTER: Duration = Duration::from_micros(2_000_000);
@@ -122,10 +123,10 @@ fn assert_case_readout(
         .unwrap();
     let expected = expected_words(&prepared);
     let (belts, _) = resident_qualification_fixture(device, queue, (), flight.clone()).unwrap();
-    let resident = belts
-        .produce_parent_maps(pipeline, builder, orientation, &flight, readout)
+    let resident = pipeline
+        .produce(belts, builder, orientation, &flight.frame, readout)
         .unwrap();
-    assert_eq!(resident.flight(), &flight);
+    assert!(resident.matches_frame(&flight.frame));
     let actual = resident.read_qualification(context).unwrap();
     if let Some((word, (&actual, &expected))) = actual
         .iter()
@@ -248,11 +249,11 @@ fn parent_transition_refuses_wrong_flight_foreign_context_and_nonlinear_slerp() 
     let owner = flight(20, 50, CENTER);
     let wrong = flight(20, 50, CENTER);
     let (belts, _) = resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-    let error = refused(belts.produce_parent_maps(
-        &pipeline,
+    let error = refused(pipeline.produce(
+        belts,
         &builder,
         &orientation(1.0),
-        &wrong,
+        &wrong.frame,
         calibration().readout(),
     ));
     assert!(error.to_string().contains("does not match"));
@@ -262,22 +263,22 @@ fn parent_transition_refuses_wrong_flight_foreign_context_and_nonlinear_slerp() 
     let foreign =
         GpuParentMapPipeline::new(OneXsGpuContext::new(&foreign_device, &foreign_queue)).unwrap();
     let (belts, _) = resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-    let error = refused(belts.produce_parent_maps(
-        &foreign,
+    let error = refused(foreign.produce(
+        belts,
         &builder,
         &orientation(1.0),
-        &owner,
+        &owner.frame,
         calibration().readout(),
     ));
     assert!(error.to_string().contains("different device or queue"));
     assert_eq!(foreign.encoded_transitions(), 0);
 
     let (belts, _) = resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-    let error = refused(belts.produce_parent_maps(
-        &pipeline,
+    let error = refused(pipeline.produce(
+        belts,
         &builder,
         &orientation(3_000.0),
-        &owner,
+        &owner.frame,
         calibration().readout(),
     ));
     assert!(error.to_string().contains("nonlinear interpolation"));
@@ -325,6 +326,16 @@ fn qualification_rejects_planted_parent_semantic_mutations() {
             "const POSE_BASE: u32 = 67u",
         ),
         (
+            "low endpoint clamp",
+            "if floored < 0.0 { return pose(0u); }",
+            "if floored < 0.0 { return pose(50u); }",
+        ),
+        (
+            "high endpoint clamp",
+            "return pose(50u);\n}",
+            "return pose(0u);\n}",
+        ),
+        (
             "division",
             "return bitcast<f32>(div_f32_bits(bitcast<u32>(a), bitcast<u32>(b)));",
             "return a / b;",
@@ -351,8 +362,14 @@ fn qualification_rejects_planted_parent_semantic_mutations() {
         let owner = flight(100 + number as u64, 100 + number as u64, CENTER);
         let (belts, _) =
             resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-        let resident = belts
-            .produce_parent_maps(&pipeline, &builder, &poses, &owner, calibration().readout())
+        let resident = pipeline
+            .produce(
+                belts,
+                &builder,
+                &poses,
+                &owner.frame,
+                calibration().readout(),
+            )
             .unwrap();
         let actual = resident.read_qualification(&context).unwrap();
         assert_ne!(

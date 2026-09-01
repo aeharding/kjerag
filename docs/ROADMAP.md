@@ -9,13 +9,14 @@ per-frame parent preparation now has one paired compute producer on the shared
 `OneXsGpuContext`. Per-frame uploads contain only the two 33-word selected
 model/control packs and 51 sealed pose quaternions. The complete two-lens
 100-by-200 float2 result remains one private A-then-B storage buffer. Parent
-production is now a purpose-specific consuming transition from exact
-`GpuBlurredBelts`: it verifies the private `FrameStamp`, generation and shared
-GPU context before encoding, advances the inherited `SubmissionLease` to the
-parent command, and returns an opaque frame-bound token retaining that lease
-and all source resources. It neither submits independently nor exposes a
-buffer, context, queue or submission index. The ordinary path has no copy,
-map, poll or wait.
+production is now a private child of the resident source owner. Its single
+purpose-specific owner method verifies an expected private `FrameStamp`,
+derives center from the stamp already sealed with the generation, verifies the
+shared GPU context before encoding, advances the inherited `SubmissionLease`
+to the parent command, and returns an opaque frame-bound token retaining the
+entire owner. No flow-wide belt, flight, command, buffer, context, queue or
+submission-index transition is added. The ordinary path has no copy, map,
+poll or wait.
 
 The WGSL retains the scalar operation order with explicitly materialized
 binary32 operations, correctly rounded software division and integer square
@@ -30,8 +31,9 @@ whose native `sin`/`atan` operations are not qualified as bit-portable, before
 encoding. The same pre-encode boundary refuses a same-generation/readable-index
 impostor with a different private frame identity and a foreign GPU context.
 Qualification rejects planted quaternion-order, raster-orientation, scan-axis,
-iteration-count, movement-threshold, FOV, A/B-base, pose-layout, division,
-square-root and rounding mutations. Readback exists only in test code. This
+iteration-count, movement-threshold, FOV, A/B-base, pose-layout, low/high pose
+endpoint clamps, division, square-root and rounding mutations. Readback exists
+only in test code. This
 stage does not wire Scene or select playback. Its remaining seam is a geometry
 owner consuming the opaque token directly into resident geometry/mapMerge;
 there is no public raw-buffer or detached submission API.
