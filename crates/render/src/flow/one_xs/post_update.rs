@@ -72,10 +72,18 @@ impl<D: PisDirection> RetainedPublicPyramids<D> {
     /// to 270 by 15 and multiplied by one quarter; it is not recursively
     /// derived from L1.
     pub fn from_public(previous: PublicDenseField<D>) -> Self {
-        let (dcol, drow) = previous.into_components();
+        Self::from_public_ref(&previous)
+    }
+
+    /// Build both retained levels without consuming the prior public field.
+    ///
+    /// A fallible staged solver uses this form so the exact incoming owner can
+    /// be returned if either sparse level fails. The completed transaction
+    /// still replaces that owner atomically with its newly computed field.
+    pub(super) fn from_public_ref(previous: &PublicDenseField<D>) -> Self {
         Self {
-            level_one: RetainedLevel::from_public(Level::One, &dcol, &drow),
-            level_two: RetainedLevel::from_public(Level::Two, &dcol, &drow),
+            level_one: RetainedLevel::from_public(Level::One, previous.dcol(), previous.drow()),
+            level_two: RetainedLevel::from_public(Level::Two, previous.dcol(), previous.drow()),
         }
     }
 

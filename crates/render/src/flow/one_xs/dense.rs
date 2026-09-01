@@ -294,6 +294,7 @@ impl<D: PisDirection> PublicDenseField<D> {
         (&mut self.dcol, &mut self.drow)
     }
 
+    #[cfg(test)]
     pub(super) fn into_components(self) -> (Box<[f32]>, Box<[f32]>) {
         (self.dcol, self.drow)
     }

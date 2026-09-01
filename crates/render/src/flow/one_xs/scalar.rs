@@ -18,6 +18,7 @@
 //! estimator through the captured-field render oracle; it cannot be called a
 //! replay of Studio's warm result.
 
+use std::convert::Infallible;
 use std::error::Error;
 use std::fmt;
 #[cfg(test)]
@@ -38,9 +39,10 @@ use super::temporal;
 use super::temporal_median::{
     AtoBMedian, BtoAMedian, FilteredPatchGrid, MedianState, TemporalMedians,
 };
+#[cfg(test)]
+use super::warm::EffectiveWorkRows;
 use super::warm::{
-    EffectiveWorkRows, EmptyOverrideCadence, HintPyramid, RetainedWorkRows, WarmCheckpointInputs,
-    WarmDirection,
+    EmptyOverrideCadence, HintPyramid, RetainedWorkRows, WarmCheckpointInputs, WarmDirection,
 };
 use super::{
     COLS, DirectedFields, Displacement, InvalidNodeCounts, Lens, LensPair, PATCH_SIZE,
@@ -266,11 +268,32 @@ pub struct ColdNextCandidate {
 }
 
 impl ColdNextCandidate {
+    pub(super) fn checkpoint_from_borrowed(
+        &self,
+        current_post_blur: ColdInputs,
+    ) -> WarmCheckpointInputs {
+        WarmCheckpointInputs::from_borrowed_state(
+            current_post_blur,
+            &self.references,
+            &self.a_to_b_public,
+            &self.b_to_a_public,
+            &self.a_to_b_work_rows,
+            &self.b_to_a_work_rows,
+            &self.a_to_b_hints,
+            &self.b_to_a_hints,
+            self.a_to_b_cadence,
+            self.b_to_a_cadence,
+            &self.a_to_b_median,
+            &self.b_to_a_median,
+        )
+    }
+
     /// Consume this candidate as the pre-state of the first warm calculation.
     ///
     /// The pair owner validates caller-declared numeric adjacency before
     /// calling this sibling-only bridge. A production source authority must
     /// separately prove decoded-frame adjacency.
+    #[allow(dead_code)]
     pub(super) fn into_checkpoint(self, current_post_blur: ColdInputs) -> WarmCheckpointInputs {
         let Self {
             references,
@@ -319,6 +342,268 @@ pub struct ColdTransition {
     pub candidate_next: ColdNextCandidate,
 }
 
+/// One paired sparse-solver position inside a cold or warm transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PairSolveStage {
+    Cold { calculation: usize, level: Level },
+    Warm { level: Level },
+}
+
+impl PairSolveStage {
+    pub(crate) const fn level(self) -> Level {
+        match self {
+            Self::Cold { level, .. } | Self::Warm { level } => level,
+        }
+    }
+}
+
+impl fmt::Display for PairSolveStage {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cold { calculation, level } => {
+                write!(out, "cold calculation {} {level}", calculation + 1)
+            }
+            Self::Warm { level } => write!(out, "warm {level}"),
+        }
+    }
+}
+
+/// One direction's complete scalar PIS call, owned by a paired request.
+pub(crate) struct DirectionSolveRequest<D: PisDirection> {
+    pub(super) input: Input<D>,
+    pub(super) initial: InitialGrid<D>,
+    pub(super) hint: super::pis::HintGrid<D>,
+    pub(super) admission: DescentAdmission,
+}
+
+/// Both direction-specific calls for one transaction level.
+pub(crate) struct PairedSolveRequest {
+    pub(crate) stage: PairSolveStage,
+    pub(crate) a_to_b: DirectionSolveRequest<AtoB>,
+    pub(crate) b_to_a: DirectionSolveRequest<BtoA>,
+}
+
+/// Runtime identity returned beside one compile-time direction-labelled grid.
+///
+/// The redundant stamp is intentional: an asynchronous/GPU adapter can bind
+/// a returned allocation to the submitted direction and complete
+/// within-transaction stage before the scalar transaction consumes it. The
+/// outer adapter must additionally bind its frame/flight identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SolveStamp {
+    pub(crate) direction: super::Direction,
+    pub(crate) stage: PairSolveStage,
+}
+
+pub(crate) struct StampedPatchGrid<D: PisDirection> {
+    pub(super) stamp: SolveStamp,
+    pub(super) grid: PatchGrid<D>,
+}
+
+impl<D: PisDirection> StampedPatchGrid<D> {
+    pub(crate) fn new(stamp: SolveStamp, grid: PatchGrid<D>) -> Self {
+        Self { stamp, grid }
+    }
+}
+
+/// A fallible paired solver's typed A-to-B and B-to-A result.
+pub(crate) struct PairedPatchGrids {
+    pub(crate) a_to_b: StampedPatchGrid<AtoB>,
+    pub(crate) b_to_a: StampedPatchGrid<BtoA>,
+}
+
+/// Injected boundary for the only fallible work in a scalar transaction.
+pub(crate) trait PairedPisSolver {
+    type Error;
+
+    fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error>;
+}
+
+/// A returned sparse grid did not belong to its submitted direction/level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SolveStampError {
+    Direction {
+        expected: super::Direction,
+        actual: super::Direction,
+    },
+    Stage {
+        expected: PairSolveStage,
+        actual: PairSolveStage,
+    },
+    Level {
+        expected: Level,
+        actual: Level,
+    },
+}
+
+impl fmt::Display for SolveStampError {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direction { expected, actual } => write!(
+                out,
+                "ONE X2 paired PIS returned {actual}, expected {expected}",
+            ),
+            Self::Stage { expected, actual } => write!(
+                out,
+                "ONE X2 paired PIS returned {actual}, expected {expected}",
+            ),
+            Self::Level { expected, actual } => write!(
+                out,
+                "ONE X2 paired PIS returned {actual}, expected {expected}",
+            ),
+        }
+    }
+}
+
+impl Error for SolveStampError {}
+
+/// Failure from one injected paired sparse stage.
+#[derive(Debug)]
+pub(crate) enum PairSolveError<E> {
+    Solver {
+        stage: PairSolveStage,
+        source: E,
+    },
+    Stamp {
+        stage: PairSolveStage,
+        source: SolveStampError,
+    },
+}
+
+impl<E: fmt::Display> fmt::Display for PairSolveError<E> {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Solver { stage, source } => {
+                write!(out, "ONE X2 paired PIS failed at {stage}: {source}")
+            }
+            Self::Stamp { stage, source } => {
+                write!(out, "ONE X2 paired PIS stamp failed at {stage}: {source}")
+            }
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for PairSolveError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Solver { source, .. } => Some(source),
+            Self::Stamp { source, .. } => Some(source),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CpuPairedPisSolver;
+
+impl PairedPisSolver for CpuPairedPisSolver {
+    type Error = Infallible;
+
+    fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error> {
+        let PairedSolveRequest {
+            stage,
+            a_to_b,
+            b_to_a,
+        } = request;
+        let (a_to_b, b_to_a) = thread::scope(|scope| {
+            let b_to_a = scope.spawn(|| solve_one(b_to_a));
+            let a_to_b = catch_unwind(AssertUnwindSafe(|| solve_one(a_to_b)));
+            let b_to_a = b_to_a.join();
+            match (a_to_b, b_to_a) {
+                (Ok(a_to_b), Ok(b_to_a)) => (a_to_b, b_to_a),
+                (Err(panic), _) | (Ok(_), Err(panic)) => resume_unwind(panic),
+            }
+        });
+        Ok(PairedPatchGrids {
+            a_to_b: StampedPatchGrid::new(
+                SolveStamp {
+                    direction: super::Direction::AtoB,
+                    stage,
+                },
+                a_to_b,
+            ),
+            b_to_a: StampedPatchGrid::new(
+                SolveStamp {
+                    direction: super::Direction::BtoA,
+                    stage,
+                },
+                b_to_a,
+            ),
+        })
+    }
+}
+
+fn solve_one<D: PisDirection>(request: DirectionSolveRequest<D>) -> PatchGrid<D> {
+    pis::solve_with_descent_admission(
+        &request.input,
+        request.initial,
+        Some(&request.hint),
+        request.admission,
+    )
+    .expect("paired scalar PIS request has one typed level")
+}
+
+type PairedGridResult<E> = Result<(PatchGrid<AtoB>, PatchGrid<BtoA>), PairSolveError<E>>;
+
+pub(crate) fn solve_pair<S: PairedPisSolver>(
+    solver: &mut S,
+    request: PairedSolveRequest,
+) -> PairedGridResult<S::Error> {
+    let stage = request.stage;
+    let expected_level = stage.level();
+    let solved = solver
+        .solve(request)
+        .map_err(|source| PairSolveError::Solver { stage, source })?;
+    Ok((
+        validate_grid(stage, expected_level, solved.a_to_b)?,
+        validate_grid(stage, expected_level, solved.b_to_a)?,
+    ))
+}
+
+fn validate_grid<D: PisDirection, E>(
+    stage: PairSolveStage,
+    expected_level: Level,
+    solved: StampedPatchGrid<D>,
+) -> Result<PatchGrid<D>, PairSolveError<E>> {
+    if solved.stamp.direction != D::DIRECTION {
+        return Err(PairSolveError::Stamp {
+            stage,
+            source: SolveStampError::Direction {
+                expected: D::DIRECTION,
+                actual: solved.stamp.direction,
+            },
+        });
+    }
+    if solved.stamp.stage.level() != expected_level {
+        return Err(PairSolveError::Stamp {
+            stage,
+            source: SolveStampError::Level {
+                expected: expected_level,
+                actual: solved.stamp.stage.level(),
+            },
+        });
+    }
+    if solved.stamp.stage != stage {
+        return Err(PairSolveError::Stamp {
+            stage,
+            source: SolveStampError::Stage {
+                expected: stage,
+                actual: solved.stamp.stage,
+            },
+        });
+    }
+    let actual = solved.grid.level();
+    if actual != expected_level {
+        return Err(PairSolveError::Stamp {
+            stage,
+            source: SolveStampError::Level {
+                expected: expected_level,
+                actual,
+            },
+        });
+    }
+    Ok(solved.grid)
+}
+
 /// Stateless owner for one cold pair estimate.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ColdPair;
@@ -340,35 +625,144 @@ impl ColdPair {
     /// numeric owner validates adjacency and converts it for the first warm
     /// calculation.
     pub fn transition(self, retained: &ColdInputs) -> ColdTransition {
+        match self.try_transition_with_solver(retained, &mut CpuPairedPisSolver) {
+            Ok(transition) => transition,
+            Err(PairSolveError::Solver { source, .. }) => match source {},
+            Err(PairSolveError::Stamp { source, .. }) => {
+                panic!("CPU paired solver returned its own invalid stamp: {source}")
+            }
+        }
+    }
+
+    /// Run the six cold sparse stages through one injected paired boundary.
+    ///
+    /// Every persistent candidate component is built only after all six
+    /// solver calls succeed. A failure therefore leaves `retained` and the
+    /// caller's prior owner untouched for an exact retry.
+    pub(crate) fn try_transition_with_solver<S: PairedPisSolver>(
+        self,
+        retained: &ColdInputs,
+        solver: &mut S,
+    ) -> Result<ColdTransition, PairSolveError<S::Error>> {
         let masks = MaskPyramid::build(retained);
         let a_to_b_finest_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::One);
         let b_to_a_finest_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::One);
         let a_to_b_coarse_inputs = LevelInputs::build::<AtoB>(retained, &masks, Level::Two);
         let b_to_a_coarse_inputs = LevelInputs::build::<BtoA>(retained, &masks, Level::Two);
+        let a_to_b_work_rows = RetainedWorkRows::after_cold_calc(&a_to_b_finest_inputs);
+        let b_to_a_work_rows = RetainedWorkRows::after_cold_calc(&b_to_a_finest_inputs);
+        let a_to_b_effective = a_to_b_work_rows.effective();
+        let b_to_a_effective = b_to_a_work_rows.effective();
+        let mut a_to_b_hints = HintPyramid::cold_zeros();
+        let mut b_to_a_hints = HintPyramid::cold_zeros();
+        let mut a_to_b_cadence = EmptyOverrideCadence::new(0, COLD_EMPTY_OVERRIDE_CADENCE).unwrap();
+        let mut b_to_a_cadence = EmptyOverrideCadence::new(0, COLD_EMPTY_OVERRIDE_CADENCE).unwrap();
+        let mut a_to_b_median = AtoBMedian::new();
+        let mut b_to_a_median = BtoAMedian::new();
+        let mut a_to_b_raw = None;
+        let mut b_to_a_raw = None;
+        let mut a_to_b_l2 = 0;
+        let mut b_to_a_l2 = 0;
+        let mut a_to_b_l1 = 0;
+        let mut b_to_a_l1 = 0;
 
-        // The first inner call derives +0x120 before PIS. The next two retain
-        // it, while +0x108 remains absent for pre-counts zero through two.
-        // Each task owns its median and every other mutable direction state.
-        // Neither result can reach the pair transition unless both tasks join,
-        // so a sibling panic publishes no partial cold state. Each solve below
-        // constructs only finest grids before its direction-local median runs.
-        let (a_to_b, b_to_a) = thread::scope(|scope| {
-            let b_to_a_worker = scope.spawn(|| {
-                run_cold_direction::<BtoA, BtoAMedian>(&b_to_a_finest_inputs, &b_to_a_coarse_inputs)
-            });
-            let a_to_b = catch_unwind(AssertUnwindSafe(|| {
-                run_cold_direction::<AtoB, AtoBMedian>(&a_to_b_finest_inputs, &a_to_b_coarse_inputs)
-            }));
-            let b_to_a = b_to_a_worker.join();
-            match (a_to_b, b_to_a) {
-                (Ok(a_to_b), Ok(b_to_a)) => (a_to_b, b_to_a),
-                (Err(panic), _) | (Ok(_), Err(panic)) => resume_unwind(panic),
-            }
-        });
+        for calculation in 0..COLD_INNER_CALCULATIONS {
+            let (a_l2_input, a_weighted) = a_to_b_coarse_inputs
+                .input::<AtoB>(Level::Two, a_to_b_effective.modes(Level::Two).to_vec());
+            let (b_l2_input, b_weighted) = b_to_a_coarse_inputs
+                .input::<BtoA>(Level::Two, b_to_a_effective.modes(Level::Two).to_vec());
+            let (a_l2, b_l2) = solve_pair(
+                solver,
+                PairedSolveRequest {
+                    stage: PairSolveStage::Cold {
+                        calculation,
+                        level: Level::Two,
+                    },
+                    a_to_b: DirectionSolveRequest {
+                        input: a_l2_input,
+                        initial: InitialGrid::coarse_zeros(),
+                        hint: a_to_b_hints.grid(Level::Two),
+                        admission: a_to_b_cadence.admission(),
+                    },
+                    b_to_a: DirectionSolveRequest {
+                        input: b_l2_input,
+                        initial: InitialGrid::coarse_zeros(),
+                        hint: b_to_a_hints.grid(Level::Two),
+                        admission: b_to_a_cadence.admission(),
+                    },
+                },
+            )?;
+            let a_seed = cold_seed(&a_to_b_coarse_inputs, a_l2);
+            let b_seed = cold_seed(&b_to_a_coarse_inputs, b_l2);
+
+            let (a_l1_input, a_finest_weighted) = a_to_b_finest_inputs
+                .input::<AtoB>(Level::One, a_to_b_effective.modes(Level::One).to_vec());
+            let (b_l1_input, b_finest_weighted) = b_to_a_finest_inputs
+                .input::<BtoA>(Level::One, b_to_a_effective.modes(Level::One).to_vec());
+            let (a_grid, b_grid) = solve_pair(
+                solver,
+                PairedSolveRequest {
+                    stage: PairSolveStage::Cold {
+                        calculation,
+                        level: Level::One,
+                    },
+                    a_to_b: DirectionSolveRequest {
+                        input: a_l1_input,
+                        initial: a_seed,
+                        hint: a_to_b_hints.grid(Level::One),
+                        admission: a_to_b_cadence.admission(),
+                    },
+                    b_to_a: DirectionSolveRequest {
+                        input: b_l1_input,
+                        initial: b_seed,
+                        hint: b_to_a_hints.grid(Level::One),
+                        admission: b_to_a_cadence.admission(),
+                    },
+                },
+            )?;
+
+            let a_hint_images = a_to_b_finest_inputs.directed_images::<AtoB>(Level::One);
+            let b_hint_images = b_to_a_finest_inputs.directed_images::<BtoA>(Level::One);
+            a_to_b_hints = HintPyramid::from_current_finest(&a_hint_images, &a_grid);
+            b_to_a_hints = HintPyramid::from_current_finest(&b_hint_images, &b_grid);
+            let a_filtered = a_to_b_median
+                .run(a_grid)
+                .expect("selected finest grid has the temporal median's level");
+            let b_filtered = b_to_a_median
+                .run(b_grid)
+                .expect("selected finest grid has the temporal median's level");
+            a_to_b_raw = Some(finish_direction(&a_to_b_finest_inputs, a_filtered));
+            b_to_a_raw = Some(finish_direction(&b_to_a_finest_inputs, b_filtered));
+            a_to_b_l2 = a_weighted;
+            b_to_a_l2 = b_weighted;
+            a_to_b_l1 = a_finest_weighted;
+            b_to_a_l1 = b_finest_weighted;
+            a_to_b_cadence = a_to_b_cadence.after_calc();
+            b_to_a_cadence = b_to_a_cadence.after_calc();
+        }
+
+        let a_to_b = ColdDirectionResult {
+            public: finish_cold_public(a_to_b_raw.unwrap()),
+            median: a_to_b_median.state(),
+            work_rows: a_to_b_work_rows,
+            hints: a_to_b_hints,
+            cadence: a_to_b_cadence,
+            weighted_l2: a_to_b_l2,
+            weighted_l1: a_to_b_l1,
+        };
+        let b_to_a = ColdDirectionResult {
+            public: finish_cold_public(b_to_a_raw.unwrap()),
+            median: b_to_a_median.state(),
+            work_rows: b_to_a_work_rows,
+            hints: b_to_a_hints,
+            cadence: b_to_a_cadence,
+            weighted_l2: b_to_a_l2,
+            weighted_l1: b_to_a_l1,
+        };
         let (fields, invalid_nodes) =
             DirectedFields::from_public_dense_ref(&a_to_b.public, &b_to_a.public);
 
-        ColdTransition {
+        Ok(ColdTransition {
             estimate: ColdEstimate {
                 displacement: Displacement::compose(&fields),
                 invalid_nodes,
@@ -392,8 +786,15 @@ impl ColdPair {
                 a_to_b_cadence: a_to_b.cadence,
                 b_to_a_cadence: b_to_a.cadence,
             },
-        }
+        })
     }
+}
+
+fn cold_seed<D: PisDirection>(prepared: &LevelInputs, patches: PatchGrid<D>) -> InitialGrid<D> {
+    let images = prepared.directed_images::<D>(Level::Two);
+    let dense = dense::densify_coarse(&images, patches).expect("densify scalar level two");
+    let post = preserve_without_variational_or_retained(dense);
+    into_l1_initial_grid(post).expect("scalar level-two field forms a finest seed")
 }
 
 struct ColdDirectionResult<D: PisDirection> {
@@ -406,12 +807,14 @@ struct ColdDirectionResult<D: PisDirection> {
     weighted_l1: usize,
 }
 
+#[cfg(test)]
 trait ColdMedian<D: PisDirection>: Sized {
     fn new() -> Self;
     fn run(&mut self, grid: PatchGrid<D>) -> FilteredPatchGrid<D>;
     fn state(&self) -> MedianState<D>;
 }
 
+#[cfg(test)]
 impl ColdMedian<AtoB> for AtoBMedian {
     fn new() -> Self {
         Self::new()
@@ -427,6 +830,7 @@ impl ColdMedian<AtoB> for AtoBMedian {
     }
 }
 
+#[cfg(test)]
 impl ColdMedian<BtoA> for BtoAMedian {
     fn new() -> Self {
         Self::new()
@@ -442,6 +846,7 @@ impl ColdMedian<BtoA> for BtoAMedian {
     }
 }
 
+#[cfg(test)]
 fn run_cold_direction<D, M>(
     finest_inputs: &LevelInputs,
     coarse_inputs: &LevelInputs,
@@ -767,6 +1172,7 @@ fn image_level(src: &[u8], level: Level) -> (Vec<u8>, usize, usize) {
     }
 }
 
+#[cfg(test)]
 fn coarse_seed<D: PisDirection>(
     prepared: &LevelInputs,
     rows: &EffectiveWorkRows<D>,
@@ -790,6 +1196,7 @@ fn coarse_seed<D: PisDirection>(
     (seed, weighted)
 }
 
+#[cfg(test)]
 fn finest_solve<D: PisDirection>(
     prepared: &LevelInputs,
     seed: InitialGrid<D>,

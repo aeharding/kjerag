@@ -652,6 +652,11 @@ impl TemporalMedians {
         Ok(Self { a_to_b, b_to_a })
     }
 
+    /// Consume the paired filters into their exact serializable state.
+    pub(super) fn into_states(self) -> (MedianState<AtoB>, MedianState<BtoA>) {
+        (self.a_to_b.state(), self.b_to_a.state())
+    }
+
     /// Consume and filter both fresh directional solve results exactly once.
     ///
     /// Both levels are checked before either direction mutates history.
