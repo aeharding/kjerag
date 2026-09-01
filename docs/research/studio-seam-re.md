@@ -128,6 +128,70 @@ delivery's opaque stamp, and rejects a preparation that is not the zero-shift
 ONE X2 type-2 projection. A fresh exact-branch causal range and trace are
 still required before merge.
 
+## Authenticated owner-review artifact
+
+`scripts/build-owner-three-panel-review.py` at commit
+`c1a603c9c48a854a633b7eab43131ed7d17637f0`, tree
+`81bbf3c607849bb6e658b122a5736405dec8b200`, and blob
+`67286aa337b8e85324ab786663d2142b95fe9402` constructs the fixed owner-review
+artifact. It admits only the exact owner source pair, view, settings and frames
+6339 through 6399. It binds the externally named clean shipping commit, tree,
+`playback` executable and `range-trace` executable to the causal and trace
+receipts. It independently re-derives both the canonical Studio 6.0.2
+projection and the computed range trace, then byte-compares those derivations
+with the supplied receipts before encoding anything.
+
+The no-replace output directory contains `riser-three-panel-native.mp4`,
+`riser-three-panel-quarter-speed.mp4` and
+`three-panel-review-receipt.json`. The receipt schema is
+`kjerag.owner-three-panel-review.v1`; it records the fixed interval, absence of
+a registration transform, exact inputs, private derivations, construction
+commands, tools, font, codec runtime and output hashes. Its claim boundary is:
+"Owner review aid only. It authenticates exact inputs and construction, not
+Studio parity or an owner verdict." The historical review videos in the table
+above were not originally receipted. The receipt reports separately whether a
+new encode reproduces their archived hashes; that result depends on the exact
+recorded FFmpeg, libx264 and font stack and cannot transfer an earlier owner
+verdict to another production build.
+
+For the final shipping run, set every path below to an absolute path, every
+SHA-256 to the lowercase digest of that exact file, and the commit and tree to
+the clean build named by both production receipts. The output parent must
+already exist and `OWNER_REVIEW_OUT` itself must not exist:
+
+```sh
+scripts/build-owner-three-panel-review.py \
+  --kjerag-receipt "$KJERAG_RECEIPT" \
+  --kjerag-sha256 "$KJERAG_RECEIPT_SHA256" \
+  --studio-receipt "$STUDIO_RECEIPT" \
+  --studio-sha256 "$STUDIO_RECEIPT_SHA256" \
+  --trace-receipt "$TRACE_RECEIPT" \
+  --trace-sha256 "$TRACE_RECEIPT_SHA256" \
+  --oracle-dir "$PRIVATE_STUDIO_ORACLE_DIR" \
+  --expected-commit "$SHIPPING_COMMIT" \
+  --expected-tree "$SHIPPING_TREE" \
+  --playback-bin "$PLAYBACK_BIN" \
+  --expected-playback-sha256 "$PLAYBACK_SHA256" \
+  --range-trace-bin "$RANGE_TRACE_BIN" \
+  --expected-range-trace-sha256 "$RANGE_TRACE_SHA256" \
+  --font /usr/share/fonts/truetype/noto/NotoSans-Regular.ttf \
+  --ffmpeg "$FFMPEG_BIN" \
+  --ffmpeg-sha256 "$FFMPEG_SHA256" \
+  --ffprobe "$FFPROBE_BIN" \
+  --ffprobe-sha256 "$FFPROBE_SHA256" \
+  --libx264 "$LIBX264_SO" \
+  --libx264-sha256 "$LIBX264_SHA256" \
+  --libx264-package "$LIBX264_PACKAGE" \
+  --expected-libx264-core "$LIBX264_CORE" \
+  --git "$GIT_BIN" \
+  --git-sha256 "$GIT_SHA256" \
+  --out-dir "$OWNER_REVIEW_OUT"
+```
+
+`PRIVATE_STUDIO_ORACLE_DIR` is the private directory holding the artifacts
+named by `studio-video-oracle-602.json`; those personal video artifacts are
+not committed.
+
 ## Bounded owner-eye verdict
 
 The final review placed independently cropped Kjerag, Studio Flow On and
@@ -177,5 +241,5 @@ This record does not establish:
 
 Before merge, the exact shipping build still needs the complete workspace and
 GPU gates, ordinary player and installed Flatpak playback, a new authenticated
-causal range and computed trace, and the owner's verdict on the rendered
-sequence from that build.
+causal range and computed trace, the authenticated three-panel review built
+from those exact receipts, and the owner's verdict on that rendered sequence.

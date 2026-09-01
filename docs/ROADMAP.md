@@ -29,7 +29,9 @@ statistically significant. Continuous sound remains unresolved.
 
 Before merge: run the complete workspace and GPU gates, exercise ordinary
 player and installed Flatpak playback, regenerate the causal range and trace
-with the exact shipping build, and obtain the owner's verdict on that build.
+with the exact shipping build, construct its authenticated three-panel review
+with `scripts/build-owner-three-panel-review.py`, and obtain the owner's
+verdict on those exact rendered pixels.
 No whole-video, Studio-internal, seek/reset, real-time, continuous-sound or
 merge-readiness claim is made.
 
