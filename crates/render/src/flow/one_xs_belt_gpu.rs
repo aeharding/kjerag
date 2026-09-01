@@ -1,15 +1,18 @@
 //! GPU sampling and reduction for selected ONE X2 solver inputs.
 //!
 //! This is the GPU-shaped equivalent of [`super::one_xs_belt::sample_source_belts`]
-//! followed by [`SourceBelts::reduce_area_3x3`](super::one_xs_belt::SourceBelts::reduce_area_3x3).
-//! Production playback consumes its compact readback at the CPU estimator
-//! boundary. One invocation owns four final U8 codes and packs them into one
-//! storage word, so no 3240-by-180 staging allocation or full CPU luma
-//! readback lies between the imported R8 textures and the 1080-by-60 inputs.
+//! followed by [`SourceBelts::reduce_area_3x3`](super::one_xs_belt::SourceBelts::reduce_area_3x3)
+//! and Studio's selected 5-by-5 input Gaussian. Production playback consumes
+//! its compact post-blur readback at the CPU estimator boundary. Horizontal
+//! Q7 sums retain one u32 per logical byte; the vertical pass rounds, packs
+//! four final U8 codes into one word and preserves the 129,600-byte A-then-B
+//! boundary. No staging allocation or full CPU luma readback lies between the
+//! imported R8 textures and those inputs.
 
 use std::sync::mpsc;
 use std::{error::Error, fmt};
 
+use super::one_xs::temporal::{BlurredBelts as CpuBlurredBelts, gaussian_blur};
 use super::one_xs::{Lens, LensPair};
 use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
 use crate::Fallible;
@@ -17,9 +20,11 @@ use crate::Fallible;
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
 const OUTPUT_WORDS: u32 = (SolverBelts::BYTES / CODES_PER_WORD) as u32;
+const HORIZONTAL_BYTES: u64 = SolverBelts::BYTES as u64 * size_of::<u32>() as u64;
 const WITNESS_BYTES: u64 = 2 * size_of::<u32>() as u64;
 const WORKGROUP_SIZE: u32 = 64;
 const _: () = assert!(SolverBelts::BYTES.is_multiple_of(CODES_PER_WORD));
+const _: () = assert!(super::one_xs::COLS.is_multiple_of(CODES_PER_WORD));
 const _: () = assert!(RetainedBaseMaps::NODES_PER_LENS.is_multiple_of(CODES_PER_WORD));
 
 const QUALIFICATION_A_ROWS: usize = 127;
@@ -36,7 +41,8 @@ const RETAINED_FMA_BITS: [u32; 2] = [1_064_967_376, 1_051_445_982];
 struct QualificationFixture {
     sources: LensPair<SourceImage>,
     maps: RetainedBaseMaps,
-    expected: SolverBelts,
+    expected_preblur: SolverBelts,
+    expected_blurred: CpuBlurredBelts,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -51,6 +57,13 @@ enum GpuQualificationError {
     RetainedMap {
         actual: [u32; 2],
         expected: [u32; 2],
+    },
+    BlurredByte {
+        lens: Lens,
+        row: usize,
+        col: usize,
+        actual: u8,
+        expected: u8,
     },
 }
 
@@ -70,6 +83,16 @@ impl fmt::Display for GpuQualificationError {
             Self::RetainedMap { actual, expected } => write!(
                 output,
                 "ONE X2 GPU arithmetic is not exact on this graphics device: retained-map FMA wrote {actual:?}, expected {expected:?}"
+            ),
+            Self::BlurredByte {
+                lens,
+                row,
+                col,
+                actual,
+                expected,
+            } => write!(
+                output,
+                "ONE X2 GPU arithmetic is not exact on this graphics device: lens {lens} blurred row {row} column {col} is {actual}, expected {expected}"
             ),
         }
     }
@@ -161,17 +184,58 @@ fn qualification_fixture() -> QualificationFixture {
     }
     let maps = RetainedBaseMaps::from_lenses(LensPair { a, b })
         .expect("the static GPU qualification maps have the retained shape");
-    let expected = sample_source_belts(&sources, &maps).reduce_area_3x3();
+    let expected_preblur = sample_source_belts(&sources, &maps).reduce_area_3x3();
     assert_eq!(
-        expected.pixel(Lens::A, 10, 10),
+        expected_preblur.pixel(Lens::A, 10, 10),
         190,
         "the static GPU qualification source-FMA discriminator changed"
     );
+    let expected_blurred = gaussian_blur(&expected_preblur);
     QualificationFixture {
         sources,
         maps,
-        expected,
+        expected_preblur,
+        expected_blurred,
     }
+}
+
+/// Direct retained-grid input for qualifying the integer Gaussian separately
+/// from sampling. It plants isolated corner, edge and centre impulses; keeps
+/// opposite A/B storage boundaries at distinct constants; and fills the rest
+/// with alternating, ramp, constant and deterministic pseudorandom regions.
+/// The complete comparison consequently exercises both reflect-101 axes and a
+/// wide set of final Q14 rounding residues rather than relying on the sampled
+/// source fixture to happen to cover them.
+fn blur_qualification_fixture() -> SolverBelts {
+    let centre = (super::one_xs::ROWS / 2, super::one_xs::COLS / 2);
+    SolverBelts::from_fn(|lens, row, col| {
+        let in_box = |at: (usize, usize), radius: usize| {
+            row.abs_diff(at.0) <= radius && col.abs_diff(at.1) <= radius
+        };
+        match lens {
+            Lens::A if in_box((0, 0), 3) => u8::from(row == 0 && col == 0) * 255,
+            Lens::A if in_box((0, super::one_xs::COLS / 2), 3) => {
+                u8::from(row == 0 && col == super::one_xs::COLS / 2) * 173
+            }
+            Lens::A if in_box(centre, 3) => u8::from((row, col) == centre) * 255,
+            Lens::A if row >= super::one_xs::ROWS - 5 && col >= super::one_xs::COLS - 5 => 11,
+            Lens::B if row < 5 && col < 5 => 241,
+            Lens::B if row >= super::one_xs::ROWS - 4 && col >= super::one_xs::COLS - 4 => {
+                u8::from(row == super::one_xs::ROWS - 1 && col == super::one_xs::COLS - 1) * 199
+            }
+            _ if row < 32 => u8::from((row + col + lens.index()).is_multiple_of(2)) * 255,
+            _ if row < 96 => ((5 * row + 17 * col + 31 * lens.index()) % 256) as u8,
+            _ if row < 128 => 137 + lens.index() as u8 * 41,
+            _ => {
+                let mut value = (row * super::one_xs::COLS + col) as u32
+                    ^ (0x9e37_79b9u32.wrapping_mul(lens.index() as u32 + 1));
+                value ^= value >> 16;
+                value = value.wrapping_mul(0x7feb_352d);
+                value ^= value >> 15;
+                (value >> 24) as u8
+            }
+        }
+    })
 }
 
 fn qualification_texture(
@@ -219,6 +283,11 @@ pub(crate) struct SourceTextures<'a> {
     pub(crate) b: &'a wgpu::Texture,
 }
 
+enum SubmissionInput<'a> {
+    Sampled { qualify_intermediates: bool },
+    Preblurred(&'a SolverBelts),
+}
+
 impl SourceTextures<'_> {
     fn validate(self) -> Fallible<()> {
         for (lens, texture) in [(Lens::A, self.a), (Lens::B, self.b)] {
@@ -247,6 +316,8 @@ impl SourceTextures<'_> {
 /// one another.
 pub(crate) struct GpuSolverBeltPipeline {
     pipeline: wgpu::ComputePipeline,
+    horizontal_pipeline: wgpu::ComputePipeline,
+    vertical_pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     witness: wgpu::Buffer,
 }
@@ -290,6 +361,7 @@ impl GpuSolverBeltPipeline {
                 storage(2, true),
                 storage(3, false),
                 storage(4, false),
+                storage(5, false),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -309,6 +381,23 @@ impl GpuSolverBeltPipeline {
             compilation_options: Default::default(),
             cache: None,
         });
+        let horizontal_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("ONE X2 GPU horizontal Gaussian"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("blur_horizontal"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let vertical_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ONE X2 GPU vertical Gaussian"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("blur_vertical"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         // Qualification reads this once before construction returns. Later
         // overlapping submissions may overwrite it because ordinary playback
         // deliberately never reads the witness.
@@ -320,6 +409,8 @@ impl GpuSolverBeltPipeline {
         });
         let built = Self {
             pipeline,
+            horizontal_pipeline,
+            vertical_pipeline,
             layout,
             witness,
         };
@@ -350,13 +441,15 @@ impl GpuSolverBeltPipeline {
             },
             &fixture.maps,
             (),
-            true,
+            SubmissionInput::Sampled {
+                qualify_intermediates: true,
+            },
         )?;
-        let (actual, retained_bits) = pending.read_qualification()?;
-        if let Some(index) = actual
+        let (actual_blurred, actual_preblur, retained_bits) = pending.read_qualification()?;
+        if let Some(index) = actual_preblur
             .bytes()
             .iter()
-            .zip(fixture.expected.bytes())
+            .zip(fixture.expected_preblur.bytes())
             .position(|(actual, expected)| actual != expected)
         {
             let lens = if index < RetainedBaseMaps::NODES_PER_LENS {
@@ -371,8 +464,8 @@ impl GpuSolverBeltPipeline {
                 lens,
                 row,
                 col,
-                actual: actual.bytes()[index],
-                expected: fixture.expected.bytes()[index],
+                actual: actual_preblur.bytes()[index],
+                expected: fixture.expected_preblur.bytes()[index],
             }
             .into());
         }
@@ -384,24 +477,68 @@ impl GpuSolverBeltPipeline {
             }
             .into());
         }
+        if let Some(index) = actual_blurred
+            .bytes()
+            .iter()
+            .zip(fixture.expected_blurred.bytes())
+            .position(|(actual, expected)| actual != expected)
+        {
+            let lens = if index < RetainedBaseMaps::NODES_PER_LENS {
+                Lens::A
+            } else {
+                Lens::B
+            };
+            let local = index % RetainedBaseMaps::NODES_PER_LENS;
+            let row = local / super::one_xs::COLS;
+            let col = local % super::one_xs::COLS;
+            return Err(GpuQualificationError::BlurredByte {
+                lens,
+                row,
+                col,
+                actual: actual_blurred.bytes()[index],
+                expected: fixture.expected_blurred.bytes()[index],
+            }
+            .into());
+        }
+        let blur_input = blur_qualification_fixture();
+        let expected_blur = gaussian_blur(&blur_input);
+        let actual_blur = self
+            .submit_inner(
+                device,
+                queue,
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                &fixture.maps,
+                (),
+                SubmissionInput::Preblurred(&blur_input),
+            )?
+            .read()?;
+        if let Some(index) = actual_blur
+            .bytes()
+            .iter()
+            .zip(expected_blur.bytes())
+            .position(|(actual, expected)| actual != expected)
+        {
+            let lens = if index < RetainedBaseMaps::NODES_PER_LENS {
+                Lens::A
+            } else {
+                Lens::B
+            };
+            let local = index % RetainedBaseMaps::NODES_PER_LENS;
+            let row = local / super::one_xs::COLS;
+            let col = local % super::one_xs::COLS;
+            return Err(GpuQualificationError::BlurredByte {
+                lens,
+                row,
+                col,
+                actual: actual_blur.bytes()[index],
+                expected: expected_blur.bytes()[index],
+            }
+            .into());
+        }
         Ok(())
-    }
-
-    /// Submit one independent source/map transaction.
-    ///
-    /// The returned token retains every bind resource until the submission has
-    /// completed. Its packed buffer is already in final A-then-B solver order
-    /// and can become a later GPU solver's direct input; [`PendingSolverBelts::read`]
-    /// exists for the exact CPU-oracle gate and the current CPU solver bridge.
-    #[cfg(test)]
-    pub(crate) fn submit(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        sources: SourceTextures<'_>,
-        maps: &RetainedBaseMaps,
-    ) -> Fallible<PendingSolverBelts<()>> {
-        self.submit_retained(device, queue, sources, maps, ())
     }
 
     /// Submit while retaining the owner of imported source images.
@@ -417,7 +554,16 @@ impl GpuSolverBeltPipeline {
         maps: &RetainedBaseMaps,
         source_owner: K,
     ) -> Fallible<PendingSolverBelts<K>> {
-        self.submit_inner(device, queue, sources, maps, source_owner, false)
+        self.submit_inner(
+            device,
+            queue,
+            sources,
+            maps,
+            source_owner,
+            SubmissionInput::Sampled {
+                qualify_intermediates: false,
+            },
+        )
     }
 
     fn submit_inner<K>(
@@ -427,8 +573,18 @@ impl GpuSolverBeltPipeline {
         sources: SourceTextures<'_>,
         maps: &RetainedBaseMaps,
         source_owner: K,
-        read_witness: bool,
+        input: SubmissionInput<'_>,
     ) -> Fallible<PendingSolverBelts<K>> {
+        let qualify_intermediates = matches!(
+            input,
+            SubmissionInput::Sampled {
+                qualify_intermediates: true
+            }
+        );
+        let initial_preblur = match input {
+            SubmissionInput::Sampled { .. } => None,
+            SubmissionInput::Preblurred(belts) => Some(belts),
+        };
         sources.validate()?;
         let map = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 retained base maps"),
@@ -438,18 +594,37 @@ impl GpuSolverBeltPipeline {
         });
         queue.write_buffer(&map, 0, maps.bytes());
         let packed = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 packed solver belts"),
+            label: Some("ONE X2 packed blurred solver belts"),
             size: OUTPUT_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if let Some(initial) = initial_preblur {
+            queue.write_buffer(&packed, 0, &pack_belts(initial));
+        }
+        let horizontal = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 horizontal Gaussian sums"),
+            size: HORIZONTAL_BYTES,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 solver belt readback"),
+            label: Some("ONE X2 blurred solver belt readback"),
             size: OUTPUT_BYTES,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let witness_readback = read_witness.then(|| {
+        let preblur_readback = qualify_intermediates.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 pre-blur qualification readback"),
+                size: OUTPUT_BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        });
+        let witness_readback = qualify_intermediates.then(|| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("ONE X2 retained-map FMA witness readback"),
                 size: WITNESS_BYTES,
@@ -483,31 +658,60 @@ impl GpuSolverBeltPipeline {
                     binding: 4,
                     resource: self.witness.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: horizontal.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ONE X2 GPU solver belts"),
         });
+        if initial_preblur.is_none() {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("ONE X2 GPU solver belts"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &resources, &[]);
+                pass.dispatch_workgroups(OUTPUT_WORDS.div_ceil(WORKGROUP_SIZE), 1, 1);
+            }
+            if let Some(readback) = &preblur_readback {
+                encoder.copy_buffer_to_buffer(&packed, 0, readback, 0, OUTPUT_BYTES);
+            }
+            if let Some(readback) = &witness_readback {
+                encoder.copy_buffer_to_buffer(&self.witness, 0, readback, 0, WITNESS_BYTES);
+            }
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 GPU solver belts"),
+                label: Some("ONE X2 GPU horizontal Gaussian"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&self.horizontal_pipeline);
+            pass.set_bind_group(0, &resources, &[]);
+            pass.dispatch_workgroups((SolverBelts::BYTES as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ONE X2 GPU vertical Gaussian"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.vertical_pipeline);
             pass.set_bind_group(0, &resources, &[]);
             pass.dispatch_workgroups(OUTPUT_WORDS.div_ceil(WORKGROUP_SIZE), 1, 1);
         }
         encoder.copy_buffer_to_buffer(&packed, 0, &readback, 0, OUTPUT_BYTES);
-        if let Some(readback) = &witness_readback {
-            encoder.copy_buffer_to_buffer(&self.witness, 0, readback, 0, WITNESS_BYTES);
-        }
         let submission = queue.submit([encoder.finish()]);
         Ok(PendingSolverBelts {
             device: device.clone(),
             _source_owner: source_owner,
             _map: map,
             _packed: packed,
+            _horizontal: horizontal,
             readback,
+            preblur_readback,
             witness_readback,
             _resources: resources,
             submission,
@@ -523,7 +727,9 @@ pub(crate) struct PendingSolverBelts<K> {
     _map: wgpu::Buffer,
     /// Retained until the copy into `readback` has completed.
     _packed: wgpu::Buffer,
+    _horizontal: wgpu::Buffer,
     readback: wgpu::Buffer,
+    preblur_readback: Option<wgpu::Buffer>,
     witness_readback: Option<wgpu::Buffer>,
     _resources: wgpu::BindGroup,
     submission: wgpu::SubmissionIndex,
@@ -536,26 +742,40 @@ impl<K> PendingSolverBelts<K> {
         &self._packed
     }
 
-    /// Wait for and consume the exact compact payload.
+    /// Wait for and consume the exact compact post-Gaussian payload.
+    ///
+    /// This temporary external `SolverBelts` signature keeps this isolated
+    /// module commit buildable. The typed-handoff change immediately following
+    /// it replaces this with the already-blurred boundary consumed by the
+    /// estimator, so this value cannot be blurred a second time.
     pub(crate) fn read(self) -> Fallible<SolverBelts> {
         Ok(self.read_inner()?.0)
     }
 
-    fn read_qualification(self) -> Fallible<(SolverBelts, [u32; 2])> {
-        let (belts, witness) = self.read_inner()?;
+    fn read_qualification(self) -> Fallible<(SolverBelts, SolverBelts, [u32; 2])> {
+        let (blurred, preblur, witness) = self.read_inner()?;
         Ok((
-            belts,
+            blurred,
+            preblur.expect("qualification requested its pre-blur payload"),
             witness.expect("qualification requested its retained-map FMA witness"),
         ))
     }
 
-    fn read_inner(self) -> Fallible<(SolverBelts, Option<[u32; 2]>)> {
+    fn read_inner(self) -> Fallible<(SolverBelts, Option<SolverBelts>, Option<[u32; 2]>)> {
         let slice = self.readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = mapped.send(result);
         });
         let witness = self.witness_readback.as_ref().map(|buffer| {
+            let slice = buffer.slice(..);
+            let (mapped, answer) = mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = mapped.send(result);
+            });
+            (slice, answer)
+        });
+        let preblur = self.preblur_readback.as_ref().map(|buffer| {
             let slice = buffer.slice(..);
             let (mapped, answer) = mpsc::channel();
             slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -571,19 +791,25 @@ impl<K> PendingSolverBelts<K> {
         if let Some((_, answer)) = &witness {
             answer.recv()??;
         }
+        if let Some((_, answer)) = &preblur {
+            answer.recv()??;
+        }
         let mapped = slice.get_mapped_range();
-        let bytes = mapped
-            .chunks_exact(size_of::<u32>())
-            .flat_map(|word| u32::from_ne_bytes(word.try_into().unwrap()).to_le_bytes())
-            .collect::<Vec<_>>();
+        let belts = unpack_belts(&mapped)?;
         drop(mapped);
         self.readback.unmap();
-        debug_assert_eq!(bytes.len(), SolverBelts::BYTES);
-        let belts = SolverBelts::from_lenses(LensPair {
-            a: bytes[..RetainedBaseMaps::NODES_PER_LENS].to_vec(),
-            b: bytes[RetainedBaseMaps::NODES_PER_LENS..].to_vec(),
-        })
-        .map_err(Box::<dyn Error + Send + Sync>::from)?;
+        let preblur = preblur
+            .map(|(slice, _)| {
+                let mapped = slice.get_mapped_range();
+                let belts = unpack_belts(&mapped);
+                drop(mapped);
+                self.preblur_readback
+                    .as_ref()
+                    .expect("mapped pre-blur payload has its buffer")
+                    .unmap();
+                belts
+            })
+            .transpose()?;
         let witness = witness.map(|(slice, _)| {
             let mapped = slice.get_mapped_range();
             let bits = [
@@ -597,8 +823,29 @@ impl<K> PendingSolverBelts<K> {
                 .unmap();
             bits
         });
-        Ok((belts, witness))
+        Ok((belts, preblur, witness))
     }
+}
+
+fn unpack_belts(words: &[u8]) -> Fallible<SolverBelts> {
+    let bytes = words
+        .chunks_exact(size_of::<u32>())
+        .flat_map(|word| u32::from_ne_bytes(word.try_into().unwrap()).to_le_bytes())
+        .collect::<Vec<_>>();
+    debug_assert_eq!(bytes.len(), SolverBelts::BYTES);
+    SolverBelts::from_lenses(LensPair {
+        a: bytes[..RetainedBaseMaps::NODES_PER_LENS].to_vec(),
+        b: bytes[RetainedBaseMaps::NODES_PER_LENS..].to_vec(),
+    })
+    .map_err(Box::<dyn Error + Send + Sync>::from)
+}
+
+fn pack_belts(belts: &SolverBelts) -> Vec<u8> {
+    belts
+        .bytes()
+        .chunks_exact(CODES_PER_WORD)
+        .flat_map(|codes| u32::from_le_bytes(codes.try_into().unwrap()).to_ne_bytes())
+        .collect()
 }
 
 // The explicit `fma` chain and native `(1-coordinate)+floor(coordinate)`
@@ -620,6 +867,7 @@ const THIRD_BITS: u32 = 0x3eaaaaabu;
 @group(0) @binding(2) var<storage, read> base_maps: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read_write> output_words: array<u32>;
 @group(0) @binding(4) var<storage, read_write> witness_words: array<u32>;
+@group(0) @binding(5) var<storage, read_write> horizontal_codes: array<u32>;
 
 fn weights(value: f32, maximum: f32) -> vec4<f32> {
     let clamped = clamp(value, 0.0, maximum);
@@ -723,6 +971,67 @@ fn build_solver_belts(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     output_words[id.x] = packed;
 }
+
+fn packed_code(index: u32) -> u32 {
+    let word = output_words[index / 4u];
+    return (word >> (8u * (index % 4u))) & 255u;
+}
+
+fn reflect_101(position: i32, length: i32) -> u32 {
+    if position < 0 {
+        return u32(-position);
+    }
+    if position >= length {
+        return u32(2 * length - position - 2);
+    }
+    return u32(position);
+}
+
+@compute @workgroup_size(64)
+fn blur_horizontal(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if index >= TOTAL_CODES {
+        return;
+    }
+    let lens = index / PIXELS_PER_LENS;
+    let local = index - lens * PIXELS_PER_LENS;
+    let row = local / COLS;
+    let col = local - row * COLS;
+    var sum = 0u;
+    sum += 3u * packed_code(lens * PIXELS_PER_LENS + row * COLS + reflect_101(i32(col) - 2, i32(COLS)));
+    sum += 29u * packed_code(lens * PIXELS_PER_LENS + row * COLS + reflect_101(i32(col) - 1, i32(COLS)));
+    sum += 64u * packed_code(index);
+    sum += 29u * packed_code(lens * PIXELS_PER_LENS + row * COLS + reflect_101(i32(col) + 1, i32(COLS)));
+    sum += 3u * packed_code(lens * PIXELS_PER_LENS + row * COLS + reflect_101(i32(col) + 2, i32(COLS)));
+    horizontal_codes[index] = sum;
+}
+
+fn vertical_code(index: u32) -> u32 {
+    let lens = index / PIXELS_PER_LENS;
+    let local = index - lens * PIXELS_PER_LENS;
+    let row = local / COLS;
+    let col = local - row * COLS;
+    var sum = 0u;
+    sum += 3u * horizontal_codes[lens * PIXELS_PER_LENS + reflect_101(i32(row) - 2, i32(ROWS)) * COLS + col];
+    sum += 29u * horizontal_codes[lens * PIXELS_PER_LENS + reflect_101(i32(row) - 1, i32(ROWS)) * COLS + col];
+    sum += 64u * horizontal_codes[index];
+    sum += 29u * horizontal_codes[lens * PIXELS_PER_LENS + reflect_101(i32(row) + 1, i32(ROWS)) * COLS + col];
+    sum += 3u * horizontal_codes[lens * PIXELS_PER_LENS + reflect_101(i32(row) + 2, i32(ROWS)) * COLS + col];
+    return (sum + 8192u) >> 14u;
+}
+
+@compute @workgroup_size(64)
+fn blur_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
+    let first = id.x * 4u;
+    if first >= TOTAL_CODES {
+        return;
+    }
+    var packed = 0u;
+    for (var lane = 0u; lane < 4u; lane += 1u) {
+        packed |= vertical_code(first + lane) << (8u * lane);
+    }
+    output_words[id.x] = packed;
+}
 "#;
 
 #[cfg(test)]
@@ -753,7 +1062,7 @@ mod tests {
         let pipeline = GpuSolverBeltPipeline::new(&device, &queue)
             .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
         let pending = pipeline
-            .submit(
+            .submit_inner(
                 &device,
                 &queue,
                 SourceTextures {
@@ -761,19 +1070,97 @@ mod tests {
                     b: &texture_b,
                 },
                 &fixture.maps,
+                (),
+                SubmissionInput::Sampled {
+                    qualify_intermediates: true,
+                },
             )
             .unwrap();
         assert_eq!(pending.packed().size(), OUTPUT_BYTES);
-        let actual = pending.read().unwrap();
+        let (actual_blurred, actual_preblur, retained_bits) = pending.read_qualification().unwrap();
         assert_eq!(
-            actual.pixel(Lens::A, 10, 10),
+            actual_preblur.pixel(Lens::A, 10, 10),
             190,
             "GPU changed the source-FMA discriminator on {adapter}"
         );
         assert_eq!(
+            actual_preblur.bytes(),
+            fixture.expected_preblur.bytes(),
+            "GPU pre-blur solver belts differ from the scalar/native schedule on {adapter}"
+        );
+        assert_eq!(retained_bits, RETAINED_FMA_BITS);
+        assert_eq!(
+            actual_blurred.bytes(),
+            fixture.expected_blurred.bytes(),
+            "GPU blurred solver belts differ from the CPU/native schedule on {adapter}"
+        );
+    }
+
+    #[test]
+    fn gpu_gaussian_matches_complete_direct_retained_fixture() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping direct ONE X2 GPU Gaussian twin: {why}");
+                return;
+            }
+        };
+        let fixture = qualification_fixture();
+        let texture_a =
+            qualification_texture(&device, &queue, "ONE X2 blur fixture A", &fixture.sources.a);
+        let texture_b =
+            qualification_texture(&device, &queue, "ONE X2 blur fixture B", &fixture.sources.b);
+        let pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+            .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
+        let input = blur_qualification_fixture();
+        assert_eq!(input.pixel(Lens::A, 0, 0), 255, "corner impulse");
+        assert_eq!(
+            input.pixel(Lens::A, 0, super::super::one_xs::COLS / 2),
+            173,
+            "edge impulse"
+        );
+        assert_eq!(
+            input.pixel(
+                Lens::A,
+                super::super::one_xs::ROWS / 2,
+                super::super::one_xs::COLS / 2,
+            ),
+            255,
+            "centre impulse"
+        );
+        assert_eq!(
+            input.pixel(
+                Lens::A,
+                super::super::one_xs::ROWS - 1,
+                super::super::one_xs::COLS - 1,
+            ),
+            11,
+            "lens A storage boundary"
+        );
+        assert_eq!(input.pixel(Lens::B, 0, 0), 241, "lens B storage boundary");
+        let actual = pipeline
+            .submit_inner(
+                &device,
+                &queue,
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                &fixture.maps,
+                (),
+                SubmissionInput::Preblurred(&input),
+            )
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(
             actual.bytes(),
-            fixture.expected.bytes(),
-            "GPU solver belts differ from the scalar/native schedule on {adapter}"
+            gaussian_blur(&input).bytes(),
+            "GPU Gaussian differs from the complete CPU/native fixture on {adapter}"
         );
     }
 
@@ -850,6 +1237,44 @@ mod tests {
                 Some(GpuQualificationError::RetainedMap { .. })
             ),
             "changed production discriminator returned the wrong failure on {adapter}: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_qualification_refuses_changed_gaussian_rounding() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 Gaussian qualification test: {why}");
+                return;
+            }
+        };
+        if let Err(error) = GpuSolverBeltPipeline::new(&device, &queue) {
+            assert!(
+                std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                "KJERAG_REQUIRE_GPU is set and {adapter} fails the baseline ONE X2 GPU qualification: {error}"
+            );
+            eprintln!(
+                "skipping Gaussian mutation on an adapter that fails baseline qualification: {adapter}: {error}"
+            );
+            return;
+        }
+        let broken = SHADER.replacen("return (sum + 8192u) >> 14u;", "return sum >> 14u;", 1);
+        assert_ne!(broken, SHADER, "the Gaussian mutation found no target");
+        let error = match GpuSolverBeltPipeline::from_shader(&device, &queue, &broken) {
+            Ok(_) => panic!("changed ONE X2 Gaussian was accepted on {adapter}"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error.downcast_ref::<GpuQualificationError>(),
+                Some(GpuQualificationError::BlurredByte { .. })
+            ),
+            "changed Gaussian returned the wrong failure on {adapter}: {error}"
         );
     }
 
