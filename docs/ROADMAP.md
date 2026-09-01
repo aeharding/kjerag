@@ -50,6 +50,53 @@ the receipt to
 and the exact test executable before and after the run to
 `b30c547fc9119a0061f121312f63d7562101f64788321b7f9a8f5a5fd952281d`.
 
+**Exact render-pass retirement checkpoint, 2026-09-01, implementation branch
+only [PRIVATE OWNERSHIP PRIMITIVE; NOT WIRED TO SCENE; NO DMABUF SAFETY,
+PERFORMANCE OR PARITY CLAIM]:** a bounded private owner now reserves a linear
+`DrawPermit` during preparation, before a candidate or successor history can
+be installed. No capacity is backpressure at that boundary and does not move
+the offered payload. A prepared candidate that is never drawn simply returns
+its permit because no GPU sampling needs proof; every repeated redraw reserves
+a fresh permit without recommitting history.
+
+The only production arm operation consumes the current
+`wgpu::RenderPass`, permit and an `Arc` of the opaque installed-draw payload.
+It stores the `Arc`, registers `RenderPass::on_submitted_work_done`, and only
+then invokes a closure that borrows the stored payload to bind and draw before
+returning the pass. Scene can retain one `Arc`; initial draw, later redraws and
+a replaced successor each clone it without separating the exact source, map
+or upstream ownership. The caller therefore cannot bind or draw before proof
+belongs to iced's exact encoder and command buffer, rather than to an earlier
+compute or queue prefix. The callback only publishes its monotonic generation; ordinary
+`Device::poll(Poll)` drives it and payload destruction happens outside the
+callback only after the exact generation is observed. Queue storage and
+signals are bounded and reused with ABA protection. Out-of-order completion
+releases each payload once. Poll error or panic and callback-registration panic
+quarantine every prior and offered uncertain owner before terminal failure;
+destruction with a possibly unsubmitted pass also fails closed instead of
+waiting forever.
+
+The generic qualification payload owns a sampled texture and a drop witness
+representing the exact decoder source owner. The eventual
+`InstalledOneXsDraw` must transitively own the exact `Arc<Frames>` until the
+draw callback lands: cloned wgpu objects or a duplicated dmabuf descriptor do
+not stop VA-API from reusing the surface. This checkpoint deliberately removes
+the obsolete compute-prefix Scene retirement wiring. It does not install the
+resident map binding, current frame or arithmetic into Scene and does not yet
+claim that selected playback is surface-safe. The earlier queue-prefix receipt
+remains only as superseded audit history in
+[`docs/research/gpu-nonblocking-retirement-qualification.md`](research/gpu-nonblocking-retirement-qualification.md).
+
+The exact code head `c81a9c3e3e6c35069e951b79d5df17ffe43278ff`
+(tree `b2b8383cba88e37656dc4f3fe1130d9c1b9c1608`) passed the focused
+forced-Phoenix RADV gate 8/8 with one unchanged pre/post executable hash.
+Commands, identities, source/binary/driver/log hashes, timestamps and exit
+status are recorded in
+[`docs/research/gpu-draw-retirement-qualification.md`](research/gpu-draw-retirement-qualification.md).
+This is durable qualification evidence. Independent audit accepted this
+private primitive at the recorded code and docs heads, within the stated
+limits; it did not accept Scene wiring or dmabuf/source-surface safety.
+
 **Shared-context resident ONE X2 final-map materializer, 2026-09-01,
 integration branch only [UNSELECTED; EXACT TARGET-GPU TWIN; NO SCENE OR
 PERFORMANCE CLAIM]:** the accepted final bilateral materializer now owns the

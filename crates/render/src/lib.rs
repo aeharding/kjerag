@@ -16,6 +16,8 @@ pub mod chroma;
 pub mod chromatic;
 mod direct_type2;
 pub mod dmabuf;
+#[allow(dead_code)]
+mod draw_retirement;
 pub mod flow;
 mod framing;
 pub mod map_oracle;
