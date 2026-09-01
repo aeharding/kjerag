@@ -29,6 +29,11 @@ resident final-map result may then join that aggregate. This checkpoint does
 not fake that association, publish or install a resident result, wire Scene,
 or replace `live.truncate(3)` in selected playback.
 
+The combined-tree qualification is recorded in
+`docs/research/gpu-drawable-install-qualification.md`. It binds the exact code
+and tree, forced-RADV focused and workspace tests, required repository gates,
+test executable hashes and durable logs under repository `scratch/`.
+
 **Asynchronous resident final-map validity gate, 2026-09-01, implementation
 branch only [FOUR-BYTE READBACK; FORCED-RADV QUALIFIED; NO SCENE WIRING OR
 PERFORMANCE CLAIM]:** the private final-map materializer now accepts one
