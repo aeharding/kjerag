@@ -27,6 +27,12 @@ struct LaneScore {
 @group(0) @binding(0) var<storage, read> words: array<u32>;
 @group(0) @binding(1) var<storage, read> floats: array<f32>;
 @group(0) @binding(2) var<storage, read_write> terminal_bits: array<u32>;
+@group(0) @binding(3) var<storage, read> prepared_images: array<u32>;
+@group(0) @binding(4) var<storage, read> prepared_masks: array<u32>;
+@group(0) @binding(5) var<storage, read> prepared_gradient_bits: array<u32>;
+@group(0) @binding(6) var<storage, read> prepared_weight_bits: array<u32>;
+@group(0) @binding(7) var<storage, read> prepared_patch_sum_bits: array<u32>;
+@group(0) @binding(8) var<storage, read> prepared_model_bits: array<u32>;
 var<private> word_base: u32;
 var<private> float_base: u32;
 var<private> output_base: u32;
@@ -135,6 +141,7 @@ fn div_rn(a: f32, b: f32) -> f32 {
 fn word(index: u32) -> u32 { return words[word_base + index]; }
 fn local_word(index: u32) -> u32 { return words[word_base + index]; }
 fn local_float(index: u32) -> f32 { return floats[float_base + index]; }
+fn direct_prepared() -> bool { return word(30u) != 0u; }
 fn rows() -> u32 { return word(0u); }
 fn cols() -> u32 { return word(1u); }
 fn patch_rows() -> u32 { return word(2u); }
@@ -183,7 +190,33 @@ fn sampling_plan(source_row: u32, source_col: u32, flow: vec2<f32>) -> Sampling 
 }
 
 fn image_at(offset: u32, row: u32, col: u32) -> f32 {
+    if direct_prepared() {
+        return f32(prepared_images[offset + row * cols() + col]);
+    }
     return f32(local_word(offset + row * cols() + col));
+}
+
+fn mask_at(offset: u32, index: u32) -> u32 {
+    if direct_prepared() { return prepared_masks[offset + index]; }
+    return local_word(offset + index);
+}
+
+fn gradient_at(index: u32) -> vec2<f32> {
+    if direct_prepared() {
+        let at = word(14u) + 2u * index;
+        return vec2<f32>(bitcast<f32>(prepared_gradient_bits[at]), bitcast<f32>(prepared_gradient_bits[at + 1u]));
+    }
+    return vec2<f32>(local_float(word(14u) + index), local_float(word(15u) + index));
+}
+
+fn weight_at(index: u32) -> f32 {
+    if direct_prepared() { return bitcast<f32>(prepared_weight_bits[word(16u) + index]); }
+    return local_float(word(16u) + index);
+}
+
+fn patch_sum_at(cell: u32) -> f32 {
+    if direct_prepared() { return bitcast<f32>(prepared_patch_sum_bits[word(17u) + cell]); }
+    return local_float(word(17u) + cell);
 }
 
 fn target_index(plan: Sampling, patch_row: u32, patch_col: u32) -> u32 {
@@ -220,7 +253,7 @@ fn candidate_lane_score(cell: u32, flow: vec2<f32>, lane: u32, present: bool) ->
     let source_mask_offset = word(11u);
     let target_mask_offset = word(12u);
     let weight_offset = word(16u);
-    let patch_sum = local_float(word(17u) + cell);
+    let patch_sum = patch_sum_at(cell);
     var reciprocal_sum = 0.0;
     if patch_sum > 0.0 { reciprocal_sum = div_rn(1.0, patch_sum); }
     let weighted = local_word(word(13u) + patch_row) != 0u;
@@ -232,13 +265,13 @@ fn candidate_lane_score(cell: u32, flow: vec2<f32>, lane: u32, present: bool) ->
         let high_col = lane + 4u;
         let low_at = (source_row + row) * cols() + source_col + low_col;
         let high_at = (source_row + row) * cols() + source_col + high_col;
-        let low_survives = local_word(source_mask_offset + low_at) != 0u && local_word(target_mask_offset + target_index(plan, row, low_col)) != 0u;
-        let high_survives = local_word(source_mask_offset + high_at) != 0u && local_word(target_mask_offset + target_index(plan, row, high_col)) != 0u;
-        var low = candidate_residual(plan, row, low_col, f32(local_word(source_offset + low_at)), low_survives);
-        var high = candidate_residual(plan, row, high_col, f32(local_word(source_offset + high_at)), high_survives);
+        let low_survives = mask_at(source_mask_offset, low_at) != 0u && mask_at(target_mask_offset, target_index(plan, row, low_col)) != 0u;
+        let high_survives = mask_at(source_mask_offset, high_at) != 0u && mask_at(target_mask_offset, target_index(plan, row, high_col)) != 0u;
+        var low = candidate_residual(plan, row, low_col, image_at(source_offset, source_row + row, source_col + low_col), low_survives);
+        var high = candidate_residual(plan, row, high_col, image_at(source_offset, source_row + row, source_col + high_col), high_survives);
         if weighted {
-            low = mul_rn(mul_rn(low, local_float(weight_offset + low_at)), reciprocal_sum);
-            high = mul_rn(mul_rn(high, local_float(weight_offset + high_at)), reciprocal_sum);
+            low = mul_rn(mul_rn(low, weight_at(low_at)), reciprocal_sum);
+            high = mul_rn(mul_rn(high, weight_at(high_at)), reciprocal_sum);
         }
         sum = add_rn(sum, add_rn(low, high));
         sum_sq = add_rn(sum_sq, add_rn(mul_rn(low, low), mul_rn(high, high)));
@@ -249,6 +282,16 @@ fn candidate_lane_score(cell: u32, flow: vec2<f32>, lane: u32, present: bool) ->
 
 fn source_model(cell: u32) -> SourceModel {
     let at = word(21u) + 5u * cell;
+    if direct_prepared() {
+        return SourceModel(
+            vec2<f32>(bitcast<f32>(prepared_model_bits[at]), bitcast<f32>(prepared_model_bits[at + 1u])),
+            bitcast<f32>(prepared_model_bits[at + 2u]),
+            bitcast<f32>(prepared_model_bits[at + 3u]),
+            bitcast<f32>(prepared_model_bits[at + 4u]),
+            vec3<f32>(0.0),
+            0.0,
+        );
+    }
     return SourceModel(
         vec2<f32>(local_float(at), local_float(at + 1u)),
         local_float(at + 2u),
@@ -272,7 +315,7 @@ fn descent_step(cell: u32, flow: vec2<f32>, model: SourceModel) -> DescentStep {
     let gx_offset = word(14u);
     let gy_offset = word(15u);
     let weight_offset = word(16u);
-    let patch_sum = local_float(word(17u) + cell);
+    let patch_sum = patch_sum_at(cell);
     var reciprocal_sum = 0.0;
     if patch_sum > 0.0 { reciprocal_sum = div_rn(1.0, patch_sum); }
     let weighted = local_word(word(13u) + patch_row) != 0u;
@@ -284,7 +327,7 @@ fn descent_step(cell: u32, flow: vec2<f32>, model: SourceModel) -> DescentStep {
     for (var row = 0u; row < PATCH_SIZE; row++) {
         for (var col = 0u; col < PATCH_SIZE; col++) {
             let source_at = (source_row + row) * cols() + source_col + col;
-            if local_word(source_mask_offset + source_at) == 0u || local_word(target_mask_offset + target_index(plan, row, col)) == 0u { continue; }
+            if mask_at(source_mask_offset, source_at) == 0u || mask_at(target_mask_offset, target_index(plan, row, col)) == 0u { continue; }
             let row0 = clamped_index(plan.base_row + i32(row), rows());
             let col0 = clamped_index(plan.base_col + i32(col), cols());
             let row1 = clamped_index(plan.base_row + i32(row) + 1, rows());
@@ -293,15 +336,16 @@ fn descent_step(cell: u32, flow: vec2<f32>, model: SourceModel) -> DescentStep {
             let top = fma_rn(image_at(target_offset, row0, col0), plan.coefficients.x, top_right);
             let bottom_left = fma_rn(image_at(target_offset, row1, col0), plan.coefficients.z, top);
             let target_sample = fma_rn(image_at(target_offset, row1, col1), plan.coefficients.w, bottom_left);
-            let difference = sub_rn(target_sample, f32(local_word(source_offset + source_at)));
+            let difference = sub_rn(target_sample, image_at(source_offset, source_row + row, source_col + col));
             var residual = difference;
             if weighted {
-                let normalized_weight = mul_rn(local_float(weight_offset + source_at), reciprocal_sum);
+                let normalized_weight = mul_rn(weight_at(source_at), reciprocal_sum);
                 residual = mul_rn(difference, normalized_weight);
             }
-            rhs_col = fma_rn(residual, local_float(gx_offset + source_at), rhs_col);
+            let gradient = gradient_at(source_at);
+            rhs_col = fma_rn(residual, gradient.x, rhs_col);
             sum = add_rn(sum, residual);
-            rhs_row = fma_rn(residual, local_float(gy_offset + source_at), rhs_row);
+            rhs_row = fma_rn(residual, gradient.y, rhs_row);
             sum_sq = fma_rn(residual, residual, sum_sq);
             survivors += 1u;
         }

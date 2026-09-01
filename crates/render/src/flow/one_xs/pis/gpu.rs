@@ -16,10 +16,11 @@ use std::sync::mpsc;
 use kjerag_media::FrameStamp;
 
 use super::{
-    AtoB, BtoA, CostMode, DescentAdmission, Direction, Flow, HintGrid, InitialGrid, Input, Level,
-    PisDirection, solve_with_descent_admission,
+    AtoB, BtoA, CostMode, DescentAdmission, Direction, DisparityInterval, Flow, HintGrid,
+    InitialGrid, Input, Level, PisDirection, solve_with_descent_admission,
 };
 use crate::Fallible;
+use crate::flow::one_xs::pis_frontend_gpu::{GpuPreparedFrame, GpuPreparedLevel};
 use crate::flow::one_xs::scalar::{
     PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids, PairedSolveRequest, SolveStamp,
     StampedPatchGrid,
@@ -86,6 +87,70 @@ pub(crate) struct GpuPisStageReceipt {
 pub(crate) struct GpuPisStageOutput {
     pub(crate) receipt: GpuPisStageReceipt,
     pub(crate) grids: ScalarPairedPatchGrids,
+}
+
+/// The only frame-varying inputs to one direction of a direct-bound stage.
+///
+/// Image-owned terms are deliberately absent. They remain sealed in the one
+/// [`GpuPreparedFrame`] shared by every cold and warm stage for this flight.
+pub(crate) struct GpuPisDynamicDirection<D: PisDirection> {
+    pub(crate) cost_modes: Box<[CostMode]>,
+    pub(crate) initial: InitialGrid<D>,
+    pub(crate) hint: Option<HintGrid<D>>,
+    pub(crate) admission: DescentAdmission,
+    pub(crate) disparity: Option<DisparityInterval>,
+}
+
+#[cfg(test)]
+impl<D: PisDirection> GpuPisDynamicDirection<D> {
+    /// Test-only extraction of the dynamic half from the readable CPU oracle.
+    /// Production direct binding has no conversion from [`Input`].
+    pub(crate) fn from_oracle(
+        input: &Input<D>,
+        initial: InitialGrid<D>,
+        hint: Option<HintGrid<D>>,
+        admission: DescentAdmission,
+    ) -> Self {
+        Self {
+            cost_modes: input.cost_modes.clone(),
+            initial,
+            hint,
+            admission,
+            disparity: input.disparity,
+        }
+    }
+}
+
+/// Both direction-specific dynamic inputs for one direct-bound stage.
+pub(crate) struct GpuPisDynamicStage {
+    pub(crate) stage: PairSolveStage,
+    pub(crate) a_to_b: GpuPisDynamicDirection<AtoB>,
+    pub(crate) b_to_a: GpuPisDynamicDirection<BtoA>,
+}
+
+/// One direct-bound terminal result and the same linear prepared-frame token.
+///
+/// Owning rather than borrowing the frame is intentional: a caller must take
+/// this exact token into the next cold/warm stage, and the resident submission
+/// lease can later be advanced and acknowledged only at the terminal CPU
+/// boundary without inventing a second lifetime owner.
+#[must_use = "the direct-bound GPU PIS terminal and prepared frame have not been consumed"]
+pub(crate) struct GpuPreparedStageOutput<K> {
+    pub(crate) receipt: GpuPisStageReceipt,
+    pub(crate) grids: ScalarPairedPatchGrids,
+    prepared: GpuPreparedFrame<K>,
+}
+
+impl<K> GpuPreparedStageOutput<K> {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        GpuPisStageReceipt,
+        ScalarPairedPatchGrids,
+        GpuPreparedFrame<K>,
+    ) {
+        (self.receipt, self.grids, self.prepared)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -287,12 +352,177 @@ impl Error for QualificationError {}
 pub(crate) struct GpuPisPipeline {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    /// Legacy CPU-oracle submissions do not read the prepared bindings.
+    oracle_placeholder: wgpu::Buffer,
+}
+
+#[derive(Clone, Copy)]
+struct PreparedResources<'a> {
+    images: &'a wgpu::Buffer,
+    masks: &'a wgpu::Buffer,
+    gradients: &'a wgpu::Buffer,
+    weights: &'a wgpu::Buffer,
+    patch_sums: &'a wgpu::Buffer,
+    models: &'a wgpu::Buffer,
+}
+
+struct PreparedDirectionBinding<D: PisDirection> {
+    level: Level,
+    source_image: u32,
+    target_image: u32,
+    source_mask: u32,
+    target_mask: u32,
+    gradient: u32,
+    weight: u32,
+    patch_sum: u32,
+    model: u32,
+    direction: PhantomData<D>,
+}
+
+struct PreparedPairBindings<'a> {
+    resources: PreparedResources<'a>,
+    a: PreparedDirectionBinding<AtoB>,
+    b: PreparedDirectionBinding<BtoA>,
+}
+
+impl<'a> PreparedPairBindings<'a> {
+    fn new<K>(
+        frame: &'a GpuPreparedFrame<K>,
+        flight: &GpuPisFlight,
+        level: Level,
+    ) -> Fallible<Self> {
+        let shared = match level {
+            Level::One => &frame.shared_level_one,
+            Level::Two => &frame.shared_level_two,
+        };
+        if shared.level() != level {
+            return Err(format!(
+                "ONE X2 direct GPU PIS shared binding is {}, expected {level}",
+                shared.level()
+            )
+            .into());
+        }
+        let a = match level {
+            Level::One => &frame.a_to_b.level_one,
+            Level::Two => &frame.a_to_b.level_two,
+        };
+        let b = match level {
+            Level::One => &frame.b_to_a.level_one,
+            Level::Two => &frame.b_to_a.level_two,
+        };
+        Ok(Self {
+            resources: PreparedResources {
+                images: frame.shared_images(),
+                masks: frame.shared_masks(),
+                gradients: frame.gradients(),
+                weights: frame.raw_weights(),
+                patch_sums: frame.patch_weight_sums(),
+                models: frame.models(),
+            },
+            a: prepared_direction_binding::<AtoB>(flight, level, shared, a)?,
+            b: prepared_direction_binding::<BtoA>(flight, level, shared, b)?,
+        })
+    }
+}
+
+fn prepared_direction_binding<D: PisDirection>(
+    flight: &GpuPisFlight,
+    level: Level,
+    shared: &crate::flow::one_xs::pis_frontend_gpu::GpuSharedLevel,
+    direction: &GpuPreparedLevel<D>,
+) -> Fallible<PreparedDirectionBinding<D>> {
+    let receipt = direction.receipt();
+    if receipt.flight != *flight || receipt.direction != D::DIRECTION || receipt.level != level {
+        return Err(format!(
+            "ONE X2 direct GPU PIS prepared receipt is {:?}, expected flight {:?}, direction {}, level {level}",
+            receipt, flight, D::DIRECTION
+        )
+        .into());
+    }
+    let (source_image, target_image) = match D::DIRECTION {
+        Direction::AtoB => (shared.image_a_bytes(), shared.image_b_bytes()),
+        Direction::BtoA => (shared.image_b_bytes(), shared.image_a_bytes()),
+    };
+    Ok(PreparedDirectionBinding {
+        level,
+        source_image: range_word_base(source_image, level.pixels(), "source image")?,
+        target_image: range_word_base(target_image, level.pixels(), "target image")?,
+        // Native swaps images for B-to-A but deliberately retains physical
+        // mask slots A then B for both directions.
+        source_mask: range_word_base(shared.mask_a_bytes(), level.pixels(), "source mask")?,
+        target_mask: range_word_base(shared.mask_b_bytes(), level.pixels(), "target mask")?,
+        gradient: range_word_base(direction.gradient_bytes(), 2 * level.pixels(), "gradient")?,
+        weight: range_word_base(direction.weight_bytes(), level.pixels(), "weight")?,
+        patch_sum: range_word_base(
+            direction.patch_weight_sum_bytes(),
+            level.patches(),
+            "patch sum",
+        )?,
+        model: range_word_base(direction.model_bytes(), 5 * level.patches(), "source model")?,
+        direction: PhantomData,
+    })
+}
+
+fn range_word_base(
+    range: std::ops::Range<u64>,
+    expected_words: usize,
+    name: &'static str,
+) -> Fallible<u32> {
+    let expected_bytes = u64::try_from(expected_words)
+        .ok()
+        .and_then(|words| words.checked_mul(4))
+        .ok_or_else(|| format!("ONE X2 direct GPU PIS {name} span is too large"))?;
+    if range.start % 4 != 0 || range.end.checked_sub(range.start) != Some(expected_bytes) {
+        return Err(format!(
+            "ONE X2 direct GPU PIS {name} range is {}..{}, expected {expected_bytes} aligned bytes",
+            range.start, range.end
+        )
+        .into());
+    }
+    u32::try_from(range.start / 4)
+        .map_err(|_| format!("ONE X2 direct GPU PIS {name} base exceeds u32").into())
+}
+
+fn validate_direct_stage(receipt: PairSolveStage, request: PairSolveStage) -> Fallible<()> {
+    if receipt != request {
+        return Err(format!(
+            "ONE X2 direct GPU PIS receipt names {receipt}, but its request names {request}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn validate_direct_stage_for_test(
+    receipt: PairSolveStage,
+    request: PairSolveStage,
+) -> Fallible<()> {
+    validate_direct_stage(receipt, request)
 }
 
 impl GpuPisPipeline {
     /// Build and qualify the actual production shader entry on this device.
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<Self> {
         Self::from_shader(device, queue, SHADER, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_shader_for_direct_test(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shader: &str,
+    ) -> Fallible<Self> {
+        Self::from_shader(device, queue, shader, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validate_prepared_for_test<K>(
+        frame: &GpuPreparedFrame<K>,
+        flight: &GpuPisFlight,
+        level: Level,
+    ) -> Fallible<()> {
+        PreparedPairBindings::new(frame, flight, level).map(|_| ())
     }
 
     /// Solve one scalar transaction stage while preserving its outer receipt.
@@ -351,6 +581,51 @@ impl GpuPisPipeline {
         Ok(GpuPisStageOutput { receipt, grids })
     }
 
+    /// Bind one immutable prepared frame directly into the paired kernel.
+    ///
+    /// This standalone entry is deliberately not selected by `Scene` yet.
+    /// It consumes and returns the frame token so the same allocation and its
+    /// single resident lease must cross every cold/warm stage. Only the
+    /// terminal grids cross back into CPU memory.
+    pub(crate) fn solve_prepared<K>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        prepared: GpuPreparedFrame<K>,
+        receipt: GpuPisStageReceipt,
+        request: GpuPisDynamicStage,
+    ) -> Fallible<GpuPreparedStageOutput<K>> {
+        validate_direct_stage(receipt.stage, request.stage)?;
+        let level = request.stage.level();
+        let bindings = PreparedPairBindings::new(&prepared, &receipt.flight, level)?;
+        let a = PackedInput::new_prepared(bindings.a, request.a_to_b, false)?;
+        let b = PackedInput::new_prepared(bindings.b, request.b_to_a, false)?;
+        let terminal =
+            self.dispatch_prepared_pair(device, queue, PackedPair::new(a, b)?, bindings.resources)?;
+        let terminal = terminal.into_patch_grids()?;
+        let grids = ScalarPairedPatchGrids {
+            a_to_b: StampedPatchGrid::new(
+                SolveStamp {
+                    direction: Direction::AtoB,
+                    stage: request.stage,
+                },
+                terminal.a_to_b,
+            ),
+            b_to_a: StampedPatchGrid::new(
+                SolveStamp {
+                    direction: Direction::BtoA,
+                    stage: request.stage,
+                },
+                terminal.b_to_a,
+            ),
+        };
+        Ok(GpuPreparedStageOutput {
+            receipt,
+            grids,
+            prepared,
+        })
+    }
+
     fn from_shader(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -369,7 +644,17 @@ impl GpuPisPipeline {
         };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ONE X2 paired GPU PIS"),
-            entries: &[storage(0, true), storage(1, true), storage(2, false)],
+            entries: &[
+                storage(0, true),
+                storage(1, true),
+                storage(2, false),
+                storage(3, true),
+                storage(4, true),
+                storage(5, true),
+                storage(6, true),
+                storage(7, true),
+                storage(8, true),
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ONE X2 paired GPU PIS"),
@@ -388,7 +673,17 @@ impl GpuPisPipeline {
             compilation_options: Default::default(),
             cache: None,
         });
-        let built = Self { pipeline, layout };
+        let oracle_placeholder = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 GPU PIS oracle prepared-binding placeholder"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let built = Self {
+            pipeline,
+            layout,
+            oracle_placeholder,
+        };
         if qualify {
             built.qualify(device, queue)?;
         }
@@ -502,6 +797,30 @@ impl GpuPisPipeline {
                     binding: 2,
                     resource: output.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.oracle_placeholder.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.oracle_placeholder.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.oracle_placeholder.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.oracle_placeholder.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.oracle_placeholder.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.oracle_placeholder.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -510,6 +829,125 @@ impl GpuPisPipeline {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ONE X2 paired GPU PIS direction"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &resources, &[]);
+            pass.dispatch_workgroups(2, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output_size);
+        let submission = queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (mapped, answer) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = mapped.send(result);
+        });
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })?;
+        answer.recv()??;
+        let bytes = slice.get_mapped_range();
+        let words = bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        drop(bytes);
+        readback.unmap();
+        Ok(PairedTerminalBits {
+            a_to_b: decode_terminal(
+                packed.level,
+                &words[packed.a_output_base..packed.a_output_base + packed.output_span],
+                packed.diagnostic_words,
+            )?,
+            b_to_a: decode_terminal(
+                packed.level,
+                &words[packed.b_output_base..packed.b_output_base + packed.output_span],
+                packed.diagnostic_words,
+            )?,
+        })
+    }
+
+    fn dispatch_prepared_pair(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        packed: PackedPair,
+        prepared: PreparedResources<'_>,
+    ) -> Fallible<PairedTerminalBits> {
+        let u32_buffer = upload(
+            device,
+            queue,
+            "ONE X2 direct GPU PIS dynamic u32 input",
+            u32_bytes(&packed.u32s),
+        );
+        let f32_buffer = upload(
+            device,
+            queue,
+            "ONE X2 direct GPU PIS dynamic f32 input",
+            f32_bytes(&packed.f32s),
+        );
+        let output_size = (packed.output_words * 4) as u64;
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 direct GPU PIS terminal bits"),
+            size: output_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 direct GPU PIS terminal readback"),
+            size: output_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let resources = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 direct GPU PIS resources"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: u32_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: f32_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: prepared.images.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: prepared.masks.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: prepared.gradients.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: prepared.weights.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: prepared.patch_sums.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: prepared.models.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 direct paired GPU PIS"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ONE X2 direct paired GPU PIS direction"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
@@ -1064,6 +1502,112 @@ fn decode_terminal<D: PisDirection>(
 }
 
 impl<D: PisDirection> PackedInput<D> {
+    fn new_prepared(
+        binding: PreparedDirectionBinding<D>,
+        dynamic: GpuPisDynamicDirection<D>,
+        qualification_probes: bool,
+    ) -> Fallible<Self> {
+        let GpuPisDynamicDirection {
+            cost_modes,
+            initial,
+            hint,
+            admission,
+            disparity,
+        } = dynamic;
+        let level = binding.level;
+        if cost_modes.len() != level.patch_rows() {
+            return Err(format!(
+                "ONE X2 direct GPU PIS {} {level} has {} cost modes, expected {}",
+                D::DIRECTION,
+                cost_modes.len(),
+                level.patch_rows()
+            )
+            .into());
+        }
+        if initial.level != level {
+            return Err(format!(
+                "ONE X2 direct GPU PIS {} initial grid is {}, expected {level}",
+                D::DIRECTION,
+                initial.level
+            )
+            .into());
+        }
+        if let Some(hint) = &hint
+            && hint.level != level
+        {
+            return Err(format!(
+                "ONE X2 direct GPU PIS {} hint grid is {}, expected {level}",
+                D::DIRECTION,
+                hint.level
+            )
+            .into());
+        }
+
+        let mut u32s = vec![0; HEADER_WORDS];
+        u32s[0] = level.rows() as u32;
+        u32s[1] = level.cols() as u32;
+        u32s[2] = level.patch_rows() as u32;
+        u32s[3] = level.patch_cols() as u32;
+        u32s[4] = level.pixels() as u32;
+        u32s[5] = level.patches() as u32;
+        u32s[6] = u32::from(hint.is_some());
+        u32s[7] = u32::from(disparity.is_some());
+        u32s[8] = u32::from(admission.admits());
+        u32s[9] = binding.source_image;
+        u32s[10] = binding.target_image;
+        u32s[11] = binding.source_mask;
+        u32s[12] = binding.target_mask;
+        u32s[13] = u32s.len() as u32;
+        u32s.extend(cost_modes.iter().map(|mode| match mode {
+            CostMode::Unweighted => 0,
+            CostMode::Weighted => 1,
+        }));
+        u32s[14] = binding.gradient;
+        u32s[15] = binding.gradient;
+        u32s[16] = binding.weight;
+        u32s[17] = binding.patch_sum;
+        u32s[21] = binding.model;
+        u32s[22] = u32s.len() as u32;
+        u32s.push(0);
+        u32s[29] = u32::from(qualification_probes);
+        u32s[30] = 1;
+
+        let mut f32s = Vec::with_capacity(4 * level.patches() + 4);
+        u32s[18] = f32s.len() as u32;
+        for flow in &initial.flows {
+            f32s.extend([flow.dcol(), flow.drow()]);
+        }
+        u32s[19] = f32s.len() as u32;
+        if let Some(hint) = &hint {
+            for flow in &hint.flows {
+                f32s.extend([flow.dcol(), flow.drow()]);
+            }
+        } else {
+            f32s.extend(std::iter::repeat_n(0.0, 2 * level.patches()));
+        }
+        u32s[20] = f32s.len() as u32;
+        if let Some(disparity) = disparity {
+            f32s.extend([
+                disparity.first[0],
+                disparity.first[1],
+                disparity.second[0],
+                disparity.second[1],
+            ]);
+        } else {
+            f32s.extend([0.0; 4]);
+        }
+        u32s[23] = u32s.len() as u32;
+        u32s[25] = f32s.len() as u32;
+        u32s[27] = f32s.len() as u32;
+        Ok(Self {
+            level,
+            u32s,
+            f32s,
+            qualification_probes,
+            direction: PhantomData,
+        })
+    }
+
     fn new(
         input: &Input<D>,
         initial: InitialGrid<D>,
@@ -1416,6 +1960,9 @@ fn initial_grid<D: PisDirection>(level: Level, flows: &[Flow]) -> InitialGrid<D>
 }
 
 const SHADER: &str = include_str!("pis.wgsl");
+
+#[cfg(test)]
+pub(crate) const DIRECT_TEST_SHADER: &str = SHADER;
 
 #[cfg(test)]
 mod tests {

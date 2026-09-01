@@ -3,6 +3,39 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Direct GPU-prepared PIS binding checkpoint, 2026-09-01, implementation
+branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS EXACT ON TARGET RADV; KNOWN
+RESIDENT-LIFETIME BLOCKER REMAINS; NO SCENE OR OWNERSHIP-READINESS CLAIM]:** the
+qualified paired GPU PIS kernel now has a standalone entry that binds one
+`GpuPreparedFrame` directly. It binds each immutable prepared allocation as a
+whole storage buffer and carries sealed word bases in the per-direction stage
+header, so the unaligned logical ranges are never used as wgpu binding
+offsets. Only cost modes, initial grids, optional hints, descent admission and
+the selected disparity interval are uploaded per stage. Images, physical
+masks, gradients, raw weights, rolling patch sums and five-word source models
+are neither reconstructed nor uploaded by this adapter. The readable CPU
+`Input` entry remains the oracle and the existing selected Scene path is
+unchanged; there is no direct-path CPU fallback.
+
+The direct terminal value owns and returns the same non-cloneable prepared
+frame token so one allocation can cross all cold and warm stages without
+detaching its flight. The current base commit still carries the known resident
+submission-lifetime blocker: this checkpoint does not yet advance and
+acknowledge the single producer lease at exact terminal completion, and it is
+therefore not Scene-ready or ownership-ready.
+
+One integrated target-device qualification creates a resident producer and
+complete front end once, then compares exact terminal component bits at level
+two and level one for both directions with asymmetric weighted rows, hints,
+admission and disparity intervals. It reuses the same prepared frame across
+both stages. Planted direction, flight, stage and logical-range mutations are
+refused before dispatch, and a shader-level prepared image/mask buffer swap is
+observably different at the terminal comparison. The fixture caught and
+corrected one binding error during implementation: native swaps the images for
+B-to-A but deliberately retains physical mask slots A then B for both
+directions. This is a bounded adapter and qualification result, not a
+performance, range, Studio-internal, Scene, lifetime or merge-readiness claim.
+
 **GPU-resident estimator front-end checkpoint, 2026-09-01, implementation
 branch only [A-TO-B LEVEL TWO ONLY; TARGET-GPU GATE PASSED; NO SCENE WIRING OR
 PERFORMANCE CLAIM]:** the GPU solver-belt producer now has

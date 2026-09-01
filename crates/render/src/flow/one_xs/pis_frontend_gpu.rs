@@ -1196,8 +1196,18 @@ fn prepare_l1_aux(@builtin(global_invocation_id) id: vec3<u32>) {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::time::Duration;
 
     use super::*;
+    use crate::flow::one_xs::pis::gpu::{
+        DIRECT_TEST_SHADER, GpuPisDynamicDirection, GpuPisDynamicStage, GpuPisPipeline,
+        GpuPisStageReceipt, validate_direct_stage_for_test,
+    };
+    use crate::flow::one_xs::pis::{CostMode, DescentAdmission, Flow, HintGrid, InitialGrid};
+    use crate::flow::one_xs::scalar::PairSolveStage;
+    use crate::flow::one_xs_belt::{RetainedBaseMaps, SourceImage, sample_source_belts};
+    use crate::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, SourceTextures};
+    use kjerag_media::FrameStamp;
 
     #[test]
     fn fixture_exercises_every_source_model_component() {
@@ -1240,6 +1250,351 @@ mod tests {
         GpuPisFrontEnd::new(&device, &queue).unwrap_or_else(|error| {
             panic!("ONE X2 GPU prepared-source front end failed on {adapter}: {error}")
         });
+    }
+
+    #[test]
+    fn direct_bound_pis_matches_both_levels_and_directions_on_one_frame() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                );
+                eprintln!("skipping direct-bound ONE X2 GPU PIS twin: {why}");
+                return;
+            }
+        };
+        let rows = 128;
+        let cols = 256;
+        let source = |salt: usize| {
+            SourceImage::from_compact(
+                rows,
+                cols,
+                (0..rows * cols)
+                    .map(|at| ((37 * at + 19 * (at / cols) + 53 * salt) & 255) as u8)
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let sources = LensPair {
+            a: source(1),
+            b: source(2),
+        };
+        let maps = RetainedBaseMaps::from_lenses(LensPair {
+            a: (0..ROWS * COLS)
+                .map(|at| {
+                    let row = at / COLS;
+                    let col = at % COLS;
+                    [
+                        (3.25 + 0.71 * col as f32) / cols as f32,
+                        (2.75 + 0.093 * row as f32) / rows as f32,
+                    ]
+                })
+                .collect(),
+            b: (0..ROWS * COLS)
+                .map(|at| {
+                    let row = at / COLS;
+                    let col = at % COLS;
+                    [
+                        (7.5 + 0.63 * col as f32) / cols as f32,
+                        (5.0 + 0.087 * row as f32) / rows as f32,
+                    ]
+                })
+                .collect(),
+        })
+        .unwrap();
+        let texture = |label, source: &SourceImage| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: cols as u32,
+                    height: rows as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                texture.as_image_copy(),
+                source.pixels(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(cols as u32),
+                    rows_per_image: Some(rows as u32),
+                },
+                texture.size(),
+            );
+            texture
+        };
+        let texture_a = texture("direct-bound PIS A", &sources.a);
+        let texture_b = texture("direct-bound PIS B", &sources.b);
+        let (_, masks) = qualification_fixture();
+        let blurred = super::super::temporal::gaussian_blur(
+            &sample_source_belts(&sources, &maps).reduce_area_3x3(),
+        );
+        let retained = ColdInputs::from_blurred_belts_and_masks(blurred, masks.clone());
+        let pyramid = MaskPyramid::build(&retained);
+        let flight = GpuPisFlight {
+            generation: 41,
+            frame: FrameStamp::for_test(17, Duration::from_millis(567), None),
+        };
+        let belt_pipeline = GpuSolverBeltPipeline::new(&device, &queue)
+            .unwrap_or_else(|error| panic!("GPU belt qualification failed on {adapter}: {error}"));
+        let resident = belt_pipeline
+            .submit_resident_retained(
+                &device,
+                &queue,
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                &maps,
+                (),
+                flight.clone(),
+            )
+            .unwrap();
+        let front_end = GpuPisFrontEnd::new(&device, &queue).unwrap_or_else(|error| {
+            panic!("GPU prepared-source qualification failed on {adapter}: {error}")
+        });
+        let mut prepared = front_end
+            .prepare(&device, &queue, resident, &masks)
+            .unwrap();
+        GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).unwrap();
+        prepared.a_to_b.level_two.receipt.direction = Direction::BtoA;
+        assert!(
+            GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).is_err(),
+            "direction mutation entered the direct kernel"
+        );
+        prepared.a_to_b.level_two.receipt.direction = Direction::AtoB;
+        let saved_flight = prepared.b_to_a.level_two.receipt.flight.clone();
+        prepared.b_to_a.level_two.receipt.flight.generation += 1;
+        assert!(
+            GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).is_err(),
+            "flight mutation entered the direct kernel"
+        );
+        prepared.b_to_a.level_two.receipt.flight = saved_flight;
+        prepared.a_to_b.level_two.model_bytes.start += 4;
+        assert!(
+            GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).is_err(),
+            "prepared range mutation entered the direct kernel"
+        );
+        prepared.a_to_b.level_two.model_bytes.start -= 4;
+        assert!(
+            validate_direct_stage_for_test(
+                PairSolveStage::Cold {
+                    calculation: 0,
+                    level: Level::Two,
+                },
+                PairSolveStage::Cold {
+                    calculation: 1,
+                    level: Level::Two,
+                },
+            )
+            .is_err(),
+            "stage mutation entered the direct kernel"
+        );
+        let pis = GpuPisPipeline::new(&device, &queue)
+            .unwrap_or_else(|error| panic!("GPU PIS qualification failed on {adapter}: {error}"));
+
+        for (ordinal, level) in [Level::Two, Level::One].into_iter().enumerate() {
+            let a_modes = (0..level.patch_rows())
+                .map(|row| {
+                    if row % 3 == 0 {
+                        CostMode::Weighted
+                    } else {
+                        CostMode::Unweighted
+                    }
+                })
+                .collect::<Vec<_>>();
+            let b_modes = (0..level.patch_rows())
+                .map(|row| {
+                    if row % 4 < 2 {
+                        CostMode::Unweighted
+                    } else {
+                        CostMode::Weighted
+                    }
+                })
+                .collect::<Vec<_>>();
+            let a_input = LevelInputs::build::<AtoB>(&retained, &pyramid, level)
+                .input::<AtoB>(level, a_modes)
+                .0;
+            let b_input = LevelInputs::build::<BtoA>(&retained, &pyramid, level)
+                .input::<BtoA>(level, b_modes)
+                .0;
+            let flows = |salt: usize| {
+                (0..level.patches())
+                    .map(|patch| {
+                        Flow::new(
+                            ((7 * patch + salt) % 17) as f32 / 8.0 - 1.0,
+                            ((11 * patch + 3 * salt) % 19) as f32 / 9.0 - 1.0,
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let a_seed = flows(1 + ordinal);
+            let b_seed = flows(3 + ordinal);
+            let a_hint_flows = flows(5 + ordinal);
+            let b_hint_flows = flows(7 + ordinal);
+            let a_uses_hint = ordinal == 0;
+            let b_uses_hint = ordinal != 0;
+            let a_admission = if ordinal == 0 {
+                DescentAdmission::EveryPatch
+            } else {
+                DescentAdmission::NoPatches
+            };
+            let b_admission = if ordinal == 0 {
+                DescentAdmission::NoPatches
+            } else {
+                DescentAdmission::EveryPatch
+            };
+            let expected_a = super::super::pis::solve_with_descent_admission(
+                &a_input,
+                InitialGrid::from_test_row_major(level, a_seed.clone()).unwrap(),
+                a_uses_hint
+                    .then(|| HintGrid::from_row_major(level, a_hint_flows.clone()).unwrap())
+                    .as_ref(),
+                a_admission,
+            )
+            .unwrap();
+            let expected_b = super::super::pis::solve_with_descent_admission(
+                &b_input,
+                InitialGrid::from_test_row_major(level, b_seed.clone()).unwrap(),
+                b_uses_hint
+                    .then(|| HintGrid::from_row_major(level, b_hint_flows.clone()).unwrap())
+                    .as_ref(),
+                b_admission,
+            )
+            .unwrap();
+            let stage = PairSolveStage::Cold {
+                calculation: ordinal,
+                level,
+            };
+            if ordinal == 0 {
+                let swapped_shader = DIRECT_TEST_SHADER.replacen(
+                    "return f32(prepared_images[offset + row * cols() + col]);",
+                    "return f32(prepared_masks[offset + row * cols() + col]);",
+                    1,
+                );
+                assert_ne!(swapped_shader, DIRECT_TEST_SHADER);
+                let swapped =
+                    GpuPisPipeline::from_shader_for_direct_test(&device, &queue, &swapped_shader)
+                        .unwrap();
+                let output = swapped
+                    .solve_prepared(
+                        &device,
+                        &queue,
+                        prepared,
+                        GpuPisStageReceipt {
+                            flight: flight.clone(),
+                            stage,
+                        },
+                        GpuPisDynamicStage {
+                            stage,
+                            a_to_b: GpuPisDynamicDirection::from_oracle(
+                                &a_input,
+                                InitialGrid::from_test_row_major(level, a_seed.clone()).unwrap(),
+                                a_uses_hint.then(|| {
+                                    HintGrid::from_row_major(level, a_hint_flows.clone()).unwrap()
+                                }),
+                                a_admission,
+                            ),
+                            b_to_a: GpuPisDynamicDirection::from_oracle(
+                                &b_input,
+                                InitialGrid::from_test_row_major(level, b_seed.clone()).unwrap(),
+                                b_uses_hint.then(|| {
+                                    HintGrid::from_row_major(level, b_hint_flows.clone()).unwrap()
+                                }),
+                                b_admission,
+                            ),
+                        },
+                    )
+                    .unwrap();
+                let (_, swapped_bits, returned) = output.into_parts();
+                let differs = swapped_bits
+                    .a_to_b
+                    .grid
+                    .patches()
+                    .iter()
+                    .zip(expected_a.patches())
+                    .any(|(actual, expected)| {
+                        actual.flow().dcol().to_bits() != expected.flow().dcol().to_bits()
+                            || actual.flow().drow().to_bits() != expected.flow().drow().to_bits()
+                    })
+                    || swapped_bits
+                        .b_to_a
+                        .grid
+                        .patches()
+                        .iter()
+                        .zip(expected_b.patches())
+                        .any(|(actual, expected)| {
+                            actual.flow().dcol().to_bits() != expected.flow().dcol().to_bits()
+                                || actual.flow().drow().to_bits()
+                                    != expected.flow().drow().to_bits()
+                        });
+                assert!(differs, "prepared image/mask buffer swap was not detected");
+                prepared = returned;
+            }
+            let output = pis
+                .solve_prepared(
+                    &device,
+                    &queue,
+                    prepared,
+                    GpuPisStageReceipt {
+                        flight: flight.clone(),
+                        stage,
+                    },
+                    GpuPisDynamicStage {
+                        stage,
+                        a_to_b: GpuPisDynamicDirection::from_oracle(
+                            &a_input,
+                            InitialGrid::from_test_row_major(level, a_seed).unwrap(),
+                            a_uses_hint
+                                .then(|| HintGrid::from_row_major(level, a_hint_flows).unwrap()),
+                            a_admission,
+                        ),
+                        b_to_a: GpuPisDynamicDirection::from_oracle(
+                            &b_input,
+                            InitialGrid::from_test_row_major(level, b_seed).unwrap(),
+                            b_uses_hint
+                                .then(|| HintGrid::from_row_major(level, b_hint_flows).unwrap()),
+                            b_admission,
+                        ),
+                    },
+                )
+                .unwrap();
+            let (_, actual, returned) = output.into_parts();
+            fn assert_terminal<D: PisDirection>(
+                direction: &str,
+                level: Level,
+                actual: &super::super::pis::PatchGrid<D>,
+                expected: &super::super::pis::PatchGrid<D>,
+            ) {
+                for (patch, (actual, expected)) in
+                    actual.patches().iter().zip(expected.patches()).enumerate()
+                {
+                    assert_eq!(
+                        [
+                            actual.flow().dcol().to_bits(),
+                            actual.flow().drow().to_bits()
+                        ],
+                        [
+                            expected.flow().dcol().to_bits(),
+                            expected.flow().drow().to_bits()
+                        ],
+                        "{direction} {level} patch {patch} terminal bits"
+                    );
+                }
+            }
+            assert_terminal("A-to-B", level, &actual.a_to_b.grid, &expected_a);
+            assert_terminal("B-to-A", level, &actual.b_to_a.grid, &expected_b);
+            prepared = returned;
+        }
     }
 
     #[test]
