@@ -3,6 +3,36 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Context-bound GPU ONE X2 retained geometry, 2026-09-01, implementation
+branch only [UNSELECTED; NO SCENE WIRING; SEALED TRANSITION PENDING]:** the
+shared `OneXsGpuContext` now owns a correctness-first geometry pipeline for
+both 1,080-by-60 periodic map merges, the selected directional continuity
+filters, physical validity seed, 9-by-9 erosion and A/B mask unification.
+Static line coordinates upload once. The temporary input boundary uploads the
+two CPU-built 100-by-200 parent maps into private token-owned storage; the
+incoming resident-parent producer can replace only that private owner and
+binding without changing any geometry arithmetic or downstream layout.
+
+The output is one non-cloneable opaque encoded token containing its exact GPU
+context, unfinished command encoder, full frame flight, both parent preimages,
+both retained float2 maps, both physical masks and all bind groups. It exposes
+no raw buffer, queue, submission index, detached flight or ordinary completion
+hook. The geometry stage neither submits nor creates a competing lease. Its
+ordinary handoff intentionally remains unwired until the audited consuming
+producer-to-frontend transition replaces the rejected separable resident
+hooks. This also keeps the token available for future belt sampling and final
+materialization ownership rather than dropping it at the PIS frontend.
+
+The physical masks use the frontend's exact packed layout: four U8 codes per
+word, lens A then lens B, followed by its explicit runtime-zero word. No later
+consumer needs a mask reupload or layout conversion. Construction compares
+every retained float word and packed mask word with the selected CPU oracle on
+the actual adapter, including signed zero, exceptional parent payloads,
+periodic edges and the native ordered FMA schedule. Four live shader mutations
+cover FMA operand association, the strict directional threshold, erosion
+radius and lens unification. This checkpoint makes no playback, performance,
+Studio-parity, owner-eye or final ownership-readiness claim.
+
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
 READINESS CLAIM]:** the qualified paired GPU PIS kernel has a concrete
