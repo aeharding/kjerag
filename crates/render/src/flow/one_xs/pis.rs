@@ -30,6 +30,13 @@ use std::sync::Arc;
 
 use super::{COLS, Direction, LensPair, PATCH_SIZE, PATCH_STRIDE, ROWS};
 
+/// Correctness-qualified GPU execution of the paired sparse search boundary.
+///
+/// This remains render-internal until the production Scene transaction is
+/// ready to qualify the complete estimator handoff.
+#[allow(dead_code)]
+pub(crate) mod gpu;
+
 /// The finite score native PIS uses when a candidate has at most eight taps.
 pub const SENTINEL_SCORE: f32 = 1.0e10;
 
@@ -1094,7 +1101,7 @@ pub fn solve<D: PisDirection>(
 /// decision for individual spatial regions. The selected ONE X2 capture has
 /// an authenticated empty table, so its decision is uniform for one solve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DescentAdmission {
+pub(crate) enum DescentAdmission {
     EveryPatch,
     NoPatches,
 }
