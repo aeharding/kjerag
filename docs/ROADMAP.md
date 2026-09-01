@@ -3,6 +3,29 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Backend-neutral paired scheduler boundary, 2026-09-01, implementation
+branch only [CPU ORACLE IDENTITY; NO NEW GPU FRONTEND; NO PERFORMANCE CLAIM]:**
+cold and warm scheduling now consume a `PairedControlInputs` frame containing
+only data used after or around sparse solving: the current blurred belts,
+shared physical L1/L2 image views, typed lack-row classifications and one
+physical-mask block map. PIS gradients, raw weights, masks, rolling patch sums
+and source models are absent. `PairedSolveRequest` remains dynamic-only, and
+the plain `PairedPisSolver` boundary is used through `ColdPair`, `WarmPair`,
+`PairOwner`, `FrameOwner` and the capture reservation. CPU oracle sessions are
+constructed with their CPU-only PIS preparation; there is no default, optional
+or rebinding state. A future resident GPU session can instead own its device
+frame and enter the same prepared schedule without receiving or constructing
+CPU PIS preparation, and without a backend enum in `pis::Input`.
+
+The selected Scene GPU PIS frontend is intentionally unchanged in this
+checkpoint: it still constructs CPU planes for its existing upload-backed
+kernel before constructing that adapter. This is retained behavior, not the
+new resident frontend and not a second production solve. Complete six-stage
+cold plus two-stage warm output and retained-owner bytes match the CPU oracle;
+all injected stage failures, stamps, panics and receipt mismatches retain the
+exact retryable owner and ready-map allocations. No target-GPU workload or
+performance measurement was run for this scheduler-only refactor.
+
 **Shared ONE X2 GPU context foundation, 2026-09-01, implementation branch
 only [STRUCTURAL OWNERSHIP; NO NEW RESIDENT STAGE; NO PERFORMANCE OR PARITY
 CLAIM]:** the renderer now retains the exact iced device and queue as one
@@ -106,9 +129,10 @@ typed prepared source models as the temporary producer boundary, then consume
 only fallibly admitted directional `PatchGrid` results from the GPU kernel.
 Each reservation mints an exact generation plus opaque `FrameStamp`; each
 stage completion must return that complete flight and `PairSolveStage` before
-the typed grids can enter `commit_with_solver`. Pipeline, readback, receipt and
-solver-stamp failures occur before commit, surface their original error and
-restore the allocation-identical old owner and ready map without a CPU retry.
+the typed grids can enter `commit_prepared_with_solver`. Pipeline, readback,
+receipt and solver-stamp failures occur before commit, surface their original
+error and restore the allocation-identical old owner and ready map without a
+CPU retry.
 An install failure occurs after the scalar owner has advanced, so it instead
 keeps the prior ready display and makes the lineage terminal while retaining
 the advanced owner only in its exact slot or quarantine. It does not falsely

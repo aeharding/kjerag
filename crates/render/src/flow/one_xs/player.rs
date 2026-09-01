@@ -28,8 +28,9 @@ use super::map_patch::{self, BaseMap, BilateralInputs, Census, FlowMap, Preimage
 use super::owner::{AdvanceFailure, Continuity, PairOwner, PairPosition, Phase};
 use super::resources::{OneXsResources, ResourceError};
 #[cfg(test)]
-use super::scalar::CpuPairedPisSolver;
-use super::scalar::{ColdInputs, PairSolveError, PairedPisSolver, WorkRowCounts};
+use super::scalar::{ColdInputs, ColdPreparedSchedule};
+use super::scalar::{PairSolveError, PairedControlInputs, PairedPisSolver, WorkRowCounts};
+#[cfg(test)]
 use super::temporal::BlurredBelts;
 #[cfg(test)]
 use super::temporal::gaussian_blur;
@@ -68,6 +69,10 @@ impl PreparedFrame {
     /// The exact retained maps from which a CPU or GPU belt producer samples.
     pub(crate) fn retained_base_maps(&self) -> &RetainedBaseMaps {
         &self.retained
+    }
+
+    pub(crate) fn masks(&self) -> &LensPair<Vec<u8>> {
+        &self.masks
     }
 
     /// Replace only the opaque delivery identity for capture-transaction
@@ -218,7 +223,12 @@ impl FrameOwner {
         prepared: PreparedFrame,
         blurred_belts: BlurredBelts,
     ) -> Result<FrameResult, FrameOwnerError> {
-        match self.commit_with_solver(prepared, blurred_belts, &mut CpuPairedPisSolver) {
+        let input = ColdInputs::from_blurred_belts_and_masks(blurred_belts, prepared.masks.clone());
+        let ColdPreparedSchedule {
+            controls,
+            mut solver,
+        } = ColdPreparedSchedule::from_cpu(&input);
+        match self.commit_prepared_with_solver(prepared, controls, &mut solver) {
             Ok(result) => Ok(result),
             Err(FrameCommitError::Owner(error)) => Err(error),
             Err(FrameCommitError::Solver(PairSolveError::Solver { source, .. })) => match source {},
@@ -234,10 +244,10 @@ impl FrameOwner {
     /// numeric owner is restored exactly when any cold or warm solver call, or
     /// any returned solver stamp, fails. A caller can therefore roll its outer
     /// capture reservation back and retry the same decoded delivery.
-    pub(crate) fn commit_with_solver<S: PairedPisSolver>(
+    pub(crate) fn commit_prepared_with_solver<S: PairedPisSolver>(
         &mut self,
         prepared: PreparedFrame,
-        blurred_belts: BlurredBelts,
+        controls: PairedControlInputs,
         solver: &mut S,
     ) -> Result<FrameResult, FrameCommitError<S::Error>> {
         self.validate_delivery(&prepared.frame)
@@ -246,12 +256,10 @@ impl FrameOwner {
             frame,
             patch_base,
             preimage,
-            masks,
+            masks: _,
             camera_mask,
             ..
         } = prepared;
-
-        let input = ColdInputs::from_blurred_belts_and_masks(blurred_belts, masks);
 
         // Keep the retained estimator installed while the injected solver is
         // fallible. A warm success produces a distinct next owner; a failure
@@ -259,13 +267,13 @@ impl FrameOwner {
         let position = PairPosition::new(&self.continuity, frame.index());
         let step = match &self.state {
             State::NeedFrameZero => {
-                match PairOwner::try_start_with_solver(position, input, solver) {
+                match PairOwner::try_start_prepared(position, &controls, solver) {
                     Ok(step) => step,
-                    Err(failed) => return Err(FrameCommitError::Solver(failed.source)),
+                    Err(error) => return Err(FrameCommitError::Solver(error)),
                 }
             }
             State::Running { estimator, .. } => {
-                match estimator.try_advance_borrowed_with_solver(&position, &input, solver) {
+                match estimator.try_advance_prepared_borrowed(&position, &controls, solver) {
                     Ok(step) => step,
                     Err(reason) => {
                         return Err(match reason {

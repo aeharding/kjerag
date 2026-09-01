@@ -21,8 +21,8 @@ use super::{
 };
 use crate::Fallible;
 use crate::flow::one_xs::scalar::{
-    PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids, PairedSolveRequest, SolveStamp,
-    StampedPatchGrid,
+    CpuPisOracleInputs, PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids,
+    PairedSolveRequest, SolveStamp, StampedPatchGrid,
 };
 
 const HEADER_WORDS: usize = 32;
@@ -306,6 +306,7 @@ impl GpuPisPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         receipt: GpuPisStageReceipt,
+        prepared: &CpuPisOracleInputs,
         request: PairedSolveRequest,
     ) -> Fallible<GpuPisStageOutput> {
         if receipt.stage != request.stage {
@@ -320,13 +321,16 @@ impl GpuPisPipeline {
             a_to_b,
             b_to_a,
         } = request;
+        let level = stage.level();
+        let a_to_b_input = prepared.a_to_b(level, a_to_b.cost_modes);
+        let b_to_a_input = prepared.b_to_a(level, b_to_a.cost_modes);
         let terminal = self.solve_pair(
             device,
             queue,
-            &a_to_b.input,
+            &a_to_b_input,
             a_to_b.initial,
             Some(&a_to_b.hint),
-            &b_to_a.input,
+            &b_to_a_input,
             b_to_a.initial,
             Some(&b_to_a.hint),
             a_to_b.admission,
