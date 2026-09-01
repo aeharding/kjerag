@@ -3580,7 +3580,7 @@ impl ScenePipeline {
                     .direct_one_xs_map
                     .as_ref()
                     .expect("direct ONE X2 draw must own exact map resources");
-                (&draw.pipeline, &draw.read)
+                (draw.pipeline(), draw.read())
             }
             FlowDraw::MapOracle => {
                 let oracle = self
@@ -3830,10 +3830,7 @@ impl ScenePipeline {
             })],
             ..Default::default()
         });
-        pass.set_pipeline(&draw.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_bind_group(1, &draw.read, &[]);
-        pass.draw(0..3, 0..1);
+        draw.draw(&mut pass, &self.bind_group);
         drop(pass);
         Ok(queue.submit([encoder.finish()]))
     }
@@ -4736,35 +4733,7 @@ fn bind(
     lenses: [&Planes; MAX_LENSES],
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
-    // The views have to outlive the descriptor that borrows them, so they are
-    // built before it rather than inside it.
-    let views: Vec<wgpu::TextureView> = lenses
-        .iter()
-        .flat_map(|planes| [&planes.luma, &planes.chroma])
-        .map(|texture| texture.create_view(&Default::default()))
-        .collect();
-    let mut entries = vec![wgpu::BindGroupEntry {
-        binding: 0,
-        resource: uniforms.as_entire_binding(),
-    }];
-    entries.extend(
-        views
-            .iter()
-            .enumerate()
-            .map(|(plane, view)| wgpu::BindGroupEntry {
-                binding: 1 + plane as u32,
-                resource: wgpu::BindingResource::TextureView(view),
-            }),
-    );
-    entries.push(wgpu::BindGroupEntry {
-        binding: SAMPLER_BINDING,
-        resource: wgpu::BindingResource::Sampler(sampler),
-    });
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("scene"),
-        layout,
-        entries: &entries,
-    })
+    super::direct_type2::bind_picture(device, layout, uniforms, lenses, sampler)
 }
 
 fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {

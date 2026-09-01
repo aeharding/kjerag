@@ -3,6 +3,32 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Resident ONE X2 drawable installation prerequisite, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
+PERFORMANCE OR PARITY CLAIM]:** the native type-2 consumer is split into one
+immutable reusable shader/pipeline/map-layout owner and a per-result binding.
+The selected CPU path still allocates the same exact-size packed and alpha
+buffers, writes the same bytes, uses the same shader and bind order, and
+reports the same bound frame. Scene selection is unchanged.
+
+The accepted render-pass retirement queue now has an iced-compatible shared
+adapter. It reserves and polls through interior mutability and arms the
+submitted-work callback on the borrowed render pass before the guarded draw.
+No-submit work remains bounded and retained. Registration, draw and poll
+panics quarantine uncertain owners; mutex poison is recovered only to expose
+that terminal state, never to resume ordinary retirement.
+
+The exact installed-source boundary remains deliberately unimplemented. The
+current dmabuf import API returns `Vec<Planes>` separately from `Arc<Frames>`,
+so a later constructor accepting those values separately could retain and bind
+them but could not prove that the textures came from that exact frame
+allocation. A synthetic owner test cannot close that production association.
+The import site must instead produce a sealed aggregate that makes the frame,
+its imported planes and their bind group inseparable. Only a validated
+resident final-map result may then join that aggregate. This checkpoint does
+not fake that association, publish or install a resident result, wire Scene,
+or replace `live.truncate(3)` in selected playback.
+
 **Asynchronous resident final-map validity gate, 2026-09-01, implementation
 branch only [FOUR-BYTE READBACK; FORCED-RADV QUALIFIED; NO SCENE WIRING OR
 PERFORMANCE CLAIM]:** the private final-map materializer now accepts one

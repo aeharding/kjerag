@@ -5,45 +5,36 @@
 //! current `Reframe` body ray, rather than accepting a dense output-sized map.
 
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
-use crate::FrameStamp;
 use crate::projection;
 use crate::studio_type2::{ALPHA_BYTES, OneXsMapFrame, PACKED_BYTES};
+use crate::{FrameStamp, MAX_LENSES, Planes};
 
-pub(crate) struct DirectMapDraw {
-    pub(crate) pipeline: wgpu::RenderPipeline,
-    pub(crate) read: wgpu::BindGroup,
-    packed: wgpu::Buffer,
-    alpha: wgpu::Buffer,
-    bound_frame: Option<FrameStamp>,
+/// Immutable direct type-2 shader, pipeline and native-map layout.
+///
+/// A capture can share this object across every installed result. Map and
+/// source ownership live in separate per-result bindings, so replacing one
+/// result cannot mutate the resources sampled by an older in-flight draw.
+pub(crate) struct DirectType2Pipeline {
+    pipeline: wgpu::RenderPipeline,
+    map_layout: wgpu::BindGroupLayout,
 }
 
-impl DirectMapDraw {
+impl DirectType2Pipeline {
     pub(crate) fn new(
         device: &wgpu::Device,
         picture_layout: &wgpu::BindGroupLayout,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let packed = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 native packed map"),
-            size: PACKED_BYTES as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let alpha = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 native alpha map"),
-            size: ALPHA_BYTES as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let reading = layout(device, wgpu::ShaderStages::FRAGMENT);
+        let map_layout = layout(device, wgpu::ShaderStages::FRAGMENT);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ONE X2 direct type-2 map"),
             source: wgpu::ShaderSource::Wgsl(draw_wgsl().into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ONE X2 direct type-2 map"),
-            bind_group_layouts: &[picture_layout, &reading],
+            bind_group_layouts: &[picture_layout, &map_layout],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -71,9 +62,96 @@ impl DirectMapDraw {
             multiview_mask: None,
             cache: None,
         });
+        Self {
+            pipeline,
+            map_layout,
+        }
+    }
+
+    pub(crate) fn map_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.map_layout
+    }
+
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        picture: &wgpu::BindGroup,
+        map: &wgpu::BindGroup,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, picture, &[]);
+        pass.set_bind_group(1, map, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+/// Build the exact picture group from resources owned by one draw result.
+///
+/// The returned bind group is inseparable from the passed planes only when
+/// its caller retains those planes. The selected CPU path continues to retain
+/// them in Scene; the resident path does not yet have an authenticated owner
+/// for that association.
+pub(crate) fn bind_picture(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    lenses: [&Planes; MAX_LENSES],
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let views: Vec<wgpu::TextureView> = lenses
+        .iter()
+        .flat_map(|planes| [&planes.luma, &planes.chroma])
+        .map(|texture| texture.create_view(&Default::default()))
+        .collect();
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: uniforms.as_entire_binding(),
+    }];
+    entries.extend(
+        views
+            .iter()
+            .enumerate()
+            .map(|(plane, view)| wgpu::BindGroupEntry {
+                binding: 1 + plane as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            }),
+    );
+    entries.push(wgpu::BindGroupEntry {
+        binding: 5,
+        resource: wgpu::BindingResource::Sampler(sampler),
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scene"),
+        layout,
+        entries: &entries,
+    })
+}
+
+/// CPU-uploaded native map binding retained by the selected shipping path.
+struct DirectType2CpuBinding {
+    read: wgpu::BindGroup,
+    packed: wgpu::Buffer,
+    alpha: wgpu::Buffer,
+    bound_frame: Option<FrameStamp>,
+}
+
+impl DirectType2CpuBinding {
+    fn new(device: &wgpu::Device, pipeline: &DirectType2Pipeline) -> Self {
+        let packed = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 native packed map"),
+            size: PACKED_BYTES as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let alpha = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 native alpha map"),
+            size: ALPHA_BYTES as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ONE X2 native type-2 resources"),
-            layout: &reading,
+            layout: pipeline.map_layout(),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -86,7 +164,6 @@ impl DirectMapDraw {
             ],
         });
         Self {
-            pipeline,
             read,
             packed,
             alpha,
@@ -94,14 +171,47 @@ impl DirectMapDraw {
         }
     }
 
-    pub(crate) fn upload(&mut self, queue: &wgpu::Queue, map: &OneXsMapFrame) {
+    fn upload(&mut self, queue: &wgpu::Queue, map: &OneXsMapFrame) {
         queue.write_buffer(&self.packed, 0, map.packed().bytes());
         queue.write_buffer(&self.alpha, 0, map.alpha().bytes());
         self.bound_frame = Some(map.frame().clone());
     }
+}
+
+pub(crate) struct DirectMapDraw {
+    pipeline: Arc<DirectType2Pipeline>,
+    binding: DirectType2CpuBinding,
+}
+
+impl DirectMapDraw {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        picture_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        let pipeline = Arc::new(DirectType2Pipeline::new(device, picture_layout, format));
+        let binding = DirectType2CpuBinding::new(device, &pipeline);
+        Self { pipeline, binding }
+    }
+
+    pub(crate) fn upload(&mut self, queue: &wgpu::Queue, map: &OneXsMapFrame) {
+        self.binding.upload(queue, map);
+    }
 
     pub(crate) fn bound_frame(&self) -> Option<&FrameStamp> {
-        self.bound_frame.as_ref()
+        self.binding.bound_frame.as_ref()
+    }
+
+    pub(crate) fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline.pipeline
+    }
+
+    pub(crate) fn read(&self) -> &wgpu::BindGroup {
+        &self.binding.read
+    }
+
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, picture: &wgpu::BindGroup) {
+        self.pipeline.draw(pass, picture, &self.binding.read);
     }
 }
 

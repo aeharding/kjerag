@@ -16,8 +16,8 @@
 
 use std::collections::VecDeque;
 use std::error::Error;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::Fallible;
 
@@ -75,10 +75,12 @@ enum InjectedPoll {
 
 /// Private bounded owner for payloads sampled by submitted render passes.
 ///
-/// The only production arming API consumes a live render pass and returns it
-/// only after callback registration succeeds. A panic therefore drops the
-/// pass before its caller can bind or draw. Destruction with uncertain pending
-/// work is fail-closed: payloads and proof state are retained for process life.
+/// The owning production adapter consumes a live render pass and returns it
+/// only after callback registration succeeds. [`IcedDrawRetirements`] wraps
+/// the borrowed adapter with the interior mutability required by iced's
+/// `Primitive::draw(&Pipeline, &mut RenderPass)` boundary. Destruction with
+/// uncertain pending work is fail-closed: payloads and proof state are
+/// retained for process life.
 pub(crate) struct DrawRetirements<P> {
     poller: Poller,
     admission: Arc<Admission>,
@@ -90,6 +92,48 @@ pub(crate) struct DrawRetirements<P> {
     injected_poll: Option<InjectedPoll>,
     #[cfg(test)]
     injected_arm_panic: bool,
+}
+
+/// Interior-mutability adapter for iced's shared pipeline draw callback.
+///
+/// A panic poisons the mutex only after the inner owner has quarantined every
+/// uncertain payload. Later calls deliberately recover that guard and report
+/// the inner terminal error; poison never becomes a route around quarantine.
+pub(crate) struct IcedDrawRetirements<P> {
+    inner: Mutex<DrawRetirements<P>>,
+}
+
+impl<P> IcedDrawRetirements<P> {
+    pub(crate) fn new(device: &wgpu::Device, capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(DrawRetirements::new(device, capacity)),
+        }
+    }
+
+    pub(crate) fn reserve(&self) -> Fallible<DrawPermit> {
+        self.lock().reserve()
+    }
+
+    pub(crate) fn poll(&self) -> Fallible<usize> {
+        self.lock().poll()
+    }
+
+    pub(crate) fn arm_and_draw<'pass>(
+        &self,
+        permit: DrawPermit,
+        pass: &mut wgpu::RenderPass<'pass>,
+        payload: Arc<P>,
+        draw: impl FnOnce(&P, &mut wgpu::RenderPass<'pass>),
+    ) {
+        self.lock()
+            .arm_and_draw_borrowed(permit, pass, payload, draw);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, DrawRetirements<P>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
 }
 
 impl<P> DrawRetirements<P> {
@@ -161,6 +205,26 @@ impl<P> DrawRetirements<P> {
         payload: Arc<P>,
         draw: impl FnOnce(&P, &mut wgpu::RenderPass<'pass>),
     ) -> wgpu::RenderPass<'pass> {
+        self.arm_and_draw_borrowed(permit, &mut pass, payload, draw);
+        pass
+    }
+
+    /// Iced-compatible form of [`Self::arm_and_draw`] for the render pass its
+    /// shader primitive receives by mutable reference.
+    ///
+    /// Registration still precedes the guarded draw closure on this exact
+    /// pass. A registration or draw panic quarantines every uncertain owner
+    /// before resuming the panic. Unlike the owning adapter, this method
+    /// cannot consume the caller's pass, so fail-closed retention is what
+    /// makes any outer `catch_unwind` safe: even a later encoded draw cannot
+    /// release or reuse its exact source owner.
+    pub(crate) fn arm_and_draw_borrowed<'pass>(
+        &mut self,
+        permit: DrawPermit,
+        pass: &mut wgpu::RenderPass<'pass>,
+        payload: Arc<P>,
+        draw: impl FnOnce(&P, &mut wgpu::RenderPass<'pass>),
+    ) {
         if self.failed
             || !permit.active
             || !Arc::ptr_eq(&permit.admission, &self.admission)
@@ -199,8 +263,8 @@ impl<P> DrawRetirements<P> {
         if let Err(panic_payload) = armed {
             // Registration may have partially succeeded. The offered payload
             // and all older uncertain payloads enter one fail-closed set before
-            // panic resumes. `pass` drops during unwind, so no caller draw can
-            // follow the failed arm operation.
+            // panic resumes. In the borrowed adapter the pass remains with its
+            // caller, but every source it could sample is retained forever.
             self.pending.push_back(retiring);
             self.quarantine_all();
             std::panic::resume_unwind(panic_payload);
@@ -212,17 +276,15 @@ impl<P> DrawRetirements<P> {
             .and_then(|retiring| retiring.payload.as_deref())
             .expect("armed draw retirement retains its payload");
         let encoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            draw(payload, &mut pass);
+            draw(payload, pass);
         }));
         if let Err(panic_payload) = encoded {
             // The pass may contain a prefix of the requested draw, and its
             // command buffer may never be submitted after unwind. No callback
             // can safely release any owner in that state.
-            drop(pass);
             self.quarantine_all();
             std::panic::resume_unwind(panic_payload);
         }
-        pass
     }
 
     /// Drive callbacks without waiting, then release only exact generations
@@ -731,13 +793,13 @@ mod tests {
             _exact_source_owner: Arc::clone(&owner),
         });
         drop(owner);
-        let mut retirements = DrawRetirements::new(&device, 1);
+        let retirements = IcedDrawRetirements::new(&device, 1);
         let permit = retirements.reserve().unwrap();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ONE X2 never-submitted encoder"),
         });
         let view = target.create_view(&Default::default());
-        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ONE X2 never-submitted pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
@@ -753,11 +815,15 @@ mod tests {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        let pass =
-            retirements.arm_and_draw(permit, pass, Arc::clone(&installed), |installed, pass| {
+        retirements.arm_and_draw(
+            permit,
+            &mut pass,
+            Arc::clone(&installed),
+            |installed, pass| {
                 pass.set_pipeline(installed.pipeline.as_ref().unwrap());
                 pass.draw(0..3, 0..1);
-            });
+            },
+        );
         drop(pass);
         let _never_submitted = encoder.finish();
         let error = match retirements.reserve() {
@@ -804,13 +870,13 @@ mod tests {
             pipeline: Some(test_pipeline(&device)),
             _exact_source_owner: owner(10, &dropped),
         });
-        let mut retirements = DrawRetirements::new(&device, 1);
+        let retirements = IcedDrawRetirements::new(&device, 1);
         let permit = retirements.reserve().unwrap();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ONE X2 draw-panic encoder"),
         });
         let view = target.create_view(&Default::default());
-        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ONE X2 draw-panic pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
@@ -827,9 +893,9 @@ mod tests {
             multiview_mask: None,
         });
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = retirements.arm_and_draw(
+            retirements.arm_and_draw(
                 permit,
-                pass,
+                &mut pass,
                 Arc::clone(&installed),
                 |installed, pass| {
                     pass.set_pipeline(installed.pipeline.as_ref().unwrap());
@@ -842,8 +908,12 @@ mod tests {
             panic.downcast_ref::<&str>(),
             Some(&"injected ONE X2 stored draw panic")
         );
-        assert!(retirements.failed);
-        assert!(retirements.pending.is_empty());
+        let error = match retirements.reserve() {
+            Ok(_) => panic!("poisoned iced draw retirement admitted another permit"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "ONE X2 draw retirement is quarantined");
+        drop(pass);
         drop(installed);
         drop(retirements);
         assert!(
