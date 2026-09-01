@@ -4,7 +4,7 @@ Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
 **Context-bound GPU ONE X2 retained geometry, 2026-09-01, implementation
-branch only [UNSELECTED; NO SCENE WIRING; SEALED TRANSITION PENDING]:** the
+branch only [UNSELECTED; NO SCENE WIRING; SEALED TRANSITIONS]:** the
 shared `OneXsGpuContext` now owns a correctness-first geometry pipeline for
 both 1,080-by-60 periodic map merges, the selected directional continuity
 filters, physical validity seed, 9-by-9 erosion and A/B mask unification.
@@ -18,14 +18,19 @@ context, unfinished command encoder, full frame flight, both parent preimages,
 both retained float2 maps, both physical masks and all bind groups. It exposes
 no raw buffer, queue, submission index, detached flight or ordinary completion
 hook. The geometry stage neither submits nor creates a competing lease. Its
-ordinary handoff intentionally remains unwired until the audited consuming
-producer-to-frontend transition replaces the rejected separable resident
-hooks. This also keeps the token available for future belt sampling and final
-materialization ownership rather than dropping it at the PIS frontend.
+only production handoff appends exact belt sampling and Gaussian commands to
+that unfinished encoder; the belt owner then performs the one submission and
+mints the chain's sole source-surface lease. A second purpose-specific
+transition binds the token's packed masks directly into the sealed frontend.
+The geometry allocation and imported source owner remain inseparable inside
+that lease through PIS and final materialization. None of the rejected
+separable flight, packed-buffer, generic-submit or completion hooks return.
 
 The physical masks use the frontend's exact packed layout: four U8 codes per
-word, lens A then lens B, followed by its explicit runtime-zero word. No later
-consumer needs a mask reupload or layout conversion. Construction compares
+word, lens A then lens B, followed by its explicit runtime-zero word. Belt
+sampling consumes the retained map directly and the frontend consumes the
+packed masks directly, with no map or mask reupload or layout conversion.
+Construction compares
 every retained float word and packed mask word with the selected CPU oracle on
 the actual adapter, including signed zero, exceptional parent payloads,
 periodic edges and the native ordered FMA schedule. Four live shader mutations

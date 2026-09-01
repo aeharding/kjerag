@@ -291,6 +291,11 @@ enum SubmissionInput<'a> {
     Preblurred(&'a SolverBelts),
 }
 
+enum MapInput<'a> {
+    Uploaded(&'a RetainedBaseMaps),
+    Resident(&'a wgpu::Buffer),
+}
+
 impl SourceTextures<'_> {
     fn validate(self) -> Fallible<()> {
         for (lens, texture) in [(Lens::A, self.a), (Lens::B, self.b)] {
@@ -596,6 +601,32 @@ impl GpuSolverBeltPipeline {
         Ok(pending.into_resident(flight))
     }
 
+    /// Complete the one concrete geometry-to-belt transition. The resident
+    /// map is only borrowed for exact binding, commands append to the geometry
+    /// encoder, and this module performs the transaction's sole submission.
+    pub(in crate::flow) fn submit_geometry_transition<K>(
+        &self,
+        producer: &OneXsGpuContext,
+        encoder: wgpu::CommandEncoder,
+        sources: SourceTextures<'_>,
+        retained_map: &wgpu::Buffer,
+        source_owner: K,
+        flight: GpuPisFlight,
+    ) -> Fallible<GpuBlurredBelts<K>> {
+        self.context.ensure_same(producer)?;
+        let pending = self.submit_inner_with_map(
+            sources,
+            MapInput::Resident(retained_map),
+            source_owner,
+            SubmissionInput::Sampled {
+                qualify_intermediates: false,
+            },
+            false,
+            Some(encoder),
+        )?;
+        Ok(pending.into_resident(flight))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn submit_inner<K>(
         &self,
@@ -604,6 +635,25 @@ impl GpuSolverBeltPipeline {
         source_owner: K,
         input: SubmissionInput<'_>,
         copy_to_cpu: bool,
+    ) -> Fallible<PendingBlurredBelts<K>> {
+        self.submit_inner_with_map(
+            sources,
+            MapInput::Uploaded(maps),
+            source_owner,
+            input,
+            copy_to_cpu,
+            None,
+        )
+    }
+
+    fn submit_inner_with_map<K>(
+        &self,
+        sources: SourceTextures<'_>,
+        map_input: MapInput<'_>,
+        source_owner: K,
+        input: SubmissionInput<'_>,
+        copy_to_cpu: bool,
+        encoder: Option<wgpu::CommandEncoder>,
     ) -> Fallible<PendingBlurredBelts<K>> {
         let device = self.context.device();
         let queue = self.context.queue();
@@ -618,13 +668,25 @@ impl GpuSolverBeltPipeline {
             SubmissionInput::Preblurred(belts) => Some(belts),
         };
         sources.validate()?;
-        let map = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained base maps"),
-            size: maps.bytes().len() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&map, 0, maps.bytes());
+        let uploaded_map = match map_input {
+            MapInput::Uploaded(maps) => {
+                let map = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ONE X2 retained base maps"),
+                    size: maps.bytes().len() as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&map, 0, maps.bytes());
+                Some(map)
+            }
+            MapInput::Resident(_) => None,
+        };
+        let map = match map_input {
+            MapInput::Uploaded(_) => uploaded_map
+                .as_ref()
+                .expect("uploaded map was allocated before binding"),
+            MapInput::Resident(map) => map,
+        };
         let packed = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 packed blurred solver belts"),
             size: OUTPUT_BYTES,
@@ -698,8 +760,10 @@ impl GpuSolverBeltPipeline {
                 },
             ],
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ONE X2 GPU solver belts"),
+        let mut encoder = encoder.unwrap_or_else(|| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ONE X2 GPU solver belts"),
+            })
         });
         if initial_preblur.is_none() {
             {
@@ -742,7 +806,7 @@ impl GpuSolverBeltPipeline {
         let submission = queue.submit([encoder.finish()]);
         Ok(PendingBlurredBelts {
             lease: SubmissionLease::new(self.context.clone(), submission, source_owner),
-            _map: map,
+            _map: uploaded_map,
             _packed: packed,
             _horizontal: horizontal,
             readback,
@@ -966,7 +1030,7 @@ impl<K> Drop for SubmissionLease<K> {
 #[must_use = "the submitted ONE X2 solver belts have not been consumed"]
 pub(crate) struct PendingBlurredBelts<K> {
     lease: SubmissionLease<K>,
-    _map: wgpu::Buffer,
+    _map: Option<wgpu::Buffer>,
     /// Retained through either the CPU copy or the resident consumer.
     _packed: wgpu::Buffer,
     _horizontal: wgpu::Buffer,
@@ -1106,23 +1170,47 @@ pub(crate) struct GpuBlurredBelts<K> {
     flight: Option<GpuPisFlight>,
     lease: SubmissionLease<K>,
     packed: wgpu::Buffer,
-    _producer_map: wgpu::Buffer,
+    _producer_map: Option<wgpu::Buffer>,
     _horizontal: wgpu::Buffer,
     _resources: wgpu::BindGroup,
 }
 
 impl<K> GpuBlurredBelts<K> {
+    /// Geometry-specific resident transition. The mask buffer remains sealed
+    /// in its geometry carrier and binds directly into the front end.
+    pub(in crate::flow) fn prepare_geometry_front_end(
+        self,
+        front_end: &GpuPisFrontEnd,
+        physical_masks: &wgpu::Buffer,
+    ) -> Fallible<GpuPreparedFrame<K>> {
+        self.prepare_front_end_inner(front_end, |packed| {
+            front_end.encode_geometry_transition(packed, physical_masks)
+        })
+    }
+
     /// The only resident producer-to-front-end transition. Context refusal
     /// happens before allocation, binding, encoding or submission; success
     /// moves the exact flight and the sole linear lease into one opaque frame.
     pub(in crate::flow) fn prepare_front_end(
-        mut self,
+        self,
         front_end: &GpuPisFrontEnd,
         physical_masks: &LensPair<Vec<u8>>,
     ) -> Fallible<GpuPreparedFrame<K>> {
+        self.prepare_front_end_inner(front_end, |packed| {
+            front_end.encode_resident_transition(packed, physical_masks)
+        })
+    }
+
+    fn prepare_front_end_inner(
+        mut self,
+        front_end: &GpuPisFrontEnd,
+        encode: impl FnOnce(
+            &wgpu::Buffer,
+        ) -> Fallible<super::one_xs::pis_frontend_gpu::EncodedPisFrontEnd>,
+    ) -> Fallible<GpuPreparedFrame<K>> {
         let context = front_end.context_for_resident_transition();
         self.lease.validate_provenance(context)?;
-        let mut encoded = front_end.encode_resident_transition(&self.packed, physical_masks)?;
+        let mut encoded = encode(&self.packed)?;
         self.lease
             .submit_after(context, |_| encoded.take_command())?;
         let flight = self
@@ -1158,7 +1246,7 @@ impl<K> GpuBlurredBelts<K> {
 pub(in crate::flow) struct GpuPreparedRetention<K> {
     lease: SubmissionLease<K>,
     _packed: wgpu::Buffer,
-    _producer_map: wgpu::Buffer,
+    _producer_map: Option<wgpu::Buffer>,
     _horizontal: wgpu::Buffer,
     _resources: wgpu::BindGroup,
 }

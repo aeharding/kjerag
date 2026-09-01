@@ -13,9 +13,11 @@ use super::base_map::{
 };
 use super::gpu_context::OneXsGpuContext;
 use super::pis::gpu::GpuPisFlight;
+use super::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
 use super::{COLS, LensPair, ROWS};
 use crate::Fallible;
 use crate::flow::one_xs_belt::{RetainedBaseMaps, base_support_masks};
+use crate::flow::one_xs_belt_gpu::{GpuBlurredBelts, GpuSolverBeltPipeline, SourceTextures};
 
 const PARENT_NODES_PER_LENS: usize = SELECTED_FLOWSTATE_ROWS * SELECTED_FLOWSTATE_COLS;
 const RETAINED_NODES_PER_LENS: usize = SELECTED_LINE_ROWS * SELECTED_LINE_COLS;
@@ -41,9 +43,36 @@ pub(crate) struct GpuRetainedGeometry {
 }
 
 impl GpuRetainedGeometry {
-    // Intentionally no ordinary accessors. The replacement consuming
-    // producer-to-frontend transition will receive this whole token and may
-    // add a sealed binding callback when that ownership API lands.
+    // Intentionally no ordinary accessors. Only the two concrete consuming
+    // transitions below can bind its retained map and packed masks.
+}
+
+/// Source owner carried by the sole submission lease after geometry enters
+/// belt sampling. Its fields cannot be separated from that lease.
+pub(crate) struct GpuGeometryFrameOwner<K> {
+    _source_owner: K,
+    _geometry: GpuRetainedGeometry,
+}
+
+/// Exact geometry-to-belt product. The mask handle is private and can only
+/// enter the matching prepared-source front end; the geometry allocation and
+/// imported source owner remain inside the belt submission lease.
+#[must_use = "the geometry-backed ONE X2 solver belts have not been consumed"]
+pub(crate) struct GpuGeometryBelts<K> {
+    belts: GpuBlurredBelts<GpuGeometryFrameOwner<K>>,
+    masks: wgpu::Buffer,
+}
+
+impl<K> GpuGeometryBelts<K> {
+    /// Consume the complete geometry-backed belt token into the exact resident
+    /// front end. The packed physical masks bind directly without reupload.
+    pub(crate) fn prepare_front_end(
+        self,
+        front_end: &GpuPisFrontEnd,
+    ) -> Fallible<GpuPreparedFrame<GpuGeometryFrameOwner<K>>> {
+        self.belts
+            .prepare_geometry_front_end(front_end, &self.masks)
+    }
 }
 
 /// Geometry commands and their inseparable frame allocation before the source
@@ -56,6 +85,37 @@ pub(crate) struct EncodedGpuGeometry {
 }
 
 impl EncodedGpuGeometry {
+    /// The only geometry-to-belt transition. Belt commands are appended to
+    /// this producer encoder, then the belt owner performs the one submission
+    /// and creates the chain's sole source-surface lease.
+    pub(crate) fn submit_belts<K>(
+        mut self,
+        pipeline: &GpuSolverBeltPipeline,
+        sources: SourceTextures<'_>,
+        source_owner: K,
+    ) -> Fallible<GpuGeometryBelts<K>> {
+        let flight = self
+            .geometry
+            .flight
+            .take()
+            .expect("production GPU geometry carries one exact capture flight");
+        let retained = self.geometry.retained.clone();
+        let masks = self.geometry.masks.clone();
+        let owner = GpuGeometryFrameOwner {
+            _source_owner: source_owner,
+            _geometry: self.geometry,
+        };
+        let belts = pipeline.submit_geometry_transition(
+            &self.context,
+            self.encoder,
+            sources,
+            &retained,
+            owner,
+            flight,
+        )?;
+        Ok(GpuGeometryBelts { belts, masks })
+    }
+
     /// Qualification is the only local submission. Ordinary work leaves this
     /// token untouched for the replacement consuming lease transition.
     fn submit_for_qualification(self, context: &OneXsGpuContext) -> Fallible<GpuRetainedGeometry> {
@@ -580,9 +640,12 @@ fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::flow::one_xs::base_map::one_xs_static_coordinates;
+    use kjerag_media::FrameStamp;
 
     #[test]
     fn retained_geometry_matches_cpu_and_rejects_semantic_mutations() {
@@ -598,9 +661,10 @@ mod tests {
             }
         };
         let coordinates = one_xs_static_coordinates();
-        GpuGeometryPipeline::new(context.clone(), &coordinates).unwrap_or_else(|error| {
-            panic!("baseline ONE X2 GPU geometry failed on {adapter}: {error}")
-        });
+        let geometry_pipeline = GpuGeometryPipeline::new(context.clone(), &coordinates)
+            .unwrap_or_else(|error| {
+                panic!("baseline ONE X2 GPU geometry failed on {adapter}: {error}")
+            });
         eprintln!("baseline ONE X2 GPU geometry passed on {adapter}");
 
         let mutations = [
@@ -635,6 +699,66 @@ mod tests {
             );
             eprintln!("ONE X2 GPU geometry refused {name} mutation on {adapter}");
         }
+
+        let texture = |label| {
+            let texture = context.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            context.queue().write_texture(
+                texture.as_image_copy(),
+                &vec![137; 256 * 256],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(256),
+                },
+                texture.size(),
+            );
+            texture
+        };
+        let texture_a = texture("geometry transition A");
+        let texture_b = texture("geometry transition B");
+        let belt_pipeline = GpuSolverBeltPipeline::new(context.clone()).unwrap();
+        let front_end = GpuPisFrontEnd::new(context.clone()).unwrap();
+        let source_owner = Arc::new(());
+        let encoded = geometry_pipeline
+            .encode_uploaded_parents(
+                &qualification_parents(&coordinates),
+                GpuPisFlight {
+                    generation: 1,
+                    frame: FrameStamp::for_test(1, Duration::from_millis(17), None),
+                },
+            )
+            .unwrap();
+        let belts = encoded
+            .submit_belts(
+                &belt_pipeline,
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                Arc::clone(&source_owner),
+            )
+            .unwrap();
+        assert_eq!(Arc::strong_count(&source_owner), 2);
+        belts
+            .prepare_front_end(&front_end)
+            .unwrap()
+            .acknowledge_terminal()
+            .unwrap();
+        assert_eq!(Arc::strong_count(&source_owner), 1);
+        eprintln!("ONE X2 GPU geometry completed its sealed resident chain on {adapter}");
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

@@ -610,8 +610,35 @@ impl GpuPisFrontEnd {
         let device = self.context.device();
         let queue = self.context.queue();
         let mask = upload_masks(device, queue, physical_masks);
+        self.encode_bound_resident_transition(packed, &mask)
+    }
+
+    /// Bind the geometry producer's exact packed A/B physical-mask layout.
+    /// This is only callable by the concrete geometry-backed belt transition.
+    pub(in crate::flow) fn encode_geometry_transition(
+        &self,
+        packed: &wgpu::Buffer,
+        mask: &wgpu::Buffer,
+    ) -> Fallible<EncodedPisFrontEnd> {
+        if mask.size() != words_bytes(2 * MASK_WORDS_PER_LENS + 1) {
+            return Err(format!(
+                "ONE X2 GPU geometry mask buffer is {} bytes, expected {}",
+                mask.size(),
+                words_bytes(2 * MASK_WORDS_PER_LENS + 1)
+            )
+            .into());
+        }
+        self.encode_bound_resident_transition(packed, mask)
+    }
+
+    fn encode_bound_resident_transition(
+        &self,
+        packed: &wgpu::Buffer,
+        mask: &wgpu::Buffer,
+    ) -> Fallible<EncodedPisFrontEnd> {
+        let device = self.context.device();
         let outputs = OutputBuffers::new(device);
-        let resources = self.resources(device, packed, &mask, &outputs);
+        let resources = self.resources(device, packed, mask, &outputs);
         let command = self.encode_command(device, &resources);
         Ok(EncodedPisFrontEnd {
             command: Some(command),
