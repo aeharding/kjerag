@@ -1654,6 +1654,55 @@ mod tests {
     }
 
     #[test]
+    fn submission_lease_accepts_cloned_pair_and_refuses_foreign_pair_before_encoding() {
+        let ((device, queue), (foreign_device, foreign_queue)) = match two_gpu_pairs() {
+            Ok(gpu) => gpu,
+            Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+                eprintln!("skipping ONE X2 GPU context identity: {why}");
+                return;
+            }
+            Err(why) => panic!("Vulkan GPU required for ONE X2 context identity: {why}"),
+        };
+        assert_ne!(
+            device, foreign_device,
+            "same-instance requests reused one device handle"
+        );
+        let context = OneXsGpuContext::new(&device, &queue);
+        let cloned = OneXsGpuContext::new(&device, &queue);
+        context.ensure_same(&cloned).unwrap();
+        let first = queue.submit(std::iter::empty());
+        let mut lease = SubmissionLease::new(context.clone(), first, ());
+        let encoded = Arc::new(AtomicU8::new(0));
+        let foreign = OneXsGpuContext::new(&foreign_device, &foreign_queue);
+        let encoded_by_foreign = Arc::clone(&encoded);
+        let error = lease
+            .submit_after(&foreign, move |_| {
+                encoded_by_foreign.fetch_add(1, Ordering::SeqCst);
+                panic!("foreign ONE X2 context reached command encoding")
+            })
+            .expect_err("foreign ONE X2 context was accepted");
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 GPU submission crossed a different device or queue"
+        );
+        assert_eq!(
+            encoded.load(Ordering::SeqCst),
+            0,
+            "foreign context encoded work"
+        );
+        lease
+            .submit_after(&cloned, |device| {
+                device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("ONE X2 cloned-context acceptance"),
+                    })
+                    .finish()
+            })
+            .unwrap();
+        lease.complete().unwrap();
+    }
+
+    #[test]
     fn gpu_solver_belts_are_byte_exact_on_adversarial_odd_padded_sources() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -1927,5 +1976,31 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         Ok((device, queue, name))
+    }
+
+    type GpuPair = (wgpu::Device, wgpu::Queue);
+
+    fn two_gpu_pairs() -> Result<(GpuPair, GpuPair), String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .next()
+            .ok_or("no Vulkan adapter")?;
+        let request = |label| {
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some(label),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+            .map_err(|error| error.to_string())
+        };
+        Ok((
+            request("exact ONE X2 primary GPU context")?,
+            request("exact ONE X2 foreign GPU context")?,
+        ))
     }
 }
