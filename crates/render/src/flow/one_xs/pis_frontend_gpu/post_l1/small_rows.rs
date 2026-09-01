@@ -21,19 +21,23 @@ const FILTERED_WORDS: usize = 2 * PATCHES * 2;
 const ROW_WORDS: usize = 2 * PATCH_ROWS;
 const CONFIG_WORDS: usize = 3;
 
-/// Projection implemented inside this module for exactly one real paused
-/// post-L1 owner after atomic installation exists. Until then only the test
-/// fixture implements it, so production cannot assemble loose provenance and
-/// buffers into a reachable call.
-pub(super) trait GpuSmallRowInputOwner: input_owner::Sealed {
+/// Arithmetic projection used by constructor qualification and, later, by one
+/// exact paused post-L1 owner. It has no provenance fields, so qualification
+/// cannot mint a frame or a resident successor.
+pub(super) trait GpuSmallRowArithmeticInput: input_owner::Sealed {
     fn context(&self) -> &OneXsGpuContext;
-    fn producer_flight(&self) -> &GpuPisFlight;
-    fn capture_root(&self) -> &GpuResidentIdentity;
     fn filtered(&self) -> &wgpu::Buffer;
     fn common_a_block_mask(&self) -> &wgpu::Buffer;
     fn prior_rows(&self) -> &wgpu::Buffer;
     fn prior_present(&self) -> bool;
     fn pre_increment_counts(&self) -> [i32; 2];
+}
+
+/// Production frame input projection. Only the future exact paused post-L1
+/// owner may implement this sealed extension and reach ordinary encoding.
+pub(super) trait GpuSmallRowInputOwner: GpuSmallRowArithmeticInput {
+    fn producer_flight(&self) -> &GpuPisFlight;
+    fn capture_root(&self) -> &GpuResidentIdentity;
 }
 
 pub(super) mod input_owner {
@@ -42,8 +46,6 @@ pub(super) mod input_owner {
 
 struct QualificationSmallRowOwner<'a> {
     context: OneXsGpuContext,
-    flight: GpuPisFlight,
-    root: GpuResidentIdentity,
     filtered: &'a wgpu::Buffer,
     mask: &'a wgpu::Buffer,
     prior: &'a wgpu::Buffer,
@@ -53,17 +55,9 @@ struct QualificationSmallRowOwner<'a> {
 
 impl input_owner::Sealed for QualificationSmallRowOwner<'_> {}
 
-impl GpuSmallRowInputOwner for QualificationSmallRowOwner<'_> {
+impl GpuSmallRowArithmeticInput for QualificationSmallRowOwner<'_> {
     fn context(&self) -> &OneXsGpuContext {
         &self.context
-    }
-
-    fn producer_flight(&self) -> &GpuPisFlight {
-        &self.flight
-    }
-
-    fn capture_root(&self) -> &GpuResidentIdentity {
-        &self.root
     }
 
     fn filtered(&self) -> &wgpu::Buffer {
@@ -85,6 +79,62 @@ impl GpuSmallRowInputOwner for QualificationSmallRowOwner<'_> {
     fn pre_increment_counts(&self) -> [i32; 2] {
         self.counts
     }
+}
+
+#[cfg(test)]
+struct TestSmallRowOwner<'a> {
+    arithmetic: QualificationSmallRowOwner<'a>,
+    flight: GpuPisFlight,
+    root: GpuResidentIdentity,
+}
+
+#[cfg(test)]
+impl input_owner::Sealed for TestSmallRowOwner<'_> {}
+
+#[cfg(test)]
+impl GpuSmallRowArithmeticInput for TestSmallRowOwner<'_> {
+    fn context(&self) -> &OneXsGpuContext {
+        self.arithmetic.context()
+    }
+
+    fn filtered(&self) -> &wgpu::Buffer {
+        self.arithmetic.filtered()
+    }
+
+    fn common_a_block_mask(&self) -> &wgpu::Buffer {
+        self.arithmetic.common_a_block_mask()
+    }
+
+    fn prior_rows(&self) -> &wgpu::Buffer {
+        self.arithmetic.prior_rows()
+    }
+
+    fn prior_present(&self) -> bool {
+        self.arithmetic.prior_present()
+    }
+
+    fn pre_increment_counts(&self) -> [i32; 2] {
+        self.arithmetic.pre_increment_counts()
+    }
+}
+
+#[cfg(test)]
+impl GpuSmallRowInputOwner for TestSmallRowOwner<'_> {
+    fn producer_flight(&self) -> &GpuPisFlight {
+        &self.flight
+    }
+
+    fn capture_root(&self) -> &GpuResidentIdentity {
+        &self.root
+    }
+}
+
+struct GpuSmallRowAllocations {
+    rows: wgpu::Buffer,
+    present: bool,
+    candidates: wgpu::Buffer,
+    config: wgpu::Buffer,
+    resources: wgpu::BindGroup,
 }
 
 /// Exact bilateral successor row owner. `present` remains separate from the
@@ -200,15 +250,25 @@ impl GpuSmallRowPipeline {
         input: &O,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Fallible<GpuResidentSmallRows> {
-        self.encode_with_readback(input, encoder, false)
+        let allocations = self.encode_arithmetic(input, encoder, false)?;
+        Ok(GpuResidentSmallRows {
+            context: self.context.clone(),
+            producer_flight: input.producer_flight().clone(),
+            root: input.capture_root().clone(),
+            rows: allocations.rows,
+            present: allocations.present,
+            _candidates: allocations.candidates,
+            _config: allocations.config,
+            _resources: allocations.resources,
+        })
     }
 
-    fn encode_with_readback<O: GpuSmallRowInputOwner>(
+    fn encode_arithmetic<I: GpuSmallRowArithmeticInput>(
         &self,
-        input: &O,
+        input: &I,
         encoder: &mut wgpu::CommandEncoder,
         qualification_readback: bool,
-    ) -> Fallible<GpuResidentSmallRows> {
+    ) -> Fallible<GpuSmallRowAllocations> {
         self.validate(input)?;
         let device = self.context.device();
         let pre_increment_counts = input.pre_increment_counts();
@@ -266,19 +326,16 @@ impl GpuSmallRowPipeline {
             pass.dispatch_workgroups(PATCH_ROWS as u32, 1, 1);
         }
         let present = prior_present || pre_increment_counts.into_iter().any(|count| count >= 3);
-        Ok(GpuResidentSmallRows {
-            context: self.context.clone(),
-            producer_flight: input.producer_flight().clone(),
-            root: input.capture_root().clone(),
+        Ok(GpuSmallRowAllocations {
             rows,
             present,
-            _candidates: candidates,
-            _config: config,
-            _resources: resources,
+            candidates,
+            config,
+            resources,
         })
     }
 
-    fn validate<O: GpuSmallRowInputOwner>(&self, input: &O) -> Fallible<()> {
+    fn validate<I: GpuSmallRowArithmeticInput>(&self, input: &I) -> Fallible<()> {
         self.context.ensure_same(input.context())?;
         for (name, actual, expected) in [
             (
@@ -307,24 +364,16 @@ impl GpuSmallRowPipeline {
     }
 
     fn qualify(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let capture = crate::flow::one_xs_belt_gpu::resident_frame_gpu::GpuResidentCapture::new();
         for case in qualification_cases() {
-            let reservation = capture
-                .reserve(case.frame.clone())
-                .map_err(|error| error.to_string())?;
-            let flight = reservation.flight().clone();
-            let root = reservation.identity();
-            let actual = self.run_qualification(&case, flight, root)?;
+            let actual = self.run_qualification(&case)?;
             let expected = cpu_rows(&case);
             if actual != expected.rows || case.expected_present != expected.present {
-                reservation.abort().map_err(|error| error.to_string())?;
                 return Err(format!(
                     "ONE X2 mature small-row qualifier disagreed for {}",
                     case.label
                 )
                 .into());
             }
-            reservation.abort().map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -332,8 +381,6 @@ impl GpuSmallRowPipeline {
     fn run_qualification(
         &self,
         case: &QualificationCase,
-        flight: GpuPisFlight,
-        root: GpuResidentIdentity,
     ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
         let device = self.context.device();
         let filtered = upload_words(
@@ -348,8 +395,6 @@ impl GpuSmallRowPipeline {
         });
         let owner = QualificationSmallRowOwner {
             context: self.context.clone(),
-            flight,
-            root,
             filtered: &filtered,
             mask: &mask,
             prior: &prior,
@@ -357,7 +402,7 @@ impl GpuSmallRowPipeline {
             counts: case.counts,
         };
         let output = self
-            .encode_with_readback(&owner, &mut encoder, true)
+            .encode_arithmetic(&owner, &mut encoder, true)
             .map_err(|error| error.to_string())?;
         let words = read_words(&self.context, encoder.finish(), &output.rows, ROW_WORDS)?;
         if output.present != case.expected_present {
@@ -492,7 +537,6 @@ fn cpu_rows(case: &QualificationCase) -> CpuRows {
 
 struct QualificationCase {
     label: &'static str,
-    frame: kjerag_media::FrameStamp,
     filtered: Vec<u32>,
     mask: Vec<u32>,
     prior: Vec<u32>,
@@ -502,13 +546,6 @@ struct QualificationCase {
 }
 
 fn qualification_cases() -> Vec<QualificationCase> {
-    let frame = |index| {
-        kjerag_media::FrameStamp::for_test(
-            index,
-            std::time::Duration::from_millis(index * 1_001),
-            None,
-        )
-    };
     let filtered = || vec![0.0f32.to_bits(); FILTERED_WORDS];
     let mask = || vec![255; PATCHES];
     let prior = || vec![0; ROW_WORDS];
@@ -563,7 +600,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
     vec![
         QualificationCase {
             label: "count two absent",
-            frame: frame(1),
             filtered: filtered(),
             mask: mask(),
             prior: prior(),
@@ -573,7 +609,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "count two present zero",
-            frame: frame(2),
             filtered: filtered(),
             mask: mask(),
             prior: prior(),
@@ -583,7 +618,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "count three materializes",
-            frame: frame(3),
             filtered: filtered(),
             mask: mask(),
             prior: prior(),
@@ -593,7 +627,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "strict threshold",
-            frame: frame(4),
             filtered: threshold,
             mask: mask(),
             prior: prior(),
@@ -603,7 +636,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "direction asymmetry and bilateral merge",
-            frame: frame(5),
             filtered: asymmetric,
             mask: mask(),
             prior: prior(),
@@ -613,7 +645,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "masked NaN active NaN and signed zero",
-            frame: frame(6),
             filtered: specials,
             mask: specials_mask,
             prior: prior(),
@@ -623,7 +654,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "all masked positive-zero mean",
-            frame: frame(7),
             filtered: filtered(),
             mask: vec![0; PATCHES],
             prior: prior(),
@@ -633,7 +663,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "one-sided retained merge",
-            frame: frame(8),
             filtered: filtered(),
             mask: mask(),
             prior: prior_one_sided,
@@ -643,7 +672,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "asymmetric maturity",
-            frame: frame(9),
             filtered: filtered(),
             mask: mask(),
             prior: prior(),
@@ -653,7 +681,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "negative disparity uses absolute magnitude",
-            frame: frame(10),
             filtered: negative,
             mask: mask(),
             prior: prior(),
@@ -663,7 +690,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "serial column order",
-            frame: frame(11),
             filtered: ordered,
             mask: mask(),
             prior: prior(),
@@ -673,7 +699,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "mixed maturity retains only the immature direction",
-            frame: frame(12),
             filtered: mixed_maturity,
             mask: mask(),
             prior: mixed_prior,
@@ -683,7 +708,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "negative signed counts retain present zero",
-            frame: frame(13),
             filtered: filtered(),
             mask: mask(),
             prior: prior(),
@@ -693,7 +717,6 @@ fn qualification_cases() -> Vec<QualificationCase> {
         },
         QualificationCase {
             label: "maximum signed counts are mature",
-            frame: frame(14),
             filtered: filtered(),
             mask: mask(),
             prior: prior(),
@@ -919,21 +942,21 @@ mod tests {
             .unwrap();
         let flight = reservation.flight().clone();
         let root = reservation.identity();
-        let owner = QualificationSmallRowOwner {
-            context: context.clone(),
+        let owner = TestSmallRowOwner {
             flight: flight.clone(),
             root: root.clone(),
-            filtered: &filtered,
-            mask: &mask,
-            prior: &prior,
-            prior_present: false,
-            counts: [3, 3],
+            arithmetic: QualificationSmallRowOwner {
+                context: context.clone(),
+                filtered: &filtered,
+                mask: &mask,
+                prior: &prior,
+                prior_present: false,
+                counts: [3, 3],
+            },
         };
         assert!(pipeline.validate(&owner).is_ok());
         let foreign_context_owner = QualificationSmallRowOwner {
             context: foreign_context,
-            flight: flight.clone(),
-            root: root.clone(),
             filtered: &filtered,
             mask: &mask,
             prior: &prior,

@@ -79,7 +79,9 @@ field, common A-side L1 block mask, prior bilateral small-row allocation and
 its distinct optional topology, paired pre-increment counts, GPU context,
 producer frame flight and allocation-identical capture root. Its ordinary
 output has no CPU-readback usage. Constructor qualification alone allocates a
-diagnostic readback copy. The returned typed owner retains its private
+diagnostic readback copy and dispatches the same pipelines through an
+arithmetic-only fixture with no frame, flight, capture reservation or
+successor. The returned typed owner retains its private
 candidate, config, binding and identical bilateral output allocation.
 
 One serial invocation per row and direction visits all eight patch columns in
@@ -104,10 +106,11 @@ and capture root for validation by the future attachment boundary.
 
 This checkpoint intentionally has no production frame-input implementation or
 warm work-mode binding. Only a private constructor-qualification fixture
-currently implements the sealed input-owner projection. The later warm
-post-L1 owner must implement that projection inside the sealed module and
-append this work to its existing producer submission. Atomic installation must
-move the whole typed result into that producer's successor.
+currently implements the sealed arithmetic projection; it cannot reach the
+provenance-bearing ordinary encode. The later warm post-L1 owner must implement
+both sealed projections inside the module and append this work to its existing
+producer submission. Atomic installation must move the whole typed result into
+that producer's successor.
 Only the next reservation's exact installed-prior owner may then expose those
 rows to warm work modes; its consumer flight is intentionally not compared to
 the stored producer flight. Studio remains a frozen correctness oracle only;
