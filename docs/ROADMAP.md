@@ -3,6 +3,31 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Production ONE X2 paired PIS GPU wiring, 2026-09-01, implementation branch
+only [TYPED GPU RESULT; EXACT RESERVATION RECEIPT; NO CPU FALLBACK; NOT YET A
+RANGE OR PERFORMANCE CLAIM]:** the selected Scene route now lazily qualifies a
+persistent paired PIS compute pipeline before any frame-specific GPU work.
+Cold and warm scalar transactions retain CPU construction and upload of the
+typed prepared source models as the temporary producer boundary, then consume
+only fallibly admitted directional `PatchGrid` results from the GPU kernel.
+Each reservation mints an exact generation plus opaque `FrameStamp`; each
+stage completion must return that complete flight and `PairSolveStage` before
+the typed grids can enter `commit_with_solver`. Pipeline, readback, receipt,
+stamp and install failures surface their original error, restore the exact
+capture owner and ready-map identity, and do not retry through the CPU solver.
+An in-flight lookup returns before constructing either GPU producer and keeps
+the prior completed display.
+
+Committed `OneXsMapFrame` values now carry typed CPU/GPU PIS provenance
+separately from the diagnostic count of GPU stages that returned grids. The
+consecutive-range receipt contract is therefore
+`kjerag.playback-consecutive-range.v2`: every recorded production map names
+its backend and the run authenticates exact GPU and CPU transaction totals.
+The strict computed-trace consumer emits its corresponding v2 contract and
+refuses historical v1 or missing, mixed and inconsistent provenance. This
+branch does not reinterpret the frozen v1 evidence as proof of GPU-only PIS;
+a new target-GPU consecutive-range run is required before making that claim.
+
 **Second GPU ONE X2 slice, 2026-09-01, implementation branch only [GPU
 GAUSSIAN; TYPED POST-BLUR HANDOFF; 244 BYTE-IDENTICAL ARTIFACTS; SMALL NOISY
 THROUGHPUT GAIN; NOT REALTIME; NO NEW STUDIO OR OWNER VERDICT CLAIM]:** the

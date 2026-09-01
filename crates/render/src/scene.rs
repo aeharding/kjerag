@@ -486,8 +486,8 @@ struct PendingOneXsBlurredBelts {
 enum GpuPisSolverError {
     Pipeline(Box<dyn std::error::Error + Send + Sync>),
     Receipt {
-        expected: GpuPisStageReceipt,
-        actual: GpuPisStageReceipt,
+        expected: Box<GpuPisStageReceipt>,
+        actual: Box<GpuPisStageReceipt>,
     },
 }
 
@@ -518,7 +518,7 @@ struct ReservationGpuPisSolver<'a> {
     pipeline: &'a GpuPisPipeline,
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
-    submissions: &'a mut u64,
+    completed_stages: &'a mut u64,
 }
 
 impl PairedPisSolver for ReservationGpuPisSolver<'_> {
@@ -534,10 +534,10 @@ impl PairedPisSolver for ReservationGpuPisSolver<'_> {
             .pipeline
             .solve_request(self.device, self.queue, expected.clone(), request)
             .map_err(GpuPisSolverError::Pipeline)?;
-        *self.submissions = self
-            .submissions
+        *self.completed_stages = self
+            .completed_stages
             .checked_add(1)
-            .expect("ONE X2 GPU PIS submission counter is exhausted");
+            .expect("ONE X2 GPU PIS completed-stage counter is exhausted");
         finish_gpu_pis_stage(&expected, output)
     }
 }
@@ -558,8 +558,8 @@ fn validate_gpu_pis_receipt(
         Ok(())
     } else {
         Err(GpuPisSolverError::Receipt {
-            expected: expected.clone(),
-            actual: actual.clone(),
+            expected: Box::new(expected.clone()),
+            actual: Box::new(actual.clone()),
         })
     }
 }
@@ -2276,9 +2276,9 @@ pub struct ScenePipeline {
     /// Lazily built, device-qualified paired PIS kernel. CPU preparation of
     /// each source model remains the explicit producer boundary.
     one_xs_pis: Option<Box<GpuPisPipeline>>,
-    /// Frame-path instrumentation counts actual paired stage submissions, not
-    /// reservations or map installs.
-    one_xs_gpu_pis_submissions: u64,
+    /// Frame-path instrumentation counts paired GPU stages that returned typed
+    /// grids, not queue submissions, reservations or map installs.
+    one_xs_gpu_pis_completed_stages: u64,
     /// Lazily built production/direct type-2 consumer. Its pipeline and
     /// exact-size buffers are reused; only the two map payloads and their
     /// CPU-side frame association change between frames and diagnostics.
@@ -2626,7 +2626,7 @@ impl ScenePipeline {
             one_xs_luma: None,
             one_xs_belts: None,
             one_xs_pis: None,
-            one_xs_gpu_pis_submissions: 0,
+            one_xs_gpu_pis_completed_stages: 0,
             direct_one_xs_map: None,
             layout,
             sampler,
@@ -2898,7 +2898,7 @@ impl ScenePipeline {
                         .expect("the selected reservation initialized GPU PIS"),
                     device,
                     queue,
-                    submissions: &mut self.one_xs_gpu_pis_submissions,
+                    completed_stages: &mut self.one_xs_gpu_pis_completed_stages,
                 };
                 match reservation.commit_with_solver(blurred_belts, &mut solver) {
                     Ok(completed) => completed
@@ -6871,7 +6871,7 @@ mod tests {
         );
         assert!(pipeline.one_xs_belts.is_some());
         assert!(pipeline.one_xs_pis.is_some());
-        assert_eq!(pipeline.one_xs_gpu_pis_submissions, 6);
+        assert_eq!(pipeline.one_xs_gpu_pis_completed_stages, 6);
         assert!(pipeline.one_xs_luma.is_none());
         assert_eq!(
             scene
@@ -6924,7 +6924,7 @@ mod tests {
             "recreated pipeline submitted a second solver transaction"
         );
         assert!(recreated.one_xs_pis.is_none());
-        assert_eq!(recreated.one_xs_gpu_pis_submissions, 0);
+        assert_eq!(recreated.one_xs_gpu_pis_completed_stages, 0);
 
         let mut pending = pipeline
             .submit_one_xs_solver_belts(&device, &queue, frames, reservation.prepared())
@@ -6985,7 +6985,7 @@ mod tests {
         pipeline.prepare(&second_primitive, &device, &queue, 1.0);
         assert_eq!(pipeline.flow_draw, FlowDraw::DirectOneXs);
         assert_eq!(pipeline.diagnostic_one_xs_direct_frame(), Some(&second));
-        assert_eq!(pipeline.one_xs_gpu_pis_submissions, 8);
+        assert_eq!(pipeline.one_xs_gpu_pis_completed_stages, 8);
         assert_eq!(
             pipeline
                 .direct_one_xs_map

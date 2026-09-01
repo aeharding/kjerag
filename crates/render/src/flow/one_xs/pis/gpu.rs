@@ -21,7 +21,8 @@ use super::{
 };
 use crate::Fallible;
 use crate::flow::one_xs::scalar::{
-    PairSolveStage, PairedPatchGrids, PairedSolveRequest, SolveStamp, StampedPatchGrid,
+    PairSolveStage, PairedPatchGrids as ScalarPairedPatchGrids, PairedSolveRequest, SolveStamp,
+    StampedPatchGrid,
 };
 
 const HEADER_WORDS: usize = 32;
@@ -84,7 +85,7 @@ pub(crate) struct GpuPisStageReceipt {
 /// Typed terminal grids and the exact reservation/stage that submitted them.
 pub(crate) struct GpuPisStageOutput {
     pub(crate) receipt: GpuPisStageReceipt,
-    pub(crate) grids: PairedPatchGrids,
+    pub(crate) grids: ScalarPairedPatchGrids,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -331,20 +332,20 @@ impl GpuPisPipeline {
             a_to_b.admission,
             b_to_a.admission,
         )?;
-        let grids = PairedPatchGrids {
+        let grids = ScalarPairedPatchGrids {
             a_to_b: StampedPatchGrid::new(
                 SolveStamp {
                     direction: Direction::AtoB,
                     stage,
                 },
-                terminal.a_to_b.into_patch_grid()?,
+                terminal.a_to_b,
             ),
             b_to_a: StampedPatchGrid::new(
                 SolveStamp {
                     direction: Direction::BtoA,
                     stage,
                 },
-                terminal.b_to_a.into_patch_grid()?,
+                terminal.b_to_a,
             ),
         };
         Ok(GpuPisStageOutput { receipt, grids })
