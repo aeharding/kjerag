@@ -3175,13 +3175,7 @@ impl ScenePipeline {
             .one_xs_belts
             .as_ref()
             .expect("the exact GPU solver-belt producer was just qualified");
-        let pending = producer.submit_retained(
-            device,
-            queue,
-            sources,
-            prepared.retained_base_maps(),
-            frames,
-        )?;
+        let pending = producer.submit_retained(sources, prepared.retained_base_maps(), frames)?;
         Ok(PendingOneXsBlurredBelts { frame, pending })
     }
 
@@ -5585,6 +5579,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 mod tests {
     use std::future::Future;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::mpsc;
 
     use super::*;
@@ -6991,9 +6986,13 @@ mod tests {
         assert!(recreated.one_xs_pis.is_none());
         assert_eq!(recreated.one_xs_gpu_pis_completed_stages, 0);
 
+        let observed_frames = frames.clone();
         let mut pending = pipeline
             .submit_one_xs_solver_belts(&device, &queue, frames, reservation.prepared())
             .expect("could not submit frame one's exact retained maps and bound source");
+        let retained_with_pending = Arc::strong_count(&observed_frames);
+        let completion = Arc::new(AtomicU8::new(0));
+        pending.pending.observe_completion(Arc::clone(&completion));
 
         // Same report fields and decode epoch, different opaque delivered
         // pair. This is the ABA case an index/timestamp-only association
@@ -7014,6 +7013,16 @@ mod tests {
         assert_eq!(
             error.downcast_ref::<crate::studio_type2::FrameMapMismatch>(),
             Some(&mismatch)
+        );
+        assert_eq!(
+            completion.load(Ordering::SeqCst),
+            2,
+            "ABA refusal released its source without exact GPU completion"
+        );
+        assert_eq!(
+            Arc::strong_count(&observed_frames),
+            retained_with_pending - 1,
+            "completed ABA refusal did not release exactly its pending FramePair Arc"
         );
         reservation
             .abort()

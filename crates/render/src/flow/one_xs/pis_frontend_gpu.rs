@@ -28,99 +28,131 @@ const L1_LACK_ROWS: usize = 2 * Level::One.patch_rows();
 const L1_BLOCKS: usize = Level::One.patches();
 const MASK_WORDS_PER_LENS: usize = (ROWS * COLS).div_ceil(4);
 
-/// Exact identity of one GPU-resident image-owned preprocessing result.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GpuPisFrontEndReceipt {
-    pub(crate) flight: GpuPisFlight,
-    pub(crate) direction: Direction,
-    pub(crate) level: Level,
+mod level_marker {
+    pub trait Sealed {}
 }
 
-/// Typed immutable view of one direction and level in the shared frame token.
-pub(crate) struct GpuPreparedLevel<D: PisDirection> {
-    receipt: GpuPisFrontEndReceipt,
-    gradient_bytes: std::ops::Range<u64>,
-    weight_bytes: std::ops::Range<u64>,
-    patch_weight_sum_bytes: std::ops::Range<u64>,
-    model_bytes: std::ops::Range<u64>,
-    lack_row_bytes: Option<std::ops::Range<u64>>,
-    block_mask_bytes: Option<std::ops::Range<u64>>,
-    direction: PhantomData<D>,
+/// Compile-time identity of one prepared recursive level.
+pub(crate) trait GpuPreparedLevelMarker: level_marker::Sealed + 'static {
+    const LEVEL: Level;
 }
 
-impl<D: PisDirection> GpuPreparedLevel<D> {
-    pub(crate) fn receipt(&self) -> &GpuPisFrontEndReceipt {
-        &self.receipt
-    }
+pub(crate) struct GpuLevelOne;
+pub(crate) struct GpuLevelTwo;
 
-    pub(crate) fn gradient_bytes(&self) -> std::ops::Range<u64> {
-        self.gradient_bytes.clone()
-    }
-
-    pub(crate) fn weight_bytes(&self) -> std::ops::Range<u64> {
-        self.weight_bytes.clone()
-    }
-
-    pub(crate) fn patch_weight_sum_bytes(&self) -> std::ops::Range<u64> {
-        self.patch_weight_sum_bytes.clone()
-    }
-
-    pub(crate) fn model_bytes(&self) -> std::ops::Range<u64> {
-        self.model_bytes.clone()
-    }
-
-    pub(crate) fn lack_row_bytes(&self) -> Option<std::ops::Range<u64>> {
-        self.lack_row_bytes.clone()
-    }
-
-    pub(crate) fn block_mask_bytes(&self) -> Option<std::ops::Range<u64>> {
-        self.block_mask_bytes.clone()
-    }
+impl level_marker::Sealed for GpuLevelOne {}
+impl level_marker::Sealed for GpuLevelTwo {}
+impl GpuPreparedLevelMarker for GpuLevelOne {
+    const LEVEL: Level = Level::One;
+}
+impl GpuPreparedLevelMarker for GpuLevelTwo {
+    const LEVEL: Level = Level::Two;
 }
 
-/// Shared physical A/B image and mask ranges for one recursive level.
-pub(crate) struct GpuSharedLevel {
-    level: Level,
-    image_a_bytes: std::ops::Range<u64>,
-    image_b_bytes: std::ops::Range<u64>,
-    mask_a_bytes: std::ops::Range<u64>,
-    mask_b_bytes: std::ops::Range<u64>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PisPreparedBaseWords {
+    source_image: u32,
+    target_image: u32,
+    source_mask: u32,
+    target_mask: u32,
+    gradient: u32,
+    weight: u32,
+    patch_sum: u32,
+    model: u32,
+    lack_rows: Option<u32>,
+    block_mask: Option<u32>,
 }
 
-impl GpuSharedLevel {
+/// Borrow-tied, typed binding contract for one exact frame/direction/level.
+///
+/// Every storage binding covers its complete buffer at byte offset zero. The
+/// shader receives these logical word bases in its private dynamic header, so
+/// no unaligned storage-buffer slice can escape this bundle.
+pub(crate) struct PisPreparedBinding<'a, D: PisDirection, L: GpuPreparedLevelMarker> {
+    flight: &'a GpuPisFlight,
+    shared_images: &'a wgpu::Buffer,
+    shared_masks: &'a wgpu::Buffer,
+    gradients: &'a wgpu::Buffer,
+    raw_weights: &'a wgpu::Buffer,
+    patch_weight_sums: &'a wgpu::Buffer,
+    models: &'a wgpu::Buffer,
+    l1_lack_rows: &'a wgpu::Buffer,
+    l1_block_mask: &'a wgpu::Buffer,
+    bases: PisPreparedBaseWords,
+    marker: PhantomData<(D, L)>,
+}
+
+impl<'a, D: PisDirection, L: GpuPreparedLevelMarker> PisPreparedBinding<'a, D, L> {
+    pub(crate) fn flight(&self) -> &'a GpuPisFlight {
+        self.flight
+    }
     pub(crate) fn level(&self) -> Level {
-        self.level
+        L::LEVEL
     }
-    pub(crate) fn image_a_bytes(&self) -> std::ops::Range<u64> {
-        self.image_a_bytes.clone()
+    pub(crate) fn direction(&self) -> Direction {
+        D::DIRECTION
     }
-    pub(crate) fn image_b_bytes(&self) -> std::ops::Range<u64> {
-        self.image_b_bytes.clone()
+    pub(crate) fn shared_images(&self) -> &'a wgpu::Buffer {
+        self.shared_images
     }
-    pub(crate) fn mask_a_bytes(&self) -> std::ops::Range<u64> {
-        self.mask_a_bytes.clone()
+    pub(crate) fn shared_masks(&self) -> &'a wgpu::Buffer {
+        self.shared_masks
     }
-    pub(crate) fn mask_b_bytes(&self) -> std::ops::Range<u64> {
-        self.mask_b_bytes.clone()
+    pub(crate) fn gradients(&self) -> &'a wgpu::Buffer {
+        self.gradients
     }
-}
-
-/// Direction-owned L1/L2 views into one immutable frame allocation.
-pub(crate) struct GpuPreparedDirection<D: PisDirection> {
-    pub(crate) level_one: GpuPreparedLevel<D>,
-    pub(crate) level_two: GpuPreparedLevel<D>,
+    pub(crate) fn raw_weights(&self) -> &'a wgpu::Buffer {
+        self.raw_weights
+    }
+    pub(crate) fn patch_weight_sums(&self) -> &'a wgpu::Buffer {
+        self.patch_weight_sums
+    }
+    pub(crate) fn models(&self) -> &'a wgpu::Buffer {
+        self.models
+    }
+    pub(crate) fn l1_lack_rows(&self) -> &'a wgpu::Buffer {
+        self.l1_lack_rows
+    }
+    pub(crate) fn l1_block_mask(&self) -> &'a wgpu::Buffer {
+        self.l1_block_mask
+    }
+    pub(crate) fn source_image_base_words(&self) -> u32 {
+        self.bases.source_image
+    }
+    pub(crate) fn target_image_base_words(&self) -> u32 {
+        self.bases.target_image
+    }
+    pub(crate) fn source_mask_base_words(&self) -> u32 {
+        self.bases.source_mask
+    }
+    pub(crate) fn target_mask_base_words(&self) -> u32 {
+        self.bases.target_mask
+    }
+    pub(crate) fn gradient_base_words(&self) -> u32 {
+        self.bases.gradient
+    }
+    pub(crate) fn weight_base_words(&self) -> u32 {
+        self.bases.weight
+    }
+    pub(crate) fn patch_sum_base_words(&self) -> u32 {
+        self.bases.patch_sum
+    }
+    pub(crate) fn model_base_words(&self) -> u32 {
+        self.bases.model
+    }
+    pub(crate) fn lack_row_base_words(&self) -> Option<u32> {
+        self.bases.lack_rows
+    }
+    pub(crate) fn block_mask_base_words(&self) -> Option<u32> {
+        self.bases.block_mask
+    }
 }
 
 /// Complete per-frame front end, still resident and deliberately unselected.
 ///
-/// The embedded belt token preserves the checkpoint's existing lifetime
-/// behavior. This type makes no stronger ownership or Scene-readiness claim.
 #[must_use = "the GPU-resident PIS frame front end has not been consumed"]
 pub(crate) struct GpuPreparedFrame<K> {
-    pub(crate) shared_level_one: GpuSharedLevel,
-    pub(crate) shared_level_two: GpuSharedLevel,
-    pub(crate) a_to_b: GpuPreparedDirection<AtoB>,
-    pub(crate) b_to_a: GpuPreparedDirection<BtoA>,
+    flight: GpuPisFlight,
     shared_images: wgpu::Buffer,
     shared_masks: wgpu::Buffer,
     gradients: wgpu::Buffer,
@@ -131,42 +163,73 @@ pub(crate) struct GpuPreparedFrame<K> {
     l1_block_mask: wgpu::Buffer,
     _weight_horizontal: wgpu::Buffer,
     _resources: wgpu::BindGroup,
-    _belts: GpuBlurredBelts<K>,
-    submission: wgpu::SubmissionIndex,
+    belts: GpuBlurredBelts<K>,
 }
 
 impl<K> GpuPreparedFrame<K> {
-    pub(crate) fn shared_images(&self) -> &wgpu::Buffer {
-        &self.shared_images
+    pub(crate) fn bind_pis_level<D, L>(&self) -> PisPreparedBinding<'_, D, L>
+    where
+        D: PisDirection,
+        L: GpuPreparedLevelMarker,
+    {
+        PisPreparedBinding {
+            flight: &self.flight,
+            shared_images: &self.shared_images,
+            shared_masks: &self.shared_masks,
+            gradients: &self.gradients,
+            raw_weights: &self.raw_weights,
+            patch_weight_sums: &self.patch_weight_sums,
+            models: &self.models,
+            l1_lack_rows: &self.l1_lack_rows,
+            l1_block_mask: &self.l1_block_mask,
+            bases: prepared_bases::<D, L>(),
+            marker: PhantomData,
+        }
     }
-    pub(crate) fn shared_masks(&self) -> &wgpu::Buffer {
-        &self.shared_masks
+
+    pub(crate) fn record_consumer_submission(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        submission: wgpu::SubmissionIndex,
+    ) -> Fallible<()> {
+        self.belts
+            .record_consumer_submission(device, queue, submission)
     }
-    pub(crate) fn gradients(&self) -> &wgpu::Buffer {
-        &self.gradients
+
+    /// Consume the resident frame at its explicit CPU re-entry boundary.
+    /// Success proves the latest same-queue consumer and every earlier stage,
+    /// releases the imported source owner once and disarms cancellation Drop.
+    pub(crate) fn acknowledge_terminal(mut self) -> Fallible<()> {
+        self.belts.complete()
     }
-    pub(crate) fn raw_weights(&self) -> &wgpu::Buffer {
-        &self.raw_weights
+
+    #[cfg(test)]
+    fn observe_completion(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
+        self.belts.observe_completion(state);
     }
-    pub(crate) fn patch_weight_sums(&self) -> &wgpu::Buffer {
-        &self.patch_weight_sums
-    }
-    pub(crate) fn models(&self) -> &wgpu::Buffer {
-        &self.models
-    }
-    pub(crate) fn l1_lack_rows(&self) -> &wgpu::Buffer {
-        &self.l1_lack_rows
-    }
-    pub(crate) fn l1_block_mask(&self) -> &wgpu::Buffer {
-        &self.l1_block_mask
-    }
-    pub(crate) fn submission(&self) -> &wgpu::SubmissionIndex {
-        &self.submission
+
+    #[cfg(test)]
+    fn qualification_sections(&self) -> [(wgpu::Buffer, usize); 9] {
+        let counts = OutputBuffers::section_word_counts();
+        [
+            (self.shared_images.clone(), counts[0]),
+            (self.shared_masks.clone(), counts[1]),
+            (self.gradients.clone(), counts[2]),
+            (self._weight_horizontal.clone(), counts[3]),
+            (self.raw_weights.clone(), counts[4]),
+            (self.patch_weight_sums.clone(), counts[5]),
+            (self.models.clone(), counts[6]),
+            (self.l1_lack_rows.clone(), counts[7]),
+            (self.l1_block_mask.clone(), counts[8]),
+        ]
     }
 }
 
 /// Render-private production shader plus mandatory target-device CPU twin.
 pub(crate) struct GpuPisFrontEnd {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     reduce: wgpu::ComputePipeline,
     gradient: wgpu::ComputePipeline,
     weight_horizontal: wgpu::ComputePipeline,
@@ -233,6 +296,8 @@ impl GpuPisFrontEnd {
             })
         };
         let built = Self {
+            device: device.clone(),
+            queue: queue.clone(),
             reduce: pipeline("reduce_shared"),
             gradient: pipeline("prepare_gradients"),
             weight_horizontal: pipeline("prepare_weight_horizontal"),
@@ -242,7 +307,7 @@ impl GpuPisFrontEnd {
             layout,
         };
         if qualify {
-            built.qualify(device, queue)?;
+            built.qualify()?;
         }
         Ok(built)
     }
@@ -252,24 +317,21 @@ impl GpuPisFrontEnd {
     /// the producer visible without a CPU poll.
     pub(crate) fn prepare<K>(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        belts: GpuBlurredBelts<K>,
+        mut belts: GpuBlurredBelts<K>,
         physical_masks: &LensPair<Vec<u8>>,
     ) -> Fallible<GpuPreparedFrame<K>> {
+        belts.validate_provenance(&self.device, &self.queue)?;
         validate_masks(physical_masks)?;
+        let device = &self.device;
+        let queue = &self.queue;
         let mask = upload_masks(device, queue, physical_masks);
         let outputs = OutputBuffers::new(device);
         let resources = self.resources(device, belts.packed(), &mask, &outputs);
         let submission = self.dispatch(device, queue, &resources);
-        let flight = belts.flight().clone();
-        let (shared_level_one, shared_level_two) = shared_views();
-        let views = prepared_views(&flight);
+        belts.record_consumer_submission(device, queue, submission)?;
+        let flight = belts.take_flight();
         Ok(GpuPreparedFrame {
-            shared_level_one,
-            shared_level_two,
-            a_to_b: views.0,
-            b_to_a: views.1,
+            flight,
             shared_images: outputs.shared_images,
             shared_masks: outputs.shared_masks,
             gradients: outputs.gradients,
@@ -280,8 +342,7 @@ impl GpuPisFrontEnd {
             l1_block_mask: outputs.l1_block_mask,
             _weight_horizontal: outputs.weight_horizontal,
             _resources: resources,
-            _belts: belts,
-            submission,
+            belts,
         })
     }
 
@@ -330,7 +391,9 @@ impl GpuPisFrontEnd {
         queue.submit([encoder.finish()])
     }
 
-    fn qualify(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<()> {
+    fn qualify(&self) -> Fallible<()> {
+        let device = &self.device;
+        let queue = &self.queue;
         let (blurred, masks) = qualification_fixture();
         let expected = cpu_outputs(&blurred, &masks);
         let packed = upload_belts(device, queue, &blurred);
@@ -641,83 +704,45 @@ impl OutputBuffers {
     }
 }
 
-fn prepared_views(
-    flight: &GpuPisFlight,
-) -> (GpuPreparedDirection<AtoB>, GpuPreparedDirection<BtoA>) {
-    fn level<D: PisDirection>(
-        flight: &GpuPisFlight,
-        level: Level,
-        pixel_start: usize,
-        patch_start: usize,
-        lack_start: Option<usize>,
-    ) -> GpuPreparedLevel<D> {
-        GpuPreparedLevel {
-            receipt: GpuPisFrontEndReceipt {
-                flight: flight.clone(),
-                direction: D::DIRECTION,
-                level,
-            },
-            gradient_bytes: words_bytes(2 * pixel_start)
-                ..words_bytes(2 * (pixel_start + level.pixels())),
-            weight_bytes: words_bytes(pixel_start)..words_bytes(pixel_start + level.pixels()),
-            patch_weight_sum_bytes: words_bytes(patch_start)
-                ..words_bytes(patch_start + level.patches()),
-            model_bytes: words_bytes(MODEL_WORDS_PER_PATCH * patch_start)
-                ..words_bytes(MODEL_WORDS_PER_PATCH * (patch_start + level.patches())),
-            lack_row_bytes: lack_start
-                .map(|start| words_bytes(start)..words_bytes(start + Level::One.patch_rows())),
-            block_mask_bytes: (level == Level::One).then(|| 0..words_bytes(Level::One.patches())),
-            direction: PhantomData,
-        }
+fn prepared_bases<D: PisDirection, L: GpuPreparedLevelMarker>() -> PisPreparedBaseWords {
+    let level = L::LEVEL;
+    let (image_a, image_b) = match level {
+        Level::One => (0, L1_PIXELS),
+        Level::Two => (2 * L1_PIXELS, 2 * L1_PIXELS + L2_PIXELS),
+    };
+    let (source_image, target_image) = match D::DIRECTION {
+        Direction::AtoB => (image_a, image_b),
+        Direction::BtoA => (image_b, image_a),
+    };
+    let pixel_start = match (D::DIRECTION, level) {
+        (Direction::AtoB, Level::One) => 0,
+        (Direction::BtoA, Level::One) => L1_PIXELS,
+        (Direction::AtoB, Level::Two) => 2 * L1_PIXELS,
+        (Direction::BtoA, Level::Two) => 2 * L1_PIXELS + L2_PIXELS,
+    };
+    let patch_start = match (D::DIRECTION, level) {
+        (Direction::AtoB, Level::One) => 0,
+        (Direction::BtoA, Level::One) => Level::One.patches(),
+        (Direction::AtoB, Level::Two) => 2 * Level::One.patches(),
+        (Direction::BtoA, Level::Two) => 2 * Level::One.patches() + Level::Two.patches(),
+    };
+    PisPreparedBaseWords {
+        source_image: source_image as u32,
+        target_image: target_image as u32,
+        // Physical mask arguments remain A then B in both directions.
+        source_mask: image_a as u32,
+        target_mask: image_b as u32,
+        gradient: (2 * pixel_start) as u32,
+        weight: pixel_start as u32,
+        patch_sum: patch_start as u32,
+        model: (MODEL_WORDS_PER_PATCH * patch_start) as u32,
+        lack_rows: match (D::DIRECTION, level) {
+            (Direction::AtoB, Level::One) => Some(0),
+            (Direction::BtoA, Level::One) => Some(Level::One.patch_rows() as u32),
+            (_, Level::Two) => None,
+        },
+        block_mask: (level == Level::One).then_some(0),
     }
-    let ab1_patch = 0;
-    let ba1_patch = Level::One.patches();
-    let ab2_patch = 2 * Level::One.patches();
-    let ba2_patch = ab2_patch + Level::Two.patches();
-    (
-        GpuPreparedDirection {
-            level_one: level::<AtoB>(flight, Level::One, 0, ab1_patch, Some(0)),
-            level_two: level::<AtoB>(flight, Level::Two, 2 * L1_PIXELS, ab2_patch, None),
-        },
-        GpuPreparedDirection {
-            level_one: level::<BtoA>(
-                flight,
-                Level::One,
-                L1_PIXELS,
-                ba1_patch,
-                Some(Level::One.patch_rows()),
-            ),
-            level_two: level::<BtoA>(
-                flight,
-                Level::Two,
-                2 * L1_PIXELS + L2_PIXELS,
-                ba2_patch,
-                None,
-            ),
-        },
-    )
-}
-
-fn shared_views() -> (GpuSharedLevel, GpuSharedLevel) {
-    fn range(start: usize, words: usize) -> std::ops::Range<u64> {
-        words_bytes(start)..words_bytes(start + words)
-    }
-    (
-        GpuSharedLevel {
-            level: Level::One,
-            image_a_bytes: range(0, L1_PIXELS),
-            image_b_bytes: range(L1_PIXELS, L1_PIXELS),
-            mask_a_bytes: range(0, L1_PIXELS),
-            mask_b_bytes: range(L1_PIXELS, L1_PIXELS),
-        },
-        GpuSharedLevel {
-            level: Level::Two,
-            image_a_bytes: range(2 * L1_PIXELS, L2_PIXELS),
-            image_b_bytes: range(2 * L1_PIXELS + L2_PIXELS, L2_PIXELS),
-            mask_a_bytes: range(2 * L1_PIXELS, L2_PIXELS),
-            mask_b_bytes: range(2 * L1_PIXELS + L2_PIXELS, L2_PIXELS),
-        },
-    )
 }
 
 fn qualification_fixture() -> (BlurredBelts, LensPair<Vec<u8>>) {
@@ -1196,6 +1221,8 @@ fn prepare_l1_aux(@builtin(global_invocation_id) id: vec3<u32>) {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -1206,8 +1233,301 @@ mod tests {
     use crate::flow::one_xs::pis::{CostMode, DescentAdmission, Flow, HintGrid, InitialGrid};
     use crate::flow::one_xs::scalar::PairSolveStage;
     use crate::flow::one_xs_belt::{RetainedBaseMaps, SourceImage, sample_source_belts};
-    use crate::flow::one_xs_belt_gpu::{GpuSolverBeltPipeline, SourceTextures};
+    use crate::flow::one_xs_belt_gpu::{
+        GpuSolverBeltPipeline, SourceTextures, resident_qualification_fixture,
+    };
     use kjerag_media::FrameStamp;
+
+    struct DropProbe {
+        wait_state: Arc<AtomicU8>,
+        dropped: mpsc::Sender<u8>,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let _ = self.dropped.send(self.wait_state.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn prepared_binding_bases_cover_each_whole_buffer_without_overlap() {
+        let stages = [
+            prepared_bases::<AtoB, GpuLevelOne>(),
+            prepared_bases::<BtoA, GpuLevelOne>(),
+            prepared_bases::<AtoB, GpuLevelTwo>(),
+            prepared_bases::<BtoA, GpuLevelTwo>(),
+        ];
+        let pixels = [L1_PIXELS, L1_PIXELS, L2_PIXELS, L2_PIXELS];
+        let patches = [
+            Level::One.patches(),
+            Level::One.patches(),
+            Level::Two.patches(),
+            Level::Two.patches(),
+        ];
+
+        assert_partition(
+            "direction gradients",
+            stages
+                .iter()
+                .zip(pixels)
+                .map(|(base, words)| (base.gradient as usize, 2 * words))
+                .collect(),
+            2 * STAGE_PIXELS,
+        );
+        assert_partition(
+            "raw weights",
+            stages
+                .iter()
+                .zip(pixels)
+                .map(|(base, words)| (base.weight as usize, words))
+                .collect(),
+            STAGE_PIXELS,
+        );
+        assert_partition(
+            "rolling patch sums",
+            stages
+                .iter()
+                .zip(patches)
+                .map(|(base, words)| (base.patch_sum as usize, words))
+                .collect(),
+            STAGE_PATCHES,
+        );
+        assert_partition(
+            "source models",
+            stages
+                .iter()
+                .zip(patches)
+                .map(|(base, words)| (base.model as usize, MODEL_WORDS_PER_PATCH * words))
+                .collect(),
+            MODEL_WORDS_PER_PATCH * STAGE_PATCHES,
+        );
+
+        let ab1 = stages[0];
+        let ba1 = stages[1];
+        let ab2 = stages[2];
+        let ba2 = stages[3];
+        assert_eq!((ab1.source_image, ab1.target_image), (0, L1_PIXELS as u32));
+        assert_eq!((ba1.source_image, ba1.target_image), (L1_PIXELS as u32, 0));
+        assert_eq!(
+            (ab2.source_image, ab2.target_image),
+            ((2 * L1_PIXELS) as u32, (2 * L1_PIXELS + L2_PIXELS) as u32)
+        );
+        assert_eq!(
+            (ba2.source_image, ba2.target_image),
+            (ab2.target_image, ab2.source_image)
+        );
+        assert_eq!((ab1.source_mask, ab1.target_mask), (0, L1_PIXELS as u32));
+        assert_eq!((ba1.source_mask, ba1.target_mask), (0, L1_PIXELS as u32));
+        assert_eq!(ab1.lack_rows, Some(0));
+        assert_eq!(ba1.lack_rows, Some(Level::One.patch_rows() as u32));
+        assert_eq!(ab2.lack_rows, None);
+        assert_eq!(ba2.lack_rows, None);
+        assert_eq!(ab1.block_mask, Some(0));
+        assert_eq!(ba1.block_mask, Some(0));
+        assert_eq!(ab2.block_mask, None);
+        assert_eq!(ba2.block_mask, None);
+    }
+
+    #[test]
+    fn composed_resident_front_end_waits_only_at_terminal_acknowledgement() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                );
+                eprintln!("skipping composed ONE X2 GPU front end: {why}");
+                return;
+            }
+        };
+        let front = GpuPisFrontEnd::new(&device, &queue)
+            .unwrap_or_else(|error| panic!("GPU front end failed on {adapter}: {error}"));
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let flight = GpuPisFlight {
+            generation: 17,
+            frame: FrameStamp::for_test(23, Duration::from_secs(3), None),
+        };
+        let (mut belts, expected_blurred) = resident_qualification_fixture(
+            &device,
+            &queue,
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            flight.clone(),
+        )
+        .unwrap_or_else(|error| panic!("resident producer failed on {adapter}: {error}"));
+        belts.observe_completion(Arc::clone(&state));
+        assert_eq!(state.load(Ordering::SeqCst), 0, "producer handoff polled");
+
+        let masks = qualification_fixture().1;
+        let expected = cpu_outputs(&expected_blurred, &masks);
+        let frame = front
+            .prepare(belts, &masks)
+            .unwrap_or_else(|error| panic!("resident front end failed on {adapter}: {error}"));
+        assert_eq!(state.load(Ordering::SeqCst), 0, "front-end handoff polled");
+        assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        let identities = [
+            binding_identity(frame.bind_pis_level::<AtoB, GpuLevelOne>()),
+            binding_identity(frame.bind_pis_level::<BtoA, GpuLevelOne>()),
+            binding_identity(frame.bind_pis_level::<AtoB, GpuLevelTwo>()),
+            binding_identity(frame.bind_pis_level::<BtoA, GpuLevelTwo>()),
+        ];
+        for ((direction, level, seen_flight), expected_identity) in identities.into_iter().zip([
+            (Direction::AtoB, Level::One),
+            (Direction::BtoA, Level::One),
+            (Direction::AtoB, Level::Two),
+            (Direction::BtoA, Level::Two),
+        ]) {
+            assert_eq!(seen_flight, flight);
+            assert_eq!((direction, level), expected_identity);
+        }
+        assert_eq!(
+            0 % u64::from(device.limits().min_storage_buffer_offset_alignment),
+            0,
+            "whole-buffer bindings must be aligned"
+        );
+        let sections = frame.qualification_sections();
+        frame.acknowledge_terminal().unwrap();
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            2,
+            "terminal wait was not exact"
+        );
+        assert_eq!(answer.recv().unwrap(), 2, "owner preceded terminal wait");
+        assert_exact_sections(&device, &queue, sections, expected, &adapter);
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            2,
+            "disarmed frame waited twice"
+        );
+    }
+
+    #[test]
+    fn prepared_frame_early_drop_waits_for_latest_front_end_submission() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                );
+                eprintln!("skipping prepared-frame cancellation: {why}");
+                return;
+            }
+        };
+        let front = GpuPisFrontEnd::new(&device, &queue).unwrap();
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let (mut belts, _) = resident_qualification_fixture(
+            &device,
+            &queue,
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            GpuPisFlight {
+                generation: 31,
+                frame: FrameStamp::for_test(41, Duration::ZERO, None),
+            },
+        )
+        .unwrap_or_else(|error| panic!("resident producer failed on {adapter}: {error}"));
+        belts.observe_completion(Arc::clone(&state));
+        let masks = qualification_fixture().1;
+        let frame = front.prepare(belts, &masks).unwrap();
+        assert_eq!(state.load(Ordering::SeqCst), 0);
+        drop(frame);
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            answer.recv().unwrap(),
+            2,
+            "owner preceded latest front-end wait"
+        );
+    }
+
+    fn binding_identity<D, L>(
+        binding: PisPreparedBinding<'_, D, L>,
+    ) -> (Direction, Level, GpuPisFlight)
+    where
+        D: PisDirection,
+        L: GpuPreparedLevelMarker,
+    {
+        (
+            binding.direction(),
+            binding.level(),
+            binding.flight().clone(),
+        )
+    }
+
+    fn assert_partition(name: &str, mut ranges: Vec<(usize, usize)>, total: usize) {
+        ranges.sort_unstable();
+        let mut cursor = 0;
+        for (start, words) in ranges {
+            assert_eq!(
+                start, cursor,
+                "{name} has a gap or overlap at word {cursor}"
+            );
+            cursor += words;
+            assert!(cursor <= total, "{name} exceeds its whole buffer");
+        }
+        assert_eq!(cursor, total, "{name} does not cover its whole buffer");
+    }
+
+    fn assert_exact_sections(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sections: [(wgpu::Buffer, usize); 9],
+        expected: Vec<(&'static str, Vec<u32>)>,
+        adapter: &str,
+    ) {
+        let total_words = sections.iter().map(|(_, words)| words).sum::<usize>();
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 composed resident front-end readback"),
+            size: words_bytes(total_words),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 composed resident front-end readback"),
+        });
+        let mut byte_offset = 0;
+        for (buffer, words) in &sections {
+            encoder.copy_buffer_to_buffer(buffer, 0, &readback, byte_offset, words_bytes(*words));
+            byte_offset += words_bytes(*words);
+        }
+        let submission = queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (mapped, answer) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = mapped.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .unwrap();
+        answer.recv().unwrap().unwrap();
+        let bytes = slice.get_mapped_range();
+        let actual = bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        drop(bytes);
+        readback.unmap();
+        let mut offset = 0;
+        for (name, expected) in expected {
+            assert_eq!(
+                &actual[offset..offset + expected.len()],
+                expected,
+                "composed resident {name} differs from the CPU oracle on {adapter}"
+            );
+            offset += expected.len();
+        }
+        assert_eq!(offset, actual.len());
+    }
 
     #[test]
     fn fixture_exercises_every_source_model_component() {
