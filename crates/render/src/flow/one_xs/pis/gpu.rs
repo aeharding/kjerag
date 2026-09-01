@@ -45,6 +45,30 @@ impl<D: PisDirection> TerminalBits<D> {
     pub(crate) fn drow(&self) -> &[u32] {
         &self.drow
     }
+
+    /// Re-enter the typed CPU boundary without changing any terminal bits.
+    /// Pass reports are intentionally empty because this production handoff
+    /// retains only the native terminal grid.
+    pub(crate) fn into_patch_grid(self) -> super::PatchGrid<D> {
+        let patches = self
+            .dcol
+            .iter()
+            .copied()
+            .zip(self.drow.iter().copied())
+            .map(|(dcol, drow)| {
+                super::Patch::seeded(Flow {
+                    dcol: f32::from_bits(dcol),
+                    drow: f32::from_bits(drow),
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        super::PatchGrid {
+            level: self.level,
+            patches,
+            direction: PhantomData,
+        }
+    }
 }
 
 /// The two direction-typed terminal grids from one paired level solve.
@@ -660,8 +684,8 @@ fn qualification_fixture(
         let mut gx = Vec::with_capacity(pixels);
         let mut gy = Vec::with_capacity(pixels);
         let mut weight = Vec::with_capacity(pixels);
-        for at in 0..pixels {
-            if mask_a[at] == 0 {
+        for (at, mask) in mask_a.iter().copied().enumerate() {
+            if mask == 0 {
                 gx.push(0.0);
                 gy.push(0.0);
                 weight.push(0.0);
