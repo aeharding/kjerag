@@ -13,7 +13,7 @@ use crate::Fallible;
 use crate::direct_type2::ImportedOneXsPicture;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::one_xs_belt_gpu::geometry_gpu::temporal_gpu::{
-    GpuColdPriorPublicLevelTwo, GpuMotionResidentL2Post,
+    GpuColdPriorPublicLevelTwo, GpuMotionResidentL2Post, GpuPriorPublicLevelTwo,
 };
 use crate::flow::one_xs::one_xs_belt_gpu::map_patch_gpu::resident;
 use crate::flow::one_xs::pis::Level;
@@ -555,14 +555,17 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuCompletedColdCheckpoint<K
     public: wgpu::Buffer,
 }
 
-/// Concrete, nonconstructible final-map operand for the only production
-/// Cold2/source-owner combination. It deliberately has no generic parameter.
-pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdFinalOperands {
+/// Nonconstructible final-map operands for one completed resident post owner.
+///
+/// Cold and warm arithmetic retain distinct sealed `P` owners, while this
+/// downstream boundary owns their identical source, validity, map and root
+/// installation lifecycle.
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuFinalOperands<P: GpuPriorPublicLevelTwo> {
     // Carrier first: every error, panic and unwind retires the imported source
     // lease before releasing the root reservation or capture-static owners.
     prepared: super::super::GpuPreparedFrame<GpuGeometryFrameOwner<ImportedOneXsPicture>>,
     validity: GpuResidentValidity,
-    post: GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo>,
+    post: GpuMotionResidentL2Post<P>,
     public: wgpu::Buffer,
     context: OneXsGpuContext,
     flight: crate::flow::one_xs::pis::gpu::GpuPisFlight,
@@ -571,30 +574,31 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdFinalOperands {
 /// Root-free result of consuming the completed final-map operands. The source
 /// is separate only long enough for the parent module to place both pieces in
 /// one nonconstructible installed draw.
-pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdInstallParts {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuFinalInstallParts<P: GpuPriorPublicLevelTwo>
+{
     pub(in crate::flow::one_xs::one_xs_belt_gpu) source: ImportedOneXsPicture,
-    pub(in crate::flow::one_xs::one_xs_belt_gpu) carrier: CompletedColdDrawCarrier,
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) carrier: GpuFinalDrawCarrier<P>,
     pub(in crate::flow::one_xs::one_xs_belt_gpu) candidate:
         crate::flow::one_xs::one_xs_belt_gpu::resident_frame_gpu::GpuResidentCandidate,
 }
 
 /// All final-map producer state needed by the installed draw, after the root
 /// reservation and successor have been consumed into a separate capability.
-pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdDrawCarrier {
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuFinalDrawCarrier<P: GpuPriorPublicLevelTwo> {
     _prepared: super::super::GpuPreparedFrame<GpuGeometryFrameOwner<ImportedOneXsPicture>>,
     _geometry: GpuGeometryFrameOwner<()>,
     _validity: GpuResidentValidity,
-    _post: GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo>,
+    _post: GpuMotionResidentL2Post<P>,
     _public: wgpu::Buffer,
     _context: OneXsGpuContext,
     _flight: crate::flow::one_xs::pis::gpu::GpuPisFlight,
     root: crate::flow::one_xs::one_xs_belt_gpu::resident_frame_gpu::GpuResidentIdentity,
 }
 
-impl CompletedColdFinalOperands {
+impl<P: GpuPriorPublicLevelTwo> GpuFinalOperands<P> {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn into_install_parts(
         mut self,
-    ) -> Fallible<CompletedColdInstallParts> {
+    ) -> Fallible<GpuFinalInstallParts<P>> {
         let root = self
             .post
             .resident_identity()?
@@ -605,9 +609,9 @@ impl CompletedColdFinalOperands {
         // extracted source local is then dropped before `self`. Success takes
         // the already-compared pair through a non-fallible constructor.
         let candidate = self.post.take_install_candidate()?;
-        Ok(CompletedColdInstallParts {
+        Ok(GpuFinalInstallParts {
             source,
-            carrier: CompletedColdDrawCarrier {
+            carrier: GpuFinalDrawCarrier {
                 _prepared: self.prepared,
                 _geometry: geometry,
                 _validity: self.validity,
@@ -622,7 +626,7 @@ impl CompletedColdFinalOperands {
     }
 }
 
-impl CompletedColdDrawCarrier {
+impl<P: GpuPriorPublicLevelTwo> GpuFinalDrawCarrier<P> {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn matches_root(
         &self,
         root: &crate::flow::one_xs::one_xs_belt_gpu::resident_frame_gpu::GpuResidentIdentity,
@@ -634,7 +638,7 @@ impl CompletedColdDrawCarrier {
 pub(in crate::flow::one_xs::one_xs_belt_gpu) fn admit_completed_cold_final(
     mut checkpoint: GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
     producer: &OneXsGpuContext,
-) -> Fallible<CompletedColdFinalOperands> {
+) -> Fallible<GpuFinalOperands<GpuColdPriorPublicLevelTwo>> {
     validate_completed_cold_final(&checkpoint, producer)?;
     let flight = checkpoint
         .prepared
@@ -642,7 +646,7 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) fn admit_completed_cold_final(
         .expect("validated Cold2 prepared owner")
         .flight
         .clone();
-    Ok(CompletedColdFinalOperands {
+    Ok(GpuFinalOperands {
         prepared: checkpoint
             .prepared
             .take()
@@ -706,9 +710,9 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) fn validate_completed_cold_final(
     Ok(())
 }
 
-impl resident::Sealed for CompletedColdFinalOperands {}
+impl<P: GpuPriorPublicLevelTwo> resident::Sealed for GpuFinalOperands<P> {}
 
-impl resident::Operands for CompletedColdFinalOperands {
+impl<P: GpuPriorPublicLevelTwo> resident::Operands for GpuFinalOperands<P> {
     fn context(&self) -> &OneXsGpuContext {
         &self.context
     }

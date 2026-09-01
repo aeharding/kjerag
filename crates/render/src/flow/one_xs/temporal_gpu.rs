@@ -308,7 +308,7 @@ impl GpuColdPriorPublicLevelTwo {
 
 impl prior_public_l2::Sealed for GpuColdPriorPublicLevelTwo {}
 
-impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
+impl<P: GpuPriorPublicLevelTwo> GpuMotionResidentL2Post<P> {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn ensure_final_reservation(
         &self,
         context: &OneXsGpuContext,
@@ -366,7 +366,9 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
             .ok_or("ONE X2 final install lost its root reservation")?;
         Ok(reservation.seal_validated(successor))
     }
+}
 
+impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
     #[cfg(test)]
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cold_lifecycle_for_test(
         &self,

@@ -199,9 +199,14 @@ impl ResidentSourceFrontPipeline {
         &self,
         checkpoint: pis_frontend_gpu::GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
     ) -> Fallible<
-        map_patch_gpu::PendingGpuPackedMapFrame<pis_frontend_gpu::CompletedColdFinalOperands>,
+        map_patch_gpu::PendingGpuPackedMapFrame<
+            pis_frontend_gpu::GpuFinalOperands<
+                geometry_gpu::temporal_gpu::GpuColdPriorPublicLevelTwo,
+            >,
+        >,
     > {
-        self.final_map.materialize_completed_cold(checkpoint)
+        let operands = pis_frontend_gpu::admit_completed_cold_final(checkpoint, &self.context)?;
+        self.final_map.materialize_final(operands)
     }
 }
 
@@ -466,14 +471,17 @@ impl ResidentInstallCandidate {
 }
 
 #[allow(dead_code)]
-pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_completed_cold_install(
-    map: map_patch_gpu::GpuPackedMapFrame<pis_frontend_gpu::CompletedColdFinalOperands>,
+pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_resident_install<P>(
+    map: map_patch_gpu::GpuPackedMapFrame<pis_frontend_gpu::GpuFinalOperands<P>>,
     pipeline: Arc<DirectType2Pipeline>,
     retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
-) -> Fallible<ResidentInstallCandidate> {
+) -> Fallible<ResidentInstallCandidate>
+where
+    P: geometry_gpu::temporal_gpu::GpuPriorPublicLevelTwo + Send + Sync + 'static,
+{
     let context = map.install_context();
     pipeline.ensure_device(&context)?;
-    let bound = map.bind_completed_cold(&context, pipeline.map_layout())?;
+    let bound = map.bind_for_install(&context, pipeline.map_layout())?;
     Ok(ResidentBoundInstall {
         draw: Some(Arc::new(InstalledOneXsDraw {
             source: bound.source,
@@ -2026,6 +2034,18 @@ mod tests {
 
     const SESSION_CENTER: Duration = Duration::from_micros(2_000_000);
 
+    #[allow(dead_code)]
+    fn mode_neutral_final_install_typechecks<P>(
+        map: map_patch_gpu::GpuPackedMapFrame<pis_frontend_gpu::GpuFinalOperands<P>>,
+        pipeline: Arc<DirectType2Pipeline>,
+        retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+    ) -> Fallible<ResidentInstallCandidate>
+    where
+        P: geometry_gpu::temporal_gpu::GpuPriorPublicLevelTwo + Send + Sync + 'static,
+    {
+        prepare_resident_install(map, pipeline, retirements)
+    }
+
     fn session_calibration(readout_ms: f64, principal_delta: f64) -> CalibrationSet {
         let mut lenses = one_xs_lenses();
         lenses[0].intrinsics.cx += principal_delta;
@@ -2310,17 +2330,24 @@ mod tests {
     }
 
     #[test]
-    fn cold2_final_bridge_is_concrete_sealed_and_pins_the_directional_copy_law() {
+    fn final_bridge_is_mode_neutral_sealed_and_pins_the_cold_directional_copy_law() {
         let bridge = include_str!("one_xs/pis_frontend_gpu/post_l1.rs");
         let geometry = include_str!("one_xs/geometry_gpu.rs");
         let materializer = include_str!("one_xs/map_patch_gpu.rs");
+        let owner = include_str!("one_xs_belt_gpu.rs");
 
-        assert!(bridge.contains("struct CompletedColdFinalOperands"));
-        assert!(!bridge.contains("struct CompletedColdFinalOperands<"));
+        assert!(bridge.contains("struct GpuFinalOperands<P: GpuPriorPublicLevelTwo>"));
         assert!(bridge.contains("GpuCompletedColdCheckpoint<ImportedOneXsPicture>"));
-        assert!(bridge.contains("impl resident::Sealed for CompletedColdFinalOperands"));
+        assert!(bridge.contains("Fallible<GpuFinalOperands<GpuColdPriorPublicLevelTwo>>"));
+        assert!(
+            bridge.contains(
+                "impl<P: GpuPriorPublicLevelTwo> resident::Sealed for GpuFinalOperands<P>"
+            )
+        );
         assert!(bridge.contains("&self.flight.frame"));
         assert!(bridge.contains("copy_buffer_to_buffer(&self.validity.buffer"));
+        assert!(!bridge.contains("CompletedColdFinalOperands"));
+        assert!(!bridge.contains("CompletedColdDrawCarrier"));
 
         assert!(geometry.contains("const PREIMAGE_WORDS: u64 = 40_000;"));
         assert!(geometry.contains("const SIDE_FLOW_WORDS: u64 = 129_600;"));
@@ -2331,14 +2358,28 @@ mod tests {
         assert!(geometry.contains("DynamicBufferCopy::new(public, 0)"));
 
         let production = materializer
-            .split_once("pub(super) fn materialize_completed_cold(")
+            .split_once("pub(super) fn materialize_final<P>(")
             .unwrap()
             .1
             .split_once("#[cfg(test)]")
             .unwrap()
             .0;
-        assert!(production.contains("admit_completed_cold_final"));
-        assert!(!production.contains("<O:"));
+        assert!(production.contains("GpuFinalOperands<P>"));
+        assert!(!production.contains("admit_completed_cold_final"));
+        assert!(materializer.contains("fn bind_for_install("));
+        assert!(materializer.contains("Box<dyn InstalledFinalCarrier>"));
+        let install_bind = materializer
+            .split_once("fn bind_for_install(")
+            .unwrap()
+            .1
+            .split_once("pub(super) struct GpuMapBinding")
+            .unwrap()
+            .0;
+        assert!(install_bind.contains("-> Fallible<GpuBoundFinalMap>"));
+        assert!(!install_bind.contains("map_err"));
+        assert!(!install_bind.contains("BindingError"));
+        assert!(owner.contains("fn prepare_resident_install<P>("));
+        assert!(owner.contains("admit_completed_cold_final(checkpoint, &self.context)"));
         for forbidden in ["pub fn buffer", "pub fn packed", "pub fn input"] {
             assert!(!bridge.contains(forbidden));
             assert!(!geometry.contains(forbidden));

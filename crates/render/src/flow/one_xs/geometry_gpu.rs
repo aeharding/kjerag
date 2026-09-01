@@ -1137,7 +1137,11 @@ mod tests {
         assert_eq!(completion.load(Ordering::SeqCst), 0);
         assert!(capture.snapshot().pending);
 
-        let mut pending = materializer.materialize_completed_cold(successor).unwrap();
+        let operands = crate::flow::one_xs_belt_gpu::pis_frontend_gpu::admit_completed_cold_final(
+            successor, &context,
+        )
+        .unwrap();
+        let mut pending = materializer.materialize_final(operands).unwrap();
         assert_eq!(submissions.load(Ordering::SeqCst), 1);
         assert_eq!(completion.load(Ordering::SeqCst), 0);
         let ready = loop {
@@ -1218,12 +1222,9 @@ mod tests {
         ));
         let retirements = crate::draw_retirement::IcedDrawRetirements::new(context.device(), 2);
         let witness = Arc::new(AtomicU8::new(0));
-        let mut install = crate::flow::one_xs_belt_gpu::prepare_completed_cold_install(
-            ready,
-            direct,
-            &retirements,
-        )
-        .unwrap();
+        let mut install =
+            crate::flow::one_xs_belt_gpu::prepare_resident_install(ready, direct, &retirements)
+                .unwrap();
         install.observe_draw_drop(Arc::clone(&witness));
         let installed = install.install().unwrap();
         let reframe = crate::Reframe::blank(1.0, false);

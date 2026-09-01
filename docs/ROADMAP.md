@@ -41,6 +41,28 @@ it, and it makes no playback, screenshot integration, performance, rendered
 parity or Studio-parity claim. Studio remains the frozen correctness oracle;
 no optimization reverse engineering was performed.
 
+**Mode-neutral resident final-map/install adapter, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; COLD BEHAVIOR ONLY;
+NO WARM OWNER, SCENE, PERFORMANCE OR PARITY CLAIM]:** the completed resident
+post owner is now retained as a sealed `GpuFinalOperands<P>` through the
+existing asynchronous four-byte final-map validity poll. Final-map
+materialization, installed-map binding, typed draw-retirement admission and
+atomic root publication no longer name Cold in their API. The reservation and
+successor checks now apply to every sealed `GpuMotionResidentL2Post<P>`.
+Cold2 keeps its concrete checkpoint and sole production admission, so no
+caller can manufacture another mode, source owner or root identity.
+
+After the typed owner is validated and split, only its complete
+`GpuFinalDrawCarrier<P>` is erased behind the installed binding's private
+lifetime/root-match trait. The imported picture remains concrete, no raw GPU
+handle is exposed, and the carrier/source/root field ordering is unchanged on
+refusal and unwind. Production context and upstream-install failures propagate
+their original error text directly. The existing Cold0 through Cold2,
+final-map, direct-draw and atomic-install path remains the only executable
+behavior and is the focused regression. This adapter does not implement or
+admit warm arithmetic, change Scene selection, read back frame-sized data or
+perform Studio optimization reverse engineering.
+
 **GPU-resident warm post-L1 arithmetic prerequisite, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; NO SMALL-ROW CLASSIFIER,
 INSTALL, SCENE, PERFORMANCE OR PARITY CLAIM]:** the private resident post-L1

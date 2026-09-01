@@ -206,11 +206,10 @@ pub(super) mod resident {
     }
 }
 
+use super::geometry_gpu::temporal_gpu::GpuPriorPublicLevelTwo;
 #[cfg(test)]
-use super::pis_frontend_gpu::validate_completed_cold_final;
-use super::pis_frontend_gpu::{
-    CompletedColdFinalOperands, GpuCompletedColdCheckpoint, admit_completed_cold_final,
-};
+use super::pis_frontend_gpu::{GpuCompletedColdCheckpoint, validate_completed_cold_final};
+use super::pis_frontend_gpu::{GpuFinalDrawCarrier, GpuFinalOperands};
 use crate::direct_type2::ImportedOneXsPicture;
 use resident::Operands;
 
@@ -624,7 +623,7 @@ impl<O: Operands> GpuPackedMapFrame<O> {
     }
 }
 
-pub(super) struct CompletedColdBoundMap {
+pub(super) struct GpuBoundFinalMap {
     pub(super) source: ImportedOneXsPicture,
     pub(super) binding: InstalledGpuMapBinding,
     pub(super) candidate: super::resident_frame_gpu::GpuResidentCandidate,
@@ -637,7 +636,23 @@ pub(super) struct InstalledGpuMapBinding {
     _actions: wgpu::Buffer,
     _context: OneXsGpuContext,
     _statics: Arc<GpuFinalMapStatics>,
-    carrier: super::pis_frontend_gpu::CompletedColdDrawCarrier,
+    carrier: Box<dyn InstalledFinalCarrier>,
+}
+
+/// Type-erased only after the complete typed post owner has crossed the
+/// final-map boundary. The installed draw needs root comparison and lifetime
+/// retention, not access to cold- or warm-specific state.
+trait InstalledFinalCarrier: Send + Sync {
+    fn matches_root(&self, root: &super::resident_frame_gpu::GpuResidentIdentity) -> bool;
+}
+
+impl<P> InstalledFinalCarrier for GpuFinalDrawCarrier<P>
+where
+    P: GpuPriorPublicLevelTwo + Send + Sync,
+{
+    fn matches_root(&self, root: &super::resident_frame_gpu::GpuResidentIdentity) -> bool {
+        self.matches_root(root)
+    }
 }
 
 impl InstalledGpuMapBinding {
@@ -657,21 +672,22 @@ impl InstalledGpuMapBinding {
     }
 }
 
-impl GpuPackedMapFrame<CompletedColdFinalOperands> {
+impl<P> GpuPackedMapFrame<GpuFinalOperands<P>>
+where
+    P: GpuPriorPublicLevelTwo + Send + Sync + 'static,
+{
     pub(super) fn install_context(&self) -> OneXsGpuContext {
         self.context.clone()
     }
 
     /// Consume the validated map into a root-free binding plus the one exact
     /// root installation capability. Nothing returned exposes a raw resource.
-    pub(super) fn bind_completed_cold(
+    pub(super) fn bind_for_install(
         self,
         context: &OneXsGpuContext,
         layout: &wgpu::BindGroupLayout,
-    ) -> Result<CompletedColdBoundMap, BindingError> {
-        self.context
-            .ensure_same(context)
-            .map_err(|_| BindingError::Context)?;
+    ) -> Fallible<GpuBoundFinalMap> {
+        self.context.ensure_same(context)?;
         let read = context
             .device()
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -688,10 +704,7 @@ impl GpuPackedMapFrame<CompletedColdFinalOperands> {
                     },
                 ],
             });
-        let parts = self
-            .upstream
-            .into_install_parts()
-            .map_err(|error| BindingError::Upstream(error.to_string()))?;
+        let parts = self.upstream.into_install_parts()?;
         let binding = InstalledGpuMapBinding {
             frame: self.frame.clone(),
             read,
@@ -699,9 +712,9 @@ impl GpuPackedMapFrame<CompletedColdFinalOperands> {
             _actions: self._actions,
             _context: self.context,
             _statics: self.statics,
-            carrier: parts.carrier,
+            carrier: Box::new(parts.carrier),
         };
-        Ok(CompletedColdBoundMap {
+        Ok(GpuBoundFinalMap {
             source: parts.source,
             binding,
             candidate: parts.candidate,
@@ -729,7 +742,6 @@ impl<O: Operands> GpuMapBinding<O> {
 pub(super) enum BindingError {
     Context,
     Frame,
-    Upstream(String),
 }
 
 impl fmt::Display for BindingError {
@@ -739,7 +751,6 @@ impl fmt::Display for BindingError {
                 output.write_str("ONE X2 resident map belongs to a different GPU context")
             }
             Self::Frame => output.write_str("ONE X2 resident map names a different frame"),
-            Self::Upstream(error) => output.write_str(error),
         }
     }
 }
@@ -933,11 +944,13 @@ impl GpuMapMaterializer {
     /// Submission goes through the upstream token so its existing source-owner
     /// lease advances to this dispatch. Only the resident validity word is
     /// copied for asynchronous CPU observation.
-    pub(super) fn materialize_completed_cold(
+    pub(super) fn materialize_final<P>(
         &self,
-        checkpoint: GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
-    ) -> Fallible<PendingGpuPackedMapFrame<CompletedColdFinalOperands>> {
-        let operands = admit_completed_cold_final(checkpoint, &self.context)?;
+        operands: GpuFinalOperands<P>,
+    ) -> Fallible<PendingGpuPackedMapFrame<GpuFinalOperands<P>>>
+    where
+        P: GpuPriorPublicLevelTwo,
+    {
         self.materialize_inner(operands)
     }
 

@@ -885,7 +885,7 @@ mod tests {
         );
 
         let install = include_str!("flow/one_xs_belt_gpu.rs")
-            .split_once("fn prepare_completed_cold_install(")
+            .split_once("fn prepare_resident_install<")
             .unwrap()
             .1
             .split_once("const CODES_PER_WORD")
@@ -893,7 +893,7 @@ mod tests {
             .0;
         assert!(
             install.find("pipeline.ensure_device").unwrap()
-                < install.find("bind_completed_cold").unwrap()
+                < install.find("bind_for_install").unwrap()
         );
         assert!(
             install.find("pipeline.ensure_device").unwrap()

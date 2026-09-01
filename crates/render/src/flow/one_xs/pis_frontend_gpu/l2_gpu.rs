@@ -32,8 +32,8 @@ mod post_l1;
 #[cfg(test)]
 pub(in crate::flow::one_xs::one_xs_belt_gpu) use post_l1::validate_completed_cold_final;
 pub(in crate::flow::one_xs::one_xs_belt_gpu) use post_l1::{
-    CompletedColdDrawCarrier, CompletedColdFinalOperands, GpuCold0Terminal,
-    GpuCompletedColdCheckpoint, admit_completed_cold_final,
+    GpuCold0Terminal, GpuCompletedColdCheckpoint, GpuFinalDrawCarrier, GpuFinalOperands,
+    admit_completed_cold_final,
 };
 #[path = "l2_gpu/work_modes.rs"]
 mod work_modes;
