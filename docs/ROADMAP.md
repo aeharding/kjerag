@@ -96,9 +96,13 @@ publication inside the interval. The durable no-replace JSON receipt records
 every transaction and its source, primitive, prepare and waited-draw phases;
 nearest-rank median/p95/p99/maximum and interval throughput; scene presentation,
 drop, starvation and redraw counts; the exact view and source identities; and
-clean build, executable and GPU identities. Source and build identities are
-authenticated before playback and reverified only after timing. This is the
-stable pre/post throughput boundary for the GPU migration. It is not a Studio
+clean build, executable and GPU identities including vendor/device IDs. Every
+timing vector is allocated before the interval begins. Its wall elapsed time
+runs immediately before the first transaction through immediately after the
+last, including only sample recording and loop bookkeeping between transactions;
+each per-frame transaction excludes that bookkeeping. Source, build and GPU
+adapter identities are bound before playback and reverified after timing. This
+is the stable pre/post throughput boundary for the GPU migration. It is not a Studio
 parity, realtime playback, audio or visual-quality result. A real baseline run
 still has to be made through `scripts/quiet.sh` from a clean committed build.
 

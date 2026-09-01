@@ -284,6 +284,18 @@ impl Options {
         )?;
         let sample = value(6).unwrap_or("sharp").to_owned();
         let band = value(7).unwrap_or("band").to_owned();
+        if !matches!(
+            readout.as_str(),
+            "file" | "off" | "right" | "left" | "down" | "up"
+        ) {
+            return Err("readout must be file, off, right, left, down or up".into());
+        }
+        if !matches!(sample.as_str(), "bilinear" | "luma" | "sharp") {
+            return Err("sampling must be bilinear, luma or sharp".into());
+        }
+        if !matches!(band.as_str(), "band" | "notone" | "noband") {
+            return Err("band mode must be band, notone or noband".into());
+        }
         let target = named
             .get("target")
             .map(|value| {
@@ -1033,6 +1045,80 @@ struct MeasuredFrame {
     transaction_ns: u64,
 }
 
+struct MeasureSamples {
+    frames: Vec<MeasuredFrame>,
+    transaction_ns: Vec<u64>,
+    source_ns: Vec<u64>,
+    primitive_ns: Vec<u64>,
+    prepare_ns: Vec<u64>,
+    draw_ns: Vec<u64>,
+}
+
+impl MeasureSamples {
+    fn with_capacity(count: usize) -> Self {
+        Self {
+            frames: Vec::with_capacity(count),
+            transaction_ns: Vec::with_capacity(count),
+            source_ns: Vec::with_capacity(count),
+            primitive_ns: Vec::with_capacity(count),
+            prepare_ns: Vec::with_capacity(count),
+            draw_ns: Vec::with_capacity(count),
+        }
+    }
+
+    fn push(&mut self, frame: MeasuredFrame) {
+        self.transaction_ns.push(frame.transaction_ns);
+        self.source_ns.push(frame.source_ns);
+        self.primitive_ns.push(frame.primitive_ns);
+        self.prepare_ns.push(frame.prepare_ns);
+        self.draw_ns.push(frame.draw_ns);
+        self.frames.push(frame);
+    }
+
+    fn len(&self) -> usize {
+        self.frames.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdapterIdentity {
+    name: String,
+    vendor: u32,
+    device: u32,
+    device_type: String,
+    pci_bus_id: String,
+    driver: String,
+    driver_info: String,
+    backend: String,
+}
+
+impl AdapterIdentity {
+    fn read(adapter: &wgpu::Adapter) -> Self {
+        let info = adapter.get_info();
+        Self {
+            name: info.name,
+            vendor: info.vendor,
+            device: info.device,
+            device_type: format!("{:?}", info.device_type),
+            pci_bus_id: info.device_pci_bus_id,
+            driver: info.driver,
+            driver_info: info.driver_info,
+            backend: format!("{:?}", info.backend),
+        }
+    }
+
+    fn verify(&self, adapter: &wgpu::Adapter) -> Fallible<()> {
+        require_adapter_identity(self, &Self::read(adapter))
+    }
+}
+
+fn require_adapter_identity(bound: &AdapterIdentity, current: &AdapterIdentity) -> Fallible<()> {
+    if bound != current {
+        return Err("GPU adapter identity changed during measurement".into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct MeasureView<'a> {
     camera: Camera,
@@ -1052,6 +1138,7 @@ fn measure_playback(
     sources: &AuthenticatedPair,
     provenance: &RangeProvenance,
 ) -> Fallible<()> {
+    let adapter = AdapterIdentity::read(&gpu.adapter);
     let mut drive_now = Instant::now();
     for expected in 0..run.spec.start {
         draw_measured_frame(scene, pipeline, gpu, view.camera, expected, &mut drive_now)?;
@@ -1060,32 +1147,37 @@ fn measure_playback(
     // This reading is deliberately after frame START-1's waited GPU submit.
     // It is the boundary between the causal warm-up and the measured window.
     let before = scene.stats().ok_or("measure scene has no player")?;
+    let count = usize::try_from(run.spec.count).map_err(|_| "measure count does not fit memory")?;
+    // Allocate every timing series before the clock starts. Pushing exactly
+    // `count` samples cannot grow any of these vectors inside the interval.
+    let mut samples = MeasureSamples::with_capacity(count);
     let interval_started = Instant::now();
-    let mut frames = Vec::with_capacity(
-        usize::try_from(run.spec.count).map_err(|_| "measure count does not fit memory")?,
-    );
+    let mut interval_ended = None;
     for expected in run.spec.start..=run.spec.end {
-        frames.push(draw_measured_frame(
-            scene,
-            pipeline,
-            gpu,
-            view.camera,
-            expected,
-            &mut drive_now,
-        )?);
+        let frame =
+            draw_measured_frame(scene, pipeline, gpu, view.camera, expected, &mut drive_now)?;
+        if expected == run.spec.end {
+            // Stop immediately after the final transaction. Recording that
+            // last sample and all receipt work remain outside elapsed_ns.
+            interval_ended = Some(Instant::now());
+        }
+        samples.push(frame);
     }
-    let interval = interval_started.elapsed();
+    let interval = interval_ended
+        .ok_or("measure interval completed without an end timestamp")?
+        .duration_since(interval_started);
+    adapter.verify(&gpu.adapter)?;
     let stats = scene
         .stats()
         .ok_or("measure scene has no player")?
         .since(before);
-    if frames.len() as u64 != run.spec.count
+    if samples.len() as u64 != run.spec.count
         || stats.presented != run.spec.count
         || stats.dropped != 0
     {
         return Err(format!(
             "measure window completed {} transactions after {} presented and {} dropped; expected {} transactions, {} presented and 0 dropped",
-            frames.len(),
+            samples.len(),
             stats.presented,
             stats.dropped,
             run.spec.count,
@@ -1096,7 +1188,6 @@ fn measure_playback(
 
     sources.verify()?;
     let build = provenance.verify()?;
-    let adapter = gpu.adapter.get_info();
     let receipt = measure_receipt(MeasureReceipt {
         run,
         camera: view.camera,
@@ -1107,14 +1198,10 @@ fn measure_playback(
         tone: view.tone,
         interval,
         stats,
-        frames: &frames,
+        samples: &samples,
         sources: sources.receipt(),
         build,
-        adapter_name: &adapter.name,
-        adapter_backend: format!("{:?}", adapter.backend),
-        adapter_device_type: format!("{:?}", adapter.device_type),
-        adapter_driver: &adapter.driver,
-        adapter_driver_info: &adapter.driver_info,
+        adapter: &adapter,
     })?;
     publish_measure_receipt(&run.receipt, &receipt)?;
     println!(
@@ -1204,43 +1291,15 @@ struct MeasureReceipt<'a> {
     tone: bool,
     interval: Duration,
     stats: kjerag_media::Stats,
-    frames: &'a [MeasuredFrame],
+    samples: &'a MeasureSamples,
     sources: Vec<Value>,
     build: Value,
-    adapter_name: &'a str,
-    adapter_backend: String,
-    adapter_device_type: String,
-    adapter_driver: &'a str,
-    adapter_driver_info: &'a str,
+    adapter: &'a AdapterIdentity,
 }
 
 fn measure_receipt(run: MeasureReceipt<'_>) -> Fallible<Vec<u8>> {
-    let transactions = run
-        .frames
-        .iter()
-        .map(|frame| frame.transaction_ns)
-        .collect::<Vec<_>>();
-    let sources = run
-        .frames
-        .iter()
-        .map(|frame| frame.source_ns)
-        .collect::<Vec<_>>();
-    let primitives = run
-        .frames
-        .iter()
-        .map(|frame| frame.primitive_ns)
-        .collect::<Vec<_>>();
-    let prepares = run
-        .frames
-        .iter()
-        .map(|frame| frame.prepare_ns)
-        .collect::<Vec<_>>();
-    let draws = run
-        .frames
-        .iter()
-        .map(|frame| frame.draw_ns)
-        .collect::<Vec<_>>();
     let frame_values = run
+        .samples
         .frames
         .iter()
         .map(|frame| {
@@ -1295,26 +1354,32 @@ fn measure_receipt(run: MeasureReceipt<'_>) -> Fallible<Vec<u8>> {
         "source": run.sources,
         "build": run.build,
         "gpu": {
-            "name": run.adapter_name,
-            "backend": run.adapter_backend,
-            "device_type": run.adapter_device_type,
-            "driver": run.adapter_driver,
-            "driver_info": run.adapter_driver_info
+            "name": run.adapter.name,
+            "vendor_id": run.adapter.vendor,
+            "device_id": run.adapter.device,
+            "backend": run.adapter.backend,
+            "device_type": run.adapter.device_type,
+            "pci_bus_id": run.adapter.pci_bus_id,
+            "driver": run.adapter.driver,
+            "driver_info": run.adapter.driver_info,
+            "identity_scope": "AdapterInfo read after device creation before warm-up and reverified immediately after the measured interval"
         },
         "run": {
             "elapsed_ns": elapsed_ns,
+            "elapsed_scope": "wall time immediately before the first measured transaction through immediately after the last; includes only sample recording and loop bookkeeping between transactions",
+            "transaction_scope": "source wait, Scene primitive construction, production map preparation and waited GPU draw for one exact frame; excludes sample recording",
             "throughput_frames_per_second": run.run.spec.count as f64
                 / run.interval.as_secs_f64().max(f64::EPSILON),
             "presented": run.stats.presented,
             "dropped": run.stats.dropped,
             "starved": run.stats.starved,
             "scene_redraws": run.stats.redraws,
-            "instrument_redraws": run.frames.len(),
-            "transaction_ns": distribution(&transactions)?,
-            "source_ns": distribution(&sources)?,
-            "primitive_ns": distribution(&primitives)?,
-            "prepare_ns": distribution(&prepares)?,
-            "draw_ns": distribution(&draws)?
+            "instrument_redraws": run.samples.len(),
+            "transaction_ns": distribution(&run.samples.transaction_ns)?,
+            "source_ns": distribution(&run.samples.source_ns)?,
+            "primitive_ns": distribution(&run.samples.primitive_ns)?,
+            "prepare_ns": distribution(&run.samples.prepare_ns)?,
+            "draw_ns": distribution(&run.samples.draw_ns)?
         },
         "frames": frame_values
     });
@@ -2840,6 +2905,55 @@ mod tests {
     }
 
     #[test]
+    fn picture_tokens_are_closed_sets_instead_of_typo_fallbacks() {
+        for readout in ["file", "off", "right", "left", "down", "up"] {
+            assert!(
+                options(&["flight.insv", "60", "60", "0", "0", readout]).is_ok(),
+                "refused readout {readout}"
+            );
+        }
+        for sampling in ["bilinear", "luma", "sharp"] {
+            assert!(
+                options(&["flight.insv", "60", "60", "0", "0", "file", "60", sampling]).is_ok(),
+                "refused sampling {sampling}"
+            );
+        }
+        for band in ["band", "notone", "noband"] {
+            assert!(
+                options(&[
+                    "flight.insv",
+                    "60",
+                    "60",
+                    "0",
+                    "0",
+                    "file",
+                    "60",
+                    "sharp",
+                    band
+                ])
+                .is_ok(),
+                "refused band mode {band}"
+            );
+        }
+        assert!(options(&["flight.insv", "60", "60", "0", "0", "flies"]).is_err());
+        assert!(options(&["flight.insv", "60", "60", "0", "0", "file", "60", "shrap"]).is_err());
+        assert!(
+            options(&[
+                "flight.insv",
+                "60",
+                "60",
+                "0",
+                "0",
+                "file",
+                "60",
+                "sharp",
+                "no-tone"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn measure_mode_has_exact_warmup_window_and_required_unpaced_receipt() {
         let parsed = options(&[
             "flight.insv",
@@ -2941,8 +3055,9 @@ mod tests {
             },
             receipt: PathBuf::from("scratch/unused.json"),
         };
-        let frames = (200..=202)
-            .map(|index| MeasuredFrame {
+        let mut samples = MeasureSamples::with_capacity(3);
+        for index in 200..=202 {
+            samples.push(MeasuredFrame {
                 index,
                 timestamp: Duration::from_millis(index),
                 source_ns: index,
@@ -2950,8 +3065,21 @@ mod tests {
                 prepare_ns: index + 2,
                 draw_ns: index + 3,
                 transaction_ns: index + 4,
-            })
-            .collect::<Vec<_>>();
+            });
+        }
+        assert_eq!(samples.frames.capacity(), 3);
+        assert_eq!(samples.transaction_ns.capacity(), 3);
+        assert_eq!(samples.source_ns.capacity(), 3);
+        let adapter = AdapterIdentity {
+            name: "gpu".to_owned(),
+            vendor: 0x1002,
+            device: 0x164e,
+            device_type: "IntegratedGpu".to_owned(),
+            pci_bus_id: "0000:01:00.0".to_owned(),
+            driver: "driver".to_owned(),
+            driver_info: "info".to_owned(),
+            backend: "Vulkan".to_owned(),
+        };
         let encoded = measure_receipt(MeasureReceipt {
             run: &run,
             camera: Camera {
@@ -2973,14 +3101,10 @@ mod tests {
                 worst_late: Duration::ZERO,
                 audio: None,
             },
-            frames: &frames,
+            samples: &samples,
             sources: vec![json!({"lane": 0}), json!({"lane": 1})],
             build: json!({"runtime_git_commit": "commit"}),
-            adapter_name: "gpu",
-            adapter_backend: "Vulkan".to_owned(),
-            adapter_device_type: "DiscreteGpu".to_owned(),
-            adapter_driver: "driver",
-            adapter_driver_info: "info",
+            adapter: &adapter,
         })
         .unwrap();
         let receipt: Value = serde_json::from_slice(&encoded).unwrap();
@@ -2992,11 +3116,44 @@ mod tests {
         assert_eq!(receipt["run"]["starved"], 1);
         assert_eq!(receipt["run"]["transaction_ns"]["median"], 205);
         assert_eq!(receipt["run"]["transaction_ns"]["p95"], 206);
+        assert_eq!(receipt["run"]["elapsed_ns"], 1_000_000_000u64);
+        assert!(
+            receipt["run"]["elapsed_scope"]
+                .as_str()
+                .unwrap()
+                .contains("immediately before the first")
+        );
         assert_eq!(receipt["frames"].as_array().unwrap().len(), 3);
         assert_eq!(receipt["frames"][0]["index"], 200);
         assert_eq!(receipt["frames"][2]["index"], 202);
         assert_eq!(receipt["source"][1]["lane"], 1);
         assert_eq!(receipt["build"]["runtime_git_commit"], "commit");
+        assert_eq!(receipt["gpu"]["vendor_id"], 0x1002);
+        assert_eq!(receipt["gpu"]["device_id"], 0x164e);
+        assert!(
+            receipt["gpu"]["identity_scope"]
+                .as_str()
+                .unwrap()
+                .contains("reverified")
+        );
+    }
+
+    #[test]
+    fn adapter_identity_recheck_refuses_any_changed_field() {
+        let bound = AdapterIdentity {
+            name: "gpu".to_owned(),
+            vendor: 0x1002,
+            device: 0x164e,
+            device_type: "IntegratedGpu".to_owned(),
+            pci_bus_id: "0000:01:00.0".to_owned(),
+            driver: "driver".to_owned(),
+            driver_info: "info".to_owned(),
+            backend: "Vulkan".to_owned(),
+        };
+        assert!(require_adapter_identity(&bound, &bound).is_ok());
+        let mut changed = bound.clone();
+        changed.device ^= 1;
+        assert!(require_adapter_identity(&bound, &changed).is_err());
     }
 
     #[test]
