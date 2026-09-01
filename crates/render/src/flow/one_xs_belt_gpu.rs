@@ -25,6 +25,13 @@ use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sampl
 #[allow(dead_code)]
 pub(crate) mod pis_frontend_gpu;
 
+/// Device-resident final bilateral-map materializer.
+///
+/// Its input boundary stays inside this private resident owner. Scene does not
+/// consume the resulting opaque map token yet.
+#[path = "one_xs/map_patch_gpu.rs"]
+mod map_patch_gpu;
+
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
 const OUTPUT_WORDS: u32 = (SolverBelts::BYTES / CODES_PER_WORD) as u32;

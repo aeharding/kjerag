@@ -3,6 +3,39 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Shared-context resident ONE X2 final-map materializer, 2026-09-01,
+integration branch only [UNSELECTED; EXACT TARGET-GPU TWIN; NO SCENE OR
+PERFORMANCE CLAIM]:** the accepted final bilateral materializer now owns the
+one structural `OneXsGpuContext` used by the resident chain. Its production
+entry consumes a generic sealed upstream token, advances that token's existing
+submission lease, performs only GPU copies plus the exact stored compute pass,
+and returns an opaque frame-bound packed-map token. That token retains the
+upstream alpha and source ownership and can create the existing two-storage
+direct type-2 Scene binding without exposing either raw buffer. Scene does not
+construct, store or draw this token yet. Ordinary materialization creates no
+mappable buffer and performs no readback or device poll; the CPU oracle and
+diagnostic copies are test-only. The forced-RADV focused gate matches every
+packed component bit, preserves the accepted arithmetic/order, rejects foreign
+structural contexts and frame identities, and refuses all 20 accepted live
+shader mutations. The materializer is now a private child of the resident belt
+owner, so no flow sibling can name its operand copier, raw command or buffer
+details, materializer, binding or output token. The remaining seam is the
+post-L1 resident producer's implementation of the owner-private sealed operand
+copier and single-lease submit method; there is deliberately no second context,
+lease or CPU reconstruction route.
+
+The authenticated receipt in
+`docs/research/gpu-final-map-context-qualification.md` binds clean code commit
+`e620a4cae27f1a51b8998328620594765c277dd7`, tree
+`b7ce05854f507824170c1364ac4bddbc54b110c5`, the fresh retained test binary
+before and after execution, exact forced-Vulkan/RADV command and environment,
+ICD, adapter/driver, source hashes, timestamps and exit status. Its sealed
+pre-run receipt hashes to `98be0bc640364941ab06ba3d5a53e07b07e4bea9155ee5f4ab1f717d9b9d9609`,
+the complete 4/4 run log to
+`34fe395b5f996a26a4b1e5bbc6943207294c03e723d04a556c41c98216df3c86`,
+and the post-run receipt to
+`dc1039b41b68df250f0e9bb10a6e05584c64094b2ab8067d9bf6636eb407f777`.
+
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
 READINESS CLAIM]:** the qualified paired GPU PIS kernel has a concrete
