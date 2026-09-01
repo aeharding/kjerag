@@ -1650,7 +1650,8 @@ mod tests {
 
     #[test]
     fn submission_lease_drop_during_outer_unwind_is_process_safe() {
-        let helper = "flow::one_xs_belt_gpu::tests::submission_lease_double_unwind_child";
+        let helper =
+            "flow::one_xs::one_xs_belt_gpu::tests::submission_lease_double_unwind_child";
         let output = std::process::Command::new(
             std::env::current_exe().expect("the test harness has an executable path"),
         )
