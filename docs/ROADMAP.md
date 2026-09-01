@@ -3,6 +3,32 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Capture-scoped resident calibration ownership, 2026-09-01, implementation
+branch only [PRIVATE AND UNSELECTED; NO POST-L1 JOIN, INSTALL, SCENE,
+PERFORMANCE OR PARITY CLAIM]:** the sealed imported ONE X2 front transition now
+names one `ResidentSourceCapture` and nothing else. Constructing that capture
+from one calibration and its orientation track privately creates its parent
+builder and calibration-owned readout, all `OneXsResources`-derived geometry
+and final-map statics, the shared GPU pipelines and its non-cloneable resident
+root. The reusable producer is no longer crate-visible. A caller therefore
+cannot combine a same-device root from one capture with another capture's
+parent inputs, orientation or static resources, and none of those values is a
+per-frame submission argument.
+
+The same capture is now the only source-import entry. It mints an opaque
+allocation identity into the inseparable imported picture, and submission
+checks that identity and GPU context before reading its frame, reserving the
+root or encoding. The imported aggregate still moves whole into the existing
+source submission lease. Structural tests pin the capture-only import and
+submit signatures and the single calibration composition boundary. A
+forced-RADV test constructs two sessions with distinct lens calibration,
+readout and orientation but a colliding `FrameStamp`; a source tagged by B is
+refused by A before either root or encoder advances, then encoding each
+session's own frame advances only its own root generation and parent encoder.
+This checkpoint changes no selected behavior and does not implement the Cold2
+final-map operand join, atomic ready/successor publication, draw retirement
+wiring, warm state or performance work.
+
 **Capture-static resident ONE X2 final-map resources, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
 NO POST-L1 JOIN, SCENE, PLAYBACK, PERFORMANCE OR PARITY CLAIM]:** the resident

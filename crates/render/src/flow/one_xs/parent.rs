@@ -68,6 +68,13 @@ impl ParentMapBuilder {
         Ok(Self { selected, readout })
     }
 
+    /// The calibration-owned readout used by resident parent preparation.
+    /// Keeping it behind the builder prevents a capture session from storing
+    /// or accepting an independently chosen duplicate.
+    pub(super) fn readout(&self) -> Readout {
+        self.readout
+    }
+
     /// Build the map pair for one exact delivered frame identity.
     pub fn build_for_frame(
         &self,

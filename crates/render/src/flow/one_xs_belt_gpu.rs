@@ -9,7 +9,7 @@
 //! boundary. No staging allocation or full CPU luma readback lies between the
 //! imported R8 textures and those inputs.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::{error::Error, fmt};
 
 use super::gpu_context::OneXsGpuContext;
@@ -22,7 +22,7 @@ use crate::Fallible;
 use crate::direct_type2::ImportedOneXsPicture;
 use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
 use kjerag_media::FrameStamp;
-use kjerag_meta::{OrientationTrack, Readout};
+use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
 
 /// Resident PIS preparation is nested under the belt owner so its only
 /// boundary can consume the whole private producer token atomically.
@@ -91,15 +91,47 @@ impl GpuResidentFramePipeline {
 #[allow(dead_code)]
 pub(crate) trait ImportedOneXsSource: Sized {
     fn ensure_resident_context(&self, context: &OneXsGpuContext) -> Fallible<()>;
+    fn ensure_resident_session(&self, session: &ResidentSourceIdentity) -> Fallible<()>;
     fn resident_frame(&self) -> FrameStamp;
     fn submit_with(self, binder: ResidentSourceBinder<'_>) -> Fallible<ResidentImportedFront>;
 }
 
-/// The complete existing parent/geometry/belt producer for one context.
-/// Callers can only enter it with the concrete sealed imported-picture owner.
+/// Opaque allocation identity minted once for one resident capture session.
+/// It has no public constructor or value representation.
+#[derive(Clone)]
+pub(crate) struct ResidentSourceIdentity(Arc<()>);
+
+impl ResidentSourceIdentity {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn ensure_matches(&self, expected: &Self) -> Fallible<()> {
+        if self.matches(expected) {
+            Ok(())
+        } else {
+            Err("ONE X2 imported source belongs to a different resident capture session".into())
+        }
+    }
+}
+
+/// Capture-private parent, geometry, belt and final-map producers.
+///
+/// This value can only be constructed inside [`ResidentSourceCapture`] from
+/// one calibration and its one orientation track. Keeping it private prevents
+/// a same-device capture root from being paired with another capture's static
+/// resources or parent inputs.
 #[allow(dead_code)]
-pub(crate) struct ResidentSourceFrontPipeline {
+struct ResidentSourceFrontPipeline {
     context: OneXsGpuContext,
+    identity: ResidentSourceIdentity,
+    root: resident_frame_gpu::GpuResidentCapture,
+    parent_inputs: ParentMapBuilder,
+    orientation: OrientationTrack,
     parent: GpuResidentFramePipeline,
     geometry: geometry_gpu::GpuGeometryPipeline,
     belts: GpuSolverBeltPipeline,
@@ -108,38 +140,46 @@ pub(crate) struct ResidentSourceFrontPipeline {
 
 #[allow(dead_code)]
 impl ResidentSourceFrontPipeline {
-    pub(crate) fn new(context: OneXsGpuContext, resources: &OneXsResources) -> Fallible<Self> {
+    fn new(
+        context: OneXsGpuContext,
+        calibration: &CalibrationSet,
+        orientation: OrientationTrack,
+    ) -> Fallible<Self> {
+        let parent_inputs = ParentMapBuilder::new(calibration)?;
+        let resources = OneXsResources::new(&calibration.lenses)?;
         Ok(Self {
             context: context.clone(),
+            identity: ResidentSourceIdentity::new(),
+            root: resident_frame_gpu::GpuResidentCapture::new(),
+            parent_inputs,
+            orientation,
             parent: GpuResidentFramePipeline::new(context.clone())?,
             geometry: geometry_gpu::GpuGeometryPipeline::new(
                 context.clone(),
                 resources.static_coordinates(),
             )?,
             belts: GpuSolverBeltPipeline::new(context.clone())?,
-            final_map: map_patch_gpu::GpuMapMaterializer::new(context, resources)?,
+            final_map: map_patch_gpu::GpuMapMaterializer::new(context, &resources)?,
         })
     }
 
-    pub(crate) fn new_capture(&self) -> ResidentSourceCapture {
-        ResidentSourceCapture(resident_frame_gpu::GpuResidentCapture::new())
+    fn begin_parent(&self, frame: FrameStamp) -> Fallible<parent_gpu::EncodedGpuParentMaps> {
+        self.parent.begin_parent(
+            &self.root,
+            frame,
+            &self.parent_inputs,
+            &self.orientation,
+            self.parent_inputs.readout(),
+        )
     }
 
     /// Identity refusal precedes reservation, allocation and encoding. The
     /// exact frame comes from the sealed imported owner rather than a caller.
-    pub(crate) fn submit_imported(
-        &self,
-        capture: &ResidentSourceCapture,
-        builder: &ParentMapBuilder,
-        orientation: &OrientationTrack,
-        readout: Readout,
-        source: ImportedOneXsPicture,
-    ) -> Fallible<ResidentImportedFront> {
+    fn submit_source<S: ImportedOneXsSource>(&self, source: S) -> Fallible<ResidentImportedFront> {
+        source.ensure_resident_session(&self.identity)?;
         source.ensure_resident_context(&self.context)?;
         let frame = source.resident_frame();
-        let parent = self
-            .parent
-            .begin_parent(&capture.0, frame, builder, orientation, readout)?;
+        let parent = self.begin_parent(frame)?;
         let geometry = self.geometry.encode_resident_parents(parent)?;
         source.submit_with(ResidentSourceBinder {
             geometry,
@@ -148,9 +188,43 @@ impl ResidentSourceFrontPipeline {
     }
 }
 
-/// Capture-local root. Its reservation cannot be forged or separated.
+/// One open capture's inseparable calibration, orientation and resident root.
+///
+/// Submission names only this owner. There is no independently selectable
+/// pipeline, parent builder, readout, orientation or static resource argument,
+/// so two sessions sharing a GPU context cannot be cross-composed.
 #[allow(dead_code)]
-pub(crate) struct ResidentSourceCapture(resident_frame_gpu::GpuResidentCapture);
+pub(crate) struct ResidentSourceCapture {
+    pipeline: ResidentSourceFrontPipeline,
+}
+
+#[allow(dead_code)]
+impl ResidentSourceCapture {
+    pub(crate) fn new(
+        context: OneXsGpuContext,
+        calibration: &CalibrationSet,
+        orientation: OrientationTrack,
+    ) -> Fallible<Self> {
+        Ok(Self {
+            pipeline: ResidentSourceFrontPipeline::new(context, calibration, orientation)?,
+        })
+    }
+
+    pub(crate) fn import_context(&self) -> &OneXsGpuContext {
+        &self.pipeline.context
+    }
+
+    pub(crate) fn source_identity(&self) -> ResidentSourceIdentity {
+        self.pipeline.identity.clone()
+    }
+
+    pub(crate) fn submit_imported(
+        &self,
+        source: ImportedOneXsPicture,
+    ) -> Fallible<ResidentImportedFront> {
+        self.pipeline.submit_source(source)
+    }
+}
 
 /// One-shot callback handed only to the concrete imported-source owner after
 /// identity checks and front-half encoding. Its fields are private, so no
@@ -1635,8 +1709,58 @@ mod tests {
     use std::time::Duration;
 
     use kjerag_media::FrameStamp;
+    use kjerag_meta::{
+        ExposureTrack, GyroConfig, GyroEncoding, GyroTrack, OrientationSample, Quat, Size,
+    };
 
     use super::*;
+    use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+
+    const SESSION_CENTER: Duration = Duration::from_micros(2_000_000);
+
+    fn session_calibration(readout_ms: f64, principal_delta: f64) -> CalibrationSet {
+        let mut lenses = one_xs_lenses();
+        lenses[0].intrinsics.cx += principal_delta;
+        CalibrationSet {
+            camera_model: "Insta360 ONE X2".to_owned(),
+            firmware: format!("resident-session-{readout_ms}"),
+            dimension: Size {
+                width: ONE_XS_FRAME.width,
+                height: ONE_XS_FRAME.height,
+            },
+            lenses,
+            rolling_shutter_ms: readout_ms,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Scaled,
+                imu_orientation: "Zxy",
+                first_frame_timestamp: 0,
+                gyro_timestamp: None,
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
+            calibration_canvas: Size {
+                width: 6_080,
+                height: 3_040,
+            },
+        }
+    }
+
+    fn session_orientation(scale: f64) -> OrientationTrack {
+        OrientationTrack::from_samples(
+            (1_960_000..=2_040_000)
+                .step_by(2_000)
+                .map(|offset_us| OrientationSample {
+                    offset_us,
+                    world_from_body: Quat::from_rotation_vector([
+                        (offset_us - 2_000_000) as f64 * 1.0e-7 * scale,
+                        (offset_us - 2_000_000) as f64 * -0.5e-7 * scale,
+                        (offset_us - 2_000_000) as f64 * 0.25e-7 * scale,
+                    ]),
+                })
+                .collect(),
+        )
+    }
 
     struct DropProbe {
         wait_state: Arc<AtomicU8>,
@@ -1649,27 +1773,167 @@ mod tests {
         }
     }
 
+    struct SessionProbeSource {
+        identity: ResidentSourceIdentity,
+        context: OneXsGpuContext,
+        frame: FrameStamp,
+    }
+
+    impl ImportedOneXsSource for SessionProbeSource {
+        fn ensure_resident_context(&self, context: &OneXsGpuContext) -> Fallible<()> {
+            self.context.ensure_same(context)
+        }
+
+        fn ensure_resident_session(&self, session: &ResidentSourceIdentity) -> Fallible<()> {
+            self.identity.ensure_matches(session)
+        }
+
+        fn resident_frame(&self) -> FrameStamp {
+            self.frame.clone()
+        }
+
+        fn submit_with(self, _binder: ResidentSourceBinder<'_>) -> Fallible<ResidentImportedFront> {
+            panic!("a foreign-session source must refuse before binding")
+        }
+    }
+
     #[test]
     fn resident_front_admits_only_the_concrete_imported_owner() {
         let source = include_str!("one_xs_belt_gpu.rs");
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         let admission = source
+            .split_once("impl ResidentSourceCapture {")
+            .unwrap()
+            .1
             .split_once("pub(crate) fn submit_imported(")
             .unwrap()
             .1
-            .split_once("/// Capture-local root")
+            .split_once("}\n}")
             .unwrap()
             .0;
 
         assert!(admission.contains("source: ImportedOneXsPicture"));
+        assert!(admission.contains("self.pipeline.submit_source(source)"));
         assert!(!admission.contains("SourceTextures"));
         assert!(!admission.contains("source_owner"));
+        assert!(!admission.contains("ParentMapBuilder"));
+        assert!(!admission.contains("OneXsResources"));
+        assert!(!admission.contains("readout:"));
+        assert!(!admission.contains("orientation:"));
+
+        let pipeline_admission = production
+            .split_once("impl ResidentSourceFrontPipeline {")
+            .unwrap()
+            .1
+            .split_once("fn submit_source")
+            .unwrap()
+            .1
+            .split_once("}\n}")
+            .unwrap()
+            .0;
         assert!(
-            admission.find("ensure_resident_context").unwrap()
-                < admission.find("begin_parent").unwrap()
+            pipeline_admission.find("ensure_resident_context").unwrap()
+                < pipeline_admission.find("begin_parent").unwrap()
         );
         assert!(
-            admission.find("resident_frame()").unwrap() < admission.find("begin_parent").unwrap()
+            pipeline_admission.find("resident_frame()").unwrap()
+                < pipeline_admission.find("begin_parent").unwrap()
         );
+    }
+
+    #[test]
+    fn capture_constructor_is_the_only_calibration_composition_boundary() {
+        let source = include_str!("one_xs_belt_gpu.rs");
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let pipeline = production
+            .split_once("impl ResidentSourceFrontPipeline {")
+            .unwrap()
+            .1
+            .split_once("/// One open capture's inseparable")
+            .unwrap()
+            .0;
+        let capture = production
+            .split_once("impl ResidentSourceCapture {")
+            .unwrap()
+            .1
+            .split_once("/// One-shot callback")
+            .unwrap()
+            .0;
+
+        assert!(pipeline.contains("ParentMapBuilder::new(calibration)"));
+        assert!(pipeline.contains("self.parent_inputs.readout()"));
+        assert!(pipeline.contains("OneXsResources::new(&calibration.lenses)"));
+        assert!(pipeline.contains("GpuResidentFramePipeline::new(context.clone())"));
+        assert!(pipeline.contains("GpuResidentCapture::new()"));
+        assert!(capture.contains("ResidentSourceFrontPipeline::new("));
+        assert!(!production.contains("pub(crate) struct ResidentSourceFrontPipeline"));
+        assert!(!pipeline.contains("root: &resident_frame_gpu::GpuResidentCapture"));
+    }
+
+    #[test]
+    fn distinct_calibrations_with_colliding_frames_keep_separate_roots_and_encoders() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 resident session test: {why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let calibration_a = session_calibration(20.0, 0.0);
+        let calibration_b = session_calibration(23.516, 0.25);
+        let capture_a =
+            ResidentSourceCapture::new(context.clone(), &calibration_a, session_orientation(1.0))
+                .unwrap_or_else(|error| panic!("capture A failed on {adapter}: {error}"));
+        let capture_b =
+            ResidentSourceCapture::new(context, &calibration_b, session_orientation(2.0))
+                .unwrap_or_else(|error| panic!("capture B failed on {adapter}: {error}"));
+        let frame = FrameStamp::for_test(77, SESSION_CENTER, None);
+
+        let error = capture_a
+            .pipeline
+            .submit_source(SessionProbeSource {
+                identity: capture_b.source_identity(),
+                context: capture_b.import_context().clone(),
+                frame: frame.clone(),
+            })
+            .err()
+            .expect("a foreign imported session must be refused");
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 imported source belongs to a different resident capture session"
+        );
+        assert_eq!(capture_a.pipeline.parent.parent.encoded_transitions(), 0);
+        assert_eq!(capture_b.pipeline.parent.parent.encoded_transitions(), 0);
+        assert_eq!(capture_a.pipeline.root.snapshot().generation, 0);
+        assert_eq!(capture_b.pipeline.root.snapshot().generation, 0);
+
+        let encoded_a = capture_a.pipeline.begin_parent(frame.clone()).unwrap();
+        assert_eq!(capture_a.pipeline.parent.parent.encoded_transitions(), 1);
+        assert_eq!(capture_b.pipeline.parent.parent.encoded_transitions(), 0);
+        assert_eq!(capture_a.pipeline.root.snapshot().generation, 1);
+        assert_eq!(capture_b.pipeline.root.snapshot().generation, 0);
+        assert_ne!(
+            capture_a.pipeline.parent_inputs.readout().seconds.to_bits(),
+            capture_b.pipeline.parent_inputs.readout().seconds.to_bits()
+        );
+        assert_ne!(
+            capture_a.pipeline.orientation,
+            capture_b.pipeline.orientation
+        );
+        drop(encoded_a);
+        assert!(!capture_a.pipeline.root.snapshot().pending);
+
+        let encoded_b = capture_b.pipeline.begin_parent(frame).unwrap();
+        assert_eq!(capture_a.pipeline.parent.parent.encoded_transitions(), 1);
+        assert_eq!(capture_b.pipeline.parent.parent.encoded_transitions(), 1);
+        assert_eq!(capture_a.pipeline.root.snapshot().generation, 1);
+        assert_eq!(capture_b.pipeline.root.snapshot().generation, 1);
+        drop(encoded_b);
     }
 
     #[test]
