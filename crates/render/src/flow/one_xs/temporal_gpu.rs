@@ -10,7 +10,7 @@ use super::super::GpuBlurredBelts;
 use super::super::pis_frontend_gpu::{
     GpuCold0Terminal, GpuColdLoopControls, GpuL1Controls, GpuL1PreparedTerminal, GpuL2Controls,
     GpuL2PostPisBridge, GpuPisFrontEnd, GpuResidentLevelTwoPost, GpuWorkModeBinding,
-    GpuWorkModePipeline,
+    GpuWorkModePipeline, RetainedL2DirectionPixelVec2Buffer,
 };
 use super::super::resident_frame_gpu::{
     GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, ResidentPostL1Storage,
@@ -250,7 +250,7 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuColdPriorPublicLevelTwo {
     context: OneXsGpuContext,
     cadence: GpuPairedCadence,
     calculation: u8,
-    retained: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
     public: wgpu::Buffer,
     hints: wgpu::Buffer,
     histogram: wgpu::Buffer,
@@ -265,11 +265,11 @@ impl GpuColdPriorPublicLevelTwo {
         Self {
             cadence: GpuPairedCadence::cold_root(),
             calculation: 0,
-            retained: buffer(
+            retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer::new(buffer(
                 context.device(),
-                "ONE X2 cold prior-public L2 state",
+                "ONE X2 cold prior-public retained L2 direction-pixel-vec2",
                 4 * L2_BYTES * size_of::<f32>(),
-            ),
+            )),
             hints: buffer(
                 context.device(),
                 "ONE X2 cold resident successor hints",
@@ -441,7 +441,7 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
         small_rows: wgpu::Buffer,
         lack_rows: wgpu::Buffer,
         public: wgpu::Buffer,
-        retained_l2: Option<wgpu::Buffer>,
+        retained_l2_direction_pixel_vec2: Option<RetainedL2DirectionPixelVec2Buffer>,
         calculation: u8,
     ) {
         self.prior.histogram = histogram;
@@ -450,8 +450,8 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
         self.prior.small_rows = small_rows;
         self.prior.lack_rows = lack_rows;
         self.prior.public = public;
-        if let Some(retained_l2) = retained_l2 {
-            self.prior.retained = retained_l2;
+        if let Some(retained_l2_direction_pixel_vec2) = retained_l2_direction_pixel_vec2 {
+            self.prior.retained_l2_direction_pixel_vec2 = retained_l2_direction_pixel_vec2;
         }
         self.prior.cadence = self.prior.cadence.after_call();
         self.prior.calculation = calculation + 1;
@@ -462,7 +462,7 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
     ) -> Fallible<()> {
         let storage = ResidentPostL1Storage::after_cold(
             self.prior.public.clone(),
-            self.prior.retained.clone(),
+            self.prior.retained_l2_direction_pixel_vec2.clone(),
             self.prior.histogram.clone(),
             self.prior.fifo.clone(),
             self.prior.hints.clone(),
@@ -497,7 +497,7 @@ impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
 
     fn initialize(&self, encoder: &mut wgpu::CommandEncoder) {
         if self.calculation == 0 {
-            encoder.clear_buffer(&self.retained, 0, None);
+            encoder.clear_buffer(self.retained_l2_direction_pixel_vec2.buffer(), 0, None);
             encoder.clear_buffer(&self.public, 0, None);
             encoder.clear_buffer(&self.hints, 0, None);
             encoder.clear_buffer(&self.histogram, 0, None);
@@ -525,7 +525,7 @@ impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
                 entry(0, config),
                 entry(1, images),
                 entry(2, terminal),
-                entry(3, &self.retained),
+                entry(3, self.retained_l2_direction_pixel_vec2.buffer()),
                 entry(4, motion_l2),
                 entry(5, output),
                 entry(6, validity),

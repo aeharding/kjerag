@@ -12,6 +12,8 @@ use crate::Fallible;
 use crate::flow::one_xs::pis::gpu::GpuPisFlight;
 use kjerag_media::FrameStamp;
 
+use super::pis_frontend_gpu::RetainedL2DirectionPixelVec2Buffer;
+
 /// Storage installed only after a whole resident frame succeeds.
 ///
 /// Motion owns the first field. Later post-L1 composition can extend this
@@ -24,7 +26,7 @@ pub(super) struct ResidentSuccessor {
 
 pub(super) struct ResidentPostL1Storage {
     _public: wgpu::Buffer,
-    _retained_l2: wgpu::Buffer,
+    _retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
     _histogram: wgpu::Buffer,
     _fifo: wgpu::Buffer,
     _hints: wgpu::Buffer,
@@ -38,7 +40,7 @@ impl ResidentPostL1Storage {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn after_cold(
         public: wgpu::Buffer,
-        retained_l2: wgpu::Buffer,
+        retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
         histogram: wgpu::Buffer,
         fifo: wgpu::Buffer,
         hints: wgpu::Buffer,
@@ -49,7 +51,7 @@ impl ResidentPostL1Storage {
     ) -> Self {
         Self {
             _public: public,
-            _retained_l2: retained_l2,
+            _retained_l2_direction_pixel_vec2: retained_l2_direction_pixel_vec2,
             _histogram: histogram,
             _fifo: fifo,
             _hints: hints,

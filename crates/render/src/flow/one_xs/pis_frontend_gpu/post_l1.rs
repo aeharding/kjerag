@@ -627,11 +627,11 @@ fn complete_cold_tail<K>(
         HORIZONTAL_PRODUCT_WORDS,
     );
     let public = buffer(device, "ONE X2 cold public flow", PUBLIC_WORDS);
-    let retained_l2 = buffer(
+    let retained_l2_direction_pixel_vec2 = super::RetainedL2DirectionPixelVec2Buffer::new(buffer(
         device,
-        "ONE X2 cold successor retained L2",
+        "ONE X2 cold successor retained L2 direction-pixel-vec2",
         RETAINED_L2_WORDS,
-    );
+    ));
     let bind = post.bind_cold_post_l1(
         device,
         &pipeline.layout,
@@ -645,7 +645,7 @@ fn complete_cold_tail<K>(
         &horizontal,
         &public,
         &pipeline.quantized_values,
-        &retained_l2,
+        retained_l2_direction_pixel_vec2.buffer(),
         &terminal
             .resident_validity
             .as_ref()
@@ -682,7 +682,7 @@ fn complete_cold_tail<K>(
         small_rows,
         lack_rows,
         public.clone(),
-        (calculation == 2).then_some(retained_l2),
+        (calculation == 2).then_some(retained_l2_direction_pixel_vec2),
         calculation,
     );
     let validity = guard

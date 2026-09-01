@@ -48,6 +48,33 @@ const L2_PATCHES: usize = 88 * 3;
 const L1_PATCHES: usize = 178 * 8;
 const PLANES: usize = 4;
 
+/// Private retained-L2 ABI: direction-major pixels, with adjacent dcol/drow
+/// words inside each pixel. This is deliberately not the planar PIS terminal
+/// or seed layout.
+fn retained_l2_direction_pixel_vec2_index(
+    direction: usize,
+    pixel: usize,
+    component: usize,
+) -> usize {
+    ((direction * L2_PIXELS + pixel) * 2) + component
+}
+
+/// GPU storage carrying [`retained_l2_direction_pixel_vec2_index`].
+#[derive(Clone)]
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct RetainedL2DirectionPixelVec2Buffer(
+    wgpu::Buffer,
+);
+
+impl RetainedL2DirectionPixelVec2Buffer {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn new(buffer: wgpu::Buffer) -> Self {
+        Self(buffer)
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn buffer(&self) -> &wgpu::Buffer {
+        &self.0
+    }
+}
+
 /// Exact PIS producer identity accepted by the bridge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GpuL2BridgeReceipt(GpuPisStageReceipt);
@@ -102,7 +129,7 @@ impl LevelTwoImages {
     }
 }
 
-/// Direction-owned retained field at the exact level consumed by this stage.
+/// Direction-owned source for the retained-L2 direction/pixel/vec2 ABI.
 #[derive(Clone)]
 pub(crate) struct RetainedLevelTwo<D: PisDirection> {
     dcol: Box<[f32]>,
@@ -191,7 +218,7 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) trait GpuResidentLevelTwoPost:
 /// encoded as GPU clears in the same submission, never as host zero uploads.
 struct ColdResidentLevelTwoPost {
     context: OneXsGpuContext,
-    retained: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
     motion: wgpu::Buffer,
 }
 
@@ -200,7 +227,7 @@ struct ColdResidentLevelTwoPost {
 struct QualificationResidentLevelTwoPost {
     context: OneXsGpuContext,
     warm: bool,
-    retained: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
     motion: wgpu::Buffer,
     hints: Option<wgpu::Buffer>,
     work_lack: Option<wgpu::Buffer>,
@@ -212,7 +239,7 @@ struct QualificationResidentLevelTwoPost {
 #[cfg(test)]
 struct BorrowedProductionMotionPost<'a> {
     context: OneXsGpuContext,
-    retained: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
     motion: &'a wgpu::Buffer,
 }
 
@@ -395,7 +422,7 @@ impl GpuResidentLevelTwoPost for ColdResidentLevelTwoPost {
     }
 
     fn initialize(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.clear_buffer(&self.retained, 0, None);
+        encoder.clear_buffer(self.retained_l2_direction_pixel_vec2.buffer(), 0, None);
         encoder.clear_buffer(&self.motion, 0, None);
     }
 
@@ -416,7 +443,7 @@ impl GpuResidentLevelTwoPost for ColdResidentLevelTwoPost {
                 binding(0, config),
                 binding(1, images),
                 binding(2, terminal),
-                binding(3, &self.retained),
+                binding(3, self.retained_l2_direction_pixel_vec2.buffer()),
                 binding(4, &self.motion),
                 binding(5, output),
                 binding(6, validity),
@@ -478,7 +505,7 @@ impl GpuResidentLevelTwoPost for QualificationResidentLevelTwoPost {
                 binding(0, config),
                 binding(1, images),
                 binding(2, terminal),
-                binding(3, &self.retained),
+                binding(3, self.retained_l2_direction_pixel_vec2.buffer()),
                 binding(4, &self.motion),
                 binding(5, output),
                 binding(6, validity),
@@ -558,7 +585,7 @@ impl GpuResidentLevelTwoPost for BorrowedProductionMotionPost<'_> {
                 binding(0, config),
                 binding(1, images),
                 binding(2, terminal),
-                binding(3, &self.retained),
+                binding(3, self.retained_l2_direction_pixel_vec2.buffer()),
                 binding(4, self.motion),
                 binding(5, output),
                 binding(6, validity),
@@ -1547,7 +1574,13 @@ impl GpuL2PostPisBridge {
         let device = self.context.device();
         ColdResidentLevelTwoPost {
             context: self.context.clone(),
-            retained: resident_buffer(device, "L2 bridge cold retained", 4 * L2_PIXELS),
+            retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer::new(
+                resident_buffer(
+                    device,
+                    "L2 bridge cold retained direction-pixel-vec2",
+                    4 * L2_PIXELS,
+                ),
+            ),
             motion: resident_buffer(
                 device,
                 "L2 bridge cold packed motion",
@@ -1743,7 +1776,11 @@ impl GpuL2PostPisBridge {
         let resident = QualificationResidentLevelTwoPost {
             context: self.context.clone(),
             warm: matches!(post, LevelTwoPostUpdate::Warm { .. }),
-            retained: upload(device, "L2 bridge retained", &f32_bytes(&retained)),
+            retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer::new(upload(
+                device,
+                "L2 bridge retained direction-pixel-vec2",
+                &f32_bytes(&retained),
+            )),
             motion: upload(device, "L2 bridge motion", &u32_bytes(&motion)),
             hints: None,
             work_lack: None,
@@ -1870,21 +1907,14 @@ impl GpuL2PostPisBridge {
         else {
             unreachable!("qualification warm fixture changed shape")
         };
-        let retained = a_to_b
-            .dcol
-            .iter()
-            .chain(&a_to_b.drow)
-            .chain(&b_to_a.dcol)
-            .chain(&b_to_a.drow)
-            .copied()
-            .collect::<Vec<_>>();
+        let retained = pack_retained_l2_direction_pixel_vec2(a_to_b, b_to_a);
         let resident = BorrowedProductionMotionPost {
             context: self.context.clone(),
-            retained: upload(
+            retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer::new(upload(
                 self.context.device(),
                 "L2 bridge production-motion retained fixture",
                 &f32_bytes(&retained),
-            ),
+            )),
             motion,
         };
         let seeds = self.submit_qualification_resident(
@@ -2375,7 +2405,7 @@ fn pack_post(post: &LevelTwoPostUpdate) -> (Vec<f32>, Vec<u32>) {
             b_to_a,
             motion,
         } => (
-            [&*a_to_b.dcol, &*a_to_b.drow, &*b_to_a.dcol, &*b_to_a.drow].concat(),
+            pack_retained_l2_direction_pixel_vec2(a_to_b, b_to_a),
             motion
                 .chunks(4)
                 .map(|chunk| {
@@ -2386,6 +2416,22 @@ fn pack_post(post: &LevelTwoPostUpdate) -> (Vec<f32>, Vec<u32>) {
                 .collect(),
         ),
     }
+}
+
+fn pack_retained_l2_direction_pixel_vec2(
+    a_to_b: &RetainedLevelTwo<AtoB>,
+    b_to_a: &RetainedLevelTwo<BtoA>,
+) -> Vec<f32> {
+    let mut packed = Vec::with_capacity(PLANES * L2_PIXELS);
+    for (dcol, drow) in [
+        (&*a_to_b.dcol, &*a_to_b.drow),
+        (&*b_to_a.dcol, &*b_to_a.drow),
+    ] {
+        for pixel in 0..L2_PIXELS {
+            packed.extend([dcol[pixel], drow[pixel]]);
+        }
+    }
+    packed
 }
 
 #[cfg(test)]
@@ -2542,7 +2588,8 @@ fn dense_cpu(
         };
         fresh.mul_add(
             weight,
-            retained[(direction * 2 + component) * L2_PIXELS + pixel] * (1.0 - weight),
+            retained[retained_l2_direction_pixel_vec2_index(direction, pixel, component)]
+                * (1.0 - weight),
         )
     } else {
         fresh
@@ -2683,7 +2730,9 @@ const SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> config: array<u32>;
 @group(0) @binding(1) var<storage, read> images: array<u32>;
 @group(0) @binding(2) var<storage, read> terminal: array<f32>;
-@group(0) @binding(3) var<storage, read> retained: array<f32>;
+// Private retained-L2 ABI: direction-major pixel-interleaved vec2. PIS
+// terminal and seed grids elsewhere in this shader remain planar.
+@group(0) @binding(3) var<storage, read> retained_l2_direction_pixel_vec2: array<f32>;
 @group(0) @binding(4) var<storage, read> motion: array<u32>;
 @group(0) @binding(5) var<storage, read_write> seeds: array<u32>;
 @group(0) @binding(6) var<storage, read_write> finite_status: array<atomic<u32>>;
@@ -2734,6 +2783,10 @@ fn div_f32_bits(a: u32, b: u32) -> u32 {
 }
 fn div_rn(a: f32, b: f32) -> f32 { return bitcast<f32>(div_f32_bits(bitcast<u32>(a), bitcast<u32>(b))); }
 
+fn retained_l2_direction_pixel_vec2_index(direction: u32, pixel: u32, component: u32) -> u32 {
+    return (direction * 4050u + pixel) * 2u + component;
+}
+
 fn bilinear(direction: u32, row_in: f32, col_in: f32) -> f32 {
     let upper_row = add_rn(269.0, bitcast<f32>(0xba83126fu));
     let upper_col = add_rn(14.0, bitcast<f32>(0xba83126fu));
@@ -2783,7 +2836,9 @@ fn dense(direction: u32, component: u32, row: u32, col: u32) -> f32 {
         let packed_motion = motion[pixel / 4u];
         let motion_code = (packed_motion >> (8u * (pixel % 4u))) & 255u;
         let weight = select(1.0, bitcast<f32>(0x3ca3d70au), motion_code == 0u);
-        let old = retained[(direction * 2u + component) * 4050u + pixel];
+        let old = retained_l2_direction_pixel_vec2[
+            retained_l2_direction_pixel_vec2_index(direction, pixel, component)
+        ];
         fresh = fma_rn(weight, fresh, mul_rn(old, sub_rn(1.0, weight)));
     }
     return fresh;
@@ -3505,11 +3560,11 @@ mod tests {
         let post = QualificationResidentLevelTwoPost {
             context: context.clone(),
             warm: true,
-            retained: upload(
+            retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer::new(upload(
                 context.device(),
                 "L2 bridge warm terminal retained qualifier",
                 &f32_bytes(&vec![0.0; PLANES * L2_PIXELS]),
-            ),
+            )),
             motion: upload(
                 context.device(),
                 "L2 bridge warm terminal packed motion qualifier",
@@ -3870,6 +3925,11 @@ mod tests {
             ("photo gate", "difference > 1.0", "difference >= 0.0"),
             ("still weight", "0x3ca3d70au", "0x3ca3d70bu"),
             ("motion law", "motion_code == 0u", "motion_code != 0u"),
+            (
+                "retained L2 old planar indexing",
+                "return (direction * 4050u + pixel) * 2u + component;",
+                "return (direction * 2u + component) * 4050u + pixel;",
+            ),
             (
                 "packed motion word",
                 "motion[pixel / 4u]",

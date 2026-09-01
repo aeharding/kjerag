@@ -56,6 +56,27 @@ playback, rendered-parity, Studio-parity or throughput claim. Studio remains a
 frozen correctness oracle only; this change performs no optimization reverse
 engineering.
 
+**Retained level-two producer/consumer ABI correction, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV CONSUMER
+QUALIFIED; ACTUAL WARM CHAIN BLOCKED; NO SCENE, INSTALL, PERFORMANCE OR PARITY
+CLAIM]:** the private warm L2 bridge now consumes the exact direction-major, pixel-interleaved
+`(dcol, drow)` allocation emitted by Cold2 `make_retained_l2`. Its named
+storage type and CPU/WGSL index helpers distinguish that ABI from the planar
+PIS terminal, seed and hint grids, whose layouts are unchanged. Constructor
+fixtures, CPU twins, nonfinite coverage and the warm hint/terminal qualifier
+use the corrected contract; restoring the former component-planar retained
+index is a live rejected shader mutation.
+
+Forced-RADV qualification supplies asymmetric A-to-B and B-to-A dcol/drow
+retained fields, exercises warm L2 seeds and L1 terminal bits against the
+frozen CPU oracle, and proves that restoring the old planar index fails. The
+allocation-identical production Cold2-to-first-warm regression remains a
+mandatory gate for the later atomic-installed warm transition: this snapshot
+has a `GpuColdPriorPublicLevelTwo` and retains Cold2's real allocation inside
+the completed cold checkpoint, but has no warm prior-public owner or
+transition that can consume it. This correction does not widen that ownership
+API, invent a raw-buffer adapter, or claim the unavailable chain.
+
 **Capture-static resident ONE X2 final-map resources, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
 NO POST-L1 JOIN, SCENE, PLAYBACK, PERFORMANCE OR PARITY CLAIM]:** the resident
