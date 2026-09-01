@@ -1,8 +1,8 @@
 //! GPU-resident selected ONE X2 retained geometry.
 //!
-//! The CPU remains responsible for the small pose/orientation calculation and
-//! the current readable parent-map oracle. This stage uploads the two dynamic
-//! 100-by-200 parents, then performs both 1,080-by-60 periodic `mapMerge`
+//! The CPU remains responsible for the small pose/orientation calculation.
+//! This stage consumes the resident two-lens 100-by-200 parent token, then
+//! performs both 1,080-by-60 periodic `mapMerge`
 //! kernels, the selected directional continuity filters and the physical
 //! mask seed, 9-by-9 erosion and A/B unification. Static coordinates are
 //! uploaded once at construction. The result has no ordinary readback.
@@ -14,6 +14,7 @@ use super::super::base_map::{
 use super::super::gpu_context::OneXsGpuContext;
 use super::super::pis::gpu::GpuPisFlight;
 use super::super::{COLS, LensPair, ROWS};
+use super::parent_gpu::{EncodedGpuParentMaps, ResidentGpuParentMaps};
 use super::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
 use super::{GpuBlurredBelts, GpuSolverBeltPipeline, SourceTextures};
 use crate::Fallible;
@@ -36,10 +37,15 @@ const _: () = assert!(COLS == SELECTED_LINE_COLS && ROWS == SELECTED_LINE_ROWS);
 pub(crate) struct GpuRetainedGeometry {
     context: OneXsGpuContext,
     flight: Option<GpuPisFlight>,
-    _parents: wgpu::Buffer,
+    _parents: ParentRetention,
     retained: wgpu::Buffer,
     masks: wgpu::Buffer,
     _resources: wgpu::BindGroup,
+}
+
+enum ParentRetention {
+    Uploaded(wgpu::Buffer),
+    Resident(ResidentGpuParentMaps),
 }
 
 impl GpuRetainedGeometry {
@@ -245,6 +251,47 @@ impl GpuGeometryPipeline {
         self.context
             .queue()
             .write_buffer(&parent_buffer, 0, &pair_bytes(parents));
+        let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 resident geometry and source transaction"),
+        });
+        self.encode_buffer(
+            parent_buffer.clone(),
+            ParentRetention::Uploaded(parent_buffer),
+            flight,
+            encoder,
+        )
+    }
+
+    /// Consume the only resident-parent token and append geometry to its
+    /// unfinished encoder. Context refusal happens before any geometry
+    /// allocation, binding, or encoding.
+    pub(super) fn encode_resident_parents(
+        &self,
+        parents: EncodedGpuParentMaps,
+    ) -> Fallible<EncodedGpuGeometry> {
+        self.context.ensure_same(&parents.context)?;
+        let EncodedGpuParentMaps {
+            context: _,
+            flight,
+            encoder,
+            resident,
+        } = parents;
+        self.encode_buffer(
+            resident.storage.clone(),
+            ParentRetention::Resident(resident),
+            Some(flight),
+            encoder,
+        )
+    }
+
+    fn encode_buffer(
+        &self,
+        parent_buffer: wgpu::Buffer,
+        parent_retention: ParentRetention,
+        flight: Option<GpuPisFlight>,
+        mut encoder: wgpu::CommandEncoder,
+    ) -> Fallible<EncodedGpuGeometry> {
+        let device = self.context.device();
         let retained = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 resident retained maps"),
             size: RETAINED_BYTES,
@@ -279,9 +326,6 @@ impl GpuGeometryPipeline {
                 },
             ],
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ONE X2 resident geometry and source transaction"),
-        });
         for pipeline in [&self.merge, &self.filter, &self.mask] {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ONE X2 resident geometry"),
@@ -304,7 +348,7 @@ impl GpuGeometryPipeline {
             geometry: GpuRetainedGeometry {
                 context: self.context.clone(),
                 flight,
-                _parents: parent_buffer,
+                _parents: parent_retention,
                 retained,
                 masks,
                 _resources: resources,

@@ -3,6 +3,53 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Pre-submission resident ONE X2 parent maps, 2026-09-01, implementation
+branch only [BIT-EXACT ON FORCED RADV; PRIVATE OWNER; NO SCENE WIRING]:** the
+frozen parent arithmetic is a private child of the same owner as retained
+geometry. For each exact `GpuPisFlight`, it derives center only from the
+private `FrameStamp`, uploads the compact two 33-word control packs plus 51
+pose quaternions, and encodes both 100-by-200 float2 parents into resident
+storage. Its opaque product retains that storage, input, resources, context,
+flight and unfinished encoder. It has no raw component accessor and no local
+production submit, lease, readback, map, poll or wait.
+
+The private geometry child is the only consumer. It refuses a foreign context
+before allocation or encoding, then appends map merge, continuity filtering
+and mask construction directly to the same unfinished encoder while binding
+the resident parent output. Only the resulting encoded geometry can append
+source sampling and Gaussian work; that belt transition performs the frame's
+first queue submission and mints its sole decoder-surface lease. Thus parent,
+geometry and belts execute in dependency order within one submission, with no
+CPU `pair_bytes` reconstruction and no parent-after-belt cycle. The geometry,
+source owner, parent inputs and every intermediate remain retained through the
+existing frontend/PIS owner chain.
+
+Forced RADV PHOENIX qualification compares all 80,000 parent words in seven
+cold, warm, live-center, live-orientation, endpoint/clamp and changed-readout
+cases; live mutations change the CPU oracle. It rejects nonlinear slerp before
+encoding and rejects 13 planted semantic mutations covering quaternion order,
+raster orientation, scan axis, iteration count, movement threshold, FOV,
+A/B base, pose layout, both endpoint clamps, division, square root and
+rounding. A composed parent-to-geometry-to-belt-to-frontend test proves source
+ownership remains retained until the one inherited submission is explicitly
+acknowledged. Scene remains unchanged. The remaining seam is connecting the
+existing post-PIS/final-map private owners into this complete pre-submission
+front half without exposing a new public transition.
+
+The authenticated clean-build receipt is retained under the owner's repository
+at `.agents/gpu-parent-evidence-topology/scratch/gpu-parent-map-evidence/`.
+It binds qualified code commit
+`441078dc6245e56b39748444f04e8454801f6d75`, tree
+`c2cd5536d7a557e09ec2a719adf58db3621a7986`, clean pre/post status, an
+initially absent dedicated target directory, the exact build and test
+environments and commands, Mesa/RADV packages, ICD and loader hashes, source
+hashes, adapter limits, timestamps and exit status. The complete log hashes to
+`8ef951e42492f532c40ccd3b1047f1360b54eb593382910388c1ddf5a6e78a2d`,
+the receipt to
+`19da93bf9d0ad78d0b335c79d76f6b4d40909eefb040a09817fa6e26df2f198d`,
+and the exact test executable before and after the run to
+`b30c547fc9119a0061f121312f63d7562101f64788321b7f9a8f5a5fd952281d`.
+
 **Shared-context resident ONE X2 final-map materializer, 2026-09-01,
 integration branch only [UNSELECTED; EXACT TARGET-GPU TWIN; NO SCENE OR
 PERFORMANCE CLAIM]:** the accepted final bilateral materializer now owns the
@@ -41,10 +88,10 @@ branch only [UNSELECTED; NO SCENE WIRING; SEALED TRANSITIONS]:** the
 shared `OneXsGpuContext` now owns a correctness-first geometry pipeline for
 both 1,080-by-60 periodic map merges, the selected directional continuity
 filters, physical validity seed, 9-by-9 erosion and A/B mask unification.
-Static line coordinates upload once. The temporary input boundary uploads the
-two CPU-built 100-by-200 parent maps into private token-owned storage; the
-incoming resident-parent producer can replace only that private owner and
-binding without changing any geometry arithmetic or downstream layout.
+Static line coordinates upload once. Qualification retains a test-only
+CPU-parent upload, while the ordinary boundary now consumes the resident
+parent producer directly without changing geometry arithmetic or downstream
+layout.
 
 The output is one non-cloneable opaque encoded token containing its exact GPU
 context, unfinished command encoder, full frame flight, both parent preimages,

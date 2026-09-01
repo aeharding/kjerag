@@ -25,6 +25,11 @@ use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sampl
 #[allow(dead_code)]
 pub(super) mod pis_frontend_gpu;
 
+/// Parent arithmetic is private to the same pre-submission owner as geometry.
+#[path = "one_xs/parent_gpu.rs"]
+#[allow(dead_code)]
+mod parent_gpu;
+
 /// Device-resident final bilateral-map materializer.
 ///
 /// Its input boundary stays inside this private resident owner. Scene does not
