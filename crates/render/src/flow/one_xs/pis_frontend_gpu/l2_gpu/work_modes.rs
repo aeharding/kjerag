@@ -356,6 +356,21 @@ fn validate_work_mode_dynamic(words: &[u32], level: Level) -> Fallible<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn read_modes_for_test(
+    context: &OneXsGpuContext,
+    dynamic: &wgpu::Buffer,
+    level: Level,
+) -> Result<[Vec<u32>; 2], Box<dyn Error>> {
+    let direction_words = DIRECTION_HEADER_WORDS + level.patch_rows() + 1;
+    let words = read_buffer_words(context, dynamic, PAIR_HEADER_WORDS + 2 * direction_words)?;
+    Ok(std::array::from_fn(|direction| {
+        let header = PAIR_HEADER_WORDS + direction * direction_words;
+        let first = header + DIRECTION_HEADER_WORDS;
+        words[first..first + level.patch_rows()].to_vec()
+    }))
+}
+
 fn qualification_cases() -> Vec<QualificationCase> {
     let rows = |a: &[usize], b: &[usize]| {
         let mut answer = vec![0; ROW_WORDS];

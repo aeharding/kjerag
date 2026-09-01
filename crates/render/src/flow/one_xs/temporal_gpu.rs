@@ -13,8 +13,8 @@ use super::super::pis_frontend_gpu::{
     GpuWorkModePipeline, RetainedL2DirectionPixelVec2Buffer,
 };
 use super::super::resident_frame_gpu::{
-    GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, ResidentPostL1Storage,
-    ResidentSuccessor,
+    GpuResidentCandidate, GpuResidentCapture, GpuResidentReservation, InstalledResidentPrior,
+    ResidentPostL1Storage, ResidentSuccessor,
 };
 use super::GpuGeometryBelts;
 use super::GpuGeometryFrameOwner;
@@ -176,6 +176,11 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) trait GpuPriorPublicLevelTwo:
     fn is_warm(&self) -> bool;
     fn cadence(&self) -> GpuPairedCadence;
     fn initialize(&self, encoder: &mut wgpu::CommandEncoder);
+    fn initialize_work_modes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        current_l1_lack: &wgpu::Buffer,
+    );
     #[allow(clippy::too_many_arguments)]
     fn bind_l2_bridge(
         &self,
@@ -307,6 +312,45 @@ impl GpuColdPriorPublicLevelTwo {
 }
 
 impl prior_public_l2::Sealed for GpuColdPriorPublicLevelTwo {}
+
+/// Exact installed public/retained owner for one warm calculation.
+///
+/// `prior` is minted only by the motion transaction's own root reservation.
+/// It retains the complete predecessor `Arc`, while `work_lack_rows` is a new
+/// successor-side allocation populated direction by direction before either
+/// warm PIS level reads it.
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuWarmPriorPublicLevelTwo {
+    prior: InstalledResidentPrior,
+    work_lack_rows: wgpu::Buffer,
+}
+
+impl GpuWarmPriorPublicLevelTwo {
+    fn from_reservation(reservation: &GpuResidentReservation) -> Fallible<Self> {
+        let prior = reservation.installed_prior()?;
+        prior.validate_post_l1()?;
+        let work_lack_rows = buffer(
+            prior.context().device(),
+            "ONE X2 warm same-flight lack rows",
+            POST_SMALL_WORDS * size_of::<u32>(),
+        );
+        Ok(Self {
+            prior,
+            work_lack_rows,
+        })
+    }
+
+    #[cfg(test)]
+    fn installed_prior(&self) -> &InstalledResidentPrior {
+        &self.prior
+    }
+
+    #[cfg(test)]
+    fn work_lack_rows(&self) -> &wgpu::Buffer {
+        &self.work_lack_rows
+    }
+}
+
+impl prior_public_l2::Sealed for GpuWarmPriorPublicLevelTwo {}
 
 impl<P: GpuPriorPublicLevelTwo> GpuMotionResidentL2Post<P> {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn ensure_final_reservation(
@@ -505,7 +549,8 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
             self.prior.lack_rows.clone(),
             self.prior.small_rows.clone(),
             self.prior.small_present,
-            self.prior.cadence.counts(),
+            self.prior.cadence,
+            self.prior.calculation,
         );
         let successor = self
             .motion
@@ -515,6 +560,34 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
         successor
             .attach_post_l1(storage)
             .map_err(|error| error.to_string().into())
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn replace_installed_work_state_for_test(
+        &mut self,
+        counts: [i32; 2],
+        lack_rows: &[u32],
+    ) -> Fallible<()> {
+        if lack_rows.len() != 2 * crate::flow::one_xs::pis::Level::One.patch_rows() {
+            return Err("installed work-state test lack rows have the wrong length".into());
+        }
+        let cadence = GpuPairedCadence::new(
+            EmptyOverrideCadence::new(counts[0], 10)?,
+            EmptyOverrideCadence::new(counts[1], 10)?,
+        );
+        let bytes = lack_rows
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .collect::<Vec<_>>();
+        self.context()
+            .queue()
+            .write_buffer(&self.prior.lack_rows, 0, &bytes);
+        self.prior.cadence = cadence;
+        self.motion
+            .successor
+            .as_mut()
+            .ok_or("resident cold test lost its motion successor")?
+            .replace_installed_cadence_for_test(cadence)
     }
 }
 
@@ -541,6 +614,13 @@ impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
             encoder.clear_buffer(&self.small_rows, 0, None);
             encoder.clear_buffer(&self.lack_rows, 0, None);
         }
+    }
+
+    fn initialize_work_modes(
+        &self,
+        _encoder: &mut wgpu::CommandEncoder,
+        _current_l1_lack: &wgpu::Buffer,
+    ) {
     }
 
     fn bind_l2_bridge(
@@ -595,6 +675,70 @@ impl GpuPriorPublicLevelTwo for GpuColdPriorPublicLevelTwo {
     }
 }
 
+impl GpuPriorPublicLevelTwo for GpuWarmPriorPublicLevelTwo {
+    fn context(&self) -> &OneXsGpuContext {
+        self.prior.context()
+    }
+
+    fn is_warm(&self) -> bool {
+        true
+    }
+
+    fn cadence(&self) -> GpuPairedCadence {
+        self.prior.cadence()
+    }
+
+    fn initialize(&self, _encoder: &mut wgpu::CommandEncoder) {}
+
+    fn initialize_work_modes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        current_l1_lack: &wgpu::Buffer,
+    ) {
+        self.prior
+            .encode_same_flight_lack_rows(encoder, current_l1_lack, &self.work_lack_rows);
+    }
+
+    fn bind_l2_bridge(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        terminal: &wgpu::Buffer,
+        motion_l2: &wgpu::Buffer,
+        output: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.prior.bind_l2_bridge(
+            device, layout, config, images, terminal, motion_l2, output, validity,
+        )
+    }
+
+    fn bind_l1_hint_fill(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        dynamic: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.prior.bind_hints(device, layout, config, dynamic)
+    }
+
+    fn bind_work_mode_fill(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        _current_l1_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &GpuPisFlight,
+    ) -> Fallible<GpuWorkModeBinding> {
+        Ok(self
+            .prior
+            .bind_warm_work_modes(pipeline, dynamic, &self.work_lack_rows, level, flight))
+    }
+}
+
 /// Pending temporal successor fused to the prior-public L2 owner. The root
 /// reservation remains opaque and unsealed inside `motion` until a later
 /// whole-frame candidate owns every downstream result.
@@ -636,6 +780,14 @@ impl<P: GpuPriorPublicLevelTwo> GpuResidentLevelTwoPost for GpuMotionResidentL2P
 
     fn initialize(&self, encoder: &mut wgpu::CommandEncoder) {
         self.prior.initialize(encoder);
+    }
+
+    fn encode_before_work_modes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        current_l1_lack: &wgpu::Buffer,
+    ) {
+        self.prior.initialize_work_modes(encoder, current_l1_lack);
     }
 
     fn bind(
@@ -683,6 +835,16 @@ impl<P: GpuPriorPublicLevelTwo> GpuResidentLevelTwoPost for GpuMotionResidentL2P
     ) -> Fallible<GpuWorkModeBinding> {
         self.prior
             .bind_work_mode_fill(pipeline, dynamic, current_l1_lack, level, flight)
+    }
+}
+
+#[cfg(test)]
+impl GpuMotionResidentL2Post<GpuWarmPriorPublicLevelTwo> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn installed_prior_matches_for_test(
+        &self,
+        successor: &std::sync::Arc<ResidentSuccessor>,
+    ) -> bool {
+        self.prior.installed_prior().same_successor(successor)
     }
 }
 
@@ -1009,6 +1171,32 @@ impl<K> GpuMotionTransaction<GpuGeometryBelts<K>> {
             controls.l1(),
         )?;
         Ok(GpuCold0Terminal::new(terminal, controls))
+    }
+
+    /// Continue one installed predecessor through the exact warm L2 then L1
+    /// terminals on this transaction's source submission lease. The caller
+    /// supplies controls only; the prior-public allocations and cadence are
+    /// derived from the reservation that already owns this motion result.
+    pub(super) fn submit_resident_warm(
+        self,
+        front_end: &GpuPisFrontEnd,
+        solver: &GpuPisPipeline,
+        bridge: &GpuL2PostPisBridge,
+        l2: GpuL2Controls,
+        l1: GpuL1Controls,
+    ) -> Fallible<
+        GpuL1PreparedTerminal<
+            GpuGeometryFrameOwner<K>,
+            GpuMotionResidentL2Post<GpuWarmPriorPublicLevelTwo>,
+        >,
+    > {
+        let reservation = self
+            .candidate()
+            .reservation
+            .as_ref()
+            .ok_or("ONE X2 warm transition lost its root reservation")?;
+        let prior = GpuWarmPriorPublicLevelTwo::from_reservation(reservation)?;
+        self.submit_resident_l2_l1(front_end, solver, l2, bridge, prior, l1)
     }
 
     /// Consume the root-carried motion transaction directly through front end,
@@ -1389,6 +1577,109 @@ mod tests {
         dropped: mpsc::Sender<(u8, bool, usize)>,
     }
 
+    struct InstalledPostFixture {
+        capture: GpuResidentCapture,
+        committed: Arc<ResidentSuccessor>,
+        lack_rows: wgpu::Buffer,
+        public: wgpu::Buffer,
+    }
+
+    fn installed_post_fixture(
+        context: &OneXsGpuContext,
+        cadence: GpuPairedCadence,
+        lack_values: [u32; 2],
+        public_words: usize,
+    ) -> InstalledPostFixture {
+        let capture = GpuResidentCapture::new_bound(
+            context.clone(),
+            crate::flow::one_xs_belt_gpu::ResidentSourceIdentity::for_test(),
+        );
+        let reservation = capture
+            .reserve(FrameStamp::for_test(40, Duration::from_millis(40), None))
+            .unwrap();
+        let motion_references = buffer(
+            context.device(),
+            "installed warm fixture references",
+            BELT_BYTES,
+        );
+        let mut successor =
+            ResidentSuccessor::from_motion(reservation.flight().clone(), motion_references);
+        let lack_words = (0..2 * Level::One.patch_rows())
+            .map(|index| lack_values[usize::from(index >= Level::One.patch_rows())])
+            .collect::<Vec<_>>();
+        let lack_bytes = lack_words
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .collect::<Vec<_>>();
+        let lack_rows = upload(
+            context.device(),
+            context.queue(),
+            "installed warm fixture lack rows",
+            &lack_bytes,
+        );
+        let public = buffer(
+            context.device(),
+            "installed warm fixture public",
+            public_words * size_of::<u32>(),
+        );
+        successor
+            .attach_post_l1(ResidentPostL1Storage::after_cold(
+                public.clone(),
+                RetainedL2DirectionPixelVec2Buffer::new(buffer(
+                    context.device(),
+                    "installed warm fixture retained L2",
+                    4 * L2_BYTES * size_of::<f32>(),
+                )),
+                buffer(
+                    context.device(),
+                    "installed warm fixture histogram",
+                    POST_HIST_WORDS * size_of::<u32>(),
+                ),
+                buffer(
+                    context.device(),
+                    "installed warm fixture FIFO",
+                    POST_FIFO_WORDS * size_of::<u32>(),
+                ),
+                buffer(
+                    context.device(),
+                    "installed warm fixture hints",
+                    POST_HINT_WORDS * size_of::<u32>(),
+                ),
+                lack_rows.clone(),
+                buffer(
+                    context.device(),
+                    "installed warm fixture small rows",
+                    POST_SMALL_WORDS * size_of::<u32>(),
+                ),
+                true,
+                cadence,
+                3,
+            ))
+            .unwrap();
+        let candidate = reservation.seal(successor).unwrap();
+        drop(candidate.install_successor_only_for_test().unwrap());
+        let committed = Arc::clone(capture.snapshot().committed.as_ref().unwrap());
+        InstalledPostFixture {
+            capture,
+            committed,
+            lack_rows,
+            public,
+        }
+    }
+
+    fn read_words(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source: &wgpu::Buffer,
+        words: usize,
+    ) -> Vec<u32> {
+        read(device, queue, source, words * size_of::<u32>())
+            .unwrap()
+            .chunks_exact(4)
+            .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect()
+    }
+
     impl Drop for RootRollbackOrderProbe {
         fn drop(&mut self) {
             let snapshot = self.capture.snapshot();
@@ -1442,6 +1733,130 @@ mod tests {
         .after_call();
         assert_eq!(wrapped.a_to_b.calc_count(), i32::MIN);
         assert_eq!(wrapped.b_to_a.calc_count(), i32::MIN.wrapping_add(1));
+    }
+
+    #[test]
+    fn installed_prior_is_allocation_identical_and_refreshes_lack_per_direction() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                );
+                eprintln!("skipping installed warm prior qualification: {why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let fixture = installed_post_fixture(
+            &context,
+            GpuPairedCadence::new(
+                EmptyOverrideCadence::new(0, 10).unwrap(),
+                EmptyOverrideCadence::new(7, 10).unwrap(),
+            ),
+            [10, 20],
+            POST_PUBLIC_WORDS,
+        );
+        let reservation = fixture
+            .capture
+            .reserve(FrameStamp::for_test(41, Duration::from_millis(41), None))
+            .unwrap();
+        let prior = GpuWarmPriorPublicLevelTwo::from_reservation(&reservation)
+            .unwrap_or_else(|error| panic!("installed warm prior failed on {adapter}: {error}"));
+        assert!(prior.installed_prior().same_successor(&fixture.committed));
+        assert_eq!(prior.installed_prior().calculation(), 3);
+        assert!(prior.installed_prior().small_present());
+
+        let current_words = (0..2 * Level::One.patch_rows())
+            .map(|index| {
+                if index < Level::One.patch_rows() {
+                    30
+                } else {
+                    40
+                }
+            })
+            .collect::<Vec<u32>>();
+        let current_bytes = current_words
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .collect::<Vec<_>>();
+        let current = upload(
+            &device,
+            &queue,
+            "same-flight warm lack rows",
+            &current_bytes,
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        prior.initialize_work_modes(&mut encoder, &current);
+        queue.submit([encoder.finish()]);
+        let work = read_words(&device, &queue, prior.work_lack_rows(), POST_SMALL_WORDS);
+        assert_eq!(&work[..Level::One.patch_rows()], vec![30; 178]);
+        assert_eq!(&work[Level::One.patch_rows()..], vec![20; 178]);
+        assert_eq!(
+            read_words(&device, &queue, &fixture.lack_rows, POST_SMALL_WORDS),
+            [vec![10; 178], vec![20; 178]].concat(),
+            "successor lack refresh mutated the installed predecessor"
+        );
+        drop(prior);
+        reservation.abort().unwrap();
+        let after = fixture.capture.snapshot();
+        assert!(!after.pending);
+        assert!(Arc::ptr_eq(
+            after.committed.as_ref().unwrap(),
+            &fixture.committed
+        ));
+    }
+
+    #[test]
+    fn malformed_warm_prior_rolls_back_without_touching_predecessor() {
+        let (device, queue, _) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                );
+                eprintln!("skipping installed warm rollback qualification: {why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let fixture = installed_post_fixture(
+            &context,
+            GpuPairedCadence::new(
+                EmptyOverrideCadence::new(3, 10).unwrap(),
+                EmptyOverrideCadence::new(3, 10).unwrap(),
+            ),
+            [51, 73],
+            1,
+        );
+        let before_public = read_words(&device, &queue, &fixture.public, 1);
+        let before_lack = read_words(&device, &queue, &fixture.lack_rows, POST_SMALL_WORDS);
+        let reservation = fixture
+            .capture
+            .reserve(FrameStamp::for_test(42, Duration::from_millis(42), None))
+            .unwrap();
+        let error = match GpuWarmPriorPublicLevelTwo::from_reservation(&reservation) {
+            Ok(_) => panic!("malformed installed public allocation was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("installed warm public buffer"));
+        reservation.abort().unwrap();
+        let after = fixture.capture.snapshot();
+        assert!(!after.pending);
+        assert!(Arc::ptr_eq(
+            after.committed.as_ref().unwrap(),
+            &fixture.committed
+        ));
+        assert_eq!(
+            read_words(&device, &queue, &fixture.public, 1),
+            before_public
+        );
+        assert_eq!(
+            read_words(&device, &queue, &fixture.lack_rows, POST_SMALL_WORDS),
+            before_lack
+        );
     }
 
     #[test]

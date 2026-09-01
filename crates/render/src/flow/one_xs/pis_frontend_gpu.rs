@@ -252,6 +252,8 @@ pub(crate) struct GpuPreparedTerminal<K> {
     _output_span_words: usize,
     _b_output_base_words: usize,
     resident_validity: Option<GpuResidentValidity>,
+    #[cfg(test)]
+    work_modes: Option<wgpu::Buffer>,
     prepared: GpuPreparedFrame<K>,
 }
 
@@ -484,6 +486,8 @@ impl<K> GpuPreparedFrame<K> {
             _output_span_words: dispatch.output_span_words,
             _b_output_base_words: dispatch.b_output_base_words,
             resident_validity: None,
+            #[cfg(test)]
+            work_modes: None,
             prepared: self,
         })
     }
@@ -914,10 +918,13 @@ fn upload_words(
         .iter()
         .flat_map(|word| word.to_ne_bytes())
         .collect::<Vec<_>>();
+    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+    #[cfg(test)]
+    let usage = usage | wgpu::BufferUsages::COPY_SRC;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        usage,
         mapped_at_creation: false,
     });
     queue.write_buffer(&buffer, 0, &bytes);

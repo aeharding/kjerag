@@ -176,6 +176,12 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) trait GpuResidentLevelTwoPost:
     fn is_warm(&self) -> bool;
     fn admissions(&self) -> GpuAdmittedSnapshot;
     fn initialize(&self, encoder: &mut wgpu::CommandEncoder);
+    fn encode_before_work_modes(
+        &self,
+        _encoder: &mut wgpu::CommandEncoder,
+        _current_l1_lack: &wgpu::Buffer,
+    ) {
+    }
     #[allow(clippy::too_many_arguments)]
     fn bind(
         &self,
@@ -656,6 +662,8 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuL2BridgeOutput<K, P: GpuR
     _terminal: wgpu::Buffer,
     _config: wgpu::Buffer,
     _resources: wgpu::BindGroup,
+    #[cfg(test)]
+    l2_work_modes: Option<wgpu::Buffer>,
     // Drop the prepared carrier and its SubmissionLease before the post owner
     // can roll back the root reservation or release successor allocations.
     _prepared: GpuPreparedFrame<K>,
@@ -869,6 +877,11 @@ impl<K> GpuPreparedFrame<K> {
             label: Some("ONE X2 resident L2 PIS"),
         });
         encoder.clear_buffer(&dynamic_f32, 0, None);
+        joined
+            .post
+            .as_ref()
+            .expect("L2 PIS join lost its post")
+            .encode_before_work_modes(&mut encoder, &prepared.l1_lack_rows);
         bridge
             .work_modes
             .encode(&work_modes, &flight, dispatch.stage.level(), &mut encoder)?;
@@ -906,6 +919,8 @@ impl<K> GpuPreparedFrame<K> {
             _output_span_words: dispatch.output_span_words,
             _b_output_base_words: dispatch.b_output_base_words,
             resident_validity: inherited_validity,
+            #[cfg(test)]
+            work_modes: Some(dynamic_u32.clone()),
             prepared,
         }
         .submit_l2_bridge_admitted(bridge, post, admissions)
@@ -1049,6 +1064,8 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             label: Some("ONE X2 resident L2-to-L1 PIS continuation"),
         });
         encoder.clear_buffer(&dynamic_f32, 0, None);
+        self._post
+            .encode_before_work_modes(&mut encoder, &self._prepared.l1_lack_rows);
         bridge
             .work_modes
             .encode(&work_modes, &flight, dispatch.stage.level(), &mut encoder)?;
@@ -1092,6 +1109,8 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             _terminal,
             _config,
             _resources,
+            #[cfg(test)]
+            l2_work_modes,
             _prepared,
             _post: post,
         } = self;
@@ -1105,12 +1124,16 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             _output_span_words: dispatch.output_span_words,
             _b_output_base_words: dispatch.b_output_base_words,
             resident_validity: Some(validity),
+            #[cfg(test)]
+            work_modes: Some(dynamic_u32.clone()),
             prepared: _prepared,
         };
         Ok(GpuL1PreparedTerminal {
             terminal,
             post,
             ordinal,
+            #[cfg(test)]
+            l2_work_modes,
         })
     }
 
@@ -1131,10 +1154,44 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuL1PreparedTerminal<
     terminal: GpuPreparedTerminal<K>,
     post: P,
     ordinal: GpuL1Ordinal,
+    #[cfg(test)]
+    l2_work_modes: Option<wgpu::Buffer>,
 }
 
 #[cfg(test)]
 impl<K, P: GpuResidentLevelTwoPost> GpuL1PreparedTerminal<K, P> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn post_for_test(&self) -> &P {
+        &self.post
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn receipt_for_test(&self) -> &GpuPisStageReceipt {
+        &self.terminal.receipt
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn work_modes_for_test(
+        &self,
+        level: Level,
+    ) -> Result<[Vec<u32>; 2], Box<dyn Error>> {
+        let dynamic = match level {
+            Level::Two => self.l2_work_modes.as_ref(),
+            Level::One => self.terminal.work_modes.as_ref(),
+        }
+        .ok_or("resident terminal did not retain its test work-mode allocation")?;
+        work_modes::read_modes_for_test(&self.terminal.context, dynamic, level)
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn current_l1_lack_for_test(
+        &self,
+    ) -> Result<[Vec<u32>; 2], Box<dyn Error>> {
+        let words = read_buffer_words(
+            &self.terminal.context,
+            &self.terminal.prepared.l1_lack_rows,
+            2 * Level::One.patch_rows(),
+        )?;
+        let rows = Level::One.patch_rows();
+        Ok([words[..rows].to_vec(), words[rows..].to_vec()])
+    }
+
     fn read_terminal_words_for_test(&self) -> Result<Vec<u32>, Box<dyn Error>> {
         read_buffer_words(
             &self.terminal.context,
@@ -1153,6 +1210,8 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL1PreparedTerminal<K, P> {
             terminal,
             post,
             ordinal: _,
+            #[cfg(test)]
+                l2_work_modes: _,
         } = self;
         let result = terminal.prepared.acknowledge_terminal();
         drop(post);
@@ -1732,6 +1791,8 @@ impl<K> GpuPreparedTerminal<K> {
             _output_span_words: _,
             _b_output_base_words: _,
             resident_validity,
+            #[cfg(test)]
+            work_modes,
             prepared,
         } = terminal;
         debug_assert!(resident_validity.is_none());
@@ -1747,6 +1808,8 @@ impl<K> GpuPreparedTerminal<K> {
             _terminal: terminal_buffer,
             _config: config,
             _resources: resources,
+            #[cfg(test)]
+            l2_work_modes: work_modes,
             _prepared: prepared,
             _post: post,
         })

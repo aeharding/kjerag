@@ -797,8 +797,9 @@ mod tests {
     use crate::flow::one_xs::one_xs_belt_gpu::pis_frontend_gpu::{
         GpuColdLoopControls, GpuL1Controls, GpuL2Controls, GpuL2PostPisBridge,
     };
-    use crate::flow::one_xs::pis::DisparityInterval;
     use crate::flow::one_xs::pis::gpu::GpuPisPipeline;
+    use crate::flow::one_xs::pis::{CostMode, DisparityInterval, Level};
+    use crate::flow::one_xs::scalar::propagate_work_modes;
     use kjerag_media::FrameStamp;
     use temporal_gpu::{GpuColdPriorPublicLevelTwo, GpuMotionStage};
 
@@ -1008,7 +1009,7 @@ mod tests {
         let sampler = context.device().create_sampler(&Default::default());
         let imported = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
             &context,
-            session,
+            session.clone(),
             flight.frame.clone(),
             &picture_layout,
             &uniforms,
@@ -1137,6 +1138,20 @@ mod tests {
         assert_eq!(completion.load(Ordering::SeqCst), 0);
         assert!(capture.snapshot().pending);
 
+        // Install an asymmetric pre-increment cadence while Cold2 still owns
+        // its successor uniquely. A must consume this next frame's current
+        // L1 lack rows; B must retain the planted predecessor rows. The
+        // complement makes an accidental A-prior read observably different.
+        let rows = Level::One.patch_rows();
+        let mut installed_lack = vec![0; 2 * rows];
+        for row in 0..rows {
+            installed_lack[row] = u32::from(cold2_state.lack_rows[row] == 0);
+            installed_lack[rows + row] = u32::from(row % 7 == 0 || (53..=60).contains(&row));
+        }
+        successor
+            .replace_installed_work_state_for_test([0, 7], &installed_lack)
+            .unwrap();
+
         let operands = crate::flow::one_xs_belt_gpu::pis_frontend_gpu::admit_completed_cold_final(
             successor, &context,
         )
@@ -1240,8 +1255,142 @@ mod tests {
         assert!(installed_snapshot.committed.is_some());
         assert_eq!(completion.load(Ordering::SeqCst), 2);
 
-        let next = capture
+        // The next real resident source frame must derive every warm input
+        // from the exact Cold2 successor just installed above. It traverses
+        // motion, warm L2, the retained bridge and warm L1 on that imported
+        // source's one SubmissionLease; no detached prior or loose buffer can
+        // enter this call.
+        let warm_reservation = capture
             .reserve(FrameStamp::for_test(72, Duration::from_millis(72), None))
+            .unwrap();
+        let installed_cold2 = Arc::clone(installed_snapshot.committed.as_ref().unwrap());
+        assert!(
+            warm_reservation
+                .installed_prior()
+                .unwrap()
+                .same_successor(&installed_cold2)
+        );
+        let warm_flight = warm_reservation.flight().clone();
+        let warm_parent = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 installed Cold2 to warm resident parent"),
+            size: PARENT_BYTES,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue().write_buffer(&warm_parent, 0, &parent_bytes);
+        let warm_encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("ONE X2 installed Cold2 to warm resident parent"),
+                });
+        let warm_geometry = geometry
+            .encode_buffer(
+                warm_parent.clone(),
+                ParentRetention::Resident(ResidentGpuParentMaps::for_geometry_test(
+                    &context,
+                    warm_parent,
+                )),
+                Some(warm_flight.clone()),
+                Some(warm_reservation),
+                warm_encoder,
+            )
+            .unwrap();
+        let warm_source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+            &context,
+            session.clone(),
+            warm_flight.frame.clone(),
+            &picture_layout,
+            &uniforms,
+            &sampler,
+        );
+        let warm_terminal = warm_geometry
+            .submit_belts(
+                &GpuSolverBeltPipeline::new(context.clone()).unwrap(),
+                SourceTextures {
+                    a: &texture_a,
+                    b: &texture_b,
+                },
+                warm_source,
+            )
+            .unwrap()
+            .prepare_motion(&motion)
+            .unwrap()
+            .submit_resident_warm(
+                &front,
+                &solver,
+                &bridge,
+                GpuL2Controls::resident(disparity, disparity),
+                GpuL1Controls::resident(disparity, disparity),
+            )
+            .unwrap_or_else(|error| {
+                panic!("installed Cold2 to warm L2/L1 failed on {adapter}: {error}")
+            });
+        assert_eq!(warm_terminal.receipt_for_test().flight, warm_flight);
+        assert_eq!(
+            warm_terminal.receipt_for_test().stage,
+            crate::flow::one_xs::scalar::PairSolveStage::Warm {
+                level: crate::flow::one_xs::pis::Level::One,
+            }
+        );
+        assert!(
+            warm_terminal
+                .post_for_test()
+                .installed_prior_matches_for_test(&installed_cold2)
+        );
+        let current_lack = warm_terminal.current_l1_lack_for_test().unwrap();
+        let actual_l1 = warm_terminal.work_modes_for_test(Level::One).unwrap();
+        let actual_l2 = warm_terminal.work_modes_for_test(Level::Two).unwrap();
+        let expected_l1 = [
+            current_lack[0]
+                .iter()
+                .map(|word| u32::from(*word != 0))
+                .collect::<Vec<_>>(),
+            installed_lack[rows..]
+                .iter()
+                .map(|word| u32::from(*word != 0))
+                .collect::<Vec<_>>(),
+        ];
+        let planted_a = installed_lack[..rows]
+            .iter()
+            .map(|word| u32::from(*word != 0))
+            .collect::<Vec<_>>();
+        assert_ne!(
+            expected_l1[0], planted_a,
+            "same-flight A lack rows must differ from planted installed prior"
+        );
+        assert_eq!(actual_l1, expected_l1, "warm L1 chose the wrong lack owner");
+        let expected_l2 = expected_l1.clone().map(|modes| {
+            propagate_work_modes(
+                &modes
+                    .iter()
+                    .map(|word| {
+                        if *word == 0 {
+                            CostMode::Unweighted
+                        } else {
+                            CostMode::Weighted
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .map(|mode| u32::from(mode == CostMode::Weighted))
+            .collect::<Vec<_>>()
+        });
+        assert_eq!(actual_l2, expected_l2, "warm L2 chose the wrong lack owner");
+        drop(warm_terminal);
+        let warm_rollback = capture.snapshot();
+        assert!(!warm_rollback.pending);
+        assert!(Arc::ptr_eq(
+            warm_rollback.committed.as_ref().unwrap(),
+            &installed_cold2
+        ));
+        assert!(installed_snapshot.same_ready(&warm_rollback));
+
+        let next = capture
+            .reserve(FrameStamp::for_test(73, Duration::from_millis(73), None))
             .unwrap();
         let pending_snapshot = capture.snapshot();
         assert!(pending_snapshot.pending);

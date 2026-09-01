@@ -13,9 +13,13 @@ use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::pis::gpu::GpuPisFlight;
 use kjerag_media::FrameStamp;
 
-use super::pis_frontend_gpu::RetainedL2DirectionPixelVec2Buffer;
+use super::geometry_gpu::temporal_gpu::GpuPairedCadence;
+use super::pis_frontend_gpu::{
+    GpuWorkModeBinding, GpuWorkModePipeline, RetainedL2DirectionPixelVec2Buffer,
+};
 use super::{InstalledOneXsDraw, InstalledOneXsReady, ResidentSourceIdentity};
 use crate::draw_retirement::{DrawRetirementError, IcedDrawRetirements};
+use crate::flow::one_xs::pis::Level;
 
 /// Storage installed only after a whole resident frame succeeds.
 ///
@@ -24,19 +28,20 @@ use crate::draw_retirement::{DrawRetirementError, IcedDrawRetirements};
 pub(super) struct ResidentSuccessor {
     flight: GpuPisFlight,
     motion_references: wgpu::Buffer,
-    _post_l1: Option<ResidentPostL1Storage>,
+    post_l1: Option<ResidentPostL1Storage>,
 }
 
 pub(super) struct ResidentPostL1Storage {
-    _public: wgpu::Buffer,
-    _retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
-    _histogram: wgpu::Buffer,
-    _fifo: wgpu::Buffer,
-    _hints: wgpu::Buffer,
-    _lack_rows: wgpu::Buffer,
-    _small_rows: wgpu::Buffer,
-    _small_present: bool,
-    _cadence_counts: [i32; 2],
+    public: wgpu::Buffer,
+    retained_l2_direction_pixel_vec2: RetainedL2DirectionPixelVec2Buffer,
+    histogram: wgpu::Buffer,
+    fifo: wgpu::Buffer,
+    hints: wgpu::Buffer,
+    lack_rows: wgpu::Buffer,
+    small_rows: wgpu::Buffer,
+    small_present: bool,
+    cadence: GpuPairedCadence,
+    calculation: u8,
 }
 
 impl ResidentPostL1Storage {
@@ -50,19 +55,188 @@ impl ResidentPostL1Storage {
         lack_rows: wgpu::Buffer,
         small_rows: wgpu::Buffer,
         small_present: bool,
-        cadence_counts: [i32; 2],
+        cadence: GpuPairedCadence,
+        calculation: u8,
     ) -> Self {
         Self {
-            _public: public,
-            _retained_l2_direction_pixel_vec2: retained_l2_direction_pixel_vec2,
-            _histogram: histogram,
-            _fifo: fifo,
-            _hints: hints,
-            _lack_rows: lack_rows,
-            _small_rows: small_rows,
-            _small_present: small_present,
-            _cadence_counts: cadence_counts,
+            public,
+            retained_l2_direction_pixel_vec2,
+            histogram,
+            fifo,
+            hints,
+            lack_rows,
+            small_rows,
+            small_present,
+            cadence,
+            calculation,
         }
+    }
+}
+
+/// Allocation-identical immutable view of one installed predecessor.
+///
+/// The private constructor lives on [`GpuResidentReservation`], whose `prior`
+/// field is cloned from the capture root while its pending seal is created.
+/// No sibling can assemble this capability from handles that merely happen to
+/// have the right sizes.
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct InstalledResidentPrior {
+    successor: Arc<ResidentSuccessor>,
+    context: OneXsGpuContext,
+}
+
+impl InstalledResidentPrior {
+    fn post_l1(&self) -> &ResidentPostL1Storage {
+        self.successor
+            .post_l1
+            .as_ref()
+            .expect("installed-prior constructor checked post-L1 state")
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn validate_post_l1(&self) -> Fallible<()> {
+        let post = self.post_l1();
+        const EXPECTED: [(&str, u64); 7] = [
+            ("public", (2 * 1080 * 60 * 2 * 4) as u64),
+            ("retained L2", (2 * 270 * 15 * 2 * 4) as u64),
+            ("histogram", (2 * 178 * 8 * 159 * 4) as u64),
+            ("FIFO", (2 * 178 * 8 * 5 * 4) as u64),
+            ("hints", (275_400 * 4) as u64),
+            ("lack rows", (2 * 178 * 4) as u64),
+            ("small rows", (2 * 178 * 4) as u64),
+        ];
+        let actual = [
+            post.public.size(),
+            post.retained_l2_direction_pixel_vec2.buffer().size(),
+            post.histogram.size(),
+            post.fifo.size(),
+            post.hints.size(),
+            post.lack_rows.size(),
+            post.small_rows.size(),
+        ];
+        for ((name, expected), actual) in EXPECTED.into_iter().zip(actual) {
+            if actual != expected {
+                return Err(format!(
+                    "ONE X2 installed warm {name} buffer is {actual} bytes, expected {expected}"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn context(&self) -> &OneXsGpuContext {
+        &self.context
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cadence(&self) -> GpuPairedCadence {
+        self.post_l1().cadence
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn calculation(&self) -> u8 {
+        self.post_l1().calculation
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn small_present(&self) -> bool {
+        self.post_l1().small_present
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn encode_same_flight_lack_rows(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        current_l1_lack: &wgpu::Buffer,
+        successor_lack: &wgpu::Buffer,
+    ) {
+        let post = self.post_l1();
+        let counts = post.cadence.counts();
+        let direction_bytes = (Level::One.patch_rows() * size_of::<u32>()) as u64;
+        for (direction, count) in counts.into_iter().enumerate() {
+            let offset = direction as u64 * direction_bytes;
+            encoder.copy_buffer_to_buffer(
+                if count == 0 {
+                    current_l1_lack
+                } else {
+                    &post.lack_rows
+                },
+                offset,
+                successor_lack,
+                offset,
+                direction_bytes,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_l2_bridge(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        images: &wgpu::Buffer,
+        terminal: &wgpu::Buffer,
+        motion_l2: &wgpu::Buffer,
+        output: &wgpu::Buffer,
+        validity: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        let post = self.post_l1();
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 installed warm prior-public L2 owner"),
+            layout,
+            entries: &[
+                buffer_entry(0, config),
+                buffer_entry(1, images),
+                buffer_entry(2, terminal),
+                buffer_entry(3, post.retained_l2_direction_pixel_vec2.buffer()),
+                buffer_entry(4, motion_l2),
+                buffer_entry(5, output),
+                buffer_entry(6, validity),
+            ],
+        })
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_hints(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        config: &wgpu::Buffer,
+        dynamic: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 installed warm prior-public hint owner"),
+            layout,
+            entries: &[
+                buffer_entry(0, config),
+                buffer_entry(1, &self.post_l1().hints),
+                buffer_entry(2, dynamic),
+            ],
+        })
+    }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn bind_warm_work_modes(
+        &self,
+        pipeline: &GpuWorkModePipeline,
+        dynamic: &wgpu::Buffer,
+        successor_lack: &wgpu::Buffer,
+        level: Level,
+        flight: &GpuPisFlight,
+    ) -> GpuWorkModeBinding {
+        pipeline.bind_warm(
+            dynamic,
+            successor_lack,
+            &self.post_l1().small_rows,
+            level,
+            flight,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn same_successor(&self, successor: &Arc<ResidentSuccessor>) -> bool {
+        Arc::ptr_eq(&self.successor, successor)
+    }
+}
+
+fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
     }
 }
 
@@ -71,7 +245,7 @@ impl ResidentSuccessor {
         Self {
             flight,
             motion_references,
-            _post_l1: None,
+            post_l1: None,
         }
     }
 
@@ -86,10 +260,22 @@ impl ResidentSuccessor {
     }
 
     pub(super) fn attach_post_l1(&mut self, storage: ResidentPostL1Storage) -> Fallible<()> {
-        if self._post_l1.is_some() {
+        if self.post_l1.is_some() {
             return Err("ONE X2 resident successor already owns post-L1 state".into());
         }
-        self._post_l1 = Some(storage);
+        self.post_l1 = Some(storage);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn replace_installed_cadence_for_test(
+        &mut self,
+        cadence: GpuPairedCadence,
+    ) -> Fallible<()> {
+        self.post_l1
+            .as_mut()
+            .ok_or("resident successor has no installed post-L1 state")?
+            .cadence = cadence;
         Ok(())
     }
 }
@@ -281,6 +467,32 @@ impl GpuResidentReservation {
     /// the exact prior reference. It cannot change while GPU work is encoded.
     pub(super) fn prior(&self) -> &Option<Arc<ResidentSuccessor>> {
         &self.prior
+    }
+
+    /// Mint the sole warm prior capability from this reservation's exact root
+    /// snapshot. A cold reservation has no installed predecessor and refuses.
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn installed_prior(
+        &self,
+    ) -> Fallible<InstalledResidentPrior> {
+        let successor = self
+            .prior
+            .as_ref()
+            .ok_or("ONE X2 warm transition has no installed predecessor")?;
+        if successor.post_l1.is_none() {
+            return Err("ONE X2 installed predecessor has no post-L1 state".into());
+        }
+        let context = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?
+            .context
+            .clone()
+            .ok_or("ONE X2 resident root has no capture context")?;
+        Ok(InstalledResidentPrior {
+            successor: Arc::clone(successor),
+            context,
+        })
     }
 
     pub(super) fn seal(self, successor: ResidentSuccessor) -> Fallible<GpuResidentCandidate> {

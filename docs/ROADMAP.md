@@ -3,6 +3,43 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Allocation-identical installed warm prior and temporal continuation,
+2026-09-01, implementation branch only [PRIVATE AND UNSELECTED; THROUGH WARM
+L1 TERMINAL ONLY; NO WARM POST-L1 JOIN, FINAL MAP, SCENE, PERFORMANCE OR
+PARITY CLAIM]:** the capture root now installs the complete immutable post-L1
+successor state rather than detached buffers and cadence counts. That state
+retains public flow, direction-major pixel-interleaved retained L2, temporal
+histogram and FIFO, dense hints, direction-owned lack rows, bilateral small
+rows with their optional topology, the real paired cadence object and the
+completed cold-start ordinal. A warm reservation alone can mint an opaque
+`InstalledResidentPrior` holding the exact committed successor `Arc` and its
+capture context. It exposes only size validation and purpose-specific GPU
+copy/bind operations; no buffer handle or cloneable field bundle crosses the
+boundary.
+
+`GpuMotionTransaction::submit_resident_warm` derives that prior from its own
+root-carried reservation and advances the same imported source
+`SubmissionLease` through warm L2, the retained bridge and warm L1. Before
+either level consumes work modes, one ordered GPU command constructs a new
+successor-side lack allocation direction by direction: a pre-increment count
+of zero selects that direction's current L1 lack rows, while every other count
+retains that direction's installed rows. The installed predecessor is never
+written. Installed small rows remain the warm work-mode input; updating and
+attaching successor small rows belongs to the later combined warm post-L1
+join.
+
+Focused forced-RADV tests on AMD Radeon 760M Graphics, RADV PHOENIX prove an
+actual Cold0 through Cold2 final-map/atomic install followed by a second
+resident imported source through warm motion, L2 and L1, with exact prior
+`Arc` identity, flight identity, source-lease continuity and rollback that
+preserves the installed successor and ready draw. A separate asymmetric
+cadence test proves same-flight count-zero refresh in one direction and
+installed-row retention in the other while predecessor bytes remain
+unchanged. A malformed installed allocation is refused and rolls its pending
+reservation back without changing committed identity or predecessor bytes.
+Studio remains the frozen correctness oracle; no optimization reverse
+engineering was performed.
+
 **Atomic resident source-plus-map install prerequisite, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, WARM, PLAYBACK,
 PERFORMANCE OR PARITY CLAIM]:** successful Cold2 final-map validity now has one

@@ -820,6 +820,17 @@ impl<K> GpuCompletedColdCheckpoint<K> {
                 .ok_or("cold snapshot lost validity")?,
         )
     }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn replace_installed_work_state_for_test(
+        &mut self,
+        counts: [i32; 2],
+        lack_rows: &[u32],
+    ) -> Fallible<()> {
+        self.post
+            .as_mut()
+            .ok_or("completed Cold2 test checkpoint lost its temporal owner")?
+            .replace_installed_work_state_for_test(counts, lack_rows)
+    }
 }
 
 #[cfg(test)]
@@ -1038,6 +1049,8 @@ fn complete_cold_tail<K>(
         terminal,
         post,
         ordinal: _,
+        #[cfg(test)]
+            l2_work_modes: _,
     } = input;
     let mut guard = ColdTailGuard {
         terminal: Some(terminal),
@@ -1139,6 +1152,8 @@ fn complete_cold_tail<K>(
         _b_output_base_words: _,
         resident_validity,
         prepared,
+        #[cfg(test)]
+            work_modes: _,
     } = terminal;
     debug_assert!(resident_validity.is_none());
     Ok(CompletedColdTail {
