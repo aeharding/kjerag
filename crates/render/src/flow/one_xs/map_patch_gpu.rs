@@ -11,7 +11,8 @@
 )]
 
 use std::num::NonZeroU64;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
+use std::{error::Error, fmt};
 
 use kjerag_media::FrameStamp;
 
@@ -21,6 +22,7 @@ use super::super::l2_seed::SeedError;
 use super::super::map_patch::{
     self, BaseMap, BilateralInputs, CoordinateMap, FlowMap, GateMap, PreimageMap, SideInputs,
 };
+use super::super::resources::OneXsResources;
 use crate::Fallible;
 #[cfg(test)]
 use crate::studio_type2::{ALPHA_BYTES, AlphaMap, PackedMap};
@@ -29,31 +31,172 @@ use crate::studio_type2::{MAP_NODES, PACKED_BYTES};
 const SHADER: &str = include_str!("map_patch_gpu.wgsl");
 const WORKGROUP_SIZE: u32 = 64;
 const RETAINED_NODES: usize = super::super::ROWS * super::super::COLS;
-const INPUT_WORDS: usize =
-    2 * (MAP_NODES * 2 + RETAINED_NODES * 2 + RETAINED_NODES * 2 + MAP_NODES + MAP_NODES * 2);
+const PREIMAGE_WORDS: usize = MAP_NODES * 2;
+const BASE_WORDS: usize = RETAINED_NODES * 2;
+const FLOW_WORDS: usize = RETAINED_NODES * 2;
+const GATE_WORDS: usize = MAP_NODES;
+const COORDINATE_WORDS: usize = MAP_NODES * 2;
+const DYNAMIC_SIDE_WORDS: usize = PREIMAGE_WORDS + BASE_WORDS + FLOW_WORDS;
+const STATIC_SIDE_WORDS: usize = GATE_WORDS + COORDINATE_WORDS;
+const SIDE_WORDS: usize = DYNAMIC_SIDE_WORDS + STATIC_SIDE_WORDS;
+const INPUT_WORDS: usize = 2 * SIDE_WORDS;
 const INPUT_BYTES: u64 = (INPUT_WORDS * size_of::<u32>()) as u64;
+#[cfg(test)]
+const DYNAMIC_INPUT_WORDS: usize = 2 * DYNAMIC_SIDE_WORDS;
+const STATIC_INPUT_WORDS: usize = 2 * STATIC_SIDE_WORDS;
+const STATIC_INPUT_BYTES: u64 = (STATIC_INPUT_WORDS * size_of::<u32>()) as u64;
 const ACTION_BYTES: u64 = (MAP_NODES * 2 * size_of::<u32>()) as u64;
 const VALIDITY_BYTES: u64 = size_of::<u32>() as u64;
 const L1_PATCH_COLS: usize = 8;
 const L1_PATCHES: usize = 1424;
+const PIS_VALIDITY_CODES: u32 = (4 * L1_PATCHES) as u32;
+const GENERATED_HINT_FAILURE_TAG: u32 = 1 << 31;
+const GENERATED_HINT_LEVEL_BIT: u32 = 1 << 16;
+const GENERATED_HINT_DIRECTION_BIT: u32 = 1 << 15;
+const GENERATED_HINT_COMPONENT_BIT: u32 = 1 << 14;
+const GENERATED_HINT_SITE_MASK: u32 = GENERATED_HINT_COMPONENT_BIT - 1;
+const GENERATED_HINT_RESERVED_MASK: u32 = 0x7ffe_0000;
+const L1_DENSE_ROWS: usize = super::super::ROWS / 2;
+const L1_DENSE_COLS: usize = super::super::COLS / 2;
+const L2_DENSE_ROWS: usize = L1_DENSE_ROWS / 2;
+const L2_DENSE_COLS: usize = L1_DENSE_COLS / 2;
+
+/// Semantic level used by the post-L1 validity encoder. The raw bit layout
+/// remains owned and decoded here so sibling producers cannot invent another
+/// namespace for the same resident status word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GeneratedHintLevel {
+    One,
+    Two,
+}
+
+/// Semantic component used by the post-L1 validity encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GeneratedHintComponent {
+    Dcol,
+    Drow,
+}
+
+/// Encode one exact generated-successor-hint failure for the shared resident
+/// validity word. Invalid dense sites have no representation.
+pub(super) const fn generated_hint_validity_word(
+    level: GeneratedHintLevel,
+    direction: super::super::Direction,
+    component: GeneratedHintComponent,
+    dense_site: u32,
+) -> Option<u32> {
+    let sites = match level {
+        GeneratedHintLevel::One => (L1_DENSE_ROWS * L1_DENSE_COLS) as u32,
+        GeneratedHintLevel::Two => (L2_DENSE_ROWS * L2_DENSE_COLS) as u32,
+    };
+    if dense_site >= sites {
+        return None;
+    }
+    let level = match level {
+        GeneratedHintLevel::One => 0,
+        GeneratedHintLevel::Two => GENERATED_HINT_LEVEL_BIT,
+    };
+    let direction = match direction {
+        super::super::Direction::AtoB => 0,
+        super::super::Direction::BtoA => GENERATED_HINT_DIRECTION_BIT,
+    };
+    let component = match component {
+        GeneratedHintComponent::Dcol => 0,
+        GeneratedHintComponent::Drow => GENERATED_HINT_COMPONENT_BIT,
+    };
+    Some(GENERATED_HINT_FAILURE_TAG | level | direction | component | dense_site)
+}
 
 /// Sealed handoff implemented by the upstream resident ONE X2 chain.
 ///
 /// The methods are visible only within `one_xs`: no crate caller can supply a
-/// free buffer, frame or queue. `submit_after` must advance the token's one
+/// free buffer, frame or queue. Static gate, coordinate and alpha resources
+/// are deliberately absent. `submit_after` must advance the token's one
 /// existing source-owner lease to the supplied command buffer.
 pub(super) mod resident {
     use super::*;
 
     pub(in crate::flow::one_xs::one_xs_belt_gpu) trait Sealed {}
 
+    #[derive(Clone, Copy)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) enum DynamicSide {
+        LensA,
+        LensB,
+    }
+
+    /// One source range for a purpose-specific dynamic input copy. Its fields
+    /// are private so it cannot reveal a retained buffer after the call.
+    #[derive(Clone, Copy)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) struct DynamicBufferCopy<'a> {
+        buffer: &'a wgpu::Buffer,
+        offset: u64,
+    }
+
+    impl<'a> DynamicBufferCopy<'a> {
+        pub(in crate::flow::one_xs::one_xs_belt_gpu) fn new(
+            buffer: &'a wgpu::Buffer,
+            offset: u64,
+        ) -> Self {
+            Self { buffer, offset }
+        }
+    }
+
+    /// Write-only view of the frame-varying slots in the combined shader
+    /// input. The upstream owner can name its exact sources, but never the
+    /// target buffer or the capture-static destination ranges.
+    #[derive(Clone, Copy)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) struct DynamicInputTarget<'a> {
+        target: &'a wgpu::Buffer,
+    }
+
+    impl<'a> DynamicInputTarget<'a> {
+        pub(super) fn new(target: &'a wgpu::Buffer) -> Self {
+            Self { target }
+        }
+
+        pub(in crate::flow::one_xs::one_xs_belt_gpu) fn copy_side(
+            self,
+            encoder: &mut wgpu::CommandEncoder,
+            side: DynamicSide,
+            preimage: DynamicBufferCopy<'_>,
+            base: DynamicBufferCopy<'_>,
+            public_flow: DynamicBufferCopy<'_>,
+        ) {
+            let side = match side {
+                DynamicSide::LensA => 0,
+                DynamicSide::LensB => 1,
+            };
+            let target = side * SIDE_WORDS;
+            for (source, target, words) in [
+                (preimage, target, PREIMAGE_WORDS),
+                (base, target + PREIMAGE_WORDS, BASE_WORDS),
+                (
+                    public_flow,
+                    target + PREIMAGE_WORDS + BASE_WORDS,
+                    FLOW_WORDS,
+                ),
+            ] {
+                encoder.copy_buffer_to_buffer(
+                    source.buffer,
+                    source.offset,
+                    self.target,
+                    byte_offset(target),
+                    byte_offset(words),
+                );
+            }
+        }
+    }
+
     pub(in crate::flow::one_xs::one_xs_belt_gpu) trait Operands:
         Sealed + Sized
     {
         fn context(&self) -> &OneXsGpuContext;
         fn frame(&self) -> &FrameStamp;
-        fn alpha_binding(&self) -> wgpu::BufferBinding<'_>;
-        fn encode_input_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer);
+        fn encode_dynamic_input_copy(
+            &self,
+            encoder: &mut wgpu::CommandEncoder,
+            target: DynamicInputTarget<'_>,
+        );
         fn encode_validity_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer);
         fn submit_after(
             &mut self,
@@ -65,16 +208,132 @@ pub(super) mod resident {
 
 use resident::Operands;
 
+/// Capture-static final-map resources derived from one validated ONE X2
+/// calibration and uploaded on the exact resident context.
+///
+/// No constructor or buffer accessor leaves this private owner. The only
+/// operations copy its gate and coordinate payload into the materializer's
+/// fixed layout and lend its alpha while constructing the final binding.
+struct GpuFinalMapStatics {
+    context: OneXsGpuContext,
+    gate_coordinate: wgpu::Buffer,
+    alpha: wgpu::Buffer,
+}
+
+impl GpuFinalMapStatics {
+    fn new(context: OneXsGpuContext, resources: &OneXsResources) -> Arc<Self> {
+        let words = pack_static_resources(resources);
+        Self::from_words(context, &words, resources.alpha().bytes())
+    }
+
+    fn from_words(context: OneXsGpuContext, words: &[u32], alpha: &[u8]) -> Arc<Self> {
+        assert_eq!(words.len(), STATIC_INPUT_WORDS);
+        assert_eq!(alpha.len(), crate::studio_type2::ALPHA_BYTES);
+        let gate_coordinate = upload_bytes(
+            context.device(),
+            context.queue(),
+            "ONE X2 capture-static final-map gate and coordinates",
+            u32_slice_bytes(words),
+        );
+        let alpha = upload_bytes(
+            context.device(),
+            context.queue(),
+            "ONE X2 capture-static final-map alpha",
+            alpha,
+        );
+        Arc::new(Self {
+            context,
+            gate_coordinate,
+            alpha,
+        })
+    }
+
+    fn encode_input_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer) {
+        for side in 0..2 {
+            encoder.copy_buffer_to_buffer(
+                &self.gate_coordinate,
+                byte_offset(side * STATIC_SIDE_WORDS),
+                target,
+                byte_offset(side * SIDE_WORDS + DYNAMIC_SIDE_WORDS),
+                byte_offset(STATIC_SIDE_WORDS),
+            );
+        }
+    }
+
+    fn alpha_binding(&self) -> wgpu::BufferBinding<'_> {
+        self.alpha.as_entire_buffer_binding()
+    }
+}
+
+fn pack_static_resources(resources: &OneXsResources) -> Vec<u32> {
+    let mut words = Vec::with_capacity(STATIC_INPUT_WORDS);
+    append_static_side(
+        &mut words,
+        resources.gates().a.values(),
+        resources.coordinates().a.values(),
+    );
+    append_static_side(
+        &mut words,
+        resources.gates().b.values(),
+        resources.coordinates().b.values(),
+    );
+    words
+}
+
+fn append_static_side(words: &mut Vec<u32>, gates: &[f32], coordinates: &[[f32; 2]]) {
+    debug_assert_eq!(gates.len(), GATE_WORDS);
+    debug_assert_eq!(coordinates.len(), MAP_NODES);
+    words.extend(gates.iter().map(|value| value.to_bits()));
+    append_f32x2_words(words, coordinates);
+}
+
+fn append_f32x2_words(words: &mut Vec<u32>, values: &[[f32; 2]]) {
+    words.extend(
+        values
+            .iter()
+            .flat_map(|value| value.iter().map(|component| component.to_bits())),
+    );
+}
+
+const fn byte_offset(words: usize) -> u64 {
+    (words * size_of::<u32>()) as u64
+}
+
+fn upload_bytes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    bytes: &[u8],
+) -> wgpu::Buffer {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes.len() as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, bytes);
+    buffer
+}
+
+fn u32_slice_bytes(words: &[u32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), std::mem::size_of_val(words)) }
+}
+
 /// GPU-resident packed map bound to the exact delivery that produced it.
 ///
 /// This deliberately exposes no ordinary CPU byte view. Evidence code must
 /// call [`Self::diagnostic_readback`] and wait for an explicit copy.
 pub(super) struct GpuPackedMapFrame<O: Operands> {
+    // The inherited submission carrier is first so every refusal, unwind and
+    // ordinary drop retires or quarantines it before any downstream owner.
+    upstream: O,
     frame: FrameStamp,
     packed: wgpu::Buffer,
     _actions: wgpu::Buffer,
     context: OneXsGpuContext,
-    upstream: O,
+    statics: Arc<GpuFinalMapStatics>,
 }
 
 /// A resident final map whose four-byte fail-closed status has not completed.
@@ -83,13 +342,28 @@ pub(super) struct GpuPackedMapFrame<O: Operands> {
 /// owner until a successful poll converts it into [`GpuPackedMapFrame`].
 #[must_use = "the pending resident final-map validity has not been polled"]
 pub(super) struct PendingGpuPackedMapFrame<O: Operands> {
+    // See `GpuPackedMapFrame`: mapping failure must retire the inherited lease
+    // before the exact statics or candidate allocations can be released.
+    upstream: O,
     frame: FrameStamp,
     packed: wgpu::Buffer,
     actions: wgpu::Buffer,
     context: OneXsGpuContext,
-    upstream: O,
+    statics: Arc<GpuFinalMapStatics>,
     validity: wgpu::Buffer,
     mapped: mpsc::Receiver<Result<(), String>>,
+}
+
+/// Carrier-first owner spanning the only fallible submit. It becomes the
+/// pending validity owner only after the existing lease accepts the command.
+struct UnsubmittedGpuPackedMapFrame<O: Operands> {
+    upstream: O,
+    frame: FrameStamp,
+    packed: wgpu::Buffer,
+    actions: wgpu::Buffer,
+    context: OneXsGpuContext,
+    statics: Arc<GpuFinalMapStatics>,
+    validity: wgpu::Buffer,
 }
 
 pub(super) enum ValidityPoll<O: Operands> {
@@ -119,15 +393,17 @@ impl<O: Operands> PendingGpuPackedMapFrame<O> {
         let status = u32::from_ne_bytes(bytes[..size_of::<u32>()].try_into().unwrap());
         drop(bytes);
         self.validity.unmap();
-        if status != u32::MAX {
-            return Err(validity_error(status).into());
+        let validity = decode_validity(status);
+        if !matches!(validity, ResidentValidity::Success) {
+            return Err(Box::new(validity));
         }
         Ok(GpuPackedMapFrame {
+            upstream: self.upstream,
             frame: self.frame,
             packed: self.packed,
             _actions: self.actions,
             context: self.context,
-            upstream: self.upstream,
+            statics: self.statics,
         })
     }
 
@@ -139,7 +415,62 @@ impl<O: Operands> PendingGpuPackedMapFrame<O> {
     }
 }
 
-fn validity_error(status: u32) -> SeedError {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResidentValidity {
+    Success,
+    Seed(SeedError),
+    GeneratedHint {
+        direction: super::super::Direction,
+        level: GeneratedHintLevel,
+        component: GeneratedHintComponent,
+        dense_row: usize,
+        dense_col: usize,
+    },
+    InvalidStatus(u32),
+}
+
+fn decode_validity(status: u32) -> ResidentValidity {
+    if status == u32::MAX {
+        return ResidentValidity::Success;
+    }
+    if status < PIS_VALIDITY_CODES {
+        return ResidentValidity::Seed(pis_validity_error(status));
+    }
+    if status & GENERATED_HINT_FAILURE_TAG != 0 && status & GENERATED_HINT_RESERVED_MASK == 0 {
+        let level = if status & GENERATED_HINT_LEVEL_BIT == 0 {
+            GeneratedHintLevel::One
+        } else {
+            GeneratedHintLevel::Two
+        };
+        let direction = if status & GENERATED_HINT_DIRECTION_BIT == 0 {
+            super::super::Direction::AtoB
+        } else {
+            super::super::Direction::BtoA
+        };
+        let component = if status & GENERATED_HINT_COMPONENT_BIT == 0 {
+            GeneratedHintComponent::Dcol
+        } else {
+            GeneratedHintComponent::Drow
+        };
+        let site = (status & GENERATED_HINT_SITE_MASK) as usize;
+        let (rows, cols) = match level {
+            GeneratedHintLevel::One => (L1_DENSE_ROWS, L1_DENSE_COLS),
+            GeneratedHintLevel::Two => (L2_DENSE_ROWS, L2_DENSE_COLS),
+        };
+        if site < rows * cols {
+            return ResidentValidity::GeneratedHint {
+                direction,
+                level,
+                component,
+                dense_row: site / cols,
+                dense_col: site % cols,
+            };
+        }
+    }
+    ResidentValidity::InvalidStatus(status)
+}
+
+fn pis_validity_error(status: u32) -> SeedError {
     let plane = status as usize / L1_PATCHES;
     let patch = status as usize % L1_PATCHES;
     let direction = if plane < 2 {
@@ -161,6 +492,56 @@ fn validity_error(status: u32) -> SeedError {
         patch_col,
         dense_row: patch_row * 3 + 4,
         dense_col: patch_col * 3 + 4,
+    }
+}
+
+impl fmt::Display for GeneratedHintLevel {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output.write_str(match self {
+            Self::One => "level-one",
+            Self::Two => "level-two",
+        })
+    }
+}
+
+impl fmt::Display for GeneratedHintComponent {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output.write_str(match self {
+            Self::Dcol => "dcol",
+            Self::Drow => "drow",
+        })
+    }
+}
+
+impl fmt::Display for ResidentValidity {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => output.write_str("ONE X2 GPU resident validity succeeded"),
+            Self::Seed(error) => error.fmt(output),
+            Self::GeneratedHint {
+                direction,
+                level,
+                component,
+                dense_row,
+                dense_col,
+            } => write!(
+                output,
+                "ONE X2 {direction} generated {level} {component} successor hint at dense row {dense_row} column {dense_col} is not finite",
+            ),
+            Self::InvalidStatus(status) => write!(
+                output,
+                "ONE X2 GPU resident validity returned unknown status word {status:#010x}",
+            ),
+        }
+    }
+}
+
+impl Error for ResidentValidity {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Seed(error) => Some(error),
+            Self::Success | Self::GeneratedHint { .. } | Self::InvalidStatus(_) => None,
+        }
     }
 }
 
@@ -201,7 +582,7 @@ impl<O: Operands> GpuPackedMapFrame<O> {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Buffer(self.upstream.alpha_binding()),
+                        resource: wgpu::BindingResource::Buffer(self.statics.alpha_binding()),
                     },
                 ],
             });
@@ -355,16 +736,23 @@ impl std::error::Error for QualificationError {}
 /// Render-private, unselected final-map compute pipeline.
 pub(super) struct GpuMapMaterializer {
     context: OneXsGpuContext,
+    statics: Arc<GpuFinalMapStatics>,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
 impl GpuMapMaterializer {
-    pub(super) fn new(context: OneXsGpuContext) -> Self {
-        Self::from_shader(context, SHADER)
+    pub(super) fn new(context: OneXsGpuContext, resources: &OneXsResources) -> Fallible<Self> {
+        let statics = GpuFinalMapStatics::new(context.clone(), resources);
+        Self::from_shader(context, statics, SHADER)
     }
 
-    fn from_shader(context: OneXsGpuContext, shader: &str) -> Self {
+    fn from_shader(
+        context: OneXsGpuContext,
+        statics: Arc<GpuFinalMapStatics>,
+        shader: &str,
+    ) -> Fallible<Self> {
+        context.ensure_same(&statics.context)?;
         let device = context.device();
         let storage = |binding, read_only, bytes| wgpu::BindGroupLayoutEntry {
             binding,
@@ -401,11 +789,12 @@ impl GpuMapMaterializer {
             compilation_options: Default::default(),
             cache: None,
         });
-        Self {
+        Ok(Self {
             context,
+            statics,
             pipeline,
             layout,
-        }
+        })
     }
 
     /// Consume one sealed upstream token and emit an opaque resident map.
@@ -415,7 +804,7 @@ impl GpuMapMaterializer {
     /// copied for asynchronous CPU observation.
     pub(super) fn materialize<O: Operands>(
         &self,
-        mut operands: O,
+        operands: O,
     ) -> Fallible<PendingGpuPackedMapFrame<O>> {
         self.context.ensure_same(operands.context())?;
         let frame = operands.frame().clone();
@@ -438,19 +827,29 @@ impl GpuMapMaterializer {
                 mapped_at_creation: false,
             });
         let (packed, actions, command) = self.encode(&operands, &input, &validity);
-        operands.submit_after(&self.context, command)?;
-        let slice = validity.slice(..);
+        let mut unsubmitted = UnsubmittedGpuPackedMapFrame {
+            upstream: operands,
+            frame,
+            packed,
+            actions,
+            context: self.context.clone(),
+            statics: Arc::clone(&self.statics),
+            validity,
+        };
+        unsubmitted.upstream.submit_after(&self.context, command)?;
+        let slice = unsubmitted.validity.slice(..);
         let (sender, mapped) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result.map_err(|error| error.to_string()));
         });
         Ok(PendingGpuPackedMapFrame {
-            frame,
-            packed,
-            actions,
-            context: self.context.clone(),
-            upstream: operands,
-            validity,
+            upstream: unsubmitted.upstream,
+            frame: unsubmitted.frame,
+            packed: unsubmitted.packed,
+            actions: unsubmitted.actions,
+            context: unsubmitted.context,
+            statics: unsubmitted.statics,
+            validity: unsubmitted.validity,
             mapped,
         })
     }
@@ -495,7 +894,8 @@ impl GpuMapMaterializer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ONE X2 GPU final-map materializer"),
         });
-        operands.encode_input_copy(&mut encoder, input);
+        operands.encode_dynamic_input_copy(&mut encoder, resident::DynamicInputTarget::new(input));
+        self.statics.encode_input_copy(&mut encoder, input);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ONE X2 GPU final-map materializer"),
@@ -510,16 +910,14 @@ impl GpuMapMaterializer {
     }
 
     #[cfg(test)]
-    fn qualify(&self) -> Fallible<()> {
-        let fixture = QualificationFixture::new();
+    fn qualify_fixture(&self, fixture: &QualificationFixture) -> Fallible<()> {
         fixture.verify_cpu_coverage();
         let inputs = fixture.cpu_inputs();
         let expected = map_patch::materialize(inputs).packed;
-        let words = pack_inputs(inputs);
+        let words = pack_dynamic_inputs(inputs);
         let operands = TestResidentOperands::new(
             self.context.clone(),
             FrameStamp::for_test(0, std::time::Duration::ZERO, None),
-            AlphaMap::new(vec![0.5; MAP_NODES]).unwrap(),
             &words,
         );
         let result = expect_ready(self.materialize(operands)?)?;
@@ -534,51 +932,53 @@ impl GpuMapMaterializer {
         fixture.verify_gpu_actions(&actions)?;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn for_qualification(
+        context: OneXsGpuContext,
+        shader: &str,
+        fixture: &QualificationFixture,
+    ) -> Fallible<Self> {
+        let statics = fixture.gpu_statics(context.clone());
+        Self::from_shader(context, statics, shader)
+    }
+
+    #[cfg(test)]
+    fn qualify_shader(context: OneXsGpuContext, shader: &str) -> Fallible<()> {
+        let fixture = QualificationFixture::new();
+        Self::for_qualification(context, shader, &fixture)?.qualify_fixture(&fixture)
+    }
 }
 
 #[cfg(test)]
-fn pack_inputs(inputs: BilateralInputs<'_>) -> Vec<u32> {
-    let mut words = Vec::with_capacity(INPUT_WORDS);
-    append_untyped_side(&mut words, inputs.b_to_a);
-    append_untyped_side(&mut words, inputs.a_to_b);
+fn pack_dynamic_inputs(inputs: BilateralInputs<'_>) -> Vec<u32> {
+    let mut words = Vec::with_capacity(DYNAMIC_INPUT_WORDS);
+    append_dynamic_side(&mut words, inputs.b_to_a);
+    append_dynamic_side(&mut words, inputs.a_to_b);
     words
 }
 
 #[cfg(test)]
-fn append_untyped_side(words: &mut Vec<u32>, side: SideInputs<'_>) {
-    append_bound_side(
-        words,
-        side.preimage,
-        side.base,
-        side.flow,
-        side.gate,
-        side.coordinate,
+fn pack_static_inputs(inputs: BilateralInputs<'_>) -> Vec<u32> {
+    let mut words = Vec::with_capacity(STATIC_INPUT_WORDS);
+    append_static_side(
+        &mut words,
+        inputs.b_to_a.gate.values(),
+        inputs.b_to_a.coordinate.values(),
     );
+    append_static_side(
+        &mut words,
+        inputs.a_to_b.gate.values(),
+        inputs.a_to_b.coordinate.values(),
+    );
+    words
 }
 
 #[cfg(test)]
-fn append_bound_side(
-    words: &mut Vec<u32>,
-    preimage: &PreimageMap,
-    base: &BaseMap,
-    flow: &FlowMap,
-    gate: &GateMap,
-    coordinate: &CoordinateMap,
-) {
-    append_f32x2(words, preimage.values());
-    append_f32x2(words, base.values());
-    append_f32x2(words, flow.values());
-    words.extend(gate.values().iter().map(|value| value.to_bits()));
-    append_f32x2(words, coordinate.values());
-}
-
-#[cfg(test)]
-fn append_f32x2(words: &mut Vec<u32>, values: &[[f32; 2]]) {
-    words.extend(
-        values
-            .iter()
-            .flat_map(|value| value.iter().map(|component| component.to_bits())),
-    );
+fn append_dynamic_side(words: &mut Vec<u32>, side: SideInputs<'_>) {
+    append_f32x2_words(words, side.preimage.values());
+    append_f32x2_words(words, side.base.values());
+    append_f32x2_words(words, side.flow.values());
 }
 
 #[cfg(test)]
@@ -638,79 +1038,81 @@ fn expect_refusal<O: Operands>(
 
 #[cfg(test)]
 fn upload(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_DST
-            | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, bytes);
-    buffer
-}
-
-#[cfg(test)]
-fn u32_bytes(words: &[u32]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), std::mem::size_of_val(words)) }
+    upload_bytes(device, queue, label, bytes)
 }
 
 #[cfg(test)]
 struct TestResidentOperands {
     context: OneXsGpuContext,
     frame: FrameStamp,
-    alpha: wgpu::Buffer,
-    input: wgpu::Buffer,
+    dynamic: wgpu::Buffer,
     validity: wgpu::Buffer,
+    submit_error: Option<String>,
     drop_witness: Option<TestDropWitness>,
 }
 
 #[cfg(test)]
-struct TestDropWitness(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+struct TestDropWitness {
+    count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    statics: Option<std::sync::Weak<GpuFinalMapStatics>>,
+    observed_statics_strong_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+#[cfg(test)]
+impl TestDropWitness {
+    fn ordered(
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        statics: std::sync::Weak<GpuFinalMapStatics>,
+        observed_statics_strong_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            count,
+            statics: Some(statics),
+            observed_statics_strong_count: Some(observed_statics_strong_count),
+        }
+    }
+}
 
 #[cfg(test)]
 impl Drop for TestDropWitness {
     fn drop(&mut self) {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let (Some(statics), Some(observed)) =
+            (&self.statics, &self.observed_statics_strong_count)
+        {
+            observed.store(statics.strong_count(), std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
 #[cfg(test)]
 impl TestResidentOperands {
-    fn new(context: OneXsGpuContext, frame: FrameStamp, alpha: AlphaMap, words: &[u32]) -> Self {
-        Self::with_validity(context, frame, alpha, words, u32::MAX)
+    fn new(context: OneXsGpuContext, frame: FrameStamp, words: &[u32]) -> Self {
+        Self::with_validity(context, frame, words, u32::MAX)
     }
 
     fn with_validity(
         context: OneXsGpuContext,
         frame: FrameStamp,
-        alpha: AlphaMap,
         words: &[u32],
         validity_word: u32,
     ) -> Self {
-        Self::with_validity_and_witness(context, frame, alpha, words, validity_word, None)
+        Self::with_validity_and_witness(context, frame, words, validity_word, None)
     }
 
     fn with_validity_and_witness(
         context: OneXsGpuContext,
         frame: FrameStamp,
-        alpha: AlphaMap,
         words: &[u32],
         validity_word: u32,
         drop_witness: Option<TestDropWitness>,
     ) -> Self {
-        assert_eq!(words.len(), INPUT_WORDS);
-        let input = upload(
+        assert_eq!(words.len(), DYNAMIC_INPUT_WORDS);
+        let dynamic = upload(
             context.device(),
             context.queue(),
             "ONE X2 diagnostic resident final-map operands",
-            u32_bytes(words),
-        );
-        let alpha = upload(
-            context.device(),
-            context.queue(),
-            "ONE X2 diagnostic resident alpha",
-            alpha.bytes(),
+            u32_slice_bytes(words),
         );
         let validity = upload(
             context.device(),
@@ -721,11 +1123,24 @@ impl TestResidentOperands {
         Self {
             context,
             frame,
-            alpha,
-            input,
+            dynamic,
             validity,
+            submit_error: None,
             drop_witness,
         }
+    }
+
+    fn with_submit_failure(
+        context: OneXsGpuContext,
+        frame: FrameStamp,
+        words: &[u32],
+        message: &str,
+        drop_witness: TestDropWitness,
+    ) -> Self {
+        let mut operands =
+            Self::with_validity_and_witness(context, frame, words, u32::MAX, Some(drop_witness));
+        operands.submit_error = Some(message.to_owned());
+        operands
     }
 }
 
@@ -742,12 +1157,30 @@ impl resident::Operands for TestResidentOperands {
         &self.frame
     }
 
-    fn alpha_binding(&self) -> wgpu::BufferBinding<'_> {
-        self.alpha.as_entire_buffer_binding()
-    }
-
-    fn encode_input_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer) {
-        encoder.copy_buffer_to_buffer(&self.input, 0, target, 0, INPUT_BYTES);
+    fn encode_dynamic_input_copy(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: resident::DynamicInputTarget<'_>,
+    ) {
+        for (side_index, side) in [resident::DynamicSide::LensA, resident::DynamicSide::LensB]
+            .into_iter()
+            .enumerate()
+        {
+            let source = side_index * DYNAMIC_SIDE_WORDS;
+            target.copy_side(
+                encoder,
+                side,
+                resident::DynamicBufferCopy::new(&self.dynamic, byte_offset(source)),
+                resident::DynamicBufferCopy::new(
+                    &self.dynamic,
+                    byte_offset(source + PREIMAGE_WORDS),
+                ),
+                resident::DynamicBufferCopy::new(
+                    &self.dynamic,
+                    byte_offset(source + PREIMAGE_WORDS + BASE_WORDS),
+                ),
+            );
+        }
     }
 
     fn encode_validity_copy(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::Buffer) {
@@ -760,6 +1193,9 @@ impl resident::Operands for TestResidentOperands {
         command: wgpu::CommandBuffer,
     ) -> Fallible<()> {
         self.context.ensure_same(producer)?;
+        if let Some(error) = self.submit_error.take() {
+            return Err(error.into());
+        }
         self.context.queue().submit([command]);
         Ok(())
     }
@@ -839,11 +1275,14 @@ impl QualificationFixture {
         context: OneXsGpuContext,
         frame: FrameStamp,
     ) -> TestResidentOperands {
-        TestResidentOperands::new(
+        TestResidentOperands::new(context, frame, &pack_dynamic_inputs(self.cpu_inputs()))
+    }
+
+    fn gpu_statics(&self, context: OneXsGpuContext) -> Arc<GpuFinalMapStatics> {
+        GpuFinalMapStatics::from_words(
             context,
-            frame,
-            AlphaMap::new(vec![0.5; MAP_NODES]).unwrap(),
-            &pack_inputs(self.cpu_inputs()),
+            &pack_static_inputs(self.cpu_inputs()),
+            AlphaMap::new(vec![0.5; MAP_NODES]).unwrap().bytes(),
         )
     }
 
@@ -1237,6 +1676,238 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_and_static_input_ranges_are_exact_and_disjoint() {
+        assert_eq!(DYNAMIC_SIDE_WORDS, PREIMAGE_WORDS + BASE_WORDS + FLOW_WORDS);
+        assert_eq!(STATIC_SIDE_WORDS, GATE_WORDS + COORDINATE_WORDS);
+        assert_eq!(SIDE_WORDS, DYNAMIC_SIDE_WORDS + STATIC_SIDE_WORDS);
+        for side in 0..2 {
+            let start = side * SIDE_WORDS;
+            let dynamic = start..start + DYNAMIC_SIDE_WORDS;
+            let statics = dynamic.end..start + SIDE_WORDS;
+            assert_eq!(dynamic.end, statics.start);
+            assert!(dynamic.end <= statics.start);
+            assert_eq!(statics.len(), STATIC_SIDE_WORDS);
+        }
+        assert_eq!(INPUT_WORDS, 2 * SIDE_WORDS);
+    }
+
+    #[test]
+    fn generated_hint_validity_tags_decode_exact_semantics_and_reject_old_offsets() {
+        assert_eq!(decode_validity(u32::MAX), ResidentValidity::Success);
+        assert!(matches!(
+            decode_validity(0),
+            ResidentValidity::Seed(SeedError::NonFiniteCenter { .. })
+        ));
+        assert!(matches!(
+            decode_validity(PIS_VALIDITY_CODES - 1),
+            ResidentValidity::Seed(SeedError::NonFiniteCenter { .. })
+        ));
+
+        for (level, rows, cols) in [
+            (GeneratedHintLevel::One, L1_DENSE_ROWS, L1_DENSE_COLS),
+            (GeneratedHintLevel::Two, L2_DENSE_ROWS, L2_DENSE_COLS),
+        ] {
+            for direction in [
+                crate::flow::one_xs::Direction::AtoB,
+                crate::flow::one_xs::Direction::BtoA,
+            ] {
+                for component in [GeneratedHintComponent::Dcol, GeneratedHintComponent::Drow] {
+                    for site in [0, rows * cols - 1] {
+                        let word =
+                            generated_hint_validity_word(level, direction, component, site as u32)
+                                .expect("in-range generated hint site");
+                        let dense_row = site / cols;
+                        let dense_col = site % cols;
+                        let decoded = decode_validity(word);
+                        assert_eq!(
+                            decoded,
+                            ResidentValidity::GeneratedHint {
+                                direction,
+                                level,
+                                component,
+                                dense_row,
+                                dense_col,
+                            }
+                        );
+                        assert_eq!(
+                            decoded.to_string(),
+                            format!(
+                                "ONE X2 {direction} generated {level} {component} successor hint at dense row {dense_row} column {dense_col} is not finite"
+                            )
+                        );
+                    }
+                    assert_eq!(
+                        generated_hint_validity_word(
+                            level,
+                            direction,
+                            component,
+                            (rows * cols) as u32,
+                        ),
+                        None
+                    );
+                }
+            }
+        }
+
+        let old_untyped_offset = PIS_VALIDITY_CODES;
+        assert_eq!(
+            decode_validity(old_untyped_offset),
+            ResidentValidity::InvalidStatus(old_untyped_offset)
+        );
+        assert_eq!(
+            decode_validity(old_untyped_offset).to_string(),
+            "ONE X2 GPU resident validity returned unknown status word 0x00001640"
+        );
+        assert_eq!(
+            decode_validity(PIS_VALIDITY_CODES | 1 << 20),
+            ResidentValidity::InvalidStatus(PIS_VALIDITY_CODES | 1 << 20)
+        );
+        for bit in 17..=30 {
+            let word = GENERATED_HINT_FAILURE_TAG | 1 << bit;
+            assert_eq!(
+                decode_validity(word),
+                ResidentValidity::InvalidStatus(word),
+                "reserved bit {bit} was accepted"
+            );
+        }
+        for (level_bit, first_invalid_site) in [
+            (0, (L1_DENSE_ROWS * L1_DENSE_COLS) as u32),
+            (
+                GENERATED_HINT_LEVEL_BIT,
+                (L2_DENSE_ROWS * L2_DENSE_COLS) as u32,
+            ),
+        ] {
+            let word = GENERATED_HINT_FAILURE_TAG | level_bit | first_invalid_site;
+            assert_eq!(
+                decode_validity(word),
+                ResidentValidity::InvalidStatus(word),
+                "out-of-range generated site was accepted"
+            );
+        }
+
+        let first_generated = generated_hint_validity_word(
+            GeneratedHintLevel::One,
+            crate::flow::one_xs::Direction::AtoB,
+            GeneratedHintComponent::Dcol,
+            0,
+        )
+        .unwrap();
+        assert!(
+            PIS_VALIDITY_CODES - 1 < first_generated,
+            "atomicMin must retain a PIS refusal over a generated-hint refusal"
+        );
+    }
+
+    #[test]
+    fn calibration_resources_upload_exact_gate_coordinate_and_alpha_bits() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var("KJERAG_REQUIRE_GPU").is_err(), "{why}");
+                eprintln!("skipping calibration-static GPU upload: {why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let resources = OneXsResources::new(&crate::projection::tests::one_xs_lenses()).unwrap();
+        let materializer = GpuMapMaterializer::new(context, &resources)
+            .unwrap_or_else(|error| panic!("GPU final-map statics failed on {adapter}: {error}"));
+
+        assert_eq!(
+            materializer.statics.gate_coordinate.size(),
+            STATIC_INPUT_BYTES
+        );
+        assert_eq!(materializer.statics.alpha.size(), ALPHA_BYTES as u64);
+        let actual_static = readback_u32(
+            &device,
+            &queue,
+            &materializer.statics.gate_coordinate,
+            STATIC_INPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(actual_static, pack_static_resources(&resources));
+        let actual_alpha = readback_u32(
+            &device,
+            &queue,
+            &materializer.statics.alpha,
+            ALPHA_BYTES as u64,
+        )
+        .unwrap();
+        assert_eq!(
+            actual_alpha,
+            resources
+                .alpha()
+                .nodes()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn static_gate_mutation_changes_output_without_entering_frame_operands() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var("KJERAG_REQUIRE_GPU").is_err(), "{why}");
+                eprintln!("skipping final-map static mutation test: {why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let fixture = QualificationFixture::new();
+        let baseline = GpuMapMaterializer::for_qualification(context.clone(), SHADER, &fixture)
+            .unwrap_or_else(|error| panic!("baseline statics failed on {adapter}: {error}"));
+        let mut changed_words = pack_static_inputs(fixture.cpu_inputs());
+        let node = 2;
+        changed_words[node] = 0.0_f32.to_bits();
+        let changed_statics = GpuFinalMapStatics::from_words(
+            context.clone(),
+            &changed_words,
+            AlphaMap::new(vec![0.5; MAP_NODES]).unwrap().bytes(),
+        );
+        let changed = GpuMapMaterializer::from_shader(context.clone(), changed_statics, SHADER)
+            .unwrap_or_else(|error| panic!("changed statics failed on {adapter}: {error}"));
+        let frame = FrameStamp::for_test(12, std::time::Duration::ZERO, None);
+
+        let baseline_map = expect_ready(
+            baseline
+                .materialize(fixture.resident_operands(context.clone(), frame.clone()))
+                .unwrap(),
+        )
+        .unwrap()
+        .diagnostic_readback()
+        .unwrap()
+        .packed;
+        let changed_map = expect_ready(
+            changed
+                .materialize(fixture.resident_operands(context, frame))
+                .unwrap(),
+        )
+        .unwrap()
+        .diagnostic_readback()
+        .unwrap()
+        .packed;
+
+        assert_ne!(
+            baseline_map.nodes()[node].map(f32::to_bits),
+            changed_map.nodes()[node].map(f32::to_bits),
+            "the materializer ignored its sealed gate resource"
+        );
+        assert_eq!(
+            [
+                changed_map.nodes()[node][0].to_bits(),
+                changed_map.nodes()[node][1].to_bits(),
+            ],
+            [
+                (fixture.preimage.a.values()[node][0] * 0.5_f32).to_bits(),
+                fixture.preimage.a.values()[node][1].to_bits(),
+            ],
+            "zero gate must retain and exactly pack the lens-A preimage"
+        );
+    }
+
+    #[test]
     fn completed_operands_retain_frame_and_alpha_as_one_resident_binding() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -1250,27 +1921,36 @@ mod tests {
             }
         };
         let context = OneXsGpuContext::new(&device, &queue);
-        let pipeline = GpuMapMaterializer::new(context.clone());
-        pipeline.qualify().unwrap_or_else(|error| {
+        let fixture = QualificationFixture::new();
+        let pipeline = GpuMapMaterializer::for_qualification(context.clone(), SHADER, &fixture)
+            .expect("same-context qualification statics");
+        pipeline.qualify_fixture(&fixture).unwrap_or_else(|error| {
             panic!("GPU final-map qualification failed on {adapter}: {error}")
         });
-        let fixture = QualificationFixture::new();
+        let statics = Arc::downgrade(&pipeline.statics);
         let frame = FrameStamp::for_test(0, std::time::Duration::ZERO, None);
-        let gpu = expect_ready(
-            pipeline
-                .materialize(fixture.resident_operands(context.clone(), frame.clone()))
-                .unwrap(),
-        )
-        .unwrap();
+        let pending = pipeline
+            .materialize(fixture.resident_operands(context.clone(), frame.clone()))
+            .unwrap();
+        assert!(Arc::ptr_eq(&pending.statics, &pipeline.statics));
+        drop(pipeline);
+        assert!(statics.upgrade().is_some());
+        let gpu = expect_ready(pending).unwrap();
         assert_eq!(gpu.frame, frame);
         assert_eq!(gpu.packed.size(), PACKED_BYTES as u64);
+        assert!(statics.upgrade().is_some());
         let read = gpu.diagnostic_readback().unwrap();
         assert_eq!(read.frame, frame);
+        let alpha = readback_u32(&device, &queue, &gpu.statics.alpha, ALPHA_BYTES as u64).unwrap();
+        assert_eq!(alpha, vec![0.5_f32.to_bits(); MAP_NODES]);
         let layout = scene_layout(&device);
         let binding = gpu.bind_for_scene(&context, &frame, &layout).unwrap();
         assert_eq!(binding.frame(), &frame);
-        assert_eq!(binding._resident.upstream.alpha.size(), ALPHA_BYTES as u64);
+        assert_eq!(binding._resident.statics.alpha.size(), ALPHA_BYTES as u64);
+        assert!(statics.upgrade().is_some());
         let _ = binding.read();
+        drop(binding);
+        assert!(statics.upgrade().is_none());
     }
 
     #[test]
@@ -1283,27 +1963,86 @@ mod tests {
             }
         };
         let context = OneXsGpuContext::new(&device, &queue);
-        let pipeline = GpuMapMaterializer::new(context.clone());
         let fixture = QualificationFixture::new();
+        let pipeline = GpuMapMaterializer::for_qualification(context.clone(), SHADER, &fixture)
+            .expect("same-context qualification statics");
         let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_statics_strong_count =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let statics = Arc::downgrade(&pipeline.statics);
         let status = 3 * L1_PATCHES as u32 + 10;
         let operands = TestResidentOperands::with_validity_and_witness(
             context,
             FrameStamp::for_test(9, std::time::Duration::ZERO, None),
-            AlphaMap::new(vec![0.5; MAP_NODES]).unwrap(),
-            &pack_inputs(fixture.cpu_inputs()),
+            &pack_dynamic_inputs(fixture.cpu_inputs()),
             status,
-            Some(TestDropWitness(dropped.clone())),
+            Some(TestDropWitness::ordered(
+                dropped.clone(),
+                statics.clone(),
+                observed_statics_strong_count.clone(),
+            )),
         );
         let pending = pipeline.materialize(operands).unwrap();
         assert_eq!(pending.validity.size(), VALIDITY_BYTES);
         assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(pipeline);
         let error = expect_refusal(pending);
         assert_eq!(
             error.to_string(),
             "ONE X2 B-to-A level-one initial drow at patch row 1 column 2, dense row 7 column 10, is not finite"
         );
         assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            observed_statics_strong_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "validity refusal released statics before the inherited submission carrier"
+        );
+        assert!(statics.upgrade().is_none());
+    }
+
+    #[test]
+    fn submit_refusal_drops_the_upstream_owner_and_keeps_raw_error_text() {
+        let (device, queue, _) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var("KJERAG_REQUIRE_GPU").is_err(), "{why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let fixture = QualificationFixture::new();
+        let pipeline = GpuMapMaterializer::for_qualification(context.clone(), SHADER, &fixture)
+            .expect("same-context qualification statics");
+        let statics = Arc::downgrade(&pipeline.statics);
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_statics_strong_count =
+            Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let operands = TestResidentOperands::with_submit_failure(
+            context,
+            FrameStamp::for_test(11, std::time::Duration::ZERO, None),
+            &pack_dynamic_inputs(fixture.cpu_inputs()),
+            "injected raw final-map submit refusal",
+            TestDropWitness::ordered(
+                dropped.clone(),
+                statics.clone(),
+                observed_statics_strong_count.clone(),
+            ),
+        );
+
+        let error = match pipeline.materialize(operands) {
+            Err(error) => error,
+            Ok(_) => panic!("injected final-map submit refusal was accepted"),
+        };
+        assert_eq!(error.to_string(), "injected raw final-map submit refusal");
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            observed_statics_strong_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "submit refusal released statics before the inherited submission carrier"
+        );
+        assert!(statics.upgrade().is_some());
+        drop(pipeline);
+        assert!(statics.upgrade().is_none());
     }
 
     #[test]
@@ -1316,8 +2055,9 @@ mod tests {
             }
         };
         let context = OneXsGpuContext::new(&device, &queue);
-        let pipeline = GpuMapMaterializer::new(context.clone());
         let fixture = QualificationFixture::new();
+        let pipeline = GpuMapMaterializer::for_qualification(context.clone(), SHADER, &fixture)
+            .expect("same-context qualification statics");
         let mut pending = pipeline
             .materialize(fixture.resident_operands(
                 context,
@@ -1342,14 +2082,27 @@ mod tests {
             }
         };
         let context = OneXsGpuContext::new(&device, &queue);
-        let pipeline = GpuMapMaterializer::new(context.clone());
-        pipeline.qualify().unwrap();
         let fixture = QualificationFixture::new();
+        let pipeline = GpuMapMaterializer::for_qualification(context.clone(), SHADER, &fixture)
+            .expect("same-context qualification statics");
+        pipeline.qualify_fixture(&fixture).unwrap();
         let frame = FrameStamp::for_test(7, std::time::Duration::ZERO, None);
         let foreign_frame = FrameStamp::for_test(7, std::time::Duration::ZERO, None);
         let layout = scene_layout(&device);
 
         let foreign_context = OneXsGpuContext::new(&foreign_device, &foreign_queue);
+
+        let foreign_statics = fixture.gpu_statics(foreign_context.clone());
+        let error = match GpuMapMaterializer::from_shader(context.clone(), foreign_statics, SHADER)
+        {
+            Err(error) => error,
+            Ok(_) => panic!("foreign static-resource context was accepted"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("crossed a different device or queue")
+        );
 
         let gpu = expect_ready(
             pipeline
@@ -1398,11 +2151,9 @@ mod tests {
             }
         };
         let context = OneXsGpuContext::new(&device, &queue);
-        GpuMapMaterializer::new(context.clone())
-            .qualify()
-            .unwrap_or_else(|error| {
-                panic!("baseline GPU final-map qualification failed on {adapter}: {error}")
-            });
+        GpuMapMaterializer::qualify_shader(context.clone(), SHADER).unwrap_or_else(|error| {
+            panic!("baseline GPU final-map qualification failed on {adapter}: {error}")
+        });
         let mutations = [
             ("gate equality", "gate <= 0.0", "gate < 0.0"),
             ("upper gate equality", "gate >= 1.0", "gate > 1.0"),
@@ -1500,11 +2251,9 @@ mod tests {
         for (name, from, to) in mutations {
             let broken = SHADER.replacen(from, to, 1);
             assert_ne!(broken, SHADER, "{name} mutation found no target");
-            let error = GpuMapMaterializer::from_shader(context.clone(), &broken)
-                .qualify()
-                .expect_err(&format!(
-                    "changed GPU final-map {name} was accepted on {adapter}"
-                ));
+            let error = GpuMapMaterializer::qualify_shader(context.clone(), &broken).expect_err(
+                &format!("changed GPU final-map {name} was accepted on {adapter}"),
+            );
             assert!(
                 error.downcast_ref::<QualificationError>().is_some(),
                 "{name} mutation returned the wrong refusal on {adapter}: {error}"

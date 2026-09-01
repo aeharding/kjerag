@@ -15,6 +15,7 @@ use std::{error::Error, fmt};
 use super::gpu_context::OneXsGpuContext;
 use super::parent::ParentMapBuilder;
 use super::pis::gpu::GpuPisFlight;
+use super::resources::OneXsResources;
 use super::temporal::{BlurredBelts, gaussian_blur};
 use super::{Lens, LensPair};
 use crate::Fallible;
@@ -102,19 +103,21 @@ pub(crate) struct ResidentSourceFrontPipeline {
     parent: GpuResidentFramePipeline,
     geometry: geometry_gpu::GpuGeometryPipeline,
     belts: GpuSolverBeltPipeline,
+    final_map: map_patch_gpu::GpuMapMaterializer,
 }
 
 #[allow(dead_code)]
 impl ResidentSourceFrontPipeline {
-    pub(crate) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+    pub(crate) fn new(context: OneXsGpuContext, resources: &OneXsResources) -> Fallible<Self> {
         Ok(Self {
             context: context.clone(),
             parent: GpuResidentFramePipeline::new(context.clone())?,
             geometry: geometry_gpu::GpuGeometryPipeline::new(
                 context.clone(),
-                &super::base_map::one_xs_static_coordinates(),
+                resources.static_coordinates(),
             )?,
-            belts: GpuSolverBeltPipeline::new(context)?,
+            belts: GpuSolverBeltPipeline::new(context.clone())?,
+            final_map: map_patch_gpu::GpuMapMaterializer::new(context, resources)?,
         })
     }
 

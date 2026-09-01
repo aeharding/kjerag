@@ -3,6 +3,49 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Capture-static resident ONE X2 final-map resources, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
+NO POST-L1 JOIN, SCENE, PLAYBACK, PERFORMANCE OR PARITY CLAIM]:** the resident
+source-front pipeline now constructs its geometry and final-map stages from
+the same validated `OneXsResources` and exact `OneXsGpuContext`. The private
+final-map materializer owns one nonconstructible `GpuFinalMapStatics`: the
+calibration-derived 200-by-100 gates and coordinates for both lenses and the
+exact pole-completed alpha map are uploaded once, not accepted from a frame
+operand. Its only operation copies each static side into the fixed shader
+input slots. No gate, coordinate, alpha, buffer or binding accessor crosses
+the private resident owner.
+
+Each pending, ready and Scene-bindable result retains the exact same static
+owner by `Arc`; final alpha binding is borrowed from that owner. The sealed
+per-frame operand can supply only its authenticated context and frame, fixed
+copies for each side's preimage, base map and public flow, the inherited
+four-byte validity copy, and the existing submission lease. A write-only
+capability fixes all dynamic destinations and does not reveal the combined
+input buffer, so an upstream owner cannot overwrite capture-static slots.
+Carrier-first ownership also retires the upstream lease before statics on
+validity, mapping and submit refusal paths.
+
+The resident validity decoder now owns disjoint typed namespaces: success is
+`u32::MAX`, existing PIS failures are words 0 through 5695, and generated
+successor-hint failures use bit 31 plus level, direction, component and a
+14-bit dense site. Reserved bits and out-of-range sites surface the exact raw
+unknown-status word instead of being mislabeled as PIS failures. The sibling
+post-L1 Rust join and its shader-layout test can use a semantic checked
+encoder after integration; this branch has no post-L1 call site, and that
+shader must still prove its hard-coded bit layout matches the encoder. Eleven
+focused tests pass on AMD Radeon 760M Graphics, RADV PHOENIX, Mesa 26.1.6.
+They cover exact production-resource upload, dynamic/static range separation,
+a static-gate mutation, context and frame identity, static retention through
+binding, carrier-first refusal, the full validity namespace, the unchanged
+bit-exact CPU/GPU qualification and all 20 live shader mutations.
+
+This checkpoint deliberately does not invent the missing production
+`GpuGeometryFrameOwner` copy of preimage, base and public flow, join post-L1
+to the materializer, install a result or select it in Scene. The capture root
+also still receives `ParentMapBuilder`, orientation and readout per frame;
+consolidating those with the exact calibration that constructed
+`OneXsResources` is the next capture-ownership join, not a claim made here.
+
 **Sealed source-to-resident-front transition, 2026-09-01, implementation
 branch only [PRIVATE AND UNSELECTED; NO SCENE, POST-L1, PLAYBACK, PERFORMANCE
 OR PARITY CLAIM]:** `ImportedOneXsPicture` now has one consuming transition
@@ -98,15 +141,17 @@ the same command buffer and inherited submission lease and targets one
 four-byte `MAP_READ | COPY_DST` staging allocation.
 
 Materialization now returns an opaque pending frame with no Scene-binding
-operation. It retains the complete upstream/source owner, packed map, alpha,
-frame and context while `map_async` is outstanding. One nonblocking poll calls
-`Device::poll(Poll)` once and checks the callback channel once. Pending stays
-pending without changing prior capture state. Only `u32::MAX` converts into the
-existing bindable resident frame. Every encoded failure word is decoded by the
-existing `(direction * 2 + component) * 1424 + patch` contract and surfaces
-the exact `SeedError::NonFiniteCenter` direction, component, patch and dense
-center. Mapping failures retain the underlying map error text. There is no
-wait, polling loop, bulk readback or Scene selection on the ordinary path.
+operation. It retains the complete upstream/source owner, packed map, exact
+capture-static owner, frame and context while `map_async` is outstanding. One
+nonblocking poll calls `Device::poll(Poll)` once and checks the callback
+channel once. Pending stays pending without changing prior capture state. Only
+`u32::MAX` converts into the existing bindable resident frame. PIS failure
+words retain the existing `(direction * 2 + component) * 1424 + patch`
+contract and exact `SeedError::NonFiniteCenter`; the disjoint tagged namespace
+described above carries generated-hint failures. Unknown words retain their
+raw hexadecimal value. Mapping failures retain the underlying map error text.
+There is no wait, polling loop, bulk readback or Scene selection on the
+ordinary path.
 
 The focused actual-RADV tests exercise bounded safe polling, valid conversion
 and binding, precise invalid refusal with upstream-drop ownership, mapping
